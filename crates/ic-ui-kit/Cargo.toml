@@ -12,5 +12,13 @@ workspace = true
 
 [dependencies]
 gpui.workspace = true
+gpui-component.workspace = true
+# The Lucide icon catalog behind gpui-component's icons; pinned to the exact
+# release gpui-component 0.7.1 is built against.
+gpui-kit-assets = "=0.7.1"
 ic-model.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# For the gallery example (`cargo run -p ic-ui-kit --example gallery`).
+gpui_platform.workspace = true

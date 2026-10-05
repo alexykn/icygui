@@ -16,8 +16,16 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# Local clock times in the panes (comment and downtime times). Already in the
+# dependency graph through GPUI, with the same (default) features.
+chrono = "0.4.45"
 gpui.workspace = true
 gpui_platform.workspace = true
+ic-config.workspace = true
+ic-core.workspace = true
+ic-model.workspace = true
+ic-rules.workspace = true
 ic-ui-kit.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

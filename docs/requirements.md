@@ -12,6 +12,8 @@ Every requirement has a stable ID. The final production-readiness audit checks e
 - **ENV-06** Connection status in the footer: endpoint name plus age of the last event (`master-01 · 2s`), coloured by health (connected / stale > 30 s / reconnecting / failed). Clicking it opens the switcher with details.
 - **ENV-07** Automatic reconnect with backoff; banner with retry countdown and "Retry now". Auth failure and TLS failure stop retrying and show actionable banners.
 - **ENV-08** First run without environments shows an onboarding form.
+- **ENV-10** `icygui --demo` runs the full app against a built-in, in-process mock environment (the design's prod-cluster scenario with live simulated changes, storms and notifications). No Icinga or credentials needed; clearly labelled as demo in the UI.
+- **ENV-11** README screenshots are generated from demo mode (`cargo xtask screenshots` under Xvfb), so they stay current.
 - **ENV-09** Works with a least-privilege API user without `filter-expression` (Icinga 2.17 default). Buttons for actions the user may not run are disabled with an explanation.
 
 ## Live data

@@ -53,6 +53,13 @@ HOST_FULL = FULL + ["address", "address6"]
 SERVICE_LEAN = LEAN + ["host_name"]
 SERVICE_FULL = FULL + ["host_name"]
 SERVICES = ["db-prod-03!load", "k8s-node-07!ping4", "k8s-node-07!disk /var"]
+# The fields of Icinga's CheckResult type (its JSON adds `type`).
+CHECK_RESULT_FIELDS = [
+    "active", "check_source", "command", "execution_end", "execution_start",
+    "exit_status", "output", "performance_data", "previous_hard_state",
+    "schedule_end", "schedule_start", "scheduling_source", "state", "ttl",
+    "vars_after", "vars_before",
+]
 
 HOSTS_PATH = "/v1/objects/hosts"
 SERVICES_PATH = "/v1/objects/services"
@@ -178,6 +185,43 @@ EXCHANGES = [
     x("filter-unknown-attribute", HOSTS_PATH, {"filter": "host.bogus == 1", "verbose": True}, "error-text", "root"),
     x("filter-hidden-attribute", HOSTS_PATH, {"filter": "host.state_raw == 1", "verbose": True}, "error-text", "root"),
     x("filter-type-error", HOSTS_PATH, {"filter": "host.name < 1", "verbose": True}, "error", "root"),
+    # A filter that doesn't compile fails when it is evaluated (Icinga
+    # compiles it into a ThrowExpression): a type without objects finds
+    # nothing, and invalid filter_vars, read first, are the error.
+    x("filter-syntax-error-without-objects", "/v1/objects/graphitewriters",
+      {"filter": "graphitewriter.name ==", "verbose": True}, "exact", "root"),
+    x("filter-statement-without-objects", "/v1/objects/graphitewriters",
+      {"filter": "var x = 1", "verbose": True}, "exact", "root"),
+    x("filter-syntax-error-and-filter-vars", HOSTS_PATH,
+      {"filter": "host.name ==", "filter_vars": "x", "verbose": True}, "error-text", "root"),
+    # Check results are CheckResult objects: their fields, and no others.
+    x("filter-check-result-fields", SERVICES_PATH,
+      {"filter": "service.__name == \"db-prod-03!load\" && len(["
+                 + ", ".join("service.last_check_result." + field for field in CHECK_RESULT_FIELDS)
+                 + "]) == " + str(len(CHECK_RESULT_FIELDS)),
+       "attrs": ["name"]}, "exact", "root"),
+    x("filter-check-result-unknown-field", SERVICES_PATH,
+      {"filter": "service.__name == \"db-prod-03!load\" && service.last_check_result.outptu == null",
+       "verbose": True}, "error-text", "root"),
+    x("filter-check-result-type-is-no-field", SERVICES_PATH,
+      {"filter": "service.__name == \"db-prod-03!load\" && service.last_check_result.type != null",
+       "verbose": True}, "error-text", "root"),
+    # Targeted filters (ApplyRule::GetTargetHosts/GetTargetServices): looked
+    # up by name, not evaluated, so in filter order with duplicates.
+    x("filter-targeted-hosts", HOSTS_PATH,
+      {"filter": "host.name == \"k8s-node-11\" || \"db-prod-03\" == host.name"
+                 " || host[\"name\"] == n || host.name == \"no-such-host\"",
+       "filter_vars": {"n": "k8s-node-07"}, "attrs": ["name"]}, "exact", "root"),
+    x("filter-targeted-duplicates", HOSTS_PATH,
+      {"filter": "(host.name == \"db-prod-03\") || host.name == \"db-prod-03\"", "attrs": ["name"]},
+      "exact", "root"),
+    x("filter-targeted-no-such-host", HOSTS_PATH,
+      {"filter": "host.name == \"no-such-host\"", "attrs": ["name"]}, "exact", "root"),
+    x("filter-targeted-services", SERVICES_PATH,
+      {"filter": "host.name == \"k8s-node-07\" && service.name == \"ping4\""
+                 " || service.name == \"load\" && host.name == \"db-prod-03\""
+                 " || host.name == \"db-prod-03\" && service.name == \"load\"",
+       "attrs": ["name"]}, "exact", "root"),
     x("filter-vars-not-a-dictionary", HOSTS_PATH,
       {"filter": "host.name in names", "filter_vars": "x", "verbose": True}, "error-text", "root"),
     x("filter-constants", HOSTS_PATH,

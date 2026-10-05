@@ -236,6 +236,146 @@ async fn filters_select_objects() {
     assert_eq!((status, body), (StatusCode::OK, json!({"results": []})));
 }
 
+/// Icinga compiles a filter into an expression that raises the compile
+/// error when it is evaluated: a type without objects finds nothing, and
+/// invalid `filter_vars`, read before the first evaluation, are the error
+/// (verified on Icinga 2.15.6).
+#[tokio::test]
+async fn filters_that_dont_compile_fail_when_evaluated() {
+    let (server, client) = lab().await;
+    for plural in ["comments", "downtimes", "graphitewriters"] {
+        for filter in ["obj.name ==", "var x = 1", "x = 1"] {
+            let (status, body) = post_get(
+                &client,
+                &server,
+                &format!("/v1/objects/{plural}"),
+                &json!({"filter": filter, "verbose": true}),
+            )
+            .await;
+            assert_eq!(
+                (status, body),
+                (StatusCode::OK, json!({"results": []})),
+                "{plural}: {filter}"
+            );
+        }
+    }
+    // An action without objects: 404 without a diagnostic.
+    let (status, body) = post(
+        &client,
+        &server,
+        "/v1/actions/remove-comment",
+        &json!({"type": "Comment", "filter": "comment.name ==", "verbose": true}),
+    )
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::NOT_FOUND,
+            json!({"error": 404, "status": "No objects found."})
+        )
+    );
+    // With objects, the first evaluation fails.
+    let (status, body) = post_get(
+        &client,
+        &server,
+        "/v1/objects/hosts",
+        &json!({"filter": "host.name ==", "verbose": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let diagnostic = body["diagnostic_information"].as_str().unwrap();
+    assert!(
+        diagnostic.starts_with("Error: ") && diagnostic.contains("\nLocation: in <API query>: 1:"),
+        "{diagnostic}"
+    );
+    let (status, body) = post_get(
+        &client,
+        &server,
+        "/v1/objects/hosts",
+        &json!({"filter": "host.name ==", "filter_vars": "x", "verbose": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        body["diagnostic_information"],
+        "Error: Cannot convert value of type 'String' to an object."
+    );
+    let (status, body) = post_get(
+        &client,
+        &server,
+        "/v1/status",
+        &json!({"filter": "dictionary.name ==", "verbose": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "status entries always exist");
+    assert!(body["diagnostic_information"].is_string());
+}
+
+/// Filters that only compare host (and service) names with constants are
+/// Icinga's targeted lookups: no evaluation, so the filter's order,
+/// duplicates kept, unknown names left out (verified on Icinga 2.15.6).
+#[tokio::test]
+async fn targeted_filters_look_names_up() {
+    let (server, client) = prod().await;
+    let in_order = |body: &Value| -> Vec<String> {
+        results(body)
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let targeted = r#"host.name == "k8s-node-11" || host.name == "db-prod-03" || host.name == "k8s-node-11" || host.name == "missing""#;
+    let (status, body) = post_get(
+        &client,
+        &server,
+        "/v1/objects/hosts",
+        &json!({"filter": targeted, "attrs": ["name"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        in_order(&body),
+        ["k8s-node-11", "db-prod-03", "k8s-node-11"]
+    );
+    // With a comment the mock evaluates it (Icinga would still look the
+    // names up): object order, no duplicates.
+    let (_, body) = post_get(
+        &client,
+        &server,
+        "/v1/objects/hosts",
+        &json!({"filter": format!("{targeted} // evaluated"), "attrs": ["name"]}),
+    )
+    .await;
+    assert_eq!(in_order(&body), ["db-prod-03", "k8s-node-11"]);
+    let (status, body) = post_get(
+        &client,
+        &server,
+        "/v1/objects/services",
+        &json!({
+            "filter": r#"service.name == s && host.name == "db-prod-03" || host.name == "k8s-node-07" && service.name == "ping4""#,
+            "filter_vars": {"s": "load"},
+            "attrs": ["name"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(in_order(&body), ["db-prod-03!load", "k8s-node-07!ping4"]);
+    // Actions run once per name.
+    let (status, body) = post(
+        &client,
+        &server,
+        "/v1/actions/add-comment",
+        &json!({
+            "type": "Host",
+            "filter": r#"host.name == "db-prod-03" || host.name == "db-prod-03""#,
+            "author": "tester",
+            "comment": "twice"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(results(&body).len(), 2);
+}
+
 /// Actions take filters the same way.
 #[tokio::test]
 async fn actions_resolve_filters_like_queries() {

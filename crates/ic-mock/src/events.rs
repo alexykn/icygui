@@ -12,7 +12,7 @@ use serde_json::Value as Json;
 use tokio::sync::mpsc;
 
 use crate::config::NumberFormat;
-use crate::filter::{ApiFilter, Frame, Item, Value};
+use crate::filter::{ApiFilter, EvalError, Frame, Item, Value};
 use crate::json;
 use crate::model::ObjRef;
 
@@ -93,20 +93,26 @@ struct Subscriber {
 
 impl Subscriber {
     /// Whether the stream's filter lets the event through. Like Icinga, an
-    /// event whose filter fails is skipped (and logged).
+    /// event whose filter fails is skipped and logged (a filter that
+    /// doesn't compile fails every event; it was logged when the stream
+    /// opened).
     fn accepts(&self, frame: &EventFrame<'_>) -> bool {
         let Some(filter) = &self.filter else {
             return true;
         };
-        filter.matches(frame).unwrap_or_else(|error| {
-            tracing::warn!(
-                stream = self.id,
-                user = %self.user,
-                %error,
-                "error evaluating event filter"
-            );
-            false
-        })
+        match filter.matches(frame) {
+            Ok(accepted) => accepted,
+            Err(EvalError::Compile(_)) => false,
+            Err(error @ EvalError::Script(_)) => {
+                tracing::warn!(
+                    stream = self.id,
+                    user = %self.user,
+                    %error,
+                    "error evaluating event filter"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -291,7 +297,7 @@ fn deliver(subscriber: &Subscriber, line: Bytes) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::{ApiFilter, Node, compile};
+    use crate::filter::{Node, compile};
     use serde_json::json;
 
     fn types(list: &[EventType]) -> HashSet<EventType> {
@@ -331,15 +337,14 @@ mod tests {
         let filter = compile(
             r#"event.host == "a" && obj.check_result.state > 0 && get_time() == 5"#,
             Node::default(),
-        )
-        .unwrap();
+        );
         let (_, mut rx) = bus.subscribe(types(&[EventType::CheckResult]), Some(filter), "root");
         let (_, mut nothing) = bus.subscribe(
             types(&[EventType::CheckResult]),
-            Some(ApiFilter::nothing()),
+            Some(compile("event.host ==", Node::default())),
             "root",
         );
-        let failing = compile("event.host.x", Node::default()).unwrap();
+        let failing = compile("event.host.x", Node::default());
         let (_, mut failed) =
             bus.subscribe(types(&[EventType::CheckResult]), Some(failing), "root");
         for host in ["b", "a"] {
@@ -352,7 +357,7 @@ mod tests {
         let line = rx.try_recv().unwrap();
         assert!(String::from_utf8_lossy(&line).contains("\"host\":\"a\""));
         assert!(rx.try_recv().is_err());
-        assert!(nothing.try_recv().is_err(), "a filter that matches nothing");
+        assert!(nothing.try_recv().is_err(), "a filter that doesn't compile");
         assert!(failed.try_recv().is_err(), "failing filters skip the event");
         assert_eq!(bus.streams().len(), 3, "and keep the stream");
     }

@@ -379,3 +379,30 @@ async fn full_size_large_matches_the_measurements() {
         "{average} bytes per event"
     );
 }
+
+/// Filters that use objects as values (`host != null`, `service.host ==
+/// host`) build each object's value once per request, not once per use:
+/// a few seconds at most for 30 000 services, not minutes with the
+/// server's state locked.
+#[tokio::test]
+#[ignore = "full production scale: 2 000 hosts, 30 000 services"]
+async fn full_size_filters_with_objects_as_values() {
+    let (server, client) = start(MockConfig::with_scenario(scenarios::large(1))).await;
+    for filter in [
+        "host != null && service.state == 2",
+        "service.host == host",
+        "len([host, host, host, host, host, host, host, host, host, host]) == 10",
+    ] {
+        let started = Instant::now();
+        let (_, body) = query(
+            &client,
+            &server,
+            "services",
+            &json!({ "filter": filter, "attrs": ["name"] }),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(!results(&body).is_empty(), "{filter}");
+        assert!(elapsed < Duration::from_secs(20), "{filter}: {elapsed:?}");
+    }
+}

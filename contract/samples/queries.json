@@ -4782,6 +4782,251 @@
   }
  },
  {
+  "name": "filter-syntax-error-without-objects",
+  "user": "root",
+  "path": "/v1/objects/graphitewriters",
+  "body": {
+   "filter": "graphitewriter.name ==",
+   "verbose": true
+  },
+  "compare": "exact",
+  "status": 200,
+  "response": {
+   "results": []
+  }
+ },
+ {
+  "name": "filter-statement-without-objects",
+  "user": "root",
+  "path": "/v1/objects/graphitewriters",
+  "body": {
+   "filter": "var x = 1",
+   "verbose": true
+  },
+  "compare": "exact",
+  "status": 200,
+  "response": {
+   "results": []
+  }
+ },
+ {
+  "name": "filter-syntax-error-and-filter-vars",
+  "user": "root",
+  "path": "/v1/objects/hosts",
+  "body": {
+   "filter": "host.name ==",
+   "filter_vars": "x",
+   "verbose": true
+  },
+  "compare": "error-text",
+  "status": 404,
+  "response": {
+   "diagnostic_information": "Error: Cannot convert value of type 'String' to an object.",
+   "error": 404,
+   "status": "No objects found."
+  }
+ },
+ {
+  "name": "filter-check-result-fields",
+  "user": "root",
+  "path": "/v1/objects/services",
+  "body": {
+   "filter": "service.__name == \"db-prod-03!load\" && len([service.last_check_result.active, service.last_check_result.check_source, service.last_check_result.command, service.last_check_result.execution_end, service.last_check_result.execution_start, service.last_check_result.exit_status, service.last_check_result.output, service.last_check_result.performance_data, service.last_check_result.previous_hard_state, service.last_check_result.schedule_end, service.last_check_result.schedule_start, service.last_check_result.scheduling_source, service.last_check_result.state, service.last_check_result.ttl, service.last_check_result.vars_after, service.last_check_result.vars_before]) == 16",
+   "attrs": [
+    "name"
+   ]
+  },
+  "compare": "exact",
+  "status": 200,
+  "response": {
+   "results": [
+    {
+     "attrs": {
+      "name": "load"
+     },
+     "joins": {},
+     "meta": {},
+     "name": "db-prod-03!load",
+     "type": "Service"
+    }
+   ]
+  }
+ },
+ {
+  "name": "filter-check-result-unknown-field",
+  "user": "root",
+  "path": "/v1/objects/services",
+  "body": {
+   "filter": "service.__name == \"db-prod-03!load\" && service.last_check_result.outptu == null",
+   "verbose": true
+  },
+  "compare": "error-text",
+  "status": 404,
+  "response": {
+   "diagnostic_information": "Error: Invalid field access (for value of type 'CheckResult'): 'outptu'\nLocation: in <API query>: 1:39-1:70",
+   "error": 404,
+   "status": "No objects found."
+  }
+ },
+ {
+  "name": "filter-check-result-type-is-no-field",
+  "user": "root",
+  "path": "/v1/objects/services",
+  "body": {
+   "filter": "service.__name == \"db-prod-03!load\" && service.last_check_result.type != null",
+   "verbose": true
+  },
+  "compare": "error-text",
+  "status": 404,
+  "response": {
+   "diagnostic_information": "Error: Invalid field access (for value of type 'CheckResult'): 'type'\nLocation: in <API query>: 1:39-1:68",
+   "error": 404,
+   "status": "No objects found."
+  }
+ },
+ {
+  "name": "filter-targeted-hosts",
+  "user": "root",
+  "path": "/v1/objects/hosts",
+  "body": {
+   "filter": "host.name == \"k8s-node-11\" || \"db-prod-03\" == host.name || host[\"name\"] == n || host.name == \"no-such-host\"",
+   "filter_vars": {
+    "n": "k8s-node-07"
+   },
+   "attrs": [
+    "name"
+   ]
+  },
+  "compare": "exact",
+  "status": 200,
+  "response": {
+   "results": [
+    {
+     "attrs": {
+      "name": "k8s-node-11"
+     },
+     "joins": {},
+     "meta": {},
+     "name": "k8s-node-11",
+     "type": "Host"
+    },
+    {
+     "attrs": {
+      "name": "db-prod-03"
+     },
+     "joins": {},
+     "meta": {},
+     "name": "db-prod-03",
+     "type": "Host"
+    },
+    {
+     "attrs": {
+      "name": "k8s-node-07"
+     },
+     "joins": {},
+     "meta": {},
+     "name": "k8s-node-07",
+     "type": "Host"
+    }
+   ]
+  }
+ },
+ {
+  "name": "filter-targeted-duplicates",
+  "user": "root",
+  "path": "/v1/objects/hosts",
+  "body": {
+   "filter": "(host.name == \"db-prod-03\") || host.name == \"db-prod-03\"",
+   "attrs": [
+    "name"
+   ]
+  },
+  "compare": "exact",
+  "status": 200,
+  "response": {
+   "results": [
+    {
+     "attrs": {
+      "name": "db-prod-03"
+     },
+     "joins": {},
+     "meta": {},
+     "name": "db-prod-03",
+     "type": "Host"
+    },
+    {
+     "attrs": {
+      "name": "db-prod-03"
+     },
+     "joins": {},
+     "meta": {},
+     "name": "db-prod-03",
+     "type": "Host"
+    }
+   ]
+  }
+ },
+ {
+  "name": "filter-targeted-no-such-host",
+  "user": "root",
+  "path": "/v1/objects/hosts",
+  "body": {
+   "filter": "host.name == \"no-such-host\"",
+   "attrs": [
+    "name"
+   ]
+  },
+  "compare": "exact",
+  "status": 200,
+  "response": {
+   "results": []
+  }
+ },
+ {
+  "name": "filter-targeted-services",
+  "user": "root",
+  "path": "/v1/objects/services",
+  "body": {
+   "filter": "host.name == \"k8s-node-07\" && service.name == \"ping4\" || service.name == \"load\" && host.name == \"db-prod-03\" || host.name == \"db-prod-03\" && service.name == \"load\"",
+   "attrs": [
+    "name"
+   ]
+  },
+  "compare": "exact",
+  "status": 200,
+  "response": {
+   "results": [
+    {
+     "attrs": {
+      "name": "ping4"
+     },
+     "joins": {},
+     "meta": {},
+     "name": "k8s-node-07!ping4",
+     "type": "Service"
+    },
+    {
+     "attrs": {
+      "name": "load"
+     },
+     "joins": {},
+     "meta": {},
+     "name": "db-prod-03!load",
+     "type": "Service"
+    },
+    {
+     "attrs": {
+      "name": "load"
+     },
+     "joins": {},
+     "meta": {},
+     "name": "db-prod-03!load",
+     "type": "Service"
+    }
+   ]
+  }
+ },
+ {
   "name": "filter-vars-not-a-dictionary",
   "user": "root",
   "path": "/v1/objects/hosts",

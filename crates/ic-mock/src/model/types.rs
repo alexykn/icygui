@@ -120,6 +120,27 @@ pub(crate) struct CheckResultData {
 }
 
 impl CheckResultData {
+    /// The fields of Icinga's `CheckResult` type, which filters can access
+    /// (`to_json` writes them and `type`, which is not a field).
+    pub(crate) const FIELDS: [&'static str; 16] = [
+        "active",
+        "check_source",
+        "command",
+        "execution_end",
+        "execution_start",
+        "exit_status",
+        "output",
+        "performance_data",
+        "previous_hard_state",
+        "schedule_end",
+        "schedule_start",
+        "scheduling_source",
+        "state",
+        "ttl",
+        "vars_after",
+        "vars_before",
+    ];
+
     /// `Serialize(cr)`: every state attribute plus `type`.
     pub(crate) fn to_json(&self) -> Json {
         let mut map = Map::new();
@@ -587,5 +608,41 @@ pub(crate) fn object_key(host: &str, service: Option<&str>) -> ObjectKey {
     match service {
         Some(service) => ObjectKey::service(host, service),
         None => ObjectKey::host(host),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_result_fields_are_the_serialized_keys_but_type() {
+        let cr = CheckResultData {
+            schedule_start: 1.0,
+            schedule_end: 2.0,
+            execution_start: 1.0,
+            execution_end: 2.0,
+            command: Json::Null,
+            exit_status: 0,
+            state: 0,
+            previous_hard_state: 0,
+            output: "OK".into(),
+            performance_data: None,
+            active: true,
+            check_source: "master".into(),
+            scheduling_source: "master".into(),
+            ttl: 0.0,
+            vars_before: None,
+            vars_after: None,
+        };
+        let Json::Object(map) = cr.to_json() else {
+            unreachable!("a dictionary")
+        };
+        let keys: Vec<&str> = map
+            .keys()
+            .map(String::as_str)
+            .filter(|key| *key != "type")
+            .collect();
+        assert_eq!(keys, CheckResultData::FIELDS);
     }
 }

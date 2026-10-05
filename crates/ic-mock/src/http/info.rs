@@ -140,11 +140,9 @@ pub(crate) fn status(
                     None,
                 );
             }
-            let compiled = match filter::compile(&params.last_string("filter"), world.filter_node())
-            {
-                Ok(compiled) => compiled,
-                Err(error) => return not_found(&params, &error.to_string()),
-            };
+            // Compiled first, then `filter_vars` are read; a filter that
+            // doesn't compile fails at the first entry.
+            let compiled = filter::compile(&params.last_string("filter"), world.filter_node());
             match super::targets::filter_vars(&params) {
                 Ok(vars) => Some(compiled.with_vars(vars)),
                 Err(diagnostic) => return not_found(&params, &diagnostic),

@@ -2,11 +2,13 @@
 //! `*.ti`), joins, and the filter scope over the mock's objects.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 use serde_json::{Map, Value as Json};
 
 use super::World;
-use super::types::{Checkable, CommandData, GroupData};
+use super::types::{CheckResultData, Checkable, CommandData, GroupData};
 use crate::filter::{Frame, Item, Value};
 use crate::json::{int, num};
 
@@ -842,10 +844,7 @@ impl World {
             "state_type" => int(c.state_type),
             "last_state_type" => int(c.last_state_type),
             "last_reachable" => Json::Bool(c.last_reachable),
-            "last_check_result" => {
-                c.cr.as_ref()
-                    .map_or(Json::Null, super::types::CheckResultData::to_json)
-            }
+            "last_check_result" => c.cr.as_ref().map_or(Json::Null, CheckResultData::to_json),
             "last_state_change" => num(c.last_state_change),
             "last_hard_state_change" => num(c.last_hard_state_change),
             "last_state_unreachable" => num(c.last_state_unreachable),
@@ -950,6 +949,13 @@ fn command_attr(command: &CommandData, name: &str, type_name: &str) -> Option<Js
     })
 }
 
+/// The objects one request's filter used as values, each materialized
+/// once: an object is a dictionary of all its attributes, which is costly
+/// to build, while filters like `service.host == host` use the same few
+/// objects for every object they are evaluated for.
+#[derive(Debug, Default)]
+pub(crate) struct ObjectValues(RefCell<HashMap<ObjRef, Value>>);
+
 /// The filter frame for one object (`FilterUtility::EvaluateFilter`): the
 /// object as `obj` and as its type's variable (`host`, `service`, ...), its
 /// joined objects under their navigation names, and the fields of every
@@ -957,6 +963,9 @@ fn command_attr(command: &CommandData, name: &str, type_name: &str) -> Option<Js
 pub(crate) struct ObjectScope<'w> {
     pub(crate) world: &'w World,
     pub(crate) object: ObjRef,
+    /// The request's objects used as values, shared by the frames of all
+    /// the objects the filter is evaluated for.
+    pub(crate) values: &'w ObjectValues,
 }
 
 impl Frame for ObjectScope<'_> {
@@ -987,6 +996,14 @@ impl Frame for ObjectScope<'_> {
         }
         let type_name = object.kind.type_name();
         match self.world.attr(object, name) {
+            // A `CheckResult` object in Icinga, with its own fields.
+            Ok(Some(value)) if name == "last_check_result" && value.is_object() => {
+                Ok(Item::Typed {
+                    type_name: "CheckResult",
+                    fields: &CheckResultData::FIELDS,
+                    json: Cow::Owned(value),
+                })
+            }
             Ok(Some(value)) => Ok(Item::Json(Cow::Owned(value))),
             Ok(None) => Ok(Item::null()),
             Err(ResolveError::UnknownField(field)) => Err(format!(
@@ -999,12 +1016,119 @@ impl Frame for ObjectScope<'_> {
     }
 
     fn object_value(&self, object: &ObjRef) -> Value {
-        self.world
+        if let Some(value) = self.values.0.borrow().get(object) {
+            return value.clone();
+        }
+        let value = self
+            .world
             .object_attrs(object, None)
-            .map_or(Value::Null, |attrs| Value::from_json(&Json::Object(attrs)))
+            .map_or(Value::Null, |attrs| Value::from_json(&Json::Object(attrs)));
+        self.values
+            .0
+            .borrow_mut()
+            .insert(object.clone(), value.clone());
+        value
     }
 
     fn now(&self) -> f64 {
         self.world.now()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+    use crate::config::NumberFormat;
+    use crate::filter::{EvalError, Node, compile};
+    use crate::model::load::LoadOptions;
+
+    fn world() -> World {
+        World::load(
+            &crate::scenario::lab(),
+            &LoadOptions {
+                number_format: NumberFormat::Integral,
+                event_buffer: 16,
+                seed: 1,
+                reschedule_delay: 0.3,
+                check_rate: 100.0,
+                now: 1_700_000_000.0,
+            },
+        )
+        .unwrap()
+    }
+
+    fn service(name: &str) -> ObjRef {
+        ObjRef {
+            kind: ObjKind::Service,
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn objects_used_as_values_are_built_once_per_request() {
+        let world = world();
+        let services = world.object_names(ObjKind::Service);
+        let hosts: BTreeSet<&str> = services
+            .iter()
+            .filter_map(|name| name.split_once('!').map(|(host, _)| host))
+            .collect();
+        let filter = compile(
+            "service.host == host && len([host, host, host, obj]) == 4 && obj != null",
+            Node::default(),
+        );
+        let values = ObjectValues::default();
+        for name in &services {
+            let scope = ObjectScope {
+                world: &world,
+                object: service(name),
+                values: &values,
+            };
+            assert_eq!(filter.matches(&scope), Ok(true), "{name}");
+        }
+        let cache = values.0.borrow();
+        assert_eq!(
+            cache.len(),
+            hosts.len() + services.len(),
+            "each host and each service once"
+        );
+        let host = ObjRef {
+            kind: ObjKind::Host,
+            name: (*hosts.first().unwrap()).to_owned(),
+        };
+        assert_eq!(
+            cache[&host],
+            Value::from_json(&Json::Object(world.object_attrs(&host, None).unwrap()))
+        );
+    }
+
+    #[test]
+    fn check_results_are_typed() {
+        let world = world();
+        let values = ObjectValues::default();
+        let name = world
+            .object_names(ObjKind::Service)
+            .into_iter()
+            .find(|name| world.checkable(name).is_some_and(|c| c.cr.is_some()))
+            .unwrap();
+        let scope = ObjectScope {
+            world: &world,
+            object: service(&name),
+            values: &values,
+        };
+        let matches = |source: &str| compile(source, Node::default()).matches(&scope);
+        assert_eq!(
+            matches("service.last_check_result.output != null && obj.last_check_result.ttl >= 0"),
+            Ok(true)
+        );
+        for field in ["outptu", "type"] {
+            assert_eq!(
+                matches(&format!("service.last_check_result.{field} == null")),
+                Err(EvalError::Script(format!(
+                    "Invalid field access (for value of type 'CheckResult'): '{field}'"
+                )))
+            );
+        }
     }
 }

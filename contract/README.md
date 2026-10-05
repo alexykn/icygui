@@ -34,10 +34,20 @@ Facts learned from the real instance that the client must respect:
 - Objects that never had a check result report `last_check` -1 and
   `last_state_change`, `last_hard_state_change` and
   `previous_state_change` 0.
-- A filter that doesn't compile or fails for any object fails the whole
-  query with `404 No objects found.`; an empty filter matches nothing.
-  Event streams treat `filter: ""` as no filter and open silently with a
-  filter that doesn't compile. Status filters see the entry as
+- A filter that fails for any object fails the whole query with
+  `404 No objects found.`; an empty filter matches nothing. A filter that
+  doesn't compile fails only when it is evaluated (Icinga compiles it into
+  a `ThrowExpression`): a type without objects answers `200` with no
+  results, and an invalid `filter_vars` (read first) is the reported
+  error. Event streams treat `filter: ""` as no filter and open silently
+  with a filter that doesn't compile. Status filters see the entry as
   `dictionary`, not `status`.
+- `last_check_result` is a `CheckResult` object in filters: a field it
+  doesn't have (`last_check_result.outptu`, even `.type`) fails the query.
+- For `type` `Host` or `Service`, a filter that only compares names with
+  constants (`host.name == "a" || host.name == "b"`, or
+  `host.name == "h" && service.name == "s" || …`) is not evaluated: the
+  named objects come in the filter's order, duplicates included, and
+  unknown names are left out.
 - `all_joins`, `pretty` and `verbose` are read through numbers: `"0"` is
   false and `"true"` an error (`pretty=true` answers 500).

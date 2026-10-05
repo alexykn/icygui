@@ -18,7 +18,7 @@ use super::response::{Body, json_error, path_not_found};
 use crate::auth::Principal;
 use crate::config::NumberFormat;
 use crate::events::{EventType, StreamItem};
-use crate::filter::{self, ApiFilter};
+use crate::filter;
 use crate::model::World;
 
 /// The body of an event stream. When the bus drops the stream (overflow,
@@ -121,13 +121,13 @@ pub(crate) fn handle(
             None
         } else {
             // A filter that doesn't compile doesn't fail the request in
-            // Icinga 2.15: the stream opens and stays silent.
-            Some(
-                filter::compile(&source, world.filter_node()).unwrap_or_else(|error| {
-                    tracing::warn!(user = %user.name, %error, "event filter doesn't compile");
-                    ApiFilter::nothing()
-                }),
-            )
+            // Icinga 2.15: the stream opens, and every event fails the
+            // filter. Logged once here instead of for every event.
+            let compiled = filter::compile(&source, world.filter_node());
+            if let Some(error) = compiled.compile_error() {
+                tracing::warn!(user = %user.name, %error, "event filter doesn't compile");
+            }
+            Some(compiled)
         }
     } else {
         None

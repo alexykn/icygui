@@ -24,8 +24,9 @@
 //! decides, the adapter keeps Icinga's errors even though `ic-filter`
 //! itself is lenient: an undefined variable is `Tried to access undefined
 //! script variable`, an attribute the type doesn't have is `Invalid field
-//! access`, and a `no_user_view` attribute is the sandbox error. The scope
-//! records the first such error while `ic-filter` evaluates, and
+//! access` (for check results too: `last_check_result.outptu`), and a
+//! `no_user_view` attribute is the sandbox error. The scope records the
+//! first such error while `ic-filter` evaluates, and
 //! [`ApiFilter::matches`] reports it instead of the result, so the request
 //! fails as in Icinga.
 //!
@@ -33,12 +34,22 @@
 //!
 //! Verified against Icinga 2.15.6 (`tests/fidelity.rs` replays the
 //! recorded queries; `tests/events.rs` checks the event streams):
-//! - Object queries, actions and `/v1/status`: a filter that doesn't
-//!   compile (syntax errors, statements, assignments) or fails for any
-//!   object fails the whole request with 404 `No objects found.`, and the
-//!   reason in `diagnostic_information` with `verbose`. Its text is
+//! - A filter that fails for any object fails object queries, actions and
+//!   `/v1/status` with 404 `No objects found.`, and the reason in
+//!   `diagnostic_information` with `verbose`.
+//! - A filter that doesn't compile (syntax errors, statements,
+//!   assignments) fails the same way, but only once it is evaluated for an
+//!   object: Icinga compiles it into a `ThrowExpression` that raises the
+//!   compile error. So a type without objects answers as for any filter
+//!   that finds nothing (a query 200 with no results, an action 404
+//!   without a diagnostic), and an invalid `filter_vars`, read before the
+//!   first evaluation, is the reported error. The error text is
 //!   `ic-filter`'s, not Icinga's.
 //! - An empty filter (blank, or only comments) matches nothing.
+//! - For `type` `Host` or `Service`, a filter that only compares names
+//!   with constants (`host.name == "a" || host.name == "b"`) isn't
+//!   evaluated: the named objects come in the filter's order, duplicates
+//!   included (see [`targeted`]).
 //! - Event streams: `filter: ""` is no filter. A filter that doesn't
 //!   compile or is blank still opens the stream (200), which then delivers
 //!   nothing; events whose evaluation fails are skipped.
@@ -67,9 +78,18 @@
 //! - **Objects used as values are dictionaries** of their attributes, so
 //!   `typeof(host)` is `Dictionary`, objects compare equal by content, and
 //!   a dynamic index with an unknown attribute (`host[name]`) is `null`.
-//!   Icinga's type globals for object types (`Host`, `CheckCommand`, …) and
-//!   its other globals (`Icinga`, `PluginDir`, …) are undefined.
+//!   The same goes for a check result used as a value
+//!   (`typeof(service.last_check_result)`, its dictionary methods such as
+//!   `contains()`), which is a `CheckResult` object in Icinga; its fields
+//!   read as in Icinga. Icinga's type globals for object types (`Host`,
+//!   `CheckCommand`, …) and its other globals (`Icinga`, `PluginDir`, …)
+//!   are undefined.
+//! - **Targeted filters** with a comment, a line break, an escape sequence
+//!   or an `@`-identifier are evaluated: the same objects, but in object
+//!   order and without duplicates.
 //! - Error messages are `ic-filter`'s.
+
+mod targeted;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -82,7 +102,7 @@ use serde_json::{Map, Value as Json};
 
 pub(crate) use ic_filter::Value;
 
-use crate::model::ObjRef;
+use crate::model::{ObjKind, ObjRef};
 
 /// A filter that doesn't compile: a syntax error, a statement or an
 /// assignment (Icinga's `ConfigCompiler` and sandbox errors).
@@ -117,13 +137,22 @@ impl fmt::Display for CompileError {
     }
 }
 
-/// A filter that failed while being evaluated (Icinga's `ScriptError`).
+/// Why a filter failed for an object (Icinga's `ScriptError`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EvalError(pub(crate) String);
+pub(crate) enum EvalError {
+    /// The filter doesn't compile. Icinga compiles it into a
+    /// `ThrowExpression`, which raises the compile error when evaluated.
+    Compile(CompileError),
+    /// Evaluating the filter failed.
+    Script(String),
+}
 
 impl fmt::Display for EvalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Error: {}", self.0)
+        match self {
+            EvalError::Compile(error) => error.fmt(f),
+            EvalError::Script(message) => write!(f, "Error: {message}"),
+        }
     }
 }
 
@@ -141,6 +170,17 @@ pub(crate) enum Item<'a> {
     Object(ObjRef),
     /// A value as the API writes it.
     Json(Cow<'a, Json>),
+    /// An object of an Icinga type that isn't a config object (a
+    /// `CheckResult`) as the API writes it: a dictionary, of which only
+    /// `fields` can be accessed.
+    Typed {
+        /// Icinga's type name, for errors.
+        type_name: &'static str,
+        /// The type's fields (the dictionary may have more keys, `type`).
+        fields: &'static [&'static str],
+        /// The dictionary.
+        json: Cow<'a, Json>,
+    },
 }
 
 impl Item<'_> {
@@ -174,23 +214,22 @@ pub(crate) trait Frame {
 /// A compiled filter with its `filter_vars`.
 #[derive(Clone, Debug)]
 pub(crate) struct ApiFilter {
-    /// `None` matches nothing (an event filter that didn't compile).
-    filter: Option<Filter>,
+    /// The filter, or why it doesn't compile, which (like Icinga) only
+    /// matters once the filter is evaluated.
+    filter: Result<Filter, CompileError>,
     vars: BTreeMap<String, Value>,
     node: Node,
 }
 
 /// Compiles a filter for the node `node` (its `NodeName` and `ZoneName`).
-///
-/// # Errors
-/// [`CompileError`] when the source is not a single valid expression.
-pub(crate) fn compile(source: &str, node: Node) -> Result<ApiFilter, CompileError> {
-    let filter = Filter::parse(source).map_err(|error| CompileError::new(source, &error))?;
-    Ok(ApiFilter {
-        filter: Some(filter),
+/// A source that is not a single valid expression gives a filter that
+/// fails with the [`CompileError`] when evaluated, as in Icinga.
+pub(crate) fn compile(source: &str, node: Node) -> ApiFilter {
+    ApiFilter {
+        filter: Filter::parse(source).map_err(|error| CompileError::new(source, &error)),
         vars: BTreeMap::new(),
         node,
-    })
+    }
 }
 
 impl ApiFilter {
@@ -204,25 +243,36 @@ impl ApiFilter {
         self
     }
 
-    /// A filter that matches nothing.
-    pub(crate) fn nothing() -> Self {
-        Self {
-            filter: None,
-            vars: BTreeMap::new(),
-            node: Node::default(),
-        }
+    /// Why the filter doesn't compile, if it doesn't.
+    pub(crate) fn compile_error(&self) -> Option<&CompileError> {
+        self.filter.as_ref().err()
+    }
+
+    /// Icinga's targeted lookup for `type` `Host` or `Service`: the full
+    /// names a filter like `host.name == "a" || host.name == "b"` compares
+    /// with, in its order and with duplicates, whether those objects exist
+    /// or not. `None` when the filter must be evaluated instead (see
+    /// [`targeted`]).
+    pub(crate) fn targets(&self, kind: ObjKind) -> Option<Vec<String>> {
+        let filter = self.filter.as_ref().ok()?;
+        targeted::targets(filter.source(), kind, &self.vars)
     }
 
     /// Evaluates the filter for one object (or event, or status entry) and
     /// takes the result's truthiness. An empty filter matches nothing.
     ///
     /// # Errors
-    /// The first Icinga error the frame reported (undefined variable,
-    /// invalid or hidden field), else `ic-filter`'s evaluation error.
+    /// [`EvalError::Compile`] when the filter doesn't compile; else the
+    /// first Icinga error the frame reported (undefined variable, invalid
+    /// or hidden field), else `ic-filter`'s evaluation error.
     pub(crate) fn matches(&self, frame: &dyn Frame) -> Result<bool, EvalError> {
-        let Some(filter) = self.filter.as_ref().filter(|filter| !filter.is_empty()) else {
+        let filter = self
+            .filter
+            .as_ref()
+            .map_err(|error| EvalError::Compile(error.clone()))?;
+        if filter.is_empty() {
             return Ok(false);
-        };
+        }
         let scope = FrameScope {
             frame,
             vars: &self.vars,
@@ -231,11 +281,11 @@ impl ApiFilter {
         };
         let result = filter.evaluate_at(&scope, Timestamp::from_unix_seconds(frame.now()));
         if let Some(message) = scope.error.into_inner() {
-            return Err(EvalError(message));
+            return Err(EvalError::Script(message));
         }
         result
             .map(|value| value.is_truthy())
-            .map_err(|error| EvalError(error.message))
+            .map_err(|error| EvalError::Script(error.message))
     }
 }
 
@@ -307,7 +357,8 @@ impl<'a> FrameScope<'a> {
     }
 
     /// Follows `rest` from a frame variable: object fields through the
-    /// frame, values like [`follow_value`].
+    /// frame, fields of typed items checked against their type, values like
+    /// [`follow_value`].
     fn follow(&self, mut item: Item<'a>, mut rest: &[&str]) -> Option<Value> {
         let frame: &'a dyn Frame = self.frame;
         loop {
@@ -326,6 +377,22 @@ impl<'a> FrameScope<'a> {
                             return Some(Value::Null);
                         }
                     }
+                }
+                Item::Typed {
+                    type_name,
+                    fields,
+                    json,
+                } => {
+                    let Some((field, deeper)) = rest.split_first() else {
+                        return Some(Value::from_json(&json));
+                    };
+                    if !fields.contains(field) {
+                        self.fail(format!(
+                            "Invalid field access (for value of type '{type_name}'): '{field}'"
+                        ));
+                        return Some(Value::Null);
+                    }
+                    return follow_json(json.get(*field).unwrap_or(&Json::Null), deeper);
                 }
                 Item::Json(json) => return follow_json(&json, rest),
             }
@@ -435,6 +502,15 @@ mod tests {
             if object.kind == ObjKind::Service && name == "host" {
                 return Ok(Item::Object(host_ref()));
             }
+            if name == "last_check_result"
+                && let Some(json) = attrs.get(name).filter(|json| json.is_object())
+            {
+                return Ok(Item::Typed {
+                    type_name: "CheckResult",
+                    fields: &["output", "performance_data", "state"],
+                    json: Cow::Borrowed(json),
+                });
+            }
             if name == "state_raw" {
                 return Err(format!(
                     "Accessing the field '{name}' for type '{type_name}' is not allowed in sandbox mode."
@@ -468,6 +544,12 @@ mod tests {
             "address": "",
             "vars": { "role": "web", "disks": { "/var": { "warn": 80 } }, "tags": ["a", "b"] },
             "groups": ["linux-servers", "web"],
+            "last_check_result": {
+                "output": "ok",
+                "performance_data": ["a=1"],
+                "state": 0,
+                "type": "CheckResult",
+            },
         });
         let service = json!({
             "name": "http",
@@ -491,7 +573,6 @@ mod tests {
 
     fn eval_vars(source: &str, vars: &Json) -> Result<bool, EvalError> {
         compile(source, node())
-            .unwrap()
             .with_vars(vars.as_object())
             .matches(&frame())
     }
@@ -501,7 +582,10 @@ mod tests {
     }
 
     fn error(source: &str) -> String {
-        eval(source).unwrap_err().0
+        match eval(source).unwrap_err() {
+            EvalError::Script(message) => message,
+            other @ EvalError::Compile(_) => panic!("{source}: {other}"),
+        }
     }
 
     #[test]
@@ -677,15 +761,26 @@ mod tests {
             &("!".repeat(10_000) + "true"),
             &("[".repeat(10_000) + &"]".repeat(10_000)),
         ] {
-            let error = compile(source, node()).unwrap_err();
+            let filter = compile(source, node());
+            let error = filter.compile_error().cloned().unwrap();
+            assert_eq!(
+                filter.matches(&frame()),
+                Err(EvalError::Compile(error.clone())),
+                "{source}: the evaluation raises the compile error"
+            );
             let text = error.to_string();
             assert!(text.starts_with("Error: "), "{source}: {text}");
             assert!(text.contains("\nLocation: in <API query>: 1:"), "{text}");
         }
-        let error = compile("a ==\n  ", node()).unwrap_err();
+        let error = compile("a ==\n  ", node())
+            .compile_error()
+            .cloned()
+            .unwrap();
         assert!(error.to_string().contains("in <API query>: 1:"), "{error}");
         assert!(
-            compile(r#"host.name == "web\x2d01""#, node()).is_err(),
+            compile(r#"host.name == "web\x2d01""#, node())
+                .compile_error()
+                .is_some(),
             "Icinga has no \\x escapes"
         );
         // ic-filter evaluates dictionary literals; Icinga's sandbox refuses
@@ -708,7 +803,49 @@ mod tests {
         for source in ["", "  \n ", "// only a comment"] {
             assert!(!eval(source).unwrap(), "{source:?}");
         }
-        assert!(!ApiFilter::nothing().matches(&frame()).unwrap());
+    }
+
+    #[test]
+    fn check_results_have_icinga_fields() {
+        assert!(eval(r#"host.last_check_result.output == "ok""#).unwrap());
+        assert!(eval(r#"host.last_check_result["state"] == 0"#).unwrap());
+        assert!(eval(r#"host.last_check_result.performance_data[0] == "a=1""#).unwrap());
+        for (source, field) in [
+            ("host.last_check_result.outptu == null", "outptu"),
+            (r#"host.last_check_result.type == "CheckResult""#, "type"),
+            (r#"host.last_check_result["bogus"] == null"#, "bogus"),
+            ("host.last_check_result.bogus.deeper == null", "bogus"),
+        ] {
+            assert_eq!(
+                error(source),
+                format!("Invalid field access (for value of type 'CheckResult'): '{field}'"),
+                "{source}"
+            );
+        }
+        assert!(
+            eval("service.last_check_result.bogus == null").unwrap(),
+            "a pending object's check result is null"
+        );
+        // Used as a value, a check result is a dictionary (Icinga: an
+        // object without dictionary methods).
+        assert!(eval(r#"host.last_check_result.contains("output")"#).unwrap());
+        assert!(eval("typeof(host.last_check_result) == Dictionary").unwrap());
+    }
+
+    #[test]
+    fn targeted_filters_see_filter_vars() {
+        let filter = compile(r#"host.name == "a" || host.name == n"#, node())
+            .with_vars(json!({ "n": "b" }).as_object());
+        assert_eq!(
+            filter.targets(ObjKind::Host),
+            Some(vec!["a".to_owned(), "b".to_owned()])
+        );
+        assert_eq!(filter.targets(ObjKind::Service), None);
+        assert_eq!(
+            compile(r#"host.name == "a" ||"#, node()).targets(ObjKind::Host),
+            None,
+            "a filter that doesn't compile is evaluated (and fails)"
+        );
     }
 
     #[test]

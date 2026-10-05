@@ -23,6 +23,18 @@ Every requirement has a stable ID. The final production-readiness audit checks e
 - **LIVE-03** Objects created or deleted in Icinga appear or disappear.
 - **LIVE-04** 20 000 services stay smooth: virtualised lists, nothing per frame proportional to the object count.
 
+## Scale (docs/performance.md)
+
+Production scale is 2 000 hosts / 30 000 services; the numbers were measured against a real Icinga 2.15.
+
+- **PERF-01** Tiered loading: hosts full, services lean, problem details by name. Problem lists are complete within 5 s on a LAN, and the UI fills in progressively with visible load progress.
+- **PERF-02** Live changes appear in the UI within 1 s of Icinga emitting the event; no polling for state.
+- **PERF-03** The event pipeline never stalls Icinga's stream. It absorbs a 50 000-event burst in under 3 s and costs under 5 % of one core in steady state (~110 events/s).
+- **PERF-04** No per-event re-queries (`vars_after` is used). Re-queries happen by name only for config changes, unknown objects and on-demand hydration of visible rows and opened panes.
+- **PERF-05** Master-friendly: one event stream per client; lean reconcile adaptively (5 or 15 minutes), on reconnect with jitter, and on Icinga restart; never periodic full-attribute reloads.
+- **PERF-06** Client memory under 400 MB at production scale; 30 000-row dashboards scroll smoothly; dashboards are evaluated incrementally.
+- **PERF-07** Reproducible benchmarks: `contract/scale/benchmark.sh` (real Icinga) and `ic-mock`'s `large` scenario with burst mode. Release-mode performance tests run in nightly CI.
+
 ## Sidebar and dashboards
 
 - **DASH-01** The sidebar matches the design: search, groups (folders) with active highlight, chevron, + and ···, dashboard rows with state dot (worst unhandled), label and unhandled count, footer icons (sidebar toggle, notification centre, environment status, +).

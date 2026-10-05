@@ -204,20 +204,26 @@ impl Client {
     pub fn new(settings: ConnectionSettings) -> Result<Client, ApiError>;
     pub async fn info(&self) -> Result<ApiInfo, ApiError>;               // GET /v1 with `Accept: application/json` exactly: user, permissions, version
     pub async fn status(&self) -> Result<InstanceStatus, ApiError>;     // /v1/status/IcingaApplication + /v1/status/CIB
-    pub async fn hosts(&self) -> Result<Vec<Host>, ApiError>;
-    pub async fn services(&self) -> Result<Vec<Service>, ApiError>;
+    pub async fn hosts(&self) -> Result<Vec<Host>, ApiError>;                    // full attributes (hosts are few)
+    pub async fn services(&self, detail: Detail) -> Result<Vec<Service>, ApiError>;  // Detail::Lean for the initial load (docs/performance.md)
     pub async fn comments(&self) -> Result<Vec<Comment>, ApiError>;
     pub async fn downtimes(&self) -> Result<Vec<Downtime>, ApiError>;
     pub async fn host_groups(&self) -> Result<Vec<HostGroup>, ApiError>;
     pub async fn service_groups(&self) -> Result<Vec<ServiceGroup>, ApiError>;
     pub async fn dependencies(&self) -> Result<Vec<Dependency>, ApiError>;
     pub async fn endpoints(&self) -> Result<Vec<Endpoint>, ApiError>;
-    pub async fn objects(&self, keys: &[ObjectKey]) -> Result<(Vec<Host>, Vec<Service>), ApiError>;   // targeted re-query, chunked
+    pub async fn objects(&self, keys: &[ObjectKey], detail: Detail) -> Result<Fetched, ApiError>;   // by name, ≤ 200 per request; a 404 batch is bisected to find deleted names
     pub async fn run_action(&self, action: &Action, target: &ActionTarget, author: &str) -> Result<Vec<ActionResult>, ApiError>;
     pub async fn events(&self, queue: &str, kinds: &[EventKind]) -> Result<EventStream, ApiError>;
 }
 pub async fn fetch_server_certificate(base_url: &Url, server_name: Option<&str>) -> Result<CertificateInfo, ApiError>;  // trust on first use: sha256, subject, issuer, not_after; accepts any cert, only reads it
 
+pub enum Detail {
+    Lean,   // state, state_type, last_state_change, last_hard_state_change, last_check, next_check, check_attempt, max_check_attempts,
+            // acknowledgement(+expiry), downtime_depth, flapping, last_reachable, check_interval, retry_interval, groups, vars, display_name, host_name
+    Full,   // Lean + last_check_result, check_command, command_endpoint, zone, enable_*, flapping_current, notes, notes_url, action_url, icon_image
+}
+pub struct Fetched { pub hosts: Vec<Host>, pub services: Vec<Service>, pub missing: Vec<ObjectKey> }   // missing = deleted in Icinga
 pub struct ApiInfo { pub user: String, pub permissions: Vec<String>, pub version: String }
 impl ApiInfo { pub fn allows(&self, permission: &str) -> bool; }       // Icinga wildcard semantics ("*", "actions/*", "objects/query/*"); "(filtered)" entries count as allowed
 pub struct ActionResult { pub code: u16, pub status: String, pub name: Option<String> }
@@ -239,6 +245,8 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
   - Output: split `last_check_result.output` into first line and long output.
   - `performance_data` entries are strings (parse with `ic_model::parse_perfdata_entry`) or `PerfdataValue` dictionaries (`label`, `value`, `unit`, `warn`, `crit`, `min`, `max`).
   - Timestamps of 0 mean never.
+- *Lean objects* have no `last_check_result`: `check.result` is `None`. If `last_check < 0` the object is pending (`ServiceState::Pending`/`HostState::Pending`); otherwise its state is known and only the output isn't loaded yet. Services: `state` 0–3; hosts: `state` 0/1 with `last_reachable`.
+- *`CheckResult` events* carry `check_result.vars_after` (`state`, `state_type`, `attempt`, `reachable`) plus `downtime_depth` and `acknowledgement` (a boolean in events). Map them into the event so `ic-core` can update the object without a re-query. For hosts, `vars_after.state` is a *service-style* state (0/1 = up, 2/3 = down; see `Host::CalculateState`).
 - *Comments and downtimes:* the object comes from `host_name` / `service_name` (empty string = host).
   - `Downtime.in_effect`: use `is_in_effect` when present, otherwise compute it from fixed/flexible, start/end and `trigger_time`.
   - `config_owned`: `config_owner` is non-empty, or `scheduled_by` is non-empty.
@@ -272,7 +280,10 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
 
 ## ic-mock (wave 2)
 
-See PLAN.md §3.6. `MockServer::start(MockConfig) -> MockServer` serves HTTPS on `127.0.0.1:<port>` with a self-signed certificate and Basic auth. It exposes `url()`, `cert_pem()`, `cert_sha256()`, `control() -> MockControl` and `shutdown()`. It has built-in scenarios (`prod_cluster`, `staging`, `lab`, `large(seed)`) and a seedable simulator. The binary is `icinga-mock`. It writes its own wire JSON straight from the docs and sources; it never uses `ic-api`'s types.
+See PLAN.md §3.6. `MockServer::start(MockConfig) -> MockServer` serves HTTPS on `127.0.0.1:<port>` with a self-signed certificate and Basic auth. It exposes `url()`, `cert_pem()`, `cert_sha256()`, `control() -> MockControl` and `shutdown()`. It has built-in scenarios (`prod_cluster`, `staging`, `lab`, `large(seed)`) and a seedable simulator.
+- `large` matches production scale (docs/performance.md): 2 000 hosts × 15 services, realistic payload sizes, 5-minute intervals.
+- Mass re-check bursts are available through `MockControl::burst` (every object, ~5 000 events/s).
+- It honours `Detail`-style `attrs` selection and name lists exactly like Icinga, including the all-or-nothing 404. The binary is `icinga-mock`. It writes its own wire JSON straight from the docs and sources; it never uses `ic-api`'s types.
 
 ---
 
@@ -311,6 +322,7 @@ pub enum Command {
     LoadNotifications { limit: usize, reply: oneshot::Sender<Vec<NotificationRecord>> },
     MarkNotificationsRead,
     PreviewDashboard { view: ic_config::View, reply: oneshot::Sender<Result<DashboardResult, String>> },   // dashboard editor: live match count and rows
+    Hydrate(Vec<ObjectKey>),                                   // fetch Full details for lean objects (visible rows, opened pane)
 }
 pub enum CoreEvent {
     Connection(ConnectionState),
@@ -322,6 +334,7 @@ pub enum CoreEvent {
 }
 pub enum ConnectionState {
     Connecting { attempt: u32 },
+    Loading { phase: LoadPhase, done: usize, total: Option<usize> },   // tiered initial load progress
     Connected { endpoint: String, version: String, since: Timestamp },
     Reconnecting { error: String, attempt: u32, retry_at: Timestamp },
     AuthFailed { message: String },                            // no automatic retry; Refresh or UpdateEnvironment retries
@@ -338,21 +351,32 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
 - `last_event_at: Option<Timestamp>`, which the footer shows as "master-01 · 2s";
 - `overall: Summary`, over all hosts and services, which drives the tray icon and its tooltip.
 
-**Sync engine:**
+**Sync engine** (designed for 2 000 hosts / 30 000 services; numbers and reasoning in docs/performance.md):
 1. Connect: build an `ic_api::Client` from the environment.
    - The password comes from `SecretStore` with account = environment id; `MissingSecret` if absent.
    - Client certificates are read from their files.
    - The CA file is read; the pin is parsed with `ic_config::parse_fingerprint`.
-2. Initial load, in parallel: `info`, `status`, hosts, services, comments, downtimes, groups, dependencies, endpoints. Then publish `Permissions` and the first snapshot. The initial load produces *no* rule inputs.
-3. Open the event stream (queue `icygui-<uuid>`, all `EventKind::ALL`) and apply events to the store:
-   - state, check result, acknowledgement and flapping go to the objects;
-   - comments and downtimes are added or removed;
-   - `ObjectCreated`/`ObjectDeleted` for hosts and services trigger a re-query or removal.
-   - Each event marks the object *dirty*.
-   - A debounced task (500 ms, batches of up to 200) re-queries dirty objects with `Client::objects` to fill in what events don't carry: attempts, next check, reachability, severity inputs, `last_hard_state_change`.
-4. Reconcile with a full reload every `reconcile_interval_secs`, after every reconnect, and on `Refresh`. Diff the result against the store; state changes found only by the diff produce rule inputs (missed events), as do object removals.
-5. Refresh status every 30 s.
-6. Stream end or error → `Reconnecting` with exponential backoff and jitter (1 s → 60 s, reset after 5 minutes of health). Auth (401) → `AuthFailed`. TLS errors and pin mismatch → `TlsFailed` with the presented certificate (via `fetch_server_certificate`).
+2. Tiered initial load, with no rule inputs. Publish a snapshot after each tier so the UI fills in progressively.
+   1. `info`, `status`, groups, dependencies, endpoints, comments, downtimes and hosts (`Full`).
+   2. Services (`Detail::Lean`).
+   3. Every service in a problem state, `Full`, by name in batches.
+   - Expose progress (`ConnectionState::Loading { phase, done, total }`).
+3. Open the event stream (queue `icygui-<uuid>`, all `EventKind::ALL`). Split it into two tasks:
+   - a *reader* that only reads lines into an unbounded channel, so Icinga's send buffer never backs up;
+   - an *applier* that parses and applies in batches.
+   - `CheckResult` updates the object completely (state, state type, attempt and reachability from `vars_after`; downtime depth; acknowledgement; output and perfdata). `next_check` is estimated from `execution_end` plus the check or retry interval.
+   - Several `CheckResult`s for one object within a batch collapse to the last one. Other event types are never collapsed.
+   - Objects are re-queried only for `ObjectCreated`/`ObjectModified`/`ObjectDeleted` and for unknown objects.
+   - Required throughput: 50 000 recorded events applied in under 3 s; steady state about 110 events/s.
+4. *Hydration on demand:*
+   - `Command::Hydrate(Vec<ObjectKey>)` asks for `Full` details of lean objects. The UI sends it, debounced, for visible rows without output and for an opened pane.
+   - Batches hold at most 200 names and requests are deduplicated.
+5. *Reconcile:* a lean reload (tiers 1–3) on connect, after every reconnect (with jitter) and on `Refresh`.
+   - Periodically, adaptively: every 5 minutes below 5 000 objects, every 15 minutes above. `General.reconcile_interval_secs = 0` means adaptive; any other value overrides it.
+   - Diff the reload against the store; state changes found only by the diff produce rule inputs, as do removals.
+   - **Never** periodic full-attribute reloads: they cost the master around 1 GB of memory at this scale.
+6. Poll status every 30 s. A changed `program_start` means Icinga restarted and triggers a reload.
+7. Stream end or error → `Reconnecting` with exponential backoff and jitter (1 s → 60 s, reset after 5 minutes of health). Auth (401) → `AuthFailed`. TLS errors and pin mismatch → `TlsFailed` with the presented certificate (via `fetch_server_certificate`).
 
 **Store and snapshots:**
 - Objects are `Arc`-shared in `BTreeMap`s and copied on write.

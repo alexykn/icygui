@@ -26,8 +26,8 @@ use ic_api::{
 };
 use ic_mock::{MockConfig, MockServer, MockTls, MockUser, scenarios};
 use ic_model::{
-    AckKind, Action, ActionTarget, DowntimeMode, Event, EventKind, HostState, ObjectKey, Service,
-    ServiceState, StateType, Timestamp,
+    AckKind, Action, ActionTarget, DowntimeMode, Event, EventKind, HostState, Links, ObjectKey,
+    Service, ServiceState, StateType, Timestamp,
 };
 use raw::Raw;
 use secrecy::SecretString;
@@ -221,10 +221,17 @@ async fn prod_cluster_loads_lean_and_full() {
         assert_eq!(service.check.state_type, full.check.state_type, "{name}");
         assert_eq!(service.groups, full.groups, "{name}");
         assert_eq!(service.vars, full.vars, "{name}");
-        assert_eq!(
-            service.check.features.active_checks,
-            full.check.features.active_checks
+        // The check configuration and the switches come with lean
+        // objects (no event would ever bring them); the links don't.
+        assert_eq!(service.check.check_command, full.check.check_command);
+        assert_eq!(service.check.command_endpoint, full.check.command_endpoint);
+        assert_eq!(service.check.zone, full.check.zone, "{name}");
+        assert_eq!(service.check.features, full.check.features, "{name}");
+        assert!(
+            (service.check.flapping_current - full.check.flapping_current).abs() < f64::EPSILON
         );
+        assert_eq!(service.links, Links::default(), "{name}: lean");
+        assert_eq!(full.links, mock.links, "{name}");
         if mock.state == ServiceState::Pending {
             assert_eq!(full.check.result, None);
         } else {
@@ -234,6 +241,11 @@ async fn prod_cluster_loads_lean_and_full() {
         problems += usize::from(service.is_problem());
     }
     assert!(problems > 10, "{problems} problems");
+    assert!(
+        lean.iter()
+            .all(|service| !service.check.check_command.is_empty())
+    );
+    assert!(lean.iter().any(|service| service.check.zone.is_some()));
 }
 
 #[tokio::test]
@@ -630,29 +642,59 @@ async fn tiered_load(client: &Client) -> (usize, usize, usize) {
     (hosts.len(), services.len(), problems.len())
 }
 
-/// Bytes of a lean and a full service list, and of all attributes.
-async fn service_payloads(server: &MockServer) -> (usize, usize, usize) {
-    let raw = Raw::new(
-        &url(server),
-        None,
-        server.ca_pem().unwrap().as_bytes(),
-        ROOT.0,
-        ROOT.1,
-    );
-    let mut sizes = [0; 3];
-    let bodies = [
-        json!({ "attrs": Detail::Lean.service_attrs() }),
-        json!({ "attrs": Detail::Full.service_attrs() }),
-        json!({}),
-    ];
-    let services = server.control().services().len();
-    for (size, body) in sizes.iter_mut().zip(&bodies) {
-        let answer = raw.query("services", body).await;
-        assert_eq!(answer.status, 200);
-        assert_eq!(answer.json()["results"].as_array().unwrap().len(), services);
-        *size = answer.body.len();
+/// The sizes of the service lists, in bytes.
+struct Payloads {
+    /// [`Detail::Lean`].
+    lean: usize,
+    /// [`Detail::Full`].
+    full: usize,
+    /// The check results in the full list (`last_check_result` values).
+    results: usize,
+    /// All attributes (no `attrs`).
+    all: usize,
+}
+
+impl Payloads {
+    async fn measure(server: &MockServer) -> Self {
+        let raw = Raw::new(
+            &url(server),
+            None,
+            server.ca_pem().unwrap().as_bytes(),
+            ROOT.0,
+            ROOT.1,
+        );
+        let services = server.control().services().len();
+        let query = async |body| {
+            let answer = raw.query("services", &body).await;
+            assert_eq!(answer.status, 200);
+            assert_eq!(answer.json()["results"].as_array().unwrap().len(), services);
+            answer
+        };
+        let lean = query(json!({ "attrs": Detail::Lean.service_attrs() })).await;
+        let full = query(json!({ "attrs": Detail::Full.service_attrs() })).await;
+        let all = query(json!({})).await;
+        Self {
+            lean: lean.body.len(),
+            full: full.body.len(),
+            results: full.attr_bytes("last_check_result"),
+            all: all.body.len(),
+        }
     }
-    (sizes[0], sizes[1], sizes[2])
+
+    /// Lean leaves out at least every check result.
+    fn assert_lean_saves_the_results(&self) {
+        let Self {
+            lean,
+            full,
+            results,
+            all,
+        } = *self;
+        assert!(
+            lean + results < full,
+            "lean {lean} bytes, full {full} bytes, check results {results} bytes"
+        );
+        assert!(full < all, "full {full} bytes, all attributes {all} bytes");
+    }
 }
 
 #[tokio::test]
@@ -670,9 +712,9 @@ async fn a_tenth_of_the_large_scenario_loads_in_tiers() {
     assert!(problems > 50, "about 5 % problems: {problems}");
     assert!(started.elapsed() < Duration::from_mins(1));
 
-    let (lean, full, all) = service_payloads(&server).await;
-    assert!(lean * 2 < full, "lean {lean} bytes, full {full} bytes");
-    assert!(full < all, "full {full} bytes, all attributes {all} bytes");
+    Payloads::measure(&server)
+        .await
+        .assert_lean_saves_the_results();
 }
 
 /// Production scale: 2 000 hosts, 30 000 services (docs/performance.md).
@@ -695,14 +737,20 @@ async fn the_large_scenario_loads_in_tiers() {
     );
     assert!(elapsed < Duration::from_mins(5), "{elapsed:?}");
 
-    let (lean, full, all) = service_payloads(&server).await;
+    let payloads = Payloads::measure(&server).await;
+    let Payloads {
+        lean,
+        full,
+        results,
+        all,
+    } = payloads;
     println!(
-        "services: lean {lean} bytes ({:.0} per service), full {full} bytes ({:.0}), all attributes {all} bytes ({:.0})",
+        "services: lean {lean} bytes ({:.0} per service), full {full} bytes ({:.0}, check results {results}), all attributes {all} bytes ({:.0})",
         per_service(lean, services),
         per_service(full, services),
         per_service(all, services),
     );
-    assert!(lean * 2 < full, "lean {lean} bytes, full {full} bytes");
+    payloads.assert_lean_saves_the_results();
 }
 
 #[expect(clippy::cast_precision_loss, reason = "a rough average for the report")]

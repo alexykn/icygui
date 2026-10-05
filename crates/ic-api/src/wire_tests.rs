@@ -2,6 +2,8 @@
 //! samples in `contract/samples/` (Icinga 2.15.6) and hand-written edge
 //! cases.
 
+use std::collections::BTreeSet;
+
 use ic_model::{CommentKind, PerfdataStatus};
 use serde_json::json;
 
@@ -292,10 +294,59 @@ fn recorded_lean_services() {
 
     let ok = find("k8s-node-07", "ping4");
     assert_eq!(ok.state, ServiceState::Ok);
-    // Full-only attributes keep their defaults.
-    assert_eq!(ok.check.check_command, "");
-    assert_eq!(ok.check.zone, None);
-    assert_eq!(ok.links, Links::default());
+    // The check configuration and the switches are lean too.
+    assert_eq!(ok.check.check_command, "dummy");
+    assert_eq!(ok.check.zone, None, "defined outside a zone");
+    assert!(ok.check.features.passive_checks && ok.check.features.notifications);
+    let icinga = find("icinga-master", "icinga");
+    assert_eq!(icinga.check.check_command, "icinga");
+    assert!(icinga.check.flapping_current > 0.0);
+    // The links are Full only.
+    for service in &services {
+        assert_eq!(service.links, Links::default());
+    }
+}
+
+/// The keys of every result's `attrs` in a recorded sample. The samples
+/// were recorded without `attrs`, so these are all the attributes Icinga
+/// 2.15.6 has for the type.
+fn recorded_attributes(name: &str) -> BTreeSet<String> {
+    let json: Value = serde_json::from_str(&sample(name)).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert!(!results.is_empty(), "{name}");
+    results
+        .iter()
+        .flat_map(|entry| entry["attrs"].as_object().unwrap().keys().cloned())
+        .collect()
+}
+
+/// Icinga 2.15 only notices an attribute it doesn't know while it
+/// serialises an object, and the client then leaves the attribute out
+/// with a warning. So a misspelt attribute would fail no query against an
+/// instance without such objects (the contract instance has no comments
+/// or downtimes): check every requested attribute against the recorded
+/// objects instead.
+#[test]
+fn every_requested_attribute_exists_in_icinga() {
+    let lists: [(&str, &[&str]); 11] = [
+        ("hosts.json", Detail::Lean.host_attrs()),
+        ("hosts.json", Detail::Full.host_attrs()),
+        ("services.json", Detail::Lean.service_attrs()),
+        ("services.json", Detail::Full.service_attrs()),
+        ("comments.json", COMMENT_ATTRS),
+        ("downtimes.json", DOWNTIME_ATTRS),
+        ("hostgroups.json", GROUP_ATTRS),
+        ("servicegroups.json", GROUP_ATTRS),
+        ("dependencies.json", DEPENDENCY_ATTRS),
+        ("endpoints.json", ENDPOINT_ATTRS),
+        ("zones.json", ZONE_ATTRS),
+    ];
+    for (name, attrs) in lists {
+        let known = recorded_attributes(name);
+        for attr in attrs {
+            assert!(known.contains(*attr), "{name}: Icinga has no {attr:?}");
+        }
+    }
 }
 
 #[test]

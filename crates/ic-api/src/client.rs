@@ -184,6 +184,29 @@ impl Client {
         &self.inner.base
     }
 
+    /// The attributes this Icinga answered as unknown (`Invalid field
+    /// specified`) so far, as `(object type plural, attribute)` pairs such
+    /// as `("downtimes", "parent")`, sorted. Queries leave them out and the
+    /// mapping keeps those fields' defaults. Empty against a current
+    /// Icinga; something here means an older version (for diagnostics and
+    /// a connection report) or a misspelt attribute (the contract tests
+    /// check it stays empty).
+    ///
+    /// Icinga only notices an unknown attribute while it serialises an
+    /// object, so a type with no objects (no comments, say) can't reveal
+    /// one.
+    #[must_use]
+    pub fn unknown_attributes(&self) -> Vec<(&'static str, &'static str)> {
+        let unsupported = self
+            .inner
+            .unsupported
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut pairs: Vec<_> = unsupported.iter().copied().collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
     /// `GET /v1`: the API user, its permissions and the Icinga version.
     /// Also the cheapest way to check credentials.
     ///
@@ -247,9 +270,9 @@ impl Client {
     }
 
     /// All services, with `detail`: [`Detail::Lean`] for the initial load
-    /// and reconciles of a large installation (about 40 % of the bytes),
-    /// then [`Client::objects`] with [`Detail::Full`] for the services
-    /// whose output is needed.
+    /// and reconciles of a large installation (about 57 % of the bytes:
+    /// no check results, no links), then [`Client::objects`] with
+    /// [`Detail::Full`] for the services whose output is needed.
     ///
     /// # Errors
     ///
@@ -731,9 +754,9 @@ impl Client {
     /// versions stream every object as a per-object error with that
     /// message. Either way the attribute is left out, remembered for this
     /// client, and the query repeated; the mapping keeps that attribute's
-    /// default. (Repeating without `attrs` would load *every* attribute:
-    /// four times the bytes of a lean service list, and a lot of the
-    /// master's memory at scale.)
+    /// default (see [`Client::unknown_attributes`]). (Repeating without
+    /// `attrs` would load *every* attribute: about three times the bytes
+    /// of a lean service list, and a lot of the master's memory at scale.)
     async fn query<A: DeserializeOwned>(
         &self,
         plural: &'static str,

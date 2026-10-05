@@ -6,6 +6,10 @@
 //! nightly contract workflow sets it): then missing variables fail every
 //! test. They only read: queries, status, the event stream, and a refused
 //! action as the read-only `viewer` user.
+//!
+//! A freshly started Icinga runs its first checks within a minute (see
+//! [`wait_for_first_checks`]); tests that need checked objects wait for
+//! them.
 
 #![expect(
     clippy::unwrap_used,
@@ -16,14 +20,16 @@
 mod raw;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use ic_api::{
     ApiError, Client, ConnectionSettings, Credentials, Detail, TlsSettings, Url,
     fetch_server_certificate,
 };
-use ic_model::{Action, ActionTarget, EventKind, HostState, ObjectKey, Service, ServiceState};
+use ic_model::{
+    Action, ActionTarget, EventKind, HostState, Links, ObjectKey, Service, ServiceState,
+};
 use raw::Raw;
 use secrecy::SecretString;
 use serde_json::json;
@@ -89,6 +95,45 @@ impl Contract {
     }
 }
 
+/// How long a fresh Icinga may take to check every object once: 2.15
+/// schedules each first check within `min(check_interval, 60 s)` of its
+/// start (`Checkable::Start`).
+const FIRST_CHECKS: Duration = Duration::from_secs(150);
+
+/// Waits until Icinga has checked every object with active checks (the
+/// fixtures' passive services are never checked). On a long-running
+/// instance that is at once; `contract/run-icinga.sh` returns as soon as
+/// the API answers, before any check ran.
+async fn wait_for_first_checks(raw: &Raw) {
+    let deadline = Instant::now() + FIRST_CHECKS;
+    let attrs = json!({ "attrs": ["last_check", "enable_active_checks"] });
+    loop {
+        let mut unchecked = Vec::new();
+        for plural in ["hosts", "services"] {
+            let answer = raw.query(plural, &attrs).await;
+            let body = answer.json();
+            assert_eq!(answer.status, 200, "{plural}: {body}");
+            for entry in body["results"].as_array().unwrap() {
+                let attrs = &entry["attrs"];
+                let active = attrs["enable_active_checks"].as_bool().unwrap_or(true);
+                let checked = attrs["last_check"].as_f64().is_some_and(|at| at > 0.0);
+                if active && !checked {
+                    unchecked.push(entry["name"].to_string());
+                }
+            }
+        }
+        if unchecked.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never checked within {FIRST_CHECKS:?}: {}",
+            unchecked.join(", ")
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 #[tokio::test]
 async fn real_icinga_ca_and_pin() {
     let Some(contract) = contract() else {
@@ -124,6 +169,7 @@ async fn real_icinga_queries() {
     let Some(contract) = contract() else {
         return;
     };
+    wait_for_first_checks(&contract.raw()).await;
     let client = contract.client();
     let status = client.status().await.unwrap();
     assert!(!status.node_name.is_empty());
@@ -145,14 +191,34 @@ async fn real_icinga_queries() {
     assert!(endpoints.iter().any(|endpoint| !endpoint.zone.is_empty()));
 }
 
-/// Every attribute of [`Detail::Lean`] and [`Detail::Full`] exists: Icinga
-/// 2.15 rejects a whole query that names an unknown one (the client would
-/// then leave it out and log a warning; here it must not come to that).
+/// Every attribute the client asks for exists: Icinga 2.15 rejects a
+/// whole query that names an unknown one, newer versions every object
+/// (the client would then leave it out and log a warning; here it must
+/// not come to that). Both [`Detail`] lists come back verbatim.
 #[tokio::test]
-async fn real_icinga_knows_every_lean_and_full_attribute() {
+async fn real_icinga_knows_every_requested_attribute() {
     let Some(contract) = contract() else {
         return;
     };
+    // Every query the client makes. Icinga only notices an unknown
+    // attribute while it serialises an object, so types without objects
+    // here (comments, downtimes) are checked against the recorded samples
+    // instead (`every_requested_attribute_exists_in_icinga`).
+    let client = contract.client();
+    let hosts = client.hosts().await.unwrap();
+    for detail in [Detail::Lean, Detail::Full] {
+        let services = client.services(detail).await.unwrap();
+        let keys = [hosts[0].key(), services[0].object_key()];
+        client.objects(&keys, detail).await.unwrap();
+    }
+    client.comments().await.unwrap();
+    client.downtimes().await.unwrap();
+    assert!(!client.host_groups().await.unwrap().is_empty());
+    assert!(!client.service_groups().await.unwrap().is_empty());
+    assert!(!client.dependencies().await.unwrap().is_empty());
+    assert!(!client.endpoints().await.unwrap().is_empty());
+    assert_eq!(client.unknown_attributes(), []);
+
     let raw = contract.raw();
     for detail in [Detail::Lean, Detail::Full] {
         for (plural, attrs) in [
@@ -227,6 +293,8 @@ async fn real_icinga_lean_and_full_services() {
     let Some(contract) = contract() else {
         return;
     };
+    let raw = contract.raw();
+    wait_for_first_checks(&raw).await;
     let client = contract.client();
     let lean = client.services(Detail::Lean).await.unwrap();
     let full = client.services(Detail::Full).await.unwrap();
@@ -240,7 +308,12 @@ async fn real_icinga_lean_and_full_services() {
     assert!(lean.iter().all(|service| service.check.result.is_none()));
 
     let pairs = unchanged(&lean, &full);
-    assert!(!pairs.is_empty());
+    assert!(
+        pairs
+            .iter()
+            .any(|(lean, _)| lean.state != ServiceState::Pending),
+        "a checked service"
+    );
     for (lean, full) in pairs {
         let name = lean.key.full_name();
         // Icinga reports never-checked services as state 3 (UNKNOWN); lean
@@ -258,41 +331,48 @@ async fn real_icinga_lean_and_full_services() {
         assert_eq!(lean.check.acknowledgement, full.check.acknowledgement);
         assert_eq!(lean.check.downtime_depth, full.check.downtime_depth);
         assert_eq!(lean.check.reachable, full.check.reachable, "{name}");
-        assert_eq!(
-            lean.check.features.active_checks,
-            full.check.features.active_checks
-        );
+        assert_eq!(lean.check.features, full.check.features, "{name}");
         assert!((lean.check.check_interval - full.check.check_interval).abs() < f64::EPSILON);
         assert!((lean.check.retry_interval - full.check.retry_interval).abs() < f64::EPSILON);
+        assert!(
+            (lean.check.flapping_current - full.check.flapping_current).abs() < f64::EPSILON,
+            "{name}"
+        );
         assert_eq!(lean.groups, full.groups, "{name}");
         assert_eq!(lean.vars, full.vars, "{name}");
         assert_eq!(lean.display_name, full.display_name, "{name}");
+        // The check configuration is lean too; the links are Full only.
         assert!(!full.check.check_command.is_empty(), "{name}");
-        assert_eq!(lean.check.check_command, "", "not loaded when lean");
+        assert_eq!(lean.check.check_command, full.check.check_command);
+        assert_eq!(lean.check.command_endpoint, full.check.command_endpoint);
+        assert_eq!(lean.check.zone, full.check.zone, "{name}");
+        assert_eq!(lean.links, Links::default(), "{name}");
     }
 
-    // Lean is the smaller query (on 30 000 services: 20 MB instead of
-    // 46 MB, docs/performance.md).
-    let raw = contract.raw();
-    let lean_bytes = raw
+    // Lean leaves out at least the check results (64 % of the bytes of
+    // 30 000 services, docs/performance.md). Compared with the results'
+    // bytes rather than as a ratio: here one service's result (`icinga`'s
+    // about 10 KB) is most of them.
+    let lean = raw
         .query(
             "services",
             &json!({ "attrs": Detail::Lean.service_attrs() }),
         )
-        .await
-        .body
-        .len();
-    let full_bytes = raw
+        .await;
+    let full = raw
         .query(
             "services",
             &json!({ "attrs": Detail::Full.service_attrs() }),
         )
-        .await
-        .body
-        .len();
+        .await;
+    let (lean, results, full) = (
+        lean.body.len(),
+        full.attr_bytes("last_check_result"),
+        full.body.len(),
+    );
     assert!(
-        lean_bytes * 2 < full_bytes,
-        "lean {lean_bytes} bytes, full {full_bytes} bytes"
+        lean + results < full,
+        "lean {lean} bytes, full {full} bytes, check results {results} bytes"
     );
 }
 

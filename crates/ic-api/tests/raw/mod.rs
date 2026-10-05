@@ -26,6 +26,18 @@ impl Answer {
     pub(crate) fn json(&self) -> Value {
         serde_json::from_slice(&self.body).unwrap()
     }
+
+    /// The bytes one attribute's values take in a query answer: each
+    /// result's `attrs[attr]`, serialised compactly as Icinga and `ic-mock`
+    /// do (`null` where it's missing).
+    pub(crate) fn attr_bytes(&self, attr: &str) -> usize {
+        self.json()["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| serde_json::to_vec(&entry["attrs"][attr]).unwrap().len())
+            .sum()
+    }
 }
 
 impl Raw {

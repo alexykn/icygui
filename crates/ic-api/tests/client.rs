@@ -479,11 +479,12 @@ async fn lean_and_full_services_ask_for_their_attributes() {
         // Like Icinga: a never-checked service has state 3 and last_check -1.
         let mut attrs = json!({
             "host_name": "db-prod-03", "name": "postgres-replication", "state": 3, "state_type": 0,
-            "last_check": -1, "enable_active_checks": false
+            "last_check": -1, "enable_active_checks": false, "check_command": "dummy",
+            "zone": "master", "enable_notifications": false
         });
         if full {
             attrs["last_check_result"] = Value::Null;
-            attrs["check_command"] = json!("dummy");
+            attrs["notes_url"] = json!("https://wiki.example.com/pg");
         }
         ok_json(&json!({ "results": [
             { "name": "db-prod-03!postgres-replication", "type": "Service", "attrs": attrs }
@@ -495,15 +496,37 @@ async fn lean_and_full_services_ask_for_their_attributes() {
     let full = client.services(Detail::Full).await.unwrap();
     assert_eq!(lean[0].state, ServiceState::Pending, "pending, not UNKNOWN");
     assert_eq!(full[0].state, ServiceState::Pending);
-    assert_eq!(lean[0].check.check_command, "", "not asked for");
-    assert_eq!(full[0].check.check_command, "dummy");
+    for service in [&lean[0], &full[0]] {
+        assert_eq!(service.check.check_command, "dummy");
+        assert_eq!(service.check.zone.as_deref(), Some("master"));
+        assert!(!service.check.features.notifications);
+    }
+    assert_eq!(lean[0].links.notes_url, "", "not asked for");
+    assert_eq!(full[0].links.notes_url, "https://wiki.example.com/pg");
 
     let requests = server.requests();
     assert_eq!(requested_attrs(&requests[0]), Detail::Lean.service_attrs());
     assert_eq!(requested_attrs(&requests[1]), Detail::Full.service_attrs());
-    for attr in ["last_check_result", "check_command", "notes", "zone"] {
-        assert!(!requested_attrs(&requests[0]).contains(&attr.to_owned()));
+    let lean_attrs = requested_attrs(&requests[0]);
+    for attr in [
+        "last_check_result",
+        "notes",
+        "notes_url",
+        "action_url",
+        "icon_image",
+    ] {
+        assert!(!lean_attrs.contains(&attr.to_owned()), "{attr}");
     }
+    for attr in [
+        "check_command",
+        "command_endpoint",
+        "zone",
+        "enable_notifications",
+        "flapping_current",
+    ] {
+        assert!(lean_attrs.contains(&attr.to_owned()), "{attr}");
+    }
+    assert!(client.unknown_attributes().is_empty());
 }
 
 #[tokio::test]
@@ -543,6 +566,8 @@ async fn an_unknown_attribute_is_left_out_like_icinga_2_15_rejects_it() {
     assert_eq!(requests.len(), 3);
     assert!(!requested_attrs(&requests[2]).contains(&"flapping_current".to_owned()));
     assert_eq!(requests[2].json()["hosts"], json!(["a"]));
+    // Services are another type: unaffected.
+    assert_eq!(client.unknown_attributes(), [("hosts", "flapping_current")]);
 }
 
 #[tokio::test]
@@ -574,6 +599,13 @@ async fn an_unknown_attribute_is_left_out_like_newer_icinga_reports_it() {
     assert_eq!(last.len(), Detail::Full.service_attrs().len() - 2);
     // Hosts are another type: their attributes are not affected.
     assert!(requests.iter().all(|r| r.path == "/v1/objects/services"));
+    assert_eq!(
+        client.unknown_attributes(),
+        [
+            ("services", "acknowledgement_expiry"),
+            ("services", "notes")
+        ]
+    );
 }
 
 #[tokio::test]
@@ -605,6 +637,7 @@ async fn other_query_errors_are_not_retried() {
     ));
     assert!(client.comments().await.unwrap().is_empty(), "skipped");
     assert_eq!(server.requests().len(), 3);
+    assert!(client.unknown_attributes().is_empty());
 }
 
 #[tokio::test]

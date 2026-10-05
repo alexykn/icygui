@@ -15,30 +15,39 @@ use ic_model::{Host, ObjectKey, Service};
 /// real 2.15.6 by the contract tests). Icinga 2.15 and older reject a whole
 /// query that names an attribute they don't know (`400 Invalid field
 /// specified: …`); newer versions answer it per object. Either way the
-/// client leaves that attribute out and asks again (see [`crate::Client`]).
+/// client leaves that attribute out and asks again (see [`crate::Client`]
+/// and [`crate::Client::unknown_attributes`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Detail {
-    /// State and scheduling, without the check result and the check
-    /// configuration: everything states, handled flags, severity, the
-    /// dashboards' filters and the freshness watchdog need.
+    /// Everything except the check result and the links: identity,
+    /// states, scheduling, handled flags, the check configuration
+    /// (`check_command`, `command_endpoint`, `zone`, intervals), every
+    /// `enable_*` switch, `flapping_current`, groups and custom variables.
+    /// So states, severity, the freshness watchdog and dashboard or rule
+    /// filters on any of these are exact for lean objects. (No event
+    /// carries the check configuration, the switches or
+    /// `flapping_current`: a lean object without them would never learn
+    /// them.)
     ///
     /// - [`CheckInfo::result`](ic_model::CheckInfo::result) is `None`. The
     ///   object is pending ([`ServiceState::Pending`](ic_model::ServiceState::Pending),
     ///   [`HostState::Pending`](ic_model::HostState::Pending)) only if Icinga's
     ///   `last_check` is negative (never checked); otherwise its state is
-    ///   known and only its output isn't loaded.
-    /// - Of the feature switches only `active_checks` is loaded (active and
-    ///   passive checks go stale differently); the others keep their
-    ///   defaults, as do `check_command`, `command_endpoint`, `zone`,
-    ///   `flapping_current` and the links. Don't overwrite those of a
-    ///   [`Detail::Full`] object with a lean one's.
+    ///   known and only its output isn't loaded. `CheckResult` events bring
+    ///   the result.
+    /// - [`Links`](ic_model::Links) (`notes`, `notes_url`, `action_url`,
+    ///   `icon_image`) keep their defaults: free text, possibly long, that
+    ///   only a pane shows.
+    /// - Filters on `last_check_result` or the links see `null` and `""`
+    ///   until a `CheckResult` event (the result) or a [`Detail::Full`]
+    ///   fetch brings them. Don't overwrite a full object's result and
+    ///   links with a lean one's.
     ///
     /// Attributes: see [`Detail::host_attrs`] and [`Detail::service_attrs`].
     Lean,
     /// Everything the client shows: [`Detail::Lean`] plus
-    /// `last_check_result`, `check_command`, `command_endpoint`, `zone`, the
-    /// other `enable_*` switches, `flapping_current`, `notes`, `notes_url`,
-    /// `action_url` and `icon_image`. Pending means no check result.
+    /// `last_check_result`, `notes`, `notes_url`, `action_url` and
+    /// `icon_image`. Pending means no check result.
     Full,
 }
 
@@ -94,9 +103,18 @@ const HOST_LEAN: &[&str] = &[
     "downtime_depth",
     "flapping",
     "last_reachable",
+    "flapping_current",
+    "check_command",
     "check_interval",
     "retry_interval",
+    "command_endpoint",
+    "zone",
     "enable_active_checks",
+    "enable_passive_checks",
+    "enable_notifications",
+    "enable_event_handler",
+    "enable_flapping",
+    "enable_perfdata",
     "groups",
     "vars",
 ];
@@ -119,22 +137,22 @@ const HOST_FULL: &[&str] = &[
     "downtime_depth",
     "flapping",
     "last_reachable",
+    "flapping_current",
+    "check_command",
     "check_interval",
     "retry_interval",
-    "enable_active_checks",
-    "groups",
-    "vars",
-    // Full only.
-    "last_check_result",
-    "check_command",
     "command_endpoint",
     "zone",
+    "enable_active_checks",
     "enable_passive_checks",
     "enable_notifications",
     "enable_event_handler",
     "enable_flapping",
     "enable_perfdata",
-    "flapping_current",
+    "groups",
+    "vars",
+    // Full only.
+    "last_check_result",
     "notes",
     "notes_url",
     "action_url",
@@ -160,9 +178,18 @@ const SERVICE_LEAN: &[&str] = &[
     "downtime_depth",
     "flapping",
     "last_reachable",
+    "flapping_current",
+    "check_command",
     "check_interval",
     "retry_interval",
+    "command_endpoint",
+    "zone",
     "enable_active_checks",
+    "enable_passive_checks",
+    "enable_notifications",
+    "enable_event_handler",
+    "enable_flapping",
+    "enable_perfdata",
     "groups",
     "vars",
 ];
@@ -185,22 +212,22 @@ const SERVICE_FULL: &[&str] = &[
     "downtime_depth",
     "flapping",
     "last_reachable",
+    "flapping_current",
+    "check_command",
     "check_interval",
     "retry_interval",
-    "enable_active_checks",
-    "groups",
-    "vars",
-    // Full only.
-    "last_check_result",
-    "check_command",
     "command_endpoint",
     "zone",
+    "enable_active_checks",
     "enable_passive_checks",
     "enable_notifications",
     "enable_event_handler",
     "enable_flapping",
     "enable_perfdata",
-    "flapping_current",
+    "groups",
+    "vars",
+    // Full only.
+    "last_check_result",
     "notes",
     "notes_url",
     "action_url",
@@ -212,15 +239,6 @@ const SERVICE_FULL: &[&str] = &[
 #[cfg(test)]
 const FULL_ONLY: &[&str] = &[
     "last_check_result",
-    "check_command",
-    "command_endpoint",
-    "zone",
-    "enable_passive_checks",
-    "enable_notifications",
-    "enable_event_handler",
-    "enable_flapping",
-    "enable_perfdata",
-    "flapping_current",
     "notes",
     "notes_url",
     "action_url",
@@ -249,15 +267,84 @@ mod tests {
     }
 
     #[test]
-    fn lean_leaves_out_the_check_result() {
+    fn lean_leaves_out_the_check_result_and_the_links() {
         for detail in [Detail::Lean, Detail::Full] {
             let full = detail == Detail::Full;
-            assert_eq!(detail.service_attrs().contains(&"last_check_result"), full);
-            assert_eq!(detail.host_attrs().contains(&"last_check_result"), full);
+            for attr in FULL_ONLY {
+                assert_eq!(detail.service_attrs().contains(attr), full, "{attr}");
+                assert_eq!(detail.host_attrs().contains(attr), full, "{attr}");
+            }
             // What decides pending in a lean object, and what tells active
             // from passive checks for the freshness watchdog.
             assert!(detail.service_attrs().contains(&"last_check"));
             assert!(detail.service_attrs().contains(&"enable_active_checks"));
+        }
+    }
+
+    /// The stored attributes dashboard and rule filters can use
+    /// (`docs/architecture.md`, ic-filter: "Object attributes"; `problem`,
+    /// `handled`, `severity` and `__name` are derived from these).
+    const FILTER_ATTRIBUTES: &[&str] = &[
+        "name",
+        "display_name",
+        "state",
+        "state_type",
+        "last_state_change",
+        "last_hard_state_change",
+        "last_check",
+        "next_check",
+        "check_attempt",
+        "max_check_attempts",
+        "acknowledgement",
+        "acknowledgement_expiry",
+        "downtime_depth",
+        "flapping",
+        "flapping_current",
+        "last_reachable",
+        "check_command",
+        "check_interval",
+        "retry_interval",
+        "command_endpoint",
+        "zone",
+        "enable_active_checks",
+        "enable_passive_checks",
+        "enable_notifications",
+        "enable_event_handler",
+        "enable_flapping",
+        "enable_perfdata",
+        "groups",
+        "vars",
+        "notes",
+        "notes_url",
+        "action_url",
+        "icon_image",
+        "last_check_result",
+    ];
+
+    /// Check events never carry the check configuration or the switches,
+    /// so a lean object must have every filter attribute except those a
+    /// full fetch brings: the check result and the links.
+    #[test]
+    fn lean_has_every_filter_attribute_but_the_result_and_the_links() {
+        let missing_when_lean: BTreeSet<&str> = FILTER_ATTRIBUTES
+            .iter()
+            .copied()
+            .filter(|attr| *attr != "name")
+            .filter(|attr| !SERVICE_LEAN.contains(attr))
+            .collect();
+        assert_eq!(missing_when_lean, set(FULL_ONLY));
+        let missing_when_lean: BTreeSet<&str> = FILTER_ATTRIBUTES
+            .iter()
+            .copied()
+            .filter(|attr| !HOST_LEAN.contains(attr))
+            .collect();
+        // A host's name is the query result's `name`, not an attribute.
+        let mut expected = set(FULL_ONLY);
+        expected.insert("name");
+        assert_eq!(missing_when_lean, expected);
+        for attr in FILTER_ATTRIBUTES.iter().filter(|attr| **attr != "name") {
+            assert!(SERVICE_FULL.contains(attr), "{attr}");
+            assert!(HOST_FULL.contains(attr), "{attr}");
         }
     }
 

@@ -13,10 +13,14 @@
 //!   server name than the URL's host.
 //! - [`fetch_server_certificate`] reads a server's certificate for trust on
 //!   first use.
+//! - [`Detail`] chooses how much of a host or service to load: at scale the
+//!   services are loaded lean (no check result) and fetched in full by name
+//!   only where needed ([`Client::objects`], [`Fetched`]).
 //! - Wire JSON is mapped into `ic-model` types; the wire structs are private.
 
 mod actions;
 mod client;
+mod detail;
 mod error;
 mod events;
 mod info;
@@ -26,6 +30,7 @@ mod tls;
 mod wire;
 
 pub use client::{ActionResult, Client, NAMES_PER_REQUEST};
+pub use detail::{Detail, Fetched};
 pub use error::ApiError;
 pub use events::EventStream;
 pub use info::ApiInfo;

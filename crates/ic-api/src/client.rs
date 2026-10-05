@@ -1,7 +1,8 @@
 //! The HTTP client: object queries, status, actions and the event stream.
 
+use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -16,6 +17,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::actions::{self, Batch, TargetKind};
+use crate::detail::{Detail, Fetched};
 use crate::error::ApiError;
 use crate::events::EventStream;
 use crate::info::ApiInfo;
@@ -33,6 +35,10 @@ pub const NAMES_PER_REQUEST: usize = 200;
 
 /// Icinga's message for a name list that contains an unknown name.
 const NO_OBJECTS_FOUND: &str = "No objects found.";
+
+/// How Icinga's message for an unknown attribute begins
+/// (`Invalid field specified: <attr>`).
+const INVALID_FIELD: &str = "Invalid field specified: ";
 
 /// How long an idle pooled connection is kept. Icinga closes idle API
 /// connections after about 10 seconds; reusing one it is about to close
@@ -108,6 +114,9 @@ struct Inner {
     base: Url,
     basic: Option<(String, SecretString)>,
     timeout: Duration,
+    /// Attributes this Icinga turned out not to know, by object type
+    /// (plural), so later queries leave them out from the start.
+    unsupported: Mutex<HashSet<(&'static str, &'static str)>>,
 }
 
 impl fmt::Debug for Client {
@@ -164,6 +173,7 @@ impl Client {
                 base,
                 basic,
                 timeout: settings.request_timeout,
+                unsupported: Mutex::new(HashSet::new()),
             }),
         })
     }
@@ -219,33 +229,38 @@ impl Client {
         Ok(entry.status.0.unwrap_or(Value::Null))
     }
 
-    /// All hosts.
+    /// All hosts, with every attribute the client shows ([`Detail::Full`]):
+    /// hosts are few, and the first thing the UI needs.
     ///
     /// # Errors
     ///
     /// Transport, TLS and HTTP errors as [`ApiError`]; [`ApiError::Decode`]
     /// for unexpected JSON. Single unusable objects are skipped, not errors.
     pub async fn hosts(&self) -> Result<Vec<Host>, ApiError> {
+        let detail = Detail::Full;
         let results = self
-            .query::<CheckableAttrs>("hosts", None, wire::HOST_ATTRS)
+            .query::<CheckableAttrs>("hosts", None, detail.host_attrs())
             .await?;
-        Ok(map_results(results, "host", CheckableAttrs::into_host))
+        Ok(map_results(results, "host", |attrs, name| {
+            attrs.into_host(name, detail)
+        }))
     }
 
-    /// All services.
+    /// All services, with `detail`: [`Detail::Lean`] for the initial load
+    /// and reconciles of a large installation (about 40 % of the bytes),
+    /// then [`Client::objects`] with [`Detail::Full`] for the services
+    /// whose output is needed.
     ///
     /// # Errors
     ///
     /// As [`Client::hosts`].
-    pub async fn services(&self) -> Result<Vec<Service>, ApiError> {
+    pub async fn services(&self, detail: Detail) -> Result<Vec<Service>, ApiError> {
         let results = self
-            .query::<CheckableAttrs>("services", None, wire::SERVICE_ATTRS)
+            .query::<CheckableAttrs>("services", None, detail.service_attrs())
             .await?;
-        Ok(map_results(
-            results,
-            "service",
-            CheckableAttrs::into_service,
-        ))
+        Ok(map_results(results, "service", |attrs, name| {
+            attrs.into_service(name, detail)
+        }))
     }
 
     /// All comments.
@@ -372,29 +387,39 @@ impl Client {
         }))
     }
 
-    /// Re-queries specific hosts and services by name, in batches of
-    /// [`NAMES_PER_REQUEST`]. Objects that no longer exist are left out
-    /// (a batch with an unknown name is split until the unknown names are
-    /// isolated).
+    /// Queries specific hosts and services by name with `detail`: to
+    /// hydrate lean objects, re-query overdue or changed ones, or check
+    /// whether they still exist. Names go out in batches of
+    /// [`NAMES_PER_REQUEST`] (duplicates once; no keys, no request).
+    ///
+    /// Icinga fails a whole batch with `404 No objects found.` if one of its
+    /// names is unknown, so such a batch is split in halves until the
+    /// unknown names are isolated; they come back in [`Fetched::missing`].
     ///
     /// # Errors
     ///
     /// As [`Client::hosts`].
-    pub async fn objects(&self, keys: &[ObjectKey]) -> Result<(Vec<Host>, Vec<Service>), ApiError> {
+    pub async fn objects(&self, keys: &[ObjectKey], detail: Detail) -> Result<Fetched, ApiError> {
         let (host_names, service_names) = actions::names_by_kind(keys);
         let (hosts, services) = futures::try_join!(
-            self.query_names::<CheckableAttrs>("hosts", "hosts", host_names, wire::HOST_ATTRS),
+            self.query_names::<CheckableAttrs>("hosts", "hosts", host_names, detail.host_attrs()),
             self.query_names::<CheckableAttrs>(
                 "services",
                 "services",
                 service_names,
-                wire::SERVICE_ATTRS
+                detail.service_attrs()
             ),
         )?;
-        Ok((
-            map_results(hosts, "host", CheckableAttrs::into_host),
-            map_results(services, "service", CheckableAttrs::into_service),
-        ))
+        let missing = missing_keys(keys, &hosts.missing, &services.missing);
+        Ok(Fetched {
+            hosts: map_results(hosts.found, "host", |attrs, name| {
+                attrs.into_host(name, detail)
+            }),
+            services: map_results(services.found, "service", |attrs, name| {
+                attrs.into_service(name, detail)
+            }),
+            missing,
+        })
     }
 
     /// Runs an action (`POST /v1/actions/<name>`) on its target. Hosts and
@@ -697,53 +722,85 @@ impl Client {
         serde_json::from_slice(&body).map_err(|error| ApiError::Decode(error.to_string()))
     }
 
-    /// `POST /v1/objects/<plural>` with `X-HTTP-Method-Override: GET`.
+    /// `POST /v1/objects/<plural>` with `X-HTTP-Method-Override: GET`,
+    /// asking for `attrs`.
     ///
-    /// If entries come back as per-object errors (an attribute this Icinga
-    /// version doesn't have), the query is repeated once without `attrs`
-    /// (all attributes) so older versions still work.
+    /// An attribute this Icinga doesn't know (an older version, or one
+    /// that dropped it) fails the query: Icinga 2.15 and older reject the
+    /// whole request with `400 Invalid field specified: <attr>`; newer
+    /// versions stream every object as a per-object error with that
+    /// message. Either way the attribute is left out, remembered for this
+    /// client, and the query repeated; the mapping keeps that attribute's
+    /// default. (Repeating without `attrs` would load *every* attribute:
+    /// four times the bytes of a lean service list, and a lot of the
+    /// master's memory at scale.)
     async fn query<A: DeserializeOwned>(
         &self,
-        plural: &str,
+        plural: &'static str,
         names: Option<(&str, &[String])>,
-        attrs: &[&str],
+        attrs: &[&'static str],
     ) -> Result<Vec<QueryResult<A>>, ApiError> {
-        let results = self.query_once::<A>(plural, names, Some(attrs)).await?;
-        let failed = results.iter().filter(|entry| entry.attrs.is_none()).count();
-        if failed == 0 || attrs.is_empty() {
-            return Ok(results);
-        }
-        if let Some(entry) = results.iter().find(|entry| entry.attrs.is_none()) {
+        let mut attrs = self.supported(plural, attrs);
+        loop {
+            let outcome = self.query_once::<A>(plural, names, &attrs).await;
+            let unknown = match &outcome {
+                Ok(results) => results
+                    .iter()
+                    .filter(|entry| entry.attrs.is_none())
+                    .find_map(|entry| unknown_attribute(&entry.status.0)),
+                Err(ApiError::Http {
+                    status: 400,
+                    message,
+                }) => unknown_attribute(message),
+                Err(_) => None,
+            };
+            // Only an attribute that was asked for can be left out, and at
+            // least one must remain (no `attrs` would mean all of them).
+            let Some(position) = unknown
+                .and_then(|unknown| attrs.iter().position(|attr| *attr == unknown))
+                .filter(|_| attrs.len() > 1)
+            else {
+                if let Ok(results) = &outcome {
+                    log_failed_entries(plural, results);
+                }
+                return outcome;
+            };
+            let attr = attrs.remove(position);
             tracing::warn!(
                 plural,
-                failed,
-                code = ?entry.code.0,
-                status = %entry.status.0,
-                "object query entries failed; retrying with all attributes"
+                attr,
+                "this Icinga doesn't know the attribute; querying without it"
             );
+            self.inner
+                .unsupported
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert((plural, attr));
         }
-        let retried = self.query_once::<A>(plural, names, None).await?;
-        let still_failed = retried.iter().filter(|entry| entry.attrs.is_none()).count();
-        if still_failed > 0 {
-            tracing::warn!(
-                plural,
-                still_failed,
-                "skipping objects the server couldn't serialise"
-            );
-        }
-        Ok(retried)
+    }
+
+    /// `attrs` without those this Icinga is known not to have.
+    fn supported(&self, plural: &'static str, attrs: &[&'static str]) -> Vec<&'static str> {
+        let unsupported = self
+            .inner
+            .unsupported
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        attrs
+            .iter()
+            .copied()
+            .filter(|attr| !unsupported.contains(&(plural, *attr)))
+            .collect()
     }
 
     async fn query_once<A: DeserializeOwned>(
         &self,
         plural: &str,
         names: Option<(&str, &[String])>,
-        attrs: Option<&[&str]>,
+        attrs: &[&str],
     ) -> Result<Vec<QueryResult<A>>, ApiError> {
         let mut body = serde_json::Map::new();
-        if let Some(attrs) = attrs {
-            body.insert("attrs".to_owned(), json!(attrs));
-        }
+        body.insert("attrs".to_owned(), json!(attrs));
         if let Some((key, names)) = names {
             body.insert(key.to_owned(), json!(names));
         }
@@ -757,16 +814,20 @@ impl Client {
 
     /// A targeted query in batches. A 404 ("No objects found.") means a
     /// name in the batch is unknown: the batch is split until the unknown
-    /// names are isolated, and those are left out (deleted objects). An
-    /// empty name list sends nothing (Icinga would return every object).
+    /// names are isolated, and those come back as missing (deleted
+    /// objects), in request order. An empty name list sends nothing
+    /// (Icinga would return every object).
     async fn query_names<A: DeserializeOwned>(
         &self,
-        plural: &str,
+        plural: &'static str,
         key: &str,
         names: Vec<String>,
-        attrs: &[&str],
-    ) -> Result<Vec<QueryResult<A>>, ApiError> {
-        let mut results = Vec::new();
+        attrs: &[&'static str],
+    ) -> Result<Named<A>, ApiError> {
+        let mut answer = Named {
+            found: Vec::new(),
+            missing: Vec::new(),
+        };
         let mut pending: Vec<Vec<String>> = names
             .chunks(NAMES_PER_REQUEST)
             .rev()
@@ -777,10 +838,11 @@ impl Client {
                 continue;
             }
             match self.query::<A>(plural, Some((key, &batch)), attrs).await {
-                Ok(found) => results.extend(found),
+                Ok(found) => answer.found.extend(found),
                 Err(ApiError::NotFound(message)) if is_no_objects(&message) => {
                     if let [name] = batch.as_slice() {
                         tracing::debug!(%name, plural, "object no longer exists");
+                        answer.missing.extend(batch);
                     } else {
                         let (first, second) = batch.split_at(batch.len() / 2);
                         pending.push(second.to_vec());
@@ -790,7 +852,54 @@ impl Client {
                 Err(error) => return Err(error),
             }
         }
-        Ok(results)
+        Ok(answer)
+    }
+}
+
+/// What [`Client::query_names`] found, and the names Icinga doesn't know.
+struct Named<A> {
+    found: Vec<QueryResult<A>>,
+    missing: Vec<String>,
+}
+
+/// The keys whose names came back missing, in request order, each once.
+fn missing_keys(keys: &[ObjectKey], hosts: &[String], services: &[String]) -> Vec<ObjectKey> {
+    if hosts.is_empty() && services.is_empty() {
+        return Vec::new();
+    }
+    let hosts: HashSet<&str> = hosts.iter().map(String::as_str).collect();
+    let services: HashSet<&str> = services.iter().map(String::as_str).collect();
+    let mut seen = HashSet::new();
+    keys.iter()
+        .filter(|key| match key {
+            ObjectKey::Host { name } => hosts.contains(name.as_str()),
+            ObjectKey::Service { key } => {
+                !services.is_empty() && services.contains(key.full_name().as_str())
+            }
+        })
+        .filter(|key| seen.insert(*key))
+        .cloned()
+        .collect()
+}
+
+/// The attribute named by Icinga's "Invalid field specified: <attr>".
+fn unknown_attribute(message: &str) -> Option<&str> {
+    let attr = message.trim().strip_prefix(INVALID_FIELD)?.trim();
+    (!attr.is_empty()).then_some(attr)
+}
+
+/// Logs entries of a query answer that came back as per-object errors
+/// (they are skipped when mapped).
+fn log_failed_entries<A>(plural: &str, results: &[QueryResult<A>]) {
+    let mut failed = results.iter().filter(|entry| entry.attrs.is_none());
+    if let Some(entry) = failed.next() {
+        tracing::warn!(
+            plural,
+            failed = failed.count() + 1,
+            code = ?entry.code.0,
+            status = %entry.status.0,
+            "object query entries failed"
+        );
     }
 }
 

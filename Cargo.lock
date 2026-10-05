@@ -3467,6 +3467,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "ic-mock",
  "ic-model",
  "rcgen",
  "reqwest",

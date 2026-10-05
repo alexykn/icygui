@@ -5,7 +5,7 @@ This is the binding contract between crates. `PLAN.md` explains the product and 
 Already implemented and binding:
 - `ic-model`: all domain types (names, timestamps, perfdata, objects, severity, events, actions, instance status).
 - `ic-filter`, `ic-config`, `ic-rules` (engine included), `ic-platform`: implemented and reviewed, as specified below.
-- `ic-api`: implemented and reviewed, except the tiered loading (`Detail`, `Fetched`), which is the next step.
+- `ic-api`: implemented and reviewed, including the tiered loading (`Detail`, `Fetched`), with integration tests against `ic-mock` and contract tests against a real Icinga 2.15.6.
 - `ic-mock`: implemented (wave 2); its filter is still a shim, to be replaced by `ic-filter`.
 - `ic-ui-kit` and `ic-app`: the static UI (chrome, dashboard list, service and host panes, tabs) on demo data.
 - `ic-core`: `ports.rs` (`SecretStore`, `Notifier`, `Clock`) and `snapshot.rs` (`Snapshot`, `DashboardResult`, `DashboardRow`, `Summary`). The runtime is still to be built (wave 3).
@@ -256,11 +256,13 @@ pub struct CertificateInfo { pub sha256: [u8; 32], pub subject: String, pub issu
 pub fn format_fingerprint(sha256: &[u8; 32]) -> String;              // "AB:CD:…", as in CertificateMismatch
 
 pub enum Detail {
-    Lean,   // state, state_type, last_state_change, last_hard_state_change, last_check, next_check, next_update, check_attempt, max_check_attempts,
-            // acknowledgement(+expiry), downtime_depth, flapping, last_reachable, check_interval, retry_interval, groups, vars, display_name, host_name
-    Full,   // Lean + last_check_result, check_command, command_endpoint, zone, enable_*, flapping_current, notes, notes_url, action_url, icon_image
+    Lean,   // display_name, state, state_type, last_state_change, last_hard_state_change, last_check, next_check, check_attempt, max_check_attempts,
+            // acknowledgement(+expiry), downtime_depth, flapping, last_reachable, check_interval, retry_interval, enable_active_checks, groups, vars;
+            // hosts also address, address6; services also host_name, name
+    Full,   // Lean + last_check_result, check_command, command_endpoint, zone, the other enable_*, flapping_current, notes, notes_url, action_url, icon_image
 }
-pub struct Fetched { pub hosts: Vec<Host>, pub services: Vec<Service>, pub missing: Vec<ObjectKey> }   // missing = deleted in Icinga
+impl Detail { pub fn host_attrs(self) -> &'static [&'static str]; pub fn service_attrs(self) -> &'static [&'static str]; }   // the exact lists
+pub struct Fetched { pub hosts: Vec<Host>, pub services: Vec<Service>, pub missing: Vec<ObjectKey> }   // missing: unknown to Icinga (deleted), request order, each once
 pub struct ApiInfo { pub user: String, pub permissions: Vec<String>, pub version: String }
 impl ApiInfo { pub fn allows(&self, permission: &str) -> bool; }       // Icinga wildcard semantics ("*", "actions/*", "objects/query/*"); "(filtered)" entries count as allowed
 pub struct ActionResult { pub code: u16, pub status: String, pub name: Option<String>, pub target: Option<String> }   // name: created comment/downtime; target: the object/downtime/comment the result is for
@@ -284,6 +286,10 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
   - `performance_data` entries are strings (parse with `ic_model::parse_perfdata_entry`) or `PerfdataValue` dictionaries (`label`, `value`, `unit`, `warn`, `crit`, `min`, `max`).
   - Timestamps of 0 mean never.
 - *Lean objects* have no `last_check_result`: `check.result` is `None`. If `last_check < 0` the object is pending (`ServiceState::Pending`/`HostState::Pending`); otherwise its state is known and only the output isn't loaded yet. Services: `state` 0–3; hosts: `state` 0/1 with `last_reachable`.
+  - Verified on 2.15.6: a never-checked service has `last_check: -1` and `state: 3` (the default raw state UNKNOWN; hosts map it to `state: 1`, `Host::CalculateState`), so `last_check` alone decides pending; mapping `state` would show every pending service as UNKNOWN and every pending host as DOWN.
+  - Of the feature switches, lean objects load only `enable_active_checks` (active and passive checks go stale differently); the other `Full`-only fields keep their defaults. `ic-core` must not overwrite a hydrated object's `Full`-only fields with a lean reload's.
+  - `next_update` is **not** loaded: `ic_model::CheckInfo` has no field for it. The freshness watchdog computes the deadline with Icinga's formula (`Checkable::GetNextUpdate`): with active checks `next_check + interval + 2 × latency`, without `(end of the last result, or program start) + 2 × interval + 2 × latency`; `interval` is `retry_interval` for a soft problem with active checks and `check_interval` otherwise; `latency` (the last result's `execution_end − schedule_start`) is unknown for a lean object and counts as 0 until a `CheckResult` event or a full fetch brings a result. Request `next_update` once the model can carry it (it exists in 2.15).
+  - Sizes (`Detail::Lean` / `Detail::Full` / all attributes, services): `ic-mock`'s `large` scenario (30 000 services) 20.1 / 46.4 / 75.7 MB, like the real measurements in docs/performance.md; the contract instance's 6 services 3.4 / 15.9 / 21.5 KB.
 - *`CheckResult` events* carry `check_result.vars_after` (`state`, `state_type`, `attempt`, `reachable`) plus `downtime_depth` and `acknowledgement` (a boolean in events). Map them into the event so `ic-core` can update the object without a re-query. For hosts, `vars_after.state` is a *service-style* state (0/1 = up, 2/3 = down; see `Host::CalculateState`).
 - *Comments and downtimes:* the object comes from `host_name` / `service_name` (empty string = host).
   - `Downtime.in_effect`: use `is_in_effect` when present, otherwise compute it from fixed/flexible, start/end and `trigger_time`.
@@ -293,7 +299,8 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
   - A name list that contains one unknown name fails the whole request with `404 No objects found.` On a 404 for a batch, retry each name individually and treat the 404s as deleted objects. (`ic-api` splits the batch in halves until the unknown names are isolated: same result, fewer requests.)
   - **Never send an empty name list:** Icinga then targets *every* object of the type (`FilterUtility::GetFilterTargets` falls back to the type when no target was found).
   - Name lists go out in batches of `ic_api::NAMES_PER_REQUEST` (200).
-  - An object query whose entries come back as per-object errors (an attribute an older Icinga doesn't know) is repeated once without `attrs`.
+  - `Fetched.missing` holds the isolated unknown names. Icinga answers a name hidden by a filtered `objects/query/*` permission ("Access denied to object") with the same 404, so those count as missing too.
+- *Unknown attributes:* every attribute of both `Detail` lists exists in 2.15 (the contract tests query them verbatim). An attribute Icinga doesn't know fails the query: 2.15 and older reject the whole request (`400 {"error": 400, "status": "Invalid field specified: <attr>"}`, verified on 2.15.6); newer versions (current sources, which stream the response) answer `200` with every object as `{ "code": 400, "status": "Invalid field specified: <attr>" }`. Either way `ic-api` leaves out exactly the named attribute (only one it asked for, never the last one), remembers it per client and type, and repeats the query; the mapping keeps that field's default. It never repeats without `attrs`: that returns every attribute, 75.7 MB instead of 20.1 MB for 30 000 services, and costs the master the memory docs/performance.md warns about. (`"attrs": []` returns objects with no attributes at all.)
 - *Actions:* `POST /v1/actions/<name>` with `{ "type": "Host"|"Service", "hosts"|"services": [...], … }`.
   - Split mixed host/service targets into two requests.
   - `ActionTarget::Downtime(name)` uses `{ "downtime": name }` (only with `Action::RemoveAllDowntimes`, else `InvalidSettings`); `ActionTarget::Comment(name)` uses `{ "comment": name }` and means `remove-comment` (`ic_model::Action` has no remove-comment variant): it too needs `Action::RemoveAllDowntimes`, else `InvalidSettings` before anything is sent.
@@ -321,8 +328,8 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
 - *Tests:*
   - deserialisation tests from realistic JSON (doc examples plus pending, unreachable, perfdata dict and string forms, comments, downtimes);
   - an in-process HTTPS test server (hyper or axum with a self-signed certificate from `rcgen`) for pinning, CA trust, name override, auth headers, action bodies, event streaming split across chunks, and error mapping.
-  - Integration against `ic-mock` comes in wave 2.
-  - `crates/ic-api/tests/contract.rs` runs read-only checks against a real Icinga when the `ICYGUI_CONTRACT_*` variables from `contract/run-icinga.sh` are set (and passes trivially otherwise).
+  - `crates/ic-api/tests/mock.rs` runs against `ic-mock` in-process: pinning to its self-signed certificate (and its CA), `prod_cluster` lean and full against the mock's own state, pending lean objects, `objects()` with unknown names across batches, actions with per-object results (200/409/404, created comment and downtime names), the event stream with a `MockControl::burst`, error mapping (401, 403 with Icinga's lowercased permission, the hidden events 404, 404 and 503), and the tiered load of a tenth of the `large` scenario; the full-size `large` load is `#[ignore]`d (about 20 s in a debug build).
+  - `crates/ic-api/tests/contract.rs` runs read-only checks against a real Icinga when the `ICYGUI_CONTRACT_*` variables from `contract/run-icinga.sh` are set (and passes trivially otherwise): queries, both `Detail` lists verbatim, lean against full services, `objects()` with unknown names, the unknown-attribute answer, a refused action and the event stream. With `ICYGUI_CONTRACT_REQUIRED` set, missing variables fail instead; `.github/workflows/contract.yml` sets it and runs them nightly (and on demand, with an image tag) against Icinga in Docker.
 
 ---
 

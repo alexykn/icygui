@@ -349,9 +349,20 @@ fn dashboard_service_filters() {
                 "web-01!disk",
             ],
         ),
+        // As in Icinga, a pending host has state 1 (DOWN) but is no problem.
         (
             "host.state == HostDown",
-            &["k8s-node-07!kubelet", "k8s-pod-a!http"],
+            &["k8s-node-07!kubelet", "k8s-pod-a!http", "new-host!ping"],
+        ),
+        ("host.problem", &["k8s-node-07!kubelet", "k8s-pod-a!http"]),
+        // Pending services have state 3 (UNKNOWN) but are no problem.
+        (
+            "service.state == ServiceUnknown",
+            &["k8s-pod-a!http", "new-host!ping"],
+        ),
+        (
+            "service.state == ServiceUnknown && service.problem",
+            &["k8s-pod-a!http"],
         ),
         (
             "host.state == HostDown && !host.last_reachable",
@@ -515,6 +526,10 @@ fn host_dashboards() {
     let cases: &[(&str, &[&str])] = &[
         (
             "host.state != 0 && !host.handled",
+            &["k8s-node-07", "k8s-pod-a", "new-host"],
+        ),
+        (
+            "host.problem && !host.handled",
             &["k8s-node-07", "k8s-pod-a"],
         ),
         (
@@ -532,6 +547,20 @@ fn host_dashboards() {
             &["db-prod-01", "db-prod-03", "mq-prod-01"],
         ),
         (r#"host.vars.tags.contains("primary")"#, &["db-prod-01"]),
+        // Hosts without `tags` don't contain anything, so the negation and
+        // other alternatives still work for them.
+        (
+            r#"!host.vars.tags.contains("primary") && host.vars.role"#,
+            &["db-prod-03", "mq-prod-01", "web-01"],
+        ),
+        (
+            r#"host.vars.tags.contains("primary") || host.name == "web-01""#,
+            &["db-prod-01", "web-01"],
+        ),
+        (
+            "host.vars == null",
+            &["k8s-node-07", "k8s-pod-a", "new-host"],
+        ),
     ];
     for (source, expected) in cases {
         assert_eq!(
@@ -543,7 +572,7 @@ fn host_dashboards() {
 }
 
 #[test]
-fn errors_on_some_objects_only_exclude_those() {
+fn missing_check_results_are_empty_not_errors() {
     let cluster = cluster();
     let filter = Filter::parse(r#"service.last_check_result.output.contains("OK")"#).unwrap();
     let pending = cluster
@@ -555,17 +584,54 @@ fn errors_on_some_objects_only_exclude_those() {
         service: pending,
         host: cluster.hosts.get(pending.key.host.as_str()),
     };
-    let error = filter.evaluate(&scope).unwrap_err();
-    assert_eq!(
-        error.message,
-        "cannot call method 'contains' on null (in `service.last_check_result.output.contains(\"OK\")`)"
-    );
-    assert!(!filter.matches(&scope));
+    assert_eq!(filter.evaluate(&scope), Ok(Value::Bool(false)));
     assert_eq!(
         cluster
             .matching_services(r#"service.last_check_result.output.contains("OK")"#, &[])
             .unwrap(),
         ["db-prod-01!pg_main", "web-01!http"]
+    );
+    assert_eq!(
+        cluster
+            .matching_services(r#"!service.last_check_result.output.contains("OK")"#, &[])
+            .unwrap()
+            .len(),
+        8,
+        "the pending service's output doesn't contain OK either"
+    );
+}
+
+#[test]
+fn errors_on_some_objects_only_exclude_those() {
+    let cluster = cluster();
+    // `number()` fails for outputs that aren't numbers, which is all but
+    // one of them here; only the objects it fails on are excluded.
+    let mut cluster = cluster;
+    if let Some(result) = cluster
+        .services
+        .iter_mut()
+        .find(|service| service.key.full_name() == "web-01!http")
+        .and_then(|service| service.check.result.as_mut())
+    {
+        "200".clone_into(&mut result.output);
+    }
+    let source = "number(service.last_check_result.output) >= 200 || service.name == \"disk\"";
+    let filter = Filter::parse(source).unwrap();
+    let failing = &cluster.services[0];
+    let scope = ServiceScope {
+        service: failing,
+        host: cluster.hosts.get(failing.key.host.as_str()),
+    };
+    assert_eq!(
+        filter.evaluate(&scope).unwrap_err().message,
+        "can't convert 'CRITICAL - lag 412s' to a floating point number \
+         (in `number(service.last_check_result.output)`)"
+    );
+    assert!(!filter.matches(&scope));
+    assert_eq!(
+        cluster.matching_services(source, &[]).unwrap(),
+        ["web-01!http"],
+        "web-01!disk fails in number() before its name is compared"
     );
 }
 

@@ -1,9 +1,14 @@
 //! Hostile and extreme input: deeply nested filters are rejected cleanly,
-//! and the deepest accepted ones parse and evaluate on a small stack.
+//! the deepest accepted ones parse and evaluate on a small stack, filters
+//! that would create huge amounts of data fail instead of exhausting memory,
+//! pathological input takes linear (or n log n) time, and error messages
+//! stay short.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
-use ic_filter::{Filter, Value, VarsScope};
+use ic_filter::{Chain, Filter, HostScope, Scope, Value, VarsScope};
+use ic_model::Host;
 
 /// Thread stacks are usually 2 MiB (std, tokio's blocking pool). The deepest
 /// accepted filter must fit in half of that even in unoptimised builds
@@ -147,4 +152,250 @@ fn huge_and_odd_input_does_not_panic() {
             let _ = filter.matches(&scope);
         }
     }
+}
+
+fn evaluate(source: &str, vars: &BTreeMap<String, Value>) -> Result<Value, String> {
+    Filter::parse(source)
+        .map_err(|error| error.to_string())?
+        .evaluate(&VarsScope { vars })
+        .map_err(|error| error.message)
+}
+
+/// Generous for unoptimised builds on a busy machine; the operations below
+/// take milliseconds when they are linear and minutes when quadratic.
+const SLOW: Duration = Duration::from_secs(10);
+
+#[test]
+fn amplification_hits_the_evaluation_limit() {
+    let vars = BTreeMap::new();
+    let tenfold = ".replace(\"a\", \"aaaaaaaaaa\")";
+    // 10^7 bytes fit into the limit…
+    let seven = format!("len(\"a\"{})", tenfold.repeat(7));
+    assert_eq!(evaluate(&seven, &vars), Ok(Value::Number(1e7)));
+    let start = Instant::now();
+    for steps in [8, 11, 30] {
+        // …10^8 bytes don't, and 10^11 or 10^30 are refused just as fast,
+        // before anything that large is allocated.
+        let source = format!("len(\"a\"{}) > 0", tenfold.repeat(steps));
+        let error = evaluate(&source, &vars).unwrap_err();
+        assert!(error.starts_with("evaluation limit reached"), "{error}");
+        assert!(
+            !Filter::parse(&source)
+                .unwrap()
+                .matches(&VarsScope { vars: &vars })
+        );
+    }
+    let doubling = format!("len(\"ab\"{})", " + \"ab\"".repeat(40));
+    assert_eq!(evaluate(&doubling, &vars), Ok(Value::Number(82.0)));
+    let mut growing = "\"x\"".to_owned();
+    for _ in 0..40 {
+        growing = format!("({growing}).replace(\"x\", \"xx\")");
+    }
+    assert!(
+        evaluate(&format!("len({growing})"), &vars)
+            .unwrap_err()
+            .starts_with("evaluation limit reached")
+    );
+    assert!(start.elapsed() < SLOW, "{:?}", start.elapsed());
+}
+
+#[test]
+fn many_ranges_hit_the_evaluation_limit() {
+    let vars = BTreeMap::new();
+    assert!(
+        evaluate("len(range(10001))", &vars)
+            .unwrap_err()
+            .contains("range() would produce more than 10000 numbers")
+    );
+    let ten = format!("len([{}])", ["range(10000)"; 10].join(", "));
+    assert_eq!(evaluate(&ten, &vars), Ok(Value::Number(10.0)));
+    let start = Instant::now();
+    for source in [
+        format!("len([{}])", vec!["range(10000)"; 1_000].join(", ")),
+        format!("len(union({}))", vec!["range(10000)"; 1_000].join(", ")),
+        format!("len({})", vec!["range(10000)"; 50].join(" + ")),
+    ] {
+        let error = evaluate(&source, &vars).unwrap_err();
+        assert!(error.starts_with("evaluation limit reached"), "{error}");
+    }
+    assert!(start.elapsed() < SLOW, "{:?}", start.elapsed());
+}
+
+#[test]
+fn shared_values_are_not_written_out_beyond_the_limit() {
+    // A value from the scope referenced many times stays shared until it is
+    // turned into text, which is then cut off at the limit.
+    let big = Value::from("x".repeat(1_000_000));
+    let vars = BTreeMap::from([("big".to_owned(), big)]);
+    let list = format!("[{}]", vec!["big"; 100].join(", "));
+    assert_eq!(
+        evaluate(&format!("len({list})"), &vars),
+        Ok(Value::Number(100.0))
+    );
+    let start = Instant::now();
+    for source in [
+        format!("len(string({list}))"),
+        format!("len({list}.join(\"\"))"),
+        format!("len({list}.to_string())"),
+        format!("match(\"*\", [{list}])"),
+        format!("\"x\".contains({list})"),
+        format!("{{}}[{list}]"),
+    ] {
+        let error = evaluate(&source, &vars).unwrap_err();
+        assert!(
+            error.starts_with("evaluation limit reached"),
+            "{source}: {error}"
+        );
+    }
+    assert!(start.elapsed() < SLOW, "{:?}", start.elapsed());
+}
+
+#[test]
+fn pathological_input_takes_linear_time() {
+    let vars = BTreeMap::new();
+    let start = Instant::now();
+    // `join` appends in place instead of copying the result for every item.
+    assert_eq!(
+        evaluate(
+            "len(range(10000).join(\",\") + range(10000).join(\",\")) > 0",
+            &vars
+        ),
+        Ok(Value::Bool(true))
+    );
+    // `union` sorts once instead of inserting into a sorted list.
+    assert_eq!(
+        evaluate(
+            "len(union(range(10000, 0, -1), range(0, 10000))) == 10001",
+            &vars
+        ),
+        Ok(Value::Bool(true))
+    );
+    // Array `-` hashes the right side.
+    assert_eq!(
+        evaluate("len(range(10000) - range(1, 10000))", &vars),
+        Ok(Value::Number(1.0))
+    );
+    // `find` doesn't compare the needle at every position, and `split`
+    // doesn't compare every byte with every delimiter.
+    let text = format!("{}b", "a".repeat(1_000_000));
+    let needle = format!("{}b", "a".repeat(10_000));
+    let vars = BTreeMap::from([
+        ("text".to_owned(), Value::from(text.as_str())),
+        ("needle".to_owned(), Value::from(needle)),
+        ("other".to_owned(), Value::from("xyz".repeat(300_000))),
+    ]);
+    assert_eq!(
+        evaluate("text.find(needle)", &vars),
+        Ok(Value::Number(990_000.0))
+    );
+    assert_eq!(
+        evaluate("len(other.split(text))", &vars),
+        Ok(Value::Number(1.0))
+    );
+    assert!(
+        evaluate("len(text.split(text))", &vars)
+            .unwrap_err()
+            .starts_with("evaluation limit reached"),
+        "a million parts are over the limit"
+    );
+    // The lexer checks for include paths (`<…>`) in one pass.
+    for source in [
+        "<".repeat(200_000),
+        "x<1||".repeat(40_000),
+        "a<".repeat(100_000),
+    ] {
+        let _ = Filter::parse(&source);
+    }
+    assert!(start.elapsed() < SLOW, "{:?}", start.elapsed());
+}
+
+#[test]
+fn error_messages_stay_short() {
+    let output = "x".repeat(1_000_000);
+    let vars = BTreeMap::from([
+        ("output".to_owned(), Value::from(output.as_str())),
+        (
+            "list".to_owned(),
+            (0..100_000)
+                .map(|index| Value::Number(f64::from(index)))
+                .collect(),
+        ),
+        (
+            "dict".to_owned(),
+            Value::from(BTreeMap::from([(
+                "k".to_owned(),
+                Value::from(output.as_str()),
+            )])),
+        ),
+    ]);
+    let long_expression = format!("(\"{}\" + 1) < 2 && x", "y".repeat(70_000));
+    for source in [
+        "\"a\" in output",
+        "\"a\" !in dict",
+        "number(output) > 5",
+        "number(list) > 5",
+        "output.substr(2000000)",
+        "output[output]",
+        "list[output]",
+        "cidr_match(output, \"10.0.0.1\")",
+        "cidr_match(\"10.0.0.0/\" + output, \"10.0.0.1\")",
+        "output.nope()",
+        long_expression.as_str(),
+    ] {
+        let start = Instant::now();
+        let error = evaluate(source, &vars).unwrap_err();
+        assert!(error.len() < 400, "{} bytes for {source:.60}", error.len());
+        assert!(start.elapsed() < Duration::from_secs(2), "{source:.60}");
+    }
+    // Failing on a long expression is cheap, also when repeated per object.
+    let filter = Filter::parse(&long_expression).unwrap();
+    let scope = VarsScope { vars: &vars };
+    let start = Instant::now();
+    for _ in 0..1_000 {
+        assert!(!filter.matches(&scope));
+    }
+    assert!(start.elapsed() < SLOW, "{:?}", start.elapsed());
+    // Parse errors don't repeat huge identifiers either.
+    let error = Filter::parse(&format!("a {}", "b".repeat(100_000))).unwrap_err();
+    assert!(error.message.len() < 400, "{}", error.message.len());
+    let error = Filter::parse(&format!("\"\\0{}\"", "1".repeat(100_000))).unwrap_err();
+    assert!(error.message.len() < 400, "{}", error.message.len());
+}
+
+#[test]
+fn one_filter_is_shared_between_threads() {
+    let mut host = Host::new("web-01");
+    host.vars = serde_json::json!({ "pattern": "web-*", "regex": "^web" })
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let mut other = Host::new("db-01");
+    other.vars = serde_json::json!({ "pattern": "db-*", "regex": "^db" })
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let filter = Filter::parse(
+        "match(host.vars.pattern, host.name) && regex(host.vars.regex, host.name) \
+         && !match(host.vars.regex, host.name)",
+    )
+    .unwrap();
+    let hosts = [&host, &other];
+    std::thread::scope(|scope| {
+        for thread in 0..4 {
+            let filter = &filter;
+            let clone = filter.clone();
+            scope.spawn(move || {
+                for round in 0..2_000 {
+                    // Alternate hosts, so the dynamic patterns change between
+                    // evaluations on every thread.
+                    let host = hosts[(round + thread) % 2];
+                    let host_scope = HostScope { host };
+                    let scopes: [&dyn Scope; 1] = [&host_scope];
+                    let chain = Chain { scopes: &scopes };
+                    assert!(filter.matches(&chain), "shared, round {round}");
+                    assert!(clone.matches(&host_scope), "cloned, round {round}");
+                }
+            });
+        }
+    });
 }

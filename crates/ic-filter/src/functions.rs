@@ -5,17 +5,21 @@
 //! without parameters (`get_time`) ignore extra ones.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::EvalError;
-use crate::ast::{Expr, Function, PatternArg, Span};
+use crate::ast::{Expr, Function, PatternArg, Primitive, Span};
+use crate::budget::Budget;
 use crate::eval::Evaluator;
-use crate::ops;
 use crate::pattern::{Cidr, Glob, IcingaRegex};
 use crate::value::Value;
+use crate::{methods, ops};
 
-/// `range()` refuses to build arrays larger than this.
-const RANGE_LIMIT: usize = 1_000_000;
+/// `range()` refuses to build arrays larger than this. Icinga doesn't allow
+/// `range()` in API filters at all (it isn't marked safe for its sandbox);
+/// small ranges are harmless and occasionally handy in dashboards.
+const RANGE_LIMIT: usize = 10_000;
 
 /// `MatchAll`: every array item has to match.
 const MATCH_ALL: i32 = 0;
@@ -48,11 +52,15 @@ pub(crate) fn call(
         | Function::Bool
         | Function::Keys => {
             let value = single_arg(ev, function, args, span)?;
-            convert(function, value).map_err(|message| ev.fail(span, message))
+            convert(function, value, ev.budget()).map_err(|message| ev.fail(span, message))
         }
         Function::Union | Function::Intersection | Function::Range | Function::GetTime => {
             let values = ev.eval_all(args)?;
             combine(ev, function, &values).map_err(|message| ev.fail(span, message))
+        }
+        Function::Construct(primitive) => {
+            let values = ev.eval_all(args)?;
+            construct(*primitive, &values, ev.budget()).map_err(|message| ev.fail(span, message))
         }
         Function::Unsupported(_) | Function::Unknown(_) => {
             Err(ev.fail(span, not_available(function)))
@@ -61,7 +69,7 @@ pub(crate) fn call(
 }
 
 /// The one-parameter functions, on their evaluated argument.
-fn convert(function: &Function, value: Value) -> Result<Value, String> {
+fn convert(function: &Function, value: Value, budget: &Budget) -> Result<Value, String> {
     match function {
         Function::Len => {
             #[expect(
@@ -76,15 +84,12 @@ fn convert(function: &Function, value: Value) -> Result<Value, String> {
             };
             Ok(Value::Number(length))
         }
-        Function::TypeOf => Ok(Value::str(type_name(&value))),
-        Function::String => Ok(match value {
-            Value::String(_) => value,
-            other => Value::from(other.to_icinga_string()),
-        }),
+        Function::TypeOf => Ok(type_value(type_name(&value))),
+        Function::String => to_string(value, budget),
         Function::Number => ops::to_number(&value).map(Value::Number),
         Function::Bool => Ok(Value::Bool(value.is_truthy())),
         Function::Keys => match value {
-            Value::Dict(entries) => Ok(entries.keys().map(|key| Value::str(key)).collect()),
+            Value::Dict(entries) => methods::keys(&entries, budget),
             Value::Null | Value::Array(_) => Ok(Value::array(Vec::new())),
             other => Err(format!(
                 "keys() expects a dictionary, got a value of type '{}'",
@@ -95,12 +100,22 @@ fn convert(function: &Function, value: Value) -> Result<Value, String> {
     }
 }
 
+/// `string(value)`: strings as they are, everything else converted (and
+/// charged).
+fn to_string(value: Value, budget: &Budget) -> Result<Value, String> {
+    Ok(match value {
+        Value::String(_) => value,
+        other => Value::from(budget.text_of(&other)?.into_owned()),
+    })
+}
+
 /// The functions taking any number of arguments, on their values.
 fn combine(ev: &Evaluator<'_>, function: &Function, values: &[Value]) -> Result<Value, String> {
+    let budget = ev.budget();
     match function {
-        Function::Union => union(values),
-        Function::Intersection => intersection(values),
-        Function::Range => range(values),
+        Function::Union => union(values, budget),
+        Function::Intersection => intersection(values, budget),
+        Function::Range => range(values, budget),
         // Takes no parameters; extra arguments are ignored, as in Icinga.
         Function::GetTime => Ok(Value::Number(ev.now())),
         other => Err(format!(
@@ -110,26 +125,57 @@ fn combine(ev: &Evaluator<'_>, function: &Function, values: &[Value]) -> Result<
     }
 }
 
+/// Calling a type, Icinga's `ConstructorCall`: `String(x)`, `Number(x)` and
+/// `Boolean(x)` convert like `string()`, `number()` and `bool()`; without an
+/// argument they give `""`, `0` and (sic) `0`.
+fn construct(primitive: Primitive, args: &[Value], budget: &Budget) -> Result<Value, String> {
+    let value = match args {
+        [] => {
+            return Ok(match primitive {
+                Primitive::String => Value::str(""),
+                Primitive::Number | Primitive::Boolean => Value::Number(0.0),
+            });
+        }
+        [value] => value,
+        _ => {
+            return Err(format!(
+                "{}() takes at most 1 argument ({} given)",
+                primitive.name(),
+                args.len()
+            ));
+        }
+    };
+    match primitive {
+        Primitive::String => to_string(value.clone(), budget),
+        Primitive::Number => ops::to_number(value).map(Value::Number),
+        Primitive::Boolean => Ok(Value::Bool(value.is_truthy())),
+    }
+}
+
 #[cold]
 fn not_available(function: &Function) -> String {
     match function {
         Function::Unsupported(name) => {
-            let hint = match name.as_ref() {
-                "String" | "Number" | "Boolean" => "; use string(), number() or bool()",
-                _ => "",
-            };
-            format!("the Icinga function '{name}()' is not available in filters{hint}")
+            format!("the Icinga function '{name}()' is not available in filters")
         }
         other => format!("unknown function '{}()'", other.name()),
     }
 }
 
-/// The name `typeof()` returns: the type's name (`null` is an `Object`).
+/// The name of the type `typeof()` returns (`null` is an `Object`).
 pub(crate) fn type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "Object",
         other => other.type_name(),
     }
+}
+
+/// A type, as `typeof()` returns it and the globals `String`, `Number`, …
+/// hold it: a dictionary with the type's `name`. Types compare equal by
+/// name, so `typeof(x) == Number` and `typeof(x).name == "Number"` work as
+/// in Icinga, and a type is not equal to the string of its name.
+pub(crate) fn type_value(name: &str) -> Value {
+    Value::from(BTreeMap::from([("name".to_owned(), Value::str(name))]))
 }
 
 /// Evaluates the only argument of a one-parameter function.
@@ -151,15 +197,6 @@ fn arity_error(function: &Function, given: usize) -> String {
         "{}() takes exactly 1 argument ({given} given)",
         function.name()
     )
-}
-
-/// The text of a value as Icinga converts it to a string, without copying
-/// strings.
-pub(crate) fn text(value: &Value) -> Cow<'_, str> {
-    match value {
-        Value::String(text) => Cow::Borrowed(text),
-        other => Cow::Owned(other.to_icinga_string()),
-    }
 }
 
 /// Something a pattern function tests text against.
@@ -222,7 +259,8 @@ fn pattern_match<T: Matcher>(
             None => None,
         },
     };
-    apply_pattern(name, pattern, compile, &inputs).map_err(|message| ev.fail(span, message))
+    apply_pattern(name, pattern, compile, &inputs, ev.budget())
+        .map_err(|message| ev.fail(span, message))
 }
 
 #[cold]
@@ -238,6 +276,7 @@ fn apply_pattern<T: Matcher>(
     pattern: &PatternArg<T>,
     compile: fn(&str) -> Result<T, String>,
     inputs: &PatternInputs,
+    budget: &Budget,
 ) -> Result<Value, String> {
     if let Value::Dict(_) = inputs.value {
         return Err(format!("dictionaries are not supported by {name}()"));
@@ -250,18 +289,21 @@ fn apply_pattern<T: Matcher>(
     let matcher: Arc<T> = match pattern {
         PatternArg::Compiled(compiled) => Arc::clone(compiled),
         PatternArg::Dynamic(cache) => {
-            let text = inputs.pattern.as_ref().map(Value::to_icinga_string);
-            cache.get_or_compile(&text.unwrap_or_default(), compile)?
+            let text = match &inputs.pattern {
+                Some(pattern) => budget.text_of(pattern)?,
+                None => Cow::Borrowed(""),
+            };
+            cache.get_or_compile(&text, compile)?
         }
     };
     let Value::Array(items) = &inputs.value else {
-        return Ok(Value::Bool(matcher.test(&text(&inputs.value))));
+        return Ok(Value::Bool(matcher.test(&budget.text_of(&inputs.value)?)));
     };
     if items.is_empty() {
         return Ok(Value::Bool(false));
     }
     for item in items.iter() {
-        let hit = matcher.test(&text(item));
+        let hit = matcher.test(&budget.text_of(item)?);
         if mode == MATCH_ANY && hit {
             return Ok(Value::Bool(true));
         }
@@ -287,36 +329,30 @@ fn array_arg<'v>(function: &str, value: &'v Value) -> Result<Option<&'v [Value]>
 }
 
 /// `union(arrays…)`: the distinct items of all arrays, sorted with `<`.
-fn union(args: &[Value]) -> Result<Value, String> {
-    let mut set: Vec<Value> = Vec::new();
+///
+/// Icinga inserts every item into a `std::set`, which keeps the first of
+/// items that are neither less nor greater than each other. A stable sort
+/// followed by dropping such duplicates gives the same set in O(n log n).
+fn union(args: &[Value], budget: &Budget) -> Result<Value, String> {
+    let mut all: Vec<Value> = Vec::new();
     for arg in args {
         let Some(items) = array_arg("union", arg)? else {
             continue;
         };
-        for item in items {
-            insert_sorted_unique(&mut set, item)?;
+        budget.items(items.len())?;
+        all.extend_from_slice(items);
+    }
+    let mut set: Vec<Value> = Vec::with_capacity(all.len());
+    for item in ops::sort_values(all)? {
+        let duplicate = match set.last() {
+            Some(last) => !ops::less(last, &item)? && !ops::less(&item, last)?,
+            None => false,
+        };
+        if !duplicate {
+            set.push(item);
         }
     }
     Ok(Value::array(set))
-}
-
-/// Inserts into a sorted set (`std::set<Value>`): items that are neither
-/// less nor greater than an existing one are duplicates.
-fn insert_sorted_unique(set: &mut Vec<Value>, item: &Value) -> Result<(), String> {
-    let (mut low, mut high) = (0, set.len());
-    while low < high {
-        let middle = low + (high - low) / 2;
-        if ops::less(&set[middle], item)? {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
-    if low < set.len() && !ops::less(item, &set[low])? {
-        return Ok(());
-    }
-    set.insert(low, item.clone());
-    Ok(())
 }
 
 /// `intersection(arrays…)`: the items common to all arrays (sorted; an item
@@ -325,7 +361,7 @@ fn insert_sorted_unique(set: &mut Vec<Value>, item: &Value) -> Result<(), String
 /// Like Icinga, a single array gives an empty result, and a `null` argument
 /// ends the computation with the result so far (empty if it's the first or
 /// second argument).
-fn intersection(args: &[Value]) -> Result<Value, String> {
+fn intersection(args: &[Value], budget: &Budget) -> Result<Value, String> {
     let Some((first, rest)) = args.split_first() else {
         return Ok(Value::array(Vec::new()));
     };
@@ -335,11 +371,13 @@ fn intersection(args: &[Value]) -> Result<Value, String> {
     if rest.is_empty() {
         return Ok(Value::array(Vec::new()));
     }
+    budget.items(first.len())?;
     let mut current = ops::sort_values(first.to_vec())?;
     for (index, arg) in rest.iter().enumerate() {
         let Some(other) = array_arg("intersection", arg)? else {
             return Ok(Value::array(if index == 0 { Vec::new() } else { current }));
         };
+        budget.items(other.len())?;
         current = intersect_sorted(&current, &ops::sort_values(other.to_vec())?)?;
     }
     Ok(Value::array(current))
@@ -364,7 +402,7 @@ fn intersect_sorted(left: &[Value], right: &[Value]) -> Result<Vec<Value>, Strin
 }
 
 /// `range(end)`, `range(start, end)`, `range(start, end, increment)`.
-fn range(args: &[Value]) -> Result<Value, String> {
+fn range(args: &[Value], budget: &Budget) -> Result<Value, String> {
     let numbers = args
         .iter()
         .map(ops::to_number)
@@ -398,6 +436,7 @@ fn range(args: &[Value]) -> Result<Value, String> {
         items.push(Value::Number(current));
         current += increment;
     }
+    budget.items(items.len())?;
     Ok(Value::array(items))
 }
 
@@ -417,36 +456,48 @@ mod tests {
         Value::from(items.to_vec())
     }
 
+    fn union_(args: &[Value]) -> Result<Value, String> {
+        union(args, &Budget::new())
+    }
+
+    fn intersection_(args: &[Value]) -> Result<Value, String> {
+        intersection(args, &Budget::new())
+    }
+
+    fn range_(args: &[Value]) -> Result<Value, String> {
+        range(args, &Budget::new())
+    }
+
     #[test]
     fn union_sorts_and_dedupes() {
         assert_eq!(
-            union(&[a(&[s("devs"), s("slack")]), a(&[s("slack"), s("noc")])]).unwrap(),
+            union_(&[a(&[s("devs"), s("slack")]), a(&[s("slack"), s("noc")])]).unwrap(),
             a(&[s("devs"), s("noc"), s("slack")])
         );
         assert_eq!(
-            union(&[a(&[n(3.0), n(1.0)]), Value::Null, a(&[n(1.0)])]).unwrap(),
+            union_(&[a(&[n(3.0), n(1.0)]), Value::Null, a(&[n(1.0)])]).unwrap(),
             a(&[n(1.0), n(3.0)])
         );
-        assert_eq!(union(&[]).unwrap(), a(&[]));
+        assert_eq!(union_(&[]).unwrap(), a(&[]));
         assert!(
-            union(&[a(&[n(1.0), s("a")])]).is_err(),
+            union_(&[a(&[n(1.0), s("a")])]).is_err(),
             "mixed types can't be ordered"
         );
-        assert!(union(&[s("a")]).is_err());
+        assert!(union_(&[s("a")]).is_err());
     }
 
     #[test]
     fn intersection_follows_icinga() {
         assert_eq!(
-            intersection(&[a(&[s("devs"), s("slack")]), a(&[s("slack"), s("noc")])]).unwrap(),
+            intersection_(&[a(&[s("devs"), s("slack")]), a(&[s("slack"), s("noc")])]).unwrap(),
             a(&[s("slack")])
         );
         assert_eq!(
-            intersection(&[a(&[n(1.0), n(1.0), n(2.0)]), a(&[n(1.0), n(1.0), n(3.0)])]).unwrap(),
+            intersection_(&[a(&[n(1.0), n(1.0), n(2.0)]), a(&[n(1.0), n(1.0), n(3.0)])]).unwrap(),
             a(&[n(1.0), n(1.0)])
         );
         assert_eq!(
-            intersection(&[
+            intersection_(&[
                 a(&[s("a"), s("b"), s("c")]),
                 a(&[s("c"), s("b")]),
                 a(&[s("b"), s("x"), s("y")])
@@ -455,52 +506,60 @@ mod tests {
             a(&[s("b")])
         );
         assert_eq!(
-            intersection(&[a(&[n(1.0)])]).unwrap(),
+            intersection_(&[a(&[n(1.0)])]).unwrap(),
             a(&[]),
             "one array: empty"
         );
-        assert_eq!(intersection(&[]).unwrap(), a(&[]));
-        assert_eq!(intersection(&[Value::Null, a(&[n(1.0)])]).unwrap(), a(&[]));
-        assert_eq!(intersection(&[a(&[n(1.0)]), Value::Null]).unwrap(), a(&[]));
+        assert_eq!(intersection_(&[]).unwrap(), a(&[]));
+        assert_eq!(intersection_(&[Value::Null, a(&[n(1.0)])]).unwrap(), a(&[]));
+        assert_eq!(intersection_(&[a(&[n(1.0)]), Value::Null]).unwrap(), a(&[]));
         assert_eq!(
-            intersection(&[a(&[n(1.0), n(2.0)]), a(&[n(2.0)]), Value::Null]).unwrap(),
+            intersection_(&[a(&[n(1.0), n(2.0)]), a(&[n(2.0)]), Value::Null]).unwrap(),
             a(&[n(2.0)]),
             "null ends with the result so far"
         );
-        assert!(intersection(&[a(&[]), s("x")]).is_err());
+        assert!(intersection_(&[a(&[]), s("x")]).is_err());
     }
 
     #[test]
     fn range_follows_icinga() {
         assert_eq!(
-            range(&[n(5.0)]).unwrap(),
+            range_(&[n(5.0)]).unwrap(),
             a(&[n(0.0), n(1.0), n(2.0), n(3.0), n(4.0)])
         );
-        assert_eq!(range(&[n(2.0), n(4.0)]).unwrap(), a(&[n(2.0), n(3.0)]));
+        assert_eq!(range_(&[n(2.0), n(4.0)]).unwrap(), a(&[n(2.0), n(3.0)]));
         assert_eq!(
-            range(&[n(2.0), n(10.0), n(2.0)]).unwrap(),
+            range_(&[n(2.0), n(10.0), n(2.0)]).unwrap(),
             a(&[n(2.0), n(4.0), n(6.0), n(8.0)])
         );
         assert_eq!(
-            range(&[n(3.0), n(0.0), n(-1.0)]).unwrap(),
+            range_(&[n(3.0), n(0.0), n(-1.0)]).unwrap(),
             a(&[n(3.0), n(2.0), n(1.0)])
         );
-        assert_eq!(range(&[n(0.0), n(3.0), n(-1.0)]).unwrap(), a(&[]));
-        assert_eq!(range(&[n(3.0), n(0.0)]).unwrap(), a(&[]));
-        assert_eq!(range(&[n(1.0), n(1.0)]).unwrap(), a(&[]));
-        assert_eq!(range(&[n(1.0), n(2.0), n(0.0)]).unwrap(), a(&[]));
+        assert_eq!(range_(&[n(0.0), n(3.0), n(-1.0)]).unwrap(), a(&[]));
+        assert_eq!(range_(&[n(3.0), n(0.0)]).unwrap(), a(&[]));
+        assert_eq!(range_(&[n(1.0), n(1.0)]).unwrap(), a(&[]));
+        assert_eq!(range_(&[n(1.0), n(2.0), n(0.0)]).unwrap(), a(&[]));
         assert_eq!(
-            range(&[s("2")]).unwrap(),
+            range_(&[s("2")]).unwrap(),
             a(&[n(0.0), n(1.0)]),
             "arguments are converted"
         );
-        assert_eq!(range(&[n(f64::NAN)]).unwrap(), a(&[]));
-        assert!(range(&[]).is_err());
-        assert!(range(&[n(1.0), n(2.0), n(3.0), n(4.0)]).is_err());
-        assert!(range(&[s("x")]).is_err());
-        assert!(range(&[n(1e12)]).unwrap_err().contains("more than"));
+        assert_eq!(range_(&[n(f64::NAN)]).unwrap(), a(&[]));
+        assert!(range_(&[]).is_err());
+        assert!(range_(&[n(1.0), n(2.0), n(3.0), n(4.0)]).is_err());
+        assert!(range_(&[s("x")]).is_err());
+        assert!(range_(&[n(1e12)]).unwrap_err().contains("more than 10000"));
+        assert_eq!(
+            range_(&[n(10_000.0)])
+                .unwrap()
+                .as_array()
+                .map(<[Value]>::len),
+            Some(10_000)
+        );
+        assert!(range_(&[n(10_001.0)]).is_err());
         assert!(
-            range(&[n(1e16), n(1e16 + 10.0), n(0.1)]).is_err(),
+            range_(&[n(1e16), n(1e16 + 10.0), n(0.1)]).is_err(),
             "an increment too small to change the value doesn't loop forever"
         );
     }
@@ -515,9 +574,98 @@ mod tests {
     }
 
     #[test]
-    fn text_borrows_strings() {
-        assert!(matches!(text(&s("x")), Cow::Borrowed("x")));
-        assert_eq!(text(&n(2.5)), "2.500000");
-        assert_eq!(text(&Value::Null), "");
+    fn union_keeps_the_first_of_equivalent_items() {
+        // 0 and "" are neither less nor greater than each other.
+        assert_eq!(
+            union_(&[a(&[n(0.0), s(""), n(1.0)])]).unwrap(),
+            a(&[n(0.0), n(1.0)])
+        );
+        assert_eq!(union_(&[a(&[s(""), n(0.0)])]).unwrap(), a(&[s("")]));
+        assert_eq!(union_(&[a(&[n(1.0)])]).unwrap(), a(&[n(1.0)]));
+    }
+
+    #[test]
+    fn union_takes_n_log_n_time() {
+        let descending: Vec<Value> = (0..100_000)
+            .rev()
+            .map(|index| n(f64::from(index)))
+            .collect();
+        let start = std::time::Instant::now();
+        let set = union_(&[a(&descending), a(&descending)]).unwrap_err();
+        assert!(
+            set.contains("evaluation limit reached"),
+            "200 000 items: {set}"
+        );
+        let set = union_(&[a(&descending)]).unwrap();
+        assert_eq!(set.as_array().map(<[Value]>::len), Some(100_000));
+        assert_eq!(set.as_array().and_then(<[Value]>::first), Some(&n(0.0)));
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn functions_charge_what_they_create() {
+        let budget = Budget::new();
+        budget.items(crate::budget::MAX_ITEMS - 5).unwrap();
+        assert!(range(&[n(5.0)], &budget).is_ok());
+        assert!(
+            range(&[n(1.0)], &budget)
+                .unwrap_err()
+                .contains("evaluation limit")
+        );
+        let budget = Budget::new();
+        budget.items(crate::budget::MAX_ITEMS - 3).unwrap();
+        assert!(intersection(&[a(&[n(1.0), n(2.0)]), a(&[n(2.0), n(3.0)])], &budget).is_err());
+        let budget = Budget::new();
+        budget.text(crate::budget::MAX_TEXT - 3).unwrap();
+        assert!(convert(&Function::String, a(&[n(1.0)]), &budget).is_err());
+        assert_eq!(
+            convert(&Function::String, s("long text"), &budget).unwrap(),
+            s("long text")
+        );
+    }
+
+    #[test]
+    fn constructors_follow_icinga() {
+        let budget = Budget::new();
+        let cases = [
+            (Primitive::String, vec![], s("")),
+            (Primitive::String, vec![n(3.0)], s("3")),
+            (Primitive::String, vec![a(&[s("a")])], s(r#"[ "a" ]"#)),
+            (Primitive::Number, vec![], n(0.0)),
+            (Primitive::Number, vec![s("5")], n(5.0)),
+            (Primitive::Number, vec![Value::Bool(true)], n(1.0)),
+            (Primitive::Boolean, vec![], n(0.0)),
+            (Primitive::Boolean, vec![n(1.0)], Value::Bool(true)),
+            (Primitive::Boolean, vec![s("")], Value::Bool(false)),
+        ];
+        for (primitive, args, expected) in cases {
+            assert_eq!(
+                construct(primitive, &args, &budget).unwrap(),
+                expected,
+                "{primitive:?}({args:?})"
+            );
+        }
+        assert_eq!(
+            construct(Primitive::Number, &[n(1.0), n(2.0)], &budget).unwrap_err(),
+            "Number() takes at most 1 argument (2 given)"
+        );
+        assert!(construct(Primitive::Number, &[s("x")], &budget).is_err());
+    }
+
+    #[test]
+    fn types_are_dictionaries_with_a_name() {
+        let number = type_value("Number");
+        assert_eq!(
+            number.as_dict().and_then(|entries| entries.get("name")),
+            Some(&s("Number"))
+        );
+        assert_eq!(
+            convert(&Function::TypeOf, n(1.0), &Budget::new()).unwrap(),
+            number
+        );
+        assert_eq!(
+            convert(&Function::TypeOf, Value::Null, &Budget::new()).unwrap(),
+            type_value("Object")
+        );
     }
 }

@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex};
 use regex::bytes::{Regex, RegexBuilder};
 
 use crate::ops::parse_integer;
+use crate::value::preview_str;
 
 /// Compiled patterns are capped at this size so a pathological pattern
 /// can't use unbounded memory.
@@ -187,8 +188,12 @@ impl Cidr {
             Some((address, prefix)) => (address, Some(parse_long(prefix)?)),
             None => (pattern, None),
         };
-        let (network, is_v4) = parse_ip(address)
-            .ok_or_else(|| format!("invalid IP address '{address}' in CIDR pattern"))?;
+        let (network, is_v4) = parse_ip(address).ok_or_else(|| {
+            format!(
+                "invalid IP address '{}' in CIDR pattern",
+                preview_str(address)
+            )
+        })?;
         let mut bits = prefix.unwrap_or(0);
         if is_v4 {
             if !(0..=32).contains(&bits) {
@@ -205,7 +210,8 @@ impl Cidr {
             .ok_or_else(|| "mask must be between 0 and 128 for IPv6 CIDR masks".to_owned())?;
         if network & host_mask(prefix) != 0 {
             return Err(format!(
-                "masked-off bits must all be zero in CIDR pattern '{pattern}'"
+                "masked-off bits must all be zero in CIDR pattern '{}'",
+                preview_str(pattern)
             ));
         }
         Ok(Cidr { network, prefix })
@@ -236,15 +242,20 @@ fn parse_ip(text: &str) -> Option<(u128, bool)> {
 }
 
 fn parse_long(text: &str) -> Result<i64, String> {
-    parse_integer(text).ok_or_else(|| format!("can't convert '{text}' to an integer"))
+    parse_integer(text)
+        .ok_or_else(|| format!("can't convert '{}' to an integer", preview_str(text)))
 }
 
-/// Caches the most recently compiled pattern for a computed pattern
-/// argument, so `match(host.vars.pattern, …)` compiles once per distinct
-/// pattern in a row of objects rather than once per object.
+/// The outcome of compiling a pattern: the pattern or the error message.
+type Compiled<T> = Result<Arc<T>, String>;
+
+/// Caches the outcome of compiling the most recent pattern for a computed
+/// pattern argument, so `match(host.vars.pattern, …)` compiles once per
+/// distinct pattern in a row of objects rather than once per object. Failed
+/// compiles are cached too: an invalid pattern can be slow to reject.
 #[derive(Debug)]
 pub(crate) struct PatternCache<T> {
-    last: Mutex<Option<(Box<str>, Arc<T>)>>,
+    last: Mutex<Option<(Box<str>, Compiled<T>)>>,
 }
 
 impl<T> Default for PatternCache<T> {
@@ -263,23 +274,24 @@ impl<T> Clone for PatternCache<T> {
 }
 
 impl<T> PatternCache<T> {
-    /// The compiled pattern, from the cache or freshly compiled.
+    /// The compiled pattern (or why it doesn't compile), from the cache or
+    /// freshly compiled.
     pub(crate) fn get_or_compile(
         &self,
         pattern: &str,
         compile: impl FnOnce(&str) -> Result<T, String>,
-    ) -> Result<Arc<T>, String> {
+    ) -> Compiled<T> {
         if let Ok(last) = self.last.lock()
-            && let Some((cached, compiled)) = last.as_ref()
+            && let Some((cached, outcome)) = last.as_ref()
             && **cached == *pattern
         {
-            return Ok(Arc::clone(compiled));
+            return outcome.clone();
         }
-        let compiled = Arc::new(compile(pattern)?);
+        let outcome = compile(pattern).map(Arc::new);
         if let Ok(mut last) = self.last.lock() {
-            *last = Some((pattern.into(), Arc::clone(&compiled)));
+            *last = Some((pattern.into(), outcome.clone()));
         }
-        Ok(compiled)
+        outcome
     }
 }
 
@@ -540,5 +552,48 @@ mod tests {
         let failing: PatternCache<Cidr> = PatternCache::default();
         assert!(failing.get_or_compile("x", Cidr::new).is_err());
         assert!(failing.clone().get_or_compile("::/0", Cidr::new).is_ok());
+    }
+
+    #[test]
+    fn failed_compiles_are_cached_too() {
+        let cache: PatternCache<IcingaRegex> = PatternCache::default();
+        let mut compiled = 0;
+        let mut errors = Vec::new();
+        for pattern in ["(", "(", "(", "a", "("] {
+            let outcome = cache.get_or_compile(pattern, |pattern| {
+                compiled += 1;
+                IcingaRegex::new(pattern)
+            });
+            errors.push(outcome.err());
+        }
+        assert_eq!(compiled, 3, "\"(\" twice, \"a\", \"(\" again");
+        assert!(
+            errors[0]
+                .as_deref()
+                .is_some_and(|error| error.contains("invalid regular expression"))
+        );
+        assert_eq!(errors[1], errors[0], "the cached error");
+        assert_eq!(errors[3], None);
+    }
+
+    #[test]
+    fn concurrent_use_of_one_cache() {
+        let cache: PatternCache<Glob> = PatternCache::default();
+        std::thread::scope(|scope| {
+            for thread in 0..4 {
+                let cache = &cache;
+                scope.spawn(move || {
+                    for round in 0..2_000 {
+                        let pattern = if (round + thread) % 2 == 0 {
+                            "a*"
+                        } else {
+                            "b*"
+                        };
+                        let glob = cache.get_or_compile(pattern, Glob::new).unwrap();
+                        assert_eq!(glob.is_match("abc"), pattern == "a*");
+                    }
+                });
+            }
+        });
     }
 }

@@ -13,9 +13,10 @@ use std::sync::Arc;
 use ic_model::Timestamp;
 
 use crate::ast::{BinaryOp, Expr, ExprKind, Span, UnaryOp};
+use crate::budget::Budget;
 use crate::ops::{self, Comparison};
 use crate::scope::Scope;
-use crate::value::Value;
+use crate::value::{Value, floor_char_boundary, preview_str};
 use crate::{EvalError, functions, methods};
 
 /// Paths up to this many segments are resolved without allocating.
@@ -26,13 +27,20 @@ pub(crate) struct Evaluator<'a> {
     scope: &'a dyn Scope,
     now: Option<f64>,
     source: &'a str,
+    budget: Budget,
 }
 
 impl<'a> Evaluator<'a> {
     /// `now` fixes what `get_time()` returns (Unix seconds); `None` reads
     /// the clock. `source` is used to quote the failing part in errors.
+    /// Each evaluator has its own [`Budget`], so create one per evaluation.
     pub(crate) fn new(scope: &'a dyn Scope, now: Option<f64>, source: &'a str) -> Self {
-        Evaluator { scope, now, source }
+        Evaluator {
+            scope,
+            now,
+            source,
+            budget: Budget::new(),
+        }
     }
 
     /// The current time for `get_time()`.
@@ -41,20 +49,47 @@ impl<'a> Evaluator<'a> {
             .unwrap_or_else(|| Timestamp::now().as_unix_seconds())
     }
 
-    /// An evaluation error, quoting the part of the filter that failed.
+    /// What this evaluation may still create.
+    pub(crate) fn budget(&self) -> &Budget {
+        &self.budget
+    }
+
+    /// An evaluation error, quoting the start of the part of the filter that
+    /// failed with its whitespace collapsed. Only the start of the source is
+    /// looked at, so failing on a long expression stays cheap.
     #[cold]
     pub(crate) fn fail(&self, span: Span, message: impl Into<String>) -> EvalError {
+        const MAX_CHARS: usize = 60;
+        const MAX_SCAN: usize = 1024;
         let mut message = message.into();
         let snippet = self.source.get(span.start..span.end).unwrap_or_default();
-        let snippet = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-        if !snippet.is_empty() {
-            const MAX_CHARS: usize = 60;
+        let scanned = &snippet[..floor_char_boundary(snippet, MAX_SCAN)];
+        let mut quoted = String::new();
+        let mut written = 0;
+        let mut space = false;
+        let mut cut = scanned.len() < snippet.len();
+        for ch in scanned.chars() {
+            if ch.is_whitespace() {
+                space = written > 0;
+                continue;
+            }
+            if written + usize::from(space) >= MAX_CHARS {
+                cut = true;
+                break;
+            }
+            if space {
+                quoted.push(' ');
+                written += 1;
+                space = false;
+            }
+            quoted.push(ch);
+            written += 1;
+        }
+        if !quoted.is_empty() {
             message.push_str(" (in `");
-            if snippet.chars().count() > MAX_CHARS {
-                message.extend(snippet.chars().take(MAX_CHARS));
+            message.push_str(&quoted);
+            if cut {
                 message.push('…');
-            } else {
-                message.push_str(&snippet);
             }
             message.push_str("`)");
         }
@@ -102,7 +137,11 @@ impl<'a> Evaluator<'a> {
     fn index(&self, target: &Expr, index: &Expr, span: Span) -> Result<Value, EvalError> {
         let target = self.eval(target)?;
         let index = self.eval(index)?;
-        self.field(&target, &index.to_icinga_string(), span)
+        let name = self
+            .budget
+            .text_of(&index)
+            .map_err(|message| self.fail(span, message))?;
+        self.field(&target, &name, span)
     }
 
     fn unary(&self, op: UnaryOp, operand: &Expr, span: Span) -> Result<Value, EvalError> {
@@ -110,14 +149,16 @@ impl<'a> Evaluator<'a> {
         match op {
             UnaryOp::Not => Ok(Value::Bool(!operand.is_truthy())),
             UnaryOp::BitNot => ops::bit_not(&operand).map_err(|message| self.fail(span, message)),
-            UnaryOp::Negate => ops::negate(&operand).map_err(|message| self.fail(span, message)),
+            UnaryOp::Negate => {
+                ops::negate(&operand, &self.budget).map_err(|message| self.fail(span, message))
+            }
         }
     }
 
     fn binary(&self, op: BinaryOp, lhs: &Expr, rhs: &Expr, span: Span) -> Result<Value, EvalError> {
         let lhs = self.eval(lhs)?;
         let rhs = self.eval(rhs)?;
-        binary(op, &lhs, &rhs).map_err(|message| self.fail(span, message))
+        binary(op, &lhs, &rhs, &self.budget).map_err(|message| self.fail(span, message))
     }
 
     fn conditional(
@@ -183,7 +224,7 @@ impl<'a> Evaluator<'a> {
                 format!(
                     "invalid right side argument for '{}' operator: {} (expected an array)",
                     if negated { "!in" } else { "in" },
-                    collection.to_json_text()
+                    collection.json_preview()
                 ),
             ));
         };
@@ -203,7 +244,8 @@ impl<'a> Evaluator<'a> {
         let method =
             methods::resolve(&receiver, name).map_err(|message| self.fail(span, message))?;
         let args = self.eval_all(args)?;
-        methods::invoke(method, &receiver, &args).map_err(|message| self.fail(span, message))
+        methods::invoke(method, &receiver, &args, &self.budget)
+            .map_err(|message| self.fail(span, message))
     }
 
     /// Evaluates arguments in order.
@@ -291,17 +333,18 @@ fn field_error(target: &Value, name: &str) -> String {
         format!("'{name}' is a method; call it as {name}()")
     } else {
         format!(
-            "invalid field access (for value of type '{}'): '{name}'",
-            target.type_name()
+            "invalid field access (for value of type '{}'): '{}'",
+            target.type_name(),
+            preview_str(name)
         )
     }
 }
 
-fn binary(op: BinaryOp, lhs: &Value, rhs: &Value) -> ops::OpResult<Value> {
+fn binary(op: BinaryOp, lhs: &Value, rhs: &Value, budget: &Budget) -> ops::OpResult<Value> {
     let compare = |comparison| ops::compare(comparison, lhs, rhs).map(Value::Bool);
     match op {
-        BinaryOp::Add => ops::add(lhs, rhs),
-        BinaryOp::Subtract => ops::subtract(lhs, rhs),
+        BinaryOp::Add => ops::add(lhs, rhs, budget),
+        BinaryOp::Subtract => ops::subtract(lhs, rhs, budget),
         BinaryOp::Multiply => ops::multiply(lhs, rhs),
         BinaryOp::Divide => ops::divide(lhs, rhs),
         BinaryOp::Modulo => ops::modulo(lhs, rhs),
@@ -327,8 +370,10 @@ fn builtin(name: &str) -> Option<Value> {
         "MatchAny" | "ServiceWarning" | "HostDown" => Value::Number(1.0),
         "ServiceCritical" => Value::Number(2.0),
         "ServiceUnknown" => Value::Number(3.0),
-        // Type objects, as returned by typeof(); see `functions::type_name`.
-        "Object" | "Boolean" | "Number" | "String" | "Array" | "Dictionary" => Value::str(name),
+        // Types, as returned by typeof(); see `functions::type_value`.
+        "Object" | "Boolean" | "Number" | "String" | "Array" | "Dictionary" => {
+            functions::type_value(name)
+        }
         _ => return None,
     })
 }
@@ -355,6 +400,19 @@ mod tests {
         let long = format!("\"{}\" in \"x\"", "a".repeat(100));
         let error = eval(&long).unwrap_err();
         assert!(error.message.ends_with("…`)"), "{}", error.message);
+        // Exactly 60 characters are quoted whole, 61 are cut.
+        let error = eval(&format!("\"{}\" < 1", "a".repeat(54))).unwrap_err();
+        assert!(
+            error
+                .message
+                .ends_with(&format!("\"{}\" < 1`)", "a".repeat(54)))
+        );
+        let error = eval(&format!("\"{}\" < 1", "a".repeat(55))).unwrap_err();
+        assert!(
+            error
+                .message
+                .ends_with(&format!("\"{}\" <…`)", "a".repeat(55)))
+        );
         let error = eval("(true\n  +\n  1)").unwrap_err();
         assert!(
             error.message.ends_with("(in `true + 1`)"),
@@ -370,7 +428,7 @@ mod tests {
         assert_eq!(eval("MatchAny").unwrap(), Value::Number(1.0));
         assert_eq!(eval("ServiceCritical").unwrap(), Value::Number(2.0));
         assert_eq!(eval("HostDown").unwrap(), Value::Number(1.0));
-        assert_eq!(eval("String").unwrap(), Value::from("String"));
+        assert_eq!(eval("String.name").unwrap(), Value::from("String"));
         assert!(eval("MatchAny.x").is_err(), "numbers have no members");
 
         let vars = BTreeMap::from([("MatchAny".to_owned(), Value::from("shadowed"))]);

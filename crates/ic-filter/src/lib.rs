@@ -11,7 +11,7 @@
 //! The grammar, operator precedence and value semantics follow Icinga 2's own
 //! implementation (`config_lexer.ll`, `config_parser.yy`, `expression.cpp`,
 //! `value-operators.cpp`), so a filter behaves here the way it does in an API
-//! query:
+//! query, apart from the differences listed below:
 //!
 //! - literals: numbers, durations (`500ms`, `30s`, `5m`, `1h`, `2d`), strings
 //!   with escapes, `{{{multi-line}}}` strings, `true`, `false`, `null`, arrays
@@ -21,15 +21,24 @@
 //!   operators `!` `~` `-` `+`, and member access `.`, indexers `[…]` and calls;
 //! - `&&` and `||` short-circuit and return one of their operands, as in Icinga;
 //! - functions: `match`, `regex`, `cidr_match`, `len`, `typeof`, `string`,
-//!   `number`, `bool`, `intersection`, `union`, `range`, `keys`, `get_time`;
+//!   `number`, `bool`, `intersection`, `union`, `range`, `keys`, `get_time`,
+//!   and the type conversions `String()`, `Number()` and `Boolean()`;
 //! - methods on strings, arrays, dictionaries, numbers and booleans (see
 //!   [`Filter`] for the list).
+//!
+//! Host and service attributes have Icinga's names and values. Note that, as
+//! in Icinga, pending services have `state` 3 and pending hosts `state` 1;
+//! `problem` is false for them.
 //!
 //! # Deliberate differences from Icinga
 //!
 //! - Unknown variables evaluate to `null` instead of failing, so a dashboard
 //!   filter doesn't break on objects that lack a variable. Missing dictionary
 //!   keys and out-of-range array indexes are `null` too.
+//! - For the same reason, methods called on `null` don't fail: `null` counts
+//!   as an empty value that contains nothing. `host.vars.tags.contains("x")`
+//!   is false and `host.vars.tags.len()` is 0 for hosts without `tags`, so
+//!   `!host.vars.tags.contains("x")` matches them.
 //! - Assignments, loops, function definitions and other statements are
 //!   rejected when parsing: filters are single expressions.
 //! - Glob, regular expression and CIDR patterns given as literals are compiled
@@ -40,10 +49,20 @@
 //!   Icinga's Boost.Regex it works on bytes, with `^`/`$` matching at line
 //!   breaks and `.` matching newlines.
 //! - Dictionaries compare equal when their contents are equal (Icinga compares
-//!   object identity), `typeof` returns the type's name as a string and the
-//!   type names (`String`, `Number`, …) are strings too, so
-//!   `typeof(x) == String` works as in Icinga.
+//!   object identity).
+//! - Types (`typeof(x)` and the globals `Object`, `Boolean`, `Number`,
+//!   `String`, `Array`, `Dictionary`) are dictionaries holding the type's
+//!   `name`. `typeof(x) == Number` and `typeof(x).name == "Number"` work as in
+//!   Icinga and `typeof(x) == "Number"` is false as there, but
+//!   `string(typeof(x))` and `typeof(typeof(x))` describe a dictionary.
 //! - `starts_with` and `ends_with` string methods are extensions.
+//! - `range()` and the dictionary method `get()` work; Icinga's API refuses
+//!   them in filters because they aren't marked safe for its sandbox.
+//! - One evaluation may create at most 16 MiB of text and 100 000 array items
+//!   and dictionary entries, and `range()` at most 10 000 numbers, so that no
+//!   filter can exhaust memory (`.replace()` chains grow tenfold per call);
+//!   an evaluation that needs more fails. Values read from objects and
+//!   literals don't count.
 //! - A glob with a non-ASCII character right after `*` (`*ü*`) matches as
 //!   documented; x86 builds of Icinga never match it (a signedness bug).
 //! - Where Icinga's behaviour is undefined (division of integers by zero
@@ -56,8 +75,8 @@
 //!
 //! # Icinga quirks that are kept
 //!
-//! These come from Icinga's lexer and grammar; a filter that works here also
-//! works in an API query. Parse errors explain them.
+//! These come from Icinga's lexer and grammar, so a filter parses here
+//! exactly as in an API query. Parse errors explain them.
 //!
 //! - A line break ends the expression, except inside parentheses: wrap
 //!   multi-line filters in `( … )`.
@@ -75,6 +94,7 @@
 //! exhausting the stack.
 
 mod ast;
+mod budget;
 mod eval;
 mod functions;
 mod lexer;
@@ -105,7 +125,11 @@ pub use value::Value;
 ///   `substr`, `starts_with`, `ends_with`, `replace`, `to_string`;
 /// - arrays: `contains`, `len`, `join`, `to_string`;
 /// - dictionaries: `contains`, `get`, `keys`, `values`, `len`, `to_string`;
-/// - numbers and booleans: `to_string`.
+/// - numbers and booleans: `to_string`;
+/// - `null` (a missing variable or key): all of the above, treating `null`
+///   as empty. `contains`, `starts_with` and `ends_with` are false, `len` is
+///   0, `find` is -1, `split`, `keys` and `values` are `[]`, `join` and `get`
+///   are `null`, and the other string methods return `""`.
 ///
 /// Lengths and string positions count bytes, as in Icinga.
 #[derive(Clone)]
@@ -149,7 +173,8 @@ impl Filter {
     ///
     /// Returns an [`EvalError`] when an operator or function is applied to
     /// values it doesn't support (`true + 1`, `"a" in "b"`, `len()`), an
-    /// unknown function or method is called, or a dynamic pattern is invalid.
+    /// unknown function or method is called, a dynamic pattern is invalid,
+    /// or the evaluation would create more data than its limit allows.
     pub fn evaluate(&self, scope: &dyn Scope) -> Result<Value, EvalError> {
         self.run(scope, None)
     }

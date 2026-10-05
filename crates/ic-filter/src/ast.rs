@@ -153,14 +153,34 @@ pub(crate) enum Function {
     Range,
     Keys,
     GetTime,
+    /// Calling a type: `String(x)`, `Number(x)`, `Boolean(x)`.
+    Construct(Primitive),
     /// An Icinga function filters don't support (`get_host`, `log`, …).
     Unsupported(Box<str>),
     /// Not a function at all. Calling it is an evaluation error.
     Unknown(Box<str>),
 }
 
+/// The types that can be called to convert a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Primitive {
+    String,
+    Number,
+    Boolean,
+}
+
+impl Primitive {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Primitive::String => "String",
+            Primitive::Number => "Number",
+            Primitive::Boolean => "Boolean",
+        }
+    }
+}
+
 /// Icinga functions that exist but aren't available in filters here.
-const UNSUPPORTED: [&str; 36] = [
+const UNSUPPORTED: [&str; 33] = [
     "assert",
     "basename",
     "dirname",
@@ -194,9 +214,6 @@ const UNSUPPORTED: [&str; 36] = [
     "ptr",
     "random",
     "sleep",
-    "Boolean",
-    "Number",
-    "String",
 ];
 
 impl Function {
@@ -215,6 +232,9 @@ impl Function {
             "range" => Function::Range,
             "keys" => Function::Keys,
             "get_time" => Function::GetTime,
+            "String" => Function::Construct(Primitive::String),
+            "Number" => Function::Construct(Primitive::Number),
+            "Boolean" => Function::Construct(Primitive::Boolean),
             _ if UNSUPPORTED.contains(&name) => Function::Unsupported(name.into()),
             _ => Function::Unknown(name.into()),
         }
@@ -235,6 +255,7 @@ impl Function {
             Function::Range => "range",
             Function::Keys => "keys",
             Function::GetTime => "get_time",
+            Function::Construct(primitive) => primitive.name(),
             Function::Unsupported(name) | Function::Unknown(name) => name,
         }
     }

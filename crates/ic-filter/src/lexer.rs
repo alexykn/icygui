@@ -7,6 +7,7 @@
 //! separators) except inside parentheses, as in Icinga.
 
 use crate::ParseError;
+use crate::value::preview_str;
 
 /// Keywords that can't be used as identifiers (escape them with `@`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,7 +205,7 @@ impl Tok {
         match self {
             Tok::Number(_) => "number".to_owned(),
             Tok::Str(_) => "string".to_owned(),
-            Tok::Ident(name) => format!("identifier '{name}'"),
+            Tok::Ident(name) => format!("identifier '{}'", preview_str(name)),
             Tok::Keyword(keyword) => format!("keyword '{}'", keyword.as_str()),
             Tok::Newline => "line break".to_owned(),
             Tok::Eof => "end of filter".to_owned(),
@@ -290,6 +291,7 @@ pub(crate) fn tokenize(source: &str) -> (Vec<Token>, Option<ParseError>) {
         pos: 0,
         newline_modes: Vec::new(),
         tokens: Vec::new(),
+        angle_scan: None,
     };
     let error = lexer.run().err();
     let mut tokens = lexer.tokens;
@@ -312,6 +314,11 @@ struct Lexer<'s> {
     /// Whether line breaks are ignored, per open `(` (yes) and `{` (no).
     newline_modes: Vec<bool>,
     tokens: Vec<Token>,
+    /// The last scan for the end of an include path: where it started, and
+    /// the first `' '` or `'>'` at or after that (`None`: none until the
+    /// end). Reused while it's still ahead, so a run of `<` is scanned once
+    /// rather than once per `<`.
+    angle_scan: Option<(usize, Option<usize>)>,
 }
 
 fn error(message: impl Into<String>, offset: usize) -> ParseError {
@@ -567,7 +574,10 @@ impl Lexer<'_> {
             .count();
         let run = &self.source[backslash..digits_start + digits];
         if octal == 0 || digits > octal {
-            return Err(error(format!("bad escape sequence '{run}'"), backslash));
+            return Err(error(
+                format!("bad escape sequence '{}'", preview_str(run)),
+                backslash,
+            ));
         }
         let value = self.bytes[digits_start..digits_start + octal]
             .iter()
@@ -599,13 +609,29 @@ impl Lexer<'_> {
         Ok(())
     }
 
-    /// `<` starts an include path when a `>` follows before any space.
-    fn angle_string_len(&self) -> Option<usize> {
-        self.bytes[self.pos + 1..]
-            .iter()
-            .position(|byte| matches!(byte, b' ' | b'>'))
-            .filter(|&offset| self.bytes[self.pos + 1 + offset] == b'>')
-            .map(|offset| offset + 2)
+    /// `<` starts an include path when a `>` follows before any space
+    /// (flex: `\<[^ \>]*\>`). Returns the include path's length.
+    fn angle_string_len(&mut self) -> Option<usize> {
+        let from = self.pos + 1;
+        let stop = match self.angle_scan {
+            // No stop between the last scan's start and its stop, so its
+            // stop is also the first one at or after `from`.
+            Some((scanned_from, stop))
+                if scanned_from <= from && stop.is_none_or(|stop| stop >= from) =>
+            {
+                stop
+            }
+            _ => {
+                let stop = self.bytes[from..]
+                    .iter()
+                    .position(|byte| matches!(byte, b' ' | b'>'))
+                    .map(|offset| from + offset);
+                self.angle_scan = Some((from, stop));
+                stop
+            }
+        };
+        stop.filter(|&stop| self.bytes.get(stop) == Some(&b'>'))
+            .map(|stop| stop + 1 - self.pos)
     }
 
     fn operator(&mut self) -> Result<(), ParseError> {
@@ -918,8 +944,49 @@ mod tests {
         assert_eq!(toks("a <b >c")[1], Tok::Lt);
         assert_eq!(toks("<>")[0], Tok::AngleString);
         assert_eq!(toks("1<<2>1")[1], Tok::AngleString);
+        assert_eq!(
+            toks("a<\nb>")[1],
+            Tok::AngleString,
+            "line breaks don't end it"
+        );
+        assert_eq!(
+            toks("a < b <c> d"),
+            vec![
+                Tok::Ident("a".into()),
+                Tok::Lt,
+                Tok::Ident("b".into()),
+                Tok::AngleString,
+                Tok::Ident("d".into()),
+                Tok::Eof
+            ],
+            "the cached scan is redone past its stop"
+        );
+        assert_eq!(
+            toks("x<1||y<2||z>3"),
+            vec![
+                Tok::Ident("x".into()),
+                Tok::AngleString,
+                Tok::Number(3.0),
+                Tok::Eof
+            ]
+        );
         // `}}` closes a function, so nested dictionaries need a space.
         assert_eq!(toks("}}")[0], Tok::LambdaClose);
+    }
+
+    #[test]
+    fn runs_of_less_than_signs_lex_in_linear_time() {
+        let start = std::time::Instant::now();
+        for source in [
+            "<".repeat(200_000),
+            "a<".repeat(100_000),
+            "x<1||".repeat(40_000),
+        ] {
+            let (tokens, error) = tokenize(&source);
+            assert_eq!(error, None);
+            assert!(tokens.len() > 40_000);
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
@@ -997,6 +1064,7 @@ mod tests {
     #[test]
     fn describes_tokens() {
         assert_eq!(Tok::Ident("x".into()).describe(), "identifier 'x'");
+        assert!(Tok::Ident("x".repeat(100_000)).describe().len() < 100);
         assert_eq!(Tok::Keyword(Keyword::If).describe(), "keyword 'if'");
         assert_eq!(Tok::NotIn.describe(), "'!in'");
         assert_eq!(Tok::CompoundAssign("+=").describe(), "'+='");

@@ -1,7 +1,6 @@
 //! Values of the filter language and Icinga's conversions between them.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 /// A value in Icinga's filter language: what variables resolve to and what
@@ -104,16 +103,50 @@ impl Value {
             Value::Bool(value) => bool_str(*value).to_owned(),
             Value::Number(value) => format_number(*value),
             Value::String(text) => text.to_string(),
-            Value::Array(items) => {
+            Value::Array(_) | Value::Dict(_) => {
                 let mut out = String::new();
-                emit_array(&mut out, 1, items);
+                // Without a limit the text can't become too long.
+                let _ = self.write_icinga_string(&mut Limited::new(&mut out, usize::MAX));
                 out
             }
-            Value::Dict(entries) => {
-                let mut out = String::new();
-                emit_dict(&mut out, 1, entries);
-                out
-            }
+        }
+    }
+
+    /// [`Value::to_icinga_string`], or `None` when the text would be longer
+    /// than `limit` bytes. Never writes much more than `limit` bytes, so
+    /// a huge (or hugely repetitive) array costs no more than the limit.
+    pub(crate) fn icinga_string_within(&self, limit: usize) -> Option<String> {
+        let mut out = String::new();
+        self.write_icinga_string(&mut Limited::new(&mut out, limit))
+            .ok()
+            .map(|()| out)
+    }
+
+    /// The value as `string()` writes it, shortened for an error message.
+    pub(crate) fn icinga_preview(&self) -> String {
+        let mut out = String::new();
+        let complete = self
+            .write_icinga_string(&mut Limited::new(&mut out, PREVIEW_BYTES))
+            .is_ok();
+        finish_preview(out, complete)
+    }
+
+    /// The value as compact JSON (Icinga's `JsonEncode`), shortened for an
+    /// error message.
+    pub(crate) fn json_preview(&self) -> String {
+        let mut out = String::new();
+        let complete = write_json(&mut Limited::new(&mut out, PREVIEW_BYTES), self).is_ok();
+        finish_preview(out, complete)
+    }
+
+    fn write_icinga_string(&self, out: &mut Limited<'_>) -> Result<(), TooLong> {
+        match self {
+            Value::Null => Ok(()),
+            Value::Bool(value) => out.push_str(bool_str(*value)),
+            Value::Number(value) => out.push_str(&format_number(*value)),
+            Value::String(text) => out.push_str(text),
+            Value::Array(items) => emit_array(out, 1, items),
+            Value::Dict(entries) => emit_dict(out, 1, entries),
         }
     }
 
@@ -170,11 +203,6 @@ impl Value {
             Value::String(text) => text.is_empty(),
             _ => false,
         }
-    }
-
-    /// The value as compact JSON, for error messages.
-    pub(crate) fn to_json_text(&self) -> String {
-        self.to_json().to_string()
     }
 
     /// A string value.
@@ -336,16 +364,74 @@ const CONFIG_KEYWORDS: [&str; 38] = [
     "except",
 ];
 
+/// Error messages show at most this many bytes of a value.
+const PREVIEW_BYTES: usize = 80;
+
+/// Text written into a string that must not grow beyond a limit.
+struct Limited<'a> {
+    out: &'a mut String,
+    limit: usize,
+}
+
+/// The text reached the limit; what was written so far is cut there.
+struct TooLong;
+
+impl<'a> Limited<'a> {
+    fn new(out: &'a mut String, limit: usize) -> Self {
+        Limited { out, limit }
+    }
+
+    /// Appends `text`, or as much of it as fits.
+    fn push_str(&mut self, text: &str) -> Result<(), TooLong> {
+        let room = self.limit.saturating_sub(self.out.len());
+        if text.len() <= room {
+            self.out.push_str(text);
+            Ok(())
+        } else {
+            self.out.push_str(&text[..floor_char_boundary(text, room)]);
+            Err(TooLong)
+        }
+    }
+
+    fn push(&mut self, ch: char) -> Result<(), TooLong> {
+        self.push_str(ch.encode_utf8(&mut [0; 4]))
+    }
+}
+
+/// The largest character boundary in `text` at or below `index`.
+pub(crate) fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// Ends a preview: complete text as is, cut text with an ellipsis.
+fn finish_preview(mut text: String, complete: bool) -> String {
+    if !complete {
+        text.push('…');
+    }
+    text
+}
+
+/// `text` for an error message: at most [`PREVIEW_BYTES`] bytes of it.
+pub(crate) fn preview_str(text: &str) -> String {
+    let mut out = String::new();
+    let complete = Limited::new(&mut out, PREVIEW_BYTES).push_str(text).is_ok();
+    finish_preview(out, complete)
+}
+
 /// Icinga's `ConfigWriter::EmitValue`.
-fn emit_value(out: &mut String, indent: usize, value: &Value) {
+fn emit_value(out: &mut Limited<'_>, indent: usize, value: &Value) -> Result<(), TooLong> {
     match value {
         Value::Null => out.push_str("null"),
         Value::Bool(value) => out.push_str(bool_str(*value)),
         Value::Number(value) => {
             if value.is_nan() {
-                out.push_str(nan_str(*value));
+                out.push_str(nan_str(*value))
             } else {
-                let _ = write!(out, "{value:.6}");
+                out.push_str(&format!("{value:.6}"))
             }
         }
         Value::String(text) => emit_string(out, text),
@@ -354,48 +440,53 @@ fn emit_value(out: &mut String, indent: usize, value: &Value) {
     }
 }
 
-fn emit_array(out: &mut String, indent: usize, items: &[Value]) {
-    out.push_str("[ ");
+fn emit_array(out: &mut Limited<'_>, indent: usize, items: &[Value]) -> Result<(), TooLong> {
+    out.push_str("[ ")?;
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
-            out.push_str(", ");
+            out.push_str(", ")?;
         }
-        emit_value(out, indent, item);
+        emit_value(out, indent, item)?;
     }
     if !items.is_empty() {
-        out.push(' ');
+        out.push(' ')?;
     }
-    out.push(']');
+    out.push(']')
 }
 
-fn emit_dict(out: &mut String, indent: usize, entries: &BTreeMap<String, Value>) {
-    out.push('{');
+fn emit_dict(
+    out: &mut Limited<'_>,
+    indent: usize,
+    entries: &BTreeMap<String, Value>,
+) -> Result<(), TooLong> {
+    out.push('{')?;
     for (key, value) in entries {
-        out.push('\n');
-        push_tabs(out, indent);
-        emit_identifier(out, key);
-        out.push_str(" = ");
-        emit_value(out, indent + 1, value);
+        out.push('\n')?;
+        push_tabs(out, indent)?;
+        emit_identifier(out, key)?;
+        out.push_str(" = ")?;
+        emit_value(out, indent + 1, value)?;
     }
-    out.push('\n');
-    push_tabs(out, indent.saturating_sub(1));
-    out.push('}');
+    out.push('\n')?;
+    push_tabs(out, indent.saturating_sub(1))?;
+    out.push('}')
 }
 
-fn push_tabs(out: &mut String, count: usize) {
+fn push_tabs(out: &mut Limited<'_>, count: usize) -> Result<(), TooLong> {
     for _ in 0..count {
-        out.push('\t');
+        out.push('\t')?;
     }
+    Ok(())
 }
 
-fn emit_identifier(out: &mut String, key: &str) {
+fn emit_identifier(out: &mut Limited<'_>, key: &str) -> Result<(), TooLong> {
     if CONFIG_KEYWORDS.contains(&key) {
-        out.push('@');
-        out.push_str(key);
+        out.push('@')?;
+        out.push_str(key)
     } else if is_identifier(key) {
-        out.push_str(key);
+        out.push_str(key)
     } else {
-        emit_string(out, key);
+        emit_string(out, key)
     }
 }
 
@@ -408,21 +499,89 @@ pub(crate) fn is_identifier(text: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-fn emit_string(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            '"' => out.push_str("\\\""),
-            other => out.push(other),
+fn emit_string(out: &mut Limited<'_>, text: &str) -> Result<(), TooLong> {
+    out.push('"')?;
+    write_escaped(out, text, |byte| {
+        Some(match byte {
+            b'\\' => "\\\\",
+            b'\n' => "\\n",
+            b'\t' => "\\t",
+            b'\r' => "\\r",
+            0x08 => "\\b",
+            0x0c => "\\f",
+            b'"' => "\\\"",
+            _ => return None,
+        })
+    })?;
+    out.push('"')
+}
+
+/// Writes `text` with the ASCII bytes `escape` maps replaced, copying the
+/// runs in between at once.
+fn write_escaped(
+    out: &mut Limited<'_>,
+    text: &str,
+    escape: impl Fn(u8) -> Option<&'static str>,
+) -> Result<(), TooLong> {
+    let mut plain = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        if let Some(escaped) = escape(byte) {
+            // Escaped bytes are ASCII, so `index` is a character boundary.
+            out.push_str(&text[plain..index])?;
+            out.push_str(escaped)?;
+            plain = index + 1;
         }
     }
-    out.push('"');
+    out.push_str(&text[plain..])
+}
+
+/// Compact JSON, as `serde_json` writes it.
+fn write_json(out: &mut Limited<'_>, value: &Value) -> Result<(), TooLong> {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(value) => out.push_str(bool_str(*value)),
+        Value::Number(value) => out.push_str(&number_to_json(*value).to_string()),
+        Value::String(text) => write_json_string(out, text),
+        Value::Array(items) => {
+            out.push('[')?;
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',')?;
+                }
+                write_json(out, item)?;
+            }
+            out.push(']')
+        }
+        Value::Dict(entries) => {
+            out.push('{')?;
+            for (index, (key, item)) in entries.iter().enumerate() {
+                if index > 0 {
+                    out.push(',')?;
+                }
+                write_json_string(out, key)?;
+                out.push(':')?;
+                write_json(out, item)?;
+            }
+            out.push('}')
+        }
+    }
+}
+
+fn write_json_string(out: &mut Limited<'_>, text: &str) -> Result<(), TooLong> {
+    /// `\u00XX` for the control characters JSON has no short escape for.
+    const CONTROL: [&str; 32] = [
+        "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007",
+        "\\b", "\\t", "\\n", "\\u000b", "\\f", "\\r", "\\u000e", "\\u000f", "\\u0010", "\\u0011",
+        "\\u0012", "\\u0013", "\\u0014", "\\u0015", "\\u0016", "\\u0017", "\\u0018", "\\u0019",
+        "\\u001a", "\\u001b", "\\u001c", "\\u001d", "\\u001e", "\\u001f",
+    ];
+    out.push('"')?;
+    write_escaped(out, text, |byte| match byte {
+        b'"' => Some("\\\""),
+        b'\\' => Some("\\\\"),
+        control => CONTROL.get(usize::from(control)).copied(),
+    })?;
+    out.push('"')
 }
 
 #[cfg(test)]
@@ -507,10 +666,60 @@ mod tests {
 
     #[test]
     fn to_json_writes_whole_numbers_without_fraction() {
-        assert_eq!(Value::Number(2.0).to_json_text(), "2");
-        assert_eq!(Value::Number(2.5).to_json_text(), "2.5");
-        assert_eq!(Value::Number(f64::INFINITY).to_json_text(), "null");
-        assert_eq!(Value::from("a\"b").to_json_text(), r#""a\"b""#);
+        assert_eq!(Value::Number(2.0).to_json().to_string(), "2");
+        assert_eq!(Value::Number(2.5).to_json().to_string(), "2.5");
+        assert_eq!(Value::Number(f64::INFINITY).to_json().to_string(), "null");
+        assert_eq!(Value::from("a\"b").to_json().to_string(), r#""a\"b""#);
+    }
+
+    #[test]
+    fn json_previews_match_serde_json_and_are_short() {
+        let value = Value::from_json(&json!({
+            "a": [1, 2.5, null, true, "x\"y\\z\n\t\r\u{8}\u{c}\u{1}é"],
+            "b": {},
+        }));
+        assert_eq!(value.json_preview(), value.to_json().to_string());
+        assert_eq!(Value::from("b").json_preview(), r#""b""#);
+        assert_eq!(Value::Number(5.0).json_preview(), "5");
+
+        let long = Value::from("é".repeat(1_000));
+        let preview = long.json_preview();
+        assert!(preview.len() <= PREVIEW_BYTES + '…'.len_utf8(), "{preview}");
+        assert!(preview.starts_with("\"éé") && preview.ends_with('…'));
+        let many: Value = (0..100_000).map(|n| Value::Number(f64::from(n))).collect();
+        assert!(many.json_preview().len() <= PREVIEW_BYTES + '…'.len_utf8());
+    }
+
+    #[test]
+    fn icinga_previews_and_bounded_conversion() {
+        let array = Value::from(vec![Value::from("dev"), Value::from("slack")]);
+        assert_eq!(array.icinga_preview(), r#"[ "dev", "slack" ]"#);
+        assert_eq!(
+            array.icinga_string_within(100).as_deref(),
+            Some(r#"[ "dev", "slack" ]"#)
+        );
+        assert_eq!(
+            array.icinga_string_within(18).as_deref(),
+            Some(r#"[ "dev", "slack" ]"#)
+        );
+        assert_eq!(array.icinga_string_within(17), None);
+        assert_eq!(Value::Null.icinga_string_within(0).as_deref(), Some(""));
+
+        // A value shared many times over is cut off at the limit, not
+        // written out completely first.
+        let shared = Value::from(vec![Value::from("x".repeat(1_000)); 1_000]);
+        let nested = Value::from(vec![shared; 1_000]);
+        assert_eq!(nested.icinga_string_within(10_000), None);
+        let preview = nested.icinga_preview();
+        assert!(preview.len() <= PREVIEW_BYTES + '…'.len_utf8() && preview.ends_with('…'));
+
+        assert_eq!(preview_str("short"), "short");
+        assert_eq!(
+            preview_str(&"ü".repeat(100)),
+            format!("{}…", "ü".repeat(40))
+        );
+        assert_eq!(floor_char_boundary("aü", 2), 1);
+        assert_eq!(floor_char_boundary("aü", 9), 3);
     }
 
     #[test]

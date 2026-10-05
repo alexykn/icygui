@@ -22,16 +22,38 @@ use crate::value::Value;
 /// prefixes, and indexes whatever is left itself. So an implementation
 /// returns:
 ///
-/// - `Some(value)` when it resolves the entire path. A missing key below a
-///   variable it provides is `Some(Value::Null)`.
+/// - `Some(value)` only when `value` is the value of the **entire** path. A
+///   missing key below a variable it provides is `Some(Value::Null)`.
 /// - `None` when it doesn't provide the variable `path[0]`, or can't (or
 ///   doesn't want to) follow the path to its end, for example through a
 ///   string or a list. The evaluator then retries with a shorter prefix and
 ///   applies Icinga's rules to the rest, including its errors.
 ///
+/// Never return the value of a shorter prefix for a longer path: the
+/// evaluator would take it as the value of the whole path.
+///
 /// Resolving deep paths directly is an optimisation: `host.vars.role` is
 /// then read straight from the host's custom variables instead of
-/// converting all of them first.
+/// converting all of them first. The simplest correct scope resolves only
+/// single-element paths:
+///
+/// ```
+/// use ic_filter::{Filter, Scope, Value};
+///
+/// struct Site;
+///
+/// impl Scope for Site {
+///     fn lookup(&self, path: &[&str]) -> Option<Value> {
+///         match path {
+///             ["site"] => Some(Value::from("berlin")),
+///             _ => None,
+///         }
+///     }
+/// }
+///
+/// let filter = Filter::parse(r#"site == "berlin" && site.len() == 6"#).unwrap();
+/// assert!(filter.matches(&Site));
+/// ```
 pub trait Scope {
     /// Resolves `path`. See the trait documentation.
     fn lookup(&self, path: &[&str]) -> Option<Value>;
@@ -47,20 +69,34 @@ impl<T: Scope + ?Sized> Scope for &T {
 /// attribute names and types.
 ///
 /// Attributes: `name`, `display_name`, `__name`, `type`, `address`,
-/// `address6`, `state` (0 up, 1 down or unreachable; pending is 0),
-/// `state_type`, `last_state_change`, `last_hard_state_change`,
-/// `last_check` (-1 if never), `next_check`, `check_attempt`,
-/// `max_check_attempts`, `acknowledgement` (0, 1 normal, 2 sticky),
-/// `acknowledgement_expiry`, `downtime_depth`, `flapping`,
-/// `flapping_current`, `last_reachable`, `problem`, `handled`, `severity`,
-/// `check_command`, `check_interval`, `retry_interval`, `command_endpoint`,
-/// `zone`, `enable_active_checks`, `enable_passive_checks`,
-/// `enable_notifications`, `enable_event_handler`, `enable_flapping`,
-/// `enable_perfdata`, `groups`, `vars`, `notes`, `notes_url`, `action_url`,
-/// `icon_image` and `last_check_result` (`null` while pending, otherwise a
-/// dictionary with `output`, `exit_status`, `state`, `execution_start`,
-/// `execution_end`, `schedule_start`, `check_source`, `active`, `type`).
-/// Unknown attributes are `null`.
+/// `address6`, `state` (0 up, 1 down or unreachable, and 1 while pending,
+/// as in Icinga), `state_type`, `last_state_change`,
+/// `last_hard_state_change`, `last_check` (-1 if never), `next_check`,
+/// `check_attempt`, `max_check_attempts`, `acknowledgement` (0, 1 normal,
+/// 2 sticky), `acknowledgement_expiry`, `downtime_depth`, `flapping`,
+/// `flapping_current`, `last_reachable`, `problem` (false while pending),
+/// `handled`, `severity`, `check_command`, `check_interval`,
+/// `retry_interval`, `command_endpoint`, `zone`, `enable_active_checks`,
+/// `enable_passive_checks`, `enable_notifications`, `enable_event_handler`,
+/// `enable_flapping`, `enable_perfdata`, `groups`, `vars` (`null` when the
+/// host has no custom variables, as in Icinga), `notes`, `notes_url`,
+/// `action_url`, `icon_image` and `last_check_result` (`null` without a
+/// check result, otherwise a dictionary with `output`, `exit_status`,
+/// `state`, `execution_start`, `execution_end`, `schedule_start`,
+/// `check_source`, `active`, `type`). Unknown attributes are `null`.
+///
+/// The model doesn't keep a check result's own state, so for hosts
+/// `last_check_result.state` is derived: up hosts give 1 for exit status 1
+/// and 0 otherwise; down and unreachable hosts give 3 for exit statuses
+/// outside 0–2 (Icinga maps them to UNKNOWN) and for active results with
+/// exit status 0 or 1 (Icinga sets UNKNOWN without an exit status, for
+/// example when a command endpoint is not connected), and 2 otherwise.
+///
+/// The scope reads what the [`Host`] holds. Attributes the caller didn't
+/// load (an object fetched without its check result, say) read as the
+/// model's defaults: `null` for `last_check_result`, `""`, `0` or the
+/// default switches for the others. Filters on such attributes need fully
+/// loaded objects.
 #[derive(Clone, Copy, Debug)]
 pub struct HostScope<'a> {
     /// The host.
@@ -81,10 +117,16 @@ impl Scope for HostScope<'_> {
 ///
 /// Services have the attributes listed for [`HostScope`] except `address`
 /// and `address6`, plus `host_name` and `host` (the host's attributes).
-/// `name` is the short name and `__name` is `host!service`. `state` is 0 ok
-/// (and pending), 1 warning, 2 critical, 3 unknown. `handled` follows
-/// Icinga: a problem that is acknowledged or in downtime, or any service
-/// whose host has a problem.
+/// `name` is the short name and `__name` is `host!service`. `state` is 0 ok,
+/// 1 warning, 2 critical, 3 unknown, and 3 while pending, as in Icinga
+/// (`problem` is false while pending). `last_check_result.state` is the
+/// service's state.
+///
+/// `handled` follows Icinga's `Service::GetHandled()`: a problem that is
+/// acknowledged or in downtime, or *any* service whose host has a problem,
+/// including an OK one. That deliberately differs from
+/// [`ic_model::Service::is_handled`], which also requires the service
+/// itself to be a problem.
 ///
 /// Without a host, `host.name` and `host.__name` still resolve (from the
 /// service's key) and other host attributes are `null`.
@@ -205,7 +247,12 @@ impl Scope for VarsScope<'_> {
     }
 }
 
-/// Combines scopes: the first scope that resolves a path wins.
+/// Combines scopes: the first scope that provides a variable resolves it.
+///
+/// The variable (`path[0]`) decides, not the whole path: once a scope
+/// provides `host`, it alone answers for `host.…`, even where it can't
+/// follow the path (through a string, say). Later scopes never answer for
+/// a variable an earlier one provides.
 ///
 /// For API filters, put the object's scope before the [`VarsScope`] with the
 /// `filter_vars`: in Icinga, `host`, `service` and `obj` win over filter
@@ -218,7 +265,19 @@ pub struct Chain<'a> {
 
 impl Scope for Chain<'_> {
     fn lookup(&self, path: &[&str]) -> Option<Value> {
-        self.scopes.iter().find_map(|scope| scope.lookup(path))
+        for scope in self.scopes {
+            if let Some(value) = scope.lookup(path) {
+                return Some(value);
+            }
+            // The scope can't follow the path; if it provides the variable,
+            // the evaluator has to retry with a shorter path rather than let
+            // a later scope answer. (Only asked on this rare path, since
+            // resolving just the variable may build a large value.)
+            if path.len() > 1 && scope.lookup(&path[..1]).is_some() {
+                return None;
+            }
+        }
+        None
     }
 }
 
@@ -285,7 +344,12 @@ fn json_path(vars: &Vars, rest: &[&str]) -> Option<Value> {
     Some(Value::from_json(current))
 }
 
+/// Custom variables as a dictionary. Objects without any are `null`, as in
+/// Icinga, where `vars` is unset until a variable is assigned.
 fn vars_value(vars: &Vars) -> Value {
+    if vars.is_empty() {
+        return Value::Null;
+    }
     Value::from(
         vars.iter()
             .map(|(key, value)| (key.clone(), Value::from_json(value)))
@@ -417,19 +481,24 @@ fn host_dict(host: &Host) -> Value {
     Value::from(entries)
 }
 
+/// Icinga's host `state`. Pending hosts are 1: Icinga's raw state starts
+/// as UNKNOWN, which `Host::CalculateState` turns into DOWN.
 fn host_state_code(state: HostState) -> f64 {
     match state {
-        HostState::Up | HostState::Pending => 0.0,
-        HostState::Down | HostState::Unreachable => 1.0,
+        HostState::Up => 0.0,
+        HostState::Down | HostState::Unreachable | HostState::Pending => 1.0,
     }
 }
 
+/// Icinga's service `state`. Pending services are 3: Icinga's raw state
+/// starts as UNKNOWN (`checkable.ti`), and the API reports it until the
+/// first check result.
 fn service_state_code(state: ServiceState) -> f64 {
     match state {
-        ServiceState::Ok | ServiceState::Pending => 0.0,
+        ServiceState::Ok => 0.0,
         ServiceState::Warning => 1.0,
         ServiceState::Critical => 2.0,
-        ServiceState::Unknown => 3.0,
+        ServiceState::Unknown | ServiceState::Pending => 3.0,
     }
 }
 
@@ -555,8 +624,16 @@ fn check_result_attribute(result: &CheckResult, state: &CheckState, name: &str) 
 }
 
 /// The check result's own state, a service state code even for hosts
-/// (0 ok, 1 warning, 2 critical, 3 unknown). For hosts it's derived from the
-/// exit status, kept consistent with the host state (up is ok or warning).
+/// (0 ok, 1 warning, 2 critical, 3 unknown). The model doesn't keep it, so
+/// for hosts it's derived from the exit status, consistent with the host
+/// state (up is ok or warning, down is critical or unknown):
+///
+/// - Icinga maps exit statuses outside 0–3 to UNKNOWN.
+/// - Passive results keep exit status 0 whatever their state.
+/// - Icinga sets UNKNOWN without touching the exit status when it can't run
+///   a check, for example on a disconnected command endpoint; such a result
+///   is active with exit status 0, which can't otherwise belong to a down
+///   host.
 fn check_result_state(result: &CheckResult, state: &CheckState) -> f64 {
     match state {
         CheckState::Service(state) => service_state_code(*state),
@@ -567,13 +644,11 @@ fn check_result_state(result: &CheckResult, state: &CheckState) -> f64 {
                 0.0
             }
         }
-        CheckState::Host(HostState::Down | HostState::Unreachable) => {
-            if result.exit_status == 3 {
-                3.0
-            } else {
-                2.0
-            }
-        }
+        CheckState::Host(HostState::Down | HostState::Unreachable) => match result.exit_status {
+            0 | 1 if result.active => 3.0,
+            0..=2 => 2.0,
+            _ => 3.0,
+        },
     }
 }
 
@@ -723,8 +798,11 @@ mod tests {
         assert_eq!(state(&host, "acknowledgement"), Some(Value::Number(2.0)));
         assert_eq!(state(&host, "handled"), Some(Value::Bool(true)));
 
+        // Icinga reports pending hosts as DOWN (state 1) but not as problems.
         let pending = Host::new("new");
-        assert_eq!(state(&pending, "state"), Some(Value::Number(0.0)));
+        assert_eq!(state(&pending, "state"), Some(Value::Number(1.0)));
+        assert_eq!(state(&pending, "problem"), Some(Value::Bool(false)));
+        assert_eq!(state(&pending, "handled"), Some(Value::Bool(false)));
         assert_eq!(state(&pending, "last_check_result"), Some(Value::Null));
         assert_eq!(
             HostScope { host: &pending }.lookup(&["host", "last_check_result", "output"]),
@@ -892,24 +970,133 @@ mod tests {
     }
 
     #[test]
-    fn pending_service_state_is_zero() {
+    fn pending_services_are_unknown_but_no_problem() {
+        // As recorded from Icinga 2.15.6 (`db-prod-03!postgres-replication`):
+        // state 3, last_check -1, last_check_result null, problem false,
+        // handled false, severity 16.
         let service = Service::new("h", "s");
         let scope = ServiceScope {
             service: &service,
             host: None,
         };
+        for (attribute, expected) in [
+            ("state", Value::Number(3.0)),
+            ("last_check", Value::Number(-1.0)),
+            ("last_check_result", Value::Null),
+            ("problem", Value::Bool(false)),
+            ("handled", Value::Bool(false)),
+            ("severity", Value::Number(16.0)),
+        ] {
+            assert_eq!(
+                scope.lookup(&["service", attribute]),
+                Some(expected),
+                "{attribute}"
+            );
+        }
+    }
+
+    #[test]
+    fn objects_without_custom_variables_have_null_vars() {
+        // As recorded from Icinga 2.15.6 (`"vars": null`).
+        let host = Host::new("bare");
+        let scope = HostScope { host: &host };
+        assert_eq!(scope.lookup(&["host", "vars"]), Some(Value::Null));
+        assert_eq!(scope.lookup(&["host", "vars", "role"]), Some(Value::Null));
+        let Some(Value::Dict(all)) = scope.lookup(&["host"]) else {
+            panic!("host is a dictionary");
+        };
+        assert_eq!(all.get("vars"), Some(&Value::Null));
+        let service = Service::new("bare", "s");
+        let service_scope = ServiceScope {
+            service: &service,
+            host: Some(&host),
+        };
+        for source in [
+            "service.vars == null",
+            "host.vars == null",
+            "\"x\" !in service.vars",
+            "!(\"x\" in host.vars)",
+            "typeof(service.vars) == Object",
+            "len(service.vars) == 0",
+        ] {
+            let filter = crate::Filter::parse(source).unwrap();
+            assert_eq!(
+                filter.evaluate(&service_scope),
+                Ok(Value::Bool(true)),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_check_result_state_is_derived_like_icinga() {
+        let mut host = host();
+        let result_state =
+            |host: &Host| HostScope { host }.lookup(&["host", "last_check_result", "state"]);
+        let cases = [
+            (HostState::Up, 0, true, 0.0),
+            (HostState::Up, 1, true, 1.0),
+            (HostState::Up, 0, false, 0.0),
+            (HostState::Down, 2, true, 2.0),
+            (HostState::Down, 3, true, 3.0),
+            (HostState::Down, 4, true, 3.0),
+            (HostState::Down, 127, true, 3.0),
+            (HostState::Down, -1, true, 3.0),
+            // Passive DOWN results keep exit status 0.
+            (HostState::Down, 0, false, 2.0),
+            // A disconnected command endpoint: UNKNOWN, exit status 0.
+            (HostState::Down, 0, true, 3.0),
+            (HostState::Unreachable, 2, true, 2.0),
+        ];
+        for (state, exit_status, active, expected) in cases {
+            host.state = state;
+            host.check.result = Some(CheckResult {
+                exit_status,
+                active,
+                ..CheckResult::default()
+            });
+            assert_eq!(
+                result_state(&host),
+                Some(Value::Number(expected)),
+                "{state:?} exit {exit_status} active {active}"
+            );
+        }
+    }
+
+    #[test]
+    fn chain_lets_the_scope_providing_a_variable_answer_alone() {
+        let host = host();
+        let host_scope = HostScope { host: &host };
+        let shadow = BTreeMap::from([(
+            "host".to_owned(),
+            Value::from(BTreeMap::from([(
+                "name".to_owned(),
+                Value::from(BTreeMap::from([("x".to_owned(), Value::Number(1.0))])),
+            )])),
+        )]);
+        let shadow_scope = VarsScope { vars: &shadow };
+        let chain = Chain {
+            scopes: &[&host_scope, &shadow_scope],
+        };
+        assert_eq!(chain.lookup(&["host", "name", "x"]), None);
         assert_eq!(
-            scope.lookup(&["service", "state"]),
-            Some(Value::Number(0.0))
+            chain.lookup(&["host", "name"]),
+            Some(Value::from("db-prod-03"))
         );
+        let filter = crate::Filter::parse("host.name.x").unwrap();
         assert_eq!(
-            scope.lookup(&["service", "last_check_result"]),
-            Some(Value::Null)
+            filter.evaluate(&chain).unwrap_err().message,
+            "invalid field access (for value of type 'String'): 'x' (in `host.name.x`)",
+            "the host answers, as with HostScope alone"
         );
-        assert_eq!(
-            scope.lookup(&["service", "problem"]),
-            Some(Value::Bool(false))
-        );
+        // A variable the first scope doesn't provide still falls through.
+        let vars = BTreeMap::from([("cfg".to_owned(), Value::from(vec![Value::Number(7.0)]))]);
+        let vars_scope = VarsScope { vars: &vars };
+        let chain = Chain {
+            scopes: &[&host_scope, &vars_scope],
+        };
+        assert_eq!(chain.lookup(&["cfg", "0"]), Some(Value::Number(7.0)));
+        assert_eq!(chain.lookup(&["cfg", "x"]), None);
     }
 
     #[test]

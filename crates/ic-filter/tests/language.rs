@@ -527,7 +527,12 @@ fn other_functions() {
         ("len(dict)", json!(4)),
         ("len(nil)", json!(0)),
         ("len(5)", json!(0)),
-        ("typeof(3)", json!("Number")),
+        ("typeof(3)", json!({ "name": "Number" })),
+        ("typeof(3).name", json!("Number")),
+        ("typeof(s).name == \"String\"", json!(true)),
+        ("typeof(3) == \"Number\"", json!(false)),
+        ("typeof(3) != String", json!(true)),
+        ("typeof(dict) in [Array, Dictionary]", json!(true)),
         ("typeof(3) == Number", json!(true)),
         ("typeof(\"x\") == String", json!(true)),
         ("typeof(true) == Boolean", json!(true)),
@@ -564,6 +569,15 @@ fn other_functions() {
         ("range(2, 10, 2)", json!([2, 4, 6, 8])),
         ("len(range(3)) == 3", json!(true)),
         ("len(\"abc\", )", json!(3)),
+        ("String(5)", json!("5")),
+        ("String(arr)", json!("[ 1.000000, \"two\", true, null ]")),
+        ("String()", json!("")),
+        ("Number(\"5\")", json!(5)),
+        ("Number(t)", json!(1)),
+        ("Number()", json!(0)),
+        ("Boolean(1)", json!(true)),
+        ("Boolean(empty)", json!(false)),
+        ("Boolean()", json!(0)),
     ]);
     check_errors(&[
         ("nope()", "unknown function 'nope()'"),
@@ -571,7 +585,14 @@ fn other_functions() {
             "get_host(\"x\")",
             "the Icinga function 'get_host()' is not available in filters",
         ),
-        ("String(5)", "use string(), number() or bool()"),
+        (
+            "Number(1, 2)",
+            "Number() takes at most 1 argument (2 given)",
+        ),
+        (
+            "Number(s)",
+            "can't convert 'abc' to a floating point number",
+        ),
         ("len()", "len() takes exactly 1 argument (0 given)"),
         ("len(1, 2)", "len() takes exactly 1 argument (2 given)"),
         ("typeof()", "typeof() takes exactly 1 argument"),
@@ -660,12 +681,23 @@ fn methods() {
         ("strs[0].starts_with(\"web\")", json!(true)),
         ("s[\"len\"]()", json!(3)),
         ("(s).len()", json!(3)),
+        // Methods on null (missing variables and keys) treat it as empty.
+        ("nil.len()", json!(0)),
+        ("undefined.contains(\"x\")", json!(false)),
+        ("!undefined.contains(\"x\")", json!(true)),
+        ("dict.missing.contains(\"x\") || s == \"abc\"", json!(true)),
+        ("undefined.find(\"x\") >= 0", json!(false)),
+        ("undefined.lower() == \"\"", json!(true)),
+        ("undefined.split(\",\")", json!([])),
+        ("undefined.keys()", json!([])),
+        ("undefined.get(\"a\")", json!(null)),
+        ("undefined.join(\",\")", json!(null)),
     ]);
     check_errors(&[
-        ("nil.len()", "cannot call method 'len' on null"),
+        ("nil.nope()", "unknown method 'nope' (called on null"),
         (
-            "undefined.contains(\"x\")",
-            "cannot call method 'contains' on null",
+            "nil.contains()",
+            "contains() takes exactly 1 argument (0 given)",
         ),
         (
             "dict.len()",
@@ -701,7 +733,8 @@ fn builtin_constants() {
         ("ServiceUnknown", json!(3)),
         ("HostUp", json!(0)),
         ("HostDown", json!(1)),
-        ("Dictionary", json!("Dictionary")),
+        ("Dictionary", json!({ "name": "Dictionary" })),
+        ("Dictionary.name", json!("Dictionary")),
     ]);
 }
 

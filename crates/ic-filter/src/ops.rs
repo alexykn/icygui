@@ -6,10 +6,13 @@
 //! work on 32-bit integers. Errors are plain messages; the evaluator adds
 //! where in the filter they happened.
 
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{BuildHasher, Hasher, RandomState};
 use std::sync::Arc;
 
-use crate::value::Value;
+use crate::budget::Budget;
+use crate::value::{Value, format_number, preview_str};
 
 /// Result of an operator: a value or an error message.
 pub(crate) type OpResult<T> = Result<T, String>;
@@ -49,12 +52,15 @@ pub(crate) fn to_number(value: &Value) -> OpResult<f64> {
         Value::Bool(flag) => Ok(if *flag { 1.0 } else { 0.0 }),
         Value::Null => Ok(0.0),
         Value::String(text) if text.is_empty() => Ok(0.0),
-        Value::String(text) => text
-            .parse::<f64>()
-            .map_err(|_| format!("can't convert '{text}' to a floating point number")),
+        Value::String(text) => text.parse::<f64>().map_err(|_| {
+            format!(
+                "can't convert '{}' to a floating point number",
+                preview_str(text)
+            )
+        }),
         Value::Array(_) | Value::Dict(_) => Err(format!(
             "can't convert '{}' to a floating point number",
-            value.to_icinga_string()
+            value.icinga_preview()
         )),
     }
 }
@@ -139,30 +145,51 @@ pub(crate) fn contains(items: &[Value], value: &Value) -> bool {
     items.iter().any(|item| equals(item, value))
 }
 
+/// `null`, a number or a string: the operands `+` concatenates as text
+/// (when one of them is a string).
+pub(crate) fn is_text_operand(value: &Value) -> bool {
+    matches!(value, Value::Null | Value::Number(_) | Value::String(_))
+}
+
+/// The text of `null`, a number or a string.
+pub(crate) fn operand_text(value: &Value) -> Cow<'_, str> {
+    match value {
+        Value::String(text) => Cow::Borrowed(text),
+        Value::Number(number) => Cow::Owned(format_number(*number)),
+        _ => Cow::Borrowed(""),
+    }
+}
+
 /// `+`: numbers add, strings concatenate (with numbers and `null` converted),
-/// arrays concatenate, dictionaries merge (the right side wins).
-pub(crate) fn add(lhs: &Value, rhs: &Value) -> OpResult<Value> {
+/// arrays concatenate, dictionaries merge (the right side wins). What it
+/// creates is charged to `budget`.
+pub(crate) fn add(lhs: &Value, rhs: &Value, budget: &Budget) -> OpResult<Value> {
     let both_null = lhs.is_null() && rhs.is_null();
     if is_null_or_number(lhs) && is_null_or_number(rhs) && !both_null {
         return Ok(Value::Number(numeric(lhs) + numeric(rhs)));
     }
-    let stringish =
-        |value: &Value| matches!(value, Value::Null | Value::Number(_) | Value::String(_));
-    if stringish(lhs)
-        && stringish(rhs)
+    if is_text_operand(lhs)
+        && is_text_operand(rhs)
         && (!both_null || matches!(lhs, Value::String(_)) || matches!(rhs, Value::String(_)))
     {
-        let mut text = lhs.to_icinga_string();
-        text.push_str(&rhs.to_icinga_string());
+        let (left, right) = (operand_text(lhs), operand_text(rhs));
+        let length = left.len().saturating_add(right.len());
+        budget.text(length)?;
+        let mut text = String::with_capacity(length);
+        text.push_str(&left);
+        text.push_str(&right);
         return Ok(Value::from(text));
     }
     if !(lhs.is_empty_value() && rhs.is_empty_value()) {
         if let (Some(left), Some(right)) = (array_or_empty(lhs), array_or_empty(rhs)) {
-            let mut items = left.to_vec();
+            budget.items(left.len().saturating_add(right.len()))?;
+            let mut items = Vec::with_capacity(left.len() + right.len());
+            items.extend_from_slice(left);
             items.extend_from_slice(right);
             return Ok(Value::array(items));
         }
         if let (Some(left), Some(right)) = (dict_or_empty(lhs), dict_or_empty(rhs)) {
+            budget.items(left.len().saturating_add(right.len()))?;
             let mut entries: BTreeMap<String, Value> = left.clone();
             for (key, value) in right {
                 entries.insert(key.clone(), value.clone());
@@ -195,8 +222,8 @@ fn dict_or_empty(value: &Value) -> Option<&BTreeMap<String, Value>> {
 }
 
 /// `-`: numbers subtract; for arrays, the items of the left side that are not
-/// in the right side.
-pub(crate) fn subtract(lhs: &Value, rhs: &Value) -> OpResult<Value> {
+/// in the right side. What it creates is charged to `budget`.
+pub(crate) fn subtract(lhs: &Value, rhs: &Value, budget: &Budget) -> OpResult<Value> {
     if is_null_or_number(lhs) && is_null_or_number(rhs) && !(lhs.is_null() && rhs.is_null()) {
         return Ok(Value::Number(numeric(lhs) - numeric(rhs)));
     }
@@ -205,14 +232,77 @@ pub(crate) fn subtract(lhs: &Value, rhs: &Value) -> OpResult<Value> {
     {
         // Icinga dereferences a null right side here and crashes; an empty
         // right side removes nothing.
-        return Ok(Value::array(
-            left.iter()
-                .filter(|item| !contains(right, item))
-                .cloned()
-                .collect(),
-        ));
+        budget.items(left.len())?;
+        return Ok(Value::array(difference(left, right)));
     }
     Err(type_error("-", lhs, rhs))
+}
+
+/// The items of `left` that are not `==` to any item of `right`. Large right
+/// sides are hashed, so this takes linear rather than quadratic time.
+fn difference(left: &[Value], right: &[Value]) -> Vec<Value> {
+    const SCAN_UP_TO: usize = 16;
+    if right.len() <= SCAN_UP_TO {
+        return left
+            .iter()
+            .filter(|item| !contains(right, item))
+            .cloned()
+            .collect();
+    }
+    let hasher = RandomState::new();
+    let hash = |value: &Value| {
+        let mut state = hasher.build_hasher();
+        hash_for_equality(value, &mut state);
+        state.finish()
+    };
+    let mut buckets: HashMap<u64, Vec<&Value>> = HashMap::with_capacity(right.len());
+    for item in right {
+        buckets.entry(hash(item)).or_default().push(item);
+    }
+    left.iter()
+        .filter(|item| {
+            !buckets
+                .get(&hash(item))
+                .is_some_and(|candidates| candidates.iter().any(|other| equals(other, item)))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Feeds `value` to `state` so that values that are `==` hash alike:
+/// numbers and booleans by their numeric value, `null` like `""`, strings,
+/// arrays and dictionaries by their contents.
+fn hash_for_equality(value: &Value, state: &mut impl Hasher) {
+    match value {
+        Value::Null => state.write_u8(0),
+        Value::String(text) if text.is_empty() => state.write_u8(0),
+        Value::String(text) => {
+            state.write_u8(1);
+            state.write(text.as_bytes());
+            state.write_u8(0xff);
+        }
+        Value::Number(_) | Value::Bool(_) => {
+            state.write_u8(2);
+            // `+ 0.0` turns -0 into 0, which compares equal to it.
+            state.write_u64((numeric(value) + 0.0).to_bits());
+        }
+        Value::Array(items) => {
+            state.write_u8(3);
+            state.write_usize(items.len());
+            for item in items.iter() {
+                hash_for_equality(item, state);
+            }
+        }
+        Value::Dict(entries) => {
+            state.write_u8(4);
+            state.write_usize(entries.len());
+            for (key, item) in entries.iter() {
+                state.write(key.as_bytes());
+                state.write_u8(0xff);
+                hash_for_equality(item, state);
+            }
+        }
+    }
 }
 
 /// `*`: numbers (empty values count as 0).
@@ -303,8 +393,8 @@ pub(crate) fn shift_right(lhs: &Value, rhs: &Value) -> OpResult<Value> {
 }
 
 /// Unary `-`, which Icinga implements as `0 - x`.
-pub(crate) fn negate(value: &Value) -> OpResult<Value> {
-    subtract(&Value::Number(0.0), value)
+pub(crate) fn negate(value: &Value, budget: &Budget) -> OpResult<Value> {
+    subtract(&Value::Number(0.0), value, budget)
 }
 
 /// `~`: bitwise negation of the operand converted to a 64-bit integer.
@@ -511,7 +601,11 @@ mod tests {
             (NULL, d(&[("a", n(1.0))]), d(&[("a", n(1.0))])),
         ];
         for (lhs, rhs, expected) in ok {
-            assert_eq!(add(&lhs, &rhs).unwrap(), expected, "{lhs:?} + {rhs:?}");
+            assert_eq!(
+                add(&lhs, &rhs, &Budget::new()).unwrap(),
+                expected,
+                "{lhs:?} + {rhs:?}"
+            );
         }
         for (lhs, rhs) in [
             (NULL, NULL),
@@ -521,36 +615,47 @@ mod tests {
             (a(&[]), d(&[])),
             (d(&[]), n(1.0)),
         ] {
-            let error = add(&lhs, &rhs).unwrap_err();
+            let error = add(&lhs, &rhs, &Budget::new()).unwrap_err();
             assert!(error.starts_with("operator + cannot be applied"), "{error}");
         }
         assert_eq!(
-            add(&T, &n(1.0)).unwrap_err(),
+            add(&T, &n(1.0), &Budget::new()).unwrap_err(),
             "operator + cannot be applied to values of type 'Boolean' and 'Number'"
         );
     }
 
     #[test]
     fn subtraction_and_arithmetic() {
-        assert_eq!(subtract(&n(3.0), &n(1.0)).unwrap(), n(2.0));
-        assert_eq!(subtract(&NULL, &n(5.0)).unwrap(), n(-5.0));
-        assert_eq!(subtract(&n(5.0), &NULL).unwrap(), n(5.0));
-        assert!(subtract(&NULL, &NULL).is_err());
-        assert!(subtract(&s("5"), &n(1.0)).is_err());
+        assert_eq!(subtract(&n(3.0), &n(1.0), &Budget::new()).unwrap(), n(2.0));
+        assert_eq!(subtract(&NULL, &n(5.0), &Budget::new()).unwrap(), n(-5.0));
+        assert_eq!(subtract(&n(5.0), &NULL, &Budget::new()).unwrap(), n(5.0));
+        assert!(subtract(&NULL, &NULL, &Budget::new()).is_err());
+        assert!(subtract(&s("5"), &n(1.0), &Budget::new()).is_err());
         assert!(
-            subtract(&n(5.0), &s("")).is_err(),
+            subtract(&n(5.0), &s(""), &Budget::new()).is_err(),
             "\"\" is a string, not null, for -"
         );
         assert_eq!(
-            subtract(&a(&[n(1.0), n(2.0), n(3.0), n(2.0)]), &a(&[n(2.0)])).unwrap(),
+            subtract(
+                &a(&[n(1.0), n(2.0), n(3.0), n(2.0)]),
+                &a(&[n(2.0)]),
+                &Budget::new()
+            )
+            .unwrap(),
             a(&[n(1.0), n(3.0)])
         );
-        assert_eq!(subtract(&a(&[n(1.0)]), &NULL).unwrap(), a(&[n(1.0)]));
-        assert_eq!(subtract(&NULL, &a(&[n(1.0)])).unwrap(), a(&[]));
-        assert_eq!(negate(&n(2.0)).unwrap(), n(-2.0));
-        assert_eq!(negate(&NULL).unwrap(), n(0.0));
-        assert!(negate(&s("1")).is_err());
-        assert!(negate(&T).is_err());
+        assert_eq!(
+            subtract(&a(&[n(1.0)]), &NULL, &Budget::new()).unwrap(),
+            a(&[n(1.0)])
+        );
+        assert_eq!(
+            subtract(&NULL, &a(&[n(1.0)]), &Budget::new()).unwrap(),
+            a(&[])
+        );
+        assert_eq!(negate(&n(2.0), &Budget::new()).unwrap(), n(-2.0));
+        assert_eq!(negate(&NULL, &Budget::new()).unwrap(), n(0.0));
+        assert!(negate(&s("1"), &Budget::new()).is_err());
+        assert!(negate(&T, &Budget::new()).is_err());
 
         assert_eq!(multiply(&n(300.0), &n(10.0)).unwrap(), n(3000.0));
         assert_eq!(multiply(&s(""), &n(10.0)).unwrap(), n(0.0));
@@ -685,6 +790,94 @@ mod tests {
     }
 
     #[test]
+    fn large_differences_use_icinga_equality() {
+        // More than 16 items on the right side: the hashed path.
+        let right: Vec<Value> = (0..40)
+            .map(|index| match index % 5 {
+                0 => n(f64::from(index)),
+                1 => s(&format!("s{index}")),
+                2 => a(&[n(f64::from(index)), s("x")]),
+                3 => d(&[("k", n(f64::from(index)))]),
+                _ => NULL,
+            })
+            .collect();
+        let left = vec![
+            n(0.0),
+            n(-0.0),
+            T,
+            n(1.0),
+            n(5.0),
+            F,
+            s("s1"),
+            s("s2"),
+            s(""),
+            NULL,
+            a(&[n(2.0), s("x")]),
+            a(&[T, s("x")]),
+            a(&[n(2.0)]),
+            d(&[("k", n(3.0))]),
+            d(&[("k", n(4.0))]),
+        ];
+        let budget = Budget::new();
+        let hashed = subtract(&a(&left), &a(&right), &budget).unwrap();
+        let scanned: Vec<Value> = left
+            .iter()
+            .filter(|item| !contains(&right, item))
+            .cloned()
+            .collect();
+        assert_eq!(hashed, a(&scanned));
+        // 0 and -0 and false, the empty string and null are equal.
+        assert_eq!(
+            hashed,
+            a(&[
+                T,
+                n(1.0),
+                s("s2"),
+                a(&[T, s("x")]),
+                a(&[n(2.0)]),
+                d(&[("k", n(4.0))]),
+            ])
+        );
+        // NaN equals nothing, so it is never removed.
+        let nan = subtract(&a(&[n(f64::NAN)]), &a(&right), &budget).unwrap();
+        assert!(matches!(nan.as_array(), Some([Value::Number(x)]) if x.is_nan()));
+        // The same array object is equal to itself even with NaN inside.
+        let with_nan = a(&[n(f64::NAN)]);
+        let mut right_with_nan = right.clone();
+        right_with_nan.push(with_nan.clone());
+        assert_eq!(
+            subtract(&a(&[with_nan]), &a(&right_with_nan), &budget).unwrap(),
+            a(&[])
+        );
+    }
+
+    #[test]
+    fn large_differences_take_linear_time() {
+        let items: Vec<Value> = (0..50_000).map(|index| n(f64::from(index))).collect();
+        let start = std::time::Instant::now();
+        let rest = subtract(&a(&items), &a(&items[1..]), &Budget::new()).unwrap();
+        assert_eq!(rest, a(&[n(0.0)]));
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn operators_charge_what_they_create() {
+        let budget = Budget::new();
+        budget.text(crate::budget::MAX_TEXT - 4).unwrap();
+        assert_eq!(add(&s("ab"), &n(1.0), &budget).unwrap(), s("ab1"));
+        let error = add(&s("ab"), &s("cd"), &budget).unwrap_err();
+        assert!(error.starts_with("evaluation limit reached"), "{error}");
+        let budget = Budget::new();
+        budget.items(crate::budget::MAX_ITEMS - 3).unwrap();
+        assert!(add(&a(&[n(1.0)]), &a(&[n(2.0), n(3.0)]), &budget).is_ok());
+        assert!(add(&a(&[n(1.0)]), &a(&[]), &budget).is_err());
+        let budget = Budget::new();
+        budget.items(crate::budget::MAX_ITEMS - 1).unwrap();
+        assert!(subtract(&a(&[n(1.0), n(2.0)]), &NULL, &budget).is_err());
+        assert!(add(&d(&[("a", n(1.0))]), &d(&[("b", n(1.0))]), &budget).is_err());
+    }
+
+    #[test]
     fn number_conversion() {
         assert_eq!(to_number(&s("78")), Ok(78.0));
         assert_eq!(to_number(&s("-1.5e3")), Ok(-1500.0));
@@ -698,5 +891,12 @@ mod tests {
             to_number(&a(&[n(1.0)])).unwrap_err(),
             "can't convert '[ 1.000000 ]' to a floating point number"
         );
+        // Messages show only the start of long values.
+        let long = to_number(&s(&"9x".repeat(100_000))).unwrap_err();
+        assert!(long.len() < 200, "{}", long.len());
+        let big: Value = (0..100_000).map(|index| n(f64::from(index))).collect();
+        let message = to_number(&big).unwrap_err();
+        assert!(message.len() < 200, "{}", message.len());
+        assert!(message.contains("[ 0.000000, 1.000000,"), "{message}");
     }
 }

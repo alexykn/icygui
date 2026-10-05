@@ -535,7 +535,7 @@ impl World {
                 }
             },
         };
-        let command = checkable.cr.as_ref().map_or_else(
+        let mut command = checkable.cr.as_ref().map_or_else(
             || plugin_command(&checkable.check_command),
             |cr| {
                 if cr.command.is_null() {
@@ -545,6 +545,11 @@ impl World {
                 }
             },
         );
+        let address = self
+            .hosts
+            .get(&checkable.host_name)
+            .map_or("", |host| host.address.as_str());
+        super::load::resolve_address(&mut command, address);
         let execution_time = execution_time(&checkable.check_command);
         CheckInput {
             state,
@@ -1101,9 +1106,14 @@ pub(crate) fn plugin_command(check_command: &str) -> Json {
         "hostalive" | "ping4" | "ping" => "check_ping",
         "dummy" | "passive" => return Json::Null,
         other => {
+            let plugin = other.replace('-', "_");
+            let plugin = if plugin.starts_with("check_") {
+                plugin
+            } else {
+                format!("check_{plugin}")
+            };
             return Json::Array(vec![Json::String(format!(
-                "/usr/lib/nagios/plugins/check_{}",
-                other.replace('-', "_")
+                "/usr/lib/nagios/plugins/{plugin}"
             ))]);
         }
     };

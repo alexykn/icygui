@@ -481,7 +481,40 @@ impl World {
                 parent.triggers.push(child);
             }
         }
+        world.resolve_command_macros();
         Ok(world)
+    }
+
+    /// Check results carry the executed (macro-resolved) command line.
+    fn resolve_command_macros(&mut self) {
+        let addresses: BTreeMap<String, String> = self
+            .hosts
+            .iter()
+            .map(|(name, host)| (name.clone(), host.address.clone()))
+            .collect();
+        let hosts = self.hosts.values_mut();
+        let services = self.services.values_mut().flat_map(BTreeMap::values_mut);
+        for checkable in hosts.chain(services) {
+            let address = addresses
+                .get(&checkable.host_name)
+                .map_or("", String::as_str);
+            if let Some(cr) = checkable.cr.as_mut() {
+                resolve_address(&mut cr.command, address);
+            }
+        }
+    }
+}
+
+/// Replaces `$address$` in a command line (array of arguments).
+pub(crate) fn resolve_address(command: &mut Json, address: &str) {
+    if let Json::Array(arguments) = command {
+        for argument in arguments {
+            if let Json::String(text) = argument
+                && text.contains("$address$")
+            {
+                *text = text.replace("$address$", address);
+            }
+        }
     }
 }
 

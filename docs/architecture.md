@@ -278,20 +278,34 @@ See PLAN.md §3.6. `MockServer::start(MockConfig) -> MockServer` serves HTTPS on
 
 ## ic-core (wave 3)
 
+The UI-agnostic engine for the *active* environment (PLAN.md D2: one at a time). It owns a tokio runtime on a dedicated thread and talks to the UI only through `CoreHandle`.
+
 ```rust
 pub struct EnvironmentSpec { pub environment: ic_config::Environment, pub general: ic_config::General, pub data_dir: PathBuf }
 pub struct Ports { pub secrets: Arc<dyn SecretStore>, pub notifier: Arc<dyn Notifier>, pub clock: Arc<dyn Clock> }
-pub fn start(spec: EnvironmentSpec, ports: Ports) -> Result<CoreHandle, CoreError>;   // spawns the runtime thread (tokio)
-pub struct CoreHandle { /* command sender, event receiver, join handle */ }
+pub struct SystemClock;                                        // impl Clock with the local time zone (jiff)
+
+pub fn start(spec: EnvironmentSpec, ports: Ports) -> Result<CoreHandle, CoreError>;   // spawns the runtime thread
+pub struct CoreHandle { … }
 impl CoreHandle {
-    pub fn send(&self, command: Command);
-    pub fn events(&self) -> impl Stream<Item = CoreEvent>;    // runtime-agnostic (futures channel), consumed on the GPUI thread
-    pub fn shutdown(self);                                    // stops streams, flushes the event log, joins the thread
+    pub fn send(&self, command: Command);                      // never blocks
+    pub fn take_events(&mut self) -> Option<futures::channel::mpsc::UnboundedReceiver<CoreEvent>>;   // taken once by the UI bridge
+    pub fn shutdown(self);                                     // stops streams, flushes the log, joins the thread (bounded wait)
 }
+
+/// Settings dialog helpers, runnable without a started environment.
+/// They run on a shared background runtime and return a oneshot receiver
+/// the UI can await.
+pub fn test_connection(environment: ic_config::Environment, password: Option<SecretString>) -> oneshot::Receiver<Result<ConnectionReport, ConnectionFailure>>;
+pub fn fetch_certificate(url: String, server_name: Option<String>) -> oneshot::Receiver<Result<CertificateInfo, String>>;
+pub struct ConnectionReport { pub info: ApiInfo, pub status: InstanceStatus, pub missing_permissions: Vec<String> }
+pub enum ConnectionFailure { Unauthorized, Tls { message: String, certificate: Option<CertificateInfo> }, CertificateMismatch { expected: String, actual: String }, Unreachable(String), Other(String) }
+
 pub enum Command {
     Action { id: u64, target: ActionTarget, action: Action },
-    Refresh,                                                   // full re-sync now
-    UpdateEnvironment(ic_config::Environment),                 // dashboards or rules changed; re-evaluate
+    Refresh,                                                   // full re-sync now (also retries a failed connection)
+    UpdateEnvironment(ic_config::Environment),                 // dashboards/rules changed → re-evaluate; connection settings changed → reconnect
+    UpdateGeneral(ic_config::General),
     PauseNotifications(Option<Timestamp>),
     LoadHistory { object: Option<ObjectKey>, limit: usize, reply: oneshot::Sender<Vec<LogEntry>> },
     LoadNotifications { limit: usize, reply: oneshot::Sender<Vec<NotificationRecord>> },
@@ -300,18 +314,98 @@ pub enum Command {
 pub enum CoreEvent {
     Connection(ConnectionState),
     Snapshot(Arc<Snapshot>),
-    ActionFinished { id: u64, outcome: Result<ActionSummary, String> },
-    Notification(NotificationRecord),
     Permissions(ApiInfo),
+    ActionFinished { id: u64, outcome: ActionOutcome },
+    Notification(NotificationRecord),                          // every intent, silent or not, after it is logged
+    NotificationsPaused(Option<Timestamp>),
 }
+pub enum ConnectionState {
+    Connecting { attempt: u32 },
+    Connected { endpoint: String, version: String, since: Timestamp },
+    Reconnecting { error: String, attempt: u32, retry_at: Timestamp },
+    AuthFailed { message: String },                            // no automatic retry; Refresh or UpdateEnvironment retries
+    TlsFailed { message: String, certificate: Option<CertificateInfo> },   // no automatic retry; offers trust-on-first-use
+    MissingSecret,                                             // no password in the keychain
+}
+pub struct ActionOutcome { pub ok: usize, pub failed: Vec<(String, String)>, pub error: Option<String> }   // per-object failures, or a request error
+pub struct LogEntry { pub at: Timestamp, pub object: ObjectKey, pub kind: LogKind, pub text: String, pub author: Option<String> }
+pub enum LogKind { State { state: CheckableState, state_type: StateType }, AcknowledgementSet, AcknowledgementCleared, CommentAdded, CommentRemoved, DowntimeStarted, DowntimeEnded, FlappingStarted, FlappingStopped }
+pub struct NotificationRecord { pub intent: NotificationIntent, pub read: bool }
 ```
 
-- *Sync:* initial parallel load → event stream → apply events to the store → mark the touched objects dirty → re-query dirty objects in batches (debounced about 500 ms) to fill in what events don't carry → reconcile everything every `reconcile_interval_secs`, and after every reconnect.
-- *Snapshots:* batch publishing (at most about 4 per second).
-- *Dashboards:* evaluate every dashboard (filter, `problems_only`, `hide_handled`, sort, group-by, summary) off the async threads, using `spawn_blocking`.
-- *Rules:* feed `RuleInput`s for state, acknowledgement, downtime and flapping changes, never for the initial load. Changes found during a reconcile do count.
-- *Event log:* SQLite in `data_dir`, pruned to `event_log_retention_hours`.
-- *Connection:* reconnect with exponential backoff and jitter (1 s → 60 s). `ConnectionState` covers connecting, connected, reconnecting (with error and next retry), auth failed, and TLS failure (with the server fingerprint, for the trust-on-first-use dialog).
+The `Snapshot` contract type gains `last_event_at: Option<Timestamp>`, which the footer shows as "master-01 · 2s". This is an allowed additive change.
+
+**Sync engine:**
+1. Connect: build an `ic_api::Client` from the environment.
+   - The password comes from `SecretStore` with account = environment id; `MissingSecret` if absent.
+   - Client certificates are read from their files.
+   - The CA file is read; the pin is parsed with `ic_config::parse_fingerprint`.
+2. Initial load, in parallel: `info`, `status`, hosts, services, comments, downtimes, groups, dependencies, endpoints. Then publish `Permissions` and the first snapshot. The initial load produces *no* rule inputs.
+3. Open the event stream (queue `icygui-<uuid>`, all `EventKind::ALL`) and apply events to the store:
+   - state, check result, acknowledgement and flapping go to the objects;
+   - comments and downtimes are added or removed;
+   - `ObjectCreated`/`ObjectDeleted` for hosts and services trigger a re-query or removal.
+   - Each event marks the object *dirty*.
+   - A debounced task (500 ms, batches of up to 200) re-queries dirty objects with `Client::objects` to fill in what events don't carry: attempts, next check, reachability, severity inputs, `last_hard_state_change`.
+4. Reconcile with a full reload every `reconcile_interval_secs`, after every reconnect, and on `Refresh`. Diff the result against the store; state changes found only by the diff produce rule inputs (missed events), as do object removals.
+5. Refresh status every 30 s.
+6. Stream end or error → `Reconnecting` with exponential backoff and jitter (1 s → 60 s, reset after 5 minutes of health). Auth (401) → `AuthFailed`. TLS errors and pin mismatch → `TlsFailed` with the presented certificate (via `fetch_server_certificate`).
+
+**Store and snapshots:**
+- Objects are `Arc`-shared in `BTreeMap`s and copied on write.
+- A snapshot is published at most every 250 ms while there are changes, and immediately after the initial load and after actions.
+- `Snapshot.revision` increases monotonically.
+
+**Dashboards:** evaluate per dashboard per snapshot, incrementally, on a blocking thread (`spawn_blocking`):
+- Keep a compiled `ic_filter::Filter` per dashboard (recompiled when its source changes) and a per-dashboard match set.
+- Re-evaluate only dirty objects; do a full re-evaluation when dashboards or the object set change wholesale (reload).
+- A `Services` view evaluates `ServiceScope { service, host }`; a `Hosts` view evaluates `HostScope`.
+- *Membership* (used for notifications) = filter matches, ignoring `problems_only` and `hide_handled`, so recoveries still match.
+- *Rows:*
+  - apply `problems_only`, then `hide_handled` (Icinga's handled: acknowledged, in downtime, or host problem for services);
+  - sort per `Sort`; ties go to severity desc, then `last_state_change` desc, then host name, then service name;
+  - `GroupBy` inserts `DashboardRow::Group` headers. Groups are ordered by their worst severity (desc), then label; with host groups and service groups an object appears under each of its groups, and objects without groups go under "ungrouped" last.
+- *Summary* is computed over the matches *before* `hide_handled`.
+- A filter error sets `DashboardResult.error`.
+- Performance target: 20 000 services × 10 dashboards stays responsive. A full evaluation takes well under a second in release builds; incremental updates take milliseconds. Test this with the `large` mock scenario (ignored test, run in release).
+
+**Notifications:**
+- Build an `ic_rules::RuleSet` from the environment (environment name, settings, groups/dashboards with their `ScopeSetting`s) and rebuild it on `UpdateEnvironment`.
+- For every applied change, produce a `RuleInput`:
+  - `StateChange`: previous state from the store before applying, `since` = `last_state_change`;
+  - `AcknowledgementSet`/`AcknowledgementCleared`;
+  - `DowntimeStarted`/`DowntimeTriggered` → `DowntimeStarted`;
+  - `DowntimeRemoved` of an in-effect downtime → `DowntimeEnded`;
+  - `Flapping`.
+  - `handled` is computed from the store after applying; `memberships` from the dashboard filters.
+- Tick the engine every second.
+- Every intent goes into the SQLite log, then `CoreEvent::Notification`; non-silent ones also go to `Notifier::notify`.
+
+**Event log:** SQLite (rusqlite, bundled) at `<data_dir>/events-<environment id>.sqlite3`.
+- WAL mode, schema version table.
+- Tables `events` (at, object, kind, state, state_type, text, author) and `notifications` (id, at, object, title, subtitle, body, tone, silent, read).
+- What gets logged: state changes (hard and soft), acknowledgements, user comments, downtime start/end, flapping. Not plain check results.
+- Prune on start and hourly to `event_log_retention_hours`.
+- All database work happens on blocking threads.
+
+**Actions:**
+- `Command::Action` runs `Client::run_action` with `author` = `Environment::author_name()`.
+- It reports `ActionFinished` with per-object failures. For example, `execute-command`'s "Can't find a valid endpoint": by default pass the object's `command_endpoint`, else the instance's node name.
+- After success it marks the targets dirty, so their new state shows within a second.
+
+**Tests** (integration, against `ic_mock::MockServer` in-process, no sleeps beyond small bounded waits on channels):
+- initial load → snapshot contents;
+- event application (each event type) → snapshot;
+- dirty re-query;
+- reconcile diff (drop the stream, change state behind its back, reconnect) → rule input;
+- backoff states;
+- 401 → `AuthFailed`; pin mismatch → `TlsFailed` with the fingerprint; missing secret;
+- every action end to end;
+- dashboard evaluation (filters, sort, group-by, summary, hide_handled, problems_only, filter error);
+- notifications end to end with a fake `Notifier` (including no notifications from the initial load);
+- event log write, prune and query;
+- shutdown joins cleanly;
+- `test_connection` success, missing permissions and TLS failure.
 
 ## ic-platform
 

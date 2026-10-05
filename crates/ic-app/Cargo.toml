@@ -1,0 +1,22 @@
+[package]
+name = "ic-app"
+description = "Icinga 2 desktop client: the GPUI application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "icinga-client"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+ic-ui-kit.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

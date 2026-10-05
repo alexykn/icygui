@@ -1,0 +1,12 @@
+[package]
+name = "ic-rules"
+description = "Client-side notification rule engine: scopes, matching, dedupe and storm control. Pure."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

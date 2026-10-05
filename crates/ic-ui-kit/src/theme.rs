@@ -3,8 +3,8 @@
 //! Views never hard-code colours or sizes; they read them from the active
 //! [`Theme`] (`cx.theme()`), so a light theme is another `Theme` value.
 
-use gpui::{App, Global, Hsla, Pixels, SharedString, px, rgb};
-use ic_model::{HostState, ServiceState};
+use gpui::{App, Global, Hsla, Pixels, SharedString, px, rgb, rgba};
+use ic_model::{CheckableState, HostState, PerfdataStatus, ServiceState};
 
 /// The family name of the bundled UI font.
 pub const FONT_FAMILY: &str = "IBM Plex Mono";
@@ -38,6 +38,17 @@ impl Theme {
             metrics: Metrics::default(),
         }
     }
+
+    /// The colour of a perfdata value: state colours when a threshold is
+    /// crossed, body text otherwise.
+    #[must_use]
+    pub fn perfdata_color(&self, status: PerfdataStatus) -> Hsla {
+        match status {
+            PerfdataStatus::Ok => self.colors.text,
+            PerfdataStatus::Warning => self.states.warning,
+            PerfdataStatus::Critical => self.states.critical,
+        }
+    }
 }
 
 /// Surface, border, text and accent colours.
@@ -49,14 +60,22 @@ pub struct Colors {
     pub pane_background: Hsla,
     /// Plugin output and other code blocks (`#16191c`).
     pub code_background: Hsla,
-    /// Secondary buttons (`#262a2e`).
+    /// Secondary buttons and tooltips (`#262a2e`).
     pub element_background: Hsla,
+    /// Hovered secondary buttons and icon buttons (`#2e3337`).
+    pub element_hover: Hsla,
+    /// Pressed secondary buttons and icon buttons (`#33383c`).
+    pub element_active: Hsla,
     /// Selected list row (`#2a3036`).
     pub row_selected: Hsla,
     /// Active group header in the sidebar (`#30353a`).
     pub group_active: Hsla,
+    /// Hovered, inactive group header in the sidebar (`#262a2e`).
+    pub group_hover: Hsla,
     /// Active dashboard in the sidebar (`#272c30`).
     pub item_active: Hsla,
+    /// Hovered, inactive dashboard in the sidebar (`#23272b`).
+    pub item_hover: Hsla,
 
     /// Window outline and the titlebar divider (`#33383c`).
     pub border_window: Hsla,
@@ -73,9 +92,9 @@ pub struct Colors {
     pub text_strong: Hsla,
     /// Body text (`#d6d8da`).
     pub text: Hsla,
-    /// Host names and inactive sidebar labels (`#b5b9bc`).
+    /// Host names, inactive sidebar labels and footer icons (`#b5b9bc`).
     pub text_secondary: Hsla,
-    /// Plugin output and secondary labels (`#8b9094`).
+    /// Plugin output, placeholders and secondary labels (`#8b9094`).
     pub text_muted: Hsla,
     /// Section labels, tags and key hints (`#6c7175`).
     pub text_faint: Hsla,
@@ -86,10 +105,14 @@ pub struct Colors {
     pub accent: Hsla,
     /// Hovered links (`#a3c8f0`).
     pub accent_hover: Hsla,
+    /// Hovered primary button (`#86b9ec`).
+    pub accent_button_hover: Hsla,
     /// Text on the primary button (`#10161d`).
     pub on_accent: Hsla,
     /// Key hints on the primary button (`#2b4766`).
     pub on_accent_muted: Hsla,
+    /// Selected text in inputs (accent at 30 % opacity).
+    pub selection: Hsla,
 
     /// Window control: close (`#ff5f57`).
     pub traffic_close: Hsla,
@@ -97,6 +120,10 @@ pub struct Colors {
     pub traffic_minimize: Hsla,
     /// Window control: zoom (`#28c840`).
     pub traffic_zoom: Hsla,
+    /// Window controls while the window is inactive (`#3a3f43`).
+    pub traffic_inactive: Hsla,
+    /// Glyphs inside the window controls on hover (black at 55 %).
+    pub traffic_glyph: Hsla,
 }
 
 impl Colors {
@@ -106,9 +133,13 @@ impl Colors {
             pane_background: hex(0x1a_1d21),
             code_background: hex(0x16_191c),
             element_background: hex(0x26_2a2e),
+            element_hover: hex(0x2e_3337),
+            element_active: hex(0x33_383c),
             row_selected: hex(0x2a_3036),
             group_active: hex(0x30_353a),
+            group_hover: hex(0x26_2a2e),
             item_active: hex(0x27_2c30),
+            item_hover: hex(0x23_272b),
 
             border_window: hex(0x33_383c),
             border_split: hex(0x2e_3337),
@@ -125,12 +156,16 @@ impl Colors {
 
             accent: hex(0x74_ade8),
             accent_hover: hex(0xa3_c8f0),
+            accent_button_hover: hex(0x86_b9ec),
             on_accent: hex(0x10_161d),
             on_accent_muted: hex(0x2b_4766),
+            selection: rgba(0x74ad_e84d).into(),
 
             traffic_close: hex(0xff_5f57),
             traffic_minimize: hex(0xfe_bc2e),
             traffic_zoom: hex(0x28_c840),
+            traffic_inactive: hex(0x3a_3f43),
+            traffic_glyph: rgba(0x0000_008c).into(),
         }
     }
 }
@@ -184,6 +219,15 @@ impl StateColors {
             HostState::Pending => self.pending,
         }
     }
+
+    /// The colour for a host or service state.
+    #[must_use]
+    pub fn checkable(&self, state: CheckableState) -> Hsla {
+        match state {
+            CheckableState::Host(state) => self.host(state),
+            CheckableState::Service(state) => self.service(state),
+        }
+    }
 }
 
 /// The type scale. Names describe where each size is used in the design.
@@ -223,6 +267,10 @@ impl Default for TextSizes {
 }
 
 /// Fixed sizes from the layout.
+///
+/// Bar heights are content heights, as the design's CSS states them; bars
+/// with a rule add it on top (the design renders with `content-box` sizing,
+/// so its 40px header with a rule is 41px tall). Use [`Metrics::with_rule`].
 #[derive(Clone, Copy, Debug)]
 pub struct Metrics {
     /// Sidebar width.
@@ -239,18 +287,61 @@ pub struct Metrics {
     pub item_row_height: Pixels,
     /// Sidebar footer bar.
     pub footer_height: Pixels,
+    /// Horizontal padding of the sidebar's header, rows and footer.
+    pub sidebar_padding: Pixels,
+    /// Horizontal padding of the list header, summary bar and list rows.
+    pub list_padding: Pixels,
+    /// Horizontal padding of the detail pane.
+    pub pane_padding: Pixels,
     /// Action buttons.
     pub button_height: Pixels,
     /// Action button corner radius.
     pub button_radius: Pixels,
+    /// Square hit area of icon buttons.
+    pub icon_button: Pixels,
+    /// Corner radius of icon buttons and tooltips.
+    pub small_radius: Pixels,
+    /// Corner radius of code blocks.
+    pub code_radius: Pixels,
+    /// Small icons (sidebar header and footer).
+    pub icon_small: Pixels,
+    /// Default icon size.
+    pub icon: Pixels,
+    /// Large icons (the footer's `+`).
+    pub icon_large: Pixels,
     /// State circle in list rows.
     pub row_circle: Pixels,
+    /// Ring width of a handled state circle in list rows.
+    pub row_ring: Pixels,
     /// State circle in the host pane's service rows.
     pub compact_circle: Pixels,
+    /// Ring width of a handled compact state circle.
+    pub compact_ring: Pixels,
     /// State circle in the detail pane header.
     pub pane_circle: Pixels,
+    /// Ring width of a handled pane state circle.
+    pub pane_ring: Pixels,
     /// Dashboard state dot in the sidebar.
     pub sidebar_dot: Pixels,
+    /// State dots in the summary bar.
+    pub summary_dot: Pixels,
+    /// Connection status dot in the sidebar footer.
+    pub status_dot: Pixels,
+    /// Window control circles (traffic lights).
+    pub window_control: Pixels,
+    /// Space between window control circles.
+    pub window_control_gap: Pixels,
+}
+
+impl Metrics {
+    /// Width of the rules under header bars and between rows.
+    pub const RULE: Pixels = px(1.);
+
+    /// The outer height of a bar with content height `height` and a rule.
+    #[must_use]
+    pub fn with_rule(height: Pixels) -> Pixels {
+        height + Self::RULE
+    }
 }
 
 impl Default for Metrics {
@@ -263,12 +354,28 @@ impl Default for Metrics {
             group_row_height: px(36.),
             item_row_height: px(30.),
             footer_height: px(38.),
+            sidebar_padding: px(12.),
+            list_padding: px(18.),
+            pane_padding: px(20.),
             button_height: px(28.),
             button_radius: px(5.),
+            icon_button: px(22.),
+            small_radius: px(4.),
+            code_radius: px(6.),
+            icon_small: px(13.),
+            icon: px(14.),
+            icon_large: px(16.),
             row_circle: px(22.),
+            row_ring: px(3.),
             compact_circle: px(14.),
+            compact_ring: px(2.),
             pane_circle: px(34.),
+            pane_ring: px(4.),
             sidebar_dot: px(8.),
+            summary_dot: px(9.),
+            status_dot: px(6.),
+            window_control: px(12.),
+            window_control_gap: px(8.),
         }
     }
 }
@@ -305,6 +412,23 @@ mod tests {
             states.host(HostState::Unreachable),
             states.service(ServiceState::Unknown)
         );
+        assert_eq!(
+            states.host(HostState::Pending),
+            states.service(ServiceState::Pending)
+        );
+    }
+
+    #[test]
+    fn checkable_states_use_their_own_palette() {
+        let states = StateColors::dark();
+        assert_eq!(
+            states.checkable(CheckableState::Service(ServiceState::Warning)),
+            states.warning
+        );
+        assert_eq!(
+            states.checkable(CheckableState::Host(HostState::Unreachable)),
+            states.unknown
+        );
     }
 
     #[test]
@@ -312,6 +436,36 @@ mod tests {
         let colors = Colors::dark();
         assert_eq!(colors.window_background, hex(0x1d_2125));
         assert_eq!(colors.accent, hex(0x74_ade8));
-        assert_eq!(Metrics::default().sidebar_width, px(300.));
+        assert_eq!(colors.group_active, hex(0x30_353a));
+        assert_eq!(colors.item_active, hex(0x27_2c30));
+        let metrics = Metrics::default();
+        assert_eq!(metrics.sidebar_width, px(300.));
+        assert_eq!(metrics.group_row_height, px(36.));
+        assert_eq!(metrics.item_row_height, px(30.));
+        assert_eq!(metrics.footer_height, px(38.));
+        assert_eq!(Metrics::with_rule(metrics.header_height), px(41.));
+    }
+
+    #[test]
+    fn hover_colours_sit_between_rest_and_active() {
+        let colors = Colors::dark();
+        assert!(colors.item_hover.l > colors.window_background.l);
+        assert!(colors.item_hover.l < colors.item_active.l);
+        assert!(colors.group_hover.l < colors.group_active.l);
+        assert!(colors.element_hover.l > colors.element_background.l);
+    }
+
+    #[test]
+    fn perfdata_values_are_coloured_by_threshold() {
+        let theme = Theme::dark();
+        assert_eq!(theme.perfdata_color(PerfdataStatus::Ok), theme.colors.text);
+        assert_eq!(
+            theme.perfdata_color(PerfdataStatus::Warning),
+            theme.states.warning
+        );
+        assert_eq!(
+            theme.perfdata_color(PerfdataStatus::Critical),
+            theme.states.critical
+        );
     }
 }

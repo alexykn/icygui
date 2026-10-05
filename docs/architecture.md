@@ -4,9 +4,11 @@ This is the binding contract between crates. `PLAN.md` explains the product and 
 
 Already implemented and binding:
 - `ic-model`: all domain types (names, timestamps, perfdata, objects, severity, events, actions, instance status).
-- `ic-rules`: settings and intent types (`settings.rs`, `intent.rs`). The engine is still to be built.
-- `ic-config`: data types (`model.rs`). Persistence is still to be built.
-- `ic-core`: `ports.rs` (`SecretStore`, `Notifier`, `Clock`) and `snapshot.rs` (`Snapshot`, `DashboardResult`, `DashboardRow`, `Summary`). The runtime is still to be built.
+- `ic-filter`, `ic-config`, `ic-rules` (engine included), `ic-platform`: implemented and reviewed, as specified below.
+- `ic-api`: implemented and reviewed, except the tiered loading (`Detail`, `Fetched`), which is the next step.
+- `ic-mock`: implemented (wave 2); its filter is still a shim, to be replaced by `ic-filter`.
+- `ic-ui-kit` and `ic-app`: the static UI (chrome, dashboard list, service and host panes, tabs) on demo data.
+- `ic-core`: `ports.rs` (`SecretStore`, `Notifier`, `Clock`) and `snapshot.rs` (`Snapshot`, `DashboardResult`, `DashboardRow`, `Summary`). The runtime is still to be built (wave 3).
 
 Read the existing code before implementing against it. Don't change these types without a strong reason; if you must, explain the change in your report.
 
@@ -156,7 +158,7 @@ pub enum ConfigError {
 
 ## ic-rules (engine)
 
-The types are done (`settings.rs`, `intent.rs`). To be built:
+Implemented: the types (`settings.rs`, `intent.rs`) and the engine.
 
 ```rust
 pub struct RuleSet { pub environment_name: String, pub settings: NotificationSettings, pub groups: Vec<GroupScope> }
@@ -219,7 +221,7 @@ pub struct ConnectionSettings {
     pub base_url: Url,                         // https://host:5665 (the client appends /v1/…)
     pub credentials: Credentials,
     pub tls: TlsSettings,
-    pub request_timeout: Duration,             // default 30 s; connect timeout 10 s
+    pub request_timeout: Duration,             // default 30 s: until the response headers, and per pause between body reads (a body may take ≤ 20× in total); connect timeout 10 s
 }
 pub enum Credentials {
     Basic { username: String, password: SecretString },
@@ -246,7 +248,7 @@ impl Client {
     pub async fn dependencies(&self) -> Result<Vec<Dependency>, ApiError>;
     pub async fn endpoints(&self) -> Result<Vec<Endpoint>, ApiError>;
     pub async fn objects(&self, keys: &[ObjectKey], detail: Detail) -> Result<Fetched, ApiError>;   // by name, ≤ 200 per request; a 404 batch is bisected to find deleted names
-    pub async fn run_action(&self, action: &Action, target: &ActionTarget, author: &str) -> Result<Vec<ActionResult>, ApiError>;
+    pub async fn run_action(&self, action: &Action, target: &ActionTarget, author: &str) -> Result<Vec<ActionResult>, ApiError>;   // Err only if the first request fails as a whole; later failures become per-target results (code 0 for timeout/connect)
     pub async fn events(&self, queue: &str, kinds: &[EventKind]) -> Result<EventStream, ApiError>;
 }
 pub async fn fetch_server_certificate(base_url: &Url, server_name: Option<&str>) -> Result<CertificateInfo, ApiError>;  // trust on first use: sha256, subject, issuer, not_after; accepts any cert, only reads it
@@ -294,17 +296,19 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
   - An object query whose entries come back as per-object errors (an attribute an older Icinga doesn't know) is repeated once without `attrs`.
 - *Actions:* `POST /v1/actions/<name>` with `{ "type": "Host"|"Service", "hosts"|"services": [...], … }`.
   - Split mixed host/service targets into two requests.
-  - `ActionTarget::Downtime(name)` uses `{ "downtime": name }` (only with `Action::RemoveAllDowntimes`, else `InvalidSettings`); `ActionTarget::Comment(name)` uses `{ "comment": name }` and always means `remove-comment` (`ic_model::Action` has no remove-comment variant; pass any action, `RemoveAllDowntimes` reads best).
-  - Parameter names and rules follow `12-icinga2-api.md`: `reschedule-check` sends `force` and leaves out `next_check`, so Icinga uses its own "now" (no client clock skew); `acknowledge-problem` always sends `notify: false`; `schedule-downtime` sends `fixed`, `duration` (0 for fixed), `all_services`, `child_options`, `trigger_name`.
+  - `ActionTarget::Downtime(name)` uses `{ "downtime": name }` (only with `Action::RemoveAllDowntimes`, else `InvalidSettings`); `ActionTarget::Comment(name)` uses `{ "comment": name }` and means `remove-comment` (`ic_model::Action` has no remove-comment variant): it too needs `Action::RemoveAllDowntimes`, else `InvalidSettings` before anything is sent.
+  - Parameter names and rules follow `12-icinga2-api.md`: `reschedule-check` sends `force` and leaves out `next_check`, so Icinga uses its own "now" (no client clock skew); `acknowledge-problem` always sends `notify: false`; `schedule-downtime` sends `fixed`, `duration` (0 for fixed), `all_services`, `child_options`, `trigger_name`; `process-check-result` for hosts sends 0 (UP) for plugin statuses 0–1 and 1 (DOWN) for 2 and above, since the API accepts only 0 and 1 for hosts (a UI offering UP/DOWN passes 0 or 2).
   - A 404 `No objects found.` for an action is handled like for queries (the targets were resolved before anything ran, so retrying is safe); the vanished names get a per-object 404 result. Results are matched to their target names by order.
   - `execute-command` needs an `endpoint` unless the object has `command_endpoint` (otherwise the per-object result is `404 Can't find a valid endpoint`). Pass the endpoint explicitly, defaulting to the object's `command_endpoint` or the instance's node name.
-  - A response with per-object `code >= 400` still returns `Ok`, and the caller inspects the results. HTTP-level errors map to `ApiError`.
+  - A response with per-object `code >= 400` still returns `Ok`, and the caller inspects the results. Icinga sets the HTTP status from the per-object codes, so any `{"results": [...]}` body is read as results whatever the status; only Icinga's error document (`{error, status}`) or an unreadable body maps to `ApiError`.
 - *Events:* `POST /v1/events` with `{ "queue": queue, "types": [...] }`. The response is newline-delimited JSON over a long-lived HTTP/1.1 response.
   - Parse incrementally (lines can span chunks).
   - Map each type per `icinga2-apievents.cpp`.
   - Skip unknown types and malformed lines with a warning; don't end the stream.
   - The stream ends when the connection closes.
-  - No read timeout on the stream; enable TCP keepalive.
+  - No read timeout on the stream; TCP keepalive (idle 30 s, interval 10 s, 3 retries; on Linux also `TCP_USER_TIMEOUT` 30 s) notices a dead connection within about a minute.
+  - The queue name must not be blank (Icinga 2.15 rejects it with 400): `InvalidSettings`, nothing sent.
+  - A missing `events/<type>` permission comes back from Icinga as a generic 404 (`path 'v1/events' … could not be found`). `events()` maps it to `Forbidden`, naming the missing permissions from `GET /v1`. Subscribe only to kinds `ApiInfo::allows`.
 - *TLS:* rustls (ring provider).
   - Pinning: a custom verifier that compares the SHA-256 of the leaf DER and reports `CertificateMismatch` with both fingerprints, colon-hex uppercase.
   - Name override: verify against `server_name`.
@@ -441,7 +445,7 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
   - apply `problems_only`, then `hide_handled` (Icinga's handled: acknowledged, in downtime, or host problem for services);
   - sort per `Sort`; ties go to severity desc, then `last_state_change` desc, then host name, then service name;
   - `GroupBy` inserts `DashboardRow::Group` headers. Groups are ordered by their worst severity (desc), then label; with host groups and service groups an object appears under each of its groups, and objects without groups go under "ungrouped" last.
-- *Summary* is computed over the matches *before* `hide_handled`.
+- *Summary* is computed over all filter matches, *before* `problems_only` and `hide_handled` (it counts OK objects and handled problems too).
 - A filter error sets `DashboardResult.error`.
 - Performance target: 20 000 services × 10 dashboards stays responsive. A full evaluation takes well under a second in release builds; incremental updates take milliseconds. Test this with the `large` mock scenario (ignored test, run in release).
 

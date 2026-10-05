@@ -230,9 +230,10 @@ pub enum ApiError {
 impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect/timeout/5xx → retry with backoff
 ```
 
-**Wire rules:** verify against the docs and the handler sources.
+**Wire rules:** verify against the docs, the handler sources and the **real recorded samples in `contract/samples/`** (Icinga 2.15.6). The samples win when they disagree with the docs.
 - *Queries:* `POST /v1/objects/<type>` with `X-HTTP-Method-Override: GET`, `Accept: application/json` and a JSON body `{ "attrs": [...], "filter": ..., "filter_vars": ... }`. Request only the attributes the model needs. Responses are `{ "results": [ { "name", "type", "attrs": {…}, "joins": {}, "meta": {} } ] }`.
-- *Numbers* arrive as JSON floats (`2.0`); map them defensively, never panic on odd input.
+- *Numbers:* Icinga writes doubles with integral values as JSON *integers* (`"state": 2`) and others as floats; accept both everywhere and never panic on odd input. In *events*, `acknowledgement` is a boolean; on *objects* it is 0/1/2.
+  - `last_check_result.exit_status` stays 0 for passive results: take the state from `state`, never from `exit_status`.
   - Pending is `last_check_result == null`.
   - Host `state` 1 with `last_reachable == false` is `HostState::Unreachable`.
   - Output: split `last_check_result.output` into first line and long output.
@@ -241,10 +242,14 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
 - *Comments and downtimes:* the object comes from `host_name` / `service_name` (empty string = host).
   - `Downtime.in_effect`: use `is_in_effect` when present, otherwise compute it from fixed/flexible, start/end and `trigger_time`.
   - `config_owned`: `config_owner` is non-empty, or `scheduled_by` is non-empty.
-- *Actions:* `POST /v1/actions/<name>` with `{ "type": "Host"|"Service", "filter": "host.name in names" | "service.__name in names", "filter_vars": { "names": [...] }, … }`.
+- *Targeting (verified against a real Icinga 2.15 with `enforce_filter_expression_permission = true`, see `contract/`):* never send `filter` expressions. From Icinga 2.17 they need the `filter-expression` permission (`403 Missing permission: filter-expression`).
+  - Target objects by name: `"hosts": [...]` (type `Host`) or `"services": ["host!service", ...]` (type `Service`). This works for both queries and actions without extra permissions.
+  - A name list that contains one unknown name fails the whole request with `404 No objects found.` On a 404 for a batch, retry each name individually and treat the 404s as deleted objects.
+- *Actions:* `POST /v1/actions/<name>` with `{ "type": "Host"|"Service", "hosts"|"services": [...], … }`.
   - Split mixed host/service targets into two requests.
   - `ActionTarget::Downtime(name)` uses `{ "downtime": name }`; `ActionTarget::Comment(name)` uses `{ "comment": name }`.
   - Parameter names and rules follow `12-icinga2-api.md`: `reschedule-check` sets `next_check` = now with `force`; `acknowledge-problem` always sends `notify: false`; `schedule-downtime` sends `fixed`, `duration`, `all_services`, `child_options`, `trigger_name`.
+  - `execute-command` needs an `endpoint` unless the object has `command_endpoint` (otherwise the per-object result is `404 Can't find a valid endpoint`). Pass the endpoint explicitly, defaulting to the object's `command_endpoint` or the instance's node name.
   - A response with per-object `code >= 400` still returns `Ok`, and the caller inspects the results. HTTP-level errors map to `ApiError`.
 - *Events:* `POST /v1/events` with `{ "queue": queue, "types": [...] }`. The response is newline-delimited JSON over a long-lived HTTP/1.1 response.
   - Parse incrementally (lines can span chunks).

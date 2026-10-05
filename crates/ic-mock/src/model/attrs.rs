@@ -225,9 +225,11 @@ const ENDPOINT: &[&str] = &[
     "local_log_position",
     "log_duration",
     "messages_received_per_second",
+    "messages_received_per_type",
     "messages_sent_per_second",
     "port",
     "remote_log_position",
+    "seconds_processing_messages",
     "syncing",
 ];
 const ZONE: &[&str] = &["all_parents", "endpoints", "global", "parent"];
@@ -331,6 +333,24 @@ impl ObjKind {
         names
     }
 
+    /// Whether every name is a field of the type (`Type::GetFieldId`);
+    /// hidden fields count, they are only left out of the output.
+    ///
+    /// # Errors
+    /// `Invalid field specified: <name>` for the first unknown name.
+    pub(crate) fn check_fields<'a>(
+        self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), String> {
+        let known = self.attr_names();
+        for name in names {
+            if !known.contains(&name) && !self.hidden().contains(&name) {
+                return Err(format!("Invalid field specified: {name}"));
+            }
+        }
+        Ok(())
+    }
+
     fn hidden(self) -> &'static [&'static str] {
         match self {
             Self::Host | Self::Service => CHECKABLE_HIDDEN,
@@ -417,6 +437,16 @@ fn string(value: &str) -> Json {
 
 fn strings(values: &[String]) -> Json {
     Json::Array(values.iter().cloned().map(Json::String).collect())
+}
+
+/// An array attribute that was never set: Icinga writes `null` rather than
+/// `[]` (zones without endpoints, groups without parent groups).
+fn strings_or_null(values: &[String]) -> Json {
+    if values.is_empty() {
+        Json::Null
+    } else {
+        strings(values)
+    }
 }
 
 fn vars(vars: Option<&Map<String, Json>>) -> Json {
@@ -544,18 +574,39 @@ impl World {
         object: &ObjRef,
         selection: Option<&[String]>,
     ) -> Result<Map<String, Json>, String> {
+        // Hosts and services are looked up once, not once per attribute:
+        // they are most of the objects of a big installation.
+        let checkable = match object.kind {
+            ObjKind::Host | ObjKind::Service => {
+                self.checkable(&object.name).map(|c| (c, c.full_name()))
+            }
+            _ => None,
+        };
+        let resolve = |name: &str| -> Result<Option<Json>, ResolveError> {
+            match &checkable {
+                Some((c, full)) => {
+                    if object.kind.hidden().contains(&name) {
+                        return Err(ResolveError::Hidden(name.to_owned()));
+                    }
+                    self.checkable_attr(c, full, name)
+                        .map(Some)
+                        .ok_or_else(|| ResolveError::UnknownField(name.to_owned()))
+                }
+                None => self.attr(object, name),
+            }
+        };
         let mut map = Map::new();
         match selection {
             None => {
                 for name in object.kind.attr_names() {
-                    if let Ok(Some(value)) = self.attr(object, name) {
+                    if let Ok(Some(value)) = resolve(name) {
                         map.insert(name.to_owned(), value);
                     }
                 }
             }
             Some(names) => {
                 for name in names {
-                    match self.attr(object, name) {
+                    match resolve(name) {
                         Ok(Some(value)) => {
                             map.insert(name.clone(), value);
                         }
@@ -586,7 +637,7 @@ impl World {
         let value = match object.kind {
             ObjKind::Host | ObjKind::Service => self
                 .checkable(&object.name)
-                .map(|c| self.checkable_attr(c, name)),
+                .map(|c| self.checkable_attr(c, &c.full_name(), name)),
             ObjKind::Comment => self.comments.get(&object.name).map(|c| {
                 common(&c.meta, name, &c.name, &c.short_name, "Comment").or_else(|| {
                     let mut map = Map::new();
@@ -657,6 +708,23 @@ impl World {
                         "bytes_sent_per_second" | "bytes_received_per_second" => {
                             num(if e.connected { 18_432.5 } else { 0.0 })
                         }
+                        "messages_received_per_type" => {
+                            let mut counts = Map::new();
+                            if e.connected {
+                                for (method, count) in [
+                                    ("event::CheckResult", 18_250),
+                                    ("event::Heartbeat", 412),
+                                    ("event::SetNextCheck", 18_244),
+                                    ("log::SetLogPosition", 3_105),
+                                ] {
+                                    counts.insert(method.into(), int(count));
+                                }
+                            }
+                            Json::Object(counts)
+                        }
+                        "seconds_processing_messages" => {
+                            num(if e.connected { 4.187_5 } else { 0.0 })
+                        }
                         _ => return None,
                     })
                 })
@@ -665,7 +733,7 @@ impl World {
                 common(&z.meta, name, &z.name, &z.name, "Zone").or_else(|| {
                     Some(match name {
                         "parent" => string(&z.parent),
-                        "endpoints" => strings(&z.endpoints),
+                        "endpoints" => strings_or_null(&z.endpoints),
                         "global" => Json::Bool(z.global),
                         "all_parents" => strings(&self.zone_parents(&z.name)),
                         _ => return None,
@@ -689,11 +757,11 @@ impl World {
             ObjKind::CheckCommand => self
                 .check_commands
                 .get(&object.name)
-                .map(|c| command_attr(c, name, "CheckCommand", "Internal#PluginCheck")),
+                .map(|c| command_attr(c, name, "CheckCommand")),
             ObjKind::EventCommand => self
                 .event_commands
                 .get(&object.name)
-                .map(|c| command_attr(c, name, "EventCommand", "Internal#PluginEvent")),
+                .map(|c| command_attr(c, name, "EventCommand")),
         };
         match value {
             None => Ok(None),
@@ -716,9 +784,9 @@ impl World {
         parents
     }
 
-    fn checkable_attr(&self, c: &Checkable, name: &str) -> Option<Json> {
-        let full = c.full_name();
-        if let Some(value) = common(&c.meta, name, &full, c.short_name(), c.type_name()) {
+    /// One attribute of a host or service (`full` is its full name).
+    fn checkable_attr(&self, c: &Checkable, full: &str, name: &str) -> Option<Json> {
+        if let Some(value) = common(&c.meta, name, full, c.short_name(), c.type_name()) {
             return Some(value);
         }
         Some(match name {
@@ -775,7 +843,7 @@ impl World {
             "acknowledgement_last_change" => num(c.acknowledgement_last_change),
             "force_next_notification" => Json::Bool(c.force_next_notification),
             "last_check" => num(c.last_check()),
-            "downtime_depth" => int(self.downtime_depth(&full)),
+            "downtime_depth" => int(self.downtime_depth(full)),
             "flapping_current" => num(c.flapping_current),
             "flapping_last_change" => num(c.flapping_last_change),
             "flapping" => Json::Bool(c.flapping),
@@ -815,7 +883,7 @@ fn group_attr(group: &GroupData, name: &str, type_name: &str) -> Option<Json> {
     common(&group.meta, name, &group.name, &group.name, type_name).or_else(|| {
         Some(match name {
             "display_name" => string(&group.display_name),
-            "groups" => strings(&group.groups),
+            "groups" => strings_or_null(&group.groups),
             "notes" => string(&group.notes),
             "notes_url" => string(&group.notes_url),
             "action_url" => string(&group.action_url),
@@ -825,15 +893,10 @@ fn group_attr(group: &GroupData, name: &str, type_name: &str) -> Option<Json> {
     })
 }
 
-fn command_attr(
-    command: &CommandData,
-    name: &str,
-    type_name: &str,
-    function: &str,
-) -> Option<Json> {
+fn command_attr(command: &CommandData, name: &str, type_name: &str) -> Option<Json> {
     common(&command.meta, name, &command.name, &command.name, type_name).or_else(|| {
         Some(match name {
-            "command" => strings(&command.command),
+            "command" => command.command.as_deref().map_or(Json::Null, strings),
             "arguments" => command
                 .arguments
                 .as_ref()
@@ -842,18 +905,25 @@ fn command_attr(
             "timeout" => num(command.timeout),
             "vars" => vars(command.vars.as_ref()),
             "execute" => {
+                // The parameters of the task functions in Icinga 2.15.
+                let parameters: &[&str] = if type_name == "CheckCommand" {
+                    &[
+                        "checkable",
+                        "cr",
+                        "producer",
+                        "resolvedMacros",
+                        "useResolvedMacros",
+                    ]
+                } else {
+                    &["checkable", "resolvedMacros", "useResolvedMacros"]
+                };
                 let mut map = Map::new();
                 map.insert(
                     "arguments".into(),
-                    strings(&[
-                        "checkable".to_owned(),
-                        "cr".to_owned(),
-                        "resolvedMacros".to_owned(),
-                        "useResolvedMacros".to_owned(),
-                    ]),
+                    Json::Array(parameters.iter().map(|p| string(p)).collect()),
                 );
                 map.insert("deprecated".into(), Json::Bool(false));
-                map.insert("name".into(), string(function));
+                map.insert("name".into(), string(command.execute));
                 map.insert("side_effect_free".into(), Json::Bool(false));
                 map.insert("type".into(), string("Function"));
                 Json::Object(map)

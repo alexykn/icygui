@@ -441,20 +441,78 @@ impl MockControl {
         self.world().sim.tick
     }
 
+    // --- checks and bursts ----------------------------------------------------------
+
+    /// A burst: re-checks every host and service at once, like a forced
+    /// `reschedule-check` of everything or an Icinga restart. Each object
+    /// gets a new check result (its current state again, with fresh
+    /// timestamps), so `CheckResult` events (and `StateChange` for soft
+    /// states) follow. The checker works through them at
+    /// [`crate::MockConfig::check_rate`] per second (Icinga: about 5 000),
+    /// so the 32 000 objects of the `large` scenario take about 6.5 s.
+    /// Returns how many checks were queued; objects already waiting are
+    /// checked once.
+    pub fn burst(&self) -> usize {
+        let queued = self.world().queue_all_checks();
+        tracing::debug!(queued, "burst: re-checking every object");
+        queued
+    }
+
+    /// Checks waiting for the checker (from bursts and forced re-checks).
+    pub fn queued_checks(&self) -> usize {
+        self.world().checks.len()
+    }
+
+    /// Changes how many queued checks the checker runs per second.
+    ///
+    /// # Errors
+    /// [`MockError::InvalidConfig`] unless `per_second` is a positive
+    /// number.
+    pub fn set_check_rate(&self, per_second: f64) -> Result<(), MockError> {
+        let rate = crate::server::check_rate(per_second)?;
+        self.world().checks.set_rate(rate);
+        Ok(())
+    }
+
+    /// Runs up to `max` queued checks now, ignoring the rate (for tests
+    /// that don't want to wait). Returns how many ran.
+    pub fn run_queued_checks(&self, max: usize) -> usize {
+        self.world().run_queued_checks(max)
+    }
+
+    /// Waits until no check is queued any more; `false` on timeout.
+    pub async fn wait_for_queued_checks(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.queued_checks() == 0 {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     // --- time -------------------------------------------------------------------
 
-    /// Moves the mock's clock forward and runs the timers (downtimes
-    /// starting and expiring, acknowledgements and comments expiring,
-    /// rescheduled checks).
+    /// Moves the mock's clock forward and runs the timers (see
+    /// [`Self::run_timers`]).
     pub fn advance_clock(&self, by: Duration) {
         let mut world = self.world();
         world.clock_offset += by.as_secs_f64();
         world.housekeeping();
+        world.run_queued_checks(usize::MAX);
     }
 
-    /// Runs the timers now.
+    /// Runs the timers now: downtimes starting and expiring,
+    /// acknowledgements and comments expiring, command executions finishing,
+    /// and every check that is due, including everything still queued from
+    /// a burst (without waiting for the checker's rate).
     pub fn run_timers(&self) {
-        self.world().housekeeping();
+        let mut world = self.world();
+        world.housekeeping();
+        world.run_queued_checks(usize::MAX);
     }
 
     /// The mock's current time.
@@ -537,8 +595,9 @@ impl MockControl {
         self.world().status_snapshot()
     }
 
-    /// An object's attributes exactly as `/v1/objects` returns them
-    /// (before number formatting), by Icinga type name and full name.
+    /// An object's attributes exactly as `/v1/objects` returns them (in
+    /// the server's [`crate::NumberFormat`]), by Icinga type name (`Host`,
+    /// `Service`, `Comment`, ...) and full name.
     pub fn object_attrs(&self, type_name: &str, name: &str) -> Option<serde_json::Value> {
         let kind = ObjKind::from_type_name(type_name)?;
         let world = self.world();
@@ -549,9 +608,8 @@ impl MockControl {
         if !world.exists(kind, name) {
             return None;
         }
-        world
-            .object_attrs(&object, None)
-            .ok()
-            .map(serde_json::Value::Object)
+        let mut attrs = serde_json::Value::Object(world.object_attrs(&object, None).ok()?);
+        crate::json::normalize(&mut attrs, self.shared.number_format);
+        Some(attrs)
     }
 }

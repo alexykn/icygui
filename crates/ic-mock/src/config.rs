@@ -27,10 +27,15 @@ pub struct MockConfig {
     /// How numbers are written (see [`NumberFormat`]).
     pub number_format: NumberFormat,
     /// Events buffered per event stream before a slow consumer is
-    /// disconnected (the server never blocks on a stream).
+    /// disconnected (the server never blocks on a stream). The default
+    /// holds a whole burst of the `large` scenario (about 32 000 events).
     pub event_buffer: usize,
     /// Delay between a `reschedule-check` and the check result it causes.
     pub reschedule_delay: Duration,
+    /// How many queued checks (forced re-checks, [`crate::MockControl::burst`])
+    /// the checker runs per second at most. Icinga managed about 5 000 with
+    /// 2 000 hosts and 30 000 services (docs/performance.md).
+    pub check_rate: f64,
     /// How many requests [`crate::MockControl::requests`] keeps (oldest are
     /// dropped first).
     pub max_recorded_requests: usize,
@@ -50,9 +55,10 @@ impl Default for MockConfig {
             simulation: SimulationConfig::default(),
             tls: MockTls::SelfSigned,
             enforce_filter_expression_permission: true,
-            number_format: NumberFormat::Float,
-            event_buffer: 10_000,
+            number_format: NumberFormat::Integral,
+            event_buffer: 50_000,
             reschedule_delay: Duration::from_millis(300),
+            check_rate: 5_000.0,
             max_recorded_requests: 10_000,
             housekeeping_interval: Duration::from_millis(250),
         }
@@ -160,12 +166,14 @@ pub enum MockTls {
 /// How JSON numbers are written.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum NumberFormat {
-    /// Every number with a fractional part (`200.0`), like Icinga up to
-    /// 2.12 and the API documentation's examples.
+    /// Whole numbers as integers (`"state": 2`), everything else as floats,
+    /// like current Icinga (recorded from 2.15.6).
     #[default]
-    Float,
-    /// Integral values without a fractional part (`200`), like Icinga 2.13+.
     Integral,
+    /// Every number with a fractional part (`200.0`), like the examples in
+    /// the API documentation and old Icinga versions. Useful to check that
+    /// a client accepts both.
+    Float,
 }
 
 /// The simulator: churn, flapping, outages, downtimes and storms on a

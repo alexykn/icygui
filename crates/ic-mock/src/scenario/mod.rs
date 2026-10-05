@@ -22,7 +22,7 @@ use ic_model::{
 pub(crate) use build::format_perfdata;
 pub use build::raw_check_result;
 pub use lab::lab;
-pub use large::large;
+pub use large::{large, large_with_hosts};
 pub use prod_cluster::prod_cluster;
 pub use staging::staging;
 
@@ -300,24 +300,16 @@ mod tests {
     }
 
     #[test]
-    fn large_is_deterministic_and_big() {
-        let a = large(3);
-        let b = large(3);
+    fn large_is_deterministic_and_like_the_measured_setup() {
+        let a = large_with_hosts(200, 3);
+        let b = large_with_hosts(200, 3);
         assert_eq!(a.summary(), b.summary());
         assert_eq!(
             a.services.iter().map(|s| s.state).collect::<Vec<_>>(),
             b.services.iter().map(|s| s.state).collect::<Vec<_>>()
         );
-        let summary = a.summary();
-        assert!(summary.hosts >= 2000, "{summary:?}");
-        assert!(summary.services >= 20_000, "{summary:?}");
-        let problems =
-            summary.services_warning + summary.services_critical + summary.services_unknown;
-        #[expect(clippy::cast_precision_loss, reason = "test arithmetic")]
-        let ratio = problems as f64 / summary.services as f64;
-        assert!((0.02..=0.04).contains(&ratio), "{ratio}");
         assert_ne!(
-            large(4)
+            large_with_hosts(200, 4)
                 .services
                 .iter()
                 .map(|s| s.state)
@@ -325,5 +317,45 @@ mod tests {
             a.services.iter().map(|s| s.state).collect::<Vec<_>>(),
             "the seed changes the scenario"
         );
+        check_consistency(&a);
+        let summary = a.summary();
+        assert_eq!(summary.hosts, 200);
+        assert_eq!(summary.services, 200 * 15);
+        let problems =
+            summary.services_warning + summary.services_critical + summary.services_unknown;
+        #[expect(clippy::cast_precision_loss, reason = "test arithmetic")]
+        let ratio = problems as f64 / summary.services as f64;
+        assert!((0.035..=0.065).contains(&ratio), "{ratio}");
+        for service in &a.services {
+            assert!((service.check.check_interval - 300.0).abs() < f64::EPSILON);
+            assert!((service.check.retry_interval - 60.0).abs() < f64::EPSILON);
+            assert_eq!(service.check.max_attempts, 3);
+            assert!(!service.vars.is_empty(), "{}", service.key);
+            assert!(service.check.result.is_some(), "{}", service.key);
+        }
+        let with_perfdata = a
+            .services
+            .iter()
+            .filter(|s| {
+                s.check
+                    .result
+                    .as_ref()
+                    .is_some_and(|r| !r.perfdata.is_empty())
+            })
+            .count();
+        assert!(with_perfdata * 10 > a.services.len() * 7, "{with_perfdata}");
+        for host in &a.hosts {
+            assert!(host.vars.contains_key("runbook"), "{}", host.name);
+            assert!((host.check.check_interval - 300.0).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn large_has_two_thousand_hosts_with_fifteen_services() {
+        let scenario = large(1);
+        let summary = scenario.summary();
+        assert_eq!(summary.hosts, 2_000);
+        assert_eq!(summary.services, 30_000);
+        assert!((5..=40).contains(&summary.hosts_down), "{summary:?}");
     }
 }

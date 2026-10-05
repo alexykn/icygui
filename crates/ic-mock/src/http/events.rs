@@ -90,8 +90,8 @@ pub(crate) fn handle(
             return path_not_found(segments, format, Some(params));
         }
     }
-    // Icinga up to 2.14 requires `queue`; newer versions ignore it. The mock
-    // is strict, so a client that works here works with both.
+    // Icinga 2.15 requires `queue` (newer versions ignore it), so a client
+    // that works here works with both.
     if params.last_string("queue").is_empty() {
         return json_error(
             400,

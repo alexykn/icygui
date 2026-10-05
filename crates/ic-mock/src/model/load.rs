@@ -27,6 +27,8 @@ pub(crate) struct LoadOptions {
     pub(crate) event_buffer: usize,
     pub(crate) seed: u64,
     pub(crate) reschedule_delay: f64,
+    /// Checks per second the checker runs from its queue.
+    pub(crate) check_rate: f64,
     /// The time the scenario's `time_base` is moved to.
     pub(crate) now: f64,
 }
@@ -125,7 +127,8 @@ impl World {
             names: Rng::derive(options.seed, 0x006e_616d_6573),
             stats: CheckStats::default(),
             bus: EventBus::new(options.number_format, options.event_buffer),
-            scheduled_checks: Vec::new(),
+            scheduled_checks: BTreeMap::new(),
+            checks: super::CheckQueue::new(options.check_rate),
             pending_executions: Vec::new(),
             pinned: scenario.pinned.iter().map(ObjectKey::full_name).collect(),
             sim: SimState::default(),
@@ -289,7 +292,7 @@ impl World {
         for name in check_commands {
             world
                 .check_commands
-                .insert(name.clone(), command_data(&name, "plugin-check-command"));
+                .insert(name.clone(), command_data(&name, true));
         }
         let event_commands: BTreeSet<String> = world
             .all_checkables()
@@ -300,7 +303,7 @@ impl World {
         for name in event_commands {
             world
                 .event_commands
-                .insert(name.clone(), command_data(&name, "plugin-event-command"));
+                .insert(name.clone(), command_data(&name, false));
         }
 
         // Dependencies.
@@ -383,7 +386,13 @@ impl World {
                 persistent: comment.persistent,
                 sticky: false,
                 legacy_id,
-                meta: runtime_object_meta(short, &zone, "comments", &comment.name, entry_time),
+                meta: super::logic::runtime_meta(
+                    "Comment",
+                    short,
+                    &zone,
+                    &comment.name,
+                    entry_time,
+                ),
             };
             world.index_comment(&data);
             if world.comments.insert(comment.name.clone(), data).is_some() {
@@ -459,7 +468,13 @@ impl World {
                     String::new()
                 },
                 config_owner,
-                meta: runtime_object_meta(short, &zone, "downtimes", &downtime.name, entry_time),
+                meta: super::logic::runtime_meta(
+                    "Downtime",
+                    short,
+                    &zone,
+                    &downtime.name,
+                    entry_time,
+                ),
             };
             world.index_downtime(&data);
             if world
@@ -539,47 +554,93 @@ fn group_data(name: &str, display_name: &str, directory: &str) -> GroupData {
     }
 }
 
-fn command_data(name: &str, template: &str) -> CommandData {
+/// A `CheckCommand` (`check = true`) or `EventCommand` as the ITL defines
+/// it: internal ones (`dummy`, `icinga`, ...) have no command line.
+fn command_data(name: &str, check: bool) -> CommandData {
+    let internal = check
+        .then(|| super::logic::internal_check_function(name))
+        .flatten();
+    if let Some(function) = internal {
+        let vars = match name {
+            "dummy" => Some(json_vars(&[
+                ("dummy_state", Json::from(0)),
+                ("dummy_text", Json::from("Check was successful.")),
+            ])),
+            "passive" => Some(json_vars(&[
+                ("dummy_state", Json::from(3)),
+                (
+                    "dummy_text",
+                    Json::from("No Passive Check Result Received."),
+                ),
+            ])),
+            "icinga" => Some(json_vars(&[("icinga_min_version", Json::from(""))])),
+            _ => None,
+        };
+        // `passive` imports `dummy`; the others their own template.
+        let base = if name == "passive" { "dummy" } else { name };
+        return CommandData {
+            name: name.to_owned(),
+            command: None,
+            arguments: None,
+            timeout: 60.0,
+            vars,
+            execute: function,
+            meta: ObjMeta::config(
+                vec![
+                    name.to_owned(),
+                    "plugin-check-command".to_owned(),
+                    format!("{base}-check-command"),
+                ],
+                "",
+                SourceLocation::file("/usr/share/icinga2/include/command-icinga.conf", 17, 0),
+            ),
+        };
+    }
     let command = match plugin_command(name) {
         Json::Array(items) => items
             .into_iter()
             .filter_map(|item| item.as_str().map(str::to_owned))
             .take(1)
             .collect(),
-        _ => vec!["/usr/lib/nagios/plugins/check_dummy".to_owned()],
+        _ => vec![format!("/usr/lib/nagios/plugins/{name}")],
     };
+    let mut host_argument = Map::new();
+    host_argument.insert("description".into(), Json::from("host name or address"));
+    host_argument.insert("value".into(), Json::from("$address$"));
     let mut arguments = Map::new();
-    arguments.insert("-H".into(), Json::String("$address$".into()));
+    arguments.insert("-H".into(), Json::Object(host_argument));
     CommandData {
         name: name.to_owned(),
-        command,
+        command: Some(command),
         arguments: Some(arguments),
         timeout: 60.0,
         vars: None,
+        execute: if check {
+            "Internal#PluginCheck"
+        } else {
+            "Internal#PluginEvent"
+        },
         meta: ObjMeta::config(
-            vec![name.to_owned(), template.to_owned()],
+            vec![
+                name.to_owned(),
+                if check {
+                    "plugin-check-command"
+                } else {
+                    "plugin-event-command"
+                }
+                .to_owned(),
+            ],
             "",
             SourceLocation::file("/usr/share/icinga2/include/command-plugins.conf", 40, 30),
         ),
     }
 }
 
-fn runtime_object_meta(short: &str, zone: &str, directory: &str, name: &str, at: f64) -> ObjMeta {
-    ObjMeta {
-        templates: vec![short.to_owned()],
-        package: "_api".to_owned(),
-        zone: zone.to_owned(),
-        source: SourceLocation {
-            path: format!(
-                "/var/lib/icinga2/api/packages/_api/9e5e1e6f-2c43-4c09-8c53-7a1ee8d9d2b1/conf.d/{directory}/{name}.conf"
-            ),
-            first_line: 1,
-            first_column: 0,
-            last_line: 1,
-            last_column: 69,
-        },
-        version: at,
-    }
+fn json_vars(pairs: &[(&str, Json)]) -> Map<String, Json> {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), value.clone()))
+        .collect()
 }
 
 /// The parts of a checkable common to hosts and services.

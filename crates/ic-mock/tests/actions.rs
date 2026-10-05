@@ -51,13 +51,13 @@ async fn process_check_result_drives_soft_and_hard_states() {
         assert_eq!(status, StatusCode::OK, "{response}");
         assert_eq!(
             results(&response)[0],
-            json!({"code": 200.0, "status": "Successfully processed check result for object 'lab-01!ssh'."})
+            json!({"code": 200, "status": "Successfully processed check result for object 'lab-01!ssh'."})
         );
         let check = events.next().await;
         assert_eq!(check["type"], "CheckResult");
         assert_eq!(check["host"], "lab-01");
         assert_eq!(check["service"], "ssh");
-        assert_eq!(check["check_result"]["state"], json!(2.0));
+        assert_eq!(check["check_result"]["state"], json!(2));
         assert_eq!(
             check["check_result"]["output"],
             "SSH CRITICAL - connection refused"
@@ -69,21 +69,14 @@ async fn process_check_result_drives_soft_and_hard_states() {
         );
         assert_eq!(
             check["check_result"]["vars_after"]["attempt"],
-            json!(if attempt == 3 {
-                1.0
-            } else {
-                f64::from(attempt)
-            })
+            json!(if attempt == 3 { 1 } else { attempt })
         );
         // Icinga signals a state change for every soft result and for the
         // hard transition, after the check result.
         let change = events.next().await;
         assert_eq!(change["type"], "StateChange");
-        assert_eq!(change["state"], json!(2.0));
-        assert_eq!(
-            change["state_type"],
-            json!(if attempt == 3 { 1.0 } else { 0.0 })
-        );
+        assert_eq!(change["state"], json!(2));
+        assert_eq!(change["state_type"], json!(u8::from(attempt == 3)));
     }
     let (_, body) = get(
         &client,
@@ -93,7 +86,7 @@ async fn process_check_result_drives_soft_and_hard_states() {
     .await;
     assert_eq!(
         results(&body)[0]["attrs"],
-        json!({"state": 2.0, "state_type": 1.0, "last_hard_state": 2.0})
+        json!({"state": 2, "state_type": 1, "last_hard_state": 2})
     );
 
     // Hosts take 0 (UP) and 1 (DOWN) only.
@@ -160,10 +153,10 @@ async fn acknowledgements_set_clear_and_reject() {
     let ack = set.last().unwrap();
     assert_eq!(ack["author"], "tester");
     assert_eq!(ack["comment"], "looking into it");
-    assert_eq!(ack["acknowledgement_type"], json!(2.0));
+    assert_eq!(ack["acknowledgement_type"], json!(2));
     assert!(
         set.iter()
-            .any(|e| e["type"] == "CommentAdded" && e["comment"]["entry_type"] == json!(4.0)),
+            .any(|e| e["type"] == "CommentAdded" && e["comment"]["entry_type"] == json!(4)),
         "{set:?}"
     );
 
@@ -206,14 +199,14 @@ async fn acknowledgements_set_clear_and_reject() {
     events.until("AcknowledgementCleared").await;
     // The acknowledgement comment goes after the acknowledgement.
     let removed = events.until("CommentRemoved").await;
-    assert_eq!(removed.last().unwrap()["comment"]["entry_type"], json!(4.0));
+    assert_eq!(removed.last().unwrap()["comment"]["entry_type"], json!(4));
     let (_, body) = get(
         &client,
         &server,
         "/v1/objects/services/db-prod-03!postgres-replication?attrs=acknowledgement",
     )
     .await;
-    assert_eq!(results(&body)[0]["attrs"]["acknowledgement"], json!(0.0));
+    assert_eq!(results(&body)[0]["attrs"]["acknowledgement"], json!(0));
 }
 
 #[tokio::test]
@@ -235,7 +228,7 @@ async fn non_sticky_acks_clear_on_any_state_change_sticky_only_on_ok() {
         control
             .object_attrs("Service", "db-prod-03!postgres-replication")
             .unwrap()["acknowledgement"],
-        json!(0.0)
+        json!(0)
     );
 
     control
@@ -261,7 +254,7 @@ async fn non_sticky_acks_clear_on_any_state_change_sticky_only_on_ok() {
         control
             .object_attrs("Service", "db-prod-03!postgres-replication")
             .unwrap()["acknowledgement"],
-        json!(2.0),
+        json!(2),
         "sticky acks survive problem state changes"
     );
     control
@@ -277,7 +270,7 @@ async fn non_sticky_acks_clear_on_any_state_change_sticky_only_on_ok() {
         control
             .object_attrs("Service", "db-prod-03!postgres-replication")
             .unwrap()["acknowledgement"],
-        json!(0.0)
+        json!(0)
     );
     let _ = client;
 }
@@ -306,7 +299,7 @@ async fn comments_add_and_remove() {
     let comment = &added.last().unwrap()["comment"];
     assert_eq!(comment["author"], "tester");
     assert_eq!(comment["text"], "hello");
-    assert_eq!(comment["entry_type"], json!(1.0));
+    assert_eq!(comment["entry_type"], json!(1));
     assert_eq!(comment["host_name"], "lab-01");
     assert_eq!(
         events.until("ObjectCreated").await.last().unwrap()["object_name"],
@@ -380,7 +373,7 @@ async fn fixed_downtimes_start_and_flexible_ones_trigger_on_problems() {
         "/v1/objects/hosts/lab-01?attrs=downtime_depth",
     )
     .await;
-    assert_eq!(results(&body)[0]["attrs"]["downtime_depth"], json!(1.0));
+    assert_eq!(results(&body)[0]["attrs"]["downtime_depth"], json!(1));
 
     // The service downtimes are its children and go with it.
     let (status, body) = post(
@@ -416,7 +409,7 @@ async fn fixed_downtimes_start_and_flexible_ones_trigger_on_problems() {
         &format!("/v1/objects/downtimes/{flexible}?attrs=trigger_time"),
     )
     .await;
-    assert_eq!(results(&body)[0]["attrs"]["trigger_time"], json!(0.0));
+    assert_eq!(results(&body)[0]["attrs"]["trigger_time"], json!(0));
     server
         .control()
         .set_service_state(
@@ -525,7 +518,7 @@ async fn execute_command_is_accepted_and_reports_back() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     let result = &results(&body)[0];
-    assert_eq!(result["code"], json!(202.0));
+    assert_eq!(result["code"], json!(202));
     assert_eq!(result["status"], "Accepted");
     assert_eq!(result["checkable"], "lab-01");
     let execution = result["execution"].as_str().unwrap().to_owned();
@@ -542,7 +535,7 @@ async fn execute_command_is_accepted_and_reports_back() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let finished = finished.expect("execution finishes");
-    assert_eq!(finished["exit"], json!(0.0));
+    assert_eq!(finished["exit"], json!(0));
     assert!(finished["output"].is_string());
 
     // Without a command endpoint, Icinga needs an explicit endpoint.

@@ -38,8 +38,8 @@ async fn single_objects_by_name_and_plural() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let attrs = &results(&body)[0]["attrs"];
-    assert_eq!(attrs["state"], json!(2.0));
-    assert_eq!(attrs["state_type"], json!(1.0));
+    assert_eq!(attrs["state"], json!(2));
+    assert_eq!(attrs["state_type"], json!(1));
     let cr = &attrs["last_check_result"];
     assert_eq!(cr["type"], "CheckResult");
     assert!(cr["output"].as_str().unwrap().starts_with("CRITICAL"));
@@ -70,13 +70,51 @@ async fn unknown_types_and_bad_parameters() {
         "Invalid type for 'attrs' attribute specified. Array type is required."
     );
 
-    // Unknown attributes produce a per-object error entry.
-    let (status, body) = get(&client, &server, "/v1/objects/hosts/lab-01?attrs=bogus").await;
-    assert_eq!(status, StatusCode::OK);
+    // Unknown attributes fail the whole request (Icinga 2.15 serializes
+    // every object before it answers); hidden ones are left out.
+    let (status, body) = get(
+        &client,
+        &server,
+        "/v1/objects/hosts?attrs=state&attrs=bogus&attrs=other",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
-        results(&body)[0],
-        json!({"code": 400.0, "name": "lab-01", "status": "Invalid field specified: bogus", "type": "Host"})
+        body,
+        json!({"error": 400, "status": "Invalid field specified: bogus"})
     );
+    let (status, body) = get(
+        &client,
+        &server,
+        "/v1/objects/hosts/lab-01?attrs=state_raw&attrs=state",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(results(&body)[0]["attrs"], json!({"state": 0}));
+    // The same for joined attributes, but only where a joined object is
+    // serialized; `attrs: []` selects nothing.
+    let (status, body) = post_get(
+        &client,
+        &server,
+        "/v1/objects/services",
+        &json!({"service": "lab-01!ssh", "attrs": ["state"], "joins": ["host.state", "host.bogus"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["status"], "Invalid field specified: bogus");
+    let (status, body) = post_get(
+        &client,
+        &server,
+        "/v1/objects/services",
+        &json!({"service": "lab-01!ssh", "attrs": [], "joins": ["nothing.bogus"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(results(&body)[0]["attrs"], json!({}));
+    assert_eq!(results(&body)[0]["joins"], json!({}));
+    let (status, body) = get(&client, &server, "/v1/objects/comments?attrs=bogus").await;
+    assert_eq!(status, StatusCode::OK, "no comments, nothing serialized");
+    assert_eq!(body, json!({"results": []}));
 }
 
 async fn post_get(
@@ -170,7 +208,7 @@ async fn joins_add_the_host() {
     assert_eq!(status, StatusCode::OK);
     let entry = &results(&body)[0];
     assert_eq!(entry["joins"]["host"]["name"], "db-prod-03");
-    assert_eq!(entry["joins"]["host"]["state"], json!(0.0));
+    assert_eq!(entry["joins"]["host"]["state"], json!(0));
     assert!(entry["joins"]["host"]["address"].is_string());
 
     // `joins=host` (whole object).
@@ -248,7 +286,7 @@ async fn state_matches_the_design_scenario() {
     )
     .await;
     let attrs = &results(&body)[0]["attrs"];
-    assert_eq!(attrs["acknowledgement"], json!(1.0));
+    assert_eq!(attrs["acknowledgement"], json!(1));
     assert_eq!(attrs["handled"], json!(true));
     // Problem in downtime.
     let (_, body) = get(
@@ -258,7 +296,7 @@ async fn state_matches_the_design_scenario() {
     )
     .await;
     let attrs = &results(&body)[0]["attrs"];
-    assert_eq!(attrs["downtime_depth"], json!(1.0));
+    assert_eq!(attrs["downtime_depth"], json!(1));
     assert_eq!(attrs["handled"], json!(true));
     // Soft state.
     let (_, body) = get(
@@ -268,9 +306,9 @@ async fn state_matches_the_design_scenario() {
     )
     .await;
     let attrs = &results(&body)[0]["attrs"];
-    assert_eq!(attrs["state_type"], json!(0.0));
-    assert_eq!(attrs["check_attempt"], json!(2.0));
-    assert_eq!(attrs["max_check_attempts"], json!(3.0));
+    assert_eq!(attrs["state_type"], json!(0));
+    assert_eq!(attrs["check_attempt"], json!(2));
+    assert_eq!(attrs["max_check_attempts"], json!(3));
     // Unreachable hosts behind the AMS uplink.
     let (_, body) = get(
         &client,
@@ -279,7 +317,7 @@ async fn state_matches_the_design_scenario() {
     )
     .await;
     let attrs = &results(&body)[0]["attrs"];
-    assert_eq!(attrs["state"], json!(1.0));
+    assert_eq!(attrs["state"], json!(1));
     assert_eq!(attrs["last_reachable"], json!(false));
 }
 
@@ -324,4 +362,274 @@ async fn objects_query_by_post_body() {
     // A POST without override is not an object query.
     let (status, _) = post(&client, &server, "/v1/objects/hosts", &json!({})).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Name lists target objects for queries and actions without the
+/// `filter-expression` permission; one unknown name fails the whole request
+/// (recorded from Icinga 2.15.6).
+#[tokio::test]
+async fn name_lists_need_no_filter_permission() {
+    let config = ic_mock::MockConfig {
+        users: vec![ic_mock::MockUser::new(
+            "icygui",
+            "icygui-test",
+            &["objects/query/*", "status/query", "events/*", "actions/*"],
+        )],
+        ..ic_mock::MockConfig::with_scenario(ic_mock::scenarios::prod_cluster())
+    };
+    let (server, client) = common::start(config).await;
+    // `GET` is sent like the client does: `POST` with the override header.
+    let send = async |method: Method, path: &str, body: Value| {
+        let mut request = client
+            .post(format!("{}{path}", server.url()))
+            .basic_auth("icygui", Some("icygui-test"))
+            .header("Accept", "application/json")
+            .json(&body);
+        if method == Method::GET {
+            request = request.header("X-HTTP-Method-Override", "GET");
+        }
+        json(request.send().await.unwrap()).await
+    };
+
+    let (status, body) = send(
+        Method::GET,
+        "/v1/objects/hosts",
+        json!({"hosts": ["db-prod-03", "k8s-node-11"], "attrs": ["name"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["db-prod-03", "k8s-node-11"]);
+    let (_, body) = send(
+        Method::GET,
+        "/v1/objects/services",
+        json!({"services": ["db-prod-03!postgres-replication"], "attrs": ["state"]}),
+    )
+    .await;
+    assert_eq!(names(&body), ["db-prod-03!postgres-replication"]);
+    let (_, body) = send(
+        Method::GET,
+        "/v1/objects/services",
+        json!({"service": "db-prod-03!postgres-replication", "attrs": ["state"]}),
+    )
+    .await;
+    assert_eq!(results(&body).len(), 1);
+
+    let comments: Vec<String> = server
+        .control()
+        .comments()
+        .into_iter()
+        .map(|c| c.name)
+        .take(2)
+        .collect();
+    assert_eq!(comments.len(), 2);
+    let (_, body) = send(
+        Method::GET,
+        "/v1/objects/comments",
+        json!({"comments": comments, "attrs": ["author"]}),
+    )
+    .await;
+    assert_eq!(results(&body).len(), 2);
+    let downtime = server.control().downtimes()[0].name.clone();
+    let (_, body) = send(
+        Method::GET,
+        "/v1/objects/downtimes",
+        json!({"downtimes": [downtime], "attrs": ["author"]}),
+    )
+    .await;
+    assert_eq!(results(&body).len(), 1);
+
+    // One unknown name fails the whole request.
+    let not_found = json!({"error": 404, "status": "No objects found."});
+    for (path, body) in [
+        (
+            "/v1/objects/hosts",
+            json!({"hosts": ["db-prod-03", "decommissioned-01"]}),
+        ),
+        (
+            "/v1/objects/services",
+            json!({"services": ["db-prod-03!postgres-replication", "db-prod-03!gone"]}),
+        ),
+        (
+            "/v1/objects/comments",
+            json!({"comments": [comments[0], "db-prod-03!no-such-comment"]}),
+        ),
+    ] {
+        let (status, response) = send(Method::GET, path, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(response, not_found, "{path}");
+    }
+
+    // Actions take the same lists.
+    let (status, body) = send(
+        Method::POST,
+        "/v1/actions/add-comment",
+        json!({"type": "Host", "hosts": ["db-prod-03", "k8s-node-11"], "author": "icygui", "comment": "drill"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let added: Vec<Value> = results(&body).iter().map(|r| r["name"].clone()).collect();
+    assert_eq!(added.len(), 2);
+    let (status, body) = send(
+        Method::POST,
+        "/v1/actions/remove-comment",
+        json!({"comments": added}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(results(&body).len(), 2);
+    let (status, body) = send(
+        Method::POST,
+        "/v1/actions/remove-comment",
+        json!({"comments": added}),
+    )
+    .await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::NOT_FOUND, not_found.clone()),
+        "gone now"
+    );
+    let now = server.control().now().as_unix_seconds();
+    let (_, body) = send(
+        Method::POST,
+        "/v1/actions/schedule-downtime",
+        json!({"type": "Service", "services": ["db-prod-03!load"], "author": "icygui", "comment": "x", "start_time": now, "end_time": now + 600.0}),
+    )
+    .await;
+    let scheduled = results(&body)[0]["name"].clone();
+    let (status, body) = send(
+        Method::POST,
+        "/v1/actions/remove-downtime",
+        json!({"downtimes": [scheduled]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Filters need the permission this user lacks.
+    let (status, body) = send(
+        Method::GET,
+        "/v1/objects/hosts",
+        json!({"filter": "host.name == \"db-prod-03\""}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body,
+        json!({"error": 403, "status": "Missing permission: filter-expression"})
+    );
+}
+
+/// `next_update` (`Checkable::GetNextUpdate`): active checks at
+/// `next_check` + interval + 2 × latency, passive ones at the last result
+/// (or the program start) + 2 × interval.
+#[tokio::test]
+async fn next_update_follows_icinga() {
+    let (server, client) = lab().await;
+    let attrs = async |object: &str| -> Value {
+        let (_, body) = get(
+            &client,
+            &server,
+            &format!(
+                "/v1/objects/services/{object}?attrs=next_update&attrs=next_check&attrs=check_interval&attrs=last_check_result"
+            ),
+        )
+        .await;
+        results(&body)[0]["attrs"].clone()
+    };
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-3;
+
+    let active = attrs("lab-01!ssh").await;
+    let cr = &active["last_check_result"];
+    let latency = cr["execution_end"].as_f64().unwrap() - cr["schedule_start"].as_f64().unwrap();
+    let expected = active["next_check"].as_f64().unwrap()
+        + active["check_interval"].as_f64().unwrap()
+        + 2.0 * latency;
+    assert!(
+        close(active["next_update"].as_f64().unwrap(), expected),
+        "{active}"
+    );
+
+    // Passive and pending: from the program start.
+    let (_, status) = get(&client, &server, "/v1/status/IcingaApplication").await;
+    let program_start = results(&status)[0]["status"]["icingaapplication"]["app"]["program_start"]
+        .as_f64()
+        .unwrap();
+    let pending = attrs("lab-02!ping4").await;
+    assert!(pending["last_check_result"].is_null());
+    assert!(
+        close(
+            pending["next_update"].as_f64().unwrap(),
+            program_start + 2.0 * 60.0
+        ),
+        "{pending}"
+    );
+
+    // Passive with a result: from that result.
+    let (status, body) = post(
+        &client,
+        &server,
+        "/v1/actions/process-check-result",
+        &json!({"type": "Service", "service": "lab-02!ping4", "exit_status": 0, "plugin_output": "PING OK"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let passive = attrs("lab-02!ping4").await;
+    let end = passive["last_check_result"]["execution_end"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        close(passive["next_update"].as_f64().unwrap(), end + 2.0 * 60.0),
+        "{passive}"
+    );
+}
+
+/// Big answers are streamed in batches (chunked, the world unlocked in
+/// between); they read exactly like answers built at once.
+#[tokio::test]
+async fn big_answers_are_streamed_in_batches() {
+    let (server, client) = prod().await;
+    let response = request(&client, &server, Method::GET, "/v1/objects/services")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().get("content-length").is_none(),
+        "streamed"
+    );
+    let streamed: Value = response.json().await.unwrap();
+    // `pretty` answers are built at once.
+    let response = request(
+        &client,
+        &server,
+        Method::GET,
+        "/v1/objects/services?pretty=1",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(response.headers().get("content-length").is_some());
+    let whole: Value = response.json().await.unwrap();
+    assert!(results(&streamed).len() > 1_000);
+    assert_eq!(names(&streamed), names(&whole));
+    for (a, b) in results(&streamed).iter().zip(results(&whole)) {
+        // Only the clock-dependent attributes may differ between the two.
+        let strip = |entry: &Value| {
+            let mut entry = entry.clone();
+            for attr in ["next_update", "severity", "downtime_depth", "handled"] {
+                entry["attrs"].as_object_mut().unwrap().remove(attr);
+            }
+            entry
+        };
+        assert_eq!(strip(a), strip(b));
+    }
+    let response = request(
+        &client,
+        &server,
+        Method::GET,
+        "/v1/objects/hosts/db-prod-03",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(response.headers().get("content-length").is_some(), "small");
 }

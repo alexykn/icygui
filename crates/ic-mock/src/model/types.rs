@@ -526,6 +526,7 @@ impl DependencyData {
 pub(crate) struct GroupData {
     pub(crate) name: String,
     pub(crate) display_name: String,
+    /// Parent groups; Icinga writes `null` when there are none.
     pub(crate) groups: Vec<String>,
     pub(crate) notes: String,
     pub(crate) notes_url: String,
@@ -571,10 +572,14 @@ pub(crate) struct UserData {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CommandData {
     pub(crate) name: String,
-    pub(crate) command: Vec<String>,
+    /// The plugin command line; `None` for commands Icinga runs internally
+    /// (`dummy`, `icinga`, ...).
+    pub(crate) command: Option<Vec<String>>,
     pub(crate) arguments: Option<Map<String, Json>>,
     pub(crate) timeout: f64,
     pub(crate) vars: Option<Map<String, Json>>,
+    /// The `execute` function (`Internal#PluginCheck`, `Internal#DummyCheck`, ...).
+    pub(crate) execute: &'static str,
     pub(crate) meta: ObjMeta,
 }
 

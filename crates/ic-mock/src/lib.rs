@@ -15,7 +15,8 @@
 //! - `POST /v1/events`: newline-delimited JSON event streams
 //!
 //! A seeded simulator produces realistic churn, and [`MockControl`] lets
-//! tests change state, inject faults and step time without sleeping.
+//! tests change state, inject faults, step time without sleeping and start
+//! bursts (mass re-checks at Icinga's pace, [`MockControl::burst`]).
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), ic_mock::MockError> {
@@ -30,17 +31,23 @@
 //! # }
 //! ```
 //!
-//! Where the API documentation and Icinga's sources disagree, the mock
-//! follows the sources (the reference is Icinga 2's `master` handlers).
-//! Deliberate choices:
-//! - `queue` is required for `/v1/events` (Icinga ≤ 2.14 requires it; newer
-//!   versions ignore it), so a client that works here works with both.
-//! - Numbers are written as doubles (`200.0`) by default, like the
-//!   documentation; [`NumberFormat::Integral`] switches to Icinga 2.13+'s
-//!   integral style.
+//! The reference is what a real Icinga 2.15.6 answers: responses recorded
+//! from it (the repository's `contract/samples`, vendored as test fixtures)
+//! win over the API documentation, and Icinga's handler sources fill in the
+//! rest. `tests/fidelity.rs` checks that the mock's responses, errors and
+//! events have the recorded keys and JSON types. In particular:
+//! - Whole numbers are written as integers (`"state": 2`), others as
+//!   floats; [`NumberFormat::Float`] writes every number with a fraction,
+//!   like the documentation's examples.
 //! - `filter` needs the `filter-expression` permission
-//!   ([`MockConfig::enforce_filter_expression_permission`]), Icinga's
-//!   current default.
+//!   ([`MockConfig::enforce_filter_expression_permission`], on by default
+//!   as from Icinga 2.17); name lists (`hosts`, `services`, `comments`,
+//!   `downtimes`) need no extra permission, and one unknown name fails the
+//!   whole request with 404.
+//! - An unknown attribute in `attrs` or `joins` fails the whole request
+//!   with 400, as in 2.15 (newer versions report it per object).
+//! - `queue` is required for `/v1/events`, as in 2.15 (newer versions
+//!   ignore it).
 
 mod auth;
 mod config;
@@ -71,7 +78,12 @@ pub use tls::{TlsMaterial, format_fingerprint};
 ///   ~150-host production estate.
 /// - [`staging`](scenarios::staging): ten hosts, three warnings.
 /// - [`lab`](scenarios::lab): two hosts, one pending.
-/// - [`large`](scenarios::large): ~2000 hosts × 10 services, ~3% problems.
+/// - [`large`](scenarios::large): production scale, 2 000 hosts × 15
+///   services with 5-minute intervals and about 5 % problems, like the
+///   measurements in docs/performance.md;
+///   [`large_with_hosts`](scenarios::large_with_hosts) builds it smaller.
 pub mod scenarios {
-    pub use crate::scenario::{NAMES, by_name, lab, large, prod_cluster, staging};
+    pub use crate::scenario::{
+        NAMES, by_name, lab, large, large_with_hosts, prod_cluster, staging,
+    };
 }

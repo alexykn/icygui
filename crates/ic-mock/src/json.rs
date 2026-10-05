@@ -85,9 +85,26 @@ pub(crate) fn encode(mut value: Value, format: NumberFormat, pretty: bool) -> Ve
     serde_json::to_vec(&value).unwrap_or_else(|_| b"null".to_vec())
 }
 
+/// The start of a `{"results": [...]}` document written entry by entry.
+pub(crate) const RESULTS_START: &[u8] = b"{\"results\":[";
+/// The end of a `{"results": [...]}` document.
+pub(crate) const RESULTS_END: &[u8] = b"]}";
+
+/// Appends `entry` (normalized, compact) to `out`, after a comma unless it
+/// is the first entry; `null` if it can't be written.
+pub(crate) fn push_result(out: &mut Vec<u8>, mut entry: Value, format: NumberFormat, first: bool) {
+    if !first {
+        out.push(b',');
+    }
+    normalize(&mut entry, format);
+    if serde_json::to_writer(&mut *out, &entry).is_err() {
+        out.extend_from_slice(b"null");
+    }
+}
+
 /// Serializes `{"results": [...]}` one entry at a time, so a large answer
-/// (all services of a big installation) never exists as a value tree and
-/// as text at once. Pretty output takes the simple route.
+/// never exists as a value tree and as text at once. Pretty output takes
+/// the simple route.
 pub(crate) fn encode_results<I>(entries: I, format: NumberFormat, pretty: bool) -> Vec<u8>
 where
     I: IntoIterator<Item = Value>,
@@ -100,17 +117,11 @@ where
         );
         return encode(Value::Object(body), format, true);
     }
-    let mut out = b"{\"results\":[".to_vec();
-    for (index, mut entry) in entries.into_iter().enumerate() {
-        if index > 0 {
-            out.push(b',');
-        }
-        normalize(&mut entry, format);
-        if serde_json::to_writer(&mut out, &entry).is_err() {
-            out.extend_from_slice(b"null");
-        }
+    let mut out = RESULTS_START.to_vec();
+    for (index, entry) in entries.into_iter().enumerate() {
+        push_result(&mut out, entry, format, index == 0);
     }
-    out.extend_from_slice(b"]}");
+    out.extend_from_slice(RESULTS_END);
     out
 }
 

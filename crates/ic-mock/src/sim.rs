@@ -462,6 +462,7 @@ impl World {
             .map(|h| h.address.clone())
             .unwrap_or_default();
         let host_name = checkable.host_name.clone();
+        let service_name = checkable.service_name.clone().unwrap_or_default();
         let current_state = checkable.cr.as_ref().map_or(0, |cr| cr.state);
         // Problems the simulator caused through a failed host or parent.
         let caused_by_outage = checkable.cr.as_ref().is_some_and(|cr| {
@@ -522,7 +523,12 @@ impl World {
             Some(result) => Some(result),
             None if pinned => None,
             None if state == current_state && state != 0 => None,
-            None if is_service => Some(outputs::service_output(&command, state, &mut self.sim.rng)),
+            None if is_service => Some(outputs::service_output(
+                &service_name,
+                &command,
+                state,
+                &mut self.sim.rng,
+            )),
             None => Some(outputs::host_output(
                 &address,
                 state == 0,

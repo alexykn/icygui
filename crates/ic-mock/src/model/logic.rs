@@ -7,7 +7,7 @@ use serde_json::{Map, Value as Json};
 use super::types::{
     CheckResultData, Checkable, CommentData, DowntimeData, ObjMeta, SourceLocation, VarsState,
 };
-use super::{PendingExecution, ScheduledCheck, World};
+use super::{PendingExecution, World};
 use crate::events::EventType;
 use crate::json::{int, num};
 
@@ -552,7 +552,15 @@ impl World {
             .get(&checkable.host_name)
             .map_or("", |host| host.address.as_str());
         super::load::resolve_address(&mut command, address);
-        let execution_time = execution_time(&checkable.check_command);
+        // The check ends now. It started its execution time earlier, but
+        // not before the previous check ended: Icinga never runs two checks
+        // of one object at once, and discards a result that started before
+        // the current one.
+        let previous_end = checkable
+            .cr
+            .as_ref()
+            .map_or(f64::MIN, |cr| cr.execution_end.min(now));
+        let execution_start = (now - execution_time(&checkable.check_command)).max(previous_end);
         CheckInput {
             state,
             exit_status: i64::from(state),
@@ -562,9 +570,9 @@ impl World {
             check_source: String::new(),
             command,
             ttl: 0.0,
-            schedule_start: now - execution_time - 0.001,
+            schedule_start: execution_start - 0.001,
             schedule_end: now,
-            execution_start: now - execution_time,
+            execution_start,
             execution_end: now,
         }
     }
@@ -712,7 +720,7 @@ impl World {
             persistent,
             sticky,
             legacy_id,
-            meta: runtime_meta(&short, &zone, "comments", &name, now),
+            meta: runtime_meta("Comment", &short, &zone, &name, now),
         };
         self.index_comment(&comment);
         self.comments.insert(name.clone(), comment);
@@ -796,7 +804,7 @@ impl World {
                 format!("{:016x}", self.names.next_u64())
             },
             config_owner: spec.config_owner,
-            meta: runtime_meta(&short, &zone, "downtimes", &name, now),
+            meta: runtime_meta("Downtime", &short, &zone, &name, now),
         };
         if let Some(trigger) = &spec.trigger
             && let Some(parent) = self.downtimes.get_mut(trigger)
@@ -911,8 +919,8 @@ impl World {
     // --- timers ------------------------------------------------------------
 
     /// Icinga's timers: acknowledgement expiry, fixed downtimes starting,
-    /// expired downtimes and comments, scheduled checks and command
-    /// executions that are due.
+    /// expired downtimes and comments, rescheduled checks that are due (to
+    /// the checker's queue) and command executions.
     pub(crate) fn housekeeping(&mut self) {
         let now = self.now();
         // Expired acknowledgements.
@@ -968,14 +976,17 @@ impl World {
         for name in expired {
             self.remove_comment(&name, "");
         }
-        // Rescheduled checks.
-        let (due, later): (Vec<ScheduledCheck>, Vec<ScheduledCheck>) =
-            std::mem::take(&mut self.scheduled_checks)
-                .into_iter()
-                .partition(|check| check.due <= now);
-        self.scheduled_checks = later;
-        for check in due {
-            self.run_check(&check.object);
+        // Rescheduled checks that are due go to the checker, in order.
+        let mut due: Vec<(f64, String)> = self
+            .scheduled_checks
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(object, at)| (*at, object.clone()))
+            .collect();
+        due.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, object) in due {
+            self.scheduled_checks.remove(&object);
+            self.checks.push(&object);
         }
         // Command executions.
         let (due, later): (Vec<PendingExecution>, Vec<PendingExecution>) =
@@ -988,14 +999,12 @@ impl World {
         }
     }
 
-    /// Queues a check (from `reschedule-check`) to run at `at`.
+    /// Schedules a check (from `reschedule-check`) for `at`; it reaches
+    /// the checker's queue `reschedule_delay` after that (the timers move
+    /// it). A later call for the same object replaces the time.
     pub(crate) fn schedule_check(&mut self, object: &str, at: f64) {
         let due = at.max(self.now()) + self.reschedule_delay;
-        self.scheduled_checks.retain(|check| check.object != object);
-        self.scheduled_checks.push(ScheduledCheck {
-            due,
-            object: object.to_owned(),
-        });
+        self.scheduled_checks.insert(object.to_owned(), due);
     }
 
     fn finish_execution(&mut self, execution: &PendingExecution, now: f64) {
@@ -1089,37 +1098,84 @@ fn update_flapping(checkable: &mut Checkable, new_state: u8, now: f64) {
     }
 }
 
-/// `ConfigObject` attributes of an object created through the API.
-fn runtime_meta(short: &str, zone: &str, directory: &str, full_name: &str, now: f64) -> ObjMeta {
-    let encoded: String = full_name
-        .chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '!' => c.to_string(),
-            other => format!("%{:02X}", u32::from(other) & 0xff),
-        })
-        .collect();
+/// `ConfigObjectUtility::EscapeName`: `<>:"/\|?*` and `%` become `%XX`.
+pub(crate) fn escape_file_name(name: &str) -> String {
+    use std::fmt::Write as _;
+    let mut escaped = String::with_capacity(name.len());
+    for c in name.chars() {
+        if matches!(
+            c,
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' | '%'
+        ) {
+            let _ = write!(escaped, "%{:02X}", u32::from(c));
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped
+}
+
+/// `ConfigObject` attributes of a comment or downtime created at runtime
+/// (`ConfigObjectUtility::CreateObject`): a file named after the escaped
+/// full name in the `_api` package. Its one generated line starts with
+/// `object <Type> "<short name>" ignore_on_error`, which is what the
+/// source location spans (columns counted from 0, as recorded from Icinga
+/// 2.15).
+pub(crate) fn runtime_meta(
+    type_name: &str,
+    short: &str,
+    zone: &str,
+    full_name: &str,
+    now: f64,
+) -> ObjMeta {
+    let directory = format!("{}s", type_name.to_lowercase());
+    let header = format!("object {type_name} \"{short}\" ignore_on_error");
+    let last_column = u32::try_from(header.chars().count().saturating_sub(1)).unwrap_or(u32::MAX);
     ObjMeta {
         templates: vec![short.to_owned()],
         package: "_api".to_owned(),
         zone: zone.to_owned(),
         source: SourceLocation {
             path: format!(
-                "/var/lib/icinga2/api/packages/_api/9e5e1e6f-2c43-4c09-8c53-7a1ee8d9d2b1/conf.d/{directory}/{encoded}.conf"
+                "/var/lib/icinga2/api/packages/_api/9e5e1e6f-2c43-4c09-8c53-7a1ee8d9d2b1/conf.d/{directory}/{}.conf",
+                escape_file_name(full_name)
             ),
             first_line: 1,
             first_column: 0,
             last_line: 1,
-            last_column: 69,
+            last_column,
         },
         version: now,
     }
 }
 
-/// A plausible plugin command line for a check command.
+/// The task function of the check commands Icinga runs internally instead
+/// of starting a plugin (`command-icinga.conf` in the ITL).
+pub(crate) fn internal_check_function(check_command: &str) -> Option<&'static str> {
+    Some(match check_command {
+        "dummy" | "passive" => "Internal#DummyCheck",
+        "random" => "Internal#RandomCheck",
+        "icinga" => "Internal#IcingaCheck",
+        "cluster" => "Internal#ClusterCheck",
+        "cluster-zone" => "Internal#ClusterZoneCheck",
+        "exception" => "Internal#ExceptionCheck",
+        "null" => "Internal#NullCheck",
+        "sleep" => "Internal#SleepCheck",
+        "ido" => "Internal#IdoCheck",
+        "ifw-api" => "Internal#IfwApiCheck",
+        _ => return None,
+    })
+}
+
+/// The `command` of an active check result: the command line a plugin
+/// check ran (with macros still unresolved), or the command's name for
+/// internal checks (`"dummy"`), as Icinga 2.15 records them.
 pub(crate) fn plugin_command(check_command: &str) -> Json {
+    if internal_check_function(check_command).is_some() {
+        return Json::String(check_command.to_owned());
+    }
     let plugin = match check_command {
         "hostalive" | "ping4" | "ping" => "check_ping",
-        "dummy" | "passive" => return Json::Null,
         other => {
             let plugin = other.replace('-', "_");
             let plugin = if plugin.starts_with("check_") {

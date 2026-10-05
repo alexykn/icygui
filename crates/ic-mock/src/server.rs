@@ -29,6 +29,34 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Runs `work`, which may block on the world's lock (a big query holds it
+/// for a while), without stalling other tasks: on a multi-threaded runtime
+/// the worker hands its other tasks off first, so event streams keep
+/// flowing. Elsewhere (single-threaded test runtimes) it just runs.
+pub(crate) fn blocking<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(work),
+        _ => work(),
+    }
+}
+
+/// Validates a checker rate (checks per second).
+///
+/// # Errors
+/// Rates that aren't positive, finite numbers.
+pub(crate) fn check_rate(rate: f64) -> Result<f64, MockError> {
+    if rate.is_finite() && rate > 0.0 {
+        Ok(rate)
+    } else {
+        Err(MockError::InvalidConfig(
+            "the check rate must be a positive number of checks per second".to_owned(),
+        ))
+    }
+}
+
+/// How often the real-time checker runs queued checks.
+const CHECKER_PERIOD: Duration = Duration::from_millis(10);
+
 /// Injected faults.
 #[derive(Debug, Default)]
 pub(crate) struct Faults {
@@ -151,6 +179,7 @@ impl MockServer {
                 "housekeeping interval must not be zero".to_owned(),
             ));
         }
+        check_rate(config.check_rate)?;
         let node_name = config.scenario.status.node_name.clone();
         let material = match &config.tls {
             MockTls::SelfSigned => TlsMaterial::self_signed(&node_name)?,
@@ -165,6 +194,7 @@ impl MockServer {
                 event_buffer: config.event_buffer,
                 seed: simulation.seed,
                 reschedule_delay: config.reschedule_delay.as_secs_f64(),
+                check_rate: config.check_rate,
                 now: crate::model::wall_clock(),
             },
         )?;
@@ -198,8 +228,9 @@ impl MockServer {
             tokio::spawn(housekeeping_loop(
                 Arc::clone(&shared),
                 config.housekeeping_interval,
-                shutdown_rx,
+                shutdown_rx.clone(),
             )),
+            tokio::spawn(checker_loop(Arc::clone(&shared), shutdown_rx)),
         ];
         tracing::info!(%addr, scenario = %config.scenario.name, "mock Icinga API listening");
         Ok(Self {
@@ -378,10 +409,12 @@ async fn simulator_loop(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>
             _ = shutdown.changed() => break,
             () = tokio::time::sleep(Duration::from_secs_f64(period)) => {}
         }
-        let mut world = shared.world();
-        if world.sim.running {
-            world.sim_tick();
-        }
+        blocking(|| {
+            let mut world = shared.world();
+            if world.sim.running {
+                world.sim_tick();
+            }
+        });
     }
 }
 
@@ -395,7 +428,26 @@ async fn housekeeping_loop(
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
-            _ = ticker.tick() => shared.world().housekeeping(),
+            _ = ticker.tick() => blocking(|| shared.world().housekeeping()),
+        }
+    }
+}
+
+/// The real-time checker: runs queued checks (forced re-checks, bursts) at
+/// the configured rate, in small batches so the event stream stays smooth.
+async fn checker_loop(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
+    let mut ticker = tokio::time::interval(CHECKER_PERIOD);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last = tokio::time::Instant::now();
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = ticker.tick() => {
+                let now = tokio::time::Instant::now();
+                let elapsed = now.duration_since(last).as_secs_f64();
+                last = now;
+                blocking(|| shared.world().checker_step(elapsed));
+            }
         }
     }
 }

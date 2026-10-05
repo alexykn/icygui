@@ -5,6 +5,7 @@
 //! in the same order, as Icinga does.
 
 pub(crate) mod attrs;
+mod checker;
 pub(crate) mod load;
 pub(crate) mod logic;
 mod snapshot;
@@ -22,6 +23,7 @@ use crate::rng::Rng;
 use crate::sim::SimState;
 
 pub(crate) use attrs::{ObjKind, ObjRef};
+pub(crate) use checker::CheckQueue;
 pub(crate) use logic::{CheckInput, DepType, ProcessOutcome};
 pub(crate) use stats::CheckStats;
 pub(crate) use types::{
@@ -47,13 +49,6 @@ pub(crate) struct AppInfo {
     pub(crate) enable_host_checks: bool,
     pub(crate) enable_service_checks: bool,
     pub(crate) enable_perfdata: bool,
-}
-
-/// A `reschedule-check` waiting to run.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ScheduledCheck {
-    pub(crate) due: f64,
-    pub(crate) object: String,
 }
 
 /// An `execute-command` waiting for its result.
@@ -98,7 +93,10 @@ pub(crate) struct World {
     pub(crate) names: Rng,
     pub(crate) stats: CheckStats,
     pub(crate) bus: EventBus,
-    pub(crate) scheduled_checks: Vec<ScheduledCheck>,
+    /// `reschedule-check`s waiting for their time: object → when.
+    pub(crate) scheduled_checks: BTreeMap<String, f64>,
+    /// Checks due now, run at the checker's rate.
+    pub(crate) checks: CheckQueue,
     pub(crate) pending_executions: Vec<PendingExecution>,
     pub(crate) pinned: HashSet<String>,
     pub(crate) sim: SimState,

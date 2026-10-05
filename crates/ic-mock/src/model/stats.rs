@@ -9,13 +9,26 @@ use super::World;
 use super::logic::DepType;
 use crate::json::{int, num};
 
-/// Status functions the mock provides, in Icinga's (sorted) order.
+/// The status functions of Icinga 2.15's packages, in its (sorted) order.
+/// Features that aren't enabled still answer, with an empty status.
 pub(crate) const STATUS_FUNCTIONS: &[&str] = &[
     "ApiListener",
     "CIB",
     "CheckerComponent",
+    "ElasticsearchWriter",
+    "FileLogger",
+    "GelfWriter",
+    "GraphiteWriter",
     "IcingaApplication",
+    "IdoMysqlConnection",
+    "IdoPgsqlConnection",
+    "Influxdb2Writer",
+    "InfluxdbWriter",
+    "JournaldLogger",
     "NotificationComponent",
+    "OpenTsdbWriter",
+    "PerfdataWriter",
+    "SyslogLogger",
 ];
 
 const ACTIVE_HOST: usize = 0;
@@ -140,10 +153,13 @@ impl World {
                 nodes.insert("notification".into(), int(1));
                 let mut status = Map::new();
                 status.insert("notificationcomponent".into(), Json::Object(nodes));
-                (
-                    status,
-                    vec![perfdata_value("notificationcomponent_notification", 1.0)],
-                )
+                (status, Vec::new())
+            }
+            other if STATUS_FUNCTIONS.contains(&other) => {
+                // A feature that isn't enabled: no instances to report.
+                let mut status = Map::new();
+                status.insert(other.to_lowercase(), Json::Object(Map::new()));
+                (status, Vec::new())
             }
             _ => return None,
         };

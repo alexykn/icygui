@@ -74,10 +74,10 @@ async fn streams_only_carry_the_requested_types() {
     let event = changes.next().await;
     assert_eq!(event["type"], "StateChange");
     assert_eq!(event["service"], "load");
-    assert_eq!(event["state"], json!(1.0));
-    assert_eq!(event["state_type"], json!(0.0));
+    assert_eq!(event["state"], json!(1));
+    assert_eq!(event["state_type"], json!(0));
     assert_eq!(event["acknowledgement"], json!(false));
-    assert_eq!(event["downtime_depth"], json!(0.0));
+    assert_eq!(event["downtime_depth"], json!(0));
     assert!(event["timestamp"].as_f64().unwrap() > 1.0e9);
     assert_eq!(event["check_result"]["output"], "LOAD WARNING");
 
@@ -88,7 +88,7 @@ async fn streams_only_carry_the_requested_types() {
         .unwrap();
     let event = changes.next().await;
     assert_eq!(event["type"], "StateChange");
-    assert_eq!(event["state"], json!(0.0));
+    assert_eq!(event["state"], json!(0));
 }
 
 #[tokio::test]

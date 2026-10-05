@@ -25,7 +25,7 @@ use serde_json::Value as Json;
 
 use crate::auth::Principal;
 use crate::control::RecordedRequest;
-use crate::server::Shared;
+use crate::server::{Shared, blocking};
 use params::{Params, parse_query, unescape};
 use response::{Body, full, html, json_error, path_not_found};
 
@@ -147,7 +147,7 @@ pub(crate) async fn serve(
 )]
 async fn pipeline(
     request: Request<Incoming>,
-    shared: &Shared,
+    shared: &Arc<Shared>,
     conn: &ConnInfo,
     record: &mut RecordedRequest,
 ) -> Response<Body> {
@@ -288,32 +288,41 @@ async fn pipeline(
                 .insert(LOCATION, HeaderValue::from_static("/v1"));
             response
         }
-        (["v1"], &Method::GET) => {
+        // The handlers work on the locked world; `blocking` keeps a long
+        // one (all services of a big installation) from stalling the
+        // other connections.
+        (["v1"], &Method::GET) => blocking(|| {
             let world = shared.world();
             info::info(&world, &user, &params, accept_json, format)
-        }
-        (["v1", "status"], &Method::GET) => {
+        }),
+        (["v1", "status"], &Method::GET) => blocking(|| {
             let world = shared.world();
             info::status(&world, &user, params, None, format, enforce)
-        }
-        (["v1", "status", name], &Method::GET) => {
+        }),
+        (["v1", "status", name], &Method::GET) => blocking(|| {
             let world = shared.world();
             info::status(&world, &user, params.clone(), Some(name), format, enforce)
-        }
+        }),
         (["v1", "objects", _] | ["v1", "objects", _, _], &Method::GET) => {
-            let world = shared.world();
-            objects::handle(&world, &user, params, &segments, format, enforce)
+            let answer = blocking(|| {
+                let world = shared.world();
+                objects::handle(&world, &user, params, &segments, format, enforce)
+            });
+            match answer {
+                objects::Answer::Done(response) => response,
+                objects::Answer::Stream(plan) => objects::stream(Arc::clone(shared), plan, format),
+            }
         }
-        (["v1", "actions", action], &Method::POST) => {
+        (["v1", "actions", action], &Method::POST) => blocking(|| {
             let mut world = shared.world();
             actions::handle(&mut world, &user, &params, action, format, enforce)
-        }
-        (["v1", "events"], &Method::POST) => {
+        }),
+        (["v1", "events"], &Method::POST) => blocking(|| {
             let mut world = shared.world();
             events::handle(
                 &mut world, &user, &params, &segments, http10, format, enforce,
             )
-        }
+        }),
         _ => path_not_found(&segments, format, Some(&params)),
     }
 }

@@ -3,6 +3,8 @@
 //!
 //! ```text
 //! icinga-mock --env prod-cluster:5665 --env staging:5666 --env lab:5667 --cert-dir ./mock-certs
+//! icinga-mock --env large --burst-every 300    # production scale, a mass re-check every 5 minutes
+//! kill -USR1 <pid>                             # a mass re-check now
 //! ```
 
 use std::collections::BTreeSet;
@@ -12,8 +14,8 @@ use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use ic_mock::{
-    MockConfig, MockError, MockServer, MockTls, MockUser, NumberFormat, SimulationConfig,
-    StormConfig, TlsMaterial, scenarios,
+    MockConfig, MockControl, MockError, MockServer, MockTls, MockUser, NumberFormat,
+    SimulationConfig, StormConfig, TlsMaterial, scenarios,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -27,10 +29,10 @@ enum TlsMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Numbers {
-    /// `200.0`, like the API documentation and Icinga up to 2.12.
-    Float,
-    /// `200`, like Icinga 2.13+.
+    /// Whole numbers as integers (`200`), like current Icinga (2.15).
     Integral,
+    /// Every number with a fraction (`200.0`), like the API documentation.
+    Float,
 }
 
 /// Mock Icinga 2 API environments for developing and testing icygui.
@@ -62,11 +64,24 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     cert_dir: Option<PathBuf>,
     /// How JSON numbers are written.
-    #[arg(long, value_enum, default_value_t = Numbers::Float)]
+    #[arg(long, value_enum, default_value_t = Numbers::Integral)]
     numbers: Numbers,
     /// Start a problem storm (30 services failing) every N ticks.
     #[arg(long, value_name = "TICKS")]
     storm_every: Option<u64>,
+    /// Checks per second the checker runs for forced re-checks and bursts
+    /// (Icinga: about 5 000).
+    #[arg(long, value_name = "N", default_value_t = 5_000.0)]
+    check_rate: f64,
+    /// Re-check every object of every environment every SECONDS seconds, a
+    /// burst like after an Icinga restart. `kill -USR1 <pid>` starts one
+    /// right away.
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    burst_every: Option<u64>,
+    /// Let users without the `filter-expression` permission use filters
+    /// (Icinga before 2.17 by default).
+    #[arg(long)]
+    no_filter_permission: bool,
 }
 
 /// One environment to serve.
@@ -252,6 +267,7 @@ fn banner(
     users: &[MockUser],
     ca_path: Option<&Path>,
     cert_path: Option<&Path>,
+    args: &Args,
     simulation: &SimulationConfig,
 ) -> String {
     use std::fmt::Write as _;
@@ -291,6 +307,19 @@ fn banner(
     } else {
         writeln!(text, "  Simulator    off")
     };
+    let pid = std::process::id();
+    let _ = match args.burst_every {
+        Some(every) => writeln!(
+            text,
+            "  Bursts       every {every} s at {} checks/s; kill -USR1 {pid} for one now",
+            args.check_rate
+        ),
+        None => writeln!(
+            text,
+            "  Bursts       kill -USR1 {pid} re-checks every object at {} checks/s",
+            args.check_rate
+        ),
+    };
     text.push('\n');
     text
 }
@@ -309,10 +338,14 @@ fn print_banner(text: &str) {
 }
 
 async fn run(args: Args) -> Result<(), String> {
+    let mut signals = Signals::register();
     let envs = parse_envs(&args.envs)?;
     let users = parse_users(&args.users)?;
     if !(args.speed.is_finite() && args.speed > 0.0) {
         return Err("--speed must be a positive number".to_owned());
+    }
+    if !(args.check_rate.is_finite() && args.check_rate > 0.0) {
+        return Err("--check-rate must be a positive number".to_owned());
     }
     let dir = args.cert_dir.as_deref();
     if let Some(dir) = dir {
@@ -354,6 +387,8 @@ async fn run(args: Args) -> Result<(), String> {
                 Numbers::Float => NumberFormat::Float,
                 Numbers::Integral => NumberFormat::Integral,
             },
+            check_rate: args.check_rate,
+            enforce_filter_expression_permission: !args.no_filter_permission,
             ..MockConfig::default()
         };
         let server = MockServer::start(config)
@@ -369,11 +404,18 @@ async fn run(args: Args) -> Result<(), String> {
             &users,
             ca_path.as_deref(),
             cert_path.as_deref(),
+            &args,
             &simulation,
         ));
         servers.push(server);
     }
-    wait_for_signal().await;
+    let controls: Vec<MockControl> = servers.iter().map(MockServer::control).collect();
+    serve_until_stopped(
+        &controls,
+        args.burst_every.map(Duration::from_secs),
+        &mut signals,
+    )
+    .await;
     tracing::info!("shutting down");
     for server in servers {
         server.shutdown().await;
@@ -381,24 +423,109 @@ async fn run(args: Args) -> Result<(), String> {
     Ok(())
 }
 
-async fn wait_for_signal() {
+/// Starts a burst on every environment.
+fn burst_all(controls: &[MockControl], why: &str) {
+    let queued: usize = controls.iter().map(MockControl::burst).sum();
+    tracing::info!(queued, "burst ({why})");
+}
+
+/// The signals `icinga-mock` reacts to. They are registered before anything
+/// is served: until then a SIGUSR1 would terminate the process.
+struct Signals {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut terminate) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = terminate.recv() => {}
+    interrupt: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    terminate: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    user1: Option<tokio::signal::unix::Signal>,
+}
+
+impl Signals {
+    /// Starts listening (a signal that can't be listened for is logged and
+    /// never fires).
+    fn register() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let listen = |kind: SignalKind, name: &str| match signal(kind) {
+                Ok(signal) => Some(signal),
+                Err(error) => {
+                    tracing::warn!(%error, "can't listen for {name}");
+                    None
                 }
-                return;
+            };
+            Self {
+                interrupt: listen(SignalKind::interrupt(), "SIGINT"),
+                terminate: listen(SignalKind::terminate(), "SIGTERM"),
+                user1: listen(SignalKind::user_defined1(), "SIGUSR1"),
             }
-            Err(error) => tracing::warn!(%error, "can't listen for SIGTERM"),
+        }
+        #[cfg(not(unix))]
+        Self {}
+    }
+}
+
+/// The next delivery of a Unix signal; never, if it can't be listened for.
+#[cfg(unix)]
+async fn next_signal(signal: Option<&mut tokio::signal::unix::Signal>) {
+    match signal {
+        Some(signal) => {
+            if signal.recv().await.is_none() {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// The next tick of the burst schedule; never without one.
+async fn next_tick(ticker: &mut Option<tokio::time::Interval>) {
+    match ticker {
+        Some(ticker) => {
+            ticker.tick().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Serves until Ctrl-C (SIGINT) or SIGTERM. Meanwhile SIGUSR1 and
+/// `--burst-every` start bursts.
+async fn serve_until_stopped(
+    controls: &[MockControl],
+    burst_every: Option<Duration>,
+    signals: &mut Signals,
+) {
+    let mut ticker = burst_every.map(|period| {
+        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker
+    });
+    #[cfg(unix)]
+    loop {
+        tokio::select! {
+            () = next_signal(signals.interrupt.as_mut()) => break,
+            () = next_signal(signals.terminate.as_mut()) => break,
+            () = next_signal(signals.user1.as_mut()) => burst_all(controls, "SIGUSR1"),
+            () = next_tick(&mut ticker) => burst_all(controls, "--burst-every"),
         }
     }
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::warn!(%error, "can't listen for Ctrl-C; stopping in a day");
-        tokio::time::sleep(Duration::from_hours(24)).await;
+    #[cfg(not(unix))]
+    {
+        let _ = signals;
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+        loop {
+            tokio::select! {
+                result = &mut ctrl_c => {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "can't listen for Ctrl-C");
+                        std::future::pending::<()>().await;
+                    }
+                    break;
+                }
+                () = next_tick(&mut ticker) => burst_all(controls, "--burst-every"),
+            }
+        }
     }
 }
 

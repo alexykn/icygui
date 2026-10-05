@@ -81,6 +81,9 @@ pub(crate) struct Builder {
     pub(crate) check_source: Option<String>,
     /// Zone for objects added next.
     pub(crate) zone: Option<String>,
+    /// `(check_interval, retry_interval)` for objects added next; `None`
+    /// picks per check command (hosts 60 s, most services 5 minutes).
+    pub(crate) intervals: Option<(f64, f64)>,
 }
 
 impl Builder {
@@ -97,6 +100,7 @@ impl Builder {
             now,
             check_source: None,
             zone: None,
+            intervals: None,
         }
     }
 
@@ -156,15 +160,16 @@ impl Builder {
         host.vars = vars;
         host.state = HostState::Up;
         "hostalive".clone_into(&mut host.check.check_command);
-        host.check.check_interval = 60.0;
-        host.check.retry_interval = 30.0;
+        let (interval, retry) = self.intervals.unwrap_or((60.0, 30.0));
+        host.check.check_interval = interval;
+        host.check.retry_interval = retry;
         host.check.max_attempts = 3;
         host.check.state_type = StateType::Hard;
         host.check.zone.clone_from(&self.zone);
         let since = self.days_ago(5.0, 60.0);
         host.check.last_state_change = since;
         host.check.last_hard_state_change = since;
-        let (last, next) = self.timing(60.0);
+        let (last, next) = self.timing(interval);
         let ping = outputs::host_output(address, true, &mut self.rng);
         host.check.result = Some(self.result(&ping.output, &ping.perfdata, 0, last));
         host.check.last_check = Some(last);
@@ -177,7 +182,13 @@ impl Builder {
     /// Sets a host down (`reachable = false`: unreachable behind a parent).
     pub(crate) fn host_down(&mut self, name: &str, output: &str, since: Duration, reachable: bool) {
         let since_ts = self.ago(since);
-        let (last, next) = self.timing(30.0);
+        let interval = self
+            .scenario
+            .hosts
+            .iter()
+            .find(|h| h.name.as_str() == name)
+            .map_or(30.0, |h| h.check.check_interval);
+        let (last, next) = self.timing(interval);
         let result = self.result(
             output,
             &[
@@ -224,11 +235,14 @@ impl Builder {
         groups: &[&str],
         vars: Vars,
     ) -> &mut Service {
-        let interval = match command {
-            "ping4" | "http" | "load" => 60.0,
-            "apt" => 3_600.0,
-            _ => 300.0,
-        };
+        let (interval, retry) = self.intervals.unwrap_or_else(|| {
+            let interval = match command {
+                "ping4" | "http" | "load" => 60.0,
+                "apt" => 3_600.0,
+                _ => 300.0,
+            };
+            (interval, (interval / 5.0).clamp(15.0, 60.0))
+        });
         let mut service = Service::new(host, name);
         name.clone_into(&mut service.display_name);
         service.groups = groups.iter().map(|g| (*g).to_owned()).collect();
@@ -236,7 +250,7 @@ impl Builder {
         service.state = ServiceState::Ok;
         command.clone_into(&mut service.check.check_command);
         service.check.check_interval = interval;
-        service.check.retry_interval = (interval / 5.0).clamp(15.0, 60.0);
+        service.check.retry_interval = retry;
         service.check.max_attempts = 3;
         service.check.state_type = StateType::Hard;
         service.check.zone.clone_from(&self.zone);
@@ -248,7 +262,7 @@ impl Builder {
         service.check.last_state_change = since;
         service.check.last_hard_state_change = since;
         let (last, next) = self.timing(interval);
-        let ok = outputs::service_output(command, 0, &mut self.rng);
+        let ok = outputs::service_output(name, command, 0, &mut self.rng);
         service.check.result = Some(self.result(&ok.output, &ok.perfdata, 0, last));
         service.check.last_check = Some(last);
         service.check.next_check = Some(next);
@@ -366,7 +380,7 @@ impl Builder {
             ServiceState::Critical => 2,
             _ => 3,
         };
-        let generated = outputs::service_output(command, code, &mut self.rng);
+        let generated = outputs::service_output(name, command, code, &mut self.rng);
         let index = self.scenario.services.len() - 1;
         self.apply_problem(
             index,
@@ -395,7 +409,7 @@ impl Builder {
             ServiceState::Critical => 2,
             _ => 3,
         };
-        let generated = outputs::service_output(&command, code, &mut self.rng);
+        let generated = outputs::service_output(name, &command, code, &mut self.rng);
         self.apply_problem(
             index,
             state,
@@ -431,6 +445,43 @@ impl Builder {
         });
     }
 
+    /// Acknowledges the service added last (no lookup, for big scenarios).
+    pub(crate) fn acknowledge_last_service(
+        &mut self,
+        author: &str,
+        text: &str,
+        ago: Duration,
+        sticky: bool,
+    ) {
+        let Some(service) = self.scenario.services.last_mut() else {
+            return;
+        };
+        service.check.acknowledgement = if sticky {
+            AckKind::Sticky
+        } else {
+            AckKind::Normal
+        };
+        let object = ObjectKey::Service {
+            key: service.key.clone(),
+        };
+        self.push_ack_comment(object, author, text, ago);
+    }
+
+    fn push_ack_comment(&mut self, object: ObjectKey, author: &str, text: &str, ago: Duration) {
+        let id = self.rng.uuid();
+        let entry_time = self.ago(ago);
+        self.scenario.comments.push(Comment {
+            name: format!("{}!{id}", object.full_name()),
+            object,
+            author: author.to_owned(),
+            text: text.to_owned(),
+            kind: CommentKind::Acknowledgement,
+            entry_time,
+            expire_time: None,
+            persistent: false,
+        });
+    }
+
     /// Acknowledges a problem and adds its acknowledgement comment.
     pub(crate) fn acknowledge(
         &mut self,
@@ -457,18 +508,7 @@ impl Builder {
                 }
             }
         }
-        let id = self.rng.uuid();
-        let entry_time = self.ago(ago);
-        self.scenario.comments.push(Comment {
-            name: format!("{}!{id}", object.full_name()),
-            object: object.clone(),
-            author: author.to_owned(),
-            text: text.to_owned(),
-            kind: CommentKind::Acknowledgement,
-            entry_time,
-            expire_time: None,
-            persistent: false,
-        });
+        self.push_ack_comment(object.clone(), author, text, ago);
     }
 
     /// A downtime; returns its name.

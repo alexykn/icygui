@@ -248,6 +248,11 @@ impl EventStream {
                 .wait_for_event_streams(before + 1, Duration::from_secs(5))
                 .await
         );
+        Self::from_response(response)
+    }
+
+    /// Reads the events of an accepted `/v1/events` response.
+    pub(crate) fn from_response(response: Response) -> Self {
         Self {
             stream: response.bytes_stream().boxed(),
             buffer: Vec::new(),

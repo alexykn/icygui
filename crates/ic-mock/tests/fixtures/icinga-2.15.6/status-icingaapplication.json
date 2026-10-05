@@ -1,0 +1,1 @@
+{"results":[{"name":"IcingaApplication","perfdata":[],"status":{"icingaapplication":{"app":{"enable_event_handlers":true,"enable_flapping":true,"enable_host_checks":true,"enable_notifications":true,"enable_perfdata":true,"enable_service_checks":true,"environment":"","node_name":"icinga-master","pid":37,"program_start":1791203139.104647,"version":"v2.15.6"}}}}]}

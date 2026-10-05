@@ -181,6 +181,75 @@ async fn survives_a_closed_stdout() {
     child.kill().await.unwrap();
 }
 
+/// Opens an event stream on a served environment.
+async fn events(banner: &Banner, types: &[&str]) -> common::EventStream {
+    let client = common::client_from(common::pinned_config(banner.fingerprint));
+    let response = client
+        .post(format!("{}/v1/events", banner.url))
+        .basic_auth("root", Some("icinga"))
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({"types": types, "queue": "cli"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    common::EventStream::from_response(response)
+}
+
+/// Reads `count` events and returns the objects they are about.
+async fn objects_of(stream: &mut common::EventStream, count: usize) -> Vec<String> {
+    let mut objects = Vec::new();
+    for _ in 0..count {
+        let event = stream.next().await;
+        assert_eq!(event["type"], "CheckResult");
+        let host = event["host"].as_str().unwrap();
+        objects.push(match event["service"].as_str() {
+            Some(service) => format!("{host}!{service}"),
+            None => host.to_owned(),
+        });
+    }
+    objects.sort();
+    objects
+}
+
+/// `kill -USR1` re-checks every object of every environment.
+#[cfg(unix)]
+#[tokio::test]
+async fn sigusr1_starts_a_burst() {
+    let (mut child, banner) = launch(&["--env", "lab:0", "--no-sim"]).await;
+    let mut stream = events(&banner, &["CheckResult"]).await;
+    let pid = child.id().unwrap().to_string();
+    let status = Command::new("kill")
+        .args(["-USR1", &pid])
+        .status()
+        .await
+        .unwrap();
+    assert!(status.success());
+    // The lab: two hosts and five services.
+    let objects = objects_of(&mut stream, 7).await;
+    assert!(objects.contains(&"lab-02!ping4".to_owned()), "{objects:?}");
+    assert!(child.try_wait().unwrap().is_none(), "still serving");
+    child.kill().await.unwrap();
+}
+
+/// `--burst-every` re-checks every object periodically.
+#[tokio::test]
+async fn burst_every_rechecks_periodically() {
+    let (mut child, banner) = launch(&["--env", "lab:0", "--no-sim", "--burst-every", "1"]).await;
+    let mut stream = events(&banner, &["CheckResult"]).await;
+    let first = objects_of(&mut stream, 7).await;
+    let second = objects_of(&mut stream, 7).await;
+    assert_eq!(first, second);
+    child.kill().await.unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_icinga-mock"))
+        .args(["--env", "lab:0", "--burst-every", "0"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success(), "a zero period is refused");
+}
+
 #[tokio::test]
 async fn rejects_unknown_environments() {
     let output = Command::new(env!("CARGO_BIN_EXE_icinga-mock"))

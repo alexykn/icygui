@@ -61,15 +61,36 @@ async fn status_lists_every_component() {
         .iter()
         .map(|entry| entry["name"].as_str().unwrap())
         .collect();
+    // Every status function of Icinga 2.15, enabled or not.
     assert_eq!(
         names,
         [
             "ApiListener",
             "CIB",
             "CheckerComponent",
+            "ElasticsearchWriter",
+            "FileLogger",
+            "GelfWriter",
+            "GraphiteWriter",
             "IcingaApplication",
-            "NotificationComponent"
+            "IdoMysqlConnection",
+            "IdoPgsqlConnection",
+            "Influxdb2Writer",
+            "InfluxdbWriter",
+            "JournaldLogger",
+            "NotificationComponent",
+            "OpenTsdbWriter",
+            "PerfdataWriter",
+            "SyslogLogger",
         ]
+    );
+    let graphite = results(&body)
+        .iter()
+        .find(|entry| entry["name"] == "GraphiteWriter")
+        .unwrap();
+    assert_eq!(
+        graphite,
+        &json!({"name": "GraphiteWriter", "perfdata": [], "status": {"graphitewriter": {}}})
     );
 
     let (status, body) = get(&client, &server, "/v1/status/IcingaApplication").await;
@@ -82,17 +103,17 @@ async fn status_lists_every_component() {
     let (status, body) = get(&client, &server, "/v1/status/CIB").await;
     assert_eq!(status, StatusCode::OK);
     let cib = &results(&body)[0]["status"];
-    assert_eq!(cib["num_hosts_down"], json!(3.0));
-    assert_eq!(cib["num_hosts_unreachable"], json!(5.0));
+    assert_eq!(cib["num_hosts_down"], json!(3));
+    assert_eq!(cib["num_hosts_unreachable"], json!(5));
     let summary = ic_mock::scenarios::prod_cluster().summary();
     assert_eq!(
         cib["num_services_critical"],
-        json!(f64::from(u32::try_from(summary.services_critical).unwrap()))
+        json!(summary.services_critical)
     );
 
     let (status, body) = get(&client, &server, "/v1/status/Nope").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body, json!({"error": 404.0, "status": "No objects found."}));
+    assert_eq!(body, json!({"error": 404, "status": "No objects found."}));
 }
 
 #[tokio::test]
@@ -114,7 +135,7 @@ async fn bad_credentials_get_icinga_401() {
         let (_, body) = json(response).await;
         assert_eq!(
             body,
-            json!({"error": 401.0, "status": "Unauthorized. Please check your user credentials."})
+            json!({"error": 401, "status": "Unauthorized. Please check your user credentials."})
         );
     }
 
@@ -296,7 +317,7 @@ async fn permissions_are_checked_per_type_and_action() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(
         body,
-        json!({"error": 403.0, "status": "Missing permission: objects/query/service"})
+        json!({"error": 403, "status": "Missing permission: objects/query/service"})
     );
     // Filters need `filter-expression` (Icinga's default enforcement).
     let (status, body) = json(
@@ -369,24 +390,35 @@ async fn filter_expression_enforcement_can_be_disabled() {
 }
 
 #[tokio::test]
-async fn integral_number_format() {
-    let config = MockConfig {
-        number_format: NumberFormat::Integral,
-        ..MockConfig::default()
-    };
-    let (server, client) = start(config).await;
-    let (_, body) = get(
-        &client,
-        &server,
-        "/v1/objects/hosts/lab-01?attrs=state&attrs=max_check_attempts",
-    )
-    .await;
-    assert_eq!(
-        results(&body)[0]["attrs"],
-        json!({"state": 0, "max_check_attempts": 3})
+async fn number_formats() {
+    // The default, like Icinga 2.15: whole numbers are integers.
+    let (server, client) = lab().await;
+    let path = "/v1/objects/hosts/lab-01?attrs=state&attrs=max_check_attempts&attrs=check_interval&attrs=last_check";
+    let (_, body) = get(&client, &server, path).await;
+    let attrs = &results(&body)[0]["attrs"];
+    assert_eq!(attrs["state"], json!(0));
+    assert_eq!(attrs["max_check_attempts"], json!(3));
+    assert!(attrs["state"].is_u64());
+    assert!(
+        attrs["last_check"].is_f64(),
+        "fractional seconds stay floats"
     );
     let (_, body) = get(&client, &server, "/v1/nonsense").await;
     assert_eq!(body["error"], json!(404));
+
+    // The documentation's style: every number with a fraction.
+    let config = MockConfig {
+        number_format: NumberFormat::Float,
+        ..MockConfig::default()
+    };
+    let (server, client) = start(config).await;
+    let (_, body) = get(&client, &server, path).await;
+    let attrs = &results(&body)[0]["attrs"];
+    assert_eq!(attrs["state"], json!(0.0));
+    assert_eq!(attrs["max_check_attempts"], json!(3.0));
+    assert_eq!(attrs["check_interval"], json!(60.0));
+    let (_, body) = get(&client, &server, "/v1/nonsense").await;
+    assert_eq!(body["error"], json!(404.0));
 }
 
 #[tokio::test]
@@ -413,7 +445,7 @@ async fn injected_failures_and_latency() {
     for _ in 0..2 {
         let (status, body) = get(&client, &server, "/v1/status").await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body["error"], json!(503.0));
+        assert_eq!(body["error"], json!(503));
         assert!(
             body["status"]
                 .as_str()

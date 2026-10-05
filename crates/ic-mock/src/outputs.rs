@@ -14,13 +14,59 @@ fn result(output: String, perfdata: Vec<String>) -> PluginResult {
     PluginResult { output, perfdata }
 }
 
-/// Output for `state` (0 OK .. 3 UNKNOWN) of a service check command.
+/// The label of a check state in plugin output.
+fn label(state: u8) -> &'static str {
+    match state {
+        0 => "OK",
+        1 => "WARNING",
+        2 => "CRITICAL",
+        _ => "UNKNOWN",
+    }
+}
+
+/// `check_disk` output for the partition a `disk <path>` service watches.
+fn disk_output(service: &str, state: u8, rng: &mut Rng) -> PluginResult {
+    let partition = service
+        .strip_prefix("disk ")
+        .filter(|path| path.starts_with('/'))
+        .unwrap_or("/");
+    let size = 40.0 + rng.range(0.0, 460.0);
+    let used_percent = match state {
+        0 => rng.range(18.0, 75.0),
+        1 => rng.range(81.0, 89.0),
+        _ => rng.range(91.0, 99.0),
+    };
+    let used = size * used_percent / 100.0;
+    let inodes = 99.0 - rng.range(0.0, 15.0);
+    result(
+        format!(
+            "DISK {} - free space: {partition} {:.0} GiB ({:.0}% inode={inodes:.0}%)",
+            label(state),
+            size - used,
+            100.0 - used_percent
+        ),
+        vec![format!(
+            "{partition}={used:.1}GiB;{:.1};{:.1};0;{size:.1}",
+            size * 0.8,
+            size * 0.9
+        )],
+    )
+}
+
+/// Output for `state` (0 OK .. 3 UNKNOWN) of a service (`service` is its
+/// short name, e.g. `disk /var`) checked with `command`.
 #[expect(
     clippy::too_many_lines,
     reason = "one arm per check command keeps the templates readable"
 )]
-pub(crate) fn service_output(command: &str, state: u8, rng: &mut Rng) -> PluginResult {
+pub(crate) fn service_output(
+    service: &str,
+    command: &str,
+    state: u8,
+    rng: &mut Rng,
+) -> PluginResult {
     match (command, state) {
+        ("disk", 0..=2) => disk_output(service, state, rng),
         ("ping4" | "ping", 0) => {
             let rta = rng.range(0.2, 2.5);
             result(
@@ -59,27 +105,6 @@ pub(crate) fn service_output(command: &str, state: u8, rng: &mut Rng) -> PluginR
             "CRITICAL - Socket timeout after 10 seconds".to_owned(),
             Vec::new(),
         ),
-        ("disk", 0) => {
-            let used = rng.range(18.0, 68.0);
-            result(
-                format!("DISK OK - {used:.0}% used"),
-                vec![format!("/={:.1}GB;35.2;39.6;0;44.0", used * 0.44)],
-            )
-        }
-        ("disk", 1) => {
-            let used = rng.range(81.0, 89.0);
-            result(
-                format!("DISK WARNING - {used:.0}% used"),
-                vec![format!("/={:.1}GB;35.2;39.6;0;44.0", used * 0.44)],
-            )
-        }
-        ("disk", 2) => {
-            let used = rng.range(91.0, 99.0);
-            result(
-                format!("DISK CRITICAL - {used:.0}% used"),
-                vec![format!("/={:.1}GB;35.2;39.6;0;44.0", used * 0.44)],
-            )
-        }
         ("load", 0) => {
             let l1 = rng.range(0.2, 3.2);
             let l5 = l1 * rng.range(0.8, 1.1);
@@ -203,9 +228,75 @@ pub(crate) fn service_output(command: &str, state: u8, rng: &mut Rng) -> PluginR
                 vec![format!("procs={count};500;800;0;")],
             )
         }
-        ("procs", 1) => result(
-            "PROCS WARNING: 612 processes".to_owned(),
-            vec!["procs=612;500;800;0;".to_owned()],
+        ("procs", 1 | 2) => {
+            let count = if state == 1 { 612 } else { 914 };
+            result(
+                format!("PROCS {}: {count} processes", label(state)),
+                vec![format!("procs={count};500;800;0;")],
+            )
+        }
+        ("swap", 2) => result(
+            "SWAP CRITICAL - 4% free".to_owned(),
+            vec!["swap=4%;25;10;0;100".to_owned()],
+        ),
+        ("users", 0..=2) => {
+            let count = match state {
+                0 => rng.below(6),
+                1 => 21 + rng.below(20),
+                _ => 51 + rng.below(30),
+            };
+            result(
+                format!(
+                    "USERS {} - {count} users currently logged in",
+                    label(state)
+                ),
+                vec![format!("users={count};20;50;0")],
+            )
+        }
+        ("ssl_cert", 0..=2) => {
+            let days = match state {
+                0 => 31 + rng.below(330),
+                1 => 8 + rng.below(22),
+                _ => rng.below(7),
+            };
+            result(
+                format!(
+                    "SSL {} - Certificate will expire in {days} days",
+                    label(state)
+                ),
+                vec![format!("days={days};30;7;0")],
+            )
+        }
+        ("backup", 0..=2) => {
+            let hours = match state {
+                0 => 1 + rng.below(20),
+                1 => 25 + rng.below(20),
+                _ => 49 + rng.below(100),
+            };
+            let size = 50 + rng.below(900);
+            result(
+                format!(
+                    "{} - last backup {hours}h ago, {size} GiB",
+                    label(state)
+                ),
+                vec![format!("age={}s;86400;172800;0", hours * 3_600)],
+            )
+        }
+        ("raid", 0..=2) => result(
+            match state {
+                0 => "OK - all 4 disks online".to_owned(),
+                1 => "WARNING - array md0 is rebuilding (37% done)".to_owned(),
+                _ => "CRITICAL - array md0 is degraded: disk sdb failed".to_owned(),
+            },
+            Vec::new(),
+        ),
+        ("smart", 0..=2) => result(
+            match state {
+                0 => "OK - no SMART errors on 4 disks".to_owned(),
+                1 => "WARNING - sdc: 12 reallocated sectors".to_owned(),
+                _ => "CRITICAL - sdc: SMART overall-health self-assessment FAILED".to_owned(),
+            },
+            Vec::new(),
         ),
         (_, 3) => result(
             match rng.below(3) {
@@ -296,14 +387,17 @@ mod tests {
 
     #[test]
     fn outputs_are_deterministic_and_plausible() {
-        let a = service_output("ping4", 0, &mut Rng::new(1));
-        let b = service_output("ping4", 0, &mut Rng::new(1));
+        let a = service_output("ping4", "ping4", 0, &mut Rng::new(1));
+        let b = service_output("ping4", "ping4", 0, &mut Rng::new(1));
         assert_eq!(a, b);
         assert!(a.output.starts_with("PING OK"));
         assert_eq!(a.perfdata.len(), 2);
-        for command in ["disk", "load", "mem", "ntp_time", "http", "apt", "whatever"] {
+        for command in [
+            "disk", "load", "mem", "ntp_time", "http", "apt", "procs", "swap", "users", "ssl_cert",
+            "backup", "raid", "smart", "whatever",
+        ] {
             for state in 0..=3 {
-                let out = service_output(command, state, &mut Rng::new(9));
+                let out = service_output("check", command, state, &mut Rng::new(9));
                 assert!(!out.output.is_empty(), "{command} {state}");
                 for entry in &out.perfdata {
                     assert!(
@@ -318,5 +412,18 @@ mod tests {
                 .output
                 .contains("10.0.0.1")
         );
+    }
+
+    #[test]
+    fn disk_output_names_the_partition() {
+        let out = service_output("disk /var", "disk", 1, &mut Rng::new(3));
+        assert!(
+            out.output.starts_with("DISK WARNING - free space: /var "),
+            "{}",
+            out.output
+        );
+        assert!(out.perfdata[0].starts_with("/var="), "{:?}", out.perfdata);
+        let root = service_output("disk", "disk", 0, &mut Rng::new(3));
+        assert!(root.perfdata[0].starts_with("/="), "{:?}", root.perfdata);
     }
 }

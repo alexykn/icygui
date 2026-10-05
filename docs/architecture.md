@@ -90,42 +90,67 @@ Pending objects have `last_check_result = null`, `problem = false` and, like Ici
 
 ## ic-config
 
-The data types are done (`model.rs`). To be built:
+Implemented: the data types (`model.rs`) plus persistence, validation and sharing.
 
 ```rust
 pub struct Paths { pub config_file: PathBuf, pub data_dir: PathBuf, pub log_dir: PathBuf }
 impl Paths {
-    pub fn from_system() -> Result<Paths, ConfigError>;   // directories::ProjectDirs("io.github", "alexykn", "icygui")
-    pub fn in_dir(root: &Path) -> Paths;                   // tests and portable mode
+    pub fn from_system() -> Result<Paths, ConfigError>;   // directories::ProjectDirs("io.github", "alexykn", "icygui"); logs: ~/Library/Logs/io.github.alexykn.icygui (macOS), $XDG_STATE_HOME/icygui/logs (Linux)
+    pub fn in_dir(root: &Path) -> Paths;                   // tests and portable mode: <root>/config.toml, <root>/data, <root>/logs
+    pub fn config_store(&self) -> ConfigStore;
+    pub fn create_dirs(&self) -> Result<(), ConfigError>;  // new directories are 0700 on Unix
 }
 pub struct ConfigStore { /* path */ }
 impl ConfigStore {
     pub fn new(path: PathBuf) -> Self;
-    pub fn load(&self) -> Result<Config, ConfigError>;    // missing file → Config::default(); runs migrations
-    pub fn save(&self, config: &Config) -> Result<(), ConfigError>;   // atomic: temp file in same dir, fsync, rename; keeps one `.bak`
+    pub fn path(&self) -> &Path;
+    pub fn backup_path(&self) -> PathBuf;                 // "<file name>.bak" next to the file
+    pub fn load(&self) -> Result<Config, ConfigError>;    // missing file → Config::default() (a dangling symlink → Io error); runs migrations; repairs ids (below)
+    pub fn load_backup(&self) -> Result<Option<Config>, ConfigError>;   // the `.bak` copy, for "restore"; never writes
+    pub fn save(&self, config: &Config) -> Result<(), ConfigError>;   // atomic: temp file in same dir, fsync, rename; keeps one `.bak`; refuses secrets (Invalid)
 }
 pub fn migrate(raw: toml::Table) -> Result<Config, ConfigError>;     // version 0/absent → 1, future versions → error
 impl Config {
     pub fn validate(&self) -> Vec<ValidationIssue>;       // ids unique, URLs are https with host, names non-empty, …
     pub fn environment(&self, id: &str) -> Option<&Environment>;
     pub fn environment_mut(&mut self, id: &str) -> Option<&mut Environment>;
+    pub fn repair_ids(&mut self) -> usize;                // ids derived from content (UUID v5) for blank or duplicate ones; returns how many changed
 }
 impl Environment {
-    pub fn new(name: &str, url: &str, auth: AuthConfig) -> Environment;   // fresh UUID, default dashboards
-    pub fn author_name(&self) -> &str;                    // author or the basic-auth username
-    pub fn dashboard(&self, group_id: &str, dashboard_id: &str) -> Option<&Dashboard>;
+    pub fn new(name: &str, url: &str, auth: AuthConfig) -> Environment;   // fresh UUID, default dashboards, trusts the system roots
+    pub fn author_name(&self) -> &str;                    // author (unless blank) or the basic-auth username, trimmed; "" for a client certificate without author
+    pub fn group(&self, group_id: &str) -> Option<&DashboardGroup>;      // + group_mut
+    pub fn dashboard(&self, group_id: &str, dashboard_id: &str) -> Option<&Dashboard>;   // + dashboard_mut
+    pub fn api_url(&self) -> Result<Url, ConfigError>;    // checked like validate(); the path always ends in "/", so join("v1/…") keeps a proxy prefix; InvalidUrl masks credentials, query and fragment
+    pub fn validate(&self) -> Vec<ValidationIssue>;       // paths relative to the environment, for the environment editor
 }
+impl TlsConfig { pub fn pinned_fingerprint(&self) -> Result<Option<[u8; 32]>, ConfigError>; }
+impl DashboardGroup { pub fn new(name: &str) -> Self; /* + dashboard, dashboard_mut */ }   // fresh id, ScopeSetting::Inherit
+impl Dashboard { pub fn new(name: &str, view: View) -> Self; }                            // fresh id, ScopeSetting::Inherit
+pub struct ValidationIssue { pub path: String, pub message: String }   // "environments[0].tls.pinned_sha256" / "must not be empty"; Display "path: message"
+pub const MIN_EVENT_LOG_RETENTION_HOURS: u32;             // 1
+pub const MIN_RECONCILE_INTERVAL_SECS: u32;               // 10
 pub fn default_groups() -> Vec<DashboardGroup>;           // "overview": "problems" (services, problems_only, hide_handled), "host problems", "all services"
 pub fn new_id() -> String;                                // UUID v4
-pub fn export_groups(groups: &[DashboardGroup]) -> Result<String, ConfigError>;     // TOML for sharing
-pub fn import_groups(text: &str) -> Result<Vec<DashboardGroup>, ConfigError>;       // fresh ids on import
-pub fn parse_fingerprint(text: &str) -> Result<[u8; 32], ConfigError>;              // "AB:CD:…" or hex
+pub fn export_groups(groups: &[DashboardGroup]) -> Result<String, ConfigError>;     // TOML for sharing: format = "icygui-dashboards", version, [[groups]]
+pub fn import_groups(text: &str) -> Result<Vec<DashboardGroup>, ConfigError>;       // fresh ids on import; nameless groups/dashboards → Invalid
+pub fn parse_fingerprint(text: &str) -> Result<[u8; 32], ConfigError>;              // "AB:CD:…", "AB CD …", plain hex, openssl's "sha256 Fingerprint=…"
+pub fn format_fingerprint(fingerprint: &[u8; 32]) -> String;                        // "AB:CD:…", the form to store in pinned_sha256
+pub enum ConfigError {
+    NoHomeDirectory, Io { action: &'static str, path: PathBuf, source: io::Error }, Parse { message: String },
+    InvalidVersion(String), UnsupportedVersion { found: u64, supported: u64 }, Serialize(String),
+    InvalidFingerprint(String), InvalidUrl { url: String, reason: String }, NotAnExport(String), Invalid(Vec<ValidationIssue>),
+}
 ```
 
-- File permissions: `0600` for the config file on Unix.
-- Unknown keys in the file are ignored without failing the load.
-- A corrupt file is reported, not silently replaced: `load` returns an error and the app offers to restore the `.bak` copy or start fresh.
-- Tests: round trips, migrations, atomicity (an interrupted write leaves the old file intact), validation, import/export, path layout.
+- File permissions: `0600` for the config file and its `.bak` on Unix.
+- Unknown keys in the file are ignored without failing the load (and logged; keys that look like passwords get a warning of their own, also inside the tagged `auth` and override `object` tables). Logs never contain values.
+- A corrupt file is reported, not silently replaced: `load` returns an error (`Parse`, with line and column and at most a short excerpt of the line) and the app offers to restore the `.bak` copy (`load_backup`, then `save`) or start fresh (`save(&Config::default())`); either way the corrupt file becomes the `.bak`, and `save` also keeps any file this version can't read (corrupt or newer) as `<name>.unreadable-<unix seconds>`, which later saves never replace. A file from a newer version gives `UnsupportedVersion`; don't save over it without asking.
+- A config file that is a symlink (or below one) whose target is missing is an `Io` error, not a missing file: the volume may not be mounted yet, and defaults would silently drop every environment. `save` never replaces such a link: it writes through it when the target's directory exists and fails otherwise.
+- `load` gives entries without a unique id (hand-written files) ids derived from their content: environment from name and URL, group from environment id and name, dashboard from environment id, group id and name (UUID v5, fixed namespace; never change the derivation). The same file therefore gets the same ids at every start even when it can't be written (read-only, managed by Nix or Ansible), so keychain accounts (environment ids) stay stable. It also saves at once to record them; a failed save is only logged.
+- `save` writes nothing when the contents are unchanged, replaces the target of a symlinked config file (keeping the link), and stamps `version = CONFIG_VERSION`. It refuses (`Invalid`, nothing written) settings that would put a secret into the file: a user name or password in an environment URL, or a basic-auth username containing `:` (curl's `user:password`, which Icinga can never match).
+- Validation is advisory and pure: `load` never fails because of it, and `save` refuses only the secret issues above. Error messages and validation issues quote user values only in short excerpts and never quote URL credentials.
+- Tests: round trips, migrations, atomicity (an interrupted write leaves the old file intact, concurrent saves and loads never see a partial file), stable derived ids, secrets, symlinks, validation, import/export (with log capture), path layout.
 
 ---
 

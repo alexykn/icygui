@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><meta name="design_doc_mode" content="canvas"><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet"><style>body{margin:0;background:#0f1113;font-family:'IBM Plex Mono',ui-monospace,monospace;color:#d6d8da}a{color:#74ade8;text-decoration:none}a:hover{color:#a3c8f0}.dv-turn{padding:40px 44px 32px;scroll-margin-top:16px}.dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 8px}.dv-tid{font:600 10px 'IBM Plex Mono',monospace;padding:3px 7px;background:#d6d8da;color:#0f1113;border-radius:4px}.dv-tname{font:600 14px/1.2 'IBM Plex Mono',monospace;color:#d6d8da}.dv-opts{display:flex;flex-wrap:wrap;gap:48px;align-items:flex-start}.dv-opt{flex:none;display:flex;flex-direction:column;gap:10px;scroll-margin-top:16px}.dv-oid{font:600 10.5px 'IBM Plex Mono',monospace;padding:3px 7px;background:#2a2f33;color:#d6d8da;border-radius:5px}.dv-olabel{display:flex;align-items:baseline;gap:8px;font:400 12px/1.3 'IBM Plex Mono',monospace;color:#8b9094}.dv-opt:target .dv-oid{background:#74ade8;color:#0f1113}.dv-next{margin:28px 0 0;font:12px/1.5 'IBM Plex Mono',monospace;color:#7a7f84}</style></helmet>
+<section class="dv-turn" id="t2">
+<div class="dv-thd"><a class="dv-tid" href="#t2">2</a><span class="dv-tname">Calmer: thread-style sidebar, Icinga Web-style list rows, detail opens on click</span></div>
+<p style="margin:0 0 28px;max-width:900px;font-size:12.5px;line-height:1.7;color:#8b9094;text-wrap:pretty">Changes from turn 1 (Icinga Client.dc.html): the sidebar now uses Zed's project/thread pattern, with environments as groups and dashboards as items. Each row is one Icinga Web line: a filled state circle with time-in-state, the object name, and the plugin output. Acknowledged or in-downtime problems show a hollow ring. Clicking a row splits the view and opens the host or service pane, like Icinga Web's second column. Everything is mono and flat, with no dashlet chrome.</p>
+<div class="dv-opts">
+<sc-for list="{{ screens }}" as="s" hint-placeholder-count="3">
+<div class="dv-opt" id="{{ s.id }}">
+<div class="dv-olabel"><a class="dv-oid" href="#{{ s.id }}">{{ s.id }}</a>{{ s.label }}</div>
+<div style="width:1440px;height:900px;background:#1d2125;border:1px solid #33383c;border-radius:10px;overflow:hidden;display:grid;grid-template-columns:300px minmax(0,1fr);box-shadow:0 30px 80px rgba(0,0,0,.5)">
+
+<div style="display:flex;flex-direction:column;border-right:1px solid #2e3337;min-height:0">
+<div style="display:flex;align-items:center;gap:8px;height:40px;padding:0 12px;border-bottom:1px solid #2a2f33;flex:none">
+<span style="width:12px;height:12px;border-radius:50%;background:#ff5f57"></span><span style="width:12px;height:12px;border-radius:50%;background:#febc2e"></span><span style="width:12px;height:12px;border-radius:50%;background:#28c840"></span>
+<span style="width:1px;height:18px;background:#33383c;margin:0 6px"></span>
+<span style="width:10px;height:10px;border:1.5px solid #8b9094;border-radius:50%;flex:none"></span>
+<span style="font-size:13px;color:#8b9094">Search dashboards…</span>
+</div>
+<sc-for list="{{ s.groups }}" as="g" hint-placeholder-count="3">
+<div style="display:flex;flex-direction:column;padding:0 0 6px">
+<div style="display:flex;align-items:center;gap:8px;height:36px;padding:0 12px;background:{{ g.bg }}">
+<span style="font-size:13.5px;font-weight:500;color:{{ g.fg }}">{{ g.name }}</span>
+<span style="font-size:11px;color:#8b9094">{{ g.chev }}</span>
+<span style="flex:1"></span>
+<span style="font-size:15px;color:{{ g.iconC }}">+</span><span style="font-size:13px;color:{{ g.iconC }};letter-spacing:1px">···</span>
+</div>
+<sc-for list="{{ g.items }}" as="t">
+<div style="display:flex;align-items:center;gap:12px;height:30px;padding:0 12px 0 14px;background:{{ t.bg }}">
+<span style="width:8px;height:8px;border-radius:50%;background:{{ t.dot }};flex:none"></span>
+<span style="flex:1;font-size:13px;color:{{ t.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.label }}</span>
+<span style="font-size:11.5px;color:#8b9094">{{ t.count }}</span>
+</div>
+</sc-for>
+</div>
+</sc-for>
+<div style="flex:1"></div>
+<div style="display:flex;align-items:center;gap:14px;height:38px;padding:0 12px;border-top:1px solid #2a2f33;flex:none">
+<span style="width:13px;height:11px;border:1.5px solid #b5b9bc;border-radius:2px;box-shadow:inset 4px 0 0 #b5b9bc"></span>
+<span style="width:12px;height:12px;border:1.5px solid #b5b9bc;border-radius:50%"></span>
+<span style="flex:1;font-size:11px;color:#6c7175;display:flex;align-items:center;gap:6px"><span style="width:6px;height:6px;border-radius:50%;background:#56b870"></span>master-01 · 2s</span>
+<span style="font-size:16px;color:#b5b9bc">+</span>
+</div>
+</div>
+
+<div style="display:grid;grid-template-columns:{{ s.cols }};min-width:0;min-height:0">
+<div style="display:flex;flex-direction:column;min-width:0;min-height:0;border-right:1px solid {{ s.splitBd }}">
+<div style="display:flex;align-items:center;gap:12px;height:40px;padding:0 18px;border-bottom:1px solid #2a2f33;flex:none">
+<span style="font-size:13.5px;font-weight:500;color:#eceeef">production</span>
+<span style="font-size:12px;color:#6c7175">service problems</span>
+<span style="flex:1"></span>
+<span style="font-size:12px;color:#8b9094">severity ↓</span>
+<span style="font-size:13px;color:#8b9094;letter-spacing:1px">···</span>
+</div>
+<div style="display:flex;align-items:center;gap:18px;height:36px;padding:0 18px;border-bottom:1px solid #2a2f33;font-size:12px;color:#8b9094;flex:none;white-space:nowrap;overflow:hidden">
+<span style="display:flex;align-items:center;gap:7px"><span style="width:9px;height:9px;border-radius:50%;background:#e06c6c"></span>12 critical</span>
+<span style="display:flex;align-items:center;gap:7px"><span style="width:9px;height:9px;border-radius:50%;background:#e5b04a"></span>29 warning</span>
+<span style="display:flex;align-items:center;gap:7px"><span style="width:9px;height:9px;border-radius:50%;background:#a97fdb"></span>24 unknown</span>
+<span style="flex:1"></span>
+<span style="color:#6c7175">handled hidden</span>
+</div>
+<sc-for list="{{ s.rows }}" as="r" hint-placeholder-count="10">
+<div style="display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:14px;align-items:center;padding:10px 18px;border-bottom:1px solid #262a2e;background:{{ r.bg }}">
+<div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+<span style="width:22px;height:22px;border-radius:50%;background:{{ r.fill }};box-shadow:inset 0 0 0 3px {{ r.c }}"></span>
+<span style="font-size:10.5px;color:#8b9094">{{ r.since }}</span>
+</div>
+<div style="display:flex;flex-direction:column;gap:4px;min-width:0">
+<span style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:#eceeef;font-weight:500">{{ r.service }}</span><span style="color:#6c7175"> on </span><span style="color:#b5b9bc">{{ r.host }}</span></span>
+<span style="font-size:12px;color:#8b9094;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.output }}</span>
+</div>
+<span style="font-size:11.5px;color:#6c7175;text-align:right">{{ r.tag }}</span>
+</div>
+</sc-for>
+</div>
+
+<sc-if value="{{ s.isSvc }}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;flex-direction:column;min-width:0;min-height:0;background:#1a1d21">
+<div style="display:flex;align-items:center;gap:12px;height:40px;padding:0 20px;border-bottom:1px solid #2a2f33;flex:none"><span style="font-size:12px;color:#8b9094">service</span><span style="flex:1"></span><span style="font-size:12px;color:#6c7175">↗ open as tab</span><span style="font-size:15px;color:#8b9094">×</span></div>
+<div style="padding:20px 24px;display:flex;flex-direction:column;gap:24px;overflow:hidden">
+<div style="display:flex;gap:16px;align-items:center">
+<div style="display:flex;flex-direction:column;align-items:center;gap:4px"><span style="width:34px;height:34px;border-radius:50%;background:#e06c6c"></span><span style="font-size:10.5px;color:#e06c6c;font-weight:600">CRIT</span></div>
+<div style="display:flex;flex-direction:column;gap:4px"><span style="font-size:18px;font-weight:500;color:#eceeef">postgres-replication</span><span style="font-size:12.5px;color:#8b9094">on <a href="#2c">db-prod-03</a> · 14m · hard 3/3</span></div>
+</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<sc-for list="{{ actions }}" as="a" hint-placeholder-count="4"><span style="display:flex;align-items:center;gap:8px;height:28px;padding:0 10px;border-radius:5px;background:{{ a.bg }};color:{{ a.fg }};font-size:12.5px">{{ a.label }}<span style="color:{{ a.kc }};font-size:11px">{{ a.key }}</span></span></sc-for>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px">
+<span style="font-size:11.5px;color:#6c7175">plugin output</span>
+<div style="background:#16191c;border:1px solid #2a2f33;border-radius:6px;padding:12px 14px;font-size:12.5px;line-height:1.7;color:#c4c7ca;white-space:pre-wrap">CRITICAL - standby lag 412s (&gt; 300s)
+primary  db-prod-01  lsn 4A/9C21F0D8
+standby  db-prod-03  lsn 4A/2E77A120
+slot     repl_db03   retained 1.8 GiB</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:2px">
+<div style="display:grid;grid-template-columns:minmax(0,1fr) 90px 60px 60px;gap:10px;font-size:11.5px;color:#6c7175;padding:0 0 6px"><span>performance data</span><span style="text-align:right">value</span><span style="text-align:right">warn</span><span style="text-align:right">crit</span></div>
+<sc-for list="{{ perf }}" as="p" hint-placeholder-count="3">
+<div style="display:grid;grid-template-columns:minmax(0,1fr) 90px 60px 60px;gap:10px;font-size:12.5px;padding:6px 0;border-top:1px solid #262a2e"><span style="color:#b5b9bc">{{ p.k }}</span><span style="text-align:right;color:{{ p.c }}">{{ p.v }}</span><span style="text-align:right;color:#6c7175">{{ p.w }}</span><span style="text-align:right;color:#6c7175">{{ p.cr }}</span></div>
+</sc-for>
+</div>
+<div style="display:flex;flex-direction:column;gap:2px">
+<span style="font-size:11.5px;color:#6c7175;padding:0 0 6px">check</span>
+<sc-for list="{{ checkKv }}" as="kv" hint-placeholder-count="5">
+<div style="display:grid;grid-template-columns:140px minmax(0,1fr);gap:10px;font-size:12.5px;padding:5px 0;border-top:1px solid #262a2e"><span style="color:#8b9094">{{ kv.k }}</span><span style="color:#d6d8da">{{ kv.v }}</span></div>
+</sc-for>
+</div>
+<div style="display:flex;gap:12px;font-size:12.5px;line-height:1.6;color:#b5b9bc"><span style="color:#6c7175;flex:none">#</span><span><span style="color:#d6d8da">j.berg</span> <span style="color:#6c7175">13:58</span><br>Failover drill on db-prod-01 at 15:00. Expect lag on 03.</span></div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ s.isHost }}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;flex-direction:column;min-width:0;min-height:0;background:#1a1d21">
+<div style="display:flex;align-items:center;gap:12px;height:40px;padding:0 20px;border-bottom:1px solid #2a2f33;flex:none"><span style="font-size:12px;color:#8b9094">host</span><span style="flex:1"></span><span style="font-size:12px;color:#6c7175">↗ open as tab</span><span style="font-size:15px;color:#8b9094">×</span></div>
+<div style="padding:20px 24px 0;display:flex;flex-direction:column;gap:20px;flex:none">
+<div style="display:flex;gap:16px;align-items:center">
+<div style="display:flex;flex-direction:column;align-items:center;gap:4px"><span style="width:34px;height:34px;border-radius:50%;background:#56b870"></span><span style="font-size:10.5px;color:#56b870;font-weight:600">UP</span></div>
+<div style="display:flex;flex-direction:column;gap:4px"><span style="font-size:18px;font-weight:500;color:#eceeef">db-prod-03</span><span style="font-size:12.5px;color:#8b9094">10.0.2.13 · up 41d · PING OK rta 0.42ms</span></div>
+</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<sc-for list="{{ hostActions }}" as="a" hint-placeholder-count="3"><span style="display:flex;align-items:center;gap:8px;height:28px;padding:0 10px;border-radius:5px;background:#262a2e;color:#d6d8da;font-size:12.5px">{{ a.label }}<span style="color:#6c7175;font-size:11px">{{ a.key }}</span></span></sc-for>
+</div>
+<div style="display:flex;gap:22px;font-size:12.5px;border-bottom:1px solid #2a2f33">
+<span style="padding:0 0 9px;color:#eceeef;border-bottom:2px solid #74ade8">services 23</span><span style="color:#8b9094">history</span><span style="color:#8b9094">vars</span><span style="color:#8b9094">config</span>
+</div>
+</div>
+<sc-for list="{{ hostServices }}" as="r" hint-placeholder-count="8">
+<div style="display:grid;grid-template-columns:22px minmax(0,1fr) 48px;gap:14px;align-items:center;padding:9px 24px;border-bottom:1px solid #262a2e">
+<span style="width:14px;height:14px;border-radius:50%;background:{{ r.fill }};box-shadow:inset 0 0 0 2px {{ r.c }}"></span>
+<div style="display:flex;flex-direction:column;gap:2px;min-width:0"><span style="font-size:13px;color:#eceeef">{{ r.name }}</span><span style="font-size:12px;color:#8b9094;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.output }}</span></div>
+<span style="font-size:11px;color:#6c7175;text-align:right">{{ r.since }}</span>
+</div>
+</sc-for>
+<div style="padding:10px 24px;font-size:12px;color:#6c7175">+ 16 more ok</div>
+</div>
+</sc-if>
+
+</div>
+</div>
+</div>
+</sc-for>
+</div>
+<p class="dv-next">Try next: "Group list rows by host like Icinga Web's grouped view" · "Show <a class="dv-oid" href="#2b">2b</a> with the acknowledge form inline in the pane" · "Collapsed sidebar state"</p>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  renderVals() {
+    const C = { crit: '#e06c6c', warn: '#e5b04a', ok: '#56b870', unk: '#a97fdb', none: '#3a3f43' };
+    const groupDefs = [
+      ['prod-cluster', [['overview', C.crit, '12'], ['production', C.crit, '41'], ['databases', C.crit, '4'], ['network', C.unk, '5'], ['kubernetes', C.warn, '7']]],
+      ['staging', [['overview', C.warn, '3'], ['deploy-checks', C.ok, '']]],
+      ['lab', [['sandbox', C.none, '']]],
+    ];
+    const groups = (activeGroup, activeItem) => groupDefs.map(([name, items]) => {
+      const on = name === activeGroup;
+      return {
+        name, chev: on ? '⌄' : '', bg: on ? '#30353a' : 'transparent', fg: on ? '#f2f3f4' : '#b5b9bc', iconC: on ? '#d6d8da' : 'transparent',
+        items: items.map(([label, dot, count]) => ({ label, dot, count, bg: on && label === activeItem ? '#272c30' : 'transparent', fg: on && label === activeItem ? '#f2f3f4' : '#b5b9bc' })),
+      };
+    });
+    const R = (st, service, host, output, since, handled, tag) => ({ c: C[st], st, service, host, output, since, handled, tag: tag || '' });
+    const base = [
+      R('crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'),
+      R('crit', 'rabbitmq-queue', 'mq-prod-01', 'CRITICAL - queue orders.retry depth 18,402', '6m'),
+      R('crit', 'disk /var', 'k8s-node-07', 'DISK CRITICAL - /var 97% used (1.2 GiB free)', '38m'),
+      R('crit', 'http-tls', 'web-edge-02', 'SSL CRITICAL - certificate expires in 2 days', '2h', true, 'ack m.keller'),
+      R('warn', 'haproxy-backend', 'lb-prod-02', 'WARNING - backend api: 2/6 servers down', '9m'),
+      R('warn', 'http-latency', 'api-gw-01', 'WARNING - p95 1.84s (> 1.5s)', '21m'),
+      R('warn', 'load', 'db-prod-01', 'WARNING - load average 14.2, 12.8, 11.1', '1h'),
+      R('warn', 'redis-memory', 'cache-02', 'WARNING - used_memory 81% of maxmemory', '3h', true, 'downtime'),
+      R('unk', 'borg-last-run', 'backup-01', 'UNKNOWN - repository lock held by PID 4412', '52m'),
+      R('unk', 'kubelet', 'k8s-node-04', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m'),
+      R('warn', 'ntp-offset', 'k8s-node-02', 'WARNING - offset 0.82s', '2h'),
+      R('warn', 'cert-expiry', 'vpn-gw-01', 'WARNING - certificate expires in 12 days', '1d'),
+    ];
+    const rows = (sel) => base.map((r, i) => ({ ...r, fill: r.handled ? 'transparent' : r.c, bg: i === sel ? '#2a3036' : 'transparent' }));
+    const screens = [
+      { id: '2a', label: 'Dashboard list: one line per problem', cols: 'minmax(0,1fr)', splitBd: 'transparent', groups: groups('prod-cluster', 'production'), rows: rows(-1) },
+      { id: '2b', label: 'Row clicked: service pane opens beside the list', cols: 'minmax(0,1fr) 620px', splitBd: '#2e3337', isSvc: true, groups: groups('prod-cluster', 'production'), rows: rows(0) },
+      { id: '2c', label: 'Host link clicked: host pane with its services', cols: 'minmax(0,1fr) 620px', splitBd: '#2e3337', isHost: true, groups: groups('prod-cluster', 'production'), rows: rows(0) },
+    ];
+    const actions = [
+      { label: 'acknowledge', key: 'a', bg: '#74ade8', fg: '#10161d', kc: '#2b4766' },
+      { label: 'downtime', key: 'd', bg: '#262a2e', fg: '#d6d8da', kc: '#6c7175' },
+      { label: 'check now', key: 'r', bg: '#262a2e', fg: '#d6d8da', kc: '#6c7175' },
+      { label: 'comment', key: 'c', bg: '#262a2e', fg: '#d6d8da', kc: '#6c7175' },
+    ];
+    const hostActions = [{ label: 'downtime', key: 'd' }, { label: 'check now', key: 'r' }, { label: 'comment', key: 'c' }];
+    const perf = [
+      { k: 'replication_lag', v: '412s', w: '60', cr: '300', c: C.crit },
+      { k: 'wal_retained', v: '1.8GiB', w: '4', cr: '8', c: '#d6d8da' },
+      { k: 'active_connections', v: '182', w: '400', cr: '450', c: '#d6d8da' },
+    ];
+    const checkKv = [
+      { k: 'command', v: 'check_postgres' }, { k: 'interval', v: '60s · retry 15s' }, { k: 'last / next', v: '12s ago / in 48s' },
+      { k: 'endpoint', v: 'sat-ams-01' }, { k: 'notified', v: 'dba-oncall · 14:32' },
+    ];
+    const S = (st, name, output, since, handled) => ({ c: C[st], fill: handled ? 'transparent' : C[st], name, output, since });
+    const hostServices = [
+      S('crit', 'postgres-replication', 'CRITICAL - standby lag 412s (> 300s)', '14m'),
+      S('warn', 'pg-connections', 'WARNING - 182 of 200 per-db limit (orders)', '22m'),
+      S('ok', 'disk /', 'DISK OK - 41% used', '6d'),
+      S('ok', 'disk /var/lib/postgresql', 'DISK OK - 63% used', '6d'),
+      S('ok', 'load', 'OK - load average 3.1, 2.8, 2.6', '2d'),
+      S('ok', 'memory', 'OK - 71% used', '9d'),
+      S('ok', 'ntp-offset', 'OK - offset 0.004s', '41d'),
+    ];
+    return { screens, actions, hostActions, perf, checkKv, hostServices };
+  }
+}
+</script>
+</body>
+</html>

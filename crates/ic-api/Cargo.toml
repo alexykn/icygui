@@ -11,3 +11,31 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+ic-model.workspace = true
+futures.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+bytes = "1"
+# HTTP client. No default features: TLS is a rustls config we build ourselves
+# (ring provider, custom certificate verifier), and HTTP/2 is not needed
+# (Icinga's event stream requires HTTP/1.1).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+rustls-pki-types = { version = "1.12", features = ["std"] }
+tokio = { version = "1", features = ["net", "time", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+url = "2"
+x509-parser = "0.18"
+
+[dev-dependencies]
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

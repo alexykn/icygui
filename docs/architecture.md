@@ -250,6 +250,8 @@ impl Client {
     pub async fn events(&self, queue: &str, kinds: &[EventKind]) -> Result<EventStream, ApiError>;
 }
 pub async fn fetch_server_certificate(base_url: &Url, server_name: Option<&str>) -> Result<CertificateInfo, ApiError>;  // trust on first use: sha256, subject, issuer, not_after; accepts any cert, only reads it
+pub struct CertificateInfo { pub sha256: [u8; 32], pub subject: String, pub issuer: String, pub names: Vec<String>, pub not_before: Timestamp, pub not_after: Timestamp }   // fingerprint() = colon hex
+pub fn format_fingerprint(sha256: &[u8; 32]) -> String;              // "AB:CD:…", as in CertificateMismatch
 
 pub enum Detail {
     Lean,   // state, state_type, last_state_change, last_hard_state_change, last_check, next_check, next_update, check_attempt, max_check_attempts,
@@ -259,7 +261,8 @@ pub enum Detail {
 pub struct Fetched { pub hosts: Vec<Host>, pub services: Vec<Service>, pub missing: Vec<ObjectKey> }   // missing = deleted in Icinga
 pub struct ApiInfo { pub user: String, pub permissions: Vec<String>, pub version: String }
 impl ApiInfo { pub fn allows(&self, permission: &str) -> bool; }       // Icinga wildcard semantics ("*", "actions/*", "objects/query/*"); "(filtered)" entries count as allowed
-pub struct ActionResult { pub code: u16, pub status: String, pub name: Option<String> }
+pub struct ActionResult { pub code: u16, pub status: String, pub name: Option<String>, pub target: Option<String> }   // name: created comment/downtime; target: the object/downtime/comment the result is for
+impl ActionResult { pub fn is_success(&self) -> bool; }              // 2xx
 pub struct EventStream { … }                                            // impl Stream<Item = Result<Event, ApiError>>; ends on disconnect
 pub enum ApiError {
     Connect(String), Tls(String), CertificateMismatch { expected: String, actual: String },
@@ -285,11 +288,15 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
   - `config_owned`: `config_owner` is non-empty, or `scheduled_by` is non-empty.
 - *Targeting (verified against a real Icinga 2.15 with `enforce_filter_expression_permission = true`, see `contract/`):* never send `filter` expressions. From Icinga 2.17 they need the `filter-expression` permission (`403 Missing permission: filter-expression`).
   - Target objects by name: `"hosts": [...]` (type `Host`) or `"services": ["host!service", ...]` (type `Service`). This works for both queries and actions without extra permissions.
-  - A name list that contains one unknown name fails the whole request with `404 No objects found.` On a 404 for a batch, retry each name individually and treat the 404s as deleted objects.
+  - A name list that contains one unknown name fails the whole request with `404 No objects found.` On a 404 for a batch, retry each name individually and treat the 404s as deleted objects. (`ic-api` splits the batch in halves until the unknown names are isolated: same result, fewer requests.)
+  - **Never send an empty name list:** Icinga then targets *every* object of the type (`FilterUtility::GetFilterTargets` falls back to the type when no target was found).
+  - Name lists go out in batches of `ic_api::NAMES_PER_REQUEST` (200).
+  - An object query whose entries come back as per-object errors (an attribute an older Icinga doesn't know) is repeated once without `attrs`.
 - *Actions:* `POST /v1/actions/<name>` with `{ "type": "Host"|"Service", "hosts"|"services": [...], … }`.
   - Split mixed host/service targets into two requests.
-  - `ActionTarget::Downtime(name)` uses `{ "downtime": name }`; `ActionTarget::Comment(name)` uses `{ "comment": name }`.
-  - Parameter names and rules follow `12-icinga2-api.md`: `reschedule-check` sets `next_check` = now with `force`; `acknowledge-problem` always sends `notify: false`; `schedule-downtime` sends `fixed`, `duration`, `all_services`, `child_options`, `trigger_name`.
+  - `ActionTarget::Downtime(name)` uses `{ "downtime": name }` (only with `Action::RemoveAllDowntimes`, else `InvalidSettings`); `ActionTarget::Comment(name)` uses `{ "comment": name }` and always means `remove-comment` (`ic_model::Action` has no remove-comment variant; pass any action, `RemoveAllDowntimes` reads best).
+  - Parameter names and rules follow `12-icinga2-api.md`: `reschedule-check` sends `force` and leaves out `next_check`, so Icinga uses its own "now" (no client clock skew); `acknowledge-problem` always sends `notify: false`; `schedule-downtime` sends `fixed`, `duration` (0 for fixed), `all_services`, `child_options`, `trigger_name`.
+  - A 404 `No objects found.` for an action is handled like for queries (the targets were resolved before anything ran, so retrying is safe); the vanished names get a per-object 404 result. Results are matched to their target names by order.
   - `execute-command` needs an `endpoint` unless the object has `command_endpoint` (otherwise the per-object result is `404 Can't find a valid endpoint`). Pass the endpoint explicitly, defaulting to the object's `command_endpoint` or the instance's node name.
   - A response with per-object `code >= 400` still returns `Ok`, and the caller inspects the results. HTTP-level errors map to `ApiError`.
 - *Events:* `POST /v1/events` with `{ "queue": queue, "types": [...] }`. The response is newline-delimited JSON over a long-lived HTTP/1.1 response.
@@ -302,12 +309,16 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
   - Pinning: a custom verifier that compares the SHA-256 of the leaf DER and reports `CertificateMismatch` with both fingerprints, colon-hex uppercase.
   - Name override: verify against `server_name`.
   - Icinga's CA certificates often lack modern extensions; use webpki verification with the provided CA and don't add stricter policies.
+  - Old Icinga node certificates may have no subjectAltName at all: then (and only then) the CN is compared with the expected name, as OpenSSL-based clients do.
+  - No pin and no trusted root (no CA, no system roots) rejects every certificate as `UnknownIssuer`, so the caller can offer trust on first use.
+  - Proxy environment variables are ignored and redirects are not followed.
 - *Auth:* Basic auth, or a client certificate via the rustls client auth config.
 - *Errors:* 401 → `Unauthorized`, 403 → `Forbidden` (include the response's `status` text), 404 → `NotFound`, other non-2xx → `Http`.
 - *Tests:*
   - deserialisation tests from realistic JSON (doc examples plus pending, unreachable, perfdata dict and string forms, comments, downtimes);
   - an in-process HTTPS test server (hyper or axum with a self-signed certificate from `rcgen`) for pinning, CA trust, name override, auth headers, action bodies, event streaming split across chunks, and error mapping.
   - Integration against `ic-mock` comes in wave 2.
+  - `crates/ic-api/tests/contract.rs` runs read-only checks against a real Icinga when the `ICYGUI_CONTRACT_*` variables from `contract/run-icinga.sh` are set (and passes trivially otherwise).
 
 ---
 

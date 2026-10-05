@@ -1,6 +1,6 @@
 [package]
 name = "ic-platform"
-description = "OS adapters: keychain, native notifications, tray icon and launch at login."
+description = "OS adapters: keychain secrets, tray / menu-bar icon and launch at login."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,3 +11,32 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+futures.workspace = true
+ic-core.workspace = true
+ic-model.workspace = true
+# Local wall-clock time for "pause until tomorrow morning" (DST-correct).
+jiff = "0.2.37"
+# The keyring 4.x API (keyring 4 is a thin wrapper around it). The stores
+# below are the ones keyring 4's default `v1` feature picks per platform.
+keyring-core = "1.0.0"
+secrecy.workspace = true
+# Atomic writes of the launch-at-login entry.
+tempfile = "3.27.0"
+thiserror.workspace = true
+tracing.workspace = true
+tray-icon.workspace = true
+
+# macOS: the login keychain (the legacy file-based keychain works for
+# unsigned and ad-hoc signed apps; the "protected" store needs entitlements).
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+# The user id, for launchd's `gui/<uid>` domain (launch at login).
+rustix = { version = "1.1.5", features = ["process"] }
+
+# Linux and the BSDs: the freedesktop Secret Service over D-Bus via zbus,
+# with pure-Rust session crypto (no libdbus, no OpenSSL).
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+# Asks the session bus whether a tray host runs (`tray::host_available`);
+# the same zbus the tray and the Secret Service already use.
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }

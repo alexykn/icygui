@@ -1,0 +1,318 @@
+//! Checks for settings that load fine but can't work: missing names, bad
+//! URLs, duplicate ids, unparsable fingerprints and the like.
+//!
+//! Validation is advisory and pure (no file system access): the settings UI
+//! shows the issues next to the fields named by their paths. Loading never
+//! fails because of them.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::path::Path;
+
+use ic_model::ObjectKey;
+use ic_rules::{NotificationSettings, QuietHours};
+
+use crate::environment::parse_api_url;
+use crate::error::ConfigError;
+use crate::fingerprint::parse_fingerprint;
+use crate::model::{
+    AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind, TlsConfig,
+};
+
+/// The shortest allowed event log retention, in hours.
+pub const MIN_EVENT_LOG_RETENTION_HOURS: u32 = 1;
+
+/// The shortest allowed full re-sync interval, in seconds. Each re-sync
+/// queries every object, which is expensive on large installations.
+pub const MIN_RECONCILE_INTERVAL_SECS: u32 = 10;
+
+const MINUTES_PER_DAY: u16 = 24 * 60;
+
+/// One problem found by [`Config::validate`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ValidationIssue {
+    /// Where the problem is, as a path of keys and indices into the
+    /// settings: `environments[0].tls.pinned_sha256`. Paths from
+    /// [`Environment::validate`] are relative to the environment
+    /// (`tls.pinned_sha256`).
+    pub path: String,
+    /// What is wrong, phrased to follow the field's name
+    /// (`must not be empty`).
+    pub message: String,
+}
+
+impl fmt::Display for ValidationIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.path, self.message)
+    }
+}
+
+impl Config {
+    /// Checks the settings and returns every problem found; empty when the
+    /// settings are usable.
+    ///
+    /// Checks app-wide preferences, that `active_environment` names an
+    /// environment, that environment ids are unique, and everything
+    /// [`Environment::validate`] checks for each environment.
+    pub fn validate(&self) -> Vec<ValidationIssue> {
+        let mut issues = Issues::default();
+        if self.general.event_log_retention_hours < MIN_EVENT_LOG_RETENTION_HOURS {
+            issues.push(
+                "general.event_log_retention_hours",
+                format!("must be at least {MIN_EVENT_LOG_RETENTION_HOURS} hour"),
+            );
+        }
+        if self.general.reconcile_interval_secs < MIN_RECONCILE_INTERVAL_SECS {
+            issues.push(
+                "general.reconcile_interval_secs",
+                format!("must be at least {MIN_RECONCILE_INTERVAL_SECS} seconds"),
+            );
+        }
+        if let Some(active) = &self.active_environment
+            && self.environment(active).is_none()
+        {
+            issues.push(
+                "active_environment",
+                format!("no environment has the id `{active}`"),
+            );
+        }
+        let mut ids = UniqueIds::default();
+        for (index, environment) in self.environments.iter().enumerate() {
+            let path = format!("environments[{index}]");
+            ids.check(&mut issues, &path, &environment.id);
+            check_environment(environment, &path, &mut issues);
+        }
+        issues.0
+    }
+}
+
+impl Environment {
+    /// Checks one environment, as the environment editor needs before
+    /// saving it. Paths are relative to the environment (`url`,
+    /// `auth.username`, `groups[0].name`).
+    ///
+    /// Checks that the id and name are set; the URL (see
+    /// [`Environment::api_url`]); the username or certificate paths; that
+    /// client-certificate authentication has an author; the CA file, pinned
+    /// fingerprint and server name; group and dashboard ids (unique within
+    /// the environment) and names; views; and the notification settings.
+    pub fn validate(&self) -> Vec<ValidationIssue> {
+        let mut issues = Issues::default();
+        UniqueIds::default().check(&mut issues, "", &self.id);
+        check_environment(self, "", &mut issues);
+        issues.0
+    }
+}
+
+/// Checks imported groups: ids, names and views. Paths are `groups[i]…`.
+pub(crate) fn validate_groups(groups: &[DashboardGroup]) -> Vec<ValidationIssue> {
+    let mut issues = Issues::default();
+    check_groups(groups, "", &mut issues);
+    issues.0
+}
+
+#[derive(Default)]
+struct Issues(Vec<ValidationIssue>);
+
+impl Issues {
+    fn push(&mut self, path: impl Into<String>, message: impl Into<String>) {
+        self.0.push(ValidationIssue {
+            path: path.into(),
+            message: message.into(),
+        });
+    }
+}
+
+/// Tracks ids within one scope and reports blank and repeated ones at
+/// `<path>.id`.
+#[derive(Default)]
+struct UniqueIds<'a> {
+    seen: HashMap<&'a str, String>,
+}
+
+impl<'a> UniqueIds<'a> {
+    fn check(&mut self, issues: &mut Issues, path: &str, id: &'a str) {
+        let field = join(path, "id");
+        if id.trim().is_empty() {
+            issues.push(field, "must not be empty");
+        } else if let Some(first) = self.seen.get(id) {
+            issues.push(field, format!("`{id}` is already used by {first}"));
+        } else {
+            self.seen.insert(id, path.to_owned());
+        }
+    }
+}
+
+/// `prefix.field`, or just `field` at the top.
+fn join(prefix: &str, field: &str) -> String {
+    if prefix.is_empty() {
+        field.to_owned()
+    } else {
+        format!("{prefix}.{field}")
+    }
+}
+
+fn check_environment(environment: &Environment, path: &str, issues: &mut Issues) {
+    check_name(&environment.name, &join(path, "name"), issues);
+    if let Err(reason) = parse_api_url(&environment.url) {
+        issues.push(join(path, "url"), reason);
+    }
+    check_auth(environment, path, issues);
+    check_tls(&environment.tls, &join(path, "tls"), issues);
+    check_groups(&environment.groups, path, issues);
+    check_notifications(
+        &environment.notifications,
+        &join(path, "notifications"),
+        issues,
+    );
+}
+
+fn check_name(name: &str, path: &str, issues: &mut Issues) {
+    if name.trim().is_empty() {
+        issues.push(path, "must not be empty");
+    }
+}
+
+fn check_auth(environment: &Environment, path: &str, issues: &mut Issues) {
+    match &environment.auth {
+        AuthConfig::Basic { username } => {
+            if username.trim().is_empty() {
+                issues.push(join(path, "auth.username"), "must not be empty");
+            }
+        }
+        AuthConfig::ClientCertificate {
+            cert_path,
+            key_path,
+        } => {
+            check_file(cert_path, &join(path, "auth.cert_path"), issues);
+            check_file(key_path, &join(path, "auth.key_path"), issues);
+            if environment.author_name().is_empty() {
+                issues.push(
+                    join(path, "author"),
+                    "must be set for client-certificate authentication, which has no \
+                     username to record as the author",
+                );
+            }
+        }
+    }
+}
+
+/// Paths to certificates and keys: set, and absolute because relative
+/// paths would depend on the directory the app happens to start in.
+fn check_file(file: &Path, path: &str, issues: &mut Issues) {
+    if file.as_os_str().is_empty() {
+        issues.push(path, "must not be empty");
+    } else if !file.is_absolute() {
+        let hint = if file.starts_with("~") {
+            " (`~` is not expanded)"
+        } else {
+            ""
+        };
+        issues.push(path, format!("must be an absolute path{hint}"));
+    }
+}
+
+fn check_tls(tls: &TlsConfig, path: &str, issues: &mut Issues) {
+    if let Some(ca_file) = &tls.ca_file {
+        check_file(ca_file, &join(path, "ca_file"), issues);
+    }
+    if let Some(fingerprint) = &tls.pinned_sha256
+        && let Err(error) = parse_fingerprint(fingerprint)
+    {
+        let reason = match error {
+            ConfigError::InvalidFingerprint(reason) => reason,
+            other => other.to_string(),
+        };
+        issues.push(
+            join(path, "pinned_sha256"),
+            format!("is not a SHA-256 fingerprint: {reason}"),
+        );
+    }
+    if let Some(server_name) = &tls.server_name {
+        let name = server_name.trim();
+        if name.is_empty() {
+            issues.push(join(path, "server_name"), "must not be empty when set");
+        } else if name.contains(|c: char| c.is_whitespace() || c == '/') {
+            issues.push(
+                join(path, "server_name"),
+                "must be a host name or an IP address",
+            );
+        }
+    }
+}
+
+fn check_groups(groups: &[DashboardGroup], path: &str, issues: &mut Issues) {
+    let mut group_ids = UniqueIds::default();
+    let mut dashboard_ids = UniqueIds::default();
+    for (group_index, group) in groups.iter().enumerate() {
+        let group_path = join(path, &format!("groups[{group_index}]"));
+        group_ids.check(issues, &group_path, &group.id);
+        check_name(&group.name, &join(&group_path, "name"), issues);
+        for (index, dashboard) in group.dashboards.iter().enumerate() {
+            let dashboard_path = format!("{group_path}.dashboards[{index}]");
+            dashboard_ids.check(issues, &dashboard_path, &dashboard.id);
+            check_dashboard(dashboard, &dashboard_path, issues);
+        }
+    }
+}
+
+fn check_dashboard(dashboard: &Dashboard, path: &str, issues: &mut Issues) {
+    check_name(&dashboard.name, &join(path, "name"), issues);
+    let view = &dashboard.view;
+    if view.object_kind == ObjectKind::Hosts && view.group_by == GroupBy::ServiceGroup {
+        issues.push(
+            join(path, "view.group_by"),
+            "hosts can't be grouped by service group",
+        );
+    }
+}
+
+fn check_notifications(settings: &NotificationSettings, path: &str, issues: &mut Issues) {
+    check_quiet_hours(&settings.quiet_hours, &join(path, "quiet_hours"), issues);
+    let mut seen: HashMap<&ObjectKey, usize> = HashMap::new();
+    for (index, entry) in settings.objects.iter().enumerate() {
+        let entry_path = join(path, &format!("objects[{index}]"));
+        check_object_key(&entry.object, &join(&entry_path, "object"), issues);
+        if let Some(until) = entry.until
+            && !until.as_unix_seconds().is_finite()
+        {
+            issues.push(join(&entry_path, "until"), "must be a valid time");
+        }
+        if let Some(first) = seen.get(&entry.object) {
+            issues.push(
+                entry_path,
+                format!(
+                    "`{}` already has an override at objects[{first}]",
+                    entry.object
+                ),
+            );
+        } else {
+            seen.insert(&entry.object, index);
+        }
+    }
+}
+
+fn check_quiet_hours(quiet_hours: &QuietHours, path: &str, issues: &mut Issues) {
+    for (field, minute) in [
+        ("start_minute", quiet_hours.start_minute),
+        ("end_minute", quiet_hours.end_minute),
+    ] {
+        if minute >= MINUTES_PER_DAY {
+            issues.push(
+                join(path, field),
+                format!("must be below {MINUTES_PER_DAY} (minutes after midnight)"),
+            );
+        }
+    }
+}
+
+fn check_object_key(object: &ObjectKey, path: &str, issues: &mut Issues) {
+    if object.host_name().as_str().trim().is_empty() {
+        issues.push(path, "the host name must not be empty");
+    }
+    if let Some(service) = object.as_service()
+        && service.name.trim().is_empty()
+    {
+        issues.push(path, "the service name must not be empty");
+    }
+}

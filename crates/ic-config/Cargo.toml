@@ -11,5 +11,14 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+directories = "6.0.0"
+ic-model.workspace = true
 ic-rules.workspace = true
 serde.workspace = true
+serde_ignored = "0.1.14"
+tempfile = "3.27.0"
+thiserror.workspace = true
+toml = "1.1.6"
+tracing.workspace = true
+url = "2.5.8"
+uuid = { version = "1.27.0", features = ["v4"] }

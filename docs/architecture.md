@@ -231,7 +231,7 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
 ```
 
 **Wire rules:** verify against the docs, the handler sources and the **real recorded samples in `contract/samples/`** (Icinga 2.15.6). The samples win when they disagree with the docs.
-- *Queries:* `POST /v1/objects/<type>` with `X-HTTP-Method-Override: GET`, `Accept: application/json` and a JSON body `{ "attrs": [...], "filter": ..., "filter_vars": ... }`. Request only the attributes the model needs. Responses are `{ "results": [ { "name", "type", "attrs": {…}, "joins": {}, "meta": {} } ] }`.
+- *Queries:* `POST /v1/objects/<type>` with `X-HTTP-Method-Override: GET`, `Accept: application/json` and a JSON body `{ "attrs": [...] }`, plus `"hosts"`/`"services"` name arrays for targeted queries (never `filter`). Request only the attributes the model needs. Responses are `{ "results": [ { "name", "type", "attrs": {…}, "joins": {}, "meta": {} } ] }`.
 - *Numbers:* Icinga writes doubles with integral values as JSON *integers* (`"state": 2`) and others as floats; accept both everywhere and never panic on odd input. In *events*, `acknowledgement` is a boolean; on *objects* it is 0/1/2.
   - `last_check_result.exit_status` stays 0 for passive results: take the state from `state`, never from `exit_status`.
   - Pending is `last_check_result == null`.

@@ -17,17 +17,27 @@ mod theme;
 
 pub use assets::Assets;
 pub use components::{
-    Button, ButtonColors, ButtonVariant, CircleSize, CodeBlock, Divider, DividerColor, IconButton,
-    KeyHint, KvTable, Paint, PaneHeader, PerfdataRow, PerfdataTable, SectionLabel, StateCircle,
-    StateDot, SubTabs, SummaryBar, SummaryItem, TextField, Tooltip,
+    Button, ButtonColors, ButtonVariant, CircleSize, CodeBlock, CompactRow, Divider, DividerColor,
+    EmptyState, GlyphButton, IconButton, KeyHint, KvTable, Link, LinkStyle, ListRow, Menu,
+    MenuItem, NoteEntry, Paint, PaneHeader, PerfdataRow, PerfdataTable, Popover, RowEmphasis,
+    SectionLabel, StateCircle, StateDot, SubTabs, SummaryBar, SummaryItem, TextField, Tooltip,
+    TreeLine, TreeTable,
 };
 pub use fonts::FontError;
 pub use icon::{Icon, IconName};
-pub use theme::{ActiveTheme, Colors, FONT_FAMILY, Metrics, StateColors, TextSizes, Theme};
+pub use theme::{
+    ActiveTheme, Colors, FONT_FAMILY, LINE_HEIGHT, Metrics, StateColors, TextSizes, Theme,
+};
 
 /// gpui-component's window root: hosts its overlays and, on Linux with
 /// client-side decorations, draws the window frame, shadow and resize edges.
 pub use gpui_component::Root;
+
+/// gpui-component's overlay scrollbar, styled by the theme. Put it in a
+/// `relative()` container next to the scrolled element:
+/// `Scrollbar::vertical(&scroll_handle)` works with GPUI's `ScrollHandle`
+/// and `UniformListScrollHandle`.
+pub use gpui_component::scroll::Scrollbar;
 
 /// Text input state and events, for [`TextField`].
 pub mod input {

@@ -10,8 +10,7 @@ use gpui::{
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 
-use crate::components::{IconButton, Tooltip};
-use crate::icon::IconName;
+use crate::components::{GlyphButton, Tooltip};
 use crate::theme::{ActiveTheme as _, Metrics};
 
 type CloseHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -160,8 +159,9 @@ impl RenderOnce for PaneHeader {
             .children(self.trailing)
             .when_some(self.on_close, |header, handler| {
                 header.child(
-                    IconButton::new(close_id, IconName::Close)
-                        .color(colors.text_muted)
+                    GlyphButton::new(close_id, "×")
+                        .text_size(px(15.))
+                        .bleed()
                         .tooltip(Tooltip::new("Close"))
                         .on_click(handler),
                 )

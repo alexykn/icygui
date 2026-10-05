@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use ic_config::{DashboardGroup, Environment};
-use ic_core::snapshot::{DashboardResult, Summary};
-use ic_model::CheckableState;
+use ic_core::snapshot::{DashboardResult, Snapshot, Summary};
+use ic_model::{CheckableState, ObjectKey};
 use ic_rules::DashboardRef;
 
 /// A dashboard's state dot.
@@ -21,6 +21,19 @@ pub(crate) enum Dot {
 }
 
 impl Dot {
+    /// The dot for one object: its state if it has a problem, green when OK,
+    /// grey while pending or when it's gone.
+    pub(crate) fn for_object(state: Option<CheckableState>) -> Self {
+        match state {
+            Some(state) if state.is_problem() => Self::State(state),
+            Some(
+                CheckableState::Service(ic_model::ServiceState::Ok)
+                | CheckableState::Host(ic_model::HostState::Up),
+            ) => Self::Ok,
+            Some(_) | None => Self::Empty,
+        }
+    }
+
     /// The dot for a dashboard's summary (`None` before it's evaluated).
     pub(crate) fn from_summary(summary: Option<&Summary>) -> Self {
         let Some(summary) = summary else {
@@ -65,6 +78,61 @@ pub(crate) struct SidebarGroup<'a> {
     pub(crate) expanded: bool,
     /// The dashboards to list; empty when collapsed.
     pub(crate) items: Vec<SidebarItem<'a>>,
+}
+
+/// An object open as a tab, in the sidebar's "open" section.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OpenTab {
+    /// The object.
+    pub(crate) key: ObjectKey,
+    /// Service or host name.
+    pub(crate) name: String,
+    /// The host, for services.
+    pub(crate) host: Option<String>,
+    /// The object's state dot.
+    pub(crate) dot: Dot,
+    /// Whether it's the tab shown.
+    pub(crate) active: bool,
+}
+
+/// The "open" section's rows.
+pub(crate) fn open_tabs(
+    tabs: &[ObjectKey],
+    active: Option<&ObjectKey>,
+    snapshot: &Snapshot,
+) -> Vec<OpenTab> {
+    tabs.iter()
+        .map(|key| {
+            let (name, host, state) = match key {
+                ObjectKey::Host { name } => {
+                    let host = snapshot.hosts.get(name);
+                    (
+                        host.map_or_else(|| name.to_string(), |host| host.display_name.clone()),
+                        None,
+                        host.map(|host| CheckableState::Host(host.state)),
+                    )
+                }
+                ObjectKey::Service { key: service_key } => {
+                    let service = snapshot.services.get(service_key);
+                    (
+                        service.map_or_else(
+                            || service_key.name.to_string(),
+                            |service| service.display_name.clone(),
+                        ),
+                        Some(service_key.host.to_string()),
+                        service.map(|service| CheckableState::Service(service.state)),
+                    )
+                }
+            };
+            OpenTab {
+                key: key.clone(),
+                name,
+                host,
+                dot: Dot::for_object(state),
+                active: active == Some(key),
+            }
+        })
+        .collect()
 }
 
 /// The groups to show for `query` (case-insensitive; empty shows all).
@@ -257,6 +325,31 @@ mod tests {
         let groups = groups(environment, &demo.snapshot.dashboards, None, "lab");
         assert_eq!(names(&groups), [("lab", vec!["sandbox"])]);
         assert!(groups[0].expanded);
+    }
+
+    #[test]
+    fn open_tabs_show_state_and_host() {
+        let demo = setup();
+        let replication = ObjectKey::service("db-prod-03", "postgres-replication");
+        let tabs = [
+            replication.clone(),
+            ObjectKey::host("db-prod-03"),
+            ObjectKey::host("gone"),
+        ];
+        let rows = open_tabs(&tabs, Some(&replication), &demo.snapshot);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].name, "postgres-replication");
+        assert_eq!(rows[0].host.as_deref(), Some("db-prod-03"));
+        assert_eq!(
+            rows[0].dot,
+            Dot::State(CheckableState::Service(ServiceState::Critical))
+        );
+        assert!(rows[0].active);
+        assert_eq!(rows[1].dot, Dot::Ok);
+        assert_eq!(rows[1].host, None);
+        assert!(!rows[1].active);
+        assert_eq!(rows[2].dot, Dot::Empty, "gone objects are grey");
+        assert_eq!(rows[2].name, "gone");
     }
 
     #[test]

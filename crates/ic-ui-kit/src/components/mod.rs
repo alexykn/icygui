@@ -5,6 +5,10 @@
 mod button;
 mod divider;
 mod header;
+mod link;
+mod list;
+mod menu;
+mod notice;
 mod state;
 mod summary;
 mod table;
@@ -12,9 +16,13 @@ mod text;
 mod text_field;
 mod tooltip;
 
-pub use button::{Button, ButtonColors, ButtonVariant, IconButton, KeyHint};
+pub use button::{Button, ButtonColors, ButtonVariant, GlyphButton, IconButton, KeyHint};
 pub use divider::{Divider, DividerColor};
 pub use header::{PaneHeader, SubTabs};
+pub use link::{Link, LinkStyle};
+pub use list::{CompactRow, ListRow, RowEmphasis};
+pub use menu::{Menu, MenuItem, Popover};
+pub use notice::{EmptyState, NoteEntry, TreeLine, TreeTable};
 pub use state::{CircleSize, Paint, StateCircle, StateDot};
 pub use summary::{SummaryBar, SummaryItem};
 pub use table::{KvTable, PerfdataRow, PerfdataTable};

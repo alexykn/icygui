@@ -1,32 +1,31 @@
 //! The sidebar: window controls and dashboard search in the header, groups
-//! (folders) of dashboards, and the footer with the sidebar toggle, the
-//! notification centre, the connection status and `+`.
+//! (folders) of dashboards, the objects open as tabs, and the footer with
+//! the sidebar toggle, the notification centre, the connection status and
+//! `+`.
+//!
+//! The footer's "last event" age refreshes with the workspace's clock
+//! (UI-04).
 
 mod model;
-
-use std::time::Duration;
 
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use ic_model::Timestamp;
 use ic_ui_kit::input::{InputEvent, InputState};
 use ic_ui_kit::{
-    ActiveTheme as _, Divider, DividerColor, Icon, IconButton, IconName, Metrics, StateDot,
-    TextField, Theme, Tooltip,
+    ActiveTheme as _, Divider, DividerColor, GlyphButton, Icon, IconButton, IconName, Metrics,
+    StateDot, TextField, Theme, Tooltip,
 };
 
 use crate::app_state::{AppState, Health};
 use crate::chrome::{Controls, WindowControls, WindowDrag};
 use crate::workspace::ToggleSidebar;
 
-use self::model::{Dot, SidebarGroup, SidebarItem};
-
-/// How often the footer's "last event" age refreshes (UI-04).
-const STATUS_REFRESH: Duration = Duration::from_secs(1);
+use self::model::{Dot, OpenTab, SidebarGroup, SidebarItem};
 
 /// The sidebar view.
 pub(crate) struct Sidebar {
@@ -35,7 +34,6 @@ pub(crate) struct Sidebar {
     query: String,
     drag: WindowDrag,
     _subscriptions: Vec<Subscription>,
-    _status_refresh: Task<()>,
 }
 
 impl Sidebar {
@@ -61,21 +59,12 @@ impl Sidebar {
                 },
             ),
         ];
-        let status_refresh = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(STATUS_REFRESH).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        });
         Self {
             state,
             search,
             query: String::new(),
             drag: WindowDrag::default(),
             _subscriptions: subscriptions,
-            _status_refresh: status_refresh,
         }
     }
 
@@ -128,13 +117,16 @@ impl Sidebar {
         let Some(environment) = state.environment() else {
             return empty_note("No dashboards yet", &theme);
         };
+        // While a tab is shown, no dashboard is highlighted.
+        let selected = state.selected().filter(|_| state.active_tab().is_none());
         let groups = model::groups(
             environment,
             &state.snapshot().dashboards,
-            state.selected(),
+            selected,
             &self.query,
         );
-        if groups.is_empty() {
+        let tabs = model::open_tabs(state.tabs(), state.active_tab(), state.snapshot());
+        if groups.is_empty() && tabs.is_empty() {
             let note = if self.query.trim().is_empty() {
                 "No dashboards yet"
             } else {
@@ -142,10 +134,13 @@ impl Sidebar {
             };
             return empty_note(note, &theme);
         }
-        let rows: Vec<AnyElement> = groups
+        let mut rows: Vec<AnyElement> = groups
             .iter()
             .map(|group| Self::render_group(group, &theme, cx))
             .collect();
+        if !tabs.is_empty() {
+            rows.push(Self::render_open_tabs(&tabs, &theme, cx));
+        }
         div()
             .id("sidebar-groups")
             .flex()
@@ -154,6 +149,154 @@ impl Sidebar {
             .min_h_0()
             .overflow_y_scroll()
             .children(rows)
+            .into_any_element()
+    }
+
+    /// The "open" section: objects opened as tabs ("↗ open as tab").
+    fn render_open_tabs(tabs: &[OpenTab], theme: &Theme, cx: &Context<Self>) -> AnyElement {
+        let colors = theme.colors;
+        let active = tabs.iter().any(|tab| tab.active);
+        let header = div()
+            .id("open-tabs")
+            .group("sidebar-open-tabs")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .h(theme.metrics.group_row_height)
+            .px(theme.metrics.sidebar_padding)
+            .when(active, |row| row.bg(colors.group_active))
+            .child(
+                div()
+                    .text_size(theme.text.heading)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if active {
+                        colors.text_emphasis
+                    } else {
+                        colors.text_secondary
+                    })
+                    .child("open"),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .invisible()
+                    .group_hover("sidebar-open-tabs", gpui::Styled::visible)
+                    .child(
+                        div()
+                            .id("close-all-tabs")
+                            .px(px(4.))
+                            .text_size(theme.text.hint)
+                            .text_color(colors.text_muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(colors.text))
+                            .child("close all")
+                            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                                window.prevent_default();
+                            })
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.state.update(cx, |state, cx| {
+                                    if state.close_all_tabs() {
+                                        cx.notify();
+                                    }
+                                });
+                            })),
+                    ),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .pb(px(6.))
+            .child(header)
+            .children(tabs.iter().map(|tab| Self::render_tab(tab, theme, cx)))
+            .into_any_element()
+    }
+
+    fn render_tab(tab: &OpenTab, theme: &Theme, cx: &Context<Self>) -> AnyElement {
+        let colors = theme.colors;
+        let metrics = theme.metrics;
+        let id = SharedString::from(format!("tab-{}", tab.key));
+        let group = SharedString::from(format!("tab-row-{}", tab.key));
+        let activate = tab.key.clone();
+        let close = tab.key.clone();
+        div()
+            .id(id.clone())
+            .group(group.clone())
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(12.))
+            .h(metrics.item_row_height)
+            .pl(px(14.))
+            .pr(px(6.))
+            .cursor_pointer()
+            .when(tab.active, |row| row.bg(colors.item_active))
+            .when(!tab.active, |row| {
+                row.hover(|style| style.bg(colors.item_hover))
+            })
+            .child(dot(tab.dot, theme).size(metrics.sidebar_dot))
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(6.))
+                    .text_size(theme.text.row)
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w_full()
+                            .truncate()
+                            .text_color(if tab.active {
+                                colors.text_emphasis
+                            } else {
+                                colors.text_secondary
+                            })
+                            .child(tab.name.clone()),
+                    )
+                    .when_some(tab.host.clone(), |label, host| {
+                        label.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(colors.text_faint)
+                                .child(host),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .when(!tab.active, |slot| {
+                        slot.invisible().group_hover(group, gpui::Styled::visible)
+                    })
+                    .child(
+                        IconButton::new(SharedString::from(format!("close-{id}")), IconName::Close)
+                            .size(px(20.))
+                            .icon_size(px(12.))
+                            .color(colors.text_muted)
+                            .tooltip(Tooltip::new("Close tab"))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                let key = close.clone();
+                                this.state.update(cx, |state, cx| {
+                                    if state.close_tab(&key) {
+                                        cx.notify();
+                                    }
+                                });
+                            })),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                let key = activate.clone();
+                this.state.update(cx, |state, cx| {
+                    if state.activate_tab(&key) {
+                        cx.notify();
+                    }
+                });
+            }))
             .into_any_element()
     }
 
@@ -207,7 +350,8 @@ impl Sidebar {
             .gap(px(8.))
             .h(theme.metrics.group_row_height)
             .pl(theme.metrics.sidebar_padding)
-            .pr(px(8.))
+            // The `···` button's reach makes up the rest of the 12px.
+            .pr(theme.metrics.sidebar_padding - GlyphButton::REACH)
             .cursor_pointer()
             .when(group.active, |row| row.bg(colors.group_active))
             .when(!group.active, |row| {
@@ -246,11 +390,7 @@ impl Sidebar {
     fn render_item(item: &SidebarItem<'_>, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let colors = theme.colors;
         let metrics = theme.metrics;
-        let dot = match item.dot {
-            Dot::State(state) => StateDot::new(state),
-            Dot::Ok => StateDot::with_color(theme.states.ok),
-            Dot::Empty => StateDot::with_color(theme.states.pending),
-        };
+        let dot = dot(item.dot, theme);
         let reference = item.reference.clone();
         let id = SharedString::from(format!(
             "dashboard-{}-{}",
@@ -406,40 +546,45 @@ impl Render for Sidebar {
 /// The group row's `+` (new dashboard) and `···` (group menu) buttons, sized
 /// and spaced like the design's glyphs.
 fn group_actions(group_id: &str, theme: &Theme) -> Div {
-    let button = |id: String, icon: IconName, size: f32, tooltip: &'static str| {
-        IconButton::new(SharedString::from(id), icon)
-            .size(px(22.))
-            .icon_size(px(size))
+    let button = |id: String, glyph: &'static str, size: f32, tooltip: &'static str| {
+        GlyphButton::new(SharedString::from(id), glyph)
+            .text_size(px(size))
             .color(theme.colors.text)
             .tooltip(Tooltip::new(tooltip))
     };
+    // The buttons' reach (4px on each side) makes the design's 8px between
+    // the glyphs.
     div()
         .flex()
         .flex_none()
         .items_center()
-        .gap(px(10.))
         .child(
-            button(
-                format!("group-add-{group_id}"),
-                IconName::Plus,
-                13.,
-                "New dashboard",
-            )
-            .on_click(|_, _, _| {
-                tracing::debug!("new dashboard: the dashboard editor comes with M4");
-            }),
+            button(format!("group-add-{group_id}"), "+", 15., "New dashboard").on_click(
+                |_, _, _| {
+                    tracing::debug!("new dashboard: the dashboard editor comes with M4");
+                },
+            ),
         )
         .child(
             button(
                 format!("group-menu-{group_id}"),
-                IconName::Ellipsis,
-                15.,
+                "···",
+                13.,
                 "Group options",
             )
             .on_click(|_, _, _| {
                 tracing::debug!("group menu: rename, reorder and delete come with M4");
             }),
         )
+}
+
+/// The state dot of a dashboard or an open tab.
+fn dot(dot: Dot, theme: &Theme) -> StateDot {
+    match dot {
+        Dot::State(state) => StateDot::new(state),
+        Dot::Ok => StateDot::with_color(theme.states.ok),
+        Dot::Empty => StateDot::with_color(theme.states.pending),
+    }
 }
 
 /// A row like a dashboard's, with a grey dot: "No dashboards yet".

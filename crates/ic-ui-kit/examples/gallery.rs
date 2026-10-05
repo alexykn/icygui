@@ -197,6 +197,7 @@ impl Render for Gallery {
             .size_full()
             .bg(theme.colors.window_background)
             .font_family(theme.font_family.clone())
+            .line_height(theme.line_height)
             .text_color(theme.colors.text)
             .child(self.catalogue(cx))
             .child(Self::service_pane(cx))

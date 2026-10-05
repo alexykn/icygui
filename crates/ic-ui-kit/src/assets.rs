@@ -12,6 +12,7 @@ gpui_kit_assets::icon_assets!(
     AppIcons,
     [
         ArrowDown,
+        ArrowLeft,
         ArrowUp,
         ArrowUpRight,
         Bell,
@@ -24,12 +25,14 @@ gpui_kit_assets::icon_assets!(
         Copy,
         Ellipsis,
         ExternalLink,
+        Folder,
         Maximize2,
         Minus,
         PanelLeft,
         Plus,
         RefreshCw,
         Search,
+        TriangleAlert,
     ]
 );
 

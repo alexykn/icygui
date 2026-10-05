@@ -1,9 +1,17 @@
 //! Icinga 2 desktop client.
 
+mod actions;
 mod app_state;
 mod chrome;
+mod dashboard;
 mod demo;
+mod dev;
+mod format;
+mod pane;
 mod sidebar;
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod ui_tests;
 mod workspace;
 
 use std::time::Duration;
@@ -19,6 +27,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::app_state::AppState;
 use crate::chrome::ControlsPreference;
+use crate::demo::DemoOptions;
+use crate::dev::{DevOptions, OpenAtStart};
 use crate::workspace::Workspace;
 
 /// Reverse-DNS application id (Wayland `app_id`, bundle id, notification identity).
@@ -49,14 +59,70 @@ fn main() {
             workspace::bind_keys(cx);
 
             // Until the live core lands, the window shows the built-in demo.
-            let state = cx.new(|_| AppState::demo(Timestamp::now()));
+            let dev = DevOptions::from_env();
+            if dev.any() {
+                tracing::info!(?dev, "development switches are set");
+            }
+            let state = cx.new(|_| demo_state(&dev, Timestamp::now()));
             simulate_demo_events(&state, cx);
 
-            if let Err(error) = open_main_window(state, cx) {
-                tracing::error!(error = %format!("{error:#}"), "failed to open the main window");
-                cx.quit();
+            match open_main_window(state.clone(), cx) {
+                Ok(window) => open_at_start(dev.open, &state, window, cx),
+                Err(error) => {
+                    tracing::error!(error = %format!("{error:#}"), "failed to open the main window");
+                    cx.quit();
+                }
             }
         });
+}
+
+/// The demo, with the development switches applied.
+fn demo_state(dev: &DevOptions, now: Timestamp) -> AppState {
+    let mut state = AppState::demo_with(
+        now,
+        DemoOptions {
+            generated_rows: dev.generated_rows,
+        },
+    );
+    if let Some(name) = &dev.dashboard {
+        if let Some(reference) = state.dashboard_named(name) {
+            state.select(reference);
+        } else {
+            tracing::warn!(%name, "{} names no demo dashboard", dev::DASHBOARD_ENV);
+        }
+    }
+    state
+}
+
+/// Opens what `ICYGUI_DEMO_OPEN` asks for.
+fn open_at_start(
+    open: Option<OpenAtStart>,
+    state: &Entity<AppState>,
+    window: WindowHandle<Root>,
+    cx: &mut App,
+) {
+    let Some(open) = open else {
+        return;
+    };
+    let workspace = window
+        .read(cx)
+        .ok()
+        .and_then(|root| root.view().clone().downcast::<Workspace>().ok());
+    let Some(workspace) = workspace else {
+        return;
+    };
+    let dashboard = workspace.read(cx).dashboard().clone();
+    match open {
+        OpenAtStart::Object(key) => dashboard.update(cx, |view, cx| view.open_object(&key, cx)),
+        OpenAtStart::Linked { cursor, pane } => {
+            dashboard.update(cx, |view, cx| view.open_linked(&cursor, pane, cx));
+        }
+        OpenAtStart::Tab(key) => state.update(cx, |state, cx| {
+            if state.open_tab(key) {
+                cx.notify();
+            }
+        }),
+    }
 }
 
 fn open_main_window(state: Entity<AppState>, cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
@@ -125,142 +191,4 @@ fn simulate_demo_events(state: &Entity<AppState>, cx: &mut App) {
         }
     })
     .detach();
-}
-
-// GPUI's headless platform runs on the test thread only on Linux (macOS
-// needs the process's main thread).
-#[cfg(test)]
-#[cfg(target_os = "linux")]
-mod tests {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use gpui::{AnyWindowHandle, Window};
-    use ic_rules::DashboardRef;
-
-    use super::*;
-    use crate::workspace::ToggleSidebar;
-
-    /// Draws `window` once. `update_window` passes the root as a view handle
-    /// without leasing it, so the root can render inside.
-    fn draw(window: AnyWindowHandle, cx: &mut App) {
-        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-    }
-
-    fn in_window(window: AnyWindowHandle, cx: &mut App, f: impl FnOnce(&mut Window, &mut App)) {
-        cx.update_window(window, |_, window, cx| f(window, cx))
-            .unwrap();
-    }
-
-    /// Opens the real window on GPUI's headless platform (no display server,
-    /// no GPU: layout and text shaping run, painting is discarded), draws it
-    /// and drives the sidebar and chrome through their main interactions.
-    #[test]
-    fn the_main_window_renders_and_reacts_headlessly() {
-        // A hung event loop must fail the run instead of blocking it.
-        let finished = Arc::new(AtomicBool::new(false));
-        let watched = finished.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_mins(2));
-            if !watched.load(Ordering::SeqCst) {
-                eprintln!("the headless app didn't quit within two minutes");
-                std::process::abort();
-            }
-        });
-        let checks: Rc<RefCell<Vec<(&'static str, bool)>>> = Rc::default();
-        let record = checks.clone();
-        gpui_platform::headless()
-            .with_assets(ic_ui_kit::Assets)
-            .run(move |cx: &mut App| {
-                let check = |name, ok| record.borrow_mut().push((name, ok));
-                ic_ui_kit::init(cx).unwrap();
-                // Draw our own traffic lights even though headless windows
-                // have server-side decorations.
-                cx.set_global(ControlsPreference::Always);
-                workspace::bind_keys(cx);
-                let state = cx.new(|_| AppState::demo(Timestamp::now()));
-                let handle = open_main_window(state.clone(), cx).unwrap();
-                let workspace = handle
-                    .read(cx)
-                    .unwrap()
-                    .view()
-                    .clone()
-                    .downcast::<Workspace>()
-                    .unwrap();
-                let window = AnyWindowHandle::from(handle);
-                draw(window, cx);
-                check(
-                    "the sidebar starts open",
-                    workspace.read(cx).is_sidebar_open(),
-                );
-
-                // ctrl-b and the footer button dispatch ToggleSidebar.
-                let toggle = |cx: &mut App| {
-                    in_window(window, cx, |window, cx| {
-                        window.dispatch_action(Box::new(ToggleSidebar), cx);
-                    });
-                };
-                toggle(cx);
-                draw(window, cx);
-                check(
-                    "the action hides the sidebar",
-                    !workspace.read(cx).is_sidebar_open(),
-                );
-                toggle(cx);
-                draw(window, cx);
-                check(
-                    "the action shows it again",
-                    workspace.read(cx).is_sidebar_open(),
-                );
-
-                // Selecting a dashboard re-renders the header and summary.
-                let network = DashboardRef {
-                    group_id: "demo-platform".to_owned(),
-                    dashboard_id: "demo-platform-network".to_owned(),
-                };
-                let selected = state.update(cx, |state, cx| {
-                    cx.notify();
-                    state.select(network)
-                });
-                draw(window, cx);
-                check("a dashboard can be selected", selected);
-
-                // Typing in the search field filters the sidebar.
-                let sidebar = workspace.read(cx).sidebar().clone();
-                let search = sidebar.read(cx).search_input().clone();
-                in_window(window, cx, |window, cx| {
-                    search.update(cx, |input, cx| input.replace_all("netw", window, cx));
-                });
-                draw(window, cx);
-                check(
-                    "the search query follows the field",
-                    sidebar.read(cx).query() == "netw",
-                );
-
-                // Collapsing a group, then clearing the search.
-                state.update(cx, |state, cx| {
-                    state.toggle_group("demo-lab");
-                    cx.notify();
-                });
-                in_window(window, cx, |window, cx| {
-                    search.update(cx, |input, cx| input.replace_all("", window, cx));
-                });
-                draw(window, cx);
-                check(
-                    "clearing the search clears the query",
-                    sidebar.read(cx).query().is_empty(),
-                );
-                // Quitting takes effect once the event loop runs.
-                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
-            });
-        finished.store(true, Ordering::SeqCst);
-        let checks = checks.borrow();
-        assert_eq!(checks.len(), 6, "the app didn't run to the end: {checks:?}");
-        for (name, ok) in checks.iter() {
-            assert!(ok, "{name}");
-        }
-    }
 }

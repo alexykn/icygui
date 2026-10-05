@@ -3,17 +3,24 @@
 //! Views never hard-code colours or sizes; they read them from the active
 //! [`Theme`] (`cx.theme()`), so a light theme is another `Theme` value.
 
-use gpui::{App, Global, Hsla, Pixels, SharedString, px, rgb, rgba};
+use gpui::{App, DefiniteLength, Global, Hsla, Pixels, SharedString, px, relative, rgb, rgba};
 use ic_model::{CheckableState, HostState, PerfdataStatus, ServiceState};
 
 /// The family name of the bundled UI font.
 pub const FONT_FAMILY: &str = "IBM Plex Mono";
+
+/// The bundled font's natural line height (its ascender plus descender),
+/// which is what the design's CSS `line-height: normal` resolves to.
+pub const LINE_HEIGHT: f32 = 1.3;
 
 /// All design tokens: colours, type scale and layout metrics.
 #[derive(Clone, Debug)]
 pub struct Theme {
     /// Font family used everywhere (the design is monospace throughout).
     pub font_family: SharedString,
+    /// Line height of running text, relative to the font size. Set it on the
+    /// window's root element; code blocks use their own, looser one.
+    pub line_height: DefiniteLength,
     /// Surface, border, text and accent colours.
     pub colors: Colors,
     /// Host and service state colours.
@@ -32,6 +39,7 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             font_family: FONT_FAMILY.into(),
+            line_height: relative(LINE_HEIGHT),
             colors: Colors::dark(),
             states: StateColors::dark(),
             text: TextSizes::default(),
@@ -68,6 +76,12 @@ pub struct Colors {
     pub element_active: Hsla,
     /// Selected list row (`#2a3036`).
     pub row_selected: Hsla,
+    /// Hovered list row (`#22262a`).
+    pub row_hover: Hsla,
+    /// Rows marked for a bulk action (`#25303a`, a dark accent tint).
+    pub row_marked: Hsla,
+    /// Group header rows in lists (`#1a1d21`, the pane surface).
+    pub row_header: Hsla,
     /// Active group header in the sidebar (`#30353a`).
     pub group_active: Hsla,
     /// Hovered, inactive group header in the sidebar (`#262a2e`).
@@ -136,6 +150,9 @@ impl Colors {
             element_hover: hex(0x2e_3337),
             element_active: hex(0x33_383c),
             row_selected: hex(0x2a_3036),
+            row_hover: hex(0x22_262a),
+            row_marked: hex(0x25_303a),
+            row_header: hex(0x1a_1d21),
             group_active: hex(0x30_353a),
             group_hover: hex(0x26_2a2e),
             item_active: hex(0x27_2c30),
@@ -291,8 +308,17 @@ pub struct Metrics {
     pub sidebar_padding: Pixels,
     /// Horizontal padding of the list header, summary bar and list rows.
     pub list_padding: Pixels,
-    /// Horizontal padding of the detail pane.
+    /// Horizontal padding of the detail pane's header.
     pub pane_padding: Pixels,
+    /// Horizontal padding of the detail pane's body and its service rows.
+    pub pane_inset: Pixels,
+    /// Dashboard list rows: a 22px circle with its caption beside two lines
+    /// of text, 10px above and below (add [`Metrics::RULE`] for the row rule).
+    pub row_height: Pixels,
+    /// Width of the list rows' state circle column.
+    pub row_leading: Pixels,
+    /// Items in popup menus.
+    pub menu_item_height: Pixels,
     /// Action buttons.
     pub button_height: Pixels,
     /// Action button corner radius.
@@ -357,6 +383,10 @@ impl Default for Metrics {
             sidebar_padding: px(12.),
             list_padding: px(18.),
             pane_padding: px(20.),
+            pane_inset: px(24.),
+            row_height: px(60.),
+            row_leading: px(44.),
+            menu_item_height: px(28.),
             button_height: px(28.),
             button_radius: px(5.),
             icon_button: px(22.),
@@ -453,6 +483,21 @@ mod tests {
         assert!(colors.item_hover.l < colors.item_active.l);
         assert!(colors.group_hover.l < colors.group_active.l);
         assert!(colors.element_hover.l > colors.element_background.l);
+        assert!(colors.row_hover.l > colors.window_background.l);
+        assert!(colors.row_hover.l < colors.row_selected.l);
+    }
+
+    #[test]
+    fn list_rows_follow_the_design() {
+        let theme = Theme::dark();
+        // 10px padding around a 22px circle, 4px gap and a 14px caption line.
+        assert_eq!(Metrics::with_rule(theme.metrics.row_height), px(61.));
+        assert_eq!(theme.metrics.row_leading, px(44.));
+        assert_eq!(theme.line_height, relative(LINE_HEIGHT));
+        // Group headers use the pane surface, darker than the window.
+        assert!(theme.colors.row_header.l < theme.colors.window_background.l);
+        // Marked rows are tinted towards the accent.
+        assert!(theme.colors.row_marked.h > 0.5 && theme.colors.row_marked.h < 0.65);
     }
 
     #[test]

@@ -13,6 +13,8 @@ use crate::theme::ActiveTheme as _;
 pub enum IconName {
     /// `arrow-down`: descending sort.
     ArrowDown,
+    /// `arrow-left`: back to the previous object in a pane.
+    ArrowLeft,
     /// `arrow-up`: ascending sort.
     ArrowUp,
     /// `arrow-up-right`: "open as tab".
@@ -37,6 +39,8 @@ pub enum IconName {
     Ellipsis,
     /// `external-link`: notes and action URLs.
     ExternalLink,
+    /// `folder`: host group and service group headers in lists.
+    Folder,
     /// `maximize-2`: the window maximise control.
     Maximize,
     /// `minus`: the window minimise control.
@@ -49,12 +53,15 @@ pub enum IconName {
     Refresh,
     /// `search`: search fields.
     Search,
+    /// `triangle-alert`: errors such as a dashboard filter that fails.
+    TriangleAlert,
 }
 
 impl IconName {
     /// Every icon, for tests and asset listings.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 22] = [
         Self::ArrowDown,
+        Self::ArrowLeft,
         Self::ArrowUp,
         Self::ArrowUpRight,
         Self::Bell,
@@ -67,12 +74,14 @@ impl IconName {
         Self::Copy,
         Self::Ellipsis,
         Self::ExternalLink,
+        Self::Folder,
         Self::Maximize,
         Self::Minus,
         Self::PanelLeft,
         Self::Plus,
         Self::Refresh,
         Self::Search,
+        Self::TriangleAlert,
     ];
 
     /// The asset path [`crate::Assets`] serves the SVG under.
@@ -86,6 +95,7 @@ impl From<IconName> for gpui_kit_assets::IconName {
     fn from(name: IconName) -> Self {
         match name {
             IconName::ArrowDown => Self::ArrowDown,
+            IconName::ArrowLeft => Self::ArrowLeft,
             IconName::ArrowUp => Self::ArrowUp,
             IconName::ArrowUpRight => Self::ArrowUpRight,
             IconName::Bell => Self::Bell,
@@ -98,12 +108,14 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::Copy => Self::Copy,
             IconName::Ellipsis => Self::Ellipsis,
             IconName::ExternalLink => Self::ExternalLink,
+            IconName::Folder => Self::Folder,
             IconName::Maximize => Self::Maximize2,
             IconName::Minus => Self::Minus,
             IconName::PanelLeft => Self::PanelLeft,
             IconName::Plus => Self::Plus,
             IconName::Refresh => Self::RefreshCw,
             IconName::Search => Self::Search,
+            IconName::TriangleAlert => Self::TriangleAlert,
         }
     }
 }

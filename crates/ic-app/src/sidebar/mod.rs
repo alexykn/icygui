@@ -69,13 +69,13 @@ impl Sidebar {
     }
 
     /// The search field's state.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn search_input(&self) -> &Entity<InputState> {
         &self.search
     }
 
     /// The current search query.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn query(&self) -> &str {
         &self.query
     }

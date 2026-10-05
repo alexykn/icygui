@@ -11,9 +11,9 @@ mod service;
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_ui_kit::{
@@ -35,6 +35,39 @@ pub(crate) enum PaneMode {
     Split,
     /// Full width as a tab; × closes the tab.
     Tab,
+}
+
+/// Width a tab's content is kept to, for reading.
+const TAB_CONTENT_WIDTH: f32 = 860.;
+/// Width of the side column of a wide service tab.
+const TAB_SIDE_WIDTH: f32 = 340.;
+/// Space between a wide service tab's columns.
+const TAB_COLUMN_GAP: f32 = 40.;
+/// A service tab at least this wide shows two columns.
+const TAB_TWO_COLUMNS_FROM: f32 = 1000.;
+
+/// How a pane's body is laid out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BodyLayout {
+    /// One column at the pane's width, beside the list.
+    Pane,
+    /// One column kept to a readable width: a narrow tab.
+    Tab,
+    /// A wide tab: the service's output, performance data and notes, with
+    /// its check details, variables, groups and links in a column beside
+    /// them.
+    WideTab,
+}
+
+impl BodyLayout {
+    /// The layout of a pane in `mode` that is `width` wide.
+    pub(crate) fn for_width(mode: PaneMode, width: Pixels) -> Self {
+        match mode {
+            PaneMode::Split => Self::Pane,
+            PaneMode::Tab if width >= px(TAB_TWO_COLUMNS_FROM) => Self::WideTab,
+            PaneMode::Tab => Self::Tab,
+        }
+    }
 }
 
 /// What the pane asks its owner to do.
@@ -70,6 +103,9 @@ impl HostTab {
 pub(crate) struct ObjectPane {
     state: Entity<AppState>,
     mode: PaneMode,
+    /// The object the pane was opened for: a tab's identity, which stays
+    /// while links inside the tab are followed.
+    opened: ObjectKey,
     object: ObjectKey,
     /// Objects visited before, for the back button.
     history: Vec<ObjectKey>,
@@ -104,6 +140,7 @@ impl ObjectPane {
         Self {
             state,
             mode,
+            opened: object.clone(),
             object,
             history: Vec::new(),
             host_tab: HostTab::default(),
@@ -122,13 +159,13 @@ impl ObjectPane {
     }
 
     /// Whether the back button has somewhere to go.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn can_go_back(&self) -> bool {
         !self.history.is_empty()
     }
 
     /// The host pane's selected tab.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn host_tab(&self) -> HostTab {
         self.host_tab
     }
@@ -189,6 +226,30 @@ impl ObjectPane {
             self.show_all_ok = false;
         }
         self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+    }
+
+    /// The body's layout. A tab is as wide as the window less the sidebar.
+    fn body_layout(&self, window: &Window, theme: &Theme) -> BodyLayout {
+        let sidebar = if self.sidebar_open {
+            theme.metrics.sidebar_width
+        } else {
+            px(0.)
+        };
+        BodyLayout::for_width(self.mode, window.viewport_size().width - sidebar)
+    }
+
+    /// Closes the pane: beside the list it asks the dashboard to; a tab
+    /// closes itself, whatever object it shows after following links.
+    pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
+        if self.mode == PaneMode::Tab {
+            let tab = self.opened.clone();
+            self.state.update(cx, |state, cx| {
+                if state.close_tab(&tab) {
+                    cx.notify();
+                }
+            });
+        }
+        cx.emit(PaneEvent::Close);
     }
 
     /// Sends an action request for the shown object.
@@ -253,16 +314,10 @@ impl ObjectPane {
                             });
                         })),
                 )
-                .on_close(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(PaneEvent::Close))),
-            PaneMode::Tab => header.on_close(cx.listener(|this, _: &ClickEvent, _, cx| {
-                let object = this.object.clone();
-                this.state.update(cx, |state, cx| {
-                    if state.close_tab(&object) {
-                        cx.notify();
-                    }
-                });
-                cx.emit(PaneEvent::Close);
-            })),
+                .on_close(cx.listener(|this, _: &ClickEvent, _, cx| this.close(cx))),
+            PaneMode::Tab => {
+                header.on_close(cx.listener(|this, _: &ClickEvent, _, cx| this.close(cx)))
+            }
         };
         // The pane's header is part of the window's top edge, beside the list
         // or as a tab.
@@ -278,9 +333,10 @@ impl Render for ObjectPane {
         let header = self.render_header(window, cx);
         let snapshot = self.state.read(cx).snapshot().clone();
         let now = Timestamp::now();
+        let layout = self.body_layout(window, &theme);
         let body = match &self.object {
             ObjectKey::Service { key } => match snapshot.services.get(key) {
-                Some(service) => service::render(self, &snapshot, service, now, cx),
+                Some(service) => service::render(self, &snapshot, service, now, layout, cx),
                 None => missing(&self.object, &theme),
             },
             ObjectKey::Host { name } => match snapshot.hosts.get(name) {
@@ -431,10 +487,44 @@ fn copy_button(
 /// The hover group of a pane's title (reveals its copy button).
 const TITLE_GROUP: &str = "pane-title";
 
-/// A web link that opens in the browser.
+/// A web link that opens in the browser; a URL too long for its cell is
+/// cut with an ellipsis and shown whole in the tooltip.
 fn web_link(id: SharedString, url: &str) -> impl IntoElement {
     let target = url.to_owned();
     Link::new(id, url.to_owned())
-        .tooltip(Tooltip::new("Open in the browser"))
+        .truncate()
+        .tooltip(Tooltip::new(format!("Open {url} in the browser")))
         .on_click(move |_, _, cx| cx.open_url(&target))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_tabs_get_two_columns() {
+        assert_eq!(
+            BodyLayout::for_width(PaneMode::Split, px(2000.)),
+            BodyLayout::Pane,
+            "beside the list the pane keeps its width"
+        );
+        assert_eq!(
+            BodyLayout::for_width(PaneMode::Tab, px(1140.)),
+            BodyLayout::WideTab,
+            "1440px window less the sidebar"
+        );
+        assert_eq!(
+            BodyLayout::for_width(PaneMode::Tab, px(TAB_TWO_COLUMNS_FROM - 1.)),
+            BodyLayout::Tab
+        );
+    }
+
+    #[test]
+    fn short_names_read_service_on_host() {
+        assert_eq!(
+            short_name(&ObjectKey::service("db-prod-03", "postgres-replication")),
+            "postgres-replication on db-prod-03"
+        );
+        assert_eq!(short_name(&ObjectKey::host("db-prod-03")), "db-prod-03");
+    }
 }

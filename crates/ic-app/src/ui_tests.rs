@@ -471,13 +471,23 @@ fn open_as_tab_shows_the_pane_full_width() {
         });
         app.draw(cx);
         assert_eq!(app.state.read(cx).active_tab(), Some(&replication()));
-        app.state.update(cx, |state, cx| {
-            state.close_tab(&replication());
-            cx.notify();
+
+        // A tab that followed its host link still closes as itself.
+        tab.update(cx, |pane, cx| {
+            pane.navigate(ObjectKey::host("db-prod-03"), cx);
         });
         app.draw(cx);
+        assert_eq!(tab.read(cx).object(), &ObjectKey::host("db-prod-03"));
+        tab.update(cx, ObjectPane::close);
+        app.draw(cx);
         assert!(app.state.read(cx).tabs().is_empty());
+        assert_eq!(app.state.read(cx).active_tab(), None);
         assert!(app.workspace.read(cx).tab(&replication()).is_none());
+        assert_eq!(
+            app.pane_object(cx),
+            Some(app.row_key(cx, 2)),
+            "the dashboard is shown again as it was"
+        );
     });
 }
 

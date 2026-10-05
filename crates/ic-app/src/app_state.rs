@@ -285,7 +285,7 @@ impl AppState {
     }
 
     /// The last action the user asked for.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn last_request(&self) -> Option<&ActionRequest> {
         self.last_request.as_ref()
     }

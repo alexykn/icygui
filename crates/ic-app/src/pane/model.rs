@@ -8,6 +8,7 @@ use ic_model::{
     CheckInfo, CheckableState, Comment, CommentKind, Downtime, Features, Host, ObjectKey, Service,
     ServiceState, Timestamp, Vars,
 };
+use ic_ui_kit::TreeLine;
 use serde_json::Value;
 
 use crate::format;
@@ -168,11 +169,10 @@ pub(crate) fn host_services(snapshot: &Snapshot, host: &Host, expanded: bool) ->
     }
 }
 
-/// Custom variables as indented `(depth, key, value)` lines in key order
-/// (as Icinga stores them): nested dictionaries and arrays get a summary
-/// line (`{3}`, `[2]`) followed by their entries; arrays of plain values
-/// stay on one line.
-pub(crate) fn vars_lines(vars: &Vars) -> Vec<(usize, String, String)> {
+/// Custom variables as indented lines in key order (as Icinga stores them):
+/// nested dictionaries and arrays get a summary line (`{3}`, `[2]`) followed
+/// by their entries; arrays of plain values stay on one line.
+pub(crate) fn vars_lines(vars: &Vars) -> Vec<TreeLine> {
     let mut lines = Vec::new();
     for (key, value) in sorted(vars) {
         push_var(&mut lines, 0, key.clone(), value);
@@ -180,19 +180,19 @@ pub(crate) fn vars_lines(vars: &Vars) -> Vec<(usize, String, String)> {
     if lines.len() > VARS_MAX_LINES {
         let more = lines.len() - VARS_MAX_LINES;
         lines.truncate(VARS_MAX_LINES);
-        lines.push((0, "…".to_owned(), format!("{more} more lines")));
+        lines.push(TreeLine::summary(0, "…", format!("{more} more lines")));
     }
     lines
 }
 
-fn push_var(lines: &mut Vec<(usize, String, String)>, depth: usize, key: String, value: &Value) {
+fn push_var(lines: &mut Vec<TreeLine>, depth: usize, key: String, value: &Value) {
     if lines.len() > VARS_MAX_LINES {
         return;
     }
     let nested = depth < VARS_MAX_DEPTH;
     match value {
         Value::Object(map) if nested && !map.is_empty() => {
-            lines.push((depth, key, format!("{{{}}}", map.len())));
+            lines.push(TreeLine::summary(depth, key, format!("{{{}}}", map.len())));
             for (child, value) in sorted(map) {
                 push_var(lines, depth + 1, child.clone(), value);
             }
@@ -200,12 +200,12 @@ fn push_var(lines: &mut Vec<(usize, String, String)>, depth: usize, key: String,
         Value::Array(items)
             if nested && items.iter().any(|item| item.is_object() || item.is_array()) =>
         {
-            lines.push((depth, key, format!("[{}]", items.len())));
+            lines.push(TreeLine::summary(depth, key, format!("[{}]", items.len())));
             for (index, item) in items.iter().enumerate() {
                 push_var(lines, depth + 1, index.to_string(), item);
             }
         }
-        value => lines.push((depth, key, var_value(value))),
+        value => lines.push(TreeLine::new(depth, key, var_value(value))),
     }
 }
 
@@ -475,19 +475,26 @@ mod tests {
         vars.insert("slots".to_owned(), json!([{ "name": "repl" }]));
         let lines = vars_lines(&vars);
         let expected = [
-            (0, "disks", "{2}"),
-            (1, "/", "{1}"),
-            (2, "warn", "80%"),
-            (1, "/var", "{}"),
-            (0, "env", "prod"),
-            (0, "slots", "[1]"),
-            (1, "0", "{1}"),
-            (2, "name", "repl"),
-            (0, "tags", "[a, 1, true]"),
+            (0, "disks", "{2}", true),
+            (1, "/", "{1}", true),
+            (2, "warn", "80%", false),
+            (1, "/var", "{}", false),
+            (0, "env", "prod", false),
+            (0, "slots", "[1]", true),
+            (1, "0", "{1}", true),
+            (2, "name", "repl", false),
+            (0, "tags", "[a, 1, true]", false),
         ];
-        let lines: Vec<(usize, &str, &str)> = lines
+        let lines: Vec<(usize, &str, &str, bool)> = lines
             .iter()
-            .map(|(depth, key, value)| (*depth, key.as_str(), value.as_str()))
+            .map(|line| {
+                (
+                    line.depth,
+                    line.key.as_str(),
+                    line.value.as_str(),
+                    line.summary,
+                )
+            })
             .collect();
         assert_eq!(lines, expected);
     }
@@ -501,7 +508,9 @@ mod tests {
         );
         let lines = vars_lines(&vars);
         assert_eq!(lines.len(), VARS_MAX_LINES + 1);
-        assert!(lines.last().unwrap().2.ends_with("more lines"));
+        let last = lines.last().unwrap();
+        assert!(last.value.ends_with("more lines"));
+        assert!(last.summary);
     }
 
     #[test]

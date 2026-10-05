@@ -243,15 +243,32 @@ pub struct TreeLine {
     pub key: SharedString,
     /// The value, or a summary (`{3}`, `[2]`) for nested containers.
     pub value: SharedString,
+    /// Whether `value` summarises the lines below (a container's size, the
+    /// number of lines left out) rather than being a value; drawn faint.
+    pub summary: bool,
 }
 
 impl TreeLine {
-    /// A line at `depth`.
+    /// A line at `depth` with a value.
     pub fn new(depth: usize, key: impl Into<SharedString>, value: impl Into<SharedString>) -> Self {
         Self {
             depth,
             key: key.into(),
             value: value.into(),
+            summary: false,
+        }
+    }
+
+    /// A line at `depth` whose `value` summarises the lines below it: a
+    /// nested container (`{3}`, `[2]`), or lines left out (`12 more`).
+    pub fn summary(
+        depth: usize,
+        key: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            summary: true,
+            ..Self::new(depth, key, value)
         }
     }
 }
@@ -331,7 +348,11 @@ impl RenderOnce for TreeTable {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_color(colors.text)
+                            .text_color(if line.summary {
+                                colors.text_faint
+                            } else {
+                                colors.text
+                            })
                             .child(line.value),
                     )
             }))
@@ -363,13 +384,15 @@ mod tests {
     #[test]
     fn trees_keep_line_order() {
         let tree = TreeTable::new([
-            TreeLine::new(0, "disks", "{2}"),
-            TreeLine::new(1, "/", "{1}"),
+            TreeLine::summary(0, "disks", "{2}"),
+            TreeLine::summary(1, "/", "{1}"),
             TreeLine::new(2, "warn", "80%"),
         ])
         .title("custom vars");
         let keys: Vec<_> = tree.lines().iter().map(|line| line.key.clone()).collect();
         assert_eq!(keys, ["disks", "/", "warn"]);
         assert_eq!(tree.lines()[2].depth, 2);
+        let summaries: Vec<_> = tree.lines().iter().map(|line| line.summary).collect();
+        assert_eq!(summaries, [true, true, false]);
     }
 }

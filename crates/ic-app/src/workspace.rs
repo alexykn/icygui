@@ -103,19 +103,19 @@ impl Workspace {
     }
 
     /// Whether the sidebar is shown.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn is_sidebar_open(&self) -> bool {
         self.sidebar_open
     }
 
     /// The sidebar view.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn sidebar(&self) -> &Entity<Sidebar> {
         &self.sidebar
     }
 
     /// The pane of an object open as a tab.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn tab(&self, key: &ObjectKey) -> Option<&Entity<ObjectPane>> {
         self.tabs.get(key).map(|tab| &tab.view)
     }

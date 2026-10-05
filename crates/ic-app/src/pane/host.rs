@@ -10,17 +10,15 @@ use ic_core::snapshot::Snapshot;
 use ic_model::{CheckableState, Host, ObjectKey, Timestamp};
 use ic_ui_kit::{
     ActiveTheme as _, CircleSize, CompactRow, KvTable, Link, StateCircle, SubTabs, Theme, Tooltip,
-    TreeLine, TreeTable,
+    TreeTable,
 };
 
 use super::service::{links_table, notes};
 use super::{
-    HostTab, ObjectPane, PaneMode, TITLE_GROUP, action_buttons, copy_button, model, scroll_area,
+    HostTab, ObjectPane, PaneMode, TAB_CONTENT_WIDTH, TITLE_GROUP, action_buttons, copy_button,
+    model, scroll_area,
 };
 use crate::format;
-
-/// Width the content is kept to in a full-width tab.
-const TAB_CONTENT_WIDTH: f32 = 860.;
 
 pub(super) fn render(
     pane: &ObjectPane,
@@ -219,12 +217,7 @@ fn vars_tab(host: &Host, theme: &Theme) -> AnyElement {
             .child("no custom variables")
             .into_any_element();
     }
-    body.child(TreeTable::new(
-        lines
-            .into_iter()
-            .map(|(depth, key, value)| TreeLine::new(depth, key, value)),
-    ))
-    .into_any_element()
+    body.child(TreeTable::new(lines)).into_any_element()
 }
 
 fn config_tab(

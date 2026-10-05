@@ -11,7 +11,7 @@ mod header;
 pub(crate) mod rows;
 pub(crate) mod selection;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) use self::header::HeaderMenu;
 
 use std::collections::HashMap;
@@ -448,13 +448,15 @@ impl DashboardView {
         let cursor = selection.cursor();
         let theme = cx.theme();
         let now = Timestamp::now();
+        // Under a host's header, `on <host>` would repeat it on every row.
+        let show_host = view.group_by != GroupBy::Host;
         range
             .filter_map(|index| {
                 let row = match selection.rows().get(index)? {
                     DashboardRow::Object(key) => {
                         let emphasis =
                             RowEmphasis::new(cursor == Some(index), selection.is_marked(key));
-                        object_row(&snapshot, index, key, now, theme)
+                        object_row(&snapshot, index, key, show_host, now, theme)
                             .emphasis(emphasis)
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                 this.click_row(index, event.modifiers(), window, cx);
@@ -609,11 +611,12 @@ impl Render for DashboardView {
     }
 }
 
-/// An object row.
+/// An object row; `show_host` adds `on <host>` after a service's name.
 fn object_row(
     snapshot: &ic_core::snapshot::Snapshot,
     index: usize,
     key: &ObjectKey,
+    show_host: bool,
     now: Timestamp,
     theme: &Theme,
 ) -> ListRow {
@@ -628,7 +631,7 @@ fn object_row(
                 )
                 .title(row.name)
                 .detail(row.output);
-            let list_row = match row.host {
+            let list_row = match row.host.filter(|_| show_host) {
                 Some(host) => list_row.context("on", host),
                 None => list_row,
             };
@@ -756,7 +759,8 @@ fn note(text: impl Into<gpui::SharedString>, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-#[cfg(test)]
+/// Accessors for the UI tests (`ui_tests`, Linux only).
+#[cfg(all(test, target_os = "linux"))]
 impl DashboardView {
     /// The selected dashboard's list state.
     fn current(&self, cx: &App) -> Option<&ListUi> {

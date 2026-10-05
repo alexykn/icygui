@@ -26,6 +26,21 @@ cargo deny check                                     # licences, advisories, sou
 
 The first build compiles GPUI and takes a few minutes. Dependencies are built with `opt-level = 2` even in dev builds, so the UI stays smooth.
 
+## Demo data and development switches
+
+Until the core is wired up (M2), `cargo run -p ic-app` shows the built-in demo: the design's dashboards and objects (`crates/ic-app/src/demo/`). Environment variables for development (the `ICYGUI_DEMO_*` ones only affect the demo):
+
+| Variable | Effect |
+| --- | --- |
+| `ICYGUI_DEMO_ROWS=20000` | Adds that many generated services and selects the `lab / load-test` dashboard that lists them, to check that scrolling stays smooth. |
+| `ICYGUI_DEMO_DASHBOARD=databases` | Selects a dashboard by name at start. |
+| `ICYGUI_DEMO_OPEN=service` | Opens an object at start: `service` (postgres-replication beside the list, screen 2b), `host` (its host db-prod-03, screen 2c), `tab` (postgres-replication as a tab), an object name (`db-prod-03`, `db-prod-03!postgres-replication`) or `tab:<name>`. |
+| `ICYGUI_WINDOW_CONTROLS=always` | Draws the window's own close/minimise/maximise buttons (`never`, `auto`): on Linux the default depends on the desktop; screenshots under Xvfb need `always`. |
+
+Action buttons and their keys (acknowledge, downtime, check now, comment) are logged at `info` level; their dialogs come with M3.
+
+The UI tests in `crates/ic-app/src/ui_tests.rs` run the real window on GPUI's headless platform (Linux only): keystrokes, clicks and snapshot updates, no display server needed.
+
 ## Lints
 
 Every crate inherits `[workspace.lints]` from the root `Cargo.toml`: `clippy::pedantic`, plus restriction lints such as no `unwrap`/`expect`/`panic` outside tests and no `println!`. CI treats every warning as an error.

@@ -17,6 +17,13 @@ use crate::theme::ActiveTheme as _;
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type DismissHandler = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>;
 
+/// Space left and right of an item's content.
+const ITEM_PADDING: f32 = 8.;
+/// Width of the check mark column.
+const CHECK_SLOT: f32 = 14.;
+/// Space between the check mark column and the label.
+const ITEM_GAP: f32 = 8.;
+
 /// One entry of a [`Menu`].
 #[derive(IntoElement)]
 #[must_use = "a menu item does nothing unless rendered"]
@@ -43,7 +50,8 @@ impl MenuItem {
     }
 
     /// Shows a check mark slot; `true` draws the mark (radio and toggle
-    /// items). Items of one menu should all have the slot or none.
+    /// items). When any item of a [`Menu`] has the slot, the menu gives the
+    /// others an empty one so that all labels line up.
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = Some(checked);
         self
@@ -106,9 +114,9 @@ impl RenderOnce for MenuItem {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(8.))
+            .gap(px(ITEM_GAP))
             .h(theme.metrics.menu_item_height)
-            .px(px(8.))
+            .px(px(ITEM_PADDING))
             .rounded(theme.metrics.small_radius)
             .text_size(theme.text.body)
             .text_color(if enabled {
@@ -118,13 +126,19 @@ impl RenderOnce for MenuItem {
             })
             .whitespace_nowrap()
             .when_some(self.checked, |item, checked| {
-                item.child(div().flex().flex_none().w(px(14.)).when(checked, |slot| {
-                    slot.child(
-                        Icon::new(IconName::Check)
-                            .size(px(13.))
-                            .color(colors.accent),
-                    )
-                }))
+                item.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .w(px(CHECK_SLOT))
+                        .when(checked, |slot| {
+                            slot.child(
+                                Icon::new(IconName::Check)
+                                    .size(px(13.))
+                                    .color(colors.accent),
+                            )
+                        }),
+                )
             })
             .child(div().flex_1().child(self.label))
             .when_some(self.key, |item, key| item.child(KeyHint::new(key)))
@@ -208,6 +222,15 @@ impl Menu {
         self
     }
 
+    /// Whether the menu has a check mark column: some item has a check mark
+    /// slot. Labels and the other items are then indented past it.
+    #[must_use]
+    pub fn has_check_column(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Item(item) if item.checked.is_some()))
+    }
+
     /// The labels of the menu's items, in order.
     #[must_use]
     pub fn item_labels(&self) -> Vec<SharedString> {
@@ -234,13 +257,25 @@ impl RenderOnce for Menu {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
+        let check_column = self.has_check_column();
+        let label_indent = if check_column {
+            ITEM_PADDING + CHECK_SLOT + ITEM_GAP
+        } else {
+            ITEM_PADDING
+        };
         let entries: Vec<AnyElement> = self
             .entries
             .into_iter()
             .map(|entry| match entry {
-                Entry::Item(item) => item.into_any_element(),
+                Entry::Item(mut item) => {
+                    if check_column && item.checked.is_none() {
+                        item.checked = Some(false);
+                    }
+                    item.into_any_element()
+                }
                 Entry::Label(label) => div()
-                    .px(px(8.))
+                    .pl(px(label_indent))
+                    .pr(px(ITEM_PADDING))
                     .pt(px(6.))
                     .pb(px(2.))
                     .text_size(theme.text.label)
@@ -378,6 +413,16 @@ mod tests {
             .item(MenuItem::new("descending", "descending").key_hint("↓"));
         assert_eq!(menu.item_labels(), ["severity", "host", "descending"]);
         assert!(format!("{menu:?}").contains("severity"));
+    }
+
+    #[test]
+    fn one_check_mark_slot_makes_a_check_column() {
+        let plain = Menu::new("plain")
+            .label("actions")
+            .item(MenuItem::new("copy", "copy"));
+        assert!(!plain.has_check_column());
+        let mixed = plain.item(MenuItem::new("hide", "hide handled").checked(false));
+        assert!(mixed.has_check_column());
     }
 
     #[test]

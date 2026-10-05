@@ -210,21 +210,24 @@ impl DashboardView {
     ) -> AnyElement {
         let theme = cx.theme();
         let open = self.menus.open() == Some(HeaderMenu::Options);
+        let trigger = GlyphButton::new("dashboard-options", "···")
+            .text_size(gpui::px(13.))
+            .bleed()
+            .color(theme.colors.text_muted)
+            .selected(open)
+            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                this.menus.toggle(HeaderMenu::Options, down_position(event));
+                cx.notify();
+            }));
         div()
             .relative()
             .flex_none()
-            .child(
-                GlyphButton::new("dashboard-options", "···")
-                    .text_size(gpui::px(13.))
-                    .bleed()
-                    .color(theme.colors.text_muted)
-                    .selected(open)
-                    .tooltip(Tooltip::new("Dashboard options"))
-                    .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                        this.menus.toggle(HeaderMenu::Options, down_position(event));
-                        cx.notify();
-                    })),
-            )
+            // The open menu says what the button is.
+            .child(if open {
+                trigger
+            } else {
+                trigger.tooltip(Tooltip::new("Dashboard options"))
+            })
             .when(open, |trigger| {
                 trigger.child(Popover::new(Self::options_menu(reference, view, cx)).align_right())
             })
@@ -271,17 +274,11 @@ impl DashboardView {
         let filter = view.filter.clone();
         menu.separator()
             .item(
-                MenuItem::new(
-                    "toggle-handled",
-                    if view.hide_handled {
-                        "show handled problems"
-                    } else {
-                        "hide handled problems"
-                    },
-                )
-                .on_click(update(Box::new(move |view: &mut View| {
-                    view.hide_handled = hide;
-                }))),
+                MenuItem::new("toggle-handled", "hide handled problems")
+                    .checked(view.hide_handled)
+                    .on_click(update(Box::new(move |view: &mut View| {
+                        view.hide_handled = hide;
+                    }))),
             )
             .item(
                 MenuItem::new("copy-filter", "copy filter expression")
@@ -315,6 +312,11 @@ impl DashboardView {
         let (_, dashboard) = state.dashboard(reference)?;
         let result = state.result(reference)?;
         let view = &dashboard.view;
+        let items = summary_items(&result.summary, view.object_kind);
+        if items.is_empty() {
+            // Nothing matches the filter: the empty state says so.
+            return None;
+        }
         let marked = self
             .lists
             .get(reference)
@@ -360,7 +362,7 @@ impl DashboardView {
         Some(
             SummaryBar::new()
                 .children(
-                    summary_items(&result.summary, view.object_kind)
+                    items
                         .into_iter()
                         .map(|(state, count, label)| SummaryItem::new(state, count, label)),
                 )
@@ -410,54 +412,55 @@ pub(super) fn sort_label(sort: Sort, kind: ObjectKind) -> SharedString {
 }
 
 /// The counts the summary bar shows: problem states with a count, or the OK
-/// count when there are none.
+/// count when there are none, then pending objects. Empty when nothing
+/// matches the dashboard's filter.
 fn summary_items(summary: &Summary, kind: ObjectKind) -> Vec<(CheckableState, u32, &'static str)> {
-    let problems: Vec<_> = match kind {
-        ObjectKind::Services => vec![
-            (
-                CheckableState::Service(ServiceState::Critical),
-                summary.critical,
-                "critical",
-            ),
-            (
-                CheckableState::Service(ServiceState::Warning),
-                summary.warning,
-                "warning",
-            ),
-            (
-                CheckableState::Service(ServiceState::Unknown),
-                summary.unknown,
-                "unknown",
-            ),
-        ],
-        ObjectKind::Hosts => vec![
-            (CheckableState::Host(HostState::Down), summary.down, "down"),
-            (
-                CheckableState::Host(HostState::Unreachable),
-                summary.unreachable,
-                "unreachable",
-            ),
-        ],
-    }
-    .into_iter()
-    .filter(|(_, count, _)| *count > 0)
-    .collect();
-    if !problems.is_empty() {
-        return problems;
-    }
-    let ok = match kind {
-        ObjectKind::Services => CheckableState::Service(ServiceState::Ok),
-        ObjectKind::Hosts => CheckableState::Host(HostState::Up),
+    let (problems, ok, pending) = match kind {
+        ObjectKind::Services => (
+            vec![
+                (
+                    CheckableState::Service(ServiceState::Critical),
+                    summary.critical,
+                    "critical",
+                ),
+                (
+                    CheckableState::Service(ServiceState::Warning),
+                    summary.warning,
+                    "warning",
+                ),
+                (
+                    CheckableState::Service(ServiceState::Unknown),
+                    summary.unknown,
+                    "unknown",
+                ),
+            ],
+            (CheckableState::Service(ServiceState::Ok), "ok"),
+            CheckableState::Service(ServiceState::Pending),
+        ),
+        ObjectKind::Hosts => (
+            vec![
+                (CheckableState::Host(HostState::Down), summary.down, "down"),
+                (
+                    CheckableState::Host(HostState::Unreachable),
+                    summary.unreachable,
+                    "unreachable",
+                ),
+            ],
+            (CheckableState::Host(HostState::Up), "up"),
+            CheckableState::Host(HostState::Pending),
+        ),
     };
-    vec![(
-        ok,
-        summary.ok,
-        if kind == ObjectKind::Hosts {
-            "up"
-        } else {
-            "ok"
-        },
-    )]
+    let mut items: Vec<_> = problems
+        .into_iter()
+        .filter(|(_, count, _)| *count > 0)
+        .collect();
+    if items.is_empty() && summary.ok > 0 {
+        items.push((ok.0, summary.ok, ok.1));
+    }
+    if summary.pending > 0 {
+        items.push((pending, summary.pending, "pending"));
+    }
+    items
 }
 
 #[cfg(test)]
@@ -525,6 +528,33 @@ mod tests {
         };
         let items = summary_items(&summary, ObjectKind::Hosts);
         assert_eq!(items, [(CheckableState::Host(HostState::Up), 7, "up")]);
+    }
+
+    #[test]
+    fn pending_objects_are_counted_and_an_empty_summary_shows_nothing() {
+        let summary = Summary {
+            warning: 2,
+            ok: 30,
+            pending: 3,
+            ..Summary::default()
+        };
+        let items = summary_items(&summary, ObjectKind::Services);
+        assert_eq!(
+            items,
+            [
+                (CheckableState::Service(ServiceState::Warning), 2, "warning"),
+                (CheckableState::Service(ServiceState::Pending), 3, "pending"),
+            ]
+        );
+        let only_pending = Summary {
+            pending: 1,
+            ..Summary::default()
+        };
+        assert_eq!(
+            summary_items(&only_pending, ObjectKind::Hosts),
+            [(CheckableState::Host(HostState::Pending), 1, "pending")]
+        );
+        assert!(summary_items(&Summary::default(), ObjectKind::Services).is_empty());
     }
 
     #[test]

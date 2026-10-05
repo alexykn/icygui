@@ -44,6 +44,7 @@ pub struct Link {
     label: SharedString,
     style: LinkStyle,
     text_size: Option<Pixels>,
+    truncate: bool,
     tooltip: Option<Tooltip>,
     on_click: Option<ClickHandler>,
 }
@@ -56,6 +57,7 @@ impl Link {
             label: label.into(),
             style: LinkStyle::Accent,
             text_size: None,
+            truncate: false,
             tooltip: None,
             on_click: None,
         }
@@ -70,6 +72,14 @@ impl Link {
     /// Sets the text size (default: inherited).
     pub fn text_size(mut self, size: Pixels) -> Self {
         self.text_size = Some(size);
+        self
+    }
+
+    /// Lets the link shrink below its label's width and cuts the label with
+    /// an ellipsis (long URLs in a table cell). Without it the link keeps
+    /// its label's width.
+    pub fn truncate(mut self) -> Self {
+        self.truncate = true;
         self
     }
 
@@ -95,6 +105,7 @@ impl fmt::Debug for Link {
             .field("id", &self.id)
             .field("label", &self.label)
             .field("style", &self.style)
+            .field("truncate", &self.truncate)
             .finish_non_exhaustive()
     }
 }
@@ -108,6 +119,9 @@ impl RenderOnce for Link {
             .aria_label(self.label.clone())
             .flex_none()
             .whitespace_nowrap()
+            .when(self.truncate, |link| {
+                link.flex_shrink(1.).min_w_0().max_w_full().truncate()
+            })
             .text_color(color)
             .when_some(self.text_size, gpui::Styled::text_size)
             .cursor_pointer()
@@ -148,6 +162,12 @@ mod tests {
             .on_click(|_, _, _| {});
         assert_eq!(link.style, LinkStyle::Quiet);
         assert!(link.on_click.is_some());
+        assert!(!link.truncate);
+        assert!(
+            Link::new("url", "https://wiki.example.com/")
+                .truncate()
+                .truncate
+        );
         assert!(format!("{link:?}").contains("db-prod-03"));
     }
 }

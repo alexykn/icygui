@@ -10,25 +10,30 @@ use ic_core::snapshot::Snapshot;
 use ic_model::{CheckableState, CommentKind, ObjectKey, Service, ServiceState, Timestamp};
 use ic_ui_kit::{
     ActiveTheme as _, CircleSize, CodeBlock, IconButton, IconName, KvTable, Link, NoteEntry,
-    PerfdataTable, SectionLabel, StateCircle, Theme, Tooltip, TreeLine, TreeTable,
+    PerfdataTable, SectionLabel, StateCircle, Theme, Tooltip, TreeTable,
 };
 
 use super::{
-    ObjectPane, PaneMode, TITLE_GROUP, action_buttons, copy_button, model, scroll_area, web_link,
+    BodyLayout, ObjectPane, TAB_COLUMN_GAP, TAB_CONTENT_WIDTH, TAB_SIDE_WIDTH, TITLE_GROUP,
+    action_buttons, copy_button, model, scroll_area, web_link,
 };
 use crate::actions::ObjectAction;
 
 /// The hover group of the plugin output (reveals its copy button).
 const OUTPUT_GROUP: &str = "pane-output";
 
-/// Width the body's content is kept to in a full-width tab, for reading.
-const TAB_CONTENT_WIDTH: f32 = 860.;
+/// The hover group of a comment or downtime (reveals its remove button).
+const NOTE_GROUP: &str = "pane-note";
+
+/// Space between the body's sections.
+const SECTION_GAP: f32 = 24.;
 
 pub(super) fn render(
     pane: &ObjectPane,
     snapshot: &Snapshot,
     service: &Service,
     now: Timestamp,
+    layout: BodyLayout,
     cx: &Context<ObjectPane>,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -38,15 +43,23 @@ pub(super) fn render(
     let handled = service.is_handled(host_problem);
     let acknowledged = service.check.acknowledgement.is_acknowledged();
 
-    let column = div()
-        .flex()
-        .flex_col()
-        .gap(px(24.))
+    let output = output(service, theme);
+    let perfdata = service
+        .check
+        .result
+        .as_ref()
+        .filter(|result| !result.perfdata.is_empty())
+        .map(|result| PerfdataTable::new(&result.perfdata).into_any_element());
+    let check = check_table(service, now).into_any_element();
+    let notes = notes(snapshot, &key, now, cx);
+    let vars = vars(service).map(IntoElement::into_any_element);
+    let groups =
+        groups(snapshot, service, host.map(|host| host.groups.as_slice())).into_any_element();
+    let links = links(service).map(IntoElement::into_any_element);
+
+    let column = sections()
         .px(theme.metrics.pane_inset)
         .py(theme.metrics.pane_padding)
-        .when(pane.mode == PaneMode::Tab, |column| {
-            column.max_w(px(TAB_CONTENT_WIDTH))
-        })
         .child(title(
             service,
             host.map(|host| host.display_name.as_str()),
@@ -54,34 +67,51 @@ pub(super) fn render(
             now,
             cx,
         ))
-        .child(action_buttons(acknowledged, service.is_problem(), cx))
-        .child(output(service, theme))
-        .when(
-            service
-                .check
-                .result
-                .as_ref()
-                .is_some_and(|result| !result.perfdata.is_empty()),
-            |column| {
-                column.children(
-                    service
-                        .check
-                        .result
-                        .as_ref()
-                        .map(|result| PerfdataTable::new(&result.perfdata)),
-                )
-            },
-        )
-        .child(check_table(service, now))
-        .children(notes(snapshot, &key, now, cx))
-        .children(vars(service))
-        .child(groups(
-            snapshot,
-            service,
-            host.map(|host| host.groups.as_slice()),
-        ))
-        .children(links(service));
+        .child(action_buttons(acknowledged, service.is_problem(), cx));
+    let column = match layout {
+        BodyLayout::Pane | BodyLayout::Tab => column
+            .when(layout == BodyLayout::Tab, |column| {
+                column.max_w(px(TAB_CONTENT_WIDTH))
+            })
+            .child(output)
+            .children(perfdata)
+            .child(check)
+            .children(notes)
+            .children(vars)
+            .child(groups)
+            .children(links),
+        BodyLayout::WideTab => column
+            .max_w(px(TAB_CONTENT_WIDTH + TAB_COLUMN_GAP + TAB_SIDE_WIDTH))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(TAB_COLUMN_GAP))
+                    .child(
+                        sections()
+                            .flex_1()
+                            .min_w_0()
+                            .child(output)
+                            .children(perfdata)
+                            .children(notes),
+                    )
+                    .child(
+                        sections()
+                            .flex_none()
+                            .w(px(TAB_SIDE_WIDTH))
+                            .child(check)
+                            .children(vars)
+                            .child(groups)
+                            .children(links),
+                    ),
+            ),
+    };
     scroll_area("service-pane-body", &pane.scroll, column).into_any_element()
+}
+
+/// A column of sections.
+fn sections() -> gpui::Div {
+    div().flex().flex_col().gap(px(SECTION_GAP))
 }
 
 fn title(
@@ -237,16 +267,23 @@ pub(super) fn notes(
     if comments.is_empty() && downtimes.is_empty() {
         return None;
     }
+    // Shown while the mouse is over its note, like the copy buttons.
     let remove = |id: String, tooltip: &'static str, action: ObjectAction| {
-        IconButton::new(gpui::SharedString::from(id), IconName::Close)
-            .size(px(20.))
-            .icon_size(px(12.))
-            .color(theme.colors.text_faint)
-            .tooltip(Tooltip::new(tooltip))
-            .on_click(
-                cx.listener(move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
-                    pane.request(action.clone(), cx);
-                }),
+        div()
+            .flex_none()
+            .invisible()
+            .group_hover(NOTE_GROUP, gpui::Styled::visible)
+            .child(
+                IconButton::new(gpui::SharedString::from(id), IconName::Close)
+                    .size(px(20.))
+                    .icon_size(px(12.))
+                    .color(theme.colors.text_faint)
+                    .tooltip(Tooltip::new(tooltip))
+                    .on_click(
+                        cx.listener(move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                            pane.request(action.clone(), cx);
+                        }),
+                    ),
             )
     };
     let mut column = div().flex().flex_col().gap(px(14.));
@@ -260,15 +297,16 @@ pub(super) fn notes(
                 ObjectAction::RemoveComment(note.name.clone()),
             ));
         }
-        column = column.child(entry);
+        column = column.child(div().group(NOTE_GROUP).child(entry));
     }
     for downtime in downtimes {
         let note = model::downtime_note(downtime, now);
-        column = column.child(note_entry(&note).child(remove(
+        let entry = note_entry(&note).child(remove(
             format!("remove-downtime-{}", note.name),
             "Remove downtime",
             ObjectAction::RemoveDowntime(note.name.clone()),
-        )));
+        ));
+        column = column.child(div().group(NOTE_GROUP).child(entry));
     }
     Some(column.into_any_element())
 }
@@ -283,13 +321,9 @@ fn note_entry(note: &model::Note) -> NoteEntry {
 fn vars(service: &Service) -> Option<TreeTable> {
     let lines = model::vars_lines(&service.vars);
     (!lines.is_empty()).then(|| {
-        TreeTable::new(
-            lines
-                .into_iter()
-                .map(|(depth, key, value)| TreeLine::new(depth, key, value)),
-        )
-        .title("custom vars")
-        .key_width(px(140.))
+        TreeTable::new(lines)
+            .title("custom vars")
+            .key_width(px(140.))
     })
 }
 

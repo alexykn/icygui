@@ -184,16 +184,82 @@ async fn filters_select_objects() {
     assert_eq!(body["status"], "No objects found.");
     assert!(body["diagnostic_information"].is_string());
 
-    // Features the stand-in evaluator doesn't support are 400, never a
-    // silently wrong answer.
-    let (status, _) = post_get(
+    // The whole language of ic-filter: regular expressions, joined objects,
+    // methods, filter_vars dictionaries.
+    let (status, body) = post_get(
+        &client,
+        &server,
+        "/v1/objects/services",
+        &json!({
+            "filter": "regex(\"^db-prod-0[13]$\", host.name) && service.name.contains(\"replication\") && service.host.name == host.name && service.state >= limits.critical",
+            "filter_vars": {"limits": {"critical": 2}},
+            "attrs": ["name"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["db-prod-03!postgres-replication"]);
+
+    // An error for any object fails the whole request, like in Icinga.
+    for filter in [
+        "host.name == \"db-prod-03\" || nothing",
+        "host.bogus",
+        "host.name < 1",
+        "x = 1",
+    ] {
+        let (status, body) = post_get(
+            &client,
+            &server,
+            "/v1/objects/hosts",
+            &json!({"filter": filter, "verbose": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{filter}: {body}");
+        assert_eq!(body["status"], "No objects found.");
+        assert!(
+            body["diagnostic_information"]
+                .as_str()
+                .unwrap()
+                .starts_with("Error: "),
+            "{body}"
+        );
+    }
+
+    // Empty filters match nothing.
+    let (status, body) = post_get(
         &client,
         &server,
         "/v1/objects/hosts",
-        &json!({"filter": "regex(\"^db\", host.name)"}),
+        &json!({"filter": " "}),
     )
     .await;
-    assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::NOT_FOUND);
+    assert_eq!((status, body), (StatusCode::OK, json!({"results": []})));
+}
+
+/// Actions take filters the same way.
+#[tokio::test]
+async fn actions_resolve_filters_like_queries() {
+    let (server, client) = lab().await;
+    let (status, body) = post(
+        &client,
+        &server,
+        "/v1/actions/reschedule-check",
+        &json!({"type": "Service", "filter": "service.name == check", "filter_vars": {"check": "ssh"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!results(&body).is_empty());
+    for (filter, code) in [("host.name ==", 404), ("nothing", 404), ("false", 404)] {
+        let (status, body) = post(
+            &client,
+            &server,
+            "/v1/actions/reschedule-check",
+            &json!({"type": "Service", "filter": filter}),
+        )
+        .await;
+        assert_eq!(status.as_u16(), code, "{filter}: {body}");
+        assert_eq!(body["status"], "No objects found.", "{filter}");
+    }
 }
 
 #[tokio::test]

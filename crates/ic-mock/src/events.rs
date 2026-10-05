@@ -4,6 +4,7 @@
 //! like a client on a broken connection. Events are encoded once and shared
 //! by every stream that receives them.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use bytes::Bytes;
@@ -11,8 +12,9 @@ use serde_json::Value as Json;
 use tokio::sync::mpsc;
 
 use crate::config::NumberFormat;
-use crate::filter::{CompiledFilter, EvalError, ObjectRef, Scope, Value};
+use crate::filter::{ApiFilter, Frame, Item, Value};
 use crate::json;
+use crate::model::ObjRef;
 
 /// The event types of `/v1/events` (`eventshandler.cpp`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -84,9 +86,28 @@ pub(crate) type StreamItem = Bytes;
 struct Subscriber {
     id: u64,
     types: HashSet<EventType>,
-    filter: Option<CompiledFilter>,
+    filter: Option<ApiFilter>,
     user: String,
     queue: mpsc::Sender<StreamItem>,
+}
+
+impl Subscriber {
+    /// Whether the stream's filter lets the event through. Like Icinga, an
+    /// event whose filter fails is skipped (and logged).
+    fn accepts(&self, frame: &EventFrame<'_>) -> bool {
+        let Some(filter) = &self.filter else {
+            return true;
+        };
+        filter.matches(frame).unwrap_or_else(|error| {
+            tracing::warn!(
+                stream = self.id,
+                user = %self.user,
+                %error,
+                "error evaluating event filter"
+            );
+            false
+        })
+    }
 }
 
 /// Information about a connected stream, for the control API.
@@ -116,18 +137,27 @@ impl std::fmt::Debug for EventBus {
     }
 }
 
-/// The scope of an event filter: the event as `event`.
-struct EventScope {
-    event: Value,
+/// The frame of an event filter: the event as `event` (and `obj`).
+struct EventFrame<'a> {
+    event: &'a Json,
+    now: f64,
 }
 
-impl Scope for EventScope {
-    fn variable(&self, name: &str) -> Option<Value> {
-        (name == "event").then(|| self.event.clone())
+impl Frame for EventFrame<'_> {
+    fn variable(&self, name: &str) -> Option<Item<'_>> {
+        matches!(name, "event" | "obj").then(|| Item::Json(Cow::Borrowed(self.event)))
     }
 
-    fn field(&self, _object: &ObjectRef, _name: &str) -> Result<Option<Value>, EvalError> {
-        Ok(None)
+    fn field(&self, _object: &ObjRef, _name: &str) -> Result<Item<'_>, String> {
+        Ok(Item::null())
+    }
+
+    fn object_value(&self, _object: &ObjRef) -> Value {
+        Value::Null
+    }
+
+    fn now(&self) -> f64 {
+        self.now
     }
 }
 
@@ -146,7 +176,7 @@ impl EventBus {
     pub(crate) fn subscribe(
         &mut self,
         types: HashSet<EventType>,
-        filter: Option<CompiledFilter>,
+        filter: Option<ApiFilter>,
         user: &str,
     ) -> (u64, mpsc::Receiver<StreamItem>) {
         let (queue, rx) = mpsc::channel(self.buffer);
@@ -168,54 +198,41 @@ impl EventBus {
     }
 
     /// Publishes an event of type `ty` to every stream that subscribed to it
-    /// and whose filter matches.
-    pub(crate) fn publish(&mut self, ty: EventType, event: Json) {
+    /// and whose filter matches; `now` is the time filters see.
+    pub(crate) fn publish(&mut self, ty: EventType, event: Json, now: f64) {
         if !self.wants(ty) {
             return;
         }
         self.published += 1;
-        let filter_scope = self
+        // Filters see the event before it's encoded (encoding consumes it).
+        let frame = EventFrame { event: &event, now };
+        let wanted: Vec<bool> = self
             .subscribers
             .iter()
-            .any(|s| s.filter.is_some() && s.types.contains(&ty))
-            .then(|| EventScope {
-                event: Value::from_json(&event),
-            });
+            .map(|subscriber| subscriber.types.contains(&ty) && subscriber.accepts(&frame))
+            .collect();
         let mut line = json::encode(event, self.number_format, false);
         line.push(b'\n');
         let line = Bytes::from(line);
+        let mut wanted = wanted.into_iter();
         self.subscribers.retain(|subscriber| {
-            if !subscriber.types.contains(&ty) {
-                return !subscriber.queue.is_closed();
+            if wanted.next().unwrap_or(false) {
+                deliver(subscriber, line.clone())
+            } else {
+                !subscriber.queue.is_closed()
             }
-            if let (Some(filter), Some(scope)) = (&subscriber.filter, &filter_scope) {
-                match filter.matches(scope) {
-                    Ok(true) => {}
-                    Ok(false) => return true,
-                    Err(error) => {
-                        tracing::warn!(
-                            stream = subscriber.id,
-                            user = %subscriber.user,
-                            %error,
-                            "error evaluating event filter"
-                        );
-                        return true;
-                    }
-                }
-            }
-            deliver(subscriber, line.clone())
         });
     }
 
     /// Sends a raw JSON value: to streams subscribed to its `type`, or to
     /// every stream when the type is missing or unknown.
-    pub(crate) fn publish_raw(&mut self, event: Json) {
+    pub(crate) fn publish_raw(&mut self, event: Json, now: f64) {
         let ty = event
             .get("type")
             .and_then(Json::as_str)
             .and_then(EventType::from_name);
         if let Some(ty) = ty {
-            self.publish(ty, event);
+            self.publish(ty, event, now);
         } else {
             let mut line = json::encode(event, self.number_format, false);
             line.push(b'\n');
@@ -274,7 +291,7 @@ fn deliver(subscriber: &Subscriber, line: Bytes) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::compile;
+    use crate::filter::{ApiFilter, Node, compile};
     use serde_json::json;
 
     fn types(list: &[EventType]) -> HashSet<EventType> {
@@ -293,10 +310,15 @@ mod tests {
     fn delivers_only_subscribed_types() {
         let mut bus = EventBus::new(NumberFormat::Float, 8);
         let (_, mut rx) = bus.subscribe(types(&[EventType::StateChange]), None, "root");
-        bus.publish(EventType::CheckResult, json!({ "type": "CheckResult" }));
+        bus.publish(
+            EventType::CheckResult,
+            json!({ "type": "CheckResult" }),
+            0.0,
+        );
         bus.publish(
             EventType::StateChange,
             json!({ "type": "StateChange", "state": 2 }),
+            0.0,
         );
         let line = rx.try_recv().unwrap();
         assert_eq!(&line[..], b"{\"state\":2.0,\"type\":\"StateChange\"}\n");
@@ -306,19 +328,33 @@ mod tests {
     #[test]
     fn filters_events() {
         let mut bus = EventBus::new(NumberFormat::Integral, 8);
-        let filter = compile(r#"event.host == "a""#, None).unwrap();
+        let filter = compile(
+            r#"event.host == "a" && obj.check_result.state > 0 && get_time() == 5"#,
+            Node::default(),
+        )
+        .unwrap();
         let (_, mut rx) = bus.subscribe(types(&[EventType::CheckResult]), Some(filter), "root");
-        bus.publish(
-            EventType::CheckResult,
-            json!({ "type": "CheckResult", "host": "b" }),
+        let (_, mut nothing) = bus.subscribe(
+            types(&[EventType::CheckResult]),
+            Some(ApiFilter::nothing()),
+            "root",
         );
-        bus.publish(
-            EventType::CheckResult,
-            json!({ "type": "CheckResult", "host": "a" }),
-        );
+        let failing = compile("event.host.x", Node::default()).unwrap();
+        let (_, mut failed) =
+            bus.subscribe(types(&[EventType::CheckResult]), Some(failing), "root");
+        for host in ["b", "a"] {
+            bus.publish(
+                EventType::CheckResult,
+                json!({ "type": "CheckResult", "host": host, "check_result": { "state": 2 } }),
+                5.0,
+            );
+        }
         let line = rx.try_recv().unwrap();
         assert!(String::from_utf8_lossy(&line).contains("\"host\":\"a\""));
         assert!(rx.try_recv().is_err());
+        assert!(nothing.try_recv().is_err(), "a filter that matches nothing");
+        assert!(failed.try_recv().is_err(), "failing filters skip the event");
+        assert_eq!(bus.streams().len(), 3, "and keep the stream");
     }
 
     #[test]
@@ -326,7 +362,11 @@ mod tests {
         let mut bus = EventBus::new(NumberFormat::Float, 2);
         let (_, mut rx) = bus.subscribe(types(&[EventType::CheckResult]), None, "root");
         for _ in 0..5 {
-            bus.publish(EventType::CheckResult, json!({ "type": "CheckResult" }));
+            bus.publish(
+                EventType::CheckResult,
+                json!({ "type": "CheckResult" }),
+                0.0,
+            );
         }
         assert!(
             bus.streams().is_empty(),
@@ -354,7 +394,7 @@ mod tests {
     fn raw_events_with_unknown_types_reach_everyone() {
         let mut bus = EventBus::new(NumberFormat::Float, 4);
         let (_, mut rx) = bus.subscribe(types(&[EventType::Flapping]), None, "root");
-        bus.publish_raw(json!({ "type": "SomethingNew" }));
+        bus.publish_raw(json!({ "type": "SomethingNew" }), 0.0);
         bus.publish_line_bytes(&Bytes::from_static(b"not json\n"));
         assert!(rx.try_recv().is_ok());
         assert_eq!(&rx.try_recv().unwrap()[..], b"not json\n");

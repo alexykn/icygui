@@ -11,6 +11,10 @@ pins that down:
 - `samples/` holds real responses recorded from that instance (Icinga
   v2.15.6): every object type, status, info, action results, error bodies
   and an event stream. Tests use them as fixtures.
+- `record-queries.py` records `samples/queries.json`: read-only object and
+  status queries with their answers (attribute selection, joins, meta,
+  name lists, unknown attributes, filters, flags). `ic-mock`'s
+  `tests/fidelity.rs` replays them against the mock.
 
 Facts learned from the real instance that the client must respect:
 
@@ -24,3 +28,16 @@ Facts learned from the real instance that the client must respect:
   `last_check_result.state` / the object's `state`.
 - `execute-command` fails per object with `Can't find a valid endpoint`
   unless an endpoint is given or the object has `command_endpoint`.
+- An attribute the type doesn't have, in `attrs` or `joins`, fails the
+  whole query with `400 Invalid field specified: <name>`; attributes users
+  can't see (`state_raw`) and `service.host` are accepted but left out.
+- Objects that never had a check result report `last_check` -1 and
+  `last_state_change`, `last_hard_state_change` and
+  `previous_state_change` 0.
+- A filter that doesn't compile or fails for any object fails the whole
+  query with `404 No objects found.`; an empty filter matches nothing.
+  Event streams treat `filter: ""` as no filter and open silently with a
+  filter that doesn't compile. Status filters see the entry as
+  `dictionary`, not `status`.
+- `all_joins`, `pretty` and `verbose` are read through numbers: `"0"` is
+  false and `"true"` an error (`pretty=true` answers 500).

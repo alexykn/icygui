@@ -341,7 +341,9 @@ impl MockControl {
     /// Sends a raw JSON value to the event streams: to those subscribed to
     /// its `type`, or to every stream when the type is missing or unknown.
     pub fn emit_raw(&self, event: serde_json::Value) {
-        self.world().bus.publish_raw(event);
+        let mut world = self.world();
+        let now = world.now();
+        world.bus.publish_raw(event, now);
     }
 
     /// Sends a raw line (a newline is appended) to every event stream, e.g.

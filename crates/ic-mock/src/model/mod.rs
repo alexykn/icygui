@@ -39,6 +39,8 @@ pub(crate) use types::{
 )]
 pub(crate) struct AppInfo {
     pub(crate) node_name: String,
+    /// The zone of the node's endpoint (Icinga's `ZoneName`).
+    pub(crate) zone_name: String,
     pub(crate) version: String,
     pub(crate) program_start: f64,
     pub(crate) pid: u32,
@@ -112,6 +114,14 @@ pub(crate) fn wall_clock() -> f64 {
 }
 
 impl World {
+    /// The node's globals for filters (`NodeName`, `ZoneName`).
+    pub(crate) fn filter_node(&self) -> crate::filter::Node {
+        crate::filter::Node {
+            name: self.app.node_name.clone(),
+            zone: self.app.zone_name.clone(),
+        }
+    }
+
     /// The mock's current time: the wall clock plus `advance_clock` offsets.
     pub(crate) fn now(&self) -> f64 {
         wall_clock() + self.clock_offset
@@ -293,8 +303,9 @@ impl World {
         }
         let mut event = build(self);
         event.insert("type".into(), Json::String(ty.name().to_owned()));
-        event.insert("timestamp".into(), crate::json::num(self.now()));
-        self.bus.publish(ty, Json::Object(event));
+        let now = self.now();
+        event.insert("timestamp".into(), crate::json::num(now));
+        self.bus.publish(ty, Json::Object(event), now);
     }
 
     /// `ObjectCreated` / `ObjectDeleted` / `ObjectModified`.

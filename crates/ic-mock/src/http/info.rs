@@ -1,14 +1,16 @@
 //! `GET /v1` (`InfoHandler`) and `GET /v1/status` (`StatusHandler`).
 
+use std::borrow::Cow;
+
 use serde_json::{Map, Value as Json};
 
 use super::params::Params;
 use super::response::{Body, html, json, json_error};
 use crate::auth::Principal;
 use crate::config::NumberFormat;
-use crate::filter::{self, EvalError, FilterError, ObjectRef, Scope, Value};
-use crate::model::World;
+use crate::filter::{self, Frame, Item, Value};
 use crate::model::stats::STATUS_FUNCTIONS;
+use crate::model::{ObjRef, World};
 
 /// `GET /v1`: JSON only when `Accept` is exactly `application/json`.
 pub(crate) fn info(
@@ -57,18 +59,28 @@ pub(crate) fn info(
     html(200, body)
 }
 
-/// The scope of a status filter: the status entry as `status`.
-struct StatusScope {
-    entry: Value,
+/// The frame of a status filter. Status entries are dictionaries, so
+/// Icinga names the variable after their type: `dictionary` (and `obj`).
+struct StatusFrame<'a> {
+    entry: &'a Json,
+    now: f64,
 }
 
-impl Scope for StatusScope {
-    fn variable(&self, name: &str) -> Option<Value> {
-        matches!(name, "status" | "obj").then(|| self.entry.clone())
+impl Frame for StatusFrame<'_> {
+    fn variable(&self, name: &str) -> Option<Item<'_>> {
+        matches!(name, "dictionary" | "obj").then(|| Item::Json(Cow::Borrowed(self.entry)))
     }
 
-    fn field(&self, _object: &ObjectRef, _name: &str) -> Result<Option<Value>, EvalError> {
-        Ok(None)
+    fn field(&self, _object: &ObjRef, _name: &str) -> Result<Item<'_>, String> {
+        Ok(Item::null())
+    }
+
+    fn object_value(&self, _object: &ObjRef) -> Value {
+        Value::Null
+    }
+
+    fn now(&self) -> f64 {
+        self.now
     }
 }
 
@@ -128,14 +140,14 @@ pub(crate) fn status(
                     None,
                 );
             }
-            match filter::compile(&params.last_string("filter"), None) {
-                Ok(compiled) => Some(compiled),
-                Err(error @ FilterError::Syntax(_)) => {
-                    return not_found(&params, &error.to_string());
-                }
-                Err(error @ FilterError::Unsupported(_)) => {
-                    return json_error(400, &error.to_string(), format, Some(&params), None);
-                }
+            let compiled = match filter::compile(&params.last_string("filter"), world.filter_node())
+            {
+                Ok(compiled) => compiled,
+                Err(error) => return not_found(&params, &error.to_string()),
+            };
+            match super::targets::filter_vars(&params) {
+                Ok(vars) => Some(compiled.with_vars(vars)),
+                Err(diagnostic) => return not_found(&params, &diagnostic),
             }
         } else {
             None
@@ -145,10 +157,11 @@ pub(crate) fn status(
                 continue;
             };
             if let Some(compiled) = &compiled {
-                let scope = StatusScope {
-                    entry: Value::from_json(&entry),
+                let frame = StatusFrame {
+                    entry: &entry,
+                    now: world.now(),
                 };
-                match compiled.matches(&scope) {
+                match compiled.matches(&frame) {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(error) => return not_found(&params, &error.to_string()),

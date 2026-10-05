@@ -437,6 +437,54 @@ async fn pretty_output_is_indented() {
     assert!(text.contains("\n    \"results\": ["), "{text}");
 }
 
+/// Icinga reads `pretty` and `verbose` through numbers ("0" is false);
+/// values it can't convert make the answer a bare 500 (recorded for
+/// queries in `fixtures/.../queries.json`). Following its sources, an
+/// action still runs when only its answer fails, and `verbose` is read
+/// before any action runs.
+#[tokio::test]
+async fn unreadable_flags_fail_the_answer() {
+    let (server, client) = lab().await;
+    let unhandled = json!({"error": 500, "status": "Unhandled exception"});
+    let (status, body) = get(&client, &server, "/v1/status/CIB?pretty=true").await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::INTERNAL_SERVER_ERROR, unhandled.clone())
+    );
+    let (status, _) = get(&client, &server, "/v1/status/CIB?pretty=0&verbose=yes").await;
+    assert_eq!(status, StatusCode::OK, "verbose only matters for errors");
+    let (status, body) = get(&client, &server, "/v1/status/nope?verbose=yes").await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::INTERNAL_SERVER_ERROR, unhandled.clone())
+    );
+
+    let comments = server.control().comments().len();
+    let add = |flags: &str| {
+        request(
+            &client,
+            &server,
+            Method::POST,
+            &format!("/v1/actions/add-comment?{flags}"),
+        )
+        .json(&json!({"type": "Host", "hosts": ["lab-01"], "author": "a", "comment": "c"}))
+    };
+    let (status, body) = json(add("verbose=yes").send().await.unwrap()).await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::INTERNAL_SERVER_ERROR, unhandled.clone())
+    );
+    assert_eq!(server.control().comments().len(), comments, "nothing ran");
+    let (status, body) = json(add("pretty=yes").send().await.unwrap()).await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::INTERNAL_SERVER_ERROR, unhandled)
+    );
+    assert_eq!(server.control().comments().len(), comments + 1, "it ran");
+    let (status, _) = json(add("pretty=0&verbose=1").send().await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 #[tokio::test]
 async fn injected_failures_and_latency() {
     let (server, client) = lab().await;

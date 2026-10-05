@@ -24,6 +24,7 @@ http-body = "1.0.1"
 http-body-util = "0.1.5"
 hyper = { version = "1.11.1", features = ["server", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
+ic-filter.workspace = true
 ic-model.workspace = true
 percent-encoding = "2.3.2"
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }

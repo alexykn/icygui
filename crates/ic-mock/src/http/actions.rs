@@ -121,12 +121,13 @@ pub(crate) fn handle(
                 Some(&diagnostic),
             );
         }
-        Err(TargetError::Unsupported(message)) => {
-            return json_error(400, &message, format, Some(params), None);
-        }
     };
     if targets.is_empty() {
         return json_error(404, "No objects found.", format, Some(params), None);
+    }
+    // `ActionsHandler` reads `verbose` before running anything.
+    if params.flag("verbose").is_err() {
+        return super::response::unhandled_exception(format);
     }
     let verbose = params.verbose();
     let mut results = Vec::with_capacity(targets.len());
@@ -162,6 +163,10 @@ pub(crate) fn handle(
         (n, 0) if n >= 2 => 200,
         _ => 500,
     };
+    // The actions ran; only the answer fails on a `pretty` Icinga can't read.
+    if params.flag("pretty").is_err() {
+        return super::response::unhandled_exception(format);
+    }
     let mut body = Map::new();
     body.insert(
         "results".into(),

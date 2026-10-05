@@ -5,7 +5,7 @@ use serde_json::Value as Json;
 
 use super::params::{Params, to_icinga_string};
 use crate::auth::Principal;
-use crate::filter::{self, FilterError};
+use crate::filter;
 use crate::model::attrs::{EMPTY_TYPES, ObjectScope};
 use crate::model::{ObjKind, ObjRef, World};
 
@@ -14,10 +14,26 @@ use crate::model::{ObjKind, ObjRef, World};
 pub(crate) enum TargetError {
     /// `MissingPermissionError` → 403 with this status.
     Forbidden(String),
-    /// Any other exception → 404 "No objects found." (with diagnostics).
+    /// Any other exception → 404 "No objects found." (with diagnostics),
+    /// filters that don't compile or fail included.
     NotFound(String),
-    /// A valid filter the mock can't evaluate → 400.
-    Unsupported(String),
+}
+
+/// `filter_vars`: a dictionary, or nothing.
+///
+/// # Errors
+/// Icinga's conversion error for anything else (a 404 for the request).
+pub(crate) fn filter_vars(
+    params: &Params,
+) -> Result<Option<&serde_json::Map<String, Json>>, String> {
+    match params.get("filter_vars") {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Object(map)) => Ok(Some(map)),
+        Some(other) => Err(format!(
+            "Error: Cannot convert value of type '{}' to an object.",
+            super::params::icinga_type_name(other)
+        )),
+    }
 }
 
 /// Whether Icinga knows a type name (`Type::GetByName` + config object).
@@ -28,10 +44,6 @@ pub(crate) fn is_config_type(name: &str) -> bool {
 /// The target objects of a query or action. `types` must be sorted by type
 /// name (Icinga iterates a `std::set`). Types the mock has no objects of
 /// are passed as `extra_types` so `type` validation still accepts them.
-#[expect(
-    clippy::too_many_lines,
-    reason = "mirrors Icinga's FilterUtility::GetFilterTargets step by step"
-)]
 pub(crate) fn filter_targets(
     world: &World,
     types: &[ObjKind],
@@ -109,21 +121,10 @@ pub(crate) fn filter_targets(
                 "Missing permission: filter-expression".into(),
             ));
         }
-        let source = params.last_string("filter");
-        let vars = match params.get("filter_vars") {
-            None | Some(Json::Null) => None,
-            Some(Json::Object(map)) => Some(map),
-            Some(other) => {
-                return Err(TargetError::NotFound(format!(
-                    "Error: Cannot convert value of type '{}' to an object.",
-                    super::params::icinga_type_name(other)
-                )));
-            }
-        };
-        let compiled = filter::compile(&source, vars).map_err(|error| match error {
-            FilterError::Syntax(_) => TargetError::NotFound(format!("{error}")),
-            FilterError::Unsupported(_) => TargetError::Unsupported(format!("{error}")),
-        })?;
+        // Compiled first, then `filter_vars` are read, as in Icinga.
+        let compiled = filter::compile(&params.last_string("filter"), world.filter_node())
+            .map_err(|error| TargetError::NotFound(error.to_string()))?
+            .with_vars(filter_vars(params).map_err(TargetError::NotFound)?);
         if let Some((kind, names)) = objects {
             for name in names {
                 let object = ObjRef { kind, name };
@@ -134,7 +135,7 @@ pub(crate) fn filter_targets(
                 match compiled.matches(&scope) {
                     Ok(true) => result.push(object),
                     Ok(false) => {}
-                    Err(error) => return Err(TargetError::NotFound(format!("{error}"))),
+                    Err(error) => return Err(TargetError::NotFound(error.to_string())),
                 }
             }
         }

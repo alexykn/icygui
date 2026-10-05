@@ -39,8 +39,26 @@ pub(crate) fn json_bytes(code: u16, body: Vec<u8>) -> Response<Body> {
     response
 }
 
+/// Marks a response `HttpServerConnection` sends itself: it carries no
+/// `Server` header.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Bare;
+
+/// The 500 of an exception that escapes the handlers (and their error
+/// handling): Icinga's request parameters `pretty` and `verbose` that
+/// can't be converted to booleans end up here.
+pub(crate) fn unhandled_exception(format: NumberFormat) -> Response<Body> {
+    let mut body = Map::new();
+    body.insert("error".into(), int(500));
+    body.insert("status".into(), Json::String("Unhandled exception".into()));
+    let mut response = json(500, Json::Object(body), format, false);
+    response.extensions_mut().insert(Bare);
+    response
+}
+
 /// `HttpUtility::SendJsonError`: `{"error": code, "status": message}`, plus
-/// `diagnostic_information` when the request asked for `verbose`.
+/// `diagnostic_information` when the request asked for `verbose`. A
+/// `verbose` or `pretty` Icinga can't read makes it fail itself: 500.
 pub(crate) fn json_error(
     code: u16,
     message: &str,
@@ -48,6 +66,11 @@ pub(crate) fn json_error(
     params: Option<&Params>,
     diagnostic: Option<&str>,
 ) -> Response<Body> {
+    if params
+        .is_some_and(|params| params.flag("verbose").is_err() || params.flag("pretty").is_err())
+    {
+        return unhandled_exception(format);
+    }
     let mut body = Map::new();
     body.insert("error".into(), int(code));
     if !message.is_empty() {

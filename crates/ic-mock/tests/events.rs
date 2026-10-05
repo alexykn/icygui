@@ -137,6 +137,50 @@ async fn event_filters_select_events() {
     );
 }
 
+/// Icinga 2.15.6 (verified): an empty `filter` is no filter, a blank one
+/// matches nothing, and a filter that doesn't compile or fails still opens
+/// the stream, which then stays silent. The event is `event` and `obj`.
+#[tokio::test]
+async fn event_filters_behave_like_icinga() {
+    let (server, client) = prod().await;
+    let mut streams = Vec::new();
+    for (filter, delivers) in [
+        ("", true),
+        ("  ", false),
+        ("event.host ==", false),
+        ("var x = 1", false),
+        ("nothing == 1", false),
+        ("event.host.x == 1", false),
+        (
+            "obj.host == \"db-prod-01\" && event.service == \"load\"",
+            true,
+        ),
+        (
+            "get_time() > 0 && typeof(event.check_result) == Dictionary",
+            true,
+        ),
+    ] {
+        let stream = EventStream::open(
+            &client,
+            &server,
+            &json!({"types": ["CheckResult"], "queue": "q", "filter": filter}),
+        )
+        .await;
+        streams.push((filter, delivers, stream));
+    }
+    let control = server.control();
+    control
+        .process_check_result(&ObjectKey::service("db-prod-01", "load"), 1, "hit", &[])
+        .unwrap();
+    // Unknown types reach every stream, whatever its filter.
+    control.emit_raw(json!({"type": "Marker"}));
+    for (filter, delivers, stream) in &mut streams {
+        let first = stream.next().await;
+        let expected = if *delivers { "CheckResult" } else { "Marker" };
+        assert_eq!(first["type"], expected, "filter {filter:?}: {first}");
+    }
+}
+
 #[tokio::test]
 async fn event_filters_need_filter_expression_permission() {
     let config = MockConfig {

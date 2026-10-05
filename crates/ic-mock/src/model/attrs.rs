@@ -1,13 +1,13 @@
 //! Object attributes as the API returns them (`ObjectQueryHandler`,
 //! `*.ti`), joins, and the filter scope over the mock's objects.
 
-use std::sync::Arc;
+use std::borrow::Cow;
 
 use serde_json::{Map, Value as Json};
 
 use super::World;
 use super::types::{Checkable, CommandData, GroupData};
-use crate::filter::{self, EvalError, ObjectRef, Scope};
+use crate::filter::{Frame, Item, Value};
 use crate::json::{int, num};
 
 /// The object types the mock serves.
@@ -344,7 +344,10 @@ impl ObjKind {
     ) -> Result<(), String> {
         let known = self.attr_names();
         for name in names {
-            if !known.contains(&name) && !self.hidden().contains(&name) {
+            if !known.contains(&name)
+                && !self.hidden().contains(&name)
+                && !self.internal_navigation().contains(&name)
+            {
                 return Err(format!("Invalid field specified: {name}"));
             }
         }
@@ -356,6 +359,17 @@ impl ObjKind {
             Self::Host | Self::Service => CHECKABLE_HIDDEN,
             Self::Comment => COMMENT_HIDDEN,
             Self::Downtime => &["removed_by"],
+            _ => &[],
+        }
+    }
+
+    /// Navigation-only fields (`[no_storage, navigation]`): they exist, so
+    /// `attrs` may name them and filters may read them, but Icinga never
+    /// serializes them (`SerializeObjectAttrs` hides internal navigation
+    /// fields).
+    pub(crate) fn internal_navigation(self) -> &'static [&'static str] {
+        match self {
+            Self::Service => &["host"],
             _ => &[],
         }
     }
@@ -606,6 +620,9 @@ impl World {
             }
             Some(names) => {
                 for name in names {
+                    if object.kind.internal_navigation().contains(&name.as_str()) {
+                        continue;
+                    }
                     match resolve(name) {
                         Ok(Some(value)) => {
                             map.insert(name.clone(), value);
@@ -933,66 +950,61 @@ fn command_attr(command: &CommandData, name: &str, type_name: &str) -> Option<Js
     })
 }
 
-/// The filter scope for one object: the object as `obj` and as its type's
-/// variable (`host`, `service`, ...), its joined objects, and field access
-/// on every object of the world.
+/// The filter frame for one object (`FilterUtility::EvaluateFilter`): the
+/// object as `obj` and as its type's variable (`host`, `service`, ...), its
+/// joined objects under their navigation names, and the fields of every
+/// object of the world.
 pub(crate) struct ObjectScope<'w> {
     pub(crate) world: &'w World,
     pub(crate) object: ObjRef,
 }
 
-fn object_value(object: &ObjRef) -> filter::Value {
-    filter::Value::Object(ObjectRef {
-        type_name: object.kind.type_name(),
-        name: Arc::from(object.name.as_str()),
-    })
-}
-
-impl Scope for ObjectScope<'_> {
-    fn variable(&self, name: &str) -> Option<filter::Value> {
-        if name == "obj" || name == self.object.kind.variable() {
-            return Some(object_value(&self.object));
+impl Frame for ObjectScope<'_> {
+    fn variable(&self, name: &str) -> Option<Item<'_>> {
+        let kind = self.object.kind;
+        if name == "obj" || name == kind.variable() {
+            return Some(Item::Object(self.object.clone()));
         }
-        if self
-            .object
-            .kind
-            .navigation()
-            .iter()
-            .any(|(n, _)| *n == name)
-            || self.object.kind.empty_navigation().contains(&name)
+        if kind.navigation().iter().any(|(n, _)| *n == name)
+            || kind.empty_navigation().contains(&name)
         {
             return Some(
                 self.world
-                    .navigate(self.object.kind, &self.object.name, name)
-                    .map_or(filter::Value::Null, |target| object_value(&target)),
+                    .navigate(kind, &self.object.name, name)
+                    .map_or_else(Item::null, Item::Object),
             );
         }
         None
     }
 
-    fn field(&self, object: &ObjectRef, name: &str) -> Result<Option<filter::Value>, EvalError> {
-        let Some(kind) = ObjKind::from_type_name(object.type_name) else {
-            return Ok(None);
-        };
-        let reference = ObjRef {
-            kind,
-            name: object.name.to_string(),
-        };
-        // `service.host` is a navigation field that's also a real field.
-        if kind == ObjKind::Service && name == "host" {
+    fn field(&self, object: &ObjRef, name: &str) -> Result<Item<'_>, String> {
+        // `service.host` is a navigation field that is never serialized.
+        if object.kind.internal_navigation().contains(&name) {
             return Ok(self
                 .world
-                .navigate(kind, &reference.name, "host")
-                .map(|host| object_value(&host)));
+                .navigate(object.kind, &object.name, name)
+                .map_or_else(Item::null, Item::Object));
         }
-        match self.world.attr(&reference, name) {
-            Ok(Some(value)) => Ok(Some(filter::Value::from_json(&value))),
-            Ok(None) => Ok(Some(filter::Value::Null)),
-            Err(ResolveError::UnknownField(_)) => Ok(None),
-            Err(ResolveError::Hidden(field)) => Err(EvalError(format!(
-                "Accessing the field '{field}' for type '{}' is not allowed in sandbox mode.",
-                object.type_name
-            ))),
+        let type_name = object.kind.type_name();
+        match self.world.attr(object, name) {
+            Ok(Some(value)) => Ok(Item::Json(Cow::Owned(value))),
+            Ok(None) => Ok(Item::null()),
+            Err(ResolveError::UnknownField(field)) => Err(format!(
+                "Invalid field access (for value of type '{type_name}'): '{field}'"
+            )),
+            Err(ResolveError::Hidden(field)) => Err(format!(
+                "Accessing the field '{field}' for type '{type_name}' is not allowed in sandbox mode."
+            )),
         }
+    }
+
+    fn object_value(&self, object: &ObjRef) -> Value {
+        self.world
+            .object_attrs(object, None)
+            .map_or(Value::Null, |attrs| Value::from_json(&Json::Object(attrs)))
+    }
+
+    fn now(&self) -> f64 {
+        self.world.now()
     }
 }

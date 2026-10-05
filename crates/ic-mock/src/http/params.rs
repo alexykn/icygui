@@ -5,8 +5,6 @@
 use percent_encoding::percent_decode_str;
 use serde_json::{Map, Value as Json};
 
-use crate::filter::format_number;
-
 /// The merged parameters of one request.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Params {
@@ -113,6 +111,15 @@ impl Params {
         self.last(key).is_some_and(to_bool)
     }
 
+    /// The last value converted to `bool` the way Icinga's handlers read
+    /// most flags (`all_joins`, `pretty`, `verbose`): see [`to_flag`].
+    ///
+    /// # Errors
+    /// Values Icinga can't convert (it throws).
+    pub(crate) fn flag(&self, key: &str) -> Result<bool, String> {
+        self.last(key).map_or(Ok(false), to_flag)
+    }
+
     /// The last value as a number.
     ///
     /// # Errors
@@ -121,14 +128,26 @@ impl Params {
         self.last(key).map_or(Ok(0.0), to_f64)
     }
 
-    /// `pretty` asks for indented JSON.
+    /// `pretty` asks for indented JSON (an invalid value counts as no; the
+    /// pipeline answers those requests with 500 first).
     pub(crate) fn pretty(&self) -> bool {
-        self.last_bool("pretty")
+        self.flag("pretty").unwrap_or(false)
     }
 
-    /// `verbose` adds `diagnostic_information` to errors.
+    /// `verbose` adds `diagnostic_information` to errors (an invalid value
+    /// counts as no; error responses turn into 500 then).
     pub(crate) fn verbose(&self) -> bool {
-        self.last_bool("verbose")
+        self.flag("verbose").unwrap_or(false)
+    }
+}
+
+/// Icinga's `Convert::ToString(double)`: whole numbers without decimals,
+/// everything else with six.
+pub(crate) fn format_number(value: f64) -> String {
+    if value.fract() == 0.0 && value.is_finite() {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.6}")
     }
 }
 
@@ -165,6 +184,31 @@ pub(crate) fn to_bool(value: &Json) -> bool {
         Json::String(s) => !s.is_empty(),
         Json::Array(items) => !items.is_empty(),
         Json::Object(map) => !map.is_empty(),
+    }
+}
+
+/// Icinga's implicit `Value` to `bool` conversion, which goes through
+/// `operator double()`: `null`, `""`, `false` and zero are false, other
+/// numbers and numeric strings (`"1"`, `"0.0"`, exactly as written) by
+/// value. So `"0"` is false, unlike with `ToBool`.
+///
+/// # Errors
+/// Other strings (`"true"`, `"yes"`, `" 1"`), arrays and dictionaries:
+/// Icinga throws.
+pub(crate) fn to_flag(value: &Json) -> Result<bool, String> {
+    match value {
+        Json::Null => Ok(false),
+        Json::Bool(b) => Ok(*b),
+        Json::Number(n) => Ok(n.as_f64().is_some_and(|f| f != 0.0)),
+        Json::String(s) if s.is_empty() => Ok(false),
+        Json::String(s) => s
+            .parse::<f64>()
+            .map(|f| f != 0.0)
+            .map_err(|_| format!("Can't convert '{s}' to a floating point number.")),
+        other => Err(format!(
+            "Can't convert '{}' to a floating point number.",
+            to_icinga_string(other)
+        )),
     }
 }
 
@@ -232,6 +276,35 @@ mod tests {
         assert!(Params::parse(b"{nope", &[]).is_err());
         assert!(Params::parse(b"null", &[]).unwrap().get("x").is_none());
         assert!(Params::parse(b"  ", &[]).is_ok());
+    }
+
+    #[test]
+    fn flags_convert_through_numbers() {
+        for (value, expected) in [
+            (json!(null), Some(false)),
+            (json!(true), Some(true)),
+            (json!(0), Some(false)),
+            (json!(2.5), Some(true)),
+            (json!(""), Some(false)),
+            (json!("0"), Some(false)),
+            (json!("0.0"), Some(false)),
+            (json!("1"), Some(true)),
+            (json!("2"), Some(true)),
+            (json!("true"), None),
+            (json!("false"), None),
+            (json!(" 1 "), None),
+            (json!({}), None),
+            (json!([1]), None),
+        ] {
+            assert_eq!(to_flag(&value).ok(), expected, "{value}");
+        }
+        let params = Params::parse(br#"{"a": ["0", "1"], "b": [], "c": "yes"}"#, &[]).unwrap();
+        assert_eq!(params.flag("a"), Ok(true), "the last value counts");
+        assert_eq!(params.flag("b"), Ok(false));
+        assert_eq!(params.flag("missing"), Ok(false));
+        assert!(params.flag("c").is_err());
+        let params = Params::parse(b"", &query("pretty=yes&verbose=0")).unwrap();
+        assert!(!params.pretty() && !params.verbose());
     }
 
     #[test]

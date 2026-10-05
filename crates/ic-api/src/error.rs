@@ -8,7 +8,8 @@ use crate::tls::{PinMismatch, format_fingerprint};
 /// Everything that can go wrong talking to Icinga.
 ///
 /// Per-object failures of an action (`code >= 400` inside `results`) are not
-/// errors: they come back as [`crate::ActionResult`]s.
+/// errors: they come back as [`crate::ActionResult`]s, whatever HTTP status
+/// Icinga derived from them.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ApiError {
     /// The TCP connection failed or broke (refused, reset, DNS, closed
@@ -33,7 +34,9 @@ pub enum ApiError {
     #[error("unauthorized: check the API user's credentials")]
     Unauthorized,
     /// HTTP 403: the API user lacks a permission. Carries Icinga's message
-    /// (`Missing permission: actions/acknowledge-problem`).
+    /// (`Missing permission: actions/acknowledge-problem`). Also used for a
+    /// missing `events/<type>` permission, which Icinga hides behind a 404
+    /// (see [`crate::Client::events`]).
     #[error("forbidden: {0}")]
     Forbidden(String),
     /// HTTP 404: the endpoint or the named objects don't exist.
@@ -75,6 +78,22 @@ impl ApiError {
             | Self::NotFound(_)
             | Self::Decode(_)
             | Self::InvalidSettings(_) => false,
+        }
+    }
+
+    /// The HTTP status the error came from, if any.
+    pub(crate) fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Unauthorized => Some(401),
+            Self::Forbidden(_) => Some(403),
+            Self::NotFound(_) => Some(404),
+            Self::Http { status, .. } => Some(*status),
+            Self::Connect(_)
+            | Self::Tls(_)
+            | Self::CertificateMismatch { .. }
+            | Self::Decode(_)
+            | Self::Timeout
+            | Self::InvalidSettings(_) => None,
         }
     }
 
@@ -263,6 +282,23 @@ mod tests {
                 message: "<html>boom</html>".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn http_statuses_of_errors() {
+        assert_eq!(ApiError::Unauthorized.http_status(), Some(401));
+        assert_eq!(ApiError::Forbidden(String::new()).http_status(), Some(403));
+        assert_eq!(ApiError::NotFound(String::new()).http_status(), Some(404));
+        assert_eq!(
+            ApiError::Http {
+                status: 503,
+                message: String::new()
+            }
+            .http_status(),
+            Some(503)
+        );
+        assert_eq!(ApiError::Timeout.http_status(), None);
+        assert_eq!(ApiError::Connect(String::new()).http_status(), None);
     }
 
     #[test]

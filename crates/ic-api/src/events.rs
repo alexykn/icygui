@@ -201,8 +201,11 @@ impl WireEvent {
                 downtime: self.downtime_payload(at)?,
                 at,
             },
+            // `in_effect` here says whether the downtime was in effect until
+            // it ended (cancelled inside its window, or ran out), not at the
+            // event: Icinga removes an expired downtime just after its end.
             "DowntimeRemoved" => Event::DowntimeRemoved {
-                downtime: self.downtime_payload(at)?,
+                downtime: self.removed_downtime_payload(at)?,
                 at,
             },
             "DowntimeStarted" => Event::DowntimeStarted {
@@ -256,6 +259,11 @@ impl WireEvent {
     fn downtime_payload(&mut self, at: Timestamp) -> Option<ic_model::Downtime> {
         let attrs: DowntimeAttrs = serde_json::from_value(self.downtime.0.take()?).ok()?;
         attrs.into_model("", at)
+    }
+
+    fn removed_downtime_payload(&mut self, at: Timestamp) -> Option<ic_model::Downtime> {
+        let attrs: DowntimeAttrs = serde_json::from_value(self.downtime.0.take()?).ok()?;
+        attrs.into_removed_model("", at)
     }
 
     fn lifecycle(&mut self, change: ObjectChange, at: Timestamp) -> Option<Event> {
@@ -585,13 +593,48 @@ mod tests {
             );
             assert!(!downtime.config_owned);
         }
-        // Removed after its window ended: no longer in effect.
-        let late = one(&downtime_line("DowntimeRemoved", 0.0, 1_791_210_400.0));
-        let Event::DowntimeRemoved { downtime, .. } = late else {
+        // Removed by Icinga's cleanup timer after the window ended (the
+        // usual end of a maintenance window): it was in effect until then,
+        // so its removal ends a downtime.
+        let expired = one(&downtime_line(
+            "DowntimeRemoved",
+            1_791_203_175.966_761,
+            1_791_210_374.1,
+        ));
+        let Event::DowntimeRemoved { downtime, .. } = expired else {
+            panic!();
+        };
+        assert!(downtime.in_effect, "ran out while in effect");
+        // Cancelled before its window started: it never was in effect.
+        let early = one(&downtime_line("DowntimeRemoved", 0.0, 1_791_203_000.0));
+        let Event::DowntimeRemoved { downtime, .. } = early else {
             panic!();
         };
         assert!(!downtime.in_effect);
         assert_eq!(downtime.trigger_time, None);
+        // Other downtime events still say whether it's in effect at the
+        // event.
+        let late_added = one(&downtime_line("DowntimeAdded", 0.0, 1_791_210_400.0));
+        let Event::DowntimeAdded { downtime, .. } = late_added else {
+            panic!();
+        };
+        assert!(!downtime.in_effect);
+    }
+
+    #[test]
+    fn recorded_downtime_removals_end_downtimes_in_effect() {
+        let recorded = include_str!("../../../contract/samples/events.ndjson");
+        let removed: Vec<ic_model::Downtime> = recorded
+            .lines()
+            .filter_map(|line| parse_line(line.as_bytes()))
+            .filter_map(|event| match event {
+                Event::DowntimeRemoved { downtime, .. } => Some(downtime),
+                _ => None,
+            })
+            .collect();
+        // Both were cancelled inside their window.
+        assert_eq!(removed.len(), 2);
+        assert!(removed.iter().all(|downtime| downtime.in_effect));
     }
 
     #[test]

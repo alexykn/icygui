@@ -6,7 +6,7 @@ use std::time::Duration;
 use secrecy::{SecretBox, SecretString};
 use url::Url;
 
-/// The default timeout for one request (not for the event stream).
+/// The default request timeout (see [`ConnectionSettings::request_timeout`]).
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long establishing a TCP connection (plus TLS) may take.
@@ -22,7 +22,12 @@ pub struct ConnectionSettings {
     pub credentials: Credentials,
     /// How to trust the server.
     pub tls: TlsSettings,
-    /// Timeout for one request. The event stream has none.
+    /// How long a request may wait for the response to begin (its
+    /// headers), and how long a response body may pause between reads. A
+    /// body that keeps arriving may take longer in total (a full object
+    /// list over a slow VPN), up to 20 times this. The event stream only
+    /// uses it for the response to begin; after that it has no read
+    /// timeout.
     pub request_timeout: Duration,
 }
 
@@ -76,8 +81,8 @@ impl fmt::Debug for Credentials {
 
 /// How the client decides whether to trust the server's certificate.
 ///
-/// With a pin, only the pinned certificate is accepted (CA and name checks
-/// are skipped). Otherwise the chain must lead to `ca_pem` or (with
+/// With a pin, only the pinned certificate is accepted (CA, name and
+/// validity checks are skipped). Otherwise the chain must lead to `ca_pem` or (with
 /// `use_system_roots`) a system root, and the certificate must be valid for
 /// `server_name` or the URL's host. With neither a pin nor any trusted root,
 /// every certificate is rejected as untrusted, which lets the caller offer
@@ -88,7 +93,9 @@ pub struct TlsSettings {
     pub ca_pem: Option<Vec<u8>>,
     /// Accept exactly the leaf certificate with this SHA-256 fingerprint.
     pub pinned_sha256: Option<[u8; 32]>,
-    /// Verify the certificate against this name instead of the URL's host.
+    /// Verify the certificate against this name instead of the URL's host
+    /// (blank counts as unset). Only verification uses it: the SNI sent is
+    /// always the URL's host.
     pub server_name: Option<String>,
     /// Also trust the operating system's root certificates.
     pub use_system_roots: bool,

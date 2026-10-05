@@ -494,24 +494,67 @@ impl DowntimeAttrs {
     /// Maps a downtime; `now` decides whether it's in effect (Icinga's
     /// `Downtime::IsInEffect`) unless the payload says so itself.
     pub(crate) fn into_model(self, full_name: &str, now: Timestamp) -> Option<Downtime> {
+        self.map(full_name, |window, flag| {
+            flag.unwrap_or_else(|| {
+                downtime_in_effect(
+                    window.fixed,
+                    window.start,
+                    window.end,
+                    window.trigger_time,
+                    window.duration,
+                    now,
+                )
+            })
+        })
+    }
+
+    /// Maps the payload of a `DowntimeRemoved` event at `removed_at`:
+    /// `in_effect` says whether the downtime was in effect until it ended,
+    /// see [`downtime_in_effect_until`].
+    pub(crate) fn into_removed_model(
+        self,
+        full_name: &str,
+        removed_at: Timestamp,
+    ) -> Option<Downtime> {
+        self.map(full_name, |window, flag| {
+            flag == Some(true)
+                || downtime_in_effect_until(
+                    window.fixed,
+                    window.start,
+                    window.end,
+                    window.trigger_time,
+                    window.duration,
+                    removed_at,
+                )
+        })
+    }
+
+    /// Maps a downtime; `in_effect` decides from its window and the
+    /// payload's own `is_in_effect`, if any.
+    fn map(
+        self,
+        full_name: &str,
+        in_effect: impl FnOnce(&Window, Option<bool>) -> bool,
+    ) -> Option<Downtime> {
         let object = object_key(&self.host_name.0, &self.service_name.0)?;
         let name = full_object_name(full_name, &self.full_name.0, &object, &self.name.0)?;
-        // Icinga's `fixed` defaults to true in actions and to false in
-        // config objects; downtimes always carry it, assume fixed if not.
-        let fixed = self.fixed.0.unwrap_or(true);
-        let start_time = Timestamp::from_unix_seconds(self.start_time.0);
-        let end_time = Timestamp::from_unix_seconds(self.end_time.0);
-        let trigger_time = Timestamp::from_unix_seconds(self.trigger_time.0).non_zero();
-        let in_effect = self.is_in_effect.0.unwrap_or_else(|| {
-            downtime_in_effect(
-                fixed,
-                start_time,
-                end_time,
-                trigger_time,
-                self.duration.0,
-                now,
-            )
-        });
+        let window = Window {
+            // Icinga's `fixed` defaults to true in actions and to false in
+            // config objects; downtimes always carry it, assume fixed if not.
+            fixed: self.fixed.0.unwrap_or(true),
+            start: Timestamp::from_unix_seconds(self.start_time.0),
+            end: Timestamp::from_unix_seconds(self.end_time.0),
+            trigger_time: Timestamp::from_unix_seconds(self.trigger_time.0).non_zero(),
+            duration: self.duration.0,
+        };
+        let in_effect = in_effect(&window, self.is_in_effect.0);
+        let Window {
+            fixed,
+            start: start_time,
+            end: end_time,
+            trigger_time,
+            ..
+        } = window;
         Some(Downtime {
             name,
             object,
@@ -531,6 +574,15 @@ impl DowntimeAttrs {
     }
 }
 
+/// The times that decide whether a downtime is in effect.
+struct Window {
+    fixed: bool,
+    start: Timestamp,
+    end: Timestamp,
+    trigger_time: Option<Timestamp>,
+    duration: f64,
+}
+
 /// Icinga's `Downtime::IsInEffect`: fixed downtimes during `[start, end)`,
 /// flexible ones from their trigger time for `duration` seconds.
 pub(crate) fn downtime_in_effect(
@@ -546,6 +598,44 @@ pub(crate) fn downtime_in_effect(
         return now >= start.as_unix_seconds() && now < end.as_unix_seconds();
     }
     trigger_time.is_some_and(|trigger| now < trigger.as_unix_seconds() + duration)
+}
+
+/// How long before the end of its effect a downtime that ran out is
+/// looked at (see [`downtime_in_effect_until`]).
+const LAST_INSTANT: f64 = 0.001;
+
+/// Whether a downtime removed at `removed_at` was in effect until then, so
+/// that its removal ends a downtime period.
+///
+/// Icinga removes a downtime that ran out from a timer shortly *after* the
+/// end of its effect (`end_time` for fixed downtimes, `trigger_time +
+/// duration` for triggered flexible ones; `downtime.cpp`), and doesn't set
+/// `remove_time` then. At that moment `IsInEffect` is already false, so
+/// asking it at the removal would say that a downtime never ends while in
+/// effect. Instead it's asked at the removal or, when that comes after the
+/// end of the effect, just before that end. A downtime cancelled inside
+/// its window was in effect; one cancelled before it started, or a
+/// flexible one that never triggered, was not.
+pub(crate) fn downtime_in_effect_until(
+    fixed: bool,
+    start: Timestamp,
+    end: Timestamp,
+    trigger_time: Option<Timestamp>,
+    duration: f64,
+    removed_at: Timestamp,
+) -> bool {
+    let effect_end = if fixed {
+        Some(end.as_unix_seconds())
+    } else {
+        trigger_time.map(|trigger| trigger.as_unix_seconds() + duration)
+    };
+    let at = match effect_end {
+        Some(effect_end) if removed_at.as_unix_seconds() >= effect_end => {
+            Timestamp::from_unix_seconds(effect_end - LAST_INSTANT)
+        }
+        _ => removed_at,
+    };
+    downtime_in_effect(fixed, start, end, trigger_time, duration, at)
 }
 
 /// Attributes of host and service groups.
@@ -626,17 +716,25 @@ pub(crate) const ENDPOINT_ATTRS: &[&str] = &["name", "zone", "connected"];
 impl EndpointAttrs {
     /// Maps an endpoint; `zone_of` finds the zone listing it (an endpoint's
     /// own `zone` attribute is where it was *defined*, usually empty).
+    ///
+    /// `local` is the name of the endpoint the client talks to (the node
+    /// name). Icinga reports its own endpoint as not connected, since it
+    /// has no connection to itself; it is the one we are connected to, so
+    /// it counts as connected (Icinga's own cluster status treats it the
+    /// same way).
     pub(crate) fn into_model(
         self,
         full_name: &str,
         zone_of: impl Fn(&str) -> Option<String>,
+        local: Option<&str>,
     ) -> Option<Endpoint> {
         let name = first_non_empty(full_name, &self.name.0)?.to_owned();
         let zone = zone_of(&name).unwrap_or(self.zone.0);
+        let connected = self.connected.0 || local == Some(name.as_str());
         Some(Endpoint {
             name,
             zone,
-            connected: self.connected.0,
+            connected,
         })
     }
 }
@@ -666,6 +764,15 @@ pub(crate) struct InfoResult {
 pub(crate) struct StatusResult {
     pub(crate) name: L<String>,
     pub(crate) status: L<Option<Value>>,
+}
+
+/// The node name from `/v1/status/IcingaApplication`'s `status` object.
+pub(crate) fn node_name(application: &Value) -> Option<String> {
+    application
+        .pointer("/icingaapplication/app/node_name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
 }
 
 /// Maps `/v1/status/IcingaApplication` and `/v1/status/CIB` (their

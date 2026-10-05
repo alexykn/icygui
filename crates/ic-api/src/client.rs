@@ -39,15 +39,42 @@ const NO_OBJECTS_FOUND: &str = "No objects found.";
 /// would fail the request.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// TCP keepalive for all connections, so a dead event stream is noticed
-/// even though it has no read timeout.
-const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+/// TCP keepalive, so a connection that died without a reset (sleep and
+/// resume, VPN or network change, lost NAT state) is noticed even when
+/// nothing is sent: the event stream has no read timeout, and Icinga writes
+/// nothing while nothing happens. After this much silence the OS starts
+/// probing the peer…
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+/// …every this often…
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// …and drops the connection after this many unanswered probes: a dead
+/// stream ends within about a minute (30 s + 3 × 10 s).
+const KEEPALIVE_RETRIES: u32 = 3;
+/// On Linux, sent data (keepalive probes included) left unacknowledged
+/// this long also drops the connection.
+#[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+const TCP_USER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A response body may take this many request timeouts in total, as long
+/// as it keeps arriving (it may pause at most one request timeout between
+/// reads). A full service list of a large installation over a slow VPN
+/// takes longer than one request timeout; a server that trickles a byte
+/// now and then still can't hold a request forever.
+const BODY_TIME_FACTOR: u32 = 20;
+
+/// How much of an error response is read (Icinga's are tiny; a proxy's
+/// error page needn't be read whole).
+const MAX_ERROR_BODY: usize = 64 * 1024;
 
 /// The result of an action for one object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionResult {
     /// Icinga's per-object code: 200 (done), 202 (accepted, for
-    /// `execute-command`), 4xx/5xx (failed for this object).
+    /// `execute-command`), 4xx/5xx (failed for this object). For objects
+    /// whose request failed as a whole after other requests of the same
+    /// action had been answered (or that weren't sent because of that
+    /// failure): the HTTP status of the failure, or 0 if it had none
+    /// (connection lost, timeout).
     pub code: u16,
     /// Icinga's message (`Successfully acknowledged problem for object …`).
     pub status: String,
@@ -100,24 +127,31 @@ impl Client {
     ///
     /// Proxy environment variables are ignored: Icinga APIs are internal,
     /// and a desktop app launched from the dock wouldn't see them anyway.
+    /// Redirects are not followed.
     ///
     /// # Errors
     ///
     /// [`ApiError::InvalidSettings`] if the URL isn't `https` with a host,
-    /// or a PEM (CA, client certificate or key) can't be parsed.
+    /// a PEM (CA, client certificate or key) can't be parsed, or the
+    /// server name override isn't a valid name.
     pub fn new(settings: ConnectionSettings) -> Result<Self, ApiError> {
         let base = normalize_base(settings.base_url)?;
         let tls = tls::client_config(&settings.tls, &settings.credentials)?;
-        let http = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
             .http1_only()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
-            .tcp_keepalive(TCP_KEEPALIVE)
+            .tcp_keepalive(KEEPALIVE_IDLE)
+            .tcp_keepalive_interval(KEEPALIVE_INTERVAL)
+            .tcp_keepalive_retries(KEEPALIVE_RETRIES)
             .tcp_nodelay(true)
             .pool_idle_timeout(POOL_IDLE_TIMEOUT)
-            .user_agent(concat!("icygui/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("icygui/", env!("CARGO_PKG_VERSION")));
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        let builder = builder.tcp_user_timeout(TCP_USER_TIMEOUT);
+        let http = builder
             .build()
             .map_err(|error| ApiError::InvalidSettings(format!("HTTP client: {error}")))?;
         let basic = match settings.credentials {
@@ -164,7 +198,8 @@ impl Client {
     /// # Errors
     ///
     /// Transport, TLS and HTTP errors as [`ApiError`] (`Forbidden` without
-    /// `status/query`); [`ApiError::Decode`] for unexpected JSON.
+    /// `status/query`), from either request; [`ApiError::Decode`] for
+    /// unexpected JSON.
     pub async fn status(&self) -> Result<InstanceStatus, ApiError> {
         let (application, cib) = futures::try_join!(
             self.status_entry("IcingaApplication"),
@@ -292,13 +327,19 @@ impl Client {
     /// `endpoints`; without permission to query zones, the endpoint's own
     /// `zone` attribute).
     ///
+    /// Icinga reports its own endpoint, the one the client talks to, as not
+    /// connected (it has no connection to itself). That endpoint, named
+    /// like the node in `/v1/status/IcingaApplication`, counts as
+    /// connected; without `status/query` permission Icinga's flag is kept.
+    ///
     /// # Errors
     ///
     /// As [`Client::hosts`].
     pub async fn endpoints(&self) -> Result<Vec<Endpoint>, ApiError> {
-        let (endpoints, zones) = futures::join!(
+        let (endpoints, zones, application) = futures::join!(
             self.query::<EndpointAttrs>("endpoints", None, wire::ENDPOINT_ATTRS),
-            self.query::<ZoneAttrs>("zones", None, wire::ZONE_ATTRS)
+            self.query::<ZoneAttrs>("zones", None, wire::ZONE_ATTRS),
+            self.status_entry("IcingaApplication"),
         );
         let endpoints = endpoints?;
         let zones = match zones {
@@ -308,6 +349,13 @@ impl Client {
                 Vec::new()
             }
             Err(error) => return Err(error),
+        };
+        let local = match application {
+            Ok(status) => wire::node_name(&status),
+            Err(error) => {
+                tracing::debug!(%error, "node name unavailable; keeping Icinga's connected flags");
+                None
+            }
         };
         let members: Vec<(String, Vec<String>)> = zones
             .into_iter()
@@ -320,7 +368,7 @@ impl Client {
                 .map(|(zone, _)| zone.clone())
         };
         Ok(map_results(endpoints, "endpoint", |attrs, name| {
-            attrs.into_model(name, zone_of)
+            attrs.into_model(name, zone_of, local.as_deref())
         }))
     }
 
@@ -333,17 +381,7 @@ impl Client {
     ///
     /// As [`Client::hosts`].
     pub async fn objects(&self, keys: &[ObjectKey]) -> Result<(Vec<Host>, Vec<Service>), ApiError> {
-        let mut host_names: Vec<String> = Vec::new();
-        let mut service_names: Vec<String> = Vec::new();
-        for key in keys {
-            let (list, name) = match key {
-                ObjectKey::Host { name } => (&mut host_names, name.to_string()),
-                ObjectKey::Service { key } => (&mut service_names, key.full_name()),
-            };
-            if !list.contains(&name) {
-                list.push(name);
-            }
-        }
+        let (host_names, service_names) = actions::names_by_kind(keys);
         let (hosts, services) = futures::try_join!(
             self.query_names::<CheckableAttrs>("hosts", "hosts", host_names, wire::HOST_ATTRS),
             self.query_names::<CheckableAttrs>(
@@ -363,104 +401,193 @@ impl Client {
     /// services go in separate requests; names are batched. `author` is
     /// sent for acknowledgements, downtimes, comments and removals.
     ///
-    /// A [`ActionTarget::Downtime`] removes that downtime (only with
-    /// [`Action::RemoveAllDowntimes`]); a [`ActionTarget::Comment`] removes
-    /// that comment, whatever the action (the model has no separate
-    /// "remove comment" action).
+    /// A [`ActionTarget::Downtime`] removes that downtime and a
+    /// [`ActionTarget::Comment`] removes that comment; both only with
+    /// [`Action::RemoveAllDowntimes`] (the model has no separate "remove
+    /// comment" action).
     ///
     /// Per-object failures (`code >= 400`) are returned as results, not as
-    /// errors; objects that no longer exist get a 404 result.
+    /// errors, whatever HTTP status Icinga derives from them (it answers a
+    /// single object's 409 with HTTP 409, and several different failures
+    /// with 500). Objects that no longer exist get a 404 result.
+    /// `process-check-result` on hosts maps the plugin exit status to UP
+    /// (0–1) or DOWN (2–3), the only values Icinga accepts for hosts.
+    ///
+    /// If a request fails as a whole after earlier requests of the action
+    /// were answered (and may have been applied), the action still returns
+    /// `Ok`: that request's objects, and those not sent yet, get failure
+    /// results carrying the error (see [`ActionResult::code`]); nothing
+    /// more is sent.
     ///
     /// # Errors
     ///
-    /// HTTP-level failures as [`ApiError`] (`Forbidden` with Icinga's
-    /// "Missing permission: …"); [`ApiError::InvalidSettings`] for a
-    /// downtime target with another action.
+    /// When the first request fails as a whole: transport, TLS and HTTP
+    /// errors as [`ApiError`] (`Forbidden` with Icinga's "Missing
+    /// permission: …"). [`ApiError::InvalidSettings`] for a downtime or
+    /// comment target with another action.
     pub async fn run_action(
         &self,
         action: &Action,
         target: &ActionTarget,
         author: &str,
     ) -> Result<Vec<ActionResult>, ApiError> {
-        let mut results = Vec::new();
-        for batch in actions::plan(action, target)? {
-            for chunk in batch.names.chunks(NAMES_PER_REQUEST) {
-                let part = Batch {
-                    names: chunk.to_vec(),
-                    ..batch.clone()
-                };
-                results.extend(self.action_batch(action, part, author).await?);
+        let requests: Vec<Batch> = actions::plan(action, target)?
+            .into_iter()
+            .flat_map(|batch| batch.chunks(NAMES_PER_REQUEST))
+            .collect();
+        let mut run = ActionRun::default();
+        let mut requests = requests.into_iter();
+        while let Some(batch) = requests.next() {
+            let Err(failure) = self.action_batch(action, batch, author, &mut run).await else {
+                continue;
+            };
+            if !run.answered {
+                return Err(failure.error);
             }
+            let error = failure.error;
+            tracing::warn!(
+                %error,
+                action = action.api_name(),
+                "an action request failed after earlier ones were answered"
+            );
+            let code = error.http_status().unwrap_or(0);
+            run.fail(failure.names, code, &format!("request failed: {error}"));
+            run.fail(
+                requests.by_ref().flat_map(|batch| batch.names),
+                code,
+                &format!("not sent: an earlier request failed: {error}"),
+            );
+            break;
         }
-        Ok(results)
+        Ok(run.results)
     }
 
+    /// Sends one request of an action. A 404 "No objects found." means a
+    /// name in it no longer exists; Icinga resolves every target before it
+    /// runs anything, so nothing was applied: the request is split until
+    /// the vanished names are isolated, and they get a 404 result.
     async fn action_batch(
         &self,
         action: &Action,
         batch: Batch,
         author: &str,
-    ) -> Result<Vec<ActionResult>, ApiError> {
-        let mut results = Vec::new();
+        run: &mut ActionRun,
+    ) -> Result<(), BatchFailure> {
         let mut pending = vec![batch.names];
         while let Some(names) = pending.pop() {
             let body = actions::body(action, batch.kind, &names, author);
-            let request = self
-                .request(
-                    reqwest::Method::POST,
-                    &format!("v1/actions/{}", batch.endpoint),
-                )?
-                .json(&body);
-            match self.send_json::<Results<ActionResultWire>>(request).await {
-                Ok(response) => {
-                    let aligned = response.results.len() == names.len();
-                    results.extend(response.results.into_iter().enumerate().map(
-                        |(index, result)| ActionResult {
-                            code: status_code(result.code.0),
-                            status: result.status.0,
-                            name: non_empty(result.name.0),
-                            target: aligned.then(|| names[index].clone()),
-                        },
-                    ));
-                }
+            match self.send_action(batch.endpoint, &body).await {
+                Ok(results) => run.answer(&names, results),
                 Err(ApiError::NotFound(message)) if is_no_objects(&message) => {
                     if let [name] = names.as_slice() {
                         tracing::debug!(%name, action = batch.endpoint, "action target no longer exists");
-                        results.push(ActionResult {
-                            code: 404,
-                            status: message,
-                            name: None,
-                            target: Some(name.clone()),
-                        });
+                        run.fail([name.clone()], 404, &message);
                     } else if matches!(batch.kind, TargetKind::Host | TargetKind::Service) {
                         let (first, second) = names.split_at(names.len() / 2);
                         pending.push(second.to_vec());
                         pending.push(first.to_vec());
                     }
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // This request's names, then the rest in sending order.
+                    let names = names
+                        .into_iter()
+                        .chain(pending.into_iter().rev().flatten())
+                        .collect();
+                    return Err(BatchFailure { error, names });
+                }
             }
         }
-        Ok(results)
+        Ok(())
+    }
+
+    /// `POST /v1/actions/<endpoint>`.
+    ///
+    /// Icinga sets the HTTP status from the per-object codes
+    /// (`actionshandler.cpp`): the code itself when all objects share one,
+    /// the single failure code when there is one (even next to successes),
+    /// 500 for several different failures. So the body decides: per-object
+    /// `results` come back whatever the status, and only Icinga's error
+    /// document (`{"error": …, "status": …}`: unknown action, missing
+    /// permission, "No objects found.", shutting down) or an unreadable
+    /// body is an error.
+    async fn send_action(
+        &self,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<Vec<ActionResultWire>, ApiError> {
+        let request = self
+            .request(reqwest::Method::POST, &format!("v1/actions/{endpoint}"))?
+            .json(body);
+        let response = self.send(request).await?;
+        let status = response.status();
+        // An action response is bounded by its request (200 names), so it
+        // is read whole whatever the status: a failure can carry 200
+        // results.
+        let body = match read_body(response, self.inner.timeout, usize::MAX).await {
+            Ok(body) => body,
+            Err(error) if status.is_success() => return Err(error),
+            Err(error) => {
+                tracing::debug!(%error, "couldn't read an action's error response");
+                Vec::new()
+            }
+        };
+        let parsed = serde_json::from_slice::<Results<ActionResultWire>>(&body);
+        if status.is_success() {
+            return parsed
+                .map(|results| results.results)
+                .map_err(|error| ApiError::Decode(error.to_string()));
+        }
+        match parsed {
+            Ok(Results { results }) if !results.is_empty() => {
+                tracing::debug!(
+                    status = status.as_u16(),
+                    endpoint,
+                    "action failed for some objects"
+                );
+                Ok(results)
+            }
+            _ => {
+                let error = ApiError::from_status(status.as_u16(), &body);
+                tracing::debug!(status = status.as_u16(), %error, "action request failed");
+                Err(error)
+            }
+        }
     }
 
     /// Opens the event stream (`POST /v1/events`) for `kinds`. `queue`
-    /// names the subscription; current Icinga versions ignore it, older
-    /// ones split events between connections that share a queue name, so
-    /// make it unique per connection.
+    /// names the subscription: Icinga 2.15 refuses a request without one
+    /// (newer versions ignore it), and older versions split events between
+    /// connections sharing a name, so make it unique per connection.
     ///
-    /// The stream has no read timeout and ends when the connection closes.
+    /// Subscribe only to kinds the API user may see
+    /// (`ApiInfo::allows(&format!("events/{}", kind.api_name()))`): Icinga
+    /// refuses the whole stream if one `events/<type>` permission is
+    /// missing.
+    ///
+    /// The response must begin within the request timeout; after that the
+    /// stream has no read timeout (TCP keepalive notices a dead connection)
+    /// and ends when the connection closes.
     ///
     /// # Errors
     ///
-    /// Transport, TLS and HTTP errors as [`ApiError`] (`Forbidden` if an
-    /// `events/<type>` permission is missing); [`ApiError::InvalidSettings`]
-    /// if `kinds` is empty; [`ApiError::Timeout`] if the server doesn't
-    /// answer within the request timeout.
+    /// - [`ApiError::InvalidSettings`] if `kinds` is empty or `queue` blank;
+    /// - [`ApiError::Forbidden`] if an `events/<type>` permission is
+    ///   missing, naming the missing ones when `GET /v1` can tell (Icinga
+    ///   itself answers with its generic 404, "The requested path
+    ///   'v1/events' could not be found …", to reveal nothing);
+    /// - [`ApiError::Timeout`] if the server doesn't answer within the
+    ///   request timeout;
+    /// - other transport, TLS and HTTP errors as [`ApiError`].
     pub async fn events(&self, queue: &str, kinds: &[EventKind]) -> Result<EventStream, ApiError> {
         if kinds.is_empty() {
             return Err(ApiError::InvalidSettings(
                 "subscribe to at least one event type".to_owned(),
+            ));
+        }
+        if queue.trim().is_empty() {
+            return Err(ApiError::InvalidSettings(
+                "the event stream needs a queue name (Icinga 2.15 requires one)".to_owned(),
             ));
         }
         let types: Vec<&str> = kinds.iter().map(|kind| kind.api_name()).collect();
@@ -468,11 +595,11 @@ impl Client {
         let request = self
             .request(reqwest::Method::POST, "v1/events")?
             .json(&body);
-        let response = tokio::time::timeout(self.inner.timeout, request.send())
-            .await
-            .map_err(|_| ApiError::Timeout)?
-            .map_err(|error| ApiError::from_reqwest(&error))?;
-        let response = check_status(response).await?;
+        let response = self.send(request).await?;
+        let response = match check_status(response, self.inner.timeout).await {
+            Ok(response) => response,
+            Err(error) => return Err(self.explain_events_error(error, kinds).await),
+        };
         let chunks = futures::stream::unfold(Some(response), |response| async move {
             let mut response = response?;
             match response.chunk().await {
@@ -484,10 +611,50 @@ impl Client {
         Ok(EventStream::new(chunks.boxed()))
     }
 
+    /// Icinga's events handler lets a missing `events/<type>` permission
+    /// escape as an exception, and its HTTP layer answers every escaped
+    /// exception with the generic 404 for unknown paths, on purpose, to
+    /// reveal nothing. Turn that back into `Forbidden`, naming the missing
+    /// permissions when the user's permissions can be read.
+    async fn explain_events_error(&self, error: ApiError, kinds: &[EventKind]) -> ApiError {
+        let ApiError::NotFound(message) = &error else {
+            return error;
+        };
+        if !is_hidden_events_error(message) {
+            return error;
+        }
+        let required: Vec<String> = kinds
+            .iter()
+            .map(|kind| format!("events/{}", kind.api_name()))
+            .collect();
+        match self.info().await {
+            Ok(info) => {
+                let missing: Vec<&str> = required
+                    .iter()
+                    .filter(|permission| !info.allows(permission))
+                    .map(String::as_str)
+                    .collect();
+                if missing.is_empty() {
+                    // Not a permission problem after all.
+                    error
+                } else {
+                    ApiError::Forbidden(format!("Missing permission: {}", missing.join(", ")))
+                }
+            }
+            Err(probe) => {
+                tracing::debug!(error = %probe, "couldn't read the API user's permissions");
+                ApiError::Forbidden(format!(
+                    "Missing permission: one of {}",
+                    required.join(", ")
+                ))
+            }
+        }
+    }
+
     /// A request with authentication and `Accept: application/json`
-    /// (exactly; Icinga answers `GET /v1` with HTML otherwise). The
-    /// request timeout is applied by [`Client::send_json`], not here, so
-    /// the event stream has none.
+    /// (exactly; Icinga answers `GET /v1` with HTML otherwise). Timeouts
+    /// are applied by [`Client::send`] and [`read_body`], not here, so the
+    /// event stream has no read timeout.
     fn request(
         &self,
         method: reqwest::Method,
@@ -509,20 +676,24 @@ impl Client {
         Ok(request)
     }
 
+    /// Sends a request; done when the response headers have arrived, which
+    /// must happen within the request timeout (connecting included).
+    async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, ApiError> {
+        tokio::time::timeout(self.inner.timeout, request.send())
+            .await
+            .map_err(|_| ApiError::Timeout)?
+            .map_err(|error| ApiError::from_reqwest(&error))
+    }
+
+    /// Sends a request and parses its JSON body; non-success statuses are
+    /// errors.
     async fn send_json<T: DeserializeOwned>(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T, ApiError> {
-        let response = request
-            .timeout(self.inner.timeout)
-            .send()
-            .await
-            .map_err(|error| ApiError::from_reqwest(&error))?;
-        let response = check_status(response).await?;
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| ApiError::from_reqwest(&error))?;
+        let response = self.send(request).await?;
+        let response = check_status(response, self.inner.timeout).await?;
+        let body = read_body(response, self.inner.timeout, usize::MAX).await?;
         serde_json::from_slice(&body).map_err(|error| ApiError::Decode(error.to_string()))
     }
 
@@ -623,16 +794,103 @@ impl Client {
     }
 }
 
-/// Fails with the mapped error for a non-success status.
-async fn check_status(response: reqwest::Response) -> Result<reqwest::Response, ApiError> {
+/// The results of one [`Client::run_action`] so far.
+#[derive(Default)]
+struct ActionRun {
+    results: Vec<ActionResult>,
+    /// Whether Icinga answered a request with per-object results, so that
+    /// something may have been applied.
+    answered: bool,
+}
+
+impl ActionRun {
+    /// Icinga's per-object results for `names` (matched by order when the
+    /// counts agree).
+    fn answer(&mut self, names: &[String], results: Vec<ActionResultWire>) {
+        self.answered = true;
+        let aligned = results.len() == names.len();
+        self.results.extend(
+            results
+                .into_iter()
+                .enumerate()
+                .map(|(index, result)| ActionResult {
+                    code: status_code(result.code.0),
+                    status: result.status.0,
+                    name: non_empty(result.name.0),
+                    target: if aligned {
+                        names.get(index).cloned()
+                    } else {
+                        None
+                    },
+                }),
+        );
+    }
+
+    /// The same failure for each of `names`.
+    fn fail(&mut self, names: impl IntoIterator<Item = String>, code: u16, status: &str) {
+        self.results
+            .extend(names.into_iter().map(|name| ActionResult {
+                code,
+                status: status.to_owned(),
+                name: None,
+                target: Some(name),
+            }));
+    }
+}
+
+/// An action request that failed as a whole, with the names it and the
+/// rest of its batch carried.
+struct BatchFailure {
+    error: ApiError,
+    names: Vec<String>,
+}
+
+/// Fails with the mapped error for a non-success status. Only the start of
+/// the error body is read, within the request timeout: the status is what
+/// matters, so a body that can't be read only costs the message.
+async fn check_status(
+    response: reqwest::Response,
+    idle: Duration,
+) -> Result<reqwest::Response, ApiError> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
     }
-    let body = response.bytes().await.unwrap_or_default();
+    let body = read_body(response, idle, MAX_ERROR_BODY)
+        .await
+        .unwrap_or_default();
     let error = ApiError::from_status(status.as_u16(), &body);
     tracing::debug!(status = status.as_u16(), %error, "request failed");
     Err(error)
+}
+
+/// Reads a response body, up to `limit` bytes: it may pause at most `idle`
+/// between reads and take at most [`BODY_TIME_FACTOR`] × `idle` in total.
+/// So a large object list over a slow link takes as long as it needs while
+/// data keeps coming, and a stalled response fails after `idle`.
+async fn read_body(
+    mut response: reqwest::Response,
+    idle: Duration,
+    limit: usize,
+) -> Result<Vec<u8>, ApiError> {
+    let read = async move {
+        let mut body = Vec::new();
+        while body.len() < limit {
+            let chunk = tokio::time::timeout(idle, response.chunk())
+                .await
+                .map_err(|_| ApiError::Timeout)?
+                .map_err(|error| ApiError::from_reqwest(&error))?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+            body.extend_from_slice(&chunk);
+        }
+        body.truncate(limit);
+        Ok(body)
+    };
+    tokio::time::timeout(idle.saturating_mul(BODY_TIME_FACTOR), read)
+        .await
+        .unwrap_or(Err(ApiError::Timeout))
 }
 
 fn normalize_base(mut url: Url) -> Result<Url, ApiError> {
@@ -700,6 +958,14 @@ fn is_no_objects(message: &str) -> bool {
     message.trim().eq_ignore_ascii_case(NO_OBJECTS_FOUND)
 }
 
+/// Icinga's generic 404 for `/v1/events` ("The requested path 'v1/events'
+/// could not be found or the request method is not valid for this
+/// path."), which is how it reports a missing `events/<type>` permission.
+/// A wrong path prefix names another path and stays a 404.
+fn is_hidden_events_error(message: &str) -> bool {
+    message.contains("path 'v1/events'") && message.contains("could not be found")
+}
+
 fn status_code(code: f64) -> u16 {
     let code = wire::clamp_u32(code);
     u16::try_from(code).unwrap_or(u16::MAX)
@@ -754,9 +1020,40 @@ mod tests {
     }
 
     #[test]
+    fn hidden_event_permission_errors() {
+        assert!(is_hidden_events_error(
+            "The requested path 'v1/events' could not be found or the request method is not valid for this path."
+        ));
+        assert!(!is_hidden_events_error(
+            "The requested path 'icinga/v1/events' could not be found or the request method is not valid for this path."
+        ));
+        assert!(!is_hidden_events_error("No objects found."));
+    }
+
+    #[test]
     fn status_codes_are_clamped() {
         assert_eq!(status_code(200.0), 200);
         assert_eq!(status_code(-5.0), 0);
         assert_eq!(status_code(1e9), u16::MAX);
+    }
+
+    #[test]
+    fn action_runs_match_results_to_names_by_order() {
+        let mut run = ActionRun::default();
+        let wire = |code: f64| ActionResultWire {
+            code: crate::lenient::L(code),
+            ..ActionResultWire::default()
+        };
+        let names = ["a".to_owned(), "b".to_owned()];
+        run.answer(&names, vec![wire(200.0), wire(409.0)]);
+        assert!(run.answered);
+        assert_eq!(run.results[1].target.as_deref(), Some("b"));
+        assert_eq!(run.results[1].code, 409);
+        // A count mismatch can't be matched.
+        run.answer(&names, vec![wire(200.0)]);
+        assert_eq!(run.results[2].target, None);
+        run.fail(["c".to_owned()], 0, "request failed: request timed out");
+        assert_eq!(run.results[3].target.as_deref(), Some("c"));
+        assert!(!run.results[3].is_success());
     }
 }

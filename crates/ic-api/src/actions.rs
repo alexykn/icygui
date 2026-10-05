@@ -5,6 +5,8 @@
 //! 2.17 on. An empty name list must never be sent: Icinga then falls back
 //! to *every* object of the type.
 
+use std::collections::HashSet;
+
 use ic_model::{Action, ActionTarget, DowntimeMode, ObjectKey};
 use serde_json::{Map, Value, json};
 
@@ -42,29 +44,35 @@ pub(crate) struct Batch {
     pub(crate) names: Vec<String>,
 }
 
+impl Batch {
+    /// Splits the batch into requests of at most `size` names, in order.
+    pub(crate) fn chunks(self, size: usize) -> Vec<Self> {
+        self.names
+            .chunks(size.max(1))
+            .map(|names| Self {
+                endpoint: self.endpoint,
+                kind: self.kind,
+                names: names.to_vec(),
+            })
+            .collect()
+    }
+}
+
 /// Splits an action on a target into requests: hosts and services go
 /// separately; a downtime target removes that downtime; a comment target
 /// removes that comment. Duplicate names are sent once; empty batches are
 /// dropped.
 ///
-/// `ic_model::Action` has no "remove comment" variant, so a
-/// [`ActionTarget::Comment`] (documented as "only for removing comments")
-/// means `remove-comment` whatever the action. A [`ActionTarget::Downtime`]
-/// is only valid with [`Action::RemoveAllDowntimes`].
+/// A [`ActionTarget::Downtime`] or [`ActionTarget::Comment`] can only be
+/// removed, so it is only valid with [`Action::RemoveAllDowntimes`]
+/// (`ic_model::Action` has no "remove comment" variant; that action stands
+/// for removing the targeted downtime or comment). Anything else is a
+/// caller bug and fails with [`ApiError::InvalidSettings`] instead of
+/// silently deleting something.
 pub(crate) fn plan(action: &Action, target: &ActionTarget) -> Result<Vec<Batch>, ApiError> {
     match target {
         ActionTarget::Objects(keys) => {
-            let mut hosts: Vec<String> = Vec::new();
-            let mut services: Vec<String> = Vec::new();
-            for key in keys {
-                let (list, name) = match key {
-                    ObjectKey::Host { name } => (&mut hosts, name.to_string()),
-                    ObjectKey::Service { key } => (&mut services, key.full_name()),
-                };
-                if !list.contains(&name) {
-                    list.push(name);
-                }
-            }
+            let (hosts, services) = names_by_kind(keys);
             Ok([(TargetKind::Host, hosts), (TargetKind::Service, services)]
                 .into_iter()
                 .filter(|(_, names)| !names.is_empty())
@@ -76,16 +84,52 @@ pub(crate) fn plan(action: &Action, target: &ActionTarget) -> Result<Vec<Batch>,
                 .collect())
         }
         ActionTarget::Downtime(name) => {
-            if !matches!(action, Action::RemoveAllDowntimes) {
-                return Err(ApiError::InvalidSettings(format!(
-                    "\"{}\" can't target a downtime; only removing it can",
-                    action.label()
-                )));
-            }
+            only_removal(action, "downtime")?;
             Ok(single(TargetKind::Downtime, "remove-downtime", name))
         }
-        ActionTarget::Comment(name) => Ok(single(TargetKind::Comment, "remove-comment", name)),
+        ActionTarget::Comment(name) => {
+            only_removal(action, "comment")?;
+            Ok(single(TargetKind::Comment, "remove-comment", name))
+        }
     }
+}
+
+fn only_removal(action: &Action, what: &str) -> Result<(), ApiError> {
+    if matches!(action, Action::RemoveAllDowntimes) {
+        return Ok(());
+    }
+    Err(ApiError::InvalidSettings(format!(
+        "\"{}\" can't target a {what}; only removing it can (Action::RemoveAllDowntimes)",
+        action.label()
+    )))
+}
+
+/// The full names of `keys`, hosts and services apart, each once, in the
+/// order they first appear. (Linear: a bulk action on a whole dashboard
+/// can carry tens of thousands of keys.)
+pub(crate) fn names_by_kind(keys: &[ObjectKey]) -> (Vec<String>, Vec<String>) {
+    #[derive(Default)]
+    struct Unique {
+        names: Vec<String>,
+        seen: HashSet<String>,
+    }
+    impl Unique {
+        fn push(&mut self, name: String) {
+            if !self.seen.contains(&name) {
+                self.seen.insert(name.clone());
+                self.names.push(name);
+            }
+        }
+    }
+    let mut hosts = Unique::default();
+    let mut services = Unique::default();
+    for key in keys {
+        match key {
+            ObjectKey::Host { name } => hosts.push(name.to_string()),
+            ObjectKey::Service { key } => services.push(key.full_name()),
+        }
+    }
+    (hosts.names, services.names)
 }
 
 fn single(kind: TargetKind, endpoint: &'static str, name: &str) -> Vec<Batch> {
@@ -118,7 +162,7 @@ pub(crate) fn body(action: &Action, kind: TargetKind, names: &[String], author: 
         }
     }
     match kind {
-        TargetKind::Host | TargetKind::Service => parameters(action, author, &mut body),
+        TargetKind::Host | TargetKind::Service => parameters(action, kind, author, &mut body),
         TargetKind::Downtime | TargetKind::Comment => {
             body.insert("author".to_owned(), json!(author));
         }
@@ -126,9 +170,19 @@ pub(crate) fn body(action: &Action, kind: TargetKind, names: &[String], author: 
     Value::Object(body)
 }
 
+/// The `exit_status` Icinga's API takes for a host: 0 (UP) or 1 (DOWN);
+/// it answers anything else with a per-object 400 (`apiactions.cpp`).
+/// [`Action::ProcessCheckResult`] carries a plugin exit status (0–3), so
+/// map it the way Icinga maps a host check plugin's exit status
+/// (`Host::CalculateState`): OK and WARNING are UP, CRITICAL, UNKNOWN and
+/// anything higher are DOWN.
+pub(crate) fn host_exit_status(plugin_exit_status: u8) -> u8 {
+    u8::from(plugin_exit_status >= 2)
+}
+
 /// The action's own parameters, named as in `12-icinga2-api.md` and
 /// `apiactions.cpp`.
-fn parameters(action: &Action, author: &str, body: &mut Map<String, Value>) {
+fn parameters(action: &Action, kind: TargetKind, author: &str, body: &mut Map<String, Value>) {
     let mut set = |key: &str, value: Value| {
         body.insert(key.to_owned(), value);
     };
@@ -197,6 +251,10 @@ fn parameters(action: &Action, author: &str, body: &mut Map<String, Value>) {
             perfdata,
             ttl,
         } => {
+            let exit_status = match kind {
+                TargetKind::Host => host_exit_status(*exit_status),
+                TargetKind::Service | TargetKind::Downtime | TargetKind::Comment => *exit_status,
+            };
             set("exit_status", json!(exit_status));
             set("plugin_output", json!(output));
             set("performance_data", json!(perfdata));
@@ -417,6 +475,37 @@ mod tests {
     }
 
     #[test]
+    fn host_check_results_map_plugin_exit_statuses_to_up_and_down() {
+        let host_body = |exit_status: u8| {
+            let action = Action::ProcessCheckResult {
+                exit_status,
+                output: "PING".to_owned(),
+                perfdata: Vec::new(),
+                ttl: None,
+            };
+            body(&action, TargetKind::Host, &["k8s-node-11".to_owned()], "me")["exit_status"]
+                .clone()
+        };
+        // Icinga's API takes only 0 (UP) and 1 (DOWN) for hosts; a plugin's
+        // OK and WARNING mean UP, CRITICAL and UNKNOWN mean DOWN.
+        assert_eq!(host_body(0), json!(0));
+        assert_eq!(host_body(1), json!(0), "WARNING is UP for a host");
+        assert_eq!(host_body(2), json!(1));
+        assert_eq!(host_body(3), json!(1));
+        assert_eq!(host_body(7), json!(1), "out of range is UNKNOWN: DOWN");
+        // Services keep the plugin's exit status.
+        for exit_status in 0..=3 {
+            let action = Action::ProcessCheckResult {
+                exit_status,
+                output: String::new(),
+                perfdata: Vec::new(),
+                ttl: None,
+            };
+            assert_eq!(service_body(&action)["exit_status"], json!(exit_status));
+        }
+    }
+
+    #[test]
     fn execute_command() {
         let mut macros = Vars::new();
         macros.insert("ls_dir".to_owned(), json!("/tmp"));
@@ -538,9 +627,9 @@ mod tests {
     }
 
     #[test]
-    fn comment_targets_remove_the_comment() {
+    fn comment_targets_only_remove_the_comment() {
         let target = ActionTarget::Comment("h!c".to_owned());
-        let batches = plan(&Action::RemoveAcknowledgement, &target).unwrap();
+        let batches = plan(&Action::RemoveAllDowntimes, &target).unwrap();
         assert_eq!(
             batches,
             vec![Batch {
@@ -549,5 +638,58 @@ mod tests {
                 names: vec!["h!c".to_owned()],
             }]
         );
+        // Any other action on a comment is a caller bug, never a silent
+        // removal.
+        for action in [
+            Action::RemoveAcknowledgement,
+            Action::CheckNow { force: true },
+            Action::AddComment {
+                text: "reply".to_owned(),
+                expiry: None,
+            },
+        ] {
+            assert!(
+                matches!(plan(&action, &target), Err(ApiError::InvalidSettings(message)) if message.contains("comment")),
+                "{action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_are_unique_per_kind_in_first_seen_order() {
+        let keys = vec![
+            ObjectKey::service("b", "x"),
+            ObjectKey::host("b"),
+            ObjectKey::host("a"),
+            ObjectKey::service("a", "y"),
+            ObjectKey::host("b"),
+            ObjectKey::service("b", "x"),
+            ObjectKey::host("c"),
+        ];
+        let (hosts, services) = names_by_kind(&keys);
+        assert_eq!(hosts, ["b", "a", "c"]);
+        assert_eq!(services, ["b!x", "a!y"]);
+
+        let many: Vec<ObjectKey> = (0..40_000)
+            .map(|i| ObjectKey::service(&format!("h{}", i % 2_000), &format!("s{i}")))
+            .chain((0..40_000).map(|i| ObjectKey::host(&format!("h{}", i % 2_000))))
+            .collect();
+        let (hosts, services) = names_by_kind(&many);
+        assert_eq!(hosts.len(), 2_000);
+        assert_eq!(services.len(), 40_000);
+    }
+
+    #[test]
+    fn batches_split_into_ordered_chunks() {
+        let batch = Batch {
+            endpoint: "reschedule-check",
+            kind: TargetKind::Host,
+            names: (0..5).map(|i| format!("h{i}")).collect(),
+        };
+        let chunks = batch.chunks(2);
+        let sizes: Vec<usize> = chunks.iter().map(|chunk| chunk.names.len()).collect();
+        assert_eq!(sizes, [2, 2, 1]);
+        assert_eq!(chunks[2].names, ["h4"]);
+        assert!(chunks.iter().all(|chunk| chunk.kind == TargetKind::Host));
     }
 }

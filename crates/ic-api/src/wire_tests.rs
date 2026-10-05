@@ -442,6 +442,89 @@ fn in_effect_follows_icinga() {
 }
 
 #[test]
+fn removal_ends_a_downtime_that_was_in_effect_until_then() {
+    let at = Timestamp::from_unix_seconds;
+    let fixed = |removed: f64| {
+        downtime_in_effect_until(
+            true,
+            at(100.0),
+            at(200.0),
+            Some(at(100.0)),
+            0.0,
+            at(removed),
+        )
+    };
+    assert!(!fixed(50.0), "cancelled before it started");
+    assert!(fixed(150.0), "cancelled inside its window");
+    // Icinga removes an expired fixed downtime at `end_time + 0.1`, or
+    // later when it was busy: it was in effect until its end.
+    assert!(fixed(200.1));
+    assert!(fixed(5_000.0));
+    assert!(
+        !downtime_in_effect_until(true, at(100.0), at(100.0), None, 0.0, at(100.1)),
+        "an empty window is never in effect"
+    );
+
+    let flexible = |trigger: Option<f64>, removed: f64| {
+        downtime_in_effect_until(
+            false,
+            at(100.0),
+            at(200.0),
+            trigger.map(at),
+            50.0,
+            at(removed),
+        )
+    };
+    assert!(!flexible(None, 150.0), "cancelled before it triggered");
+    assert!(!flexible(None, 200.1), "ran out without ever triggering");
+    assert!(flexible(Some(150.0), 170.0), "cancelled while in effect");
+    assert!(
+        flexible(Some(150.0), 200.1),
+        "ran out `duration` after its trigger"
+    );
+    assert!(
+        flexible(Some(190.0), 240.1),
+        "a triggered flexible downtime may outlast its window"
+    );
+}
+
+#[test]
+fn removed_downtimes_from_the_payload() {
+    let attrs = |json: Value| -> DowntimeAttrs { serde_json::from_value(json).unwrap() };
+    let expired = attrs(json!({
+        "__name": "h!a", "host_name": "h", "fixed": true,
+        "start_time": 1_791_203_174, "end_time": 1_791_210_374,
+        "trigger_time": 1_791_203_175.97, "remove_time": 0
+    }));
+    // Removed by Icinga's cleanup timer just after the end: it ended.
+    let downtime = expired
+        .into_removed_model("", Timestamp::from_unix_seconds(1_791_210_374.1))
+        .unwrap();
+    assert!(downtime.in_effect);
+    assert_eq!(downtime.name, "h!a");
+    let unborn = attrs(json!({
+        "__name": "h!b", "host_name": "h", "fixed": true,
+        "start_time": 1_791_210_000, "end_time": 1_791_220_000,
+        "trigger_time": 0, "remove_time": 1_791_203_179.88
+    }));
+    assert!(
+        !unborn
+            .into_removed_model("", Timestamp::from_unix_seconds(1_791_203_179.89))
+            .unwrap()
+            .in_effect,
+        "cancelled before its window"
+    );
+    let flagged =
+        attrs(json!({ "host_name": "h", "name": "c", "fixed": false, "is_in_effect": true }));
+    assert!(
+        flagged
+            .into_removed_model("", Timestamp::from_unix_seconds(1.0))
+            .unwrap()
+            .in_effect
+    );
+}
+
+#[test]
 fn downtime_flags_from_the_payload() {
     let json = json!({ "results": [
         { "name": "h!a", "attrs": { "host_name": "h", "fixed": true, "start_time": 0, "end_time": 1, "is_in_effect": true, "config_owner": "h!weekly" } },
@@ -499,8 +582,6 @@ fn recorded_groups_dependencies_and_endpoints() {
         }]
     );
 
-    let endpoints: Results<QueryResult<EndpointAttrs>> =
-        serde_json::from_str(&sample("endpoints.json")).unwrap();
     let zones: Results<QueryResult<ZoneAttrs>> =
         serde_json::from_str(&sample("zones.json")).unwrap();
     let members: Vec<(String, Vec<String>)> = zones
@@ -508,25 +589,45 @@ fn recorded_groups_dependencies_and_endpoints() {
         .into_iter()
         .filter_map(|zone| Some((zone.name.0, zone.attrs?.endpoints.0)))
         .collect();
-    let endpoints: Vec<Endpoint> = endpoints
-        .results
-        .into_iter()
-        .filter_map(|entry| {
-            entry.attrs?.into_model(&entry.name.0, |name| {
-                members
-                    .iter()
-                    .find(|(_, endpoints)| endpoints.iter().any(|e| e == name))
-                    .map(|(zone, _)| zone.clone())
-            })
-        })
-        .collect();
+    let zone_of = |name: &str| {
+        members
+            .iter()
+            .find(|(_, endpoints)| endpoints.iter().any(|e| e == name))
+            .map(|(zone, _)| zone.clone())
+    };
+    let map = |local: Option<&str>| -> Vec<Endpoint> {
+        let endpoints: Results<QueryResult<EndpointAttrs>> =
+            serde_json::from_str(&sample("endpoints.json")).unwrap();
+        endpoints
+            .results
+            .into_iter()
+            .filter_map(|entry| entry.attrs?.into_model(&entry.name.0, zone_of, local))
+            .collect()
+    };
     assert_eq!(
-        endpoints,
+        map(None),
         [Endpoint {
             name: "icinga-master".to_owned(),
             zone: "master".to_owned(),
             connected: false,
-        }]
+        }],
+        "Icinga reports its own endpoint as not connected"
+    );
+    let node = node_name(&status_of("status-icingaapplication.json"));
+    assert_eq!(node.as_deref(), Some("icinga-master"));
+    assert!(
+        map(node.as_deref())[0].connected,
+        "the endpoint we talk to is connected"
+    );
+    assert!(!map(Some("other-master"))[0].connected);
+}
+
+#[test]
+fn node_name_needs_a_name() {
+    assert_eq!(node_name(&Value::Null), None);
+    assert_eq!(
+        node_name(&json!({ "icingaapplication": { "app": { "node_name": "" } } })),
+        None
     );
 }
 

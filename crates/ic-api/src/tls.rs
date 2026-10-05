@@ -5,6 +5,7 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use ic_model::Timestamp;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -89,11 +90,7 @@ pub(crate) fn client_config(
         }),
         None => Arc::new(ChainVerifier {
             roots: Arc::new(root_store(tls)?),
-            server_name: tls
-                .server_name
-                .as_deref()
-                .map(parse_server_name)
-                .transpose()?,
+            server_name: server_name_override(tls.server_name.as_deref())?,
             algorithms,
         }),
     };
@@ -156,9 +153,20 @@ fn parse_server_name(name: &str) -> Result<ServerName<'static>, ApiError> {
         .map_err(|_| ApiError::InvalidSettings(format!("invalid server name {name:?}")))
 }
 
+/// The [`TlsSettings::server_name`] override as a TLS name. Blank counts as
+/// unset (a cleared settings field), the same everywhere.
+fn server_name_override(name: Option<&str>) -> Result<Option<ServerName<'static>>, ApiError> {
+    name.map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(parse_server_name)
+        .transpose()
+}
+
 /// Accepts exactly one leaf certificate, identified by its SHA-256. The
-/// chain and the name are not checked (that is what pinning means), but the
-/// handshake signature still is, so only the holder of the key can pass.
+/// chain, the name and the validity dates are not checked (that is what
+/// pinning means: this very certificate, which the user compared and
+/// accepted), but the handshake signature still is, so only the holder of
+/// the key can pass.
 #[derive(Debug)]
 struct PinnedVerifier {
     expected: [u8; 32],
@@ -436,18 +444,36 @@ impl ServerCertVerifier for CapturingVerifier {
 /// so the user can compare the fingerprint and pin it (trust on first use).
 /// No request is sent and no credentials are used.
 ///
-/// `server_name` is sent as SNI instead of the URL's host.
+/// The handshake sends the SNI [`crate::Client`] sends: the URL's host,
+/// none for an IP address. So a proxy that picks the certificate by SNI
+/// (or routes TLS by it) shows the certificate the client will get, and a
+/// pin taken from it matches. `server_name` (the
+/// [`TlsSettings::server_name`] override) only changes which name the
+/// client *verifies*, so it doesn't change what is fetched; it is checked
+/// like [`crate::Client::new`] checks it (blank means unset), so settings
+/// the client would refuse fail here too.
 ///
 /// # Errors
 ///
-/// - [`ApiError::InvalidSettings`] for a URL without a host or not `https`;
+/// - [`ApiError::InvalidSettings`] for a URL without a host or not
+///   `https`, or an invalid `server_name`;
 /// - [`ApiError::Connect`] / [`ApiError::Timeout`] if the server can't be
-///   reached within the connect timeout;
+///   reached, or doesn't finish the handshake, within the connect timeout;
 /// - [`ApiError::Tls`] if the handshake failed before a certificate arrived;
 /// - [`ApiError::Decode`] if the certificate can't be parsed.
 pub async fn fetch_server_certificate(
     base_url: &Url,
     server_name: Option<&str>,
+) -> Result<CertificateInfo, ApiError> {
+    read_certificate(base_url, server_name, CONNECT_TIMEOUT).await
+}
+
+/// [`fetch_server_certificate`] with the time the TCP connection and the
+/// handshake may take.
+async fn read_certificate(
+    base_url: &Url,
+    server_name: Option<&str>,
+    timeout: Duration,
 ) -> Result<CertificateInfo, ApiError> {
     if base_url.scheme() != "https" {
         return Err(ApiError::InvalidSettings(format!(
@@ -459,10 +485,9 @@ pub async fn fetch_server_certificate(
         .host_str()
         .ok_or_else(|| ApiError::InvalidSettings("the API URL has no host".to_owned()))?;
     let port = base_url.port_or_known_default().unwrap_or(5665);
-    let sni = match server_name.map(str::trim).filter(|name| !name.is_empty()) {
-        Some(name) => parse_server_name(name)?,
-        None => host_server_name(host)?,
-    };
+    // Checked like the client checks it; it isn't sent.
+    server_name_override(server_name)?;
+    let sni = host_server_name(host)?;
 
     let provider = provider();
     let verifier = Arc::new(CapturingVerifier {
@@ -491,7 +516,7 @@ pub async fn fetch_server_certificate(
             .map(drop)
             .map_err(|error| ApiError::from_io(&error))
     };
-    let outcome = tokio::time::timeout(CONNECT_TIMEOUT, handshake)
+    let outcome = tokio::time::timeout(timeout, handshake)
         .await
         .unwrap_or(Err(ApiError::Timeout));
 
@@ -509,7 +534,8 @@ pub async fn fetch_server_certificate(
     }
 }
 
-/// The URL host as a TLS server name (IP literals become IP addresses).
+/// The URL host as a TLS server name (IP literals become IP addresses, for
+/// which rustls sends no SNI), as reqwest makes it for the client.
 fn host_server_name(host: &str) -> Result<ServerName<'static>, ApiError> {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = bare.parse::<IpAddr>() {
@@ -549,6 +575,61 @@ mod tests {
         assert!(
             matches!(error, ApiError::InvalidSettings(message) if message.contains("CA certificate"))
         );
+    }
+
+    #[test]
+    fn blank_server_name_overrides_count_as_unset() {
+        assert_eq!(server_name_override(None).unwrap(), None);
+        assert_eq!(server_name_override(Some("")).unwrap(), None);
+        assert_eq!(server_name_override(Some("  ")).unwrap(), None);
+        assert!(matches!(
+            server_name_override(Some(" icinga-master ")),
+            Ok(Some(ServerName::DnsName(name))) if name.as_ref() == "icinga-master"
+        ));
+        assert!(matches!(
+            server_name_override(Some("not a name!")),
+            Err(ApiError::InvalidSettings(_))
+        ));
+        // The client accepts what the certificate fetch accepts.
+        let tls = TlsSettings {
+            pinned_sha256: None,
+            server_name: Some("   ".to_owned()),
+            ..TlsSettings::default()
+        };
+        let credentials = Credentials::Basic {
+            username: "u".to_owned(),
+            password: secrecy::SecretString::from("p".to_owned()),
+        };
+        assert!(client_config(&tls, &credentials).is_ok());
+    }
+
+    #[tokio::test]
+    async fn reading_a_certificate_from_a_silent_server_times_out() {
+        // Accepts the TCP connection and never says anything.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("https://{}", listener.local_addr().unwrap())).unwrap();
+        let silent = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((tcp, _)) = listener.accept().await {
+                open.push(tcp);
+            }
+        });
+        let started = std::time::Instant::now();
+        let error = read_certificate(&url, None, Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert_eq!(error, ApiError::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        silent.abort();
+    }
+
+    #[tokio::test]
+    async fn invalid_server_names_fail_before_connecting() {
+        let url = Url::parse("https://127.0.0.1:1").unwrap();
+        assert!(matches!(
+            read_certificate(&url, Some("not a name!"), Duration::from_secs(1)).await,
+            Err(ApiError::InvalidSettings(_))
+        ));
     }
 
     #[test]

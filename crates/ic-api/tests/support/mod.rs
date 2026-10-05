@@ -1,13 +1,15 @@
 //! An in-process HTTPS server that plays Icinga for the client tests:
-//! certificates from a throwaway CA (rcgen), every request recorded, and
-//! replies chosen by a handler per test.
+//! certificates from a throwaway CA (rcgen), every request and every
+//! handshake's SNI recorded, and replies chosen by a handler per test.
 
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::StreamExt;
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
@@ -18,6 +20,7 @@ use hyper_util::rt::TokioIo;
 use ic_api::{ConnectionSettings, Credentials, TlsSettings, Url};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair, KeyUsagePurpose,
+    date_time_ymd,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -59,14 +62,39 @@ impl Pki {
         self.ca.pem()
     }
 
-    /// A certificate for `common_name`, with `sans` as DNS subjectAltNames
-    /// (none at all if empty, like old Icinga node certificates).
+    /// A certificate for `common_name`, with `sans` as subjectAltNames
+    /// (IP addresses become IP entries; none at all if empty, like old
+    /// Icinga node certificates).
     pub(crate) fn issue(&self, common_name: &str, sans: &[&str]) -> Issued {
+        self.issue_with(common_name, sans, |_| {})
+    }
+
+    /// A certificate valid only from `from` to `until` (year, month, day).
+    pub(crate) fn issue_valid(
+        &self,
+        common_name: &str,
+        sans: &[&str],
+        from: (i32, u8, u8),
+        until: (i32, u8, u8),
+    ) -> Issued {
+        self.issue_with(common_name, sans, |params| {
+            params.not_before = date_time_ymd(from.0, from.1, from.2);
+            params.not_after = date_time_ymd(until.0, until.1, until.2);
+        })
+    }
+
+    fn issue_with(
+        &self,
+        common_name: &str,
+        sans: &[&str],
+        adjust: impl FnOnce(&mut CertificateParams),
+    ) -> Issued {
         let sans: Vec<String> = sans.iter().map(|san| (*san).to_owned()).collect();
         let mut params = CertificateParams::new(sans).unwrap();
         params
             .distinguished_name
             .push(DnType::CommonName, common_name);
+        adjust(&mut params);
         let key = KeyPair::generate().unwrap();
         let cert = params.signed_by(&key, &self.ca).unwrap();
         Issued {
@@ -106,6 +134,11 @@ pub(crate) enum Reply {
     Stream(mpsc::UnboundedReceiver<Result<Bytes, std::io::Error>>),
     /// Waits, then answers.
     Slow(Duration, Box<Reply>),
+    /// A status and the start of a body, then nothing: the response never
+    /// ends.
+    Stalled(u16, String),
+    /// `302 Found` to this location.
+    Redirect(String),
 }
 
 pub(crate) fn ok_json(value: &Value) -> Reply {
@@ -119,18 +152,69 @@ pub(crate) fn error_json(status: u16, message: &str) -> Reply {
     )
 }
 
+/// Answers an action like Icinga's `ActionsHandler` (`actionshandler.cpp`):
+/// the per-object results, with the HTTP status computed from their codes.
+/// One distinct success code (and no failure) is the status; one distinct
+/// failure code is the status even next to successes; several successes
+/// and no failure are 200; anything else is 500.
+pub(crate) fn icinga_action_reply(results: Vec<Value>) -> Reply {
+    let codes: Vec<u16> = results
+        .iter()
+        .map(|result| u16::try_from(result["code"].as_u64().unwrap()).unwrap())
+        .collect();
+    let ok: BTreeSet<u16> = codes
+        .iter()
+        .copied()
+        .filter(|code| (200..300).contains(code))
+        .collect();
+    let failed: BTreeSet<u16> = codes
+        .iter()
+        .copied()
+        .filter(|code| !(200..300).contains(code))
+        .collect();
+    let status = match (ok.len(), failed.len()) {
+        (1, 0) => *ok.first().unwrap(),
+        (_, 1) => *failed.first().unwrap(),
+        (n, 0) if n >= 2 => 200,
+        _ => 500,
+    };
+    Reply::Json(
+        status,
+        serde_json::json!({ "results": Value::Array(results) }).to_string(),
+    )
+}
+
 type Handler = Arc<dyn Fn(&Recorded) -> Reply + Send + Sync>;
 
 pub(crate) struct ServerOptions {
     pub(crate) leaf: Issued,
     pub(crate) client_ca: Option<String>,
     pub(crate) handler: Handler,
+    /// Speak TLS 1.2 only (older Icinga / OpenSSL setups).
+    pub(crate) tls12_only: bool,
+}
+
+impl ServerOptions {
+    /// A server with `leaf`, no client certificates, TLS 1.2 and 1.3.
+    pub(crate) fn new(
+        leaf: Issued,
+        handler: impl Fn(&Recorded) -> Reply + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            leaf,
+            client_ca: None,
+            handler: Arc::new(handler),
+            tls12_only: false,
+        }
+    }
 }
 
 pub(crate) struct TestServer {
     pub(crate) addr: SocketAddr,
     pub(crate) leaf_der: Vec<u8>,
     pub(crate) requests: Arc<Mutex<Vec<Recorded>>>,
+    /// The SNI of every completed handshake (`None`: no SNI sent).
+    pub(crate) handshakes: Arc<Mutex<Vec<Option<String>>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -143,9 +227,14 @@ impl Drop for TestServer {
 impl TestServer {
     pub(crate) async fn start(options: ServerOptions) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .unwrap();
+        let builder = rustls::ServerConfig::builder_with_provider(provider.clone());
+        let builder = if options.tls12_only {
+            builder
+                .with_protocol_versions(&[&rustls::version::TLS12])
+                .unwrap()
+        } else {
+            builder.with_safe_default_protocol_versions().unwrap()
+        };
         let builder = match &options.client_ca {
             Some(ca_pem) => {
                 let mut roots = rustls::RootCertStore::empty();
@@ -171,6 +260,8 @@ impl TestServer {
         let addr = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
+        let handshakes = Arc::new(Mutex::new(Vec::new()));
+        let shaken = handshakes.clone();
         let handler = options.handler;
         let task = tokio::spawn(async move {
             loop {
@@ -180,12 +271,18 @@ impl TestServer {
                 let acceptor = acceptor.clone();
                 let handler = handler.clone();
                 let recorded = recorded.clone();
+                let shaken = shaken.clone();
                 tokio::spawn(async move {
                     // Handshake failures are what some tests want.
                     let Ok(tls) = acceptor.accept(tcp).await else {
                         return;
                     };
-                    let client_certificate = tls.get_ref().1.peer_certificates().is_some();
+                    let connection = tls.get_ref().1;
+                    shaken
+                        .lock()
+                        .unwrap()
+                        .push(connection.server_name().map(str::to_owned));
+                    let client_certificate = connection.peer_certificates().is_some();
                     let service = service_fn(move |request: Request<Incoming>| {
                         let handler = handler.clone();
                         let recorded = recorded.clone();
@@ -218,6 +315,7 @@ impl TestServer {
             addr,
             leaf_der: options.leaf.der,
             requests,
+            handshakes,
             task,
         }
     }
@@ -228,6 +326,10 @@ impl TestServer {
 
     pub(crate) fn requests(&self) -> Vec<Recorded> {
         self.requests.lock().unwrap().clone()
+    }
+
+    pub(crate) fn handshakes(&self) -> Vec<Option<String>> {
+        self.handshakes.lock().unwrap().clone()
     }
 
     pub(crate) fn sha256(&self) -> [u8; 32] {
@@ -267,6 +369,26 @@ async fn respond(reply: Reply) -> Response<Body> {
             tokio::time::sleep(delay).await;
             Box::pin(respond(*reply)).await
         }
+        Reply::Stalled(status, start) => {
+            let frames = futures::stream::once(async move {
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(Frame::data(Bytes::from(start)))
+            })
+            .chain(futures::stream::pending());
+            Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(BodyExt::boxed_unsync(StreamBody::new(frames)))
+                .unwrap()
+        }
+        Reply::Redirect(location) => Response::builder()
+            .status(302)
+            .header("location", location)
+            .body(
+                Full::new(Bytes::new())
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap(),
     }
 }
 

@@ -4,8 +4,11 @@
 //!
 //! Everything is keyed by [`ObjectKey`], so a new snapshot that reorders,
 //! adds or removes rows keeps the selection on the same objects
-//! ([`ListSelection::update_rows`]). Pure and free of GPUI, so it's tested
-//! directly.
+//! ([`ListSelection::update_rows`]). When the cursor's object leaves the
+//! list, the cursor detaches instead of jumping to a neighbour the user
+//! never picked: no row is highlighted and action keys have no target,
+//! while `j`/`k` carry on from where it was. Pure and free of GPUI, so it's
+//! tested directly.
 
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
@@ -88,6 +91,27 @@ impl Rows {
             .or_else(|| self.object_from(index, false))
     }
 
+    /// The row showing `key`: `index` if it still does (an object listed
+    /// under several groups keeps the row that was clicked), else its first
+    /// row.
+    pub(crate) fn locate(&self, index: usize, key: &ObjectKey) -> Option<usize> {
+        if self.key(index) == Some(key) {
+            Some(index)
+        } else {
+            self.position(key)
+        }
+    }
+
+    /// The label of the group row `index` belongs to: the nearest group
+    /// header at or above it.
+    pub(crate) fn group_of(&self, index: usize) -> Option<&str> {
+        let last = index.min(self.len().checked_sub(1)?);
+        self.rows[..=last].iter().rev().find_map(|row| match row {
+            DashboardRow::Group { label, .. } => Some(label.as_str()),
+            DashboardRow::Object(_) => None,
+        })
+    }
+
     /// Object keys in rows `from..=to` (either order).
     fn keys_between(&self, from: usize, to: usize) -> impl Iterator<Item = &ObjectKey> {
         let (start, end) = if from <= to { (from, to) } else { (to, from) };
@@ -110,19 +134,19 @@ impl Position {
         })
     }
 
+    /// The same object in `rows`, if it's still listed.
+    fn find(&self, rows: &Rows) -> Option<Self> {
+        Some(Self {
+            key: self.key.clone(),
+            index: rows.locate(self.index, &self.key)?,
+        })
+    }
+
     /// The same object in `rows`; the row nearest to the old position if the
     /// object left the list.
     fn follow(&self, rows: &Rows) -> Option<Self> {
-        if rows.key(self.index) == Some(&self.key) {
-            return Some(self.clone());
-        }
-        match rows.position(&self.key) {
-            Some(index) => Some(Self {
-                key: self.key.clone(),
-                index,
-            }),
-            None => Self::at(rows, rows.object_near(self.index)?),
-        }
+        self.find(rows)
+            .or_else(|| Self::at(rows, rows.object_near(self.index)?))
     }
 }
 
@@ -131,6 +155,9 @@ impl Position {
 pub(crate) struct ListSelection {
     rows: Rows,
     cursor: Option<Position>,
+    /// Where a detached cursor was (its object left the list): moving
+    /// carries on from this row.
+    detached: Option<usize>,
     /// Where shift selection extends from.
     anchor: Option<Position>,
     /// Marks from before the current shift extension, kept as it grows and
@@ -153,19 +180,22 @@ impl ListSelection {
     }
 
     /// Switches to newly evaluated rows (a new snapshot): the cursor and the
-    /// anchor stay on their objects or, if those left the list, on the
-    /// nearest row; marks of objects that left are dropped, so a bulk
-    /// action never hits rows the user can't see. Returns whether the rows
-    /// changed.
+    /// anchor stay on their objects. If the cursor's object left the list,
+    /// the cursor detaches (no highlighted row, no target for action keys;
+    /// moving resumes there); the anchor moves to the nearest row. Marks of
+    /// objects that left are dropped, so a bulk action never hits rows the
+    /// user can't see. Returns whether the rows changed.
     pub(crate) fn update_rows(&mut self, rows: &Arc<Vec<DashboardRow>>) -> bool {
         if self.rows.is(rows) {
             return false;
         }
         self.rows = Rows::new(rows.clone());
-        self.cursor = self
-            .cursor
-            .take()
-            .and_then(|cursor| cursor.follow(&self.rows));
+        if let Some(cursor) = self.cursor.take() {
+            self.cursor = cursor.find(&self.rows);
+            if self.cursor.is_none() {
+                self.detached = Some(cursor.index);
+            }
+        }
         self.anchor = self
             .anchor
             .take()
@@ -178,7 +208,7 @@ impl ListSelection {
         true
     }
 
-    /// The cursor's row.
+    /// The cursor's row; `None` when there is no cursor or it detached.
     pub(crate) fn cursor(&self) -> Option<usize> {
         self.cursor.as_ref().map(|cursor| cursor.index)
     }
@@ -227,7 +257,7 @@ impl ListSelection {
     pub(crate) fn move_page(&mut self, rows: isize) -> Option<usize> {
         let last = self.rows.len().checked_sub(1)?;
         let forward = rows >= 0;
-        let target = match self.cursor() {
+        let target = match self.cursor().or(self.detached) {
             Some(cursor) => cursor.saturating_add_signed(rows).min(last),
             None if forward => 0,
             None => last,
@@ -293,16 +323,12 @@ impl ListSelection {
     }
 
     /// Flips the mark of the cursor's row (`x`); without a cursor, of the
-    /// first row.
+    /// row `j` would go to.
     pub(crate) fn toggle_mark_at_cursor(&mut self) -> bool {
-        let index = match self.cursor() {
-            Some(index) => index,
-            None => match self.rows.object_from(0, true) {
-                Some(index) => index,
-                None => return false,
-            },
-        };
-        self.toggle_mark(index)
+        match self.cursor().or_else(|| self.step(1)) {
+            Some(index) => self.toggle_mark(index),
+            None => false,
+        }
     }
 
     /// Marks every object in the list.
@@ -349,19 +375,37 @@ impl ListSelection {
     fn place(&mut self, position: Position) {
         self.anchor = Some(position.clone());
         self.cursor = Some(position);
+        self.detached = None;
         self.base = None;
     }
 
-    /// The object row `steps` object rows away from the cursor.
+    /// The object row `steps` object rows away from the cursor, stopping at
+    /// the ends. Without a cursor, the first step down lands on the first
+    /// row and the first step up on the last; from a detached cursor, on the
+    /// row that took its place and on the row above it.
     fn step(&self, steps: isize) -> Option<usize> {
-        let Some(mut row) = self.cursor() else {
-            return if steps >= 0 {
-                self.rows.object_from(0, true)
-            } else {
-                self.rows
-                    .object_from(self.rows.len().checked_sub(1)?, false)
-            };
-        };
+        if let Some(cursor) = self.cursor() {
+            return Some(self.step_from(cursor, steps));
+        }
+        let last = self.rows.len().checked_sub(1)?;
+        let forward = steps >= 0;
+        let first = match self.detached {
+            Some(detached) if forward => self.rows.object_from(detached.min(last), true),
+            Some(detached) => detached
+                .min(last + 1)
+                .checked_sub(1)
+                .and_then(|above| self.rows.object_from(above, false)),
+            None if forward => self.rows.object_from(0, true),
+            None => self.rows.object_from(last, false),
+        }
+        // Nothing in that direction: the nearest object row the other way.
+        .or_else(|| self.rows.object_near(self.detached.unwrap_or(0)))?;
+        Some(self.step_from(first, steps - steps.signum()))
+    }
+
+    /// The object row `steps` object rows away from `row`, stopping at the
+    /// ends.
+    fn step_from(&self, mut row: usize, steps: isize) -> usize {
         for _ in 0..steps.unsigned_abs() {
             let next = if steps > 0 {
                 row.checked_add(1)
@@ -375,7 +419,7 @@ impl ListSelection {
                 None => break,
             }
         }
-        Some(row)
+        row
     }
 }
 
@@ -595,23 +639,43 @@ mod tests {
     }
 
     #[test]
-    fn a_vanished_cursor_object_leaves_the_cursor_nearby() {
+    fn a_vanished_cursor_object_detaches_the_cursor() {
         let mut selection = ListSelection::new(flat(&["a", "b", "c", "d"]));
         selection.select(2);
-        // c recovered and left the problem list.
+        // c recovered and left the problem list: no row is under the cursor,
+        // so action keys can't hit d, which slid into its place.
         selection.update_rows(&flat(&["a", "b", "d"]));
-        assert_eq!(selection.cursor(), Some(2));
-        assert_eq!(selection.cursor_key(), Some(&service("d")));
-        // The last row left: the cursor moves up.
-        selection.update_rows(&flat(&["a", "b"]));
-        assert_eq!(selection.cursor_key(), Some(&service("b")));
-        // Everything left.
-        selection.update_rows(&rows(Vec::new()));
         assert_eq!(selection.cursor(), None);
+        assert_eq!(selection.cursor_key(), None);
+        // j lands on the row that took its place, k on the one above.
+        let mut down = ListSelection::new(flat(&["a", "b", "c", "d"]));
+        down.select(2);
+        down.update_rows(&flat(&["a", "b", "d"]));
+        assert_eq!(down.move_by(1), Some(2));
+        assert_eq!(down.cursor_key(), Some(&service("d")));
+        assert_eq!(selection.move_by(-1), Some(1));
+        assert_eq!(selection.cursor_key(), Some(&service("b")));
     }
 
     #[test]
-    fn a_vanished_object_next_to_a_header_moves_to_an_object() {
+    fn a_detached_cursor_at_the_end_resumes_at_the_last_row() {
+        let mut selection = ListSelection::new(flat(&["a", "b", "c"]));
+        selection.select(2);
+        selection.update_rows(&flat(&["a", "b"]));
+        assert_eq!(selection.cursor(), None);
+        assert_eq!(selection.move_by(1), Some(1), "nothing below: the last row");
+        // x without a cursor marks the row j would go to.
+        selection.update_rows(&flat(&["a"]));
+        assert!(selection.toggle_mark_at_cursor());
+        assert_eq!(names(&selection.marked_keys()), ["a"]);
+        // Everything left.
+        selection.update_rows(&rows(Vec::new()));
+        assert_eq!(selection.cursor(), None);
+        assert_eq!(selection.move_by(1), None);
+    }
+
+    #[test]
+    fn a_detached_cursor_skips_headers_and_pages_from_its_place() {
         let mut selection = ListSelection::new(rows(vec![
             group("g1", 1),
             object("a"),
@@ -620,8 +684,52 @@ mod tests {
         ]));
         selection.select(1);
         selection.update_rows(&rows(vec![group("g2", 1), object("b")]));
+        assert_eq!(selection.cursor(), None);
+        assert_eq!(selection.move_by(1), Some(1), "skips the header");
         assert_eq!(selection.cursor_key(), Some(&service("b")));
-        assert_eq!(selection.cursor(), Some(1));
+
+        let mut paged = ListSelection::new(flat(&["a", "b", "c", "d", "e", "f"]));
+        paged.select(1);
+        paged.update_rows(&flat(&["a", "c", "d", "e", "f"]));
+        assert_eq!(paged.move_page(2), Some(3));
+    }
+
+    #[test]
+    fn the_cursor_keeps_the_row_of_an_object_listed_twice() {
+        let mut selection = ListSelection::new(rows(vec![
+            group("g1", 1),
+            object("a"),
+            group("g2", 2),
+            object("b"),
+            object("a"),
+        ]));
+        assert!(selection.select(4));
+        let same = rows(selection.rows().rows.to_vec());
+        selection.update_rows(&same);
+        assert_eq!(selection.cursor(), Some(4), "not its first row");
+    }
+
+    #[test]
+    fn rows_know_their_group() {
+        let rows = Rows::new(rows(vec![
+            object("loose"),
+            group("g1", 1),
+            object("a"),
+            group("g2", 2),
+            object("b"),
+        ]));
+        assert_eq!(rows.group_of(0), None);
+        assert_eq!(rows.group_of(1), Some("g1"));
+        assert_eq!(rows.group_of(2), Some("g1"));
+        assert_eq!(rows.group_of(4), Some("g2"));
+        assert_eq!(rows.group_of(99), Some("g2"), "clamped to the last row");
+        assert_eq!(rows.locate(2, &service("a")), Some(2));
+        assert_eq!(
+            rows.locate(4, &service("a")),
+            Some(2),
+            "moved: its first row"
+        );
+        assert_eq!(rows.locate(0, &service("zz")), None);
     }
 
     #[test]

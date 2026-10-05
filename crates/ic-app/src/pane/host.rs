@@ -1,5 +1,10 @@
 //! The host pane's body (screen 2c): state, address and uptime, actions,
 //! and the sub-tabs `services · history · vars · config`.
+//!
+//! The title, the actions and the sub-tab strip stay put; everything under
+//! them scrolls, including the host's comments and downtimes (at the top of
+//! the services tab), so a host with many notes can't push its services out
+//! of reach.
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
@@ -54,10 +59,24 @@ pub(super) fn render(
             host.is_problem(),
             cx,
         ))
-        .children(notes(snapshot, &key, now, cx))
         .child(tabs);
     let content = match pane.host_tab {
-        HostTab::Services => services_tab(&services, host.is_problem(), now, cx),
+        HostTab::Services => {
+            let notes = notes(snapshot, &key, now, cx).map(|notes| {
+                div()
+                    .px(theme.metrics.pane_inset)
+                    .py(px(16.))
+                    .border_b_1()
+                    .border_color(theme.colors.border_row)
+                    .child(notes)
+            });
+            div()
+                .flex()
+                .flex_col()
+                .children(notes)
+                .child(services_tab(&services, host.is_problem(), now, cx))
+                .into_any_element()
+        }
         HostTab::History => history_tab(host, pane.state.read(cx).started_at(), now, theme),
         HostTab::Vars => vars_tab(host, theme),
         HostTab::Config => config_tab(snapshot, host, now, cx),
@@ -284,9 +303,11 @@ fn config_tab(
         .child(object)
         .children(relations)
         .children(links_table(
-            &host.links.notes,
-            &host.links.notes_url,
-            &host.links.action_url,
+            &host.links,
+            model::MacroScope {
+                host: Some(host),
+                service: None,
+            },
         ))
         .into_any_element()
 }

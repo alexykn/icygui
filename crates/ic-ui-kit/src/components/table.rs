@@ -162,7 +162,8 @@ impl PerfdataRow {
 }
 
 /// The detail pane's performance data table: label, value (coloured when a
-/// threshold is crossed), warn and crit; min and max on request.
+/// threshold is crossed), warn and crit; min and max on request, where
+/// there is room (a tab) and an entry has them.
 #[derive(Clone, Debug, IntoElement)]
 #[must_use = "a table does nothing unless rendered"]
 pub struct PerfdataTable {
@@ -187,7 +188,8 @@ impl PerfdataTable {
         self
     }
 
-    /// Also shows the min and max columns.
+    /// Also shows the min and max columns, if any entry has a min or a max
+    /// (empty columns would only take room).
     pub fn show_range(mut self, show: bool) -> Self {
         self.show_range = show;
         self
@@ -198,13 +200,23 @@ impl PerfdataTable {
     pub fn rows(&self) -> &[PerfdataRow] {
         &self.rows
     }
+
+    /// Whether the min and max columns are shown.
+    #[must_use]
+    pub fn shows_range(&self) -> bool {
+        self.show_range
+            && self
+                .rows
+                .iter()
+                .any(|row| !row.min.is_empty() || !row.max.is_empty())
+    }
 }
 
 impl RenderOnce for PerfdataTable {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
-        let show_range = self.show_range;
+        let show_range = self.shows_range();
         let cell = |width: f32, text: SharedString| {
             div()
                 .flex_none()
@@ -295,6 +307,25 @@ mod tests {
         assert_eq!(rows[0].warn, "");
         assert_eq!(rows[1].crit, "");
         assert_eq!(rows[1].status, PerfdataStatus::Ok);
+    }
+
+    #[test]
+    fn the_range_columns_need_a_min_or_max() {
+        let with_range = parse_perfdata("/=16.4GiB;32;36;0;40 /var=38.8GiB;32;36");
+        assert!(
+            !PerfdataTable::new(&with_range).shows_range(),
+            "off by default"
+        );
+        assert!(
+            PerfdataTable::new(&with_range)
+                .show_range(true)
+                .shows_range()
+        );
+        let without = parse_perfdata("load1=0.4;4;8 load5=0.3;4;8");
+        assert!(
+            !PerfdataTable::new(&without).show_range(true).shows_range(),
+            "no entry has a min or max"
+        );
     }
 
     #[test]

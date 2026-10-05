@@ -3,7 +3,7 @@
 
 use gpui::{
     AnyView, App, AppContext as _, BoxShadow, Context, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Window, div, hsla, point, prelude::FluentBuilder as _, px,
+    SharedString, Styled as _, Window, div, point, prelude::FluentBuilder as _, px,
 };
 
 use crate::theme::ActiveTheme as _;
@@ -70,7 +70,7 @@ impl Render for Tooltip {
             .border_color(colors.border_window)
             .bg(colors.element_background)
             .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.35),
+                color: colors.shadow,
                 offset: point(px(0.), px(2.)),
                 blur_radius: px(8.),
                 spread_radius: px(0.),

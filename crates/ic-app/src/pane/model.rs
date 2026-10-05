@@ -342,6 +342,152 @@ pub(crate) fn is_web_link(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
 }
 
+/// The objects a notes or action URL's macros refer to: the host, and the
+/// service in a service pane.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MacroScope<'a> {
+    /// The host (a service's host in a service pane).
+    pub(crate) host: Option<&'a Host>,
+    /// The service, in a service pane.
+    pub(crate) service: Option<&'a Service>,
+}
+
+/// A `notes_url` or `action_url` as the links Icinga Web shows for it:
+/// several URLs written as `'url1' 'url2'` are split, and each one's
+/// macros are resolved ([`resolve_macros`]).
+pub(crate) fn link_urls(raw: &str, scope: MacroScope<'_>) -> Vec<String> {
+    split_urls(raw)
+        .into_iter()
+        .map(|url| resolve_macros(url, scope))
+        .collect()
+}
+
+/// Splits Icinga Web's list syntax for several URLs in one attribute,
+/// `'url1' 'url2'`; a single URL may be quoted too.
+pub(crate) fn split_urls(raw: &str) -> Vec<&str> {
+    raw.split("' ")
+        .map(|url| {
+            url.trim()
+                .trim_start_matches('\'')
+                .trim_end_matches('\'')
+                .trim()
+        })
+        .filter(|url| !url.is_empty())
+        .collect()
+}
+
+/// Resolves Icinga's macros in a URL the way Icinga Web does: the classic
+/// names (`$HOSTNAME$`, `$HOSTADDRESS$`, `$SERVICEDESC$`, …), the object
+/// attributes (`$host.name$`, `$host.address$`, `$service.name$`,
+/// `$service.display_name$`, …) and custom variables (`$host.vars.role$`,
+/// `$service.vars.team$`; `$vars.x$` is the pane object's own). Values are
+/// inserted as they are, as Icinga Web inserts them, so a variable can hold
+/// a whole base URL or a `host:port`. Macros that don't resolve stay as
+/// written. Characters no URL may contain (spaces, quotes, non-ASCII) are
+/// then percent-encoded, as a browser would, so the platform's URL opener
+/// accepts the result.
+pub(crate) fn resolve_macros(url: &str, scope: MacroScope<'_>) -> String {
+    let mut resolved = String::with_capacity(url.len());
+    let mut rest = url;
+    while let Some(start) = rest.find('$') {
+        resolved.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        // Icinga Web's pattern: `$`, a name without `$` or white space, `$`.
+        let name_len = after
+            .find(|c: char| c == '$' || c.is_whitespace())
+            .filter(|&end| end > 0 && after[end..].starts_with('$'));
+        let Some(len) = name_len else {
+            resolved.push('$');
+            rest = after;
+            continue;
+        };
+        let name = &after[..len];
+        if let Some(value) = macro_value(name, scope) {
+            resolved.push_str(&value);
+        } else {
+            // Unresolved: keep it as written.
+            resolved.push_str(&rest[start..=start + len + 1]);
+        }
+        rest = &after[len + 1..];
+    }
+    resolved.push_str(rest);
+    encode_invalid_url_chars(&resolved)
+}
+
+/// The value of macro `name`, if it resolves to something.
+fn macro_value(name: &str, scope: MacroScope<'_>) -> Option<String> {
+    let MacroScope { host, service } = scope;
+    let value = match name {
+        "HOSTNAME" | "host.name" => host.map(|host| host.name.to_string()),
+        "HOSTDISPLAYNAME" | "HOSTALIAS" | "host.display_name" => {
+            host.map(|host| host.display_name.clone())
+        }
+        "HOSTADDRESS" | "host.address" => host.map(|host| host.address.clone()),
+        "HOSTADDRESS6" | "host.address6" => host.map(|host| host.address6.clone()),
+        "SERVICEDESC" | "service.name" | "service.description" => {
+            service.map(|service| service.key.name.to_string())
+        }
+        "SERVICEDISPLAYNAME" | "service.display_name" => {
+            service.map(|service| service.display_name.clone())
+        }
+        _ => {
+            let (vars, path) = if let Some(path) = name.strip_prefix("host.vars.") {
+                (&host?.vars, path)
+            } else if let Some(path) = name.strip_prefix("service.vars.") {
+                (&service?.vars, path)
+            } else {
+                // `vars.x`: the pane object's own variable.
+                let path = name.strip_prefix("vars.")?;
+                let own = match service {
+                    Some(service) => &service.vars,
+                    None => &host?.vars,
+                };
+                (own, path)
+            };
+            var_at(vars, path)
+        }
+    };
+    value.filter(|value| !value.is_empty())
+}
+
+/// A custom variable's plain value by name, or by a dotted path into nested
+/// dictionaries (`disks.root`). Dictionaries, arrays and null don't resolve.
+fn var_at(vars: &Vars, path: &str) -> Option<String> {
+    let mut value = vars.get(path);
+    if value.is_none() {
+        let mut parts = path.split('.');
+        value = vars.get(parts.next()?);
+        for part in parts {
+            value = value?.as_object()?.get(part);
+        }
+    }
+    match value? {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+/// Percent-encodes the bytes a URL can't contain literally (RFC 3986):
+/// white space, control characters, quotes, angle brackets, braces, the
+/// backslash, caret, backtick and pipe, and everything outside ASCII.
+fn encode_invalid_url_chars(url: &str) -> String {
+    const ALLOWED: &[u8] = b"-._~:/?#[]@!$&'()*+,;=%";
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(url.len());
+    for byte in url.bytes() {
+        if byte.is_ascii_alphanumeric() || ALLOWED.contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -595,6 +741,107 @@ mod tests {
         assert!(is_web_link("https://wiki.example.com/x"));
         assert!(!is_web_link("javascript:alert(1)"));
         assert!(!is_web_link("file:///etc/passwd"));
+    }
+
+    fn macro_objects() -> (Host, Service) {
+        let mut host = Host::new("db-prod-03");
+        host.display_name = "DB prod 03".to_owned();
+        host.address = "10.0.2.13".to_owned();
+        host.address6 = "fd00::13".to_owned();
+        host.vars.insert("role".to_owned(), json!("postgres"));
+        host.vars.insert("rack".to_owned(), json!(12));
+        host.vars
+            .insert("grafana".to_owned(), json!("https://grafana.example.com"));
+        host.vars
+            .insert("disks".to_owned(), json!({ "root": "/dev/sda1" }));
+        host.vars.insert("tags".to_owned(), json!(["a", "b"]));
+        let mut service = Service::new("db-prod-03", "disk /var");
+        service.display_name = "Disk /var".to_owned();
+        service.vars.insert("team".to_owned(), json!("dba"));
+        (host, service)
+    }
+
+    #[test]
+    fn macros_resolve_like_icinga_web() {
+        let (host, service) = macro_objects();
+        let scope = MacroScope {
+            host: Some(&host),
+            service: Some(&service),
+        };
+        let cases = [
+            ("https://wiki/$HOSTNAME$", "https://wiki/db-prod-03"),
+            ("https://wiki/$host.name$", "https://wiki/db-prod-03"),
+            ("http://$HOSTADDRESS$/status", "http://10.0.2.13/status"),
+            ("http://[$host.address6$]/", "http://[fd00::13]/"),
+            (
+                "https://g/d/x?var-host=$host.name$&var-svc=$SERVICEDESC$",
+                "https://g/d/x?var-host=db-prod-03&var-svc=disk%20/var",
+            ),
+            ("https://w/$service.name$", "https://w/disk%20/var"),
+            ("https://w/$service.display_name$", "https://w/Disk%20/var"),
+            ("https://w/$HOSTDISPLAYNAME$", "https://w/DB%20prod%2003"),
+            (
+                "https://w/$host.vars.role$/$host.vars.rack$",
+                "https://w/postgres/12",
+            ),
+            ("https://w/$service.vars.team$", "https://w/dba"),
+            ("https://w/$vars.team$", "https://w/dba"),
+            ("https://w/$host.vars.disks.root$", "https://w//dev/sda1"),
+            (
+                "$host.vars.grafana$/d/pg?var-host=$HOSTNAME$",
+                "https://grafana.example.com/d/pg?var-host=db-prod-03",
+            ),
+            // Unknown, unset and non-scalar macros stay as written.
+            ("https://w/$host.vars.nope$", "https://w/$host.vars.nope$"),
+            ("https://w/$host.vars.tags$", "https://w/$host.vars.tags$"),
+            ("https://w/$USER1$", "https://w/$USER1$"),
+            // Not macros: a lone `$`, `$$`, white space inside.
+            ("https://w/?price=5$", "https://w/?price=5$"),
+            ("https://w/$$x", "https://w/$$x"),
+            ("https://w/$a b$HOSTNAME$", "https://w/$a%20bdb-prod-03"),
+            ("https://w/ü", "https://w/%C3%BC"),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(resolve_macros(url, scope), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn host_panes_leave_service_macros_alone() {
+        let (host, _) = macro_objects();
+        let scope = MacroScope {
+            host: Some(&host),
+            service: None,
+        };
+        assert_eq!(
+            resolve_macros("https://w/$SERVICEDESC$/$vars.role$", scope),
+            "https://w/$SERVICEDESC$/postgres",
+            "`vars.` is the host's own in a host pane"
+        );
+        assert_eq!(
+            resolve_macros("https://w/$HOSTNAME$", MacroScope::default()),
+            "https://w/$HOSTNAME$"
+        );
+    }
+
+    #[test]
+    fn several_quoted_urls_become_several_links() {
+        assert_eq!(
+            split_urls("'https://a/1' 'https://b/2'  'https://c/3'"),
+            ["https://a/1", "https://b/2", "https://c/3"]
+        );
+        assert_eq!(split_urls("https://a/1"), ["https://a/1"]);
+        assert_eq!(split_urls("'https://a/1'"), ["https://a/1"]);
+        assert!(split_urls("  ").is_empty());
+        let (host, _) = macro_objects();
+        let scope = MacroScope {
+            host: Some(&host),
+            service: None,
+        };
+        assert_eq!(
+            link_urls("'https://a/$HOSTNAME$' '/grafana/$HOSTNAME$'", scope),
+            ["https://a/db-prod-03", "/grafana/db-prod-03"]
+        );
     }
 
     #[test]

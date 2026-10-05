@@ -26,7 +26,8 @@ pub use components::{
 pub use fonts::FontError;
 pub use icon::{Icon, IconName};
 pub use theme::{
-    ActiveTheme, Colors, FONT_FAMILY, LINE_HEIGHT, Metrics, StateColors, TextSizes, Theme,
+    ActiveTheme, CHAR_WIDTH, Colors, FONT_FAMILY, LINE_HEIGHT, Metrics, StateColors, TextSizes,
+    Theme,
 };
 
 /// gpui-component's window root: hosts its overlays and, on Linux with
@@ -41,6 +42,10 @@ pub use gpui_component::scroll::Scrollbar;
 
 /// Text input state and events, for [`TextField`].
 pub mod input {
+    /// The action Escape runs in a text field. A field that has nothing to
+    /// dismiss (a selection, a completion) lets it bubble up to the field's
+    /// parents, which can handle it with `on_action`.
+    pub use gpui_component::input::Escape;
     pub use gpui_component::input::{InputEvent, InputState};
 }
 

@@ -1,5 +1,7 @@
 //! The main area for a dashboard: the list (screen 2a) with its header and
-//! summary bar, and the detail pane beside it (screens 2b and 2c).
+//! summary bar, and the detail pane beside it (screens 2b and 2c). Where the
+//! window is too narrow for both, the pane narrows down to a minimum and
+//! then covers the list ([`SplitLayout`]).
 //!
 //! Rows are rendered with GPUI's `uniform_list`, which builds only the rows
 //! on screen: nothing per frame scales with the number of rows. The
@@ -18,18 +20,18 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Render, ScrollStrategy,
-    Styled as _, Subscription, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _,
-    px, uniform_list,
+    AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle,
+    Focusable, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Render,
+    ScrollStrategy, Styled as _, Subscription, UniformListScrollHandle, Window, div,
+    prelude::FluentBuilder as _, px, uniform_list,
 };
 use ic_config::{GroupBy, View};
 use ic_core::snapshot::DashboardRow;
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::{
-    ActiveTheme as _, CodeBlock, EmptyState, Icon, IconName, Link, ListRow, RowEmphasis, Scrollbar,
-    StateCircle, Theme,
+    ActiveTheme as _, CircleSize, CodeBlock, EmptyState, Icon, IconName, Link, ListRow, Metrics,
+    RowEmphasis, Scrollbar, StateCircle, Theme,
 };
 
 use self::header::HeaderMenus;
@@ -97,6 +99,11 @@ impl DashboardView {
     pub(crate) fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.sidebar_open != open {
             self.sidebar_open = open;
+            // A pane covering a narrow list needs the window controls then.
+            for pane in self.lists.values().filter_map(|list| list.pane.as_ref()) {
+                pane.view
+                    .update(cx, |pane, cx| pane.set_sidebar_open(open, cx));
+            }
             cx.notify();
         }
     }
@@ -149,7 +156,12 @@ impl DashboardView {
             pane.view.update(cx, |pane, cx| pane.show(key, cx));
         } else {
             let state = self.state.clone();
-            let view = cx.new(|cx| ObjectPane::new(state, key, PaneMode::Split, cx));
+            let sidebar_open = self.sidebar_open;
+            let view = cx.new(|cx| {
+                let mut pane = ObjectPane::new(state, key, PaneMode::Split, cx);
+                pane.set_sidebar_open(sidebar_open, cx);
+                pane
+            });
             let closed = reference.clone();
             let events = cx.subscribe(&view, move |this, _, event: &PaneEvent, cx| match event {
                 PaneEvent::Close => {
@@ -383,18 +395,32 @@ impl DashboardView {
         self.request(ObjectAction::AddComment, cx);
     }
 
-    /// A click on row `index`: plain clicks select the row and open its
-    /// pane, shift extends the marks from the anchor, ctrl/cmd toggles the
-    /// row's mark.
+    /// A click on `key`'s row, drawn as row `index`: plain clicks select the
+    /// row and open its pane, shift extends the marks from the anchor,
+    /// ctrl/cmd toggles the row's mark. A snapshot may have moved the row
+    /// since it was drawn; the click still goes to `key`.
     fn click_row(
         &mut self,
         index: usize,
+        key: &ObjectKey,
         modifiers: Modifiers,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
         self.menus.close();
+        let Some(reference) = self.sync(cx) else {
+            return;
+        };
+        let Some(index) = self
+            .lists
+            .get(&reference)
+            .and_then(|list| list.selection.rows().locate(index, key))
+        else {
+            // The object left the list.
+            cx.notify();
+            return;
+        };
         if modifiers.shift {
             self.change_selection(cx, |selection| selection.extend_to(index).then_some(index));
         } else if modifiers.secondary() {
@@ -402,9 +428,6 @@ impl DashboardView {
                 selection.toggle_mark(index).then_some(index)
             });
         } else {
-            let Some(reference) = self.sync(cx) else {
-                return;
-            };
             let key = self.lists.get_mut(&reference).and_then(|list| {
                 list.selection
                     .select(index)
@@ -450,21 +473,38 @@ impl DashboardView {
         let now = Timestamp::now();
         // Under a host's header, `on <host>` would repeat it on every row.
         let show_host = view.group_by != GroupBy::Host;
+        let grouped = view.group_by != GroupBy::None;
+        let indent = if grouped {
+            theme.metrics.row_indent
+        } else {
+            px(0.)
+        };
+        // Rows are identified by their object (and group: an object can be
+        // listed under several), not their position, so a press and release
+        // with a reordering snapshot in between can't click another object.
+        let mut group = if grouped {
+            selection.rows().group_of(range.start).map(str::to_owned)
+        } else {
+            None
+        };
         range
             .filter_map(|index| {
                 let row = match selection.rows().get(index)? {
                     DashboardRow::Object(key) => {
                         let emphasis =
                             RowEmphasis::new(cursor == Some(index), selection.is_marked(key));
-                        object_row(&snapshot, index, key, show_host, now, theme)
+                        let id = row_id(group.as_deref(), key);
+                        let clicked = key.clone();
+                        object_row(&snapshot, id, key, show_host, now, theme)
+                            .indent(indent)
                             .emphasis(emphasis)
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                this.click_row(index, event.modifiers(), window, cx);
+                                this.click_row(index, &clicked, event.modifiers(), window, cx);
                             }))
                     }
                     DashboardRow::Group { label, count } => {
-                        let header =
-                            group_header(&snapshot, &view, index, label, *count, now, theme);
+                        group = Some(label.clone());
+                        let header = group_header(&snapshot, &view, label, *count, now, theme);
                         if view.group_by == GroupBy::Host {
                             let host = ObjectKey::host(label);
                             header.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -539,27 +579,14 @@ impl DashboardView {
 impl Render for DashboardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let reference = self.sync(cx);
-        let theme = cx.theme();
-        let header = self.render_header(reference.as_ref(), window, cx);
-        let summary = reference
-            .as_ref()
-            .and_then(|reference| self.render_summary(reference, cx));
-        let body = if let Some(reference) = &reference {
-            self.render_body(reference, cx)
-        } else {
-            let text = if self.state.read(cx).environment().is_some() {
-                "Select a dashboard in the sidebar."
-            } else {
-                "Add an environment to start monitoring."
-            };
-            note(text, theme)
-        };
         let pane = reference
             .as_ref()
             .and_then(|reference| self.lists.get(reference))
             .and_then(|list| list.pane.as_ref())
             .map(|pane| pane.view.clone());
-        div()
+        let main_width = SplitLayout::main_width(window, self.sidebar_open, &cx.theme().metrics);
+        let split = SplitLayout::for_width(main_width, &cx.theme().metrics);
+        let root = div()
             .id("dashboard-view")
             .key_context(DASHBOARD_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -583,44 +610,114 @@ impl Render for DashboardView {
             .flex()
             .flex_1()
             .min_w_0()
-            .h_full()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .when(pane.is_some(), |list| {
-                        list.border_r_1().border_color(theme.colors.border_split)
-                    })
-                    .child(header)
-                    .children(summary)
-                    .child(body),
-            )
-            .when_some(pane, |view, pane| {
-                view.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .w(theme.metrics.pane_width)
-                        .h_full()
-                        .child(pane),
-                )
-            })
+            .h_full();
+        let pane_width = match (pane, split) {
+            // Too narrow for both: the pane covers the list until it's
+            // closed, like Icinga Web's single column.
+            (Some(pane), SplitLayout::Cover) => {
+                return root.child(div().flex().flex_1().min_w_0().h_full().child(pane));
+            }
+            (Some(pane), SplitLayout::Side { pane_width }) => Some((pane, pane_width)),
+            (None, _) => None,
+        };
+        let theme = cx.theme();
+        let list_width = match pane_width {
+            Some((_, pane_width)) => main_width - pane_width - Metrics::RULE,
+            None => main_width,
+        };
+        let header = self.render_header(reference.as_ref(), window, cx);
+        let summary = reference
+            .as_ref()
+            .and_then(|reference| self.render_summary(reference, list_width, cx));
+        let body = if let Some(reference) = &reference {
+            self.render_body(reference, cx)
+        } else {
+            let text = if self.state.read(cx).environment().is_some() {
+                "Select a dashboard in the sidebar."
+            } else {
+                "Add an environment to start monitoring."
+            };
+            note(text, theme)
+        };
+        root.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .when(pane_width.is_some(), |list| {
+                    list.border_r_1().border_color(theme.colors.border_split)
+                })
+                .child(header)
+                .children(summary)
+                .child(body),
+        )
+        .when_some(pane_width, |view, (pane, width)| {
+            view.child(div().flex().flex_none().w(width).h_full().child(pane))
+        })
     }
+}
+
+/// How the list and an open pane share the main area.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SplitLayout {
+    /// Side by side, the pane `pane_width` wide: the design's 620px, less
+    /// where the list would get narrower than its minimum.
+    Side {
+        /// The pane's width.
+        pane_width: Pixels,
+    },
+    /// Too narrow for both: the pane covers the list.
+    Cover,
+}
+
+impl SplitLayout {
+    /// The layout for a main area `width` wide.
+    pub(crate) fn for_width(width: Pixels, metrics: &Metrics) -> Self {
+        let pane_width = metrics.pane_width.min(width - metrics.list_min_width);
+        if pane_width < metrics.pane_min_width {
+            Self::Cover
+        } else {
+            Self::Side { pane_width }
+        }
+    }
+
+    /// The layout in `window`.
+    pub(crate) fn for_window(window: &Window, sidebar_open: bool, metrics: &Metrics) -> Self {
+        Self::for_width(Self::main_width(window, sidebar_open, metrics), metrics)
+    }
+
+    /// The main area's width in `window`: the window less the sidebar.
+    pub(crate) fn main_width(window: &Window, sidebar_open: bool, metrics: &Metrics) -> Pixels {
+        let sidebar = if sidebar_open {
+            metrics.sidebar_width
+        } else {
+            px(0.)
+        };
+        (window.viewport_size().width - sidebar).max(px(0.))
+    }
+}
+
+/// The element id of `key`'s row under `group`.
+fn row_id(group: Option<&str>, key: &ObjectKey) -> ElementId {
+    let name = match group {
+        // A control character can't occur in Icinga object or group names.
+        Some(group) => format!("row:{group}\u{1f}{key}"),
+        None => format!("row:{key}"),
+    };
+    ElementId::Name(name.into())
 }
 
 /// An object row; `show_host` adds `on <host>` after a service's name.
 fn object_row(
     snapshot: &ic_core::snapshot::Snapshot,
-    index: usize,
+    id: ElementId,
     key: &ObjectKey,
     show_host: bool,
     now: Timestamp,
     theme: &Theme,
 ) -> ListRow {
-    let id = ("row", index);
     match rows::object_row(snapshot, key, now) {
         Some(row) => {
             let list_row = ListRow::new(id)
@@ -649,24 +746,25 @@ fn object_row(
     }
 }
 
-/// A group header row.
+/// A group header row: a darker band with the group's name in semibold;
+/// grouped by host, the host's state as a compact circle and its output.
 fn group_header(
     snapshot: &ic_core::snapshot::Snapshot,
     view: &View,
-    index: usize,
     label: &str,
     count: usize,
     now: Timestamp,
     theme: &Theme,
 ) -> ListRow {
     let group = rows::group_row(snapshot, view, label, count, now);
-    let row = ListRow::new(("group", index))
+    let row = ListRow::new(ElementId::Name(format!("group:{label}").into()))
         .header(true)
         .title(group.label);
     match group.host {
         Some(host) => row
             .leading(
                 StateCircle::new(host.state)
+                    .size(CircleSize::Compact)
                     .handled(host.handled)
                     .caption(host.since),
             )
@@ -675,8 +773,8 @@ fn group_header(
         None => row
             .leading(
                 Icon::new(IconName::Folder)
-                    .size(px(16.))
-                    .color(theme.colors.text_faint),
+                    .size(px(14.))
+                    .color(theme.colors.text_muted),
             )
             .detail(group.count),
     }
@@ -697,7 +795,7 @@ fn empty_dashboard(
         + summary.down
         + summary.unreachable;
     let title = format!("No {}", header::view_label(view));
-    let ok = StateCircle::with_color(theme.states.ok).size(ic_ui_kit::CircleSize::Pane);
+    let ok = StateCircle::with_color(theme.states.ok).size(CircleSize::Pane);
     if view.hide_handled && summary.handled > 0 {
         let reference = reference.clone();
         let handled = summary.handled;
@@ -732,9 +830,7 @@ fn empty_dashboard(
             view.filter.clone()
         };
         return EmptyState::new("Nothing matches this dashboard")
-            .leading(
-                StateCircle::with_color(theme.states.pending).size(ic_ui_kit::CircleSize::Pane),
-            )
+            .leading(StateCircle::with_color(theme.states.pending).size(CircleSize::Pane))
             .detail("No host or service matches its filter:")
             .max_width(px(560.))
             .child(div().w(px(520.)).text_left().child(CodeBlock::new(filter)))
@@ -792,7 +888,8 @@ impl DashboardView {
             .unwrap_or_default()
     }
 
-    /// The rows built in the last frame.
+    /// The rows built in the last frame (the list isn't built while a pane
+    /// covers it).
     pub(crate) fn visible_rows(&self) -> Range<usize> {
         self.visible.clone()
     }
@@ -800,5 +897,53 @@ impl DashboardView {
     /// The open header menu.
     pub(crate) fn open_menu(&self) -> Option<HeaderMenu> {
         self.menus.open()
+    }
+
+    /// Where the list was drawn in the last frame it was drawn in.
+    pub(crate) fn list_bounds(&self, cx: &App) -> Option<gpui::Bounds<Pixels>> {
+        let scroll = self.current(cx)?.scroll.0.borrow();
+        Some(scroll.base_handle.bounds())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_pane_narrows_then_covers_the_list() {
+        let metrics = Theme::dark().metrics;
+        let side = |width: f32| SplitLayout::for_width(px(width), &metrics);
+        // The design: a 1440px window less the 300px sidebar.
+        assert_eq!(
+            side(1140.),
+            SplitLayout::Side {
+                pane_width: px(620.)
+            }
+        );
+        // 1280px: the list keeps its minimum, the pane gives way.
+        assert_eq!(
+            side(980.),
+            SplitLayout::Side {
+                pane_width: px(540.)
+            }
+        );
+        assert_eq!(
+            side(860.),
+            SplitLayout::Side {
+                pane_width: metrics.pane_min_width
+            }
+        );
+        // The 900px minimum window with the sidebar: one column.
+        assert_eq!(side(859.), SplitLayout::Cover);
+        assert_eq!(side(600.), SplitLayout::Cover);
+        assert_eq!(side(0.), SplitLayout::Cover);
+        // Without the sidebar, 900px still fits both.
+        assert_eq!(
+            side(900.),
+            SplitLayout::Side {
+                pane_width: px(460.)
+            }
+        );
     }
 }

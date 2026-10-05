@@ -3498,6 +3498,8 @@ dependencies = [
  "ic-model",
  "ic-rules",
  "ic-ui-kit",
+ "schemars",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",

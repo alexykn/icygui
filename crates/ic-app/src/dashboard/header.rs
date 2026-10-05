@@ -301,9 +301,12 @@ impl DashboardView {
         })
     }
 
+    /// The summary bar for a list `list_width` wide: where the labels
+    /// don't fit, the items show their counts only.
     pub(super) fn render_summary(
         &self,
         reference: &DashboardRef,
+        list_width: Pixels,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
         let theme = cx.theme();
@@ -323,6 +326,27 @@ impl DashboardView {
             .map_or(0, |list| list.selection.marked_count());
         let toggle_reference = reference.clone();
         let hide = !view.hide_handled;
+        let handled_label = if view.hide_handled {
+            "handled hidden"
+        } else {
+            "handled shown"
+        };
+        let end_text = if marked > 0 {
+            // The 14px gap is about two characters.
+            format!("{marked} selected  {handled_label}")
+        } else {
+            handled_label.to_owned()
+        };
+        let texts: Vec<String> = items
+            .iter()
+            .map(|(state, count, label)| SummaryItem::new(*state, *count, *label).text())
+            .collect();
+        let compact = !SummaryBar::fits(
+            texts.iter().map(String::as_str),
+            &end_text,
+            list_width,
+            theme,
+        );
         let end = div()
             .flex()
             .items_center()
@@ -339,11 +363,7 @@ impl DashboardView {
                     .id("handled-toggle")
                     .cursor_pointer()
                     .hover(|style| style.text_color(colors.text_muted))
-                    .child(if view.hide_handled {
-                        "handled hidden"
-                    } else {
-                        "handled shown"
-                    })
+                    .child(handled_label)
                     .tooltip(Tooltip::text(if view.hide_handled {
                         "Show acknowledged problems, downtimes and problems on down hosts"
                     } else {
@@ -361,11 +381,9 @@ impl DashboardView {
             );
         Some(
             SummaryBar::new()
-                .children(
-                    items
-                        .into_iter()
-                        .map(|(state, count, label)| SummaryItem::new(state, count, label)),
-                )
+                .children(items.into_iter().map(|(state, count, label)| {
+                    SummaryItem::new(state, count, label).compact(compact)
+                }))
                 .end(end)
                 .into_any_element(),
         )

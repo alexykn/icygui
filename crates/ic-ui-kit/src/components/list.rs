@@ -6,8 +6,9 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, HighlightStyle, InteractiveElement as _,
-    IntoElement, ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledText, Window, div, prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::theme::{ActiveTheme as _, Metrics, Theme};
@@ -93,14 +94,23 @@ impl Title {
         }
     }
 
-    fn styled(self, theme: &Theme) -> StyledText {
+    /// The title as styled text; a group header's name is emphasised.
+    fn styled(self, theme: &Theme, header: bool) -> StyledText {
         let colors = theme.colors;
         let highlights = [
             (
                 self.name,
                 HighlightStyle {
-                    color: Some(colors.text_strong),
-                    font_weight: Some(FontWeight::MEDIUM),
+                    color: Some(if header {
+                        colors.text_emphasis
+                    } else {
+                        colors.text_strong
+                    }),
+                    font_weight: Some(if header {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    }),
                     ..HighlightStyle::default()
                 },
             ),
@@ -131,7 +141,8 @@ impl Title {
 ///
 /// Every row has the same height ([`Metrics::row_height`] plus the rule), so
 /// lists of any length can be virtualised with `uniform_list`. Group headers
-/// are rows too ([`ListRow::header`]).
+/// are rows too ([`ListRow::header`]): a darker band with an emphasised
+/// name; the rows under them are indented ([`ListRow::indent`]).
 ///
 /// ```text
 /// ListRow::new(("row", index))
@@ -152,6 +163,7 @@ pub struct ListRow {
     tag: Option<SharedString>,
     emphasis: RowEmphasis,
     header: bool,
+    indent: Pixels,
     on_click: Option<ClickHandler>,
 }
 
@@ -167,6 +179,7 @@ impl ListRow {
             tag: None,
             emphasis: RowEmphasis::None,
             header: false,
+            indent: px(0.),
             on_click: None,
         }
     }
@@ -213,9 +226,17 @@ impl ListRow {
         self
     }
 
-    /// Styles the row as a group header (darker surface, header rule).
+    /// Styles the row as a group header: a darker band with a header rule
+    /// and the name in semibold. Pair it with a compact leading element.
     pub fn header(mut self, header: bool) -> Self {
         self.header = header;
+        self
+    }
+
+    /// Shifts the row's content right by `indent` (rows under a group
+    /// header, [`crate::Metrics::row_indent`]).
+    pub fn indent(mut self, indent: Pixels) -> Self {
+        self.indent = indent;
         self
     }
 
@@ -249,6 +270,7 @@ impl fmt::Debug for ListRow {
             .field("tag", &self.tag)
             .field("emphasis", &self.emphasis)
             .field("header", &self.header)
+            .field("indent", &self.indent)
             .finish_non_exhaustive()
     }
 }
@@ -262,7 +284,7 @@ impl RenderOnce for ListRow {
             .context
             .as_ref()
             .map(|(connector, context)| (connector.as_ref(), context.as_ref()));
-        let title = Title::new(&self.title, context).styled(theme);
+        let title = Title::new(&self.title, context).styled(theme, self.header);
         let background = self.emphasis.background(theme).or(if self.header {
             Some(colors.row_header)
         } else {
@@ -278,7 +300,8 @@ impl RenderOnce for ListRow {
             .gap(px(14.))
             .w_full()
             .h(Metrics::with_rule(metrics.row_height))
-            .px(metrics.list_padding)
+            .pl(metrics.list_padding + self.indent)
+            .pr(metrics.list_padding)
             .border_b_1()
             .border_color(if self.header {
                 colors.border_header

@@ -3,7 +3,9 @@
 //! Views never hard-code colours or sizes; they read them from the active
 //! [`Theme`] (`cx.theme()`), so a light theme is another `Theme` value.
 
-use gpui::{App, DefiniteLength, Global, Hsla, Pixels, SharedString, px, relative, rgb, rgba};
+use gpui::{
+    App, DefiniteLength, Global, Hsla, Pixels, SharedString, hsla, px, relative, rgb, rgba,
+};
 use ic_model::{CheckableState, HostState, PerfdataStatus, ServiceState};
 
 /// The family name of the bundled UI font.
@@ -12,6 +14,11 @@ pub const FONT_FAMILY: &str = "IBM Plex Mono";
 /// The bundled font's natural line height (its ascender plus descender),
 /// which is what the design's CSS `line-height: normal` resolves to.
 pub const LINE_HEIGHT: f32 = 1.3;
+
+/// The bundled font's advance width relative to its size: IBM Plex Mono is
+/// monospaced, 600 units to the em, so a line's width follows from its
+/// length.
+pub const CHAR_WIDTH: f32 = 0.6;
 
 /// All design tokens: colours, type scale and layout metrics.
 #[derive(Clone, Debug)]
@@ -80,7 +87,8 @@ pub struct Colors {
     pub row_hover: Hsla,
     /// Rows marked for a bulk action (`#25303a`, a dark accent tint).
     pub row_marked: Hsla,
-    /// Group header rows in lists (`#1a1d21`, the pane surface).
+    /// Group header rows in lists (`#16191c`, the code block surface: a
+    /// band darker than the rows under it).
     pub row_header: Hsla,
     /// Active group header in the sidebar (`#30353a`).
     pub group_active: Hsla,
@@ -138,6 +146,12 @@ pub struct Colors {
     pub traffic_inactive: Hsla,
     /// Glyphs inside the window controls on hover (black at 55 %).
     pub traffic_glyph: Hsla,
+
+    /// Drop shadow under tooltips (black at 35 %).
+    pub shadow: Hsla,
+    /// Drop shadow under menus and other popovers, which float higher
+    /// (black at 45 %).
+    pub shadow_strong: Hsla,
 }
 
 impl Colors {
@@ -152,7 +166,7 @@ impl Colors {
             row_selected: hex(0x2a_3036),
             row_hover: hex(0x22_262a),
             row_marked: hex(0x25_303a),
-            row_header: hex(0x1a_1d21),
+            row_header: hex(0x16_191c),
             group_active: hex(0x30_353a),
             group_hover: hex(0x26_2a2e),
             item_active: hex(0x27_2c30),
@@ -183,6 +197,9 @@ impl Colors {
             traffic_zoom: hex(0x28_c840),
             traffic_inactive: hex(0x3a_3f43),
             traffic_glyph: rgba(0x0000_008c).into(),
+
+            shadow: hsla(0., 0., 0., 0.35),
+            shadow_strong: hsla(0., 0., 0., 0.45),
         }
     }
 }
@@ -292,8 +309,13 @@ impl Default for TextSizes {
 pub struct Metrics {
     /// Sidebar width.
     pub sidebar_width: Pixels,
-    /// Detail pane width when split beside the list.
+    /// Detail pane width when split beside the list (the design's, at
+    /// 1440px).
     pub pane_width: Pixels,
+    /// The narrowest the split pane gets before it covers the list instead.
+    pub pane_min_width: Pixels,
+    /// The narrowest the list gets beside the split pane.
+    pub list_min_width: Pixels,
     /// Header bars (titlebar row, list header, pane header).
     pub header_height: Pixels,
     /// State summary bar above the list.
@@ -317,6 +339,8 @@ pub struct Metrics {
     pub row_height: Pixels,
     /// Width of the list rows' state circle column.
     pub row_leading: Pixels,
+    /// Extra indent of the rows under a group header.
+    pub row_indent: Pixels,
     /// Items in popup menus.
     pub menu_item_height: Pixels,
     /// Action buttons.
@@ -375,6 +399,8 @@ impl Default for Metrics {
         Self {
             sidebar_width: px(300.),
             pane_width: px(620.),
+            pane_min_width: px(420.),
+            list_min_width: px(440.),
             header_height: px(40.),
             summary_bar_height: px(36.),
             group_row_height: px(36.),
@@ -386,6 +412,7 @@ impl Default for Metrics {
             pane_inset: px(24.),
             row_height: px(60.),
             row_leading: px(44.),
+            row_indent: px(12.),
             menu_item_height: px(28.),
             button_height: px(28.),
             button_radius: px(5.),
@@ -488,14 +515,22 @@ mod tests {
     }
 
     #[test]
+    fn popovers_cast_stronger_shadows_than_tooltips() {
+        let colors = Colors::dark();
+        assert!(colors.shadow_strong.a > colors.shadow.a);
+        assert!(colors.shadow.l < f32::EPSILON, "shadows are black");
+    }
+
+    #[test]
     fn list_rows_follow_the_design() {
         let theme = Theme::dark();
         // 10px padding around a 22px circle, 4px gap and a 14px caption line.
         assert_eq!(Metrics::with_rule(theme.metrics.row_height), px(61.));
         assert_eq!(theme.metrics.row_leading, px(44.));
         assert_eq!(theme.line_height, relative(LINE_HEIGHT));
-        // Group headers use the pane surface, darker than the window.
+        // Group headers are a band darker than the window and the pane.
         assert!(theme.colors.row_header.l < theme.colors.window_background.l);
+        assert!(theme.colors.row_header.l < theme.colors.pane_background.l);
         // Marked rows are tinted towards the accent.
         assert!(theme.colors.row_marked.h > 0.5 && theme.colors.row_marked.h < 0.65);
     }

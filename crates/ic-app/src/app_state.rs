@@ -163,6 +163,23 @@ impl AppState {
         })
     }
 
+    /// The dashboard with `number` (from 1) in sidebar order, skipping
+    /// collapsed groups as the sidebar does (`secondary-1` … `secondary-9`).
+    pub(crate) fn dashboard_at(&self, number: usize) -> Option<DashboardRef> {
+        let index = number.checked_sub(1)?;
+        self.environment()?
+            .groups
+            .iter()
+            .filter(|group| !group.collapsed)
+            .flat_map(|group| {
+                group.dashboards.iter().map(|dashboard| DashboardRef {
+                    group_id: group.id.clone(),
+                    dashboard_id: dashboard.id.clone(),
+                })
+            })
+            .nth(index)
+    }
+
     /// A dashboard's evaluated rows and counts.
     pub(crate) fn result(&self, reference: &DashboardRef) -> Option<&DashboardResult> {
         self.snapshot.dashboards.get(reference)
@@ -251,6 +268,40 @@ impl AppState {
         }
         self.active_tab = Some(key.clone());
         true
+    }
+
+    /// Shows the selected dashboard instead of the active tab, which stays
+    /// open. Returns whether a tab was shown.
+    pub(crate) fn show_dashboard(&mut self) -> bool {
+        self.active_tab.take().is_some()
+    }
+
+    /// Shows the next open tab (`forward`) or the previous one, cycling
+    /// through the dashboard and the tabs in sidebar order: after the last
+    /// tab comes the dashboard. Returns whether anything changed.
+    pub(crate) fn cycle_tab(&mut self, forward: bool) -> bool {
+        if self.tabs.is_empty() {
+            return false;
+        }
+        // 0 is the dashboard, n the n-th tab.
+        let stops = self.tabs.len() + 1;
+        let current = self
+            .active_tab
+            .as_ref()
+            .and_then(|active| self.tabs.iter().position(|tab| tab == active))
+            .map_or(0, |index| index + 1);
+        let next = if forward {
+            (current + 1) % stops
+        } else {
+            (current + stops - 1) % stops
+        };
+        match next.checked_sub(1) {
+            Some(index) => {
+                let key = self.tabs[index].clone();
+                self.activate_tab(&key)
+            }
+            None => self.show_dashboard(),
+        }
     }
 
     /// Closes a tab; closing the shown one goes back to the dashboard.
@@ -467,6 +518,69 @@ mod tests {
         assert!(state.toggle_group("demo-lab"));
         assert!(!lab(&state));
         assert!(!state.toggle_group("demo-nope"));
+    }
+
+    #[test]
+    fn dashboards_are_numbered_in_sidebar_order() {
+        let mut state = AppState::demo(now());
+        let names = |state: &AppState| -> Vec<String> {
+            (1..=12)
+                .map_while(|number| state.dashboard_at(number))
+                .map(|reference| state.dashboard(&reference).unwrap().1.name.clone())
+                .collect()
+        };
+        assert_eq!(
+            names(&state),
+            [
+                "overview",
+                "production",
+                "databases",
+                "network",
+                "kubernetes",
+                "certificates",
+                "deploy-checks",
+                "sandbox"
+            ]
+        );
+        assert_eq!(state.dashboard_at(0), None, "numbers start at 1");
+        // A collapsed group's dashboards aren't counted.
+        state.toggle_group("demo-platform");
+        assert_eq!(
+            names(&state),
+            ["overview", "production", "databases", "sandbox"]
+        );
+        assert!(AppState::empty().dashboard_at(1).is_none());
+    }
+
+    #[test]
+    fn tabs_cycle_through_the_dashboard() {
+        let mut state = AppState::demo(now());
+        assert!(!state.cycle_tab(true), "no tabs: nothing to cycle");
+        let a = ObjectKey::host("db-prod-03");
+        let b = ObjectKey::service("db-prod-03", "postgres-replication");
+        state.open_tab(a.clone());
+        state.open_tab(b.clone());
+        assert_eq!(state.active_tab(), Some(&b));
+        assert!(state.cycle_tab(true));
+        assert_eq!(
+            state.active_tab(),
+            None,
+            "after the last tab: the dashboard"
+        );
+        assert!(state.cycle_tab(true));
+        assert_eq!(state.active_tab(), Some(&a));
+        assert!(state.cycle_tab(false));
+        assert_eq!(state.active_tab(), None);
+        assert!(state.cycle_tab(false));
+        assert_eq!(
+            state.active_tab(),
+            Some(&b),
+            "before the dashboard: the last tab"
+        );
+
+        assert!(state.show_dashboard());
+        assert!(!state.show_dashboard(), "already shown");
+        assert_eq!(state.tabs(), [a, b], "the tabs stay open");
     }
 
     #[test]

@@ -4,21 +4,28 @@
 use std::fmt;
 
 use gpui::{
-    AnyElement, App, Hsla, IntoElement, ParentElement, RenderOnce, SharedString, Styled as _,
-    Window, div, px,
+    AnyElement, App, Hsla, IntoElement, ParentElement, Pixels, RenderOnce, SharedString,
+    Styled as _, Window, div, px,
 };
 use ic_model::CheckableState;
 
 use crate::components::{Paint, StateDot};
-use crate::theme::{ActiveTheme as _, Metrics};
+use crate::theme::{ActiveTheme as _, CHAR_WIDTH, Metrics, Theme};
 
-/// One count in the summary bar: a state dot and `12 critical`.
+/// Space between a summary item's dot and its text.
+const DOT_GAP: f32 = 7.;
+/// Space between summary items.
+const ITEM_GAP: f32 = 18.;
+
+/// One count in the summary bar: a state dot and `12 critical`, or just
+/// `12` when compact.
 #[derive(Clone, Debug, IntoElement)]
 #[must_use = "a summary item does nothing unless rendered"]
 pub struct SummaryItem {
     paint: Paint,
     count: u32,
     label: SharedString,
+    compact: bool,
 }
 
 impl SummaryItem {
@@ -28,6 +35,7 @@ impl SummaryItem {
             paint: Paint::State(state),
             count,
             label: label.into(),
+            compact: false,
         }
     }
 
@@ -37,13 +45,25 @@ impl SummaryItem {
             paint: Paint::Color(color),
             count,
             label: label.into(),
+            compact: false,
         }
+    }
+
+    /// Shows only the count; the dot's colour says what it counts (for a
+    /// list too narrow for the labels, see [`SummaryBar::fits`]).
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
+        self
     }
 
     /// The text after the dot.
     #[must_use]
     pub fn text(&self) -> String {
-        format!("{} {}", self.count, self.label)
+        if self.compact {
+            self.count.to_string()
+        } else {
+            format!("{} {}", self.count, self.label)
+        }
     }
 }
 
@@ -59,14 +79,15 @@ impl RenderOnce for SummaryItem {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(7.))
+            .gap(px(DOT_GAP))
             .child(dot.size(size))
             .child(text)
     }
 }
 
 /// The 36px bar holding [`SummaryItem`]s, with an optional element at the
-/// right end (the `handled hidden` toggle).
+/// right end (the `handled hidden` toggle). In a narrow list the items are
+/// cut off at the right; the end element always stays visible.
 #[derive(IntoElement)]
 #[must_use = "a summary bar does nothing unless rendered"]
 pub struct SummaryBar {
@@ -87,6 +108,36 @@ impl SummaryBar {
     pub fn end(mut self, element: impl IntoElement) -> Self {
         self.end = Some(element.into_any_element());
         self
+    }
+
+    /// Whether items reading `texts` (`12 critical`) and an end element
+    /// reading `end` fit on a bar `width` wide. The bundled font is
+    /// monospaced, so this is exact; where they don't fit, show the items
+    /// [`SummaryItem::compact`].
+    #[must_use]
+    pub fn fits<'a>(
+        texts: impl IntoIterator<Item = &'a str>,
+        end: &str,
+        width: Pixels,
+        theme: &Theme,
+    ) -> bool {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "text lengths are far below f32's exact range"
+        )]
+        let text_width = |text: &str| theme.text.small * (CHAR_WIDTH * text.chars().count() as f32);
+        let item = theme.metrics.summary_dot + px(DOT_GAP);
+        let items = texts
+            .into_iter()
+            .map(|text| item + text_width(text))
+            .reduce(|total, width| total + px(ITEM_GAP) + width)
+            .unwrap_or_default();
+        let end = if end.is_empty() {
+            px(0.)
+        } else {
+            px(ITEM_GAP) + text_width(end)
+        };
+        theme.metrics.list_padding * 2. + items + end <= width
     }
 }
 
@@ -119,7 +170,7 @@ impl RenderOnce for SummaryBar {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(18.))
+            .gap(px(ITEM_GAP))
             .h(Metrics::with_rule(theme.metrics.summary_bar_height))
             .px(theme.metrics.list_padding)
             .border_b_1()
@@ -128,11 +179,19 @@ impl RenderOnce for SummaryBar {
             .text_color(colors.text_muted)
             .whitespace_nowrap()
             .overflow_hidden()
-            .children(self.items)
-            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(ITEM_GAP))
+                    .overflow_hidden()
+                    .children(self.items),
+            )
             .children(
                 self.end
-                    .map(|end| div().text_color(colors.text_faint).child(end)),
+                    .map(|end| div().flex_none().text_color(colors.text_faint).child(end)),
             )
     }
 }
@@ -151,6 +210,28 @@ mod tests {
             "critical",
         );
         assert_eq!(item.text(), "12 critical");
+    }
+
+    #[test]
+    fn compact_items_show_the_count_only() {
+        let item = SummaryItem::new(CheckableState::Service(ServiceState::Unknown), 2, "unknown");
+        assert_eq!(item.compact(true).text(), "2");
+    }
+
+    #[test]
+    fn labels_fit_the_design_width_but_not_a_narrow_list() {
+        let theme = Theme::dark();
+        let texts = ["10 critical", "7 warning", "2 unknown"];
+        // The design's list beside the pane is 520px wide.
+        assert!(SummaryBar::fits(texts, "handled shown", px(520.), &theme));
+        assert!(!SummaryBar::fits(texts, "handled shown", px(440.), &theme));
+        assert!(SummaryBar::fits(
+            ["10", "7", "2"],
+            "handled shown",
+            px(440.),
+            &theme
+        ));
+        assert!(SummaryBar::fits([], "", px(36.), &theme));
     }
 
     #[test]

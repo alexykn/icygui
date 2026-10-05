@@ -711,7 +711,11 @@ fn customize_replication(now: Timestamp, service: &mut Service) {
     service.links = Links {
         notes: "Streaming replication from db-prod-01. Lag above 300s means the standby can't take over without data loss.".to_owned(),
         notes_url: "https://wiki.example.com/db/replication-lag".to_owned(),
-        action_url: "https://grafana.example.com/d/pg-replication?var-host=db-prod-03".to_owned(),
+        // Icinga Web's syntax for several URLs, with macros as real
+        // configs write them.
+        action_url: "'https://grafana.example.com/d/pg-replication?var-host=$HOSTNAME$' \
+                     'https://grafana.example.com/d/pg-cluster?var-cluster=$service.vars.pg_cluster$&var-host=$host.name$'"
+            .to_owned(),
         icon_image: String::new(),
     };
     if let Some(result) = service.check.result.as_mut() {

@@ -7,7 +7,7 @@ use gpui::{
     ParentElement as _, Styled as _, div, prelude::FluentBuilder as _, px,
 };
 use ic_core::snapshot::Snapshot;
-use ic_model::{CheckableState, CommentKind, ObjectKey, Service, ServiceState, Timestamp};
+use ic_model::{CheckableState, CommentKind, Links, ObjectKey, Service, ServiceState, Timestamp};
 use ic_ui_kit::{
     ActiveTheme as _, CircleSize, CodeBlock, IconButton, IconName, KvTable, Link, NoteEntry,
     PerfdataTable, SectionLabel, StateCircle, Theme, Tooltip, TreeTable,
@@ -49,13 +49,26 @@ pub(super) fn render(
         .result
         .as_ref()
         .filter(|result| !result.perfdata.is_empty())
-        .map(|result| PerfdataTable::new(&result.perfdata).into_any_element());
+        .map(|result| {
+            // Beside the list the pane has room for the design's three
+            // columns; a tab also shows min and max.
+            PerfdataTable::new(&result.perfdata)
+                .show_range(layout != BodyLayout::Pane)
+                .into_any_element()
+        });
     let check = check_table(service, now).into_any_element();
     let notes = notes(snapshot, &key, now, cx);
     let vars = vars(service).map(IntoElement::into_any_element);
     let groups =
         groups(snapshot, service, host.map(|host| host.groups.as_slice())).into_any_element();
-    let links = links(service).map(IntoElement::into_any_element);
+    let links = links_table(
+        &service.links,
+        model::MacroScope {
+            host: host.map(AsRef::as_ref),
+            service: Some(service),
+        },
+    )
+    .map(IntoElement::into_any_element);
 
     let column = sections()
         .px(theme.metrics.pane_inset)
@@ -355,32 +368,38 @@ fn groups(snapshot: &Snapshot, service: &Service, host_groups: Option<&[String]>
         .row("host", none(host_groups))
 }
 
-pub(super) fn links(service: &Service) -> Option<KvTable> {
-    links_table(
-        &service.links.notes,
-        &service.links.notes_url,
-        &service.links.action_url,
-    )
-}
-
-/// Notes and links, if the object has any.
-pub(super) fn links_table(notes: &str, notes_url: &str, action_url: &str) -> Option<KvTable> {
-    if notes.is_empty() && notes_url.is_empty() && action_url.is_empty() {
+/// Notes and links, if the object has any. The URLs' macros are resolved
+/// against `scope`, and an attribute listing several URLs shows each.
+pub(super) fn links_table(links: &Links, scope: model::MacroScope<'_>) -> Option<KvTable> {
+    let notes = links.notes.trim();
+    let urls = [
+        ("notes url", model::link_urls(&links.notes_url, scope)),
+        ("action url", model::link_urls(&links.action_url, scope)),
+    ];
+    if notes.is_empty() && urls.iter().all(|(_, urls)| urls.is_empty()) {
         return None;
     }
     let mut table = KvTable::new().title("notes");
     if !notes.is_empty() {
         table = table.row("notes", notes.to_owned());
     }
-    for (label, url) in [("notes url", notes_url), ("action url", action_url)] {
-        if url.is_empty() {
+    for (label, urls) in urls {
+        if urls.is_empty() {
             continue;
         }
-        table = if model::is_web_link(url) {
-            table.row(label, web_link(format!("link-{label}").into(), url))
-        } else {
-            table.row(label, url.to_owned())
-        };
+        let column = urls.iter().enumerate().fold(
+            div().flex().flex_col().gap(px(4.)).min_w_0(),
+            |column, (index, url)| {
+                if model::is_web_link(url) {
+                    column.child(web_link(format!("link-{label}-{index}").into(), url))
+                } else {
+                    // A relative URL needs Icinga Web's address, which the
+                    // client doesn't know.
+                    column.child(div().truncate().child(url.clone()))
+                }
+            },
+        );
+        table = table.row(label, column);
     }
     Some(table)
 }

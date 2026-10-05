@@ -19,11 +19,11 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Entity, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseUpEvent, PlatformInput, Point, Window, point, px,
+    MouseDownEvent, MouseUpEvent, Pixels, PlatformInput, Point, Size, Window, point, px, size,
 };
 use ic_config::{GroupBy, Sort, SortKey};
 use ic_core::snapshot::{DashboardResult, DashboardRow, Snapshot};
-use ic_model::{ObjectKey, Timestamp};
+use ic_model::{Comment, CommentKind, ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::Metrics;
 
@@ -72,7 +72,14 @@ impl Harness {
     }
 
     /// Clicks at `position` with `modifiers`, then draws.
-    fn click(&self, cx: &mut App, position: Point<gpui::Pixels>, modifiers: Modifiers) {
+    fn click(&self, cx: &mut App, position: Point<Pixels>, modifiers: Modifiers) {
+        self.press(cx, position, modifiers);
+        self.release(cx, position, modifiers);
+        self.draw(cx);
+    }
+
+    /// Presses the left button at `position`.
+    fn press(&self, cx: &mut App, position: Point<Pixels>, modifiers: Modifiers) {
         self.in_window(cx, |window, cx| {
             window.dispatch_event(
                 PlatformInput::MouseDown(MouseDownEvent {
@@ -84,6 +91,12 @@ impl Harness {
                 }),
                 cx,
             );
+        });
+    }
+
+    /// Releases the left button at `position`.
+    fn release(&self, cx: &mut App, position: Point<Pixels>, modifiers: Modifiers) {
+        self.in_window(cx, |window, cx| {
             window.dispatch_event(
                 PlatformInput::MouseUp(MouseUpEvent {
                     button: MouseButton::Left,
@@ -93,6 +106,26 @@ impl Harness {
                 }),
                 cx,
             );
+        });
+    }
+
+    /// Publishes a snapshot whose production dashboard has `rows`, as the
+    /// core does after re-evaluating it, then draws.
+    fn publish_rows(&self, cx: &mut App, rows: Vec<DashboardRow>) {
+        self.state.update(cx, |state, cx| {
+            let old = state.snapshot().clone();
+            let mut dashboards = (*old.dashboards).clone();
+            let result = dashboards.get_mut(&production()).unwrap();
+            *result = DashboardResult {
+                rows: Arc::new(rows),
+                ..result.clone()
+            };
+            state.set_snapshot(Arc::new(Snapshot {
+                revision: old.revision + 1,
+                dashboards: Arc::new(dashboards),
+                ..(*old).clone()
+            }));
+            cx.notify();
         });
         self.draw(cx);
     }
@@ -135,7 +168,7 @@ impl Harness {
 /// The middle of list row `index` (with the list scrolled to the top): the
 /// sidebar is 300px wide, the header and summary bar are 41 and 37px tall
 /// with their rules, rows 61px.
-fn row_position(index: usize) -> Point<gpui::Pixels> {
+fn row_position(index: usize) -> Point<Pixels> {
     let metrics = ic_ui_kit::Theme::dark().metrics;
     let top =
         Metrics::with_rule(metrics.header_height) + Metrics::with_rule(metrics.summary_bar_height);
@@ -156,9 +189,19 @@ fn secondary() -> Modifiers {
 }
 
 /// Runs `test` in a headless app with the demo (and `options`) in the main
-/// window. Panics inside are caught, the app quits, and the panic is
-/// re-raised on the test thread.
+/// window at the design's size. Panics inside are caught, the app quits,
+/// and the panic is re-raised on the test thread.
 fn run(options: DemoOptions, test: impl FnOnce(&Harness, &mut App) + 'static) {
+    run_sized(options, crate::WINDOW_SIZE, test);
+}
+
+/// [`run`] with the main window `window_size` large (headless windows can't
+/// be resized once open).
+fn run_sized(
+    options: DemoOptions,
+    window_size: Size<Pixels>,
+    test: impl FnOnce(&Harness, &mut App) + 'static,
+) {
     let _guard = HEADLESS.lock().unwrap_or_else(PoisonError::into_inner);
     // A hung event loop must fail the run instead of blocking it.
     let finished = Arc::new(AtomicBool::new(false));
@@ -185,7 +228,7 @@ fn run(options: DemoOptions, test: impl FnOnce(&Harness, &mut App) + 'static) {
             cx.set_global(ControlsPreference::Always);
             workspace::bind_keys(cx);
             let state = cx.new(|_| AppState::demo_with(Timestamp::now(), options));
-            let handle = open_main_window(state.clone(), cx).unwrap();
+            let handle = open_main_window(state.clone(), window_size, cx).unwrap();
             let workspace = handle
                 .read(cx)
                 .unwrap()
@@ -382,24 +425,7 @@ fn the_selection_survives_snapshot_updates() {
         assert_eq!(marked.len(), 2);
 
         // The core publishes a snapshot with the rows in another order.
-        let publish = |cx: &mut App, rows: Vec<DashboardRow>| {
-            app.state.update(cx, |state, cx| {
-                let old = state.snapshot().clone();
-                let mut dashboards = (*old.dashboards).clone();
-                let result = dashboards.get_mut(&production()).unwrap();
-                *result = DashboardResult {
-                    rows: Arc::new(rows),
-                    ..result.clone()
-                };
-                state.set_snapshot(Arc::new(Snapshot {
-                    revision: old.revision + 1,
-                    dashboards: Arc::new(dashboards),
-                    ..(*old).clone()
-                }));
-                cx.notify();
-            });
-            app.draw(cx);
-        };
+        let publish = |cx: &mut App, rows: Vec<DashboardRow>| app.publish_rows(cx, rows);
         let mut reversed: Vec<DashboardRow> = app.rows(cx).to_vec();
         reversed.reverse();
         let count = reversed.len();
@@ -673,5 +699,261 @@ fn header_menus_open_and_close() {
         app.click(cx, row_position(3), Modifiers::default());
         assert_eq!(dashboard.read(cx).open_menu(), None);
         assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(3));
+    });
+}
+
+fn network() -> DashboardRef {
+    DashboardRef {
+        group_id: "demo-platform".to_owned(),
+        dashboard_id: "demo-platform-network".to_owned(),
+    }
+}
+
+/// The middle of the sidebar's dashboard row `index` (0 = `overview` under
+/// the `overview` group): the header is 41px, group rows 36px, dashboard
+/// rows 30px.
+fn sidebar_item(index: usize) -> Point<Pixels> {
+    #[expect(clippy::cast_precision_loss, reason = "small row indices")]
+    let row = 30. * index as f32;
+    point(px(150.), px(41. + 36. + 15.) + px(row))
+}
+
+#[test]
+fn clicks_outside_the_list_keep_the_keys_working() {
+    run(DemoOptions::default(), |app, cx| {
+        // The sidebar's empty space below the groups.
+        app.click(cx, point(px(150.), px(700.)), Modifiers::default());
+        app.keys(cx, "j j enter");
+        assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(1));
+        assert_eq!(app.pane_object(cx), Some(replication()));
+
+        // The dashboard that's already selected.
+        app.click(cx, sidebar_item(1), Modifiers::default());
+        assert_eq!(app.state.read(cx).selected(), Some(&production()));
+        app.keys(cx, "j");
+        assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(2));
+
+        // The footer, and a group header (which collapses the group).
+        app.click(cx, point(px(150.), px(880.)), Modifiers::default());
+        app.keys(cx, "k");
+        assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(1));
+        app.click(cx, point(px(150.), px(59.)), Modifiers::default());
+        app.keys(cx, "k");
+        assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(0));
+        app.click(cx, point(px(150.), px(59.)), Modifiers::default());
+
+        // Enter in the search field shows the first match and hands the
+        // keys back to the list.
+        let sidebar = app.workspace.read(cx).sidebar().clone();
+        app.click(cx, point(px(150.), px(20.)), Modifiers::default());
+        app.keys(cx, "n e t");
+        assert_eq!(sidebar.read(cx).query(), "net", "typing goes to the field");
+        app.keys(cx, "enter");
+        assert_eq!(app.state.read(cx).selected(), Some(&network()));
+        app.keys(cx, "j");
+        assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(0));
+        assert_eq!(sidebar.read(cx).query(), "net", "j went to the list");
+
+        // Escape clears the search and does the same.
+        app.click(cx, point(px(150.), px(20.)), Modifiers::default());
+        app.keys(cx, "escape");
+        assert_eq!(sidebar.read(cx).query(), "");
+        app.keys(cx, "j");
+        assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(1));
+    });
+}
+
+#[test]
+fn the_keyboard_switches_dashboards_and_tabs() {
+    run(DemoOptions::default(), |app, cx| {
+        app.keys(cx, "ctrl-4");
+        assert_eq!(app.state.read(cx).selected(), Some(&network()));
+        app.keys(cx, "j");
+        assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(0));
+        app.keys(cx, "ctrl-9");
+        assert_eq!(
+            app.state.read(cx).selected(),
+            Some(&network()),
+            "there's no ninth dashboard"
+        );
+
+        app.keys(cx, "ctrl-2 j j enter ctrl-enter");
+        assert_eq!(app.state.read(cx).selected(), Some(&production()));
+        assert_eq!(app.state.read(cx).active_tab(), Some(&replication()));
+        // Escape in a tab goes back to the dashboard and keeps the tab.
+        app.keys(cx, "escape");
+        assert_eq!(app.state.read(cx).active_tab(), None);
+        assert_eq!(app.state.read(cx).tabs(), [replication()]);
+        app.keys(cx, "j");
+        assert_eq!(
+            app.cursor(cx).map(|(index, _)| index),
+            Some(2),
+            "the list has the keys"
+        );
+
+        // ctrl-tab cycles through the tab and the dashboard.
+        app.keys(cx, "ctrl-tab");
+        assert_eq!(app.state.read(cx).active_tab(), Some(&replication()));
+        app.keys(cx, "ctrl-tab");
+        assert_eq!(app.state.read(cx).active_tab(), None);
+        app.keys(cx, "ctrl-shift-tab");
+        assert_eq!(app.state.read(cx).active_tab(), Some(&replication()));
+        // ctrl-1 from a tab shows that dashboard.
+        app.keys(cx, "ctrl-1");
+        assert_eq!(app.state.read(cx).active_tab(), None);
+        assert_ne!(app.state.read(cx).selected(), Some(&production()));
+        app.keys(cx, "ctrl-2 ctrl-tab");
+        assert_eq!(app.state.read(cx).active_tab(), Some(&replication()));
+        // ctrl-w closes it; the list gets the keys back.
+        app.keys(cx, "ctrl-w");
+        assert!(app.state.read(cx).tabs().is_empty());
+        assert_eq!(app.state.read(cx).active_tab(), None);
+        app.keys(cx, "k");
+        assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(1));
+
+        // A collapsed group's dashboards aren't numbered.
+        app.state.update(cx, |state, cx| {
+            state.toggle_group("demo-overview");
+            cx.notify();
+        });
+        app.draw(cx);
+        app.keys(cx, "ctrl-1");
+        assert_eq!(app.state.read(cx).selected(), Some(&network()));
+    });
+}
+
+#[test]
+fn a_host_with_many_notes_keeps_its_services_in_reach() {
+    run(DemoOptions::default(), |app, cx| {
+        let host = ObjectKey::host("db-prod-03");
+        app.state.update(cx, |state, cx| {
+            let old = state.snapshot().clone();
+            let mut comments = (*old.comments).clone();
+            let notes = comments.entry(host.clone()).or_default();
+            for index in 0..12 {
+                notes.push(Comment {
+                    name: format!("db-prod-03!note-{index}"),
+                    object: host.clone(),
+                    author: "m.keller".to_owned(),
+                    text: "Maintenance window agreed with the storage team.\n".repeat(3),
+                    kind: CommentKind::User,
+                    entry_time: Timestamp::now(),
+                    expire_time: None,
+                    persistent: true,
+                });
+            }
+            state.set_snapshot(Arc::new(Snapshot {
+                revision: old.revision + 1,
+                comments: Arc::new(comments),
+                ..(*old).clone()
+            }));
+            cx.notify();
+        });
+        let dashboard = app.dashboard(cx);
+        dashboard.update(cx, |view, cx| view.open_object(&host, cx));
+        app.draw(cx);
+        let pane = dashboard.read(cx).pane(cx).unwrap();
+        assert_eq!(pane.read(cx).object(), &host);
+        app.draw(cx);
+        // The notes scroll with the services instead of squeezing them out.
+        let scroll = pane.read(cx).body_scroll().clone();
+        let viewport = scroll.bounds();
+        assert!(viewport.size.height > px(500.), "{viewport:?}");
+        assert!(
+            scroll.max_offset().y > px(500.),
+            "{:?}",
+            scroll.max_offset()
+        );
+    });
+}
+
+#[test]
+fn a_narrow_window_narrows_the_pane_then_covers_the_list() {
+    // A 1280px laptop screen: the list keeps 440px, the pane gives way.
+    run_sized(
+        DemoOptions::default(),
+        size(px(1280.), px(800.)),
+        |app, cx| {
+            app.keys(cx, "j enter");
+            app.draw(cx);
+            let list = app.dashboard(cx).read(cx).list_bounds(cx).unwrap();
+            assert_eq!(list.origin.x, px(300.));
+            assert!((px(435.)..=px(441.)).contains(&list.size.width), "{list:?}");
+            let pane = app.dashboard(cx).read(cx).pane(cx).unwrap();
+            let body = pane.read(cx).body_scroll().bounds();
+            assert_eq!(body.origin.x + body.size.width, px(1280.));
+            assert!(body.size.width > px(500.), "{body:?}");
+        },
+    );
+    // The 900px minimum: the pane covers the list; Escape shows it again.
+    run_sized(
+        DemoOptions::default(),
+        size(px(900.), px(600.)),
+        |app, cx| {
+            app.keys(cx, "j enter");
+            app.draw(cx);
+            let pane = app.dashboard(cx).read(cx).pane(cx).unwrap();
+            let body = pane.read(cx).body_scroll().bounds();
+            assert_eq!(body.origin.x, px(300.), "{body:?}");
+            assert_eq!(body.size.width, px(600.));
+            // j still moves the cursor, and the pane follows it.
+            app.keys(cx, "j");
+            assert_eq!(app.pane_object(cx), Some(replication()));
+            app.keys(cx, "escape");
+            assert_eq!(app.pane_object(cx), None);
+            let list = app.dashboard(cx).read(cx).list_bounds(cx).unwrap();
+            assert_eq!(list.size.width, px(600.));
+        },
+    );
+}
+
+#[test]
+fn a_click_spanning_a_reorder_selects_nothing() {
+    run(DemoOptions::default(), |app, cx| {
+        let pressed = app.row_key(cx, 2);
+        app.press(cx, row_position(2), Modifiers::default());
+        // A snapshot moves the rows while the button is down.
+        let mut reversed: Vec<DashboardRow> = app.rows(cx).to_vec();
+        reversed.reverse();
+        app.publish_rows(cx, reversed);
+        assert_ne!(
+            app.row_key(cx, 2),
+            pressed,
+            "another object is under the mouse"
+        );
+        app.release(cx, row_position(2), Modifiers::default());
+        app.draw(cx);
+        assert_eq!(app.cursor(cx), None, "neither object was clicked");
+        assert_eq!(app.pane_object(cx), None);
+
+        // An ordinary click still selects the object under the mouse.
+        app.click(cx, row_position(2), Modifiers::default());
+        assert_eq!(app.cursor(cx), Some((2, app.row_key(cx, 2))));
+    });
+}
+
+#[test]
+fn a_cursor_whose_object_left_takes_no_action() {
+    run(DemoOptions::default(), |app, cx| {
+        app.keys(cx, "j j");
+        assert_eq!(app.cursor(cx).map(|(_, key)| key), Some(replication()));
+        // The replication check recovers and leaves the list.
+        let without: Vec<DashboardRow> = app
+            .rows(cx)
+            .iter()
+            .filter(|row| **row != DashboardRow::Object(replication()))
+            .cloned()
+            .collect();
+        app.publish_rows(cx, without);
+        assert_eq!(app.cursor(cx), None, "the cursor detached");
+        // `a` doesn't hit the row that slid into its place.
+        app.keys(cx, "a");
+        assert_eq!(app.state.read(cx).last_request(), None);
+        // j picks that row up.
+        app.keys(cx, "j");
+        assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(1));
+        app.keys(cx, "a");
+        let request = app.state.read(cx).last_request().cloned().unwrap();
+        assert_eq!(request.targets, [app.row_key(cx, 1)]);
     });
 }

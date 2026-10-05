@@ -7,7 +7,7 @@ use gpui::{
     Anchor, AnyElement, App, BoxShadow, ClickEvent, ElementId, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, RenderOnce, Role,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div,
-    hsla, point, prelude::FluentBuilder as _, px, relative,
+    point, prelude::FluentBuilder as _, px, relative,
 };
 
 use crate::components::KeyHint;
@@ -303,7 +303,7 @@ impl RenderOnce for Menu {
             .border_color(colors.border_window)
             .bg(colors.element_background)
             .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.45),
+                color: colors.shadow_strong,
                 offset: point(px(0.), px(6.)),
                 blur_radius: px(18.),
                 spread_radius: px(0.),

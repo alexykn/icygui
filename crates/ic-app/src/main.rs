@@ -17,8 +17,9 @@ mod workspace;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Bounds, Entity, Size, TitlebarOptions, WindowBackgroundAppearance,
-    WindowBounds, WindowDecorations, WindowHandle, WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, Entity, Pixels, Size, TitlebarOptions,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle, WindowOptions,
+    point, px,
 };
 use gpui_platform::application;
 use ic_model::Timestamp;
@@ -34,6 +35,12 @@ use crate::workspace::Workspace;
 /// Reverse-DNS application id (Wayland `app_id`, bundle id, notification identity).
 const APP_ID: &str = "io.github.alexykn.icygui";
 const APP_NAME: &str = "icygui";
+
+/// The main window's size at start: the design's.
+const WINDOW_SIZE: Size<Pixels> = Size {
+    width: px(1440.),
+    height: px(900.),
+};
 
 /// How often the demo pretends an event arrived, so its connection stays
 /// "live" in the footer.
@@ -66,7 +73,7 @@ fn main() {
             let state = cx.new(|_| demo_state(&dev, Timestamp::now()));
             simulate_demo_events(&state, cx);
 
-            match open_main_window(state.clone(), cx) {
+            match open_main_window(state.clone(), WINDOW_SIZE, cx) {
                 Ok(window) => open_at_start(dev.open, &state, window, cx),
                 Err(error) => {
                     tracing::error!(error = %format!("{error:#}"), "failed to open the main window");
@@ -125,8 +132,13 @@ fn open_at_start(
     }
 }
 
-fn open_main_window(state: Entity<AppState>, cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
-    let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+/// Opens the main window, `window_size` large, centred.
+fn open_main_window(
+    state: Entity<AppState>,
+    window_size: Size<Pixels>,
+    cx: &mut App,
+) -> anyhow::Result<WindowHandle<Root>> {
+    let bounds = Bounds::centered(None, window_size, cx);
     let title = chrome::window_title(
         state
             .read(cx)

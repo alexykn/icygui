@@ -14,13 +14,23 @@
 //! | | `x`, `secondary-a` | [`ToggleMark`], [`MarkAll`] |
 //! | | `secondary-enter` | [`OpenAsTab`] |
 //! | `DashboardView`, `ObjectPane` | `a`, `d`, `r`, `c` | [`Acknowledge`], [`ScheduleDowntime`], [`CheckNow`], [`AddComment`] |
+//! | `ObjectPane` (a tab) | `escape` | [`Dismiss`]: back to the dashboard; the tab stays open |
+//! | `Workspace` (everywhere) | `secondary-1` … `secondary-9` | [`SelectDashboard`]: the n-th dashboard in the sidebar |
+//! | | `ctrl-tab`, `ctrl-shift-tab` | [`ActivateNextTab`], [`ActivatePreviousTab`]: cycle through the dashboard and the open tabs |
+//! | | `secondary-w` | [`CloseTab`]: close the tab shown |
+//! | | `secondary-b` | `ToggleSidebar` |
+//! | | — | [`FocusMain`]: hand the keyboard to the list or the tab shown (Enter and Escape in the sidebar search do this) |
 //!
 //! `secondary` is cmd on macOS and ctrl elsewhere. Single letters are bound
 //! only in the list and pane contexts, so they never reach text fields.
 
 use gpui::{Action, App, KeyBinding};
 use ic_model::ObjectKey;
+use schemars::JsonSchema;
+use serde::{Deserialize, Deserializer};
 
+/// Key context of the window's root, an ancestor of everything focusable.
+pub(crate) const WORKSPACE_CONTEXT: &str = "Workspace";
 /// Key context of the dashboard list and its split pane.
 pub(crate) const DASHBOARD_CONTEXT: &str = "DashboardView";
 /// Key context of an object opened as a tab.
@@ -76,7 +86,8 @@ pub(crate) struct OpenSelected;
 #[action(namespace = icygui)]
 pub(crate) struct OpenAsTab;
 
-/// Closes the detail pane, or clears the marks when no pane is open.
+/// Closes the detail pane, or clears the marks when no pane is open; in a
+/// tab, goes back to the dashboard.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct Dismiss;
@@ -112,11 +123,60 @@ pub(crate) struct CheckNow;
 #[action(namespace = icygui)]
 pub(crate) struct AddComment;
 
-/// Registers the default key bindings of the list and the panes.
+/// Shows the dashboard with this number in the sidebar, counting from 1
+/// in sidebar order. Dashboards in collapsed groups are skipped, as the
+/// sidebar doesn't list them; a search doesn't renumber them. In a keymap:
+/// `["icygui::SelectDashboard", 3]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, JsonSchema, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct SelectDashboard(pub(crate) usize);
+
+// By hand rather than derived: clippy flags deriving `Deserialize` next to
+// the `unsafe` in GPUI's generated action registration.
+impl<'de> Deserialize<'de> for SelectDashboard {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        usize::deserialize(deserializer).map(Self)
+    }
+}
+
+/// Shows the next open tab; after the last one, the dashboard again.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct ActivateNextTab;
+
+/// Shows the previous open tab; before the first one, the dashboard.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct ActivatePreviousTab;
+
+/// Closes the tab shown, back to the dashboard.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct CloseTab;
+
+/// Gives the keyboard focus to the main area: the dashboard list, or the
+/// tab shown.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct FocusMain;
+
+/// Registers the default key bindings of the workspace, the list and the
+/// panes.
 pub(crate) fn bind_keys(cx: &mut App) {
+    let workspace = Some(WORKSPACE_CONTEXT);
     let list = Some(DASHBOARD_CONTEXT);
     let pane = Some(PANE_CONTEXT);
+    cx.bind_keys((1..=9).map(|number| {
+        KeyBinding::new(
+            &format!("secondary-{number}"),
+            SelectDashboard(number),
+            workspace,
+        )
+    }));
     cx.bind_keys([
+        KeyBinding::new("ctrl-tab", ActivateNextTab, workspace),
+        KeyBinding::new("ctrl-shift-tab", ActivatePreviousTab, workspace),
+        KeyBinding::new("secondary-w", CloseTab, workspace),
         KeyBinding::new("j", SelectNext, list),
         KeyBinding::new("down", SelectNext, list),
         KeyBinding::new("k", SelectPrevious, list),
@@ -142,6 +202,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("d", ScheduleDowntime, pane),
         KeyBinding::new("r", CheckNow, pane),
         KeyBinding::new("c", AddComment, pane),
+        KeyBinding::new("escape", Dismiss, pane),
     ]);
 }
 
@@ -192,6 +253,13 @@ pub(crate) struct ActionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashboard_numbers_come_from_keymaps_as_plain_numbers() {
+        let action = SelectDashboard::build(serde_json::json!(3)).unwrap();
+        assert!(action.partial_eq(&SelectDashboard(3)));
+        assert!(SelectDashboard::build(serde_json::json!("three")).is_err());
+    }
 
     #[test]
     fn labels_name_the_action() {

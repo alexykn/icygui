@@ -5,6 +5,9 @@
 //!
 //! The footer's "last event" age refreshes with the workspace's clock
 //! (UI-04).
+//!
+//! In the search field, Enter shows the first matching dashboard and Escape
+//! clears the search; both hand the keyboard back to the main area.
 
 mod model;
 
@@ -15,12 +18,13 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use ic_model::Timestamp;
-use ic_ui_kit::input::{InputEvent, InputState};
+use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{
     ActiveTheme as _, Divider, DividerColor, GlyphButton, Icon, IconButton, IconName, Metrics,
     StateDot, TextField, Theme, Tooltip,
 };
 
+use crate::actions::FocusMain;
 use crate::app_state::{AppState, Health};
 use crate::chrome::{Controls, WindowControls, WindowDrag};
 use crate::workspace::ToggleSidebar;
@@ -42,20 +46,19 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Search dashboards…")
-                .clean_on_escape()
-        });
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search dashboards…"));
         let subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
-            cx.subscribe(
+            cx.subscribe_in(
                 &search,
-                |this: &mut Self, search, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
+                window,
+                |this: &mut Self, search, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => {
                         this.query = search.read(cx).value().to_string();
                         cx.notify();
                     }
+                    InputEvent::PressEnter { .. } => this.open_first_match(window, cx),
+                    InputEvent::Focus | InputEvent::Blur => {}
                 },
             ),
         ];
@@ -66,6 +69,47 @@ impl Sidebar {
             drag: WindowDrag::default(),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Enter in the search field: shows the first dashboard the search
+    /// matches and hands the keyboard to the main area.
+    fn open_first_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let first = {
+            let state = self.state.read(cx);
+            state.environment().and_then(|environment| {
+                model::groups(
+                    environment,
+                    &state.snapshot().dashboards,
+                    state.selected(),
+                    &self.query,
+                )
+                .into_iter()
+                .flat_map(|group| group.items)
+                .map(|item| item.reference)
+                .next()
+            })
+        };
+        if let Some(reference) = first {
+            self.state.update(cx, |state, cx| {
+                if state.select(reference) {
+                    cx.notify();
+                }
+            });
+        }
+        window.dispatch_action(Box::new(FocusMain), cx);
+    }
+
+    /// Escape in the search field (it has nothing of its own to dismiss):
+    /// clears the search and hands the keyboard to the main area.
+    fn dismiss_search(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.query.is_empty() {
+            // `set_value` doesn't report a change.
+            self.search
+                .update(cx, |search, cx| search.set_value("", window, cx));
+            self.query.clear();
+            cx.notify();
+        }
+        window.dispatch_action(Box::new(FocusMain), cx);
     }
 
     /// The search field's state.
@@ -80,7 +124,7 @@ impl Sidebar {
         &self.query
     }
 
-    fn render_header(&self, window: &Window, cx: &App) -> impl IntoElement + use<> {
+    fn render_header(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let metrics = theme.metrics;
         let controls = Controls::of(window, cx);
@@ -107,7 +151,13 @@ impl Sidebar {
                     .size(metrics.icon)
                     .color(theme.colors.text_muted),
             )
-            .child(div().flex_1().min_w_0().child(TextField::new(&self.search)));
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .on_action(cx.listener(Self::dismiss_search))
+                    .child(TextField::new(&self.search)),
+            );
         self.drag.attach(header, controls)
     }
 

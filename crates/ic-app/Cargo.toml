@@ -26,6 +26,11 @@ ic-core.workspace = true
 ic-model.workspace = true
 ic-rules.workspace = true
 ic-ui-kit.workspace = true
+# Actions with data (`SelectDashboard(3)`) are built from keymap JSON: GPUI's
+# `Action` derive needs `Deserialize` and `JsonSchema` for them. Both are
+# already in GPUI's dependency graph with the same features.
+schemars = "1"
+serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -22,10 +22,12 @@ use ic_ui_kit::{
 };
 
 use crate::actions::{
-    Acknowledge, ActionRequest, AddComment, CheckNow, ObjectAction, PANE_CONTEXT, ScheduleDowntime,
+    Acknowledge, ActionRequest, AddComment, CheckNow, Dismiss, ObjectAction, PANE_CONTEXT,
+    ScheduleDowntime,
 };
 use crate::app_state::AppState;
 use crate::chrome::{Controls, WindowDrag};
+use crate::dashboard::SplitLayout;
 use crate::workspace::sidebar_reopen;
 
 /// Where the pane is shown.
@@ -114,8 +116,8 @@ pub(crate) struct ObjectPane {
     show_all_ok: bool,
     scroll: ScrollHandle,
     focus_handle: FocusHandle,
-    /// In tab mode with the sidebar hidden, the header shows the window
-    /// controls and the sidebar button.
+    /// With the sidebar hidden, a tab (or a pane covering a narrow list)
+    /// shows the window controls and the sidebar button in its header.
     sidebar_open: bool,
     drag: WindowDrag,
     _subscriptions: Vec<Subscription>,
@@ -170,6 +172,12 @@ impl ObjectPane {
         self.host_tab
     }
 
+    /// The scrolling part of the body.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn body_scroll(&self) -> &ScrollHandle {
+        &self.scroll
+    }
+
     /// Shows `object`, forgetting the back history (the list's cursor
     /// moved).
     pub(crate) fn show(&mut self, object: ObjectKey, cx: &mut Context<Self>) {
@@ -208,7 +216,7 @@ impl ObjectPane {
         }
     }
 
-    /// Tells a tab whether the sidebar is shown.
+    /// Tells the pane whether the sidebar is shown.
     pub(crate) fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.sidebar_open != open {
             self.sidebar_open = open;
@@ -277,6 +285,15 @@ impl ObjectPane {
         self.request(ObjectAction::AddComment, cx);
     }
 
+    /// Escape in a tab: back to the dashboard; the tab stays open.
+    fn on_dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            if state.show_dashboard() {
+                cx.notify();
+            }
+        });
+    }
+
     fn render_header(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let controls = Controls::of(window, cx);
@@ -285,7 +302,16 @@ impl ObjectPane {
             ObjectKey::Service { .. } => "service",
         };
         let mut header = PaneHeader::new("pane-header");
-        if self.mode == PaneMode::Tab && !self.sidebar_open {
+        // At the window's left edge (a tab, or covering a narrow list) with
+        // the sidebar hidden, the header carries the window controls.
+        let left_edge = match self.mode {
+            PaneMode::Tab => true,
+            PaneMode::Split => {
+                SplitLayout::for_window(window, self.sidebar_open, &theme.metrics)
+                    == SplitLayout::Cover
+            }
+        };
+        if left_edge && !self.sidebar_open {
             header = header.leading(sidebar_reopen(controls, theme));
         }
         if let Some(previous) = self.history.last() {
@@ -358,6 +384,7 @@ impl Render for ObjectPane {
                     .on_action(cx.listener(Self::on_downtime))
                     .on_action(cx.listener(Self::on_check_now))
                     .on_action(cx.listener(Self::on_comment))
+                    .on_action(cx.listener(Self::on_dismiss))
             })
             .child(header)
             .child(body)

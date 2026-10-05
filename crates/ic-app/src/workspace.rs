@@ -1,19 +1,28 @@
 //! The root view: the sidebar and the main area, which shows the selected
 //! dashboard (list and detail pane, screens 2a–2c) or an object opened as a
 //! tab, full width.
+//!
+//! The keyboard belongs to the main area: a click on a spot that takes no
+//! focus of its own (the sidebar, its footer, a header) hands the focus to
+//! the list or the tab shown, and so does losing the focus, so the
+//! shortcuts keep working.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::{
-    Action, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, Styled as _,
-    Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    Action, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
+    IntoElement, KeyBinding, MouseDownEvent, ParentElement as _, Render, Styled as _, Subscription,
+    Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use ic_model::ObjectKey;
 use ic_rules::DashboardRef;
 use ic_ui_kit::{ActiveTheme as _, Divider, DividerColor, IconButton, IconName, Theme, Tooltip};
 
+use crate::actions::{
+    self, ActivateNextTab, ActivatePreviousTab, CloseTab, FocusMain, SelectDashboard,
+    WORKSPACE_CONTEXT,
+};
 use crate::app_state::AppState;
 use crate::chrome::{Controls, WindowControls};
 use crate::dashboard::DashboardView;
@@ -33,7 +42,7 @@ pub(crate) struct ToggleSidebar;
 /// ctrl elsewhere).
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("secondary-b", ToggleSidebar, None)]);
-    crate::actions::bind_keys(cx);
+    actions::bind_keys(cx);
 }
 
 /// What the main area shows.
@@ -56,7 +65,6 @@ pub(crate) struct Workspace {
     tabs: HashMap<ObjectKey, TabPane>,
     sidebar_open: bool,
     shown: Shown,
-    focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _clock: Task<()>,
 }
@@ -71,9 +79,16 @@ impl Workspace {
         let dashboard = cx.new(|cx| DashboardView::new(state.clone(), cx));
         // Keyboard shortcuts reach the list through the focus path.
         window.focus(&dashboard.focus_handle(cx), cx);
-        let subscriptions = vec![cx.observe_in(&state, window, |this, _, window, cx| {
-            this.sync(window, cx);
-        })];
+        let subscriptions = vec![
+            cx.observe_in(&state, window, |this, _, window, cx| {
+                this.sync(window, cx);
+            }),
+            // The focused element went away (a closed pane): the keys go
+            // back to the main area.
+            cx.on_focus_lost(window, |this, window, cx| {
+                this.focus_main(window, cx);
+            }),
+        ];
         let clock = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(CLOCK_TICK).await;
@@ -91,7 +106,6 @@ impl Workspace {
             tabs: HashMap::new(),
             sidebar_open: true,
             shown,
-            focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
             _clock: clock,
         }
@@ -168,6 +182,72 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Gives the keyboard focus to the main area: the tab shown, else the
+    /// dashboard list.
+    fn focus_main(&self, window: &mut Window, cx: &mut App) {
+        let tab = match &self.shown {
+            Shown::Tab(key) => self.tabs.get(key),
+            Shown::Dashboard(_) => None,
+        };
+        let handle = match tab {
+            Some(tab) => tab.view.focus_handle(cx),
+            None => self.dashboard.focus_handle(cx),
+        };
+        window.focus(&handle, cx);
+    }
+
+    fn on_focus_main(&mut self, _: &FocusMain, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_main(window, cx);
+    }
+
+    /// `secondary-1` … `secondary-9`: shows that dashboard and focuses its
+    /// list (also when it's already shown, say from the search field).
+    fn select_dashboard(
+        &mut self,
+        action: &SelectDashboard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(reference) = self.state.read(cx).dashboard_at(action.0) else {
+            return;
+        };
+        self.state.update(cx, |state, cx| {
+            if state.select(reference) {
+                cx.notify();
+            }
+        });
+        // If that switched the main area, `sync` moves the focus again.
+        self.focus_main(window, cx);
+    }
+
+    fn next_tab(&mut self, _: &ActivateNextTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(true, cx);
+    }
+
+    fn previous_tab(&mut self, _: &ActivatePreviousTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(false, cx);
+    }
+
+    fn cycle_tab(&self, forward: bool, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            if state.cycle_tab(forward) {
+                cx.notify();
+            }
+        });
+    }
+
+    fn close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(active) = self.state.read(cx).active_tab().cloned() else {
+            cx.propagate();
+            return;
+        };
+        self.state.update(cx, |state, cx| {
+            if state.close_tab(&active) {
+                cx.notify();
+            }
+        });
+    }
+
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
         let open = self.sidebar_open;
@@ -194,9 +274,21 @@ impl Render for Workspace {
         .unwrap_or_else(|| self.dashboard.clone().into_any_element());
         div()
             .id("workspace")
-            .key_context("Workspace")
-            .track_focus(&self.focus_handle)
+            .key_context(WORKSPACE_CONTEXT)
+            // Runs after the element under the mouse had its say: one that
+            // takes the focus (the list, a tab, the search field), or keeps
+            // it where it is (a menu trigger), prevents the default.
+            .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                if !window.default_prevented() {
+                    this.focus_main(window, cx);
+                }
+            }))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::on_focus_main))
+            .on_action(cx.listener(Self::select_dashboard))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::close_tab))
             .flex()
             .size_full()
             .bg(theme.colors.window_background)

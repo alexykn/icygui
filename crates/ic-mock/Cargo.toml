@@ -1,0 +1,43 @@
+[package]
+name = "ic-mock"
+description = "Icinga 2 REST API look-alike for development and tests: scenarios, simulator, fault injection. Never shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "icinga-mock"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22.1"
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive"] }
+futures.workspace = true
+http = "1.5.0"
+http-body = "1.0.1"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+ic-model.workspace = true
+percent-encoding = "2.3.2"
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+ring = "0.17.14"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time = "0.3.55"
+tokio ={ version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util", "fs"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+x509-parser = "0.18.1"
+
+[dev-dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "stream"] }

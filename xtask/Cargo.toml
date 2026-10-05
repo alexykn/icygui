@@ -11,3 +11,5 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+icns = "0.3"
+png = "0.18"

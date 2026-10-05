@@ -50,14 +50,16 @@ pub enum Value { Null, Bool(bool), Number(f64), String(Arc<str>), Array(Arc<Vec<
 impl Value { pub fn is_truthy(&self) -> bool; pub fn from_json(&serde_json::Value) -> Value; }
 
 /// Resolves variables. `path` is a root name followed by constant member
-/// names: `host.vars.role` → ["host", "vars", "role"]. Return the value at the
-/// deepest prefix you can resolve; the evaluator indexes the rest.
+/// names: `host.vars.role` → ["host", "vars", "role"]. Return `Some` only with
+/// the value of the *whole* path (a missing key below a variable you provide
+/// is `Some(Null)`), `None` when you don't provide `path[0]` or can't follow
+/// the path; the evaluator then retries shorter prefixes and indexes the rest.
 pub trait Scope { fn lookup(&self, path: &[&str]) -> Option<Value>; }
 
 pub struct HostScope<'a> { pub host: &'a Host }
 pub struct ServiceScope<'a> { pub service: &'a Service, pub host: Option<&'a Host> }
 pub struct VarsScope<'a> { pub vars: &'a BTreeMap<String, Value> }       // API filter_vars
-pub struct Chain<'a> { pub scopes: &'a [&'a dyn Scope] }                  // first match wins
+pub struct Chain<'a> { pub scopes: &'a [&'a dyn Scope] }                  // the first scope providing path[0] answers
 ```
 
 **Object attributes:** these must be resolvable under `host.` and `service.`, with Icinga's names and value types (numbers are numbers):
@@ -67,7 +69,7 @@ pub struct Chain<'a> { pub scopes: &'a [&'a dyn Scope] }                  // fir
 - `groups`, `vars`, `notes`, `notes_url`, `action_url`, `icon_image`
 - `last_check_result` (dict with `output`, `exit_status`, `state`, `execution_start`, `execution_end`, `schedule_start`, `check_source`, `active`)
 
-Pending objects have `last_check_result = null` and `state = 0`; unreachable hosts have `state = 1` and `last_reachable = false`, like Icinga. `ServiceScope` resolves `host.*` from its host.
+Pending objects have `last_check_result = null`, `problem = false` and, like Icinga (whose raw state starts as UNKNOWN; recorded in `contract/samples/services.json`), `state = 3` for services and `state = 1` for hosts; unreachable hosts have `state = 1` and `last_reachable = false`. Objects without custom variables have `vars = null`, as in Icinga. `ServiceScope` resolves `host.*` from its host.
 
 **Language subset:** follow the Icinga grammar and semantics in the reference sources.
 - literals: numbers, durations (`5m`, `1h`, `30s`, `2d`, `500ms`), strings with escapes, `{{{ }}}` multi-line strings, `true`, `false`, `null`, arrays `[…]`, dictionaries `{ key = value }`
@@ -77,8 +79,9 @@ Pending objects have `last_check_result = null` and `state = 0`; unreachable hos
 
 **Semantics:**
 - equality, ordering, `+` on strings, `in` on arrays, and truthiness follow `value-operators.cpp`;
-- unknown variables and missing keys are `null`, not errors (dashboard filters must not blow up on hosts lacking a var);
+- unknown variables and missing keys are `null`, not errors (dashboard filters must not blow up on hosts lacking a var); for the same reason, methods called on `null` treat it as an empty value (`contains` false, `len` 0, …) instead of failing as in Icinga;
 - calling an unknown function is an `EvalError`;
+- one evaluation may create at most 16 MiB of text and 100 000 array items/dictionary entries (`range()` ≤ 10 000 numbers); beyond that it's an `EvalError`, so no filter can exhaust memory;
 - assignments, loops, function definitions and other statements are parse errors with a clear message ("only expressions are supported in filters").
 
 **Performance:** compile glob and regex patterns that are string literals once, at parse time. Evaluating a typical dashboard filter over 20 000 services must take well under 50 ms in release builds; add a benchmark-style test with a generous bound, ignored by default.

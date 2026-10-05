@@ -2734,6 +2734,12 @@ dependencies = [
 [[package]]
 name = "ic-filter"
 version = "0.1.0"
+dependencies = [
+ "ic-model",
+ "regex",
+ "serde_json",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "ic-model"

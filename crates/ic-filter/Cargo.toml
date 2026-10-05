@@ -11,3 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+ic-model.workspace = true
+# Glob and regular expression patterns. MIT OR Apache-2.0.
+regex = "1.13"
+serde_json.workspace = true
+thiserror.workspace = true

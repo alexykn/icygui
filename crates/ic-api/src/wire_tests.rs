@@ -2,6 +2,8 @@
 //! samples in `contract/samples/` (Icinga 2.15.6) and hand-written edge
 //! cases.
 
+use std::collections::BTreeSet;
+
 use ic_model::{CommentKind, PerfdataStatus};
 use serde_json::json;
 
@@ -14,22 +16,30 @@ fn sample(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-fn hosts(json: &str) -> Vec<Host> {
+fn hosts_with(json: &str, detail: Detail) -> Vec<Host> {
     let results: Results<QueryResult<CheckableAttrs>> = serde_json::from_str(json).unwrap();
     results
         .results
         .into_iter()
-        .filter_map(|entry| entry.attrs?.into_host(&entry.name.0))
+        .filter_map(|entry| entry.attrs?.into_host(&entry.name.0, detail))
         .collect()
 }
 
-fn services(json: &str) -> Vec<Service> {
+fn services_with(json: &str, detail: Detail) -> Vec<Service> {
     let results: Results<QueryResult<CheckableAttrs>> = serde_json::from_str(json).unwrap();
     results
         .results
         .into_iter()
-        .filter_map(|entry| entry.attrs?.into_service(&entry.name.0))
+        .filter_map(|entry| entry.attrs?.into_service(&entry.name.0, detail))
         .collect()
+}
+
+fn hosts(json: &str) -> Vec<Host> {
+    hosts_with(json, Detail::Full)
+}
+
+fn services(json: &str) -> Vec<Service> {
+    services_with(json, Detail::Full)
 }
 
 fn one_host(attrs: &Value) -> Host {
@@ -242,6 +252,157 @@ fn odd_values_never_fail() {
     assert_eq!(result.output, "42");
     assert_eq!(result.exit_status, 3, "exit_status when state is missing");
     assert_eq!(result.perfdata.len(), 2, "a raw perfdata string");
+}
+
+#[test]
+fn recorded_lean_services() {
+    // `services(Detail::Lean)` against the real Icinga 2.15.6: three
+    // passive services never checked, three active ones with results.
+    let services = services_with(&sample("services-lean.json"), Detail::Lean);
+    assert_eq!(services.len(), 6);
+    let find = |host: &str, name: &str| {
+        services
+            .iter()
+            .find(|s| s.key == ServiceKey::new(host, name))
+            .unwrap_or_else(|| panic!("{host}!{name}"))
+    };
+    for service in &services {
+        assert_eq!(service.check.result, None, "lean: no check result");
+    }
+
+    // Icinga reports a never-checked service as state 3 (UNKNOWN): only
+    // `last_check` (-1) tells that it's pending, not a problem.
+    let pending = find("db-prod-03", "postgres-replication");
+    assert_eq!(pending.state, ServiceState::Pending);
+    assert!(!pending.is_problem());
+    assert_eq!(pending.severity(), 16);
+    assert_eq!(pending.check.last_check, None);
+    assert!(pending.check.next_check.is_some());
+    assert!(!pending.check.features.active_checks, "loaded when lean");
+    assert_eq!(pending.groups, ["replication"]);
+    assert_eq!(pending.vars["lag_crit"], json!(300));
+    assert!((pending.check.check_interval - 60.0).abs() < f64::EPSILON);
+    assert!((pending.check.retry_interval - 15.0).abs() < f64::EPSILON);
+
+    let warning = find("db-prod-03", "load");
+    assert_eq!(warning.state, ServiceState::Warning, "known without output");
+    assert!(warning.check.last_check.is_some());
+    assert_eq!(warning.check.output(), "");
+    assert!(warning.check.features.active_checks);
+    assert_eq!(warning.check.max_attempts, 2);
+    assert_eq!(warning.severity(), 32 + 2048);
+
+    let ok = find("k8s-node-07", "ping4");
+    assert_eq!(ok.state, ServiceState::Ok);
+    // The check configuration and the switches are lean too.
+    assert_eq!(ok.check.check_command, "dummy");
+    assert_eq!(ok.check.zone, None, "defined outside a zone");
+    assert!(ok.check.features.passive_checks && ok.check.features.notifications);
+    let icinga = find("icinga-master", "icinga");
+    assert_eq!(icinga.check.check_command, "icinga");
+    assert!(icinga.check.flapping_current > 0.0);
+    // The links are Full only.
+    for service in &services {
+        assert_eq!(service.links, Links::default());
+    }
+}
+
+/// The keys of every result's `attrs` in a recorded sample. The samples
+/// were recorded without `attrs`, so these are all the attributes Icinga
+/// 2.15.6 has for the type.
+fn recorded_attributes(name: &str) -> BTreeSet<String> {
+    let json: Value = serde_json::from_str(&sample(name)).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert!(!results.is_empty(), "{name}");
+    results
+        .iter()
+        .flat_map(|entry| entry["attrs"].as_object().unwrap().keys().cloned())
+        .collect()
+}
+
+/// Icinga 2.15 only notices an attribute it doesn't know while it
+/// serialises an object, and the client then leaves the attribute out
+/// with a warning. So a misspelt attribute would fail no query against an
+/// instance without such objects (the contract instance has no comments
+/// or downtimes): check every requested attribute against the recorded
+/// objects instead.
+#[test]
+fn every_requested_attribute_exists_in_icinga() {
+    let lists: [(&str, &[&str]); 11] = [
+        ("hosts.json", Detail::Lean.host_attrs()),
+        ("hosts.json", Detail::Full.host_attrs()),
+        ("services.json", Detail::Lean.service_attrs()),
+        ("services.json", Detail::Full.service_attrs()),
+        ("comments.json", COMMENT_ATTRS),
+        ("downtimes.json", DOWNTIME_ATTRS),
+        ("hostgroups.json", GROUP_ATTRS),
+        ("servicegroups.json", GROUP_ATTRS),
+        ("dependencies.json", DEPENDENCY_ATTRS),
+        ("endpoints.json", ENDPOINT_ATTRS),
+        ("zones.json", ZONE_ATTRS),
+    ];
+    for (name, attrs) in lists {
+        let known = recorded_attributes(name);
+        for attr in attrs {
+            assert!(known.contains(*attr), "{name}: Icinga has no {attr:?}");
+        }
+    }
+}
+
+#[test]
+fn lean_pending_follows_last_check_only() {
+    let lean = |attrs: Value| {
+        let json = json!({ "results": [{ "name": "h!s", "type": "Service", "attrs": attrs }] });
+        services_with(&json.to_string(), Detail::Lean).remove(0)
+    };
+    assert_eq!(
+        lean(json!({ "state": 3, "last_check": -1 })).state,
+        ServiceState::Pending
+    );
+    assert_eq!(
+        lean(json!({ "state": 2, "last_check": 1_791_229_357.1 })).state,
+        ServiceState::Critical
+    );
+    // A last check at the epoch is a check (Icinga's "never" is -1).
+    let epoch = lean(json!({ "state": 1, "last_check": 0 }));
+    assert_eq!(epoch.state, ServiceState::Warning);
+    assert_eq!(epoch.check.last_check, None, "but no time to show");
+    // Without `last_check` (an Icinga that doesn't know it) the state is
+    // shown rather than hidden as pending.
+    assert_eq!(lean(json!({ "state": 2 })).state, ServiceState::Critical);
+    // A check result in a lean answer changes nothing about pending.
+    let with_result = lean(json!({
+        "state": 0, "last_check": -1,
+        "last_check_result": { "output": "OK", "state": 0 }
+    }));
+    assert_eq!(with_result.state, ServiceState::Pending);
+
+    // The same answer read as full: pending means no check result.
+    let json = json!({ "results": [{ "name": "h!s", "type": "Service",
+        "attrs": { "state": 3, "last_check": 1_791_229_357.1, "last_check_result": null } }] });
+    assert_eq!(
+        services_with(&json.to_string(), Detail::Full)[0].state,
+        ServiceState::Pending
+    );
+}
+
+#[test]
+fn lean_hosts() {
+    let lean = |attrs: Value| {
+        let json = json!({ "results": [{ "name": "h", "type": "Host", "attrs": attrs }] });
+        hosts_with(&json.to_string(), Detail::Lean).remove(0)
+    };
+    let unreachable = lean(json!({
+        "state": 1, "last_check": 1_791_229_357.1, "last_reachable": false, "address": "10.0.4.99"
+    }));
+    assert_eq!(unreachable.state, HostState::Unreachable);
+    assert_eq!(unreachable.address, "10.0.4.99");
+    assert_eq!(unreachable.check.result, None);
+    let down = lean(json!({ "state": 1, "last_check": 1_791_229_357.1, "last_reachable": true }));
+    assert_eq!(down.state, HostState::Down);
+    let pending = lean(json!({ "state": 1, "last_check": -1, "last_reachable": true }));
+    assert_eq!(pending.state, HostState::Pending);
+    assert!(!pending.is_problem());
 }
 
 #[test]

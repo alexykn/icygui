@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
-use ic_api::{ApiError, Client, TlsSettings, fetch_server_certificate, format_fingerprint};
+use ic_api::{
+    ApiError, Client, Detail, Fetched, TlsSettings, fetch_server_certificate, format_fingerprint,
+};
 use ic_model::{
     Action, ActionTarget, Event, EventKind, HostState, ObjectChange, ObjectKey, ServiceState,
 };
@@ -332,7 +334,7 @@ async fn maps_http_errors() {
     let client = client(&server, ca_trust(&pki));
     assert_eq!(client.hosts().await.unwrap_err(), ApiError::Unauthorized);
     assert_eq!(
-        client.services().await.unwrap_err(),
+        client.services(Detail::Lean).await.unwrap_err(),
         ApiError::Forbidden("Missing permission: objects/query/service".to_owned())
     );
     assert_eq!(
@@ -424,7 +426,7 @@ async fn queries_post_with_method_override_and_attrs() {
     let hosts = client.hosts().await.unwrap();
     assert_eq!(hosts.len(), 1);
     assert_eq!(hosts[0].state, HostState::Unreachable);
-    let services = client.services().await.unwrap();
+    let services = client.services(Detail::Full).await.unwrap();
     assert_eq!(services[0].state, ServiceState::Critical);
     assert_eq!(
         services[0].check.result.as_ref().unwrap().long_output,
@@ -451,22 +453,191 @@ async fn queries_post_with_method_override_and_attrs() {
     );
 }
 
+/// A response recorded from the real Icinga 2.15.6 (`contract/samples/`).
+fn sample(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contract/samples")
+        .join(name);
+    std::fs::read_to_string(path).unwrap()
+}
+
+/// The attributes a recorded query asked for.
+fn requested_attrs(request: &support::Recorded) -> Vec<String> {
+    request.json()["attrs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|attr| attr.as_str().unwrap().to_owned())
+        .collect()
+}
+
 #[tokio::test]
-async fn queries_retry_without_attrs_when_an_attribute_is_unknown() {
+async fn lean_and_full_services_ask_for_their_attributes() {
     let pki = Pki::new();
     let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), |request| {
-        if request.json().get("attrs").is_some() {
-            ok_json(&json!({ "results": [
-                { "name": "a", "type": "Host", "code": 400, "status": "Invalid field specified: flapping_current" }
-            ]}))
+        let full = requested_attrs(request).contains(&"last_check_result".to_owned());
+        // Like Icinga: a never-checked service has state 3 and last_check -1.
+        let mut attrs = json!({
+            "host_name": "db-prod-03", "name": "postgres-replication", "state": 3, "state_type": 0,
+            "last_check": -1, "enable_active_checks": false, "check_command": "dummy",
+            "zone": "master", "enable_notifications": false
+        });
+        if full {
+            attrs["last_check_result"] = Value::Null;
+            attrs["notes_url"] = json!("https://wiki.example.com/pg");
+        }
+        ok_json(&json!({ "results": [
+            { "name": "db-prod-03!postgres-replication", "type": "Service", "attrs": attrs }
+        ]}))
+    })
+    .await;
+    let client = client(&server, ca_trust(&pki));
+    let lean = client.services(Detail::Lean).await.unwrap();
+    let full = client.services(Detail::Full).await.unwrap();
+    assert_eq!(lean[0].state, ServiceState::Pending, "pending, not UNKNOWN");
+    assert_eq!(full[0].state, ServiceState::Pending);
+    for service in [&lean[0], &full[0]] {
+        assert_eq!(service.check.check_command, "dummy");
+        assert_eq!(service.check.zone.as_deref(), Some("master"));
+        assert!(!service.check.features.notifications);
+    }
+    assert_eq!(lean[0].links.notes_url, "", "not asked for");
+    assert_eq!(full[0].links.notes_url, "https://wiki.example.com/pg");
+
+    let requests = server.requests();
+    assert_eq!(requested_attrs(&requests[0]), Detail::Lean.service_attrs());
+    assert_eq!(requested_attrs(&requests[1]), Detail::Full.service_attrs());
+    let lean_attrs = requested_attrs(&requests[0]);
+    for attr in [
+        "last_check_result",
+        "notes",
+        "notes_url",
+        "action_url",
+        "icon_image",
+    ] {
+        assert!(!lean_attrs.contains(&attr.to_owned()), "{attr}");
+    }
+    for attr in [
+        "check_command",
+        "command_endpoint",
+        "zone",
+        "enable_notifications",
+        "flapping_current",
+    ] {
+        assert!(lean_attrs.contains(&attr.to_owned()), "{attr}");
+    }
+    assert!(client.unknown_attributes().is_empty());
+}
+
+#[tokio::test]
+async fn an_unknown_attribute_is_left_out_like_icinga_2_15_rejects_it() {
+    // Icinga 2.15 rejects the whole query (recorded from 2.15.6).
+    let recorded = sample("error-400-invalid-field.json");
+    assert!(recorded.contains("Invalid field specified: no_such_attribute"));
+    let pki = Pki::new();
+    let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), |request| {
+        if requested_attrs(request).contains(&"flapping_current".to_owned()) {
+            error_json(400, "Invalid field specified: flapping_current")
         } else {
             ok_json(&json!({ "results": [host_result("a")] }))
         }
     })
     .await;
-    let hosts = client(&server, ca_trust(&pki)).hosts().await.unwrap();
+    let client = client(&server, ca_trust(&pki));
+    let hosts = client.hosts().await.unwrap();
     assert_eq!(hosts.len(), 1);
-    assert_eq!(server.requests().len(), 2);
+    assert_eq!(hosts[0].state, HostState::Unreachable);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let retried = requested_attrs(&requests[1]);
+    assert!(!retried.contains(&"flapping_current".to_owned()));
+    assert_eq!(
+        retried.len(),
+        Detail::Full.host_attrs().len() - 1,
+        "only that attribute is left out, never all of them asked for"
+    );
+
+    // Remembered: later host queries leave it out from the start.
+    client
+        .objects(&[ObjectKey::host("a")], Detail::Full)
+        .await
+        .unwrap();
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(!requested_attrs(&requests[2]).contains(&"flapping_current".to_owned()));
+    assert_eq!(requests[2].json()["hosts"], json!(["a"]));
+    // Services are another type: unaffected.
+    assert_eq!(client.unknown_attributes(), [("hosts", "flapping_current")]);
+}
+
+#[tokio::test]
+async fn an_unknown_attribute_is_left_out_like_newer_icinga_reports_it() {
+    // Newer Icinga streams every object as a per-object error.
+    let pki = Pki::new();
+    let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), |request| {
+        let attrs = requested_attrs(request);
+        let unknown = ["acknowledgement_expiry", "notes"]
+            .into_iter()
+            .find(|attr| attrs.contains(&(*attr).to_owned()));
+        match unknown {
+            Some(attr) => ok_json(&json!({ "results": [
+                { "name": "a!s", "type": "Service", "code": 400, "status": format!("Invalid field specified: {attr}") },
+                { "name": "b!s", "type": "Service", "code": 400, "status": format!("Invalid field specified: {attr}") }
+            ]})),
+            None => ok_json(&json!({ "results": [service_result("a!s"), service_result("b!s")] })),
+        }
+    })
+    .await;
+    let client = client(&server, ca_trust(&pki));
+    let services = client.services(Detail::Full).await.unwrap();
+    assert_eq!(services.len(), 2);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3, "one more request per unknown attribute");
+    let last = requested_attrs(&requests[2]);
+    assert!(!last.contains(&"acknowledgement_expiry".to_owned()));
+    assert!(!last.contains(&"notes".to_owned()));
+    assert_eq!(last.len(), Detail::Full.service_attrs().len() - 2);
+    // Hosts are another type: their attributes are not affected.
+    assert!(requests.iter().all(|r| r.path == "/v1/objects/services"));
+    assert_eq!(
+        client.unknown_attributes(),
+        [
+            ("services", "acknowledgement_expiry"),
+            ("services", "notes")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn other_query_errors_are_not_retried() {
+    let pki = Pki::new();
+    let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), |request| {
+        match request.path.as_str() {
+            // An attribute the client didn't ask for: not something it can
+            // leave out.
+            "/v1/objects/hosts" => error_json(400, "Invalid field specified: something_else"),
+            "/v1/objects/services" => error_json(400, "Invalid type for 'attrs' attribute specified. Array type is required."),
+            _ => ok_json(&json!({ "results": [
+                { "name": "x", "type": "Comment", "code": 500, "status": "Some other per-object failure" }
+            ]})),
+        }
+    })
+    .await;
+    let client = client(&server, ca_trust(&pki));
+    assert_eq!(
+        client.hosts().await.unwrap_err(),
+        ApiError::Http {
+            status: 400,
+            message: "Invalid field specified: something_else".to_owned()
+        }
+    );
+    assert!(matches!(
+        client.services(Detail::Lean).await.unwrap_err(),
+        ApiError::Http { status: 400, .. }
+    ));
+    assert!(client.comments().await.unwrap().is_empty(), "skipped");
+    assert_eq!(server.requests().len(), 3);
+    assert!(client.unknown_attributes().is_empty());
 }
 
 #[tokio::test]
@@ -578,13 +749,18 @@ async fn objects_requery_by_name_and_skip_deleted_ones() {
         ObjectKey::service("a", "s1"),
         ObjectKey::service("a", "s2"),
     ];
-    let (hosts, services) = client(&server, ca_trust(&pki))
-        .objects(&keys)
+    let Fetched {
+        hosts,
+        services,
+        missing,
+    } = client(&server, ca_trust(&pki))
+        .objects(&keys, Detail::Full)
         .await
         .unwrap();
     let names: Vec<&str> = hosts.iter().map(|h| h.name.as_str()).collect();
     assert_eq!(names, ["a", "b", "c", "d"]);
     assert_eq!(services.len(), 2);
+    assert_eq!(missing, [ObjectKey::host("gone")]);
     let requests = server.requests();
     assert!(requests.iter().all(|r| r.json().get("filter").is_none()));
     let first_hosts = requests
@@ -623,12 +799,12 @@ async fn objects_are_requested_in_chunks() {
     let keys: Vec<ObjectKey> = (0..450)
         .map(|i| ObjectKey::host(&format!("h{i}")))
         .collect();
-    let (hosts, services) = client(&server, ca_trust(&pki))
-        .objects(&keys)
+    let fetched = client(&server, ca_trust(&pki))
+        .objects(&keys, Detail::Lean)
         .await
         .unwrap();
-    assert_eq!(hosts.len(), 450);
-    assert!(services.is_empty());
+    assert_eq!(fetched.hosts.len(), 450);
+    assert!(fetched.services.is_empty() && fetched.missing.is_empty());
     let sizes: Vec<usize> = server
         .requests()
         .iter()
@@ -645,8 +821,8 @@ async fn no_keys_send_no_request() {
     let pki = Pki::new();
     let server = info_server(&pki).await;
     let client = client(&server, ca_trust(&pki));
-    let (hosts, services) = client.objects(&[]).await.unwrap();
-    assert!(hosts.is_empty() && services.is_empty());
+    let fetched = client.objects(&[], Detail::Full).await.unwrap();
+    assert_eq!(fetched, Fetched::default());
     let results = client
         .run_action(
             &Action::RemoveAcknowledgement,
@@ -1545,7 +1721,71 @@ async fn the_event_stream_must_begin_within_the_request_timeout() {
 // --- Queries: more cases ---------------------------------------------------
 
 #[tokio::test]
-async fn targeted_queries_retry_without_attrs_too() {
+async fn missing_objects_are_found_by_halving_and_reported_in_request_order() {
+    let pki = Pki::new();
+    let known: Vec<String> = (0..16).map(|i| format!("h{i}")).collect();
+    let known: &'static [String] = Box::leak(known.into_boxed_slice());
+    let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), move |request| {
+        let body = request.json();
+        let (key, make): (&str, fn(&str) -> Value) = if request.path == "/v1/objects/hosts" {
+            ("hosts", host_result)
+        } else {
+            ("services", service_result)
+        };
+        let names: Vec<&str> = body[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let exists = |name: &str| {
+            known.iter().any(|known| known == name)
+                || name.split_once('!').is_some_and(|(host, _)| host == "h3")
+        };
+        if names.iter().all(|name| exists(name)) {
+            ok_json(&json!({ "results": names.iter().map(|name| make(name)).collect::<Vec<_>>() }))
+        } else {
+            error_json(404, "No objects found.")
+        }
+    })
+    .await;
+    let mut keys: Vec<ObjectKey> = (0..16).map(|i| ObjectKey::host(&format!("h{i}"))).collect();
+    keys.insert(5, ObjectKey::host("gone-1"));
+    keys.insert(12, ObjectKey::service("gone-2", "disk"));
+    keys.insert(13, ObjectKey::service("h3", "disk"));
+    keys.push(ObjectKey::host("gone-1"));
+    keys.push(ObjectKey::host("gone-3"));
+    let fetched = client(&server, ca_trust(&pki))
+        .objects(&keys, Detail::Lean)
+        .await
+        .unwrap();
+    assert_eq!(fetched.hosts.len(), 16);
+    assert_eq!(fetched.services.len(), 1);
+    assert_eq!(fetched.services[0].key.full_name(), "h3!disk");
+    assert_eq!(
+        fetched.missing,
+        [
+            ObjectKey::host("gone-1"),
+            ObjectKey::service("gone-2", "disk"),
+            ObjectKey::host("gone-3"),
+        ],
+        "request order, each once"
+    );
+    let requests = server.requests();
+    assert!(
+        requests.len() < keys.len(),
+        "halving, not one request per name: {}",
+        requests.len()
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| requested_attrs(request).len() > 1)
+    );
+}
+
+#[tokio::test]
+async fn targeted_queries_leave_out_unknown_attributes_too() {
     let pki = Pki::new();
     let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), |request| {
         let body = request.json();
@@ -1555,26 +1795,22 @@ async fn targeted_queries_retry_without_attrs_too() {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        let results: Vec<Value> = if body.get("attrs").is_some() {
-            names
-                .iter()
-                .map(|name| json!({ "name": name, "type": "Host", "code": 400, "status": "Invalid field specified: flapping_current" }))
-                .collect()
-        } else {
-            names.iter().map(|name| host_result(name)).collect()
-        };
-        ok_json(&json!({ "results": results }))
+        if requested_attrs(request).contains(&"flapping_current".to_owned()) {
+            return error_json(400, "Invalid field specified: flapping_current");
+        }
+        ok_json(&json!({ "results": names.iter().map(|name| host_result(name)).collect::<Vec<Value>>() }))
     })
     .await;
-    let (hosts, _) = client(&server, ca_trust(&pki))
-        .objects(&[ObjectKey::host("a"), ObjectKey::host("b")])
+    let fetched = client(&server, ca_trust(&pki))
+        .objects(&[ObjectKey::host("a"), ObjectKey::host("b")], Detail::Full)
         .await
         .unwrap();
-    assert_eq!(hosts.len(), 2);
+    assert_eq!(fetched.hosts.len(), 2);
+    assert!(fetched.missing.is_empty());
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
-    assert!(requests[1].json().get("attrs").is_none());
     assert_eq!(requests[1].json()["hosts"], json!(["a", "b"]));
+    assert!(!requested_attrs(&requests[1]).contains(&"flapping_current".to_owned()));
 }
 
 #[tokio::test]

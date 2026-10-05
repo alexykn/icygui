@@ -11,6 +11,7 @@ use ic_model::{
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::detail::Detail;
 use crate::lenient::{FromJson, L, number};
 
 /// `{ "results": [...] }`, the envelope of every non-streaming response.
@@ -149,8 +150,8 @@ fn perfdata_value(map: &serde_json::Map<String, Value>) -> Option<Perfdata> {
     })
 }
 
-/// Attributes of a host or a service, as requested by [`HOST_ATTRS`] and
-/// [`SERVICE_ATTRS`].
+/// Attributes of a host or a service, as requested by
+/// [`Detail::host_attrs`] and [`Detail::service_attrs`].
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct CheckableAttrs {
@@ -163,7 +164,7 @@ pub(crate) struct CheckableAttrs {
     state_type: L<Option<f64>>,
     last_state_change: L<f64>,
     last_hard_state_change: L<f64>,
-    last_check: L<f64>,
+    last_check: L<Option<f64>>,
     next_check: L<f64>,
     check_attempt: L<Option<f64>>,
     max_check_attempts: L<Option<f64>>,
@@ -193,85 +194,6 @@ pub(crate) struct CheckableAttrs {
     icon_image: L<String>,
 }
 
-/// Attributes requested for hosts.
-pub(crate) const HOST_ATTRS: &[&str] = &[
-    "name",
-    "display_name",
-    "address",
-    "address6",
-    "state",
-    "state_type",
-    "last_state_change",
-    "last_hard_state_change",
-    "last_check",
-    "next_check",
-    "check_attempt",
-    "max_check_attempts",
-    "last_check_result",
-    "acknowledgement",
-    "acknowledgement_expiry",
-    "downtime_depth",
-    "flapping",
-    "flapping_current",
-    "last_reachable",
-    "check_command",
-    "check_interval",
-    "retry_interval",
-    "command_endpoint",
-    "zone",
-    "enable_active_checks",
-    "enable_passive_checks",
-    "enable_notifications",
-    "enable_event_handler",
-    "enable_flapping",
-    "enable_perfdata",
-    "groups",
-    "vars",
-    "notes",
-    "notes_url",
-    "action_url",
-    "icon_image",
-];
-
-/// Attributes requested for services.
-pub(crate) const SERVICE_ATTRS: &[&str] = &[
-    "name",
-    "display_name",
-    "host_name",
-    "state",
-    "state_type",
-    "last_state_change",
-    "last_hard_state_change",
-    "last_check",
-    "next_check",
-    "check_attempt",
-    "max_check_attempts",
-    "last_check_result",
-    "acknowledgement",
-    "acknowledgement_expiry",
-    "downtime_depth",
-    "flapping",
-    "flapping_current",
-    "last_reachable",
-    "check_command",
-    "check_interval",
-    "retry_interval",
-    "command_endpoint",
-    "zone",
-    "enable_active_checks",
-    "enable_passive_checks",
-    "enable_notifications",
-    "enable_event_handler",
-    "enable_flapping",
-    "enable_perfdata",
-    "groups",
-    "vars",
-    "notes",
-    "notes_url",
-    "action_url",
-    "icon_image",
-];
-
 impl CheckableAttrs {
     fn check_info(&mut self) -> CheckInfo {
         let defaults = CheckInfo::default();
@@ -280,7 +202,10 @@ impl CheckableAttrs {
             state_type: state_type(self.state_type.0).unwrap_or(StateType::Hard),
             last_state_change: Timestamp::from_unix_seconds(self.last_state_change.0),
             last_hard_state_change: Timestamp::from_unix_seconds(self.last_hard_state_change.0),
-            last_check: Timestamp::from_unix_seconds(self.last_check.0).non_zero(),
+            last_check: self
+                .last_check
+                .0
+                .and_then(|seconds| Timestamp::from_unix_seconds(seconds).non_zero()),
             next_check: Timestamp::from_unix_seconds(self.next_check.0).non_zero(),
             attempt: self.check_attempt.0.map_or(defaults.attempt, clamp_u32),
             max_attempts: self
@@ -339,11 +264,22 @@ impl CheckableAttrs {
         }
     }
 
+    /// Whether the object has never been checked. A full object is
+    /// pending without a check result. A lean one has none to look at, so
+    /// it's pending when Icinga's `last_check` (the last result's
+    /// `schedule_end`, -1 without one) is negative.
+    fn is_pending(&self, detail: Detail) -> bool {
+        match detail {
+            Detail::Full => self.last_check_result.0.is_none(),
+            Detail::Lean => self.last_check.0.is_some_and(|seconds| seconds < 0.0),
+        }
+    }
+
     /// Maps a host. `full_name` is the result's `name`; `None` if the host
-    /// can't be identified.
-    pub(crate) fn into_host(mut self, full_name: &str) -> Option<Host> {
+    /// can't be identified. `detail` is what was asked for.
+    pub(crate) fn into_host(mut self, full_name: &str, detail: Detail) -> Option<Host> {
         let name = first_non_empty(full_name, &self.name.0)?.to_owned();
-        let pending = self.last_check_result.0.is_none();
+        let pending = self.is_pending(detail);
         let check = self.check_info();
         let state = if pending {
             HostState::Pending
@@ -368,14 +304,15 @@ impl CheckableAttrs {
     }
 
     /// Maps a service. `full_name` is the result's `host!service` name; the
-    /// attributes `host_name` and `name` win when present.
-    pub(crate) fn into_service(mut self, full_name: &str) -> Option<Service> {
+    /// attributes `host_name` and `name` win when present. `detail` is what
+    /// was asked for.
+    pub(crate) fn into_service(mut self, full_name: &str, detail: Detail) -> Option<Service> {
         let key = if !self.host_name.0.is_empty() && !self.name.0.is_empty() {
             ServiceKey::new(&self.host_name.0, &self.name.0)
         } else {
             ServiceKey::parse(full_name)?
         };
-        let pending = self.last_check_result.0.is_none();
+        let pending = self.is_pending(detail);
         let check = self.check_info();
         let state = if pending {
             ServiceState::Pending

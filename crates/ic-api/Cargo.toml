@@ -37,5 +37,7 @@ x509-parser = "0.18"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+# Integration tests against the mock Icinga (ic-mock never depends on ic-api).
+ic-mock = { path = "../ic-mock" }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

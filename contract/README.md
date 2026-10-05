@@ -10,7 +10,24 @@ pins that down:
   is on, as it will be by default from Icinga 2.17.
 - `samples/` holds real responses recorded from that instance (Icinga
   v2.15.6): every object type, status, info, action results, error bodies
-  and an event stream. Tests use them as fixtures.
+  and an event stream, plus a lean service query (`services-lean.json`,
+  `ic_api::Detail::Lean`'s attributes) and the answer to an unknown
+  attribute (`error-400-invalid-field.json`). Tests use them as fixtures.
+- `crates/ic-api/tests/contract.rs` checks the client against the running
+  instance (read-only):
+
+  ```sh
+  set -a; eval "$(contract/run-icinga.sh)"; set +a
+  cargo test -p ic-api --test contract
+  ```
+
+  Without the variables the tests pass without checking anything, unless
+  `ICYGUI_CONTRACT_REQUIRED` is set. The nightly `Contract` workflow
+  (`.github/workflows/contract.yml`, also runnable by hand with another
+  image tag) sets it, so a broken setup fails instead of passing. The
+  script returns as soon as the API answers; tests that need checked
+  objects wait until Icinga has run every active check once (within a
+  minute of a fresh start).
 
 Facts learned from the real instance that the client must respect:
 
@@ -24,3 +41,15 @@ Facts learned from the real instance that the client must respect:
   `last_check_result.state` / the object's `state`.
 - `execute-command` fails per object with `Can't find a valid endpoint`
   unless an endpoint is given or the object has `command_endpoint`.
+- An attribute Icinga doesn't know fails the whole query:
+  `400 {"error":400,"status":"Invalid field specified: <attr>"}` (newer
+  versions answer every object with that error instead). Icinga notices it
+  only while serialising an object: a type without objects (no comments,
+  say) answers `200 {"results":[]}` whatever `attrs` holds. `"attrs": []`
+  returns objects without any attribute.
+- A never-checked service has `last_check: -1`, no `last_check_result`
+  and `state` 3 (UNKNOWN, the default raw state); hosts map that default to
+  `state` 1 (`Host::CalculateState`). The state means nothing until the
+  first check.
+- A fresh start schedules every object's first check within
+  `min(check_interval, 60 s)` (`Checkable::Start`).

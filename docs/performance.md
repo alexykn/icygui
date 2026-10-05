@@ -33,12 +33,14 @@ Run against a real **Icinga 2.15.6** in Docker with **2 005 hosts and 30 006 ser
 | Hosts, every attribute the client needs | 5.8 MB, 0.41 s |
 | Services, every attribute the client needs | **46.4 MB, 3.66 s** |
 | Services, all attributes | 73.8 MB, 7.61 s |
-| Services, lean (no `last_check_result`, no check config) | **20.1 MB, 1.57 s** |
+| Services, without `last_check_result` and the check configuration | **20.1 MB, 1.57 s** |
 | Problem services' details by name (1 473 objects) | 1.2 MB, 0.14 s |
 | Icinga master memory | 0.72 GB idle → **1.6–1.8 GB** after the large queries |
 | Forced re-check of all 32 000 objects (worst-case burst) | **49 000 events / 34 MB in under 10 s** (~5 000 events/s) |
 | Steady state, 5-minute intervals | ~107 check results/s (~75 KB/s per client) |
 | Average event size | ~700 bytes |
+
+The lean list the client loads (`ic_api::Detail::Lean`) keeps the check configuration, the `enable_*` switches and `flapping_current`, and leaves out `last_check_result` and the links (`notes`, `notes_url`, `action_url`, `icon_image`). It wasn't measured on this instance: those attributes add about 210 bytes per service on the contract instance, and `ic-mock`'s `large` scenario, whose full and all-attribute sizes match the table, gives **26.5 MB** (884 bytes per service; about 2 s at the rate above).
 
 **Conclusions:**
 1. `last_check_result` is 64 % of a service's bytes (it includes the full command line, `vars_before`/`vars_after` and perfdata). Loading it for 30 000 OK services the user isn't looking at is wasteful.
@@ -50,10 +52,10 @@ Run against a real **Icinga 2.15.6** in Docker with **2 005 hosts and 30 006 ser
 
 **Tiered loading:**
 1. Hosts: full (0.4 s). The sidebar, host problems and dashboard counts become usable first.
-2. Services: lean attributes, no `last_check_result` (1.6 s). States, handled flags, severity and every dashboard count are exact at this point. A lean service with `last_check = -1` is pending; otherwise its output is "not loaded yet".
-3. Check results and check configuration for every service in a problem state, by name (0.14 s for 1 473). Problem lists are complete.
+2. Services: lean attributes, no `last_check_result` and no links (about 2 s). States, handled flags, severity and every dashboard count are exact at this point, except for filters on the check output (`last_check_result`) or the links, which see those only once the object is loaded in full (step 3, 5) or, for the output, by its next `CheckResult` event (step 4). The check configuration and the switches are in the lean list because no event ever brings them. A lean service with `last_check = -1` is pending; otherwise its output is "not loaded yet".
+3. Check results and links for every service in a problem state, by name (0.14 s for 1 473). Problem lists are complete.
 4. From here, every `CheckResult` event carries its object's full result, so outputs fill in by themselves within one check interval.
-5. *Hydration on demand:* rows on screen whose output isn't loaded yet (an "all services" dashboard, a host pane's service list) are fetched by name in debounced batches (≤ 200 names). Opening a pane fetches that object in full (vars, notes, check config).
+5. *Hydration on demand:* rows on screen whose output isn't loaded yet (an "all services" dashboard, a host pane's service list) are fetched by name in debounced batches (≤ 200 names). Opening a pane fetches that object in full (output, perfdata, notes and links).
 6. Never `filter` expressions (permissions, D6), only name lists. A name list containing a deleted object fails as a whole (404), so retry by halves to find the deleted names.
 
 **Event pipeline:**
@@ -69,7 +71,7 @@ Run against a real **Icinga 2.15.6** in Docker with **2 005 hosts and 30 006 ser
 - Every object has a deadline: Icinga's own `next_update`.
   - Active checks: `next_check` + the check or retry interval + 2 × latency.
   - Passive checks: last result + 2 × interval.
-  - It's loaded with the lean attributes and recomputed locally from every `CheckResult` event using the same formula.
+  - It isn't loaded (`next_update` exists only from Icinga 2.12, and the model has no field for it): it's computed locally with Icinga's formula (`Checkable::GetNextUpdate`) from the lean attributes, and recomputed from every `CheckResult` event.
 - Each event, whether a scheduled check, a manual "check now" by anyone, or a passive result, resets that object's deadline. Manual runs by colleagues therefore never desynchronise anything.
 - An object with no result past its deadline is re-queried by name (batches ≤ 200, at most once per interval per object). That cheaply catches missed events, and it corrects deadlines after someone reschedules a check without an event.
 - If Icinga still reports the object overdue after the re-query, the check is genuinely **late**. The UI marks it ("late 12m"), as Icinga DB Web does. A satellite or agent has usually stopped checking.
@@ -84,12 +86,12 @@ Run against a real **Icinga 2.15.6** in Docker with **2 005 hosts and 30 006 ser
 
 | Budget | Target |
 |---|---|
-| Initial load until problem lists are complete | ≤ 5 s on a LAN (Icinga's own time is about 2 s) |
+| Initial load until problem lists are complete | ≤ 5 s on a LAN (Icinga's own time is about 2.5 s) |
 | A change on the master is visible in the UI | ≤ 1 s after Icinga emits the event |
 | Steady-state client CPU at ~110 events/s | < 5 % of one core |
 | Replaying a burst of 50 000 recorded events | < 3 s, no dropped events |
 | Client memory | < 400 MB |
 | Scrolling a 30 000-row dashboard | smooth; nothing per frame scales with the object count |
-| Load on the master per client | one event stream (~75 KB/s), ~22 MB on connect, ~22 MB every 15 minutes |
+| Load on the master per client | one event stream (~75 KB/s), ~28 MB on connect, ~28 MB every 15 minutes |
 
 These budgets are tested: `ic-mock` has a `large` scenario of the same size with a burst mode, and release-mode performance tests (nightly CI) replay bursts and time loads and dashboard evaluation.

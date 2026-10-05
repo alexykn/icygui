@@ -1,0 +1,70 @@
+name: Contract
+
+# ic-api against a real Icinga 2 in Docker (contract/run-icinga.sh): the
+# attributes, name lists, errors and event stream the client relies on.
+# Read-only; nightly and on demand.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      icinga_tag:
+        description: "icinga/icinga2 image tag"
+        required: false
+        default: "2.15"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Missing ICYGUI_CONTRACT_* variables fail the tests instead of letting
+  # them pass without checking anything.
+  ICYGUI_CONTRACT_REQUIRED: "1"
+
+jobs:
+  contract:
+    name: ic-api against Icinga ${{ inputs.icinga_tag || '2.15' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the contract tests
+        run: cargo test -p ic-api --test contract --locked --no-run
+
+      - name: Start Icinga
+        env:
+          ICINGA_TAG: ${{ inputs.icinga_tag || '2.15' }}
+        run: |
+          set -euo pipefail
+          vars=$(contract/run-icinga.sh "$ICINGA_TAG")
+          if ! grep -q '^ICYGUI_CONTRACT_URL=' <<<"$vars"; then
+            echo "::error::contract/run-icinga.sh printed no ICYGUI_CONTRACT_URL"
+            exit 1
+          fi
+          admin_password=$(sed -n 's/^ICYGUI_CONTRACT_ADMIN_PASSWORD=//p' <<<"$vars")
+          if [ -n "$admin_password" ]; then
+            echo "::add-mask::$admin_password"
+          fi
+          echo "$vars" >> "$GITHUB_ENV"
+
+      - name: Contract tests
+        run: cargo test -p ic-api --test contract --locked
+
+      - name: Icinga logs
+        if: failure()
+        run: docker logs icygui-contract 2>&1 | tail -n 200
+
+      - name: Stop Icinga
+        if: always()
+        run: |
+          docker rm -f icygui-contract >/dev/null 2>&1 || true
+          docker volume rm -f icygui-contract-data >/dev/null 2>&1 || true

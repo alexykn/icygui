@@ -1,9 +1,11 @@
 //! Host and service states as Icinga 2 reports them.
 
+use serde::{Deserialize, Serialize};
+
 /// Whether a state is soft (still retrying) or hard (confirmed).
 ///
 /// Icinga 2 reports this as `state_type`: `0` = soft, `1` = hard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StateType {
     /// The check failed but has not reached `max_check_attempts` yet.
     Soft,
@@ -24,7 +26,7 @@ impl StateType {
 }
 
 /// The current state of a service.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ServiceState {
     /// `0`.
     Ok,
@@ -72,7 +74,7 @@ impl ServiceState {
 }
 
 /// The current state of a host.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HostState {
     /// `0`.
     Up,

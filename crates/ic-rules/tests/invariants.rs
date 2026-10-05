@@ -209,13 +209,46 @@ fn state_slug(state: CheckableState) -> &'static str {
     }
 }
 
-/// What the test knows about one object.
+fn is_up(state: CheckableState) -> bool {
+    matches!(
+        state,
+        CheckableState::Service(ServiceState::Ok) | CheckableState::Host(HostState::Up)
+    )
+}
+
+/// The state slug in a state intent's id (`host!service:critical:…`).
+fn id_state(id: &str) -> &str {
+    id.rsplit(':').nth(1).unwrap_or("")
+}
+
+/// The engine's rule for a flapping flag nobody cleared: an hour without a
+/// state change ends it.
+const FLAPPING_EXPIRY: u32 = 3_600;
+
+/// The state the test knows an object is in.
 #[derive(Clone, Copy)]
 struct Known {
     state: CheckableState,
     since: u32,
-    /// A problem intent was emitted since the object last left OK / UP.
-    problem_notified: bool,
+}
+
+/// What the test has seen of one object's notifications.
+#[derive(Clone, Copy, Default)]
+struct History {
+    /// A problem intent was emitted since the last recovery intent.
+    problem_since_recovery: bool,
+    /// The state of the last problem intent, while the object has stayed
+    /// in problem states since.
+    last_problem: Option<&'static str>,
+    /// Flapping, with the time of the last evidence (start or state change).
+    flapping_since: Option<u32>,
+}
+
+impl History {
+    fn is_flapping(&self, now: u32) -> bool {
+        self.flapping_since
+            .is_some_and(|evidence| now < evidence + FLAPPING_EXPIRY)
+    }
 }
 
 /// What a batch of intents came out of.
@@ -223,12 +256,21 @@ struct Known {
 enum Cause<'a> {
     /// A tick.
     Tick,
-    /// An input for `object`; `state` is its new state and `since` for a
-    /// state change.
+    /// An input for `object`.
     Input {
         object: &'a ObjectKey,
-        state: Option<(CheckableState, u32)>,
+        change: InputKind,
     },
+}
+
+/// The kind of input, as far as the invariants care.
+#[derive(Clone, Copy)]
+enum InputKind {
+    /// A state change (or repeat) to `state` since `since`.
+    State(CheckableState, u32),
+    FlappingStarted,
+    FlappingStopped,
+    OtherEvent,
 }
 
 /// What the random runs produced, to make sure they exercise the engine.
@@ -240,6 +282,7 @@ struct Stats {
     summaries: usize,
     events: usize,
     released_by_tick: usize,
+    held_while_flapping: usize,
 }
 
 impl Stats {
@@ -250,6 +293,7 @@ impl Stats {
         self.summaries += other.summaries;
         self.events += other.events;
         self.released_by_tick += other.released_by_tick;
+        self.held_while_flapping += other.held_while_flapping;
     }
 }
 
@@ -258,6 +302,7 @@ struct Checker {
     seen_ids: HashSet<String>,
     audible_times: Vec<u32>,
     known: HashMap<ObjectKey, Known>,
+    history: HashMap<ObjectKey, History>,
     stats: Stats,
 }
 
@@ -270,124 +315,150 @@ impl Checker {
         cause: Cause<'_>,
         context: &str,
     ) {
-        // The input object's problem episode, as its intents unfold.
-        let mut episode = match cause {
-            Cause::Input { object, .. } => self
-                .known
-                .get(object)
-                .is_some_and(|known| known.problem_notified),
-            Cause::Tick => false,
-        };
-        for intent in intents {
-            self.stats.intents += 1;
-            self.stats.silent += usize::from(intent.silent);
-            self.stats.recoveries += usize::from(intent.tone == Tone::Recovery);
-            self.stats.summaries += usize::from(intent.object.is_none());
-            self.stats.events += usize::from(intent.tone == Tone::Info && intent.object.is_some());
-            assert!(
-                self.seen_ids.insert(intent.id.clone()),
-                "{context}: id emitted twice: {intent:#?}"
-            );
-            if paused {
-                assert!(
-                    intent.silent,
-                    "{context}: audible while paused: {intent:#?}"
-                );
-            }
-            let Some(object) = &intent.object else {
-                assert!(intent.id.starts_with("storm:"), "{context}: {intent:#?}");
-                assert_eq!(intent.tone, Tone::Info, "{context}");
-                continue;
-            };
-            if !intent.silent {
-                self.audible_times.push(now);
-            }
-            if object == &ObjectKey::service("h0", "muted") {
-                assert!(
-                    now >= MUTED_UNTIL,
-                    "{context}: notified a muted object: {intent:#?}"
-                );
-            }
-            match cause {
-                Cause::Input {
-                    object: input_object,
-                    state,
-                } => {
-                    assert_eq!(object, input_object, "{context}: intent for another object");
-                    if is_problem_tone(intent.tone) {
-                        // Either a delay that ran out before the change or
-                        // the new state; both belong to the episode.
-                        if state.is_none() {
-                            self.assert_current_state(object, intent, context);
-                        }
-                        episode = true;
-                    } else if intent.tone == Tone::Recovery {
-                        assert!(
-                            state.is_some(),
-                            "{context}: recovery without a state change"
-                        );
-                        assert!(
-                            episode,
-                            "{context}: recovery without a notified problem: {intent:#?}"
-                        );
-                    }
-                }
-                Cause::Tick => {
-                    assert_ne!(
-                        intent.tone,
-                        Tone::Recovery,
-                        "{context}: recovery from a tick"
-                    );
-                    if is_problem_tone(intent.tone) {
-                        self.stats.released_by_tick += 1;
-                        self.assert_current_state(object, intent, context);
-                        if let Some(known) = self.known.get_mut(object) {
-                            known.problem_notified = true;
-                        }
-                    }
-                }
-            }
-        }
+        // Flapping that stops ends before the intents it releases.
         if let Cause::Input {
             object,
-            state: Some((state, since)),
+            change: InputKind::FlappingStopped,
         } = cause
         {
-            let problem_notified = state.is_problem() && episode;
-            self.known.insert(
-                object.clone(),
-                Known {
-                    state,
-                    since,
-                    problem_notified,
-                },
-            );
-        } else if let Cause::Input {
+            self.history
+                .entry(object.clone())
+                .or_default()
+                .flapping_since = None;
+        }
+        // A state change happens before the intents it causes; the state
+        // before it is what a delay that ran out first is about.
+        if let Cause::Input {
             object,
-            state: None,
+            change: InputKind::State(state, since),
         } = cause
-            && let Some(known) = self.known.get_mut(object)
         {
-            known.problem_notified |= episode;
+            let previous = self.known.get(object).copied();
+            let repeat = previous.is_some_and(|known| known.state == state && known.since == since);
+            if !repeat {
+                let history = self.history.entry(object.clone()).or_default();
+                history.flapping_since = history.is_flapping(now).then_some(now);
+            }
+            self.known.insert(object.clone(), Known { state, since });
+        }
+
+        for intent in intents {
+            self.check_one(intent, now, paused, cause, context);
+        }
+
+        if let Cause::Input { object, change } = cause {
+            let history = self.history.entry(object.clone()).or_default();
+            match change {
+                InputKind::FlappingStarted => history.flapping_since = Some(now),
+                InputKind::State(state, _) if !state.is_problem() => history.last_problem = None,
+                InputKind::State(..) | InputKind::FlappingStopped | InputKind::OtherEvent => {}
+            }
         }
     }
 
-    /// A problem intent outside a state change must be about the state the
-    /// object is in now: the engine never notifies a state that is gone.
-    fn assert_current_state(&self, object: &ObjectKey, intent: &NotificationIntent, context: &str) {
-        let known = self.known.get(object);
-        let slug = known.map_or("never seen", |known| state_slug(known.state));
+    fn check_one(
+        &mut self,
+        intent: &NotificationIntent,
+        now: u32,
+        paused: bool,
+        cause: Cause<'_>,
+        context: &str,
+    ) {
+        self.stats.intents += 1;
+        self.stats.silent += usize::from(intent.silent);
+        self.stats.recoveries += usize::from(intent.tone == Tone::Recovery);
+        self.stats.summaries += usize::from(intent.object.is_none());
+        self.stats.events += usize::from(intent.tone == Tone::Info && intent.object.is_some());
         assert!(
-            known.is_some_and(|known| known.state.is_problem())
-                && intent.id.contains(&format!(":{slug}:")),
-            "{context}: notified a state the object isn't in ({slug}): {intent:#?}"
+            self.seen_ids.insert(intent.id.clone()),
+            "{context}: id emitted twice: {intent:#?}"
         );
+        if paused {
+            assert!(
+                intent.silent,
+                "{context}: audible while paused: {intent:#?}"
+            );
+        }
+        let Some(object) = &intent.object else {
+            assert!(intent.id.starts_with("storm:"), "{context}: {intent:#?}");
+            assert_eq!(intent.tone, Tone::Info, "{context}");
+            return;
+        };
+        if !intent.silent {
+            self.audible_times.push(now);
+        }
+        if object == &ObjectKey::service("h0", "muted") {
+            assert!(
+                now >= MUTED_UNTIL,
+                "{context}: notified a muted object: {intent:#?}"
+            );
+        }
+        if let Cause::Input {
+            object: input_object,
+            ..
+        } = cause
+        {
+            assert_eq!(object, input_object, "{context}: intent for another object");
+        }
+        let state_input = matches!(
+            cause,
+            Cause::Input {
+                change: InputKind::State(..),
+                ..
+            }
+        );
+        let known = self.known.get(object).copied();
+        let history = self.history.entry(object.clone()).or_default();
+
+        if is_problem_tone(intent.tone) {
+            assert!(
+                !history.is_flapping(now),
+                "{context}: a problem notified while flapping: {intent:#?}"
+            );
+            // Outside a state change, a problem intent is about the state
+            // the object is in now: the engine never notifies a gone state.
+            if !state_input {
+                let slug = known.map_or("never seen", |known| state_slug(known.state));
+                assert!(
+                    known.is_some_and(|known| known.state.is_problem())
+                        && intent.id.contains(&format!(":{slug}:")),
+                    "{context}: notified a state the object isn't in ({slug}): {intent:#?}"
+                );
+            }
+            if matches!(cause, Cause::Tick) {
+                self.stats.released_by_tick += 1;
+            }
+            // A state notified during a problem isn't notified again until
+            // another state was.
+            let state = id_state(&intent.id);
+            assert_ne!(
+                history.last_problem.map(str::to_owned).as_deref(),
+                Some(state),
+                "{context}: the same state notified twice in one problem: {intent:#?}"
+            );
+            history.last_problem = slug_of(state);
+            history.problem_since_recovery = true;
+        } else if intent.tone == Tone::Recovery {
+            assert!(
+                !history.is_flapping(now),
+                "{context}: a recovery notified while flapping: {intent:#?}"
+            );
+            assert!(
+                known.is_some_and(|known| is_up(known.state)),
+                "{context}: a recovery for an object that isn't OK / UP: {intent:#?}"
+            );
+            assert!(
+                history.problem_since_recovery,
+                "{context}: a recovery without a notified problem: {intent:#?}"
+            );
+            history.problem_since_recovery = false;
+        }
     }
 
-    /// Storm control: shown notifications in any window are bounded. Fixed
-    /// windows can meet back to back, hence twice the threshold.
+    /// Storm control: shown notifications within any window are bounded by
+    /// the threshold.
     fn check_storm_rate(&self, seed: u64) {
-        let limit = usize::try_from(2 * STORM_THRESHOLD).unwrap_or(usize::MAX);
+        let limit = usize::try_from(STORM_THRESHOLD).unwrap_or(usize::MAX);
         for (index, start) in self.audible_times.iter().enumerate() {
             let in_window = self
                 .audible_times
@@ -401,6 +472,22 @@ impl Checker {
             );
         }
     }
+}
+
+/// The `'static` slug for a slug read from an id.
+fn slug_of(slug: &str) -> Option<&'static str> {
+    [
+        "ok",
+        "warning",
+        "critical",
+        "unknown",
+        "up",
+        "down",
+        "unreachable",
+        "pending",
+    ]
+    .into_iter()
+    .find(|known| *known == slug)
 }
 
 fn random_change(
@@ -462,6 +549,7 @@ fn run(seed: u64, steps: u32) -> Stats {
         seen_ids: HashSet::new(),
         audible_times: Vec::new(),
         known: HashMap::new(),
+        history: HashMap::new(),
         stats: Stats::default(),
     };
     let mut now = 0_u32;
@@ -517,10 +605,22 @@ fn run(seed: u64, steps: u32) -> Stats {
                     memberships: input_memberships,
                     at: ts(now.saturating_sub(rng.below(3))),
                 };
+                let kind = match (&input.change, state) {
+                    (_, Some((state, since))) => InputKind::State(state, since),
+                    (Change::FlappingStarted, None) => InputKind::FlappingStarted,
+                    (Change::FlappingStopped, None) => InputKind::FlappingStopped,
+                    _ => InputKind::OtherEvent,
+                };
+                let flapping_before = checker
+                    .history
+                    .get(&object)
+                    .is_some_and(|history| history.is_flapping(now));
                 let intents = engine.on_input(input, ts(now), local);
+                checker.stats.held_while_flapping +=
+                    usize::from(flapping_before && matches!(kind, InputKind::State(..)));
                 let cause = Cause::Input {
                     object: &object,
-                    state,
+                    change: kind,
                 };
                 checker.check(&intents, now, paused, cause, &context);
             }
@@ -544,4 +644,5 @@ fn invariants_hold_for_random_sequences() {
     assert!(total.summaries > 20, "{total:?}");
     assert!(total.events > 500, "{total:?}");
     assert!(total.released_by_tick > 100, "{total:?}");
+    assert!(total.held_while_flapping > 1_000, "{total:?}");
 }

@@ -151,7 +151,7 @@ impl RuleSet {
 
 /// Where a rule a change is judged by comes from. Stable across rule
 /// changes, so the engine can remember which scopes notified a problem and
-/// judge its recovery by the same scopes.
+/// judge its recovery and acknowledgement by the same scopes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Source {
     /// A dashboard the object appears on.
@@ -211,6 +211,8 @@ struct ResolvedDashboard {
 #[derive(Clone, Debug)]
 pub(crate) struct Scopes {
     rules: RuleSet,
+    /// The environment's name, cleaned for notification text.
+    environment_name: String,
     dashboards: Vec<ResolvedDashboard>,
     positions: HashMap<DashboardRef, usize>,
 }
@@ -242,6 +244,7 @@ impl Scopes {
             }
         }
         Self {
+            environment_name: text::clean(&rules.environment_name),
             rules,
             dashboards,
             positions,
@@ -253,34 +256,62 @@ impl Scopes {
         &self.rules
     }
 
-    /// The rules a change is judged by, in subtitle order: the dashboards
-    /// (sidebar order), then the environment, then the watch.
-    ///
-    /// - `memberships`: the dashboards the object appears on now. Unknown
-    ///   ones (deleted since) are skipped; if none is known, the
-    ///   environment pair applies.
-    /// - `remembered`: scopes that notified the object's problem, so they
-    ///   also judge its recovery even if the object left them.
-    /// - `watched`: the object is watched, which adds the environment's
-    ///   default rule, enabled even if every scope is off.
+    /// The environment's name for notification text.
+    pub(crate) fn environment_name(&self) -> &str {
+        &self.environment_name
+    }
+
+    /// The rules a problem state or an event is judged by, in subtitle
+    /// order: the dashboards the object appears on now (sidebar order;
+    /// unknown ones, deleted since, are skipped), the environment pair if
+    /// none of them is known, and the watch if `watched` (the environment's
+    /// default rule, enabled even if every scope is off).
     pub(crate) fn candidates(
         &self,
         memberships: &[DashboardRef],
-        remembered: &[Source],
         watched: bool,
     ) -> Vec<Candidate<'_>> {
-        let mut positions: Vec<usize> = memberships
+        let positions: Vec<usize> = memberships
             .iter()
             .filter_map(|reference| self.positions.get(reference).copied())
             .collect();
-        let on_dashboards = !positions.is_empty();
-        positions.extend(remembered.iter().filter_map(|source| match source {
-            Source::Dashboard(reference) => self.positions.get(reference).copied(),
-            Source::Environment | Source::Watch => None,
-        }));
+        let environment = positions.is_empty();
+        self.assemble(positions, environment, watched)
+    }
+
+    /// The rules a follow-up of a notified problem (its recovery, its
+    /// acknowledgement) is judged by, in subtitle order: the scopes that
+    /// notified the problem, as configured now (a dashboard deleted since
+    /// is skipped, one turned off since is disabled), and the watch if the
+    /// object is `watched` now. Scopes the object is on but that didn't
+    /// notify the problem don't count, like Icinga only tells users about
+    /// the end of a problem they were told about.
+    pub(crate) fn followup_candidates(
+        &self,
+        notified_by: &[Source],
+        watched: bool,
+    ) -> Vec<Candidate<'_>> {
+        let positions: Vec<usize> = notified_by
+            .iter()
+            .filter_map(|source| match source {
+                Source::Dashboard(reference) => self.positions.get(reference).copied(),
+                Source::Environment | Source::Watch => None,
+            })
+            .collect();
+        let environment = notified_by.contains(&Source::Environment);
+        self.assemble(positions, environment, watched)
+    }
+
+    /// The dashboards at `positions` in sidebar order (duplicates removed),
+    /// then the environment pair and the watch if asked for.
+    fn assemble(
+        &self,
+        mut positions: Vec<usize>,
+        environment: bool,
+        watched: bool,
+    ) -> Vec<Candidate<'_>> {
         positions.sort_unstable();
         positions.dedup();
-
         let mut candidates: Vec<Candidate<'_>> = positions
             .into_iter()
             .filter_map(|position| self.dashboards.get(position))
@@ -291,21 +322,21 @@ impl Scopes {
                 subtitle: &dashboard.subtitle,
             })
             .collect();
-        let environment = self.rules.environment_rule();
-        if !on_dashboards || remembered.contains(&Source::Environment) {
+        let default = self.rules.environment_rule();
+        if environment {
             candidates.push(Candidate {
                 source: SourceRef::Environment,
-                enabled: environment.enabled,
-                rule: environment.rule,
-                subtitle: &self.rules.environment_name,
+                enabled: default.enabled,
+                rule: default.rule,
+                subtitle: &self.environment_name,
             });
         }
-        if watched || remembered.contains(&Source::Watch) {
+        if watched {
             candidates.push(Candidate {
                 source: SourceRef::Watch,
                 enabled: true,
-                rule: environment.rule,
-                subtitle: &self.rules.environment_name,
+                rule: default.rule,
+                subtitle: &self.environment_name,
             });
         }
         candidates
@@ -498,12 +529,8 @@ mod tests {
             ],
         ));
 
-        let subtitles = |memberships: &[DashboardRef], remembered: &[Source], watched: bool| {
-            scopes
-                .candidates(memberships, remembered, watched)
-                .iter()
-                .map(|candidate| (candidate.subtitle.to_owned(), candidate.enabled))
-                .collect::<Vec<_>>()
+        let subtitles = |memberships: &[DashboardRef], watched: bool| {
+            listed(&scopes.candidates(memberships, watched))
         };
 
         assert_eq!(
@@ -513,40 +540,67 @@ mod tests {
                     reference("a", "1"),
                     reference("a", "1")
                 ],
-                &[],
                 false
             ),
             [("a / 1".to_owned(), false), ("b / 1".to_owned(), true)],
             "sidebar order, duplicates removed, no environment fallback"
         );
         assert_eq!(
-            subtitles(&[], &[], false),
+            subtitles(&[], false),
             [("prod".to_owned(), true)],
             "no memberships: the environment pair"
         );
         assert_eq!(
-            subtitles(&[reference("gone", "x")], &[], true),
+            subtitles(&[reference("gone", "x")], true),
             [("prod".to_owned(), true), ("prod".to_owned(), true)],
             "unknown memberships count as none; watch comes last"
         );
+    }
+
+    #[test]
+    fn follow_ups_are_judged_by_the_scopes_that_notified() {
+        let mut rules = rules(
+            true,
+            vec![group(
+                "a",
+                ScopeSetting::Inherit,
+                vec![
+                    dashboard("1", ScopeSetting::Off),
+                    dashboard("2", ScopeSetting::On),
+                ],
+            )],
+        );
+        rules.environment_name = "pr\u{0}od".to_owned();
+        let scopes = Scopes::new(rules);
+        assert_eq!(scopes.environment_name(), "pr od", "cleaned for text");
         assert_eq!(
-            subtitles(
-                &[reference("b", "1")],
+            listed(&scopes.followup_candidates(
                 &[
                     Source::Dashboard(reference("a", "2")),
-                    Source::Environment,
-                    Source::Watch
+                    Source::Dashboard(reference("a", "1")),
+                    Source::Dashboard(reference("gone", "x")),
                 ],
                 false
-            ),
-            [
-                ("a / 2".to_owned(), true),
-                ("b / 1".to_owned(), true),
-                ("prod".to_owned(), true),
-                ("prod".to_owned(), true),
-            ],
-            "remembered scopes join in"
+            )),
+            [("a / 1".to_owned(), false), ("a / 2".to_owned(), true)],
+            "dashboards as configured now; deleted ones skipped; no fallback"
         );
+        assert_eq!(
+            listed(&scopes.followup_candidates(&[Source::Environment, Source::Watch], false)),
+            [("pr od".to_owned(), true)],
+            "a remembered watch counts only while the object is watched"
+        );
+        assert!(scopes.followup_candidates(&[], false).is_empty());
+        let watched = scopes.followup_candidates(&[], true);
+        assert_eq!(watched.len(), 1);
+        assert_eq!(watched[0].source, SourceRef::Watch);
+    }
+
+    fn listed(candidates: &[Candidate<'_>]) -> Vec<(String, bool)> {
+        candidates
+            .iter()
+            .map(|candidate| (candidate.subtitle.to_owned(), candidate.enabled))
+            .collect()
     }
 
     #[test]
@@ -559,7 +613,7 @@ mod tests {
                 vec![dashboard("1", ScopeSetting::Inherit)],
             )],
         ));
-        let candidates = scopes.candidates(&[reference("a", "1")], &[], true);
+        let candidates = scopes.candidates(&[reference("a", "1")], true);
         assert_eq!(candidates.len(), 2);
         assert!(!candidates[0].enabled);
         assert!(candidates[1].enabled);

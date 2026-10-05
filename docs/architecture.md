@@ -158,18 +158,23 @@ impl RuleEngine {
 - *States:*
   - `StateFilter` picks which states notify. `recovery` covers the change to OK/UP, and only notifies for objects that had a *notified* problem.
   - `hard_only` ignores soft states.
-  - `skip_handled` ignores changes where `input.handled` is true.
-- *Other events:* `EventFilter` enables acknowledgement, downtime and flapping changes.
-- *Delays:* `min_duration_secs` holds a problem notification until `since + min_duration`. `tick` releases it if the object is still in that state and unhandled. A recovery, a handling change or another state change cancels it.
+  - `skip_handled` ignores problems where `input.handled` is true. Recoveries don't depend on it.
+  - A *problem* lasts from leaving OK/UP until back. A state already notified during it doesn't notify again unless another state notified in between (like Icinga 2.14+).
+  - A problem skipped only because it was handled notifies once the handling ends *and* a fresh check confirms it. Without a check it waits 1 minute after an ack or downtime ended, or 5 minutes after `handled` cleared without an event. A state change in between is judged instead, so a problem that recovers on its next check never notifies (like Icinga's suppressed notifications).
+  - While the object flaps, problems and recoveries don't notify; when it stops, its current state is judged. A lost `FlappingStopped` expires an hour after the last state change.
+  - Recoveries and acknowledgements are judged by the scopes that notified the problem (as configured now) plus a current watch, never by scopes that didn't notify it.
+- *Other events:* `EventFilter` enables acknowledgement, downtime and flapping changes. Downtime starts for one object within 5 s count as one.
+- *Delays:* `min_duration_secs` holds a problem notification until the *problem* has lasted that long, counted from when it began; a change to another problem state doesn't restart it. `tick` then releases the state the object is in. A recovery cancels it, and so does handling for a rule with `skip_handled`.
 
 **Output:**
 - Intent ids are stable: `"{object}:{state}:{since}"` for state changes, similar for other kinds. The same id is never emitted twice (dedupe across memberships, repeated inputs and reconnect replays). Bound the dedupe memory, e.g. 10 000 recent ids.
-- *Storm:* when more than `storm.threshold` intents fall inside `storm.window_secs`, further ones in that window are emitted with `silent = true`. When the window closes, `tick` emits one summary intent ("14 new problems in prod-cluster"; `object = None`, `tone = Info`, not silent).
+- *Storm:* an intent that would be the `storm.threshold + 1`-th audible one within the trailing `storm.window_secs` is emitted with `silent = true`, for as long as the flood lasts. `tick` emits a summary intent ("14 new problems in prod-cluster"; `object = None`, `tone = Info`, not silent) once a whole window passes without a silenced intent, and at most once a minute while the storm lasts.
 - *Quiet hours:* intents are `silent` inside the window (local time; windows may cross midnight; `days` is keyed by the start day). With `allow_critical`, critical and down states stay audible.
 - *Pause:* intents are `silent` while paused.
 - *Text:*
   - title: `"{LABEL} · {service} on {host}"` for services or `"{LABEL} · {host}"` for hosts. LABEL is CRITICAL, WARNING, UNKNOWN, DOWN, UNREACHABLE, RECOVERED, ACKNOWLEDGED, DOWNTIME, FLAPPING …, using display names.
-  - body: the output's first line, or the comment.
+  - body: the output's first non-blank line, or the comment.
+  - All text is stripped of control and bidirectional formatting characters and cut to 400 characters per part.
   - tone: by state.
   - sound: from the rule.
 
@@ -375,12 +380,14 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
 **Notifications:**
 - Build an `ic_rules::RuleSet` from the environment (environment name, settings, groups/dashboards with their `ScopeSetting`s) and rebuild it on `UpdateEnvironment`.
 - For every applied change, produce a `RuleInput`:
-  - `StateChange`: previous state from the store before applying, `since` = `last_state_change`;
+  - `StateChange`: previous state from the store before applying, `since` = `last_state_change`. A host that isn't reachable (`vars_after.reachable` / `last_reachable` false) is reported as `Unreachable`, not `Down`: a down notification can't be taken back;
   - `AcknowledgementSet`/`AcknowledgementCleared`;
-  - `DowntimeStarted`/`DowntimeTriggered` → `DowntimeStarted`;
+  - `DowntimeStarted`/`DowntimeTriggered` → `DowntimeStarted` (Icinga reports a fixed downtime as both; the engine counts starts within 5 s as one);
   - `DowntimeRemoved` of an in-effect downtime → `DowntimeEnded`;
-  - `Flapping`.
-  - `handled` is computed from the store after applying; `memberships` from the dashboard filters.
+  - `Flapping` → `FlappingStarted`/`FlappingStopped`, also when a reconcile finds the flag changed.
+  - `handled` is computed from the store after applying (acknowledged, in downtime, host problem for services, or unreachable through a dependency, which Icinga suppresses too); `memberships` from the dashboard filters.
+  - When an object's `handled` changes without an event of its own (the services of a host that went down or came back, an object whose parent recovered), a repeat of its state (same `current` and `since`) with the new `handled`.
+  - After an object's `handled` turned false, a repeat of its state on its next `CheckResult`, with `at` = that check's time: it tells the engine the state is current, not left over from the outage or maintenance.
 - Tick the engine every second.
 - Every intent goes into the SQLite log, then `CoreEvent::Notification`; non-silent ones also go to `Notifier::notify`.
 

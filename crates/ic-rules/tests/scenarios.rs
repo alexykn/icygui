@@ -404,6 +404,33 @@ mod basics {
     }
 
     #[test]
+    fn control_characters_never_reach_a_notification() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        let mut input = critical(0.0);
+        input.host_display = "DB\n3".to_owned();
+        if let Change::State { output, .. } = &mut input.change {
+            // A NUL (which D-Bus rejects), ANSI colours, a right-to-left
+            // override and a lone carriage return.
+            *output = "CRIT\0ICAL \u{1b}[31mred\u{1b}[0m \u{202e}KO\rtail".to_owned();
+        }
+        let intent = one(scenario.input(input));
+        assert_eq!(intent.body, "CRIT ICAL red KO");
+        assert_eq!(intent.title, "CRITICAL · postgres-replication on DB 3");
+    }
+
+    #[test]
+    fn huge_output_is_cut() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        let mut input = critical(0.0);
+        if let Change::State { output, .. } = &mut input.change {
+            *output = "x".repeat(1_000_000);
+        }
+        let body = one(scenario.input(input)).body;
+        assert_eq!(body.chars().count(), 400);
+        assert!(body.ends_with('…'));
+    }
+
+    #[test]
     fn a_sound_follows_the_deciding_rule() {
         let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
             settings.default_rule.sound = false;
@@ -623,6 +650,11 @@ mod overrides {
                 .at(40.0)
                 .input(event(Change::FlappingStarted, 40.0)),
         );
+        none(
+            &scenario
+                .at(50.0)
+                .input(event(Change::FlappingStopped, 50.0)),
+        );
         none(&scenario.at(999.0).tick());
         // Nothing is open when the mute ends, so nothing is held back.
         none(&scenario.at(1_000.0).tick());
@@ -688,9 +720,11 @@ mod overrides {
         none(&scenario.at(0.0).input(critical(0.0)));
         none(&scenario.at(50.0).input(ack(50.0)));
         none(&scenario.at(100.0).tick());
-        // Until the acknowledgement goes away.
+        // Until the acknowledgement goes away (and a minute passes without
+        // a check finding the problem gone).
         none(&scenario.at(200.0).input(ack_cleared(200.0)));
-        one(scenario.at(210.0).tick());
+        none(&scenario.at(259.0).tick());
+        one(scenario.at(260.0).tick());
     }
 
     #[test]
@@ -842,6 +876,185 @@ mod overrides {
         });
         let mut scenario = Scenario::new(rules);
         none(&scenario.input(critical(0.0)));
+    }
+
+    #[test]
+    fn watching_an_object_in_a_problem_notifies_the_problem_and_its_recovery() {
+        let unwatched = with_settings(rules(Vec::new()), |settings| settings.enabled = false);
+        let mut scenario = Scenario::new(unwatched.clone());
+        none(&scenario.at(0.0).input(critical(0.0)));
+        // "Tell me when this comes back", from the object's pane.
+        scenario
+            .engine
+            .set_rules(with_settings(unwatched, |settings| {
+                settings.objects = vec![ObjectOverride {
+                    object: the_service(),
+                    mode: ObjectMode::Watch,
+                    until: None,
+                }];
+            }));
+        let problem = one(scenario.at(5.0).tick());
+        assert_eq!(
+            problem.title,
+            "CRITICAL · postgres-replication on db-prod-03"
+        );
+        assert_eq!(problem.subtitle, ENV);
+        none(&scenario.at(6.0).tick());
+        assert_eq!(
+            one(scenario.at(10.0).input(ok(10.0))).title,
+            "RECOVERED · postgres-replication on db-prod-03"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Follow-ups: recoveries and acknowledgements of notified problems
+// ---------------------------------------------------------------------------
+
+mod follow_ups {
+    use super::*;
+
+    fn watched(until: Option<f64>) -> RuleSet {
+        with_settings(rules(Vec::new()), |settings| {
+            settings.enabled = false;
+            settings.objects = vec![ObjectOverride {
+                object: the_service(),
+                mode: ObjectMode::Watch,
+                until: until.map(ts),
+            }];
+        })
+    }
+
+    #[test]
+    fn a_recovery_after_the_watch_was_removed_stays_quiet() {
+        let mut scenario = Scenario::new(watched(None));
+        one(scenario.at(0.0).input(critical(0.0)));
+        scenario
+            .engine
+            .set_rules(with_settings(watched(None), |settings| {
+                settings.objects.clear();
+            }));
+        none(&scenario.at(10.0).input(ok(10.0)));
+    }
+
+    #[test]
+    fn a_recovery_after_the_watch_expired_stays_quiet() {
+        let mut scenario = Scenario::new(watched(Some(5.0)));
+        one(scenario.at(0.0).input(critical(0.0)));
+        none(&scenario.at(10.0).input(ok(10.0)));
+    }
+
+    fn no_recovery() -> Rule {
+        rule(|rule| rule.states.recovery = false)
+    }
+
+    #[test]
+    fn a_scope_that_did_not_notify_the_problem_does_not_announce_its_end() {
+        let warnings_only = rule(|rule| {
+            rule.states = StateFilter {
+                critical: false,
+                warning: true,
+                unknown: false,
+                down: false,
+                unreachable: false,
+                recovery: true,
+            };
+        });
+        let mut scenario = Scenario::new(rules(vec![group(
+            "g",
+            ScopeSetting::Inherit,
+            vec![
+                dashboard("a", ScopeSetting::Custom(no_recovery())),
+                dashboard("b", ScopeSetting::Custom(warnings_only)),
+            ],
+        )]));
+        let both = [("g", "a"), ("g", "b")];
+        assert_eq!(
+            one(scenario.at(0.0).input(critical(0.0).on(&both))).subtitle,
+            "g / a"
+        );
+        // Dashboard b wants recoveries, but it never notified this problem.
+        none(&scenario.at(10.0).input(ok(10.0).on(&both)));
+    }
+
+    #[test]
+    fn a_recovery_does_not_fall_back_to_the_environment_when_the_object_left_its_dashboard() {
+        // The environment is on (with recoveries); the dashboard that
+        // notified the problem doesn't want recoveries.
+        let groups = vec![group(
+            "databases",
+            ScopeSetting::Inherit,
+            vec![dashboard("critical", ScopeSetting::Custom(no_recovery()))],
+        )];
+        for memberships in [&[("databases", "critical")][..], &[]] {
+            let mut scenario = Scenario::new(rules(groups.clone()));
+            one(scenario
+                .at(0.0)
+                .input(critical(0.0).on(&[("databases", "critical")])));
+            none(&scenario.at(10.0).input(ok(10.0).on(memberships)));
+        }
+    }
+
+    #[test]
+    fn a_dashboard_turned_off_since_stays_quiet_whether_or_not_the_object_left_it() {
+        let on = rules(vec![group(
+            "databases",
+            ScopeSetting::Inherit,
+            vec![dashboard("critical", ScopeSetting::On)],
+        )]);
+        let mut off = on.clone();
+        off.groups[0].dashboards[0].setting = ScopeSetting::Off;
+        for memberships in [&[("databases", "critical")][..], &[]] {
+            let mut scenario = Scenario::new(on.clone());
+            one(scenario
+                .at(0.0)
+                .input(critical(0.0).on(&[("databases", "critical")])));
+            scenario.engine.set_rules(off.clone());
+            none(&scenario.at(10.0).input(ok(10.0).on(memberships)));
+        }
+    }
+
+    fn acknowledgements() -> RuleSet {
+        with_settings(rules(Vec::new()), |settings| {
+            settings.default_rule.events.acknowledgements = true;
+        })
+    }
+
+    #[test]
+    fn an_acknowledgement_of_a_problem_that_did_not_notify_stays_quiet() {
+        let mut scenario = Scenario::new(acknowledgements());
+        // Warnings don't notify, so nobody is told about the ack either.
+        none(&scenario.at(0.0).input(warning(0.0)));
+        none(&scenario.at(10.0).input(ack(10.0)));
+        none(&scenario.at(20.0).input(ack_cleared(20.0)));
+        // The same problem turns critical and notifies: now its
+        // acknowledgement does too.
+        one(scenario.at(30.0).input(critical(30.0)));
+        let acknowledged = one(scenario.at(40.0).input(ack(40.0)));
+        assert_eq!(
+            acknowledged.title,
+            "ACKNOWLEDGED · postgres-replication on db-prod-03"
+        );
+    }
+
+    #[test]
+    fn an_acknowledgement_is_judged_by_the_scopes_that_notified_the_problem() {
+        let quiet = rule(|rule| rule.events.acknowledgements = true);
+        let mut scenario = Scenario::new(rules(vec![group(
+            "g",
+            ScopeSetting::Inherit,
+            vec![
+                dashboard("problems", ScopeSetting::On),
+                dashboard("acks", ScopeSetting::Custom(quiet)),
+            ],
+        )]));
+        // The problem notifies through "problems" (and "acks", whose rule
+        // also matches).
+        one(scenario
+            .at(0.0)
+            .input(critical(0.0).on(&[("g", "problems"), ("g", "acks")])));
+        let acknowledged = one(scenario.at(10.0).input(ack(10.0).on(&[("g", "problems")])));
+        assert_eq!(acknowledged.subtitle, "g / acks");
     }
 }
 
@@ -1097,6 +1310,127 @@ mod states {
             "db-prod-03!postgres-replication:critical:1700000042.000"
         );
     }
+
+    #[test]
+    fn a_state_notified_during_the_problem_does_not_notify_again() {
+        // A check hovering around its critical threshold, with warnings
+        // off: Icinga 2.14+ doesn't repeat the critical either.
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        one(scenario.at(0.0).input(critical(0.0)));
+        none(&scenario.at(300.0).input(warning(300.0)));
+        none(&scenario.at(600.0).input(critical(600.0)));
+        none(&scenario.at(900.0).input(warning(900.0)));
+        none(&scenario.at(1_200.0).input(critical(1_200.0)));
+        assert_eq!(
+            titles(&scenario.at(1_500.0).input(ok(1_500.0))),
+            ["RECOVERED · postgres-replication on db-prod-03"]
+        );
+        // A new problem starts afresh.
+        one(scenario.at(1_800.0).input(critical(1_800.0)));
+    }
+
+    #[test]
+    fn a_state_notifies_again_after_another_state_notified() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.default_rule.states.warning = true;
+        }));
+        one(scenario.at(0.0).input(critical(0.0)));
+        one(scenario.at(300.0).input(warning(300.0)));
+        let again = one(scenario.at(600.0).input(critical(600.0)));
+        assert_eq!(
+            again.id,
+            "db-prod-03!postgres-replication:critical:1700000600.000"
+        );
+        one(scenario.at(900.0).input(ok(900.0)));
+    }
+
+    fn after(mut input: RuleInput, state: ServiceState) -> RuleInput {
+        if let Change::State { previous, .. } = &mut input.change {
+            *previous = Some(CheckableState::Service(state));
+        }
+        input
+    }
+
+    #[test]
+    fn a_previous_ok_state_ends_the_problem_the_engine_knew() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        one(scenario.at(0.0).input(critical(0.0)));
+        // The recovery in between got lost; `previous` tells.
+        none(
+            &scenario
+                .at(30.0)
+                .input(after(warning(30.0), ServiceState::Ok)),
+        );
+        // The warning never notified, so its end doesn't either.
+        none(&scenario.at(40.0).input(ok(40.0)));
+
+        // A critical after the lost recovery is a new problem.
+        one(scenario.at(50.0).input(critical(50.0)));
+        one(scenario
+            .at(60.0)
+            .input(after(critical(60.0), ServiceState::Ok)));
+    }
+
+    #[test]
+    fn a_replayed_problem_after_its_recovery_changes_nothing() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        one(scenario.at(0.0).input(critical(0.0)));
+        one(scenario.at(10.0).input(ok(10.0)));
+        // A reconnect replays the problem, then the object moves on.
+        none(&scenario.at(20.0).input(critical(0.0).happened(20.0)));
+        none(&scenario.at(30.0).input(warning(30.0)));
+        // No second recovery for a warning that never notified.
+        none(&scenario.at(40.0).input(ok(40.0)));
+    }
+
+    #[test]
+    fn a_late_problem_older_than_its_recovery_does_not_notify() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.default_rule = delayed(300);
+        }));
+        none(&scenario.at(0.0).input(critical(0.0)));
+        none(&scenario.at(100.0).input(ok(100.0)));
+        // The problem arrives again, long after it ended.
+        none(&scenario.at(400.0).input(critical(0.0).happened(400.0)));
+        none(&scenario.at(1_000.0).tick());
+    }
+
+    fn since(mut input: RuleInput, seconds: f64) -> RuleInput {
+        if let Change::State { since, .. } = &mut input.change {
+            *since = Timestamp::from_unix_seconds(T0 + seconds);
+        }
+        input
+    }
+
+    #[test]
+    fn a_since_off_by_less_than_a_millisecond_is_the_same_state() {
+        for hard_since in [100.0001, 100.0006] {
+            let mut scenario = Scenario::new(rules(Vec::new()));
+            none(
+                &scenario
+                    .at(100.0)
+                    .input(since(soft_critical(0.0), 100.0004).happened(100.0)),
+            );
+            // The hard state's `since` comes from another source.
+            let intent = one(scenario
+                .at(160.0)
+                .input(since(critical(0.0), hard_since).happened(160.0)));
+            assert_eq!(
+                intent.id, "db-prod-03!postgres-replication:critical:1700000100.000",
+                "{hard_since}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_recovery_notifies_even_when_the_object_is_handled() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        one(scenario.at(0.0).input(critical(0.0)));
+        // Recovered while its host is down: the user heard about the
+        // problem, so they hear about its end.
+        let recovery = one(scenario.at(10.0).input(ok(10.0).handled()));
+        assert_eq!(recovery.tone, Tone::Recovery);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,7 +1505,7 @@ mod delays {
     }
 
     #[test]
-    fn an_acknowledgement_notifies_itself_but_cancels_the_problem() {
+    fn an_acknowledgement_during_the_delay_cancels_the_problem_quietly() {
         let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
             settings.default_rule = rule(|rule| {
                 rule.min_duration_secs = 300;
@@ -1179,11 +1513,9 @@ mod delays {
             });
         }));
         none(&scenario.at(0.0).input(critical(0.0)));
-        let acknowledged = one(scenario.at(100.0).input(ack(100.0)));
-        assert_eq!(
-            acknowledged.title,
-            "ACKNOWLEDGED · postgres-replication on db-prod-03"
-        );
+        // Like Icinga: nobody was told about the problem, so nobody is told
+        // about its acknowledgement.
+        none(&scenario.at(100.0).input(ack(100.0)));
         none(&scenario.at(300.0).tick());
     }
 
@@ -1206,18 +1538,21 @@ mod delays {
     }
 
     #[test]
-    fn a_new_problem_state_starts_its_own_delay() {
+    fn a_new_problem_state_keeps_the_problems_delay() {
         let mut scenario = Scenario::new(delayed_rules(300));
         none(&scenario.at(0.0).input(critical(0.0)));
         none(&scenario.at(100.0).input(unknown(100.0)));
-        none(&scenario.at(300.0).tick());
-        none(&scenario.at(399.0).tick());
-        let intent = one(scenario.at(400.0).tick());
+        none(&scenario.at(299.0).tick());
+        // The problem has lasted five minutes: the state it is in now
+        // notifies.
+        let intent = one(scenario.at(300.0).tick());
         assert_eq!(intent.title, "UNKNOWN · postgres-replication on db-prod-03");
         assert_eq!(
             intent.id,
             "db-prod-03!postgres-replication:unknown:1700000100.000"
         );
+        assert_eq!(intent.at, ts(100.0));
+        none(&scenario.at(400.0).tick());
     }
 
     #[test]
@@ -1346,6 +1681,139 @@ mod delays {
         none(&scenario.at(200.0).input(critical(0.0).happened(200.0)));
         one(scenario.at(300.0).tick());
     }
+
+    /// Feeds a check hovering around its critical threshold: warning and
+    /// critical take turns every two minutes for two hours, ticking every
+    /// ten seconds, then it recovers.
+    fn hover(scenario: &mut Scenario) -> Vec<NotificationIntent> {
+        let mut intents = Vec::new();
+        for second in (0..7_200_u32).step_by(10) {
+            let now = f64::from(second);
+            if second % 120 == 0 {
+                let input = if second / 120 % 2 == 0 {
+                    warning(now)
+                } else {
+                    critical(now)
+                };
+                intents.extend(scenario.at(now).input(input));
+            }
+            intents.extend(scenario.at(now).tick());
+        }
+        intents.extend(scenario.at(7_200.0).input(ok(7_200.0)));
+        intents
+    }
+
+    #[test]
+    fn a_problem_switching_between_states_notifies_once_it_lasted_long_enough() {
+        let mut scenario = Scenario::new(delayed_rules(300));
+        let intents = hover(&mut scenario);
+        // Warnings don't notify under the default rule. The first critical
+        // after the problem lasted five minutes notifies; the later ones
+        // are the same state again.
+        assert_eq!(
+            titles(&intents),
+            [
+                "CRITICAL · postgres-replication on db-prod-03",
+                "RECOVERED · postgres-replication on db-prod-03"
+            ]
+        );
+        assert_eq!(
+            intents[0].id,
+            "db-prod-03!postgres-replication:critical:1700000360.000"
+        );
+    }
+
+    #[test]
+    fn with_both_states_selected_the_state_at_the_end_of_the_delay_notifies() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.default_rule = rule(|rule| {
+                rule.min_duration_secs = 300;
+                rule.states.warning = true;
+            });
+        }));
+        let intents = hover(&mut scenario);
+        let first = intents.first().unwrap();
+        assert_eq!(first.title, "WARNING · postgres-replication on db-prod-03");
+        assert_eq!(
+            first.id,
+            "db-prod-03!postgres-replication:warning:1700000240.000"
+        );
+        // Like Icinga, each change to the other notified state notifies.
+        assert_eq!(
+            intents[1].title,
+            "CRITICAL · postgres-replication on db-prod-03"
+        );
+        assert_eq!(
+            intents.last().unwrap().title,
+            "RECOVERED · postgres-replication on db-prod-03"
+        );
+    }
+
+    #[test]
+    fn without_skip_handled_an_acknowledgement_does_not_cancel_the_delay() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.default_rule = rule(|rule| {
+                rule.min_duration_secs = 300;
+                rule.skip_handled = false;
+            });
+        }));
+        none(&scenario.at(0.0).input(critical(0.0)));
+        none(&scenario.at(100.0).input(ack(100.0)));
+        none(&scenario.at(299.0).tick());
+        // The rule notifies handled problems, so handling changes nothing.
+        let intent = one(scenario.at(300.0).tick());
+        assert_eq!(
+            intent.title,
+            "CRITICAL · postgres-replication on db-prod-03"
+        );
+    }
+
+    fn pending(since: f64) -> RuleInput {
+        service_state(SERVICE, ServiceState::Pending, StateType::Hard, since)
+    }
+
+    #[test]
+    fn a_change_to_pending_drops_a_waiting_notification() {
+        let mut scenario = Scenario::new(delayed_rules(300));
+        none(&scenario.at(0.0).input(critical(0.0)));
+        none(&scenario.at(100.0).input(pending(100.0)));
+        none(&scenario.at(300.0).tick());
+        none(&scenario.at(1_000.0).tick());
+    }
+
+    #[test]
+    fn a_change_to_pending_drops_a_problem_held_by_a_mute() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.objects = vec![ObjectOverride {
+                object: the_service(),
+                mode: ObjectMode::Mute,
+                until: Some(ts(200.0)),
+            }];
+        }));
+        none(&scenario.at(0.0).input(critical(0.0)));
+        none(&scenario.at(100.0).input(pending(100.0)));
+        none(&scenario.at(200.0).tick());
+        none(&scenario.at(1_000.0).tick());
+    }
+
+    #[test]
+    fn a_change_to_pending_drops_a_problem_held_by_its_handling() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        none(&scenario.at(0.0).input(critical(0.0).handled()));
+        none(&scenario.at(100.0).input(pending(100.0)));
+        none(&scenario.at(200.0).input(downtime_ended(200.0)));
+        none(&scenario.at(1_000.0).tick());
+    }
+
+    #[test]
+    fn a_clock_going_back_does_not_release_a_delay_early() {
+        let mut scenario = Scenario::new(delayed_rules(300));
+        none(&scenario.at(0.0).input(critical(0.0)));
+        none(&scenario.at(299.0).tick());
+        none(&scenario.at(100.0).tick());
+        none(&scenario.at(299.0).tick());
+        one(scenario.at(300.0).tick());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,8 +1829,9 @@ mod handling {
         none(&scenario.at(0.0).input(downtime_started(0.0)));
         none(&scenario.at(100.0).input(critical(100.0).handled()));
         none(&scenario.at(1_000.0).input(downtime_ended(1_000.0)));
-        none(&scenario.at(1_009.0).tick());
-        let intent = one(scenario.at(1_010.0).tick());
+        // No check result came along to confirm it within a minute.
+        none(&scenario.at(1_059.0).tick());
+        let intent = one(scenario.at(1_060.0).tick());
         assert_eq!(
             intent.id,
             "db-prod-03!postgres-replication:critical:1700000100.000"
@@ -1393,7 +1862,8 @@ mod handling {
         none(&scenario.at(2_000.0).tick());
         // Until the acknowledgement goes away too.
         none(&scenario.at(3_000.0).input(ack_cleared(3_000.0)));
-        one(scenario.at(3_010.0).tick());
+        none(&scenario.at(3_059.0).tick());
+        one(scenario.at(3_060.0).tick());
     }
 
     #[test]
@@ -1441,20 +1911,121 @@ mod handling {
     }
 
     #[test]
-    fn a_repeated_state_with_handling_gone_notifies() {
+    fn a_problem_whose_host_came_back_notifies_once_a_check_confirms_it() {
         let mut scenario = Scenario::new(rules(Vec::new()));
         // Handled because its host is down.
         none(&scenario.at(0.0).input(critical(0.0).handled()));
         // The host came back: the caller repeats the service's state (same
-        // `since`) with `handled` cleared, as `on_input` documents.
-        let intent = one(scenario.at(120.0).input(critical(0.0).happened(120.0)));
+        // `since`) with `handled` cleared, as `on_input` documents. The
+        // state is left over from the outage, so it waits.
+        none(&scenario.at(120.0).input(critical(0.0).happened(120.0)));
+        none(&scenario.at(121.0).input(critical(0.0).happened(120.0)));
+        none(&scenario.at(130.0).tick());
+        // The service's next check found it still critical.
+        let intent = one(scenario.at(150.0).input(critical(0.0).happened(150.0)));
         assert_eq!(
             intent.id,
             "db-prod-03!postgres-replication:critical:1700000000.000"
         );
-        assert_eq!(intent.at, ts(120.0));
+        assert_eq!(intent.at, ts(150.0));
         // Repeating it again changes nothing.
         none(&scenario.at(180.0).input(critical(0.0).happened(180.0)));
+        none(&scenario.at(1_000.0).tick());
+    }
+
+    #[test]
+    fn a_problem_that_recovers_on_its_first_check_after_a_downtime_never_notifies() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        none(&scenario.at(0.0).input(downtime_started(0.0).handled()));
+        none(&scenario.at(100.0).input(critical(100.0).handled()));
+        none(&scenario.at(1_000.0).input(downtime_ended(1_000.0)));
+        // Like Icinga, it waits for the next check, which finds it fixed:
+        // neither a stale problem nor a recovery.
+        none(&scenario.at(1_040.0).input(ok(1_040.0)));
+        none(&scenario.at(1_100.0).tick());
+        none(&scenario.at(5_000.0).tick());
+    }
+
+    #[test]
+    fn a_check_after_the_downtime_that_finds_the_problem_notifies_at_once() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        none(&scenario.at(100.0).input(critical(100.0).handled()));
+        none(&scenario.at(1_000.0).input(downtime_ended(1_000.0)));
+        // A check from before the downtime ended confirms nothing.
+        none(&scenario.at(1_001.0).input(critical(100.0).happened(999.0)));
+        let intent = one(scenario
+            .at(1_020.0)
+            .input(critical(100.0).happened(1_020.0)));
+        assert_eq!(
+            intent.id,
+            "db-prod-03!postgres-replication:critical:1700000100.000"
+        );
+        assert_eq!(intent.at, ts(1_020.0));
+        none(&scenario.at(1_060.0).tick());
+        one(scenario.at(1_100.0).input(ok(1_100.0)));
+    }
+
+    #[test]
+    fn a_host_outage_ends_without_a_burst_of_stale_service_notifications() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        let host = |state, since| host_state(HOST, state, StateType::Hard, since);
+        let service = |index: u32| format!("svc-{index:02}");
+        assert_eq!(
+            one(scenario.at(0.0).input(host(HostState::Down, 0.0))).title,
+            "DOWN · db-prod-03"
+        );
+        // Every service fails while the host is down: handled.
+        for index in 0..15 {
+            none(
+                &scenario
+                    .at(30.0)
+                    .input(critical(30.0).service(&service(index)).handled()),
+            );
+        }
+        assert_eq!(
+            one(scenario.at(600.0).input(host(HostState::Up, 600.0))).title,
+            "RECOVERED · db-prod-03"
+        );
+        // ic-core repeats each service's state with `handled` cleared.
+        for index in 0..15 {
+            none(
+                &scenario
+                    .at(600.0)
+                    .input(critical(30.0).service(&service(index)).happened(600.0)),
+            );
+        }
+        // Icinga re-checks them: most are fine again, three are still
+        // broken.
+        for index in 0..10 {
+            none(&scenario.at(640.0).input(ok(640.0).service(&service(index))));
+        }
+        let mut still_broken = Vec::new();
+        for index in 10..13 {
+            still_broken.extend(
+                scenario
+                    .at(640.0)
+                    .input(critical(30.0).service(&service(index)).happened(640.0)),
+            );
+        }
+        assert_eq!(
+            titles(&still_broken),
+            [
+                "CRITICAL · svc-10 on db-prod-03",
+                "CRITICAL · svc-11 on db-prod-03",
+                "CRITICAL · svc-12 on db-prod-03"
+            ]
+        );
+        none(&scenario.at(899.0).tick());
+        // The last two never got a check result: they notify after five
+        // minutes.
+        assert_eq!(
+            titles(&scenario.at(900.0).tick()),
+            [
+                "CRITICAL · svc-13 on db-prod-03",
+                "CRITICAL · svc-14 on db-prod-03"
+            ]
+        );
+        none(&scenario.at(2_000.0).tick());
     }
 }
 
@@ -1585,6 +2156,130 @@ mod events {
         input.service_display = None;
         assert_eq!(one(scenario.input(input)).title, "DOWNTIME · k8s-node-07");
     }
+
+    #[test]
+    fn a_fixed_downtime_reported_as_started_and_triggered_notifies_once() {
+        let mut scenario = Scenario::new(events_rules());
+        // Icinga 2.15 reports both about 0.2 ms apart, here on both sides of
+        // a millisecond.
+        let started = one(scenario.at(0.0).input(downtime_started(0.0004).handled()));
+        assert_eq!(
+            started.id,
+            "db-prod-03!postgres-replication:downtime-start:1700000000.000"
+        );
+        none(&scenario.at(0.0).input(downtime_started(0.0006).handled()));
+        // Another downtime later notifies again.
+        one(scenario
+            .at(3_600.0)
+            .input(downtime_started(3_600.0).handled()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flapping
+// ---------------------------------------------------------------------------
+
+mod flapping {
+    use super::*;
+
+    fn flapping_started(at: f64) -> RuleInput {
+        event(Change::FlappingStarted, at)
+    }
+
+    fn flapping_stopped(at: f64) -> RuleInput {
+        event(Change::FlappingStopped, at)
+    }
+
+    #[test]
+    fn a_flapping_object_notifies_no_problems_or_recoveries() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        none(&scenario.at(0.0).input(flapping_started(0.0)));
+        for step in 1..=8_u32 {
+            let now = f64::from(step) * 150.0;
+            let input = if step % 2 == 1 {
+                critical(now)
+            } else {
+                ok(now)
+            };
+            none(&scenario.at(now).input(input));
+            none(&scenario.at(now + 1.0).tick());
+        }
+    }
+
+    #[test]
+    fn flapping_notifications_follow_the_event_filter() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.default_rule.events.flapping = true;
+        }));
+        assert_eq!(
+            one(scenario.at(0.0).input(flapping_started(0.0))).title,
+            "FLAPPING · postgres-replication on db-prod-03"
+        );
+        none(&scenario.at(150.0).input(critical(150.0)));
+        assert_eq!(
+            titles(&scenario.at(300.0).input(flapping_stopped(300.0))),
+            [
+                "FLAPPING STOPPED · postgres-replication on db-prod-03",
+                "CRITICAL · postgres-replication on db-prod-03"
+            ]
+        );
+    }
+
+    #[test]
+    fn when_flapping_stops_the_problem_it_is_in_notifies() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        none(&scenario.at(0.0).input(flapping_started(0.0)));
+        none(&scenario.at(100.0).input(critical(100.0)));
+        let intent = one(scenario.at(200.0).input(flapping_stopped(200.0)));
+        assert_eq!(
+            intent.id,
+            "db-prod-03!postgres-replication:critical:1700000100.000"
+        );
+        assert_eq!(intent.at, ts(100.0));
+        one(scenario.at(300.0).input(ok(300.0)));
+    }
+
+    #[test]
+    fn when_flapping_stops_after_a_notified_problem_ended_its_recovery_notifies() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        one(scenario.at(0.0).input(critical(0.0)));
+        none(&scenario.at(10.0).input(flapping_started(10.0)));
+        none(&scenario.at(100.0).input(ok(100.0)));
+        // Still the same problem, and its state already notified.
+        none(&scenario.at(200.0).input(critical(200.0)));
+        none(&scenario.at(300.0).input(ok(300.0)));
+        let recovery = one(scenario.at(400.0).input(flapping_stopped(400.0)));
+        assert_eq!(
+            recovery.id,
+            "db-prod-03!postgres-replication:ok:1700000300.000"
+        );
+        none(&scenario.at(500.0).input(ok(300.0).happened(500.0)));
+    }
+
+    #[test]
+    fn a_lost_flapping_stopped_expires_an_hour_after_the_last_state_change() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        none(&scenario.at(0.0).input(flapping_started(0.0)));
+        none(&scenario.at(100.0).input(critical(100.0)));
+        none(&scenario.at(3_699.0).tick());
+        assert_eq!(
+            one(scenario.at(3_700.0).tick()).title,
+            "CRITICAL · postgres-replication on db-prod-03"
+        );
+    }
+
+    #[test]
+    fn a_flapping_object_held_back_by_a_delay_waits_for_both() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.default_rule = delayed(300);
+        }));
+        none(&scenario.at(0.0).input(critical(0.0)));
+        none(&scenario.at(100.0).input(flapping_started(100.0)));
+        none(&scenario.at(300.0).tick());
+        // The problem lasted long enough: it notifies as soon as the
+        // flapping stops.
+        one(scenario.at(400.0).input(flapping_stopped(400.0)));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1676,8 +2371,9 @@ mod storm {
             "the first three are shown"
         );
 
-        none(&scenario.at(9.9).tick());
-        let summary = one(scenario.at(10.0).tick());
+        // The storm is over once a whole window passes without one.
+        none(&scenario.at(16.4).tick());
+        let summary = one(scenario.at(16.5).tick());
         assert_eq!(summary.title, "14 new problems in prod-cluster");
         assert_eq!(summary.body, "14 critical");
         assert_eq!(summary.subtitle, ENV);
@@ -1686,11 +2382,11 @@ mod storm {
         assert!(!summary.silent);
         assert!(summary.sound);
         assert_eq!(summary.id, "storm:1700000000.000");
-        assert_eq!(summary.at, ts(10.0));
+        assert_eq!(summary.at, ts(16.5));
 
-        // The next window starts fresh.
-        assert!(!one(scenario.at(11.0).input(problem(99, 11.0))).silent);
-        none(&scenario.at(21.0).tick());
+        // Calm again: notifications are shown.
+        assert!(!one(scenario.at(17.0).input(problem(99, 17.0))).silent);
+        none(&scenario.at(30.0).tick());
     }
 
     #[test]
@@ -1713,7 +2409,8 @@ mod storm {
             1.0,
         )));
         one(scenario.at(2.0).input(ok(2.0)));
-        let summary = one(scenario.at(10.0).tick());
+        none(&scenario.at(11.0).tick());
+        let summary = one(scenario.at(12.0).tick());
         assert_eq!(summary.title, "3 notifications in prod-cluster");
         assert_eq!(summary.body, "1 critical · 1 down · 1 recovered");
     }
@@ -1798,7 +2495,7 @@ mod storm {
         one(scenario.at(0.0).input(problem(0, 0.0)));
         one(scenario.at(1.0).input(problem(1, 1.0)));
         scenario.engine.pause_until(Some(ts(3_600.0)));
-        assert!(one(scenario.at(10.0).tick()).silent);
+        assert!(one(scenario.at(11.0).tick()).silent);
     }
 
     #[test]
@@ -1816,8 +2513,84 @@ mod storm {
         // Daytime: warnings are absorbed by the storm.
         one(scenario.at(0.0).input(warning(0.0).service("a")));
         one(scenario.at(1.0).input(warning(1.0).service("b")));
-        // The window closes at night: the summary of warnings is silent.
-        assert!(one(scenario.local(local(MONDAY, 22, 0)).at(10.0).tick()).silent);
+        // The storm ends at night: the summary of warnings is silent.
+        assert!(one(scenario.local(local(MONDAY, 22, 0)).at(11.0).tick()).silent);
+    }
+
+    /// The leading number of a summary title (`"14 new problems in …"`).
+    fn summarized(summary: &NotificationIntent) -> u32 {
+        summary
+            .title
+            .split(' ')
+            .next()
+            .and_then(|count| count.parse().ok())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_sustained_flood_stays_collapsed_however_long_it_lasts() {
+        // 50 new problems a second for two minutes, with the defaults (more
+        // than 5 within 10 s is a storm).
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        let mut audible = Vec::new();
+        let mut summaries = Vec::new();
+        let mut index = 0;
+        let mut collect = |intents: Vec<NotificationIntent>| {
+            for intent in intents {
+                if intent.object.is_none() {
+                    summaries.push(intent);
+                } else if !intent.silent {
+                    audible.push(intent);
+                }
+            }
+        };
+        for tenth in 0..1_200_u32 {
+            let now = f64::from(tenth) / 10.0;
+            collect(scenario.at(now).tick());
+            for _ in 0..5 {
+                index += 1;
+                collect(scenario.at(now).input(problem(index, now)));
+            }
+        }
+        collect(scenario.at(130.0).tick());
+        collect(scenario.at(200.0).tick());
+
+        assert_eq!(audible.len(), 5, "only the first five are shown");
+        // One summary a minute while it lasts; the last one covers the
+        // rest when it ends.
+        assert_eq!(summaries.len(), 2, "{:#?}", titles(&summaries));
+        assert!(summaries.iter().all(|summary| !summary.silent));
+        assert_eq!(summaries[0].at, ts(60.0));
+        assert_eq!(
+            summaries.iter().map(summarized).sum::<u32>(),
+            6_000,
+            "every notification is counted once"
+        );
+    }
+
+    #[test]
+    fn turning_storm_control_off_ends_a_storm_at_once() {
+        let mut scenario = Scenario::new(storm_rules(10, 1));
+        one(scenario.at(0.0).input(problem(0, 0.0)));
+        assert!(one(scenario.at(1.0).input(problem(1, 1.0))).silent);
+        scenario.engine.set_rules(storm_rules(0, 0));
+        assert_eq!(
+            one(scenario.at(2.0).tick()).title,
+            "2 new problems in prod-cluster"
+        );
+        assert!(!one(scenario.at(3.0).input(problem(2, 3.0))).silent);
+        none(&scenario.at(100.0).tick());
+    }
+
+    #[test]
+    fn a_raised_threshold_applies_to_a_storm_in_progress() {
+        let mut scenario = Scenario::new(storm_rules(10, 1));
+        one(scenario.at(0.0).input(problem(0, 0.0)));
+        assert!(one(scenario.at(1.0).input(problem(1, 1.0))).silent);
+        scenario.engine.set_rules(storm_rules(10, 5));
+        assert!(!one(scenario.at(2.0).input(problem(2, 2.0))).silent);
+        let summary = one(scenario.at(11.0).tick());
+        assert_eq!(summary.title, "3 new problems in prod-cluster");
     }
 }
 

@@ -57,6 +57,7 @@ mod dedupe;
 mod engine;
 mod intent;
 mod quiet;
+mod recent;
 mod scope;
 mod settings;
 mod storm;

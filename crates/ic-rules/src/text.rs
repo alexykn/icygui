@@ -1,13 +1,23 @@
 //! What notifications say: labels, titles, bodies, tones and ids.
+//!
+//! Everything that ends up in a notification's text goes through
+//! [`clean`]: plugin output is the least trusted input (passive results,
+//! remote agents), and names come from config files that can be shared.
+
+use std::iter::Peekable;
+use std::str::Chars;
 
 use ic_model::{CheckableState, HostState, ObjectKey, ServiceState, Timestamp};
 
 use crate::intent::Tone;
 use crate::settings::EventFilter;
 
-/// Longest body, in characters. Plugin output can be huge; OS notifications
-/// show a few lines at most, and the notification centre a single line.
-const MAX_BODY_CHARS: usize = 400;
+/// Longest text, in characters, of any part of a notification. Plugin
+/// output can be huge; OS notifications show a few lines at most, and the
+/// notification centre a single line.
+const MAX_TEXT_CHARS: usize = 400;
+
+const ESCAPE: char = '\u{1b}';
 
 /// What a notification is about. Decides the title's label, the tone, and
 /// the wording of storm summaries.
@@ -239,10 +249,12 @@ pub(crate) fn title(
     host_display: &str,
     service_display: Option<&str>,
 ) -> String {
-    let host = non_empty(host_display).unwrap_or_else(|| object.host_name().as_str());
+    let host = non_empty(host_display).unwrap_or_else(|| clean(object.host_name().as_str()));
     match object.as_service() {
         Some(key) => {
-            let service = service_display.and_then(non_empty).unwrap_or(&key.name);
+            let service = service_display
+                .and_then(non_empty)
+                .unwrap_or_else(|| clean(&key.name));
             format!("{} · {service} on {host}", label.title())
         }
         None => format!("{} · {host}", label.title()),
@@ -253,48 +265,121 @@ pub(crate) fn title(
 pub(crate) fn subtitle(group: &str, dashboard: &str) -> String {
     match (non_empty(group), non_empty(dashboard)) {
         (Some(group), Some(dashboard)) => format!("{group} / {dashboard}"),
-        (Some(name), None) | (None, Some(name)) => name.to_owned(),
+        (Some(name), None) | (None, Some(name)) => name,
         (None, None) => String::new(),
     }
 }
 
-/// The body for plugin output: its first non-blank line, clipped.
+/// The body for plugin output: its first non-blank line, [cleaned](clean).
+/// Any line break counts, including a lone `\r` and Unicode's line and
+/// paragraph separators.
 pub(crate) fn output_body(output: &str) -> String {
-    let line = output
-        .lines()
-        .map(str::trim)
+    output
+        .split(is_line_break)
+        .map(clean)
         .find(|line| !line.is_empty())
-        .unwrap_or_default();
-    clip(line)
+        .unwrap_or_default()
 }
 
 /// The body for an acknowledgement or downtime: `"{author}: {comment}"`,
-/// clipped.
+/// [cleaned](clean) (a multi-line comment becomes one line).
 pub(crate) fn comment_body(author: &str, comment: &str) -> String {
-    let (author, comment) = (author.trim(), comment.trim());
+    let (author, comment) = (clean(author), clean(comment));
     let text = match (author.is_empty(), comment.is_empty()) {
         (false, false) => format!("{author}: {comment}"),
-        (true, _) => comment.to_owned(),
-        (false, true) => author.to_owned(),
+        (true, _) => comment,
+        (false, true) => author,
     };
-    clip(&text)
+    // Each part fits, but both together may not.
+    clean(&text)
 }
 
-/// Cuts `text` to [`MAX_BODY_CHARS`] characters, ending with `…` if cut.
-fn clip(text: &str) -> String {
-    if text.char_indices().nth(MAX_BODY_CHARS).is_none() {
-        return text.to_owned();
+/// Makes untrusted text fit for a notification:
+///
+/// - control characters (C0, DEL and C1, line breaks included) become
+///   spaces, except that ANSI escape sequences (`ESC [ … m`) disappear;
+///   D-Bus rejects a NUL, and escapes are noise outside a terminal;
+/// - bidirectional formatting characters disappear, so output can't
+///   reorder what the rest of the line appears to say;
+/// - surrounding whitespace is trimmed;
+/// - the result is cut to [`MAX_TEXT_CHARS`] characters, ending with `…`
+///   when cut.
+///
+/// It reads only as far as it needs, so huge input costs little.
+pub(crate) fn clean(text: &str) -> String {
+    let mut out = String::new();
+    let mut kept = 0_usize;
+    let mut cut = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let c = match c {
+            ESCAPE => {
+                skip_escape_sequence(&mut chars);
+                continue;
+            }
+            c if is_bidi_control(c) => continue,
+            c if c.is_control() => ' ',
+            c => c,
+        };
+        if kept == 0 && c.is_whitespace() {
+            continue;
+        }
+        if kept == MAX_TEXT_CHARS {
+            if c.is_whitespace() {
+                // Only more text after it makes this a cut.
+                continue;
+            }
+            cut = true;
+            break;
+        }
+        out.push(c);
+        kept += 1;
     }
-    // Byte offset of the last character that still fits next to the `…`.
-    let cut = text
-        .char_indices()
-        .nth(MAX_BODY_CHARS - 1)
-        .map_or(text.len(), |(offset, _)| offset);
-    format!("{}…", text.get(..cut).unwrap_or(text))
+    if cut {
+        // Make room for the ellipsis.
+        out.pop();
+    }
+    out.truncate(out.trim_end().len());
+    if cut {
+        out.push('…');
+    }
+    out
 }
 
-fn non_empty(text: &str) -> Option<&str> {
-    let text = text.trim();
+/// After an `ESC`: drops a CSI sequence (`[`, parameter and intermediate
+/// bytes, one final byte). Any other escape loses only its `ESC`.
+fn skip_escape_sequence(chars: &mut Peekable<Chars<'_>>) {
+    if chars.next_if_eq(&'[').is_none() {
+        return;
+    }
+    while chars
+        .next_if(|c| ('\u{20}'..='\u{3f}').contains(c))
+        .is_some()
+    {}
+    chars.next_if(|c| ('\u{40}'..='\u{7e}').contains(c));
+}
+
+/// Unicode's `Bidi_Control` characters: marks, embeddings, overrides and
+/// isolates.
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// Unicode's mandatory line breaks: LF, CR, VT, FF, NEL and the line and
+/// paragraph separators.
+fn is_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// `text` [cleaned](clean), or `None` if nothing is left.
+fn non_empty(text: &str) -> Option<String> {
+    let text = clean(text);
     (!text.is_empty()).then_some(text)
 }
 
@@ -357,6 +442,9 @@ mod tests {
         );
         assert_eq!(output_body("\r\n  \nsecond line\r\nthird"), "second line");
         assert_eq!(output_body(""), "");
+        assert_eq!(output_body("first\rsecond"), "first", "a lone CR breaks");
+        assert_eq!(output_body("\u{2028}first\u{2029}second"), "first");
+        assert_eq!(output_body(" \t\u{0}\n\u{1b}[0m\nthird"), "third");
     }
 
     #[test]
@@ -368,23 +456,79 @@ mod tests {
         assert_eq!(comment_body("", "maintenance"), "maintenance");
         assert_eq!(comment_body("m.keller", " "), "m.keller");
         assert_eq!(comment_body("", ""), "");
+        assert_eq!(
+            comment_body("m.keller", "on it\nticket INC-1"),
+            "m.keller: on it ticket INC-1"
+        );
+        let long = comment_body("m.keller", &"x".repeat(MAX_TEXT_CHARS));
+        assert_eq!(long.chars().count(), MAX_TEXT_CHARS);
+        assert!(long.starts_with("m.keller: x") && long.ends_with('…'));
     }
 
     #[test]
     fn long_bodies_are_clipped_on_a_char_boundary() {
-        let exact = "é".repeat(MAX_BODY_CHARS);
+        let exact = "é".repeat(MAX_TEXT_CHARS);
         assert_eq!(output_body(&exact), exact, "exactly the limit stays whole");
+        let trailing = format!("{exact}   \n");
+        assert_eq!(output_body(&trailing), exact, "trailing blanks don't cut");
 
-        let long = "é".repeat(MAX_BODY_CHARS + 10);
+        let long = "é".repeat(MAX_TEXT_CHARS + 10);
         let body = output_body(&long);
-        assert_eq!(body.chars().count(), MAX_BODY_CHARS);
+        assert_eq!(body.chars().count(), MAX_TEXT_CHARS);
         assert!(body.ends_with('…'));
         assert!(body.starts_with("éé"));
 
-        let one_over = "x".repeat(MAX_BODY_CHARS + 1);
+        let one_over = "x".repeat(MAX_TEXT_CHARS + 1);
         let body = output_body(&one_over);
-        assert_eq!(body.chars().count(), MAX_BODY_CHARS);
+        assert_eq!(body.chars().count(), MAX_TEXT_CHARS);
         assert!(body.ends_with('…'));
+
+        let huge = format!("{}\nsecond", "y".repeat(2_000_000));
+        assert_eq!(output_body(&huge).chars().count(), MAX_TEXT_CHARS);
+    }
+
+    #[test]
+    fn control_and_bidi_characters_never_reach_a_notification() {
+        assert_eq!(
+            clean("CRIT\0ICAL \u{1b}[31mred\u{1b}[0m \u{202e}KO\ttail\u{7f}\u{9b}end"),
+            "CRIT ICAL red KO tail  end"
+        );
+        assert_eq!(clean("a\u{1b}[1;31;40mb"), "ab", "CSI with parameters");
+        assert_eq!(
+            clean("a\u{1b}]0;x\u{7}b"),
+            "a]0;x b",
+            "other escapes lose ESC"
+        );
+        assert_eq!(clean("trailing escape\u{1b}"), "trailing escape");
+        assert_eq!(clean("\u{1b}["), "");
+        for bidi in [
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}',
+            '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ] {
+            assert_eq!(clean(&format!("a{bidi}b")), "ab", "{bidi:?}");
+        }
+        assert_eq!(clean("  שלום  "), "שלום", "right-to-left text itself stays");
+
+        let body = output_body("CRIT\0ICAL \u{1b}[31mred\u{1b}[0m \u{202e}KO\rtail");
+        assert_eq!(body, "CRIT ICAL red KO");
+        assert!(!body.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn titles_and_subtitles_are_cleaned() {
+        let service = ObjectKey::service("db\u{0}03", "pg\u{202e}lag");
+        assert_eq!(
+            title(Label::Critical, &service, "", None),
+            "CRITICAL · pglag on db 03"
+        );
+        assert_eq!(
+            title(Label::Critical, &service, "DB\n3", Some("\u{1b}[1mlag")),
+            "CRITICAL · lag on DB 3"
+        );
+        assert_eq!(
+            subtitle("data\u{0}bases", "\u{2066}prod"),
+            "data bases / prod"
+        );
     }
 
     #[test]

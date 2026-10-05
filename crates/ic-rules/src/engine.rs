@@ -9,6 +9,7 @@ use tracing::debug;
 use crate::dedupe::Dedupe;
 use crate::intent::{Change, DashboardRef, LocalTime, NotificationIntent, RuleInput, Tone};
 use crate::quiet;
+use crate::recent::Recent;
 use crate::scope::{Candidate, RuleSet, Scopes, Source};
 use crate::settings::{ObjectMode, Rule};
 use crate::storm::{Admission, Storm};
@@ -20,17 +21,43 @@ const DEDUPE_CAPACITY: usize = 10_000;
 /// a 20 000-service environment produces even in a full outage; it only
 /// bounds memory if removed objects never report back.
 const MAX_TRACKED: usize = 50_000;
-/// After a handled problem becomes unhandled again, its notification waits
-/// at least this long. Icinga clears a normal acknowledgement *before* it
-/// reports the state change that cleared it, so the wait lets that state
-/// change cancel a notification for a state that is already gone.
-const HANDLING_GRACE: Duration = Duration::from_secs(10);
+/// How many objects that left a problem state (OK, UP or pending) are
+/// remembered, so a late or replayed older problem is recognized as such.
+const SETTLED_CAPACITY: usize = 10_000;
+/// How many flapping objects are remembered.
+const FLAPPING_CAPACITY: usize = 10_000;
+/// How many objects' latest downtime start is remembered.
+const DOWNTIME_CAPACITY: usize = 10_000;
+
+/// After an acknowledgement is removed or a downtime ends, a problem that
+/// was skipped because of it waits at most this long for a fresh check
+/// before it notifies. Icinga holds such notifications back while a check
+/// is due within a minute, so a problem that recovers right away never
+/// notifies.
+const HANDLING_SETTLE: Duration = Duration::from_mins(1);
+/// After a problem stops being handled without an event of its own (its
+/// host or a parent recovered), it waits at most this long for a fresh
+/// check: its state is likely left over from the outage. Icinga waits for
+/// the object's next check after such a recovery.
+const RECOVERY_SETTLE: Duration = Duration::from_mins(5);
+/// Downtime starts reported for one object within this long count as one:
+/// Icinga reports a fixed downtime as started and triggered at once.
+const DOWNTIME_START_PAIR: Duration = Duration::from_secs(5);
+/// A flapping object whose state hasn't changed for this long counts as no
+/// longer flapping, in case the report that it stopped got lost.
+const FLAPPING_EXPIRY: Duration = Duration::from_hours(1);
+/// `since` values closer than this are the same instant, as in intent ids
+/// (millisecond precision).
+const SINCE_TOLERANCE_SECS: f64 = 0.001;
 
 /// Memory bounds; tests shrink them.
 #[derive(Clone, Copy, Debug)]
 struct Limits {
     dedupe: usize,
     tracked: usize,
+    settled: usize,
+    flapping: usize,
+    downtime_starts: usize,
 }
 
 impl Default for Limits {
@@ -38,6 +65,9 @@ impl Default for Limits {
         Self {
             dedupe: DEDUPE_CAPACITY,
             tracked: MAX_TRACKED,
+            settled: SETTLED_CAPACITY,
+            flapping: FLAPPING_CAPACITY,
+            downtime_starts: DOWNTIME_CAPACITY,
         }
     }
 }
@@ -72,38 +102,69 @@ impl Default for Limits {
 ///    current problem rather than forgetting it: if the object is still in
 ///    that state when the mute ends (expires or is removed), the problem
 ///    notifies then. Recoveries and other events during a mute are dropped.
+///    A watch added while the object is in a problem that didn't notify
+///    judges that problem again on the next tick, so it notifies (and its
+///    recovery follows) as if it had been watched all along.
 ///
-/// # States
+/// The follow-ups of a problem, its recovery and its acknowledgement, are
+/// judged by the scopes that notified it instead (see below).
 ///
-/// - A problem state (critical, warning, unknown, down, unreachable)
-///   notifies if the rule's [`StateFilter`](crate::StateFilter) selects it,
-///   it is hard or `hard_only` is off, and it is unhandled or `skip_handled`
-///   is off. The intent id is `"{object}:{state}:{since}"`, so a soft state
-///   turning hard (same `since`) never notifies twice.
-/// - `min_duration_secs` holds the notification until `since +
-///   min_duration`; [`RuleEngine::tick`] releases it if the object is still
-///   in that state and the rule still matches. A recovery, another state
-///   change, or a handling change (acknowledgement, downtime) cancels it.
-///   With several matching rules the earliest one notifies. If `since` lies
-///   in the engine's future (Icinga's clock runs ahead), the delay counts
-///   from when the engine first saw the state instead.
-/// - A recovery (back to OK / UP) notifies only if a problem of the object
-///   was notified since it last left OK / UP, including silent
-///   notifications (quiet hours, pause, storm). It is judged by the scopes
-///   the object is on now *and* the scopes that notified the problem, so an
-///   object whose dashboard filter depends on its state still gets its
-///   recovery. Recoveries are never delayed.
-/// - Like Icinga's own notifications, a problem that didn't notify only
-///   because it was handled notifies once it is no longer handled
-///   (acknowledgement removed or expired, downtime ended) and still in the
-///   same state, after a short grace period that lets an immediately
-///   following state change cancel it.
+/// # Problems
+///
+/// A *problem* lasts from the object leaving OK / UP until it is back (or
+/// pending); it may go through several problem states on the way.
+///
+/// - A problem state notifies if the rule's
+///   [`StateFilter`](crate::StateFilter) selects it, it is hard or
+///   `hard_only` is off, and it is unhandled or `skip_handled` is off. The
+///   intent id is `"{object}:{state}:{since}"`, so a soft state turning hard
+///   (same `since`) never notifies twice.
+/// - A state already notified during the problem doesn't notify again,
+///   unless another state notified in between. A check hovering around a
+///   threshold (critical, warning, critical, …) doesn't page on every swing
+///   back; Icinga 2.14+ skips such duplicates too.
+/// - `min_duration_secs` holds the notification until the *problem* has
+///   lasted that long, counted from when it began: a change to another
+///   problem state doesn't restart the delay, and the state the object is
+///   in when the delay runs out notifies. [`RuleEngine::tick`] releases it.
+///   A recovery (or pending) cancels it, and so does handling (an
+///   acknowledgement, a downtime, an unreachable object) for a rule that
+///   skips handled problems. With several matching rules the earliest one
+///   notifies. If the problem's `since` lies in the engine's future
+///   (Icinga's clock runs ahead), the delay counts from when the engine
+///   first saw it instead.
+/// - A problem that didn't notify only because it was handled notifies once
+///   its handling ends, the way Icinga sends suppressed notifications, but
+///   only once its state is confirmed by a fresh check: a repeat of the
+///   state that happened after the handling ended. Without one, it waits a
+///   minute after an acknowledgement or downtime ended, and five minutes
+///   after the handling ended without an event (its host or a parent
+///   recovered, which leaves states over from the outage). A state change
+///   in between is judged instead, so a problem that recovers on its next
+///   check never notifies.
+/// - While Icinga reports an object as flapping, its problems and
+///   recoveries don't notify (as in Icinga). When it stops, its state then
+///   is judged: a problem notifies (unless that state already did), and if
+///   it is OK / UP, the recovery of a problem that notified does. An object
+///   that hasn't changed state for an hour counts as no longer flapping.
+/// - A recovery (back to OK / UP) notifies only if the problem notified,
+///   including silent notifications (quiet hours, pause, storm). It is
+///   judged by the scopes that notified the problem, as they are configured
+///   now, and by a watch on the object: a dashboard turned off or a watch
+///   removed since stays quiet, and a dashboard that didn't notify the
+///   problem doesn't announce its end. `handled` doesn't matter: a problem
+///   the user heard about ends even if its host is down. Recoveries are
+///   never delayed.
 /// - A change to pending forgets the object without notifying (it was
 ///   removed or re-created).
 ///
 /// Inputs for one object must arrive in order. A state change older than
-/// the state the engine already knows (by `since`) is ignored, unless the
-/// known state lies in the future (Icinga's clock was ahead).
+/// the state the engine knows (by `since`, to the millisecond) is ignored,
+/// unless the known state lies in the future (Icinga's clock was ahead);
+/// so is a problem older than the recovery that ended it, for the last
+/// 10 000 objects that recovered. A `previous` state of OK, UP or pending
+/// while the engine still tracks a problem means it missed the recovery:
+/// a new problem begins.
 ///
 /// # Other events
 ///
@@ -112,15 +173,24 @@ impl Default for Limits {
 /// `skip_handled` and delays don't apply to them. Their id is
 /// `"{object}:{kind}:{at}"`.
 ///
+/// - Like Icinga, an acknowledgement (set or cleared) of a problem the
+///   engine knows notifies only if the problem notified, and is judged by
+///   the scopes that notified it. For an object whose problem began before
+///   the engine saw it (after a restart), the scopes it is on decide.
+/// - Downtime starts reported for one object within five seconds notify
+///   once: Icinga reports a fixed downtime as both started and triggered.
+///
 /// # Output
 ///
 /// - The same id is never emitted twice (across memberships, repeated
 ///   inputs and reconnect replays). The last 10 000 ids are remembered.
-/// - Storm control: when more than `storm.threshold` audible notifications
-///   fall inside `storm.window_secs` (counted from the first one), further
-///   ones in that window are `silent`. When the window closes, one summary
-///   follows (`"14 new problems in prod-cluster"`, `object = None`, tone
-///   `Info`) with a breakdown in the body. Notifications that are silent
+/// - Storm control: a notification that would be the `storm.threshold +
+///   1`-th audible one within the `storm.window_secs` ending with it is
+///   `silent` instead, for as long as notifications keep coming that fast.
+///   What a storm silenced is summarized (`"14 new problems in
+///   prod-cluster"`, `object = None`, tone `Info`, a breakdown in the body)
+///   once a whole window passes without a silenced notification, and while
+///   the storm lasts at most once a minute. Notifications that are silent
 ///   anyway (quiet hours, pause) don't count. `window_secs = 0` disables
 ///   storm control.
 /// - Quiet hours (local time; see [`QuietHours`](crate::QuietHours)) make
@@ -130,7 +200,8 @@ impl Default for Limits {
 /// - Title `"{LABEL} · {service} on {host}"` or `"{LABEL} · {host}"` with
 ///   display names; body = the first line of the output, or `"{author}:
 ///   {comment}"`; tone by state; sound from the deciding rule; `at` = when
-///   the change happened.
+///   the change happened. Text is cleaned of control and bidirectional
+///   formatting characters and cut to 400 characters.
 #[derive(Debug)]
 pub struct RuleEngine {
     scopes: Scopes,
@@ -138,8 +209,16 @@ pub struct RuleEngine {
     /// generation are re-judged on the next tick.
     generation: u64,
     paused_until: Option<Timestamp>,
-    /// Objects in a problem state the engine has seen a change for.
+    /// Objects in a problem the engine has seen a change for.
     tracked: HashMap<ObjectKey, Tracked>,
+    /// Objects that left a problem: the `since` of the state they settled
+    /// in (OK, UP or pending).
+    settled: Recent<ObjectKey, Timestamp>,
+    /// Flapping objects, with when the engine last saw evidence of it (the
+    /// start of the flapping, or a state change since).
+    flapping: Recent<ObjectKey, Timestamp>,
+    /// When each object's latest downtime start happened.
+    downtime_starts: Recent<ObjectKey, Timestamp>,
     dedupe: Dedupe,
     storm: Storm,
     limits: Limits,
@@ -157,6 +236,9 @@ impl RuleEngine {
             generation: 0,
             paused_until: None,
             tracked: HashMap::new(),
+            settled: Recent::new(limits.settled),
+            flapping: Recent::new(limits.flapping),
+            downtime_starts: Recent::new(limits.downtime_starts),
             dedupe: Dedupe::new(limits.dedupe),
             storm: Storm::default(),
             limits,
@@ -169,11 +251,26 @@ impl RuleEngine {
     }
 
     /// Replaces the rules (settings, groups, dashboards, overrides). What
-    /// the engine remembers (notified problems, ids, the storm window,
-    /// pause) is kept. Waiting notifications are re-judged by the new rules
-    /// on the next [`RuleEngine::tick`], and so are problems held back by a
-    /// mute the new rules no longer have.
+    /// the engine remembers (problems and who notified them, ids, the
+    /// storm, pause) is kept. On the next [`RuleEngine::tick`], the new
+    /// rules judge waiting notifications, problems held back by a mute the
+    /// new rules no longer have, and problems of objects that gained a
+    /// watch. Other problems that are already open don't notify because of
+    /// the new rules: notifications are about changes.
     pub fn set_rules(&mut self, rules: RuleSet) {
+        let old = &self.scopes.rules().settings.objects;
+        let gained: Vec<ObjectKey> = rules
+            .settings
+            .objects
+            .iter()
+            .filter(|entry| entry.mode == ObjectMode::Watch && !old.contains(entry))
+            .map(|entry| entry.object.clone())
+            .collect();
+        for object in gained {
+            if let Some(tracked) = self.tracked.get_mut(&object) {
+                tracked.rejudge = true;
+            }
+        }
         self.scopes = Scopes::new(rules);
         self.generation = self.generation.wrapping_add(1);
     }
@@ -200,13 +297,27 @@ impl RuleEngine {
     /// - one input per change, in order for each object;
     /// - `since` = `last_state_change`, which a soft state turning hard
     ///   doesn't change (so the hard state keeps the soft state's id);
+    /// - `previous` = the state before the change, if known;
     /// - `handled` and `memberships` as they are *after* the change, with
-    ///   memberships ignoring `problems_only` and `hide_handled`;
+    ///   memberships ignoring `problems_only` and `hide_handled`. `handled`
+    ///   also covers an object that is unreachable (a failed host or parent
+    ///   dependency), whose notifications Icinga suppresses as well;
+    /// - for a host that isn't reachable, the state `Unreachable` rather
+    ///   than `Down`: a down notification can't be taken back;
     /// - when an object's `handled` changes without an event of its own
-    ///   (the services of a host that went down or came back), a repeat of
-    ///   its current state change (same `current` and `since`) with the new
-    ///   `handled`: the engine re-judges a repeated state, so a problem
-    ///   that was skipped as handled notifies once it no longer is.
+    ///   (the services of a host that went down or came back, an object
+    ///   whose parent recovered), a repeat of its current state (same
+    ///   `current` and `since`) with the new `handled`;
+    /// - after any change of `handled` to false, a repeat of the object's
+    ///   state once its next check result confirms it, with `at` = that
+    ///   check's time. Until then (or a settle time) the engine holds back
+    ///   a problem whose handling ended, so a state left over from an
+    ///   outage or a maintenance doesn't notify;
+    /// - `FlappingStarted` and `FlappingStopped` whenever Icinga's flapping
+    ///   flag changes, also when a reconcile finds it changed;
+    /// - one `DowntimeStarted` per downtime: Icinga reports a fixed
+    ///   downtime as both started and triggered (the engine counts starts
+    ///   within five seconds as one).
     #[must_use = "the intents must be recorded, and the audible ones shown"]
     pub fn on_input(
         &mut self,
@@ -223,10 +334,10 @@ impl RuleEngine {
         if self
             .tracked
             .get(&input.object)
-            .and_then(|tracked| self.ready_at(&input.object, tracked, cutoff))
+            .and_then(|tracked| self.ready_at(&input.object, tracked, cutoff, now))
             .is_some()
         {
-            self.evaluate(&input.object, moment, cutoff, false, &mut out);
+            self.evaluate(&input.object, moment, cutoff, &mut out);
         }
         if matches!(input.change, Change::State { .. }) {
             self.apply_state(input, moment, &mut out);
@@ -236,10 +347,10 @@ impl RuleEngine {
         out
     }
 
-    /// Advances time: ends an expired pause, closes a finished storm window
-    /// (emitting its summary), releases delayed notifications that are due,
-    /// and notifies problems whose mute ended while they were still open.
-    /// Call it about once a second.
+    /// Advances time: ends an expired pause, summarizes a storm that ended
+    /// or has gone on for a while, releases delayed notifications that are
+    /// due, and judges problems whose mute ended, whose object stopped
+    /// flapping, or that gained a watch. Call it about once a second.
     #[must_use = "the intents must be recorded, and the audible ones shown"]
     pub fn tick(&mut self, now: Timestamp, local: LocalTime) -> Vec<NotificationIntent> {
         let moment = Moment { now, local };
@@ -249,7 +360,7 @@ impl RuleEngine {
             .tracked
             .iter()
             .filter_map(|(object, tracked)| {
-                self.ready_at(object, tracked, now)
+                self.ready_at(object, tracked, now, now)
                     .map(|ready| (ready, object.clone()))
             })
             .collect();
@@ -260,45 +371,65 @@ impl RuleEngine {
                 .then_with(|| object_a.cmp(object_b))
         });
         for (_, object) in ready {
-            self.evaluate(&object, moment, now, false, &mut out);
+            self.evaluate(&object, moment, now, &mut out);
         }
         out
     }
 
     /// Whether a tracked problem must be judged again by `cutoff`, and the
     /// time that orders it among others: its delay ran out, the rules
-    /// changed while it waited, or its mute ended.
+    /// changed while it waited, its mute ended, its object stopped flapping
+    /// (by `now`), or it gained a watch.
     fn ready_at(
         &self,
         object: &ObjectKey,
         tracked: &Tracked,
         cutoff: Timestamp,
+        now: Timestamp,
     ) -> Option<Timestamp> {
+        if tracked.status == Status::Notified {
+            return None;
+        }
+        if tracked.rejudge {
+            return Some(cutoff);
+        }
         match tracked.status {
-            Status::Waiting {
-                due, generation, ..
-            } => (due <= cutoff || generation != self.generation).then_some(due),
+            Status::Waiting { due, generation } => {
+                (due <= cutoff || generation != self.generation).then_some(due)
+            }
             Status::Muted => (self.scopes.rules().object_mode(object, cutoff)
                 != Some(ObjectMode::Mute))
             .then_some(cutoff),
+            Status::Flapping => (!self.is_flapping(object, now)).then_some(cutoff),
             Status::Idle | Status::Suppressed | Status::Notified => None,
         }
     }
 
-    /// Ends an expired pause and closes a finished storm window.
+    /// Ends an expired pause and summarizes the storm if it ended or has
+    /// gone on for a while.
     fn advance(&mut self, moment: Moment, out: &mut Vec<NotificationIntent>) {
         if self.paused_until.is_some_and(|until| until <= moment.now) {
             self.paused_until = None;
         }
-        let Some(summary) = self.storm.close_if_over(moment.now) else {
+        let settings = self.scopes.rules().settings.storm;
+        let Some(summary) = self.storm.poll(moment.now, settings) else {
             return;
         };
-        let environment = &self.scopes.rules().environment_name;
+        let environment = self.scopes.environment_name();
+        // A storm starting again at the same instant (the clock went back)
+        // must not reuse an id.
+        let base = text::storm_id(summary.started);
+        let mut id = base.clone();
+        let mut attempt = 1_u32;
+        while self.dedupe.contains(&id) {
+            attempt = attempt.saturating_add(1);
+            id = format!("{base}#{attempt}");
+        }
         let intent = NotificationIntent {
-            id: text::storm_id(summary.started),
+            id,
             object: None,
             title: summary.title(environment),
-            subtitle: environment.clone(),
+            subtitle: environment.to_owned(),
             body: summary.body(),
             tone: Tone::Info,
             sound: summary.sound,
@@ -322,11 +453,11 @@ impl RuleEngine {
             at,
         } = input;
         let Change::State {
+            previous,
             current,
             state_type,
             since,
             output,
-            ..
         } = change
         else {
             return;
@@ -342,59 +473,137 @@ impl RuleEngine {
             // "Never" would give every occurrence of the state one id.
             since: since.non_zero().unwrap_or(at),
             at,
-            output,
+            // Only the cleaned first line is ever used; plugin output can be
+            // huge.
+            body: text::output_body(&output),
             handled,
             memberships,
         };
-        let object = observation.subject.object.clone();
+        match self.arrival(&observation, moment.now) {
+            Arrival::Stale => {}
+            Arrival::Repeat => self.apply_repeat(observation, moment, out),
+            Arrival::New => self.apply_new_state(observation, previous, moment, out),
+        }
+    }
 
-        if let Some(tracked) = self.tracked.get_mut(&object) {
+    /// How a state change relates to what the engine knows of the object.
+    fn arrival(&self, observation: &Observation, now: Timestamp) -> Arrival {
+        let object = &observation.subject.object;
+        if let Some(tracked) = self.tracked.get(object) {
             let known = tracked.last.since;
-            if observation.since < known && known <= moment.now {
+            if is_before(observation.since, known) && known <= now {
                 debug!(%object, "ignoring a state change older than the known state");
-                return;
+                return Arrival::Stale;
             }
-            if tracked.last.state == observation.state && known == observation.since {
-                // The same state again: soft turned hard, or a repeat.
-                tracked.last.update(observation);
-                self.evaluate(&object, moment, moment.now, false, out);
-                return;
+            if tracked.last.state == observation.state && same_instant(observation.since, known) {
+                return Arrival::Repeat;
+            }
+        } else if let Some(settled) = self.settled.get(object) {
+            if is_before(observation.since, *settled) && *settled <= now {
+                debug!(%object, "ignoring a problem older than the state that ended it");
+                return Arrival::Stale;
+            }
+            if !observation.state.is_problem() && same_instant(observation.since, *settled) {
+                // The OK / UP / pending state it settled in, again.
+                return Arrival::Repeat;
             }
         }
+        Arrival::New
+    }
 
-        let previous = self.tracked.remove(&object);
-        if previous
+    /// Takes in the same state again: soft turned hard, the handling
+    /// changed, or a check confirmed the state. For an object that isn't
+    /// in a problem, there is nothing to do.
+    fn apply_repeat(
+        &mut self,
+        observation: Observation,
+        moment: Moment,
+        out: &mut Vec<NotificationIntent>,
+    ) {
+        let object = observation.subject.object.clone();
+        let Some(tracked) = self.tracked.get_mut(&object) else {
+            return;
+        };
+        if !observation.handled
+            && tracked
+                .settle
+                .is_some_and(|settle| is_after(observation.at, settle.after))
+        {
+            debug!(%object, "state confirmed by a check after the handling ended");
+            tracked.settle = None;
+        }
+        if tracked.last.handled && !observation.handled && tracked.status != Status::Notified {
+            // Handled no more without an event: the host or a parent
+            // recovered, and the state may be left over from the outage.
+            tracked.settle = Some(Settle {
+                until: moment.now.plus(RECOVERY_SETTLE),
+                after: observation.at,
+            });
+        }
+        tracked.last.update(observation);
+        self.evaluate(&object, moment, moment.now, out);
+    }
+
+    /// Takes in a new state: the problem goes on in another state, begins,
+    /// or ends.
+    fn apply_new_state(
+        &mut self,
+        observation: Observation,
+        previous: Option<CheckableState>,
+        moment: Moment,
+        out: &mut Vec<NotificationIntent>,
+    ) {
+        let object = observation.subject.object.clone();
+        self.note_state_change(&object, moment.now);
+        let replaced = self.tracked.remove(&object);
+        if replaced
             .as_ref()
             .is_some_and(|tracked| matches!(tracked.status, Status::Waiting { .. }))
         {
-            debug!(%object, "delayed notification cancelled: the state changed");
+            debug!(%object, "waiting notification superseded by a new state");
         }
-        let notified_by = previous
-            .map(|tracked| tracked.notified_by)
-            .unwrap_or_default();
+        let episode = replaced.and_then(|tracked| {
+            // The caller saw the problem end: the engine missed a recovery.
+            let missed_recovery = tracked.last.state.is_problem()
+                && previous.is_some_and(|previous| !previous.is_problem());
+            if missed_recovery {
+                debug!(%object, "the previous problem ended unseen; a new one begins");
+            }
+            (!missed_recovery).then_some(tracked.episode)
+        });
 
-        if Label::for_problem(observation.state).is_some() {
-            // A new problem state; the problem episode (and whether it
-            // notified) carries over from the previous problem state.
-            self.track(Tracked {
-                last: observation,
-                first_seen: moment.now,
-                status: Status::Idle,
-                notified_by,
-            });
-            self.evaluate(&object, moment, moment.now, false, out);
-        } else if is_up(observation.state) && !notified_by.is_empty() {
-            self.recover(&observation, &notified_by, moment, out);
+        if observation.state.is_problem() {
+            self.settled.remove(&object);
+            let episode =
+                episode.unwrap_or_else(|| Episode::new(earliest(observation.since, moment.now)));
+            self.track(Tracked::new(observation, episode));
+            self.evaluate(&object, moment, moment.now, out);
+        } else if is_up(observation.state) {
+            self.settled.insert(object.clone(), observation.since);
+            let Some(episode) = episode.filter(|episode| !episode.notified_by.is_empty()) else {
+                return;
+            };
+            if self.is_flapping(&object, moment.now) {
+                debug!(%object, "recovery held back: flapping");
+                let mut tracked = Tracked::new(observation, episode);
+                tracked.status = Status::Flapping;
+                self.track(tracked);
+            } else {
+                self.recover(&observation, &episode, moment, out);
+            }
+        } else {
+            // Pending: the object has no state any more (removed or
+            // re-created); it is forgotten without a notification.
+            self.settled.insert(object, observation.since);
         }
-        // Pending: the object has no state any more (removed or
-        // re-created); it is forgotten without a notification.
     }
 
-    /// Notifies a recovery, if a scope wants it.
+    /// Notifies a recovery, if a scope that notified the problem (or a
+    /// watch) wants it.
     fn recover(
         &mut self,
         observation: &Observation,
-        notified_by: &[Source],
+        episode: &Episode,
         moment: Moment,
         out: &mut Vec<NotificationIntent>,
     ) {
@@ -406,11 +615,7 @@ impl RuleEngine {
         }
         let draft = self
             .scopes
-            .candidates(
-                &observation.memberships,
-                notified_by,
-                mode == Some(ObjectMode::Watch),
-            )
+            .followup_candidates(&episode.notified_by, mode == Some(ObjectMode::Watch))
             .iter()
             .find(|candidate| candidate.enabled && candidate.rule.states.recovery)
             .map(|candidate| Draft {
@@ -419,7 +624,7 @@ impl RuleEngine {
                 label: Label::Recovered,
                 title: observation.subject.title(Label::Recovered),
                 subtitle: candidate.subtitle.to_owned(),
-                body: text::output_body(&observation.output),
+                body: observation.body.clone(),
                 sound: candidate.rule.sound,
                 at: observation.at,
             });
@@ -452,130 +657,196 @@ impl RuleEngine {
             Change::FlappingStarted => (Label::Flapping, String::new()),
             Change::FlappingStopped => (Label::FlappingStopped, String::new()),
         };
+        match label {
+            Label::Flapping => self.flapping.insert(object.clone(), moment.now),
+            Label::FlappingStopped => {
+                self.flapping.remove(&object);
+            }
+            _ => {}
+        }
+        let repeated_start = label == Label::Downtime
+            && self
+                .downtime_starts
+                .get(&object)
+                .is_some_and(|previous| within(at, *previous, DOWNTIME_START_PAIR));
+        if label == Label::Downtime {
+            self.downtime_starts.insert(object.clone(), at);
+        }
         let subject = Subject {
             object,
             host_display,
             service_display,
         };
-
-        let mode = self.scopes.rules().object_mode(&subject.object, moment.now);
-        if mode == Some(ObjectMode::Mute) {
-            debug!(object = %subject.object, "event not notified: muted");
+        if repeated_start {
+            debug!(object = %subject.object, "downtime start already reported");
         } else {
-            let draft = self
-                .scopes
-                .candidates(&memberships, &[], mode == Some(ObjectMode::Watch))
-                .iter()
-                .find(|candidate| candidate.enabled && label.event_enabled(candidate.rule.events))
-                .map(|candidate| Draft {
-                    id: text::event_id(&subject.object, label, at),
-                    object: subject.object.clone(),
-                    label,
-                    title: subject.title(label),
-                    subtitle: candidate.subtitle.to_owned(),
-                    body,
-                    sound: candidate.rule.sound,
-                    at,
-                });
-            if let Some(draft) = draft {
-                self.emit(draft, moment, out);
-            }
+            self.notify_event(&subject, label, body, &memberships, at, moment, out);
         }
 
-        // The event may start or end the handling of a known problem.
+        // The event may start or end the handling of a known problem, or
+        // its flapping.
         let object = subject.object.clone();
         let Some(tracked) = self.tracked.get_mut(&object) else {
             return;
         };
+        let ended = tracked.last.handled && !handled;
         tracked.last.subject = subject;
         tracked.last.handled = handled;
         tracked.last.memberships = memberships;
-        let rearm = match tracked.status {
-            Status::Waiting { .. } => false,
-            Status::Suppressed if !handled => true,
-            Status::Suppressed | Status::Muted | Status::Idle | Status::Notified => return,
+        if ended && tracked.status != Status::Notified {
+            tracked.settle = Some(Settle {
+                until: moment.now.plus(HANDLING_SETTLE),
+                after: at,
+            });
+        }
+        let rejudge = match label {
+            Label::Flapping | Label::FlappingStopped => true,
+            _ => matches!(tracked.status, Status::Waiting { .. } | Status::Suppressed),
         };
-        self.evaluate(&object, moment, moment.now, rearm, out);
+        if rejudge {
+            self.evaluate(&object, moment, moment.now, out);
+        }
     }
 
-    /// Decides what the object's problem state does now (notify, wait for
-    /// its delay, or nothing) and records the outcome. Delays count as run
-    /// out if due by `cutoff`. `rearm`: the problem just stopped being
-    /// handled, so it waits at least the grace period.
+    /// Notifies an acknowledgement, downtime or flapping change, if a scope
+    /// wants it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the parts of one event, taken apart by the caller"
+    )]
+    fn notify_event(
+        &mut self,
+        subject: &Subject,
+        label: Label,
+        body: String,
+        memberships: &[DashboardRef],
+        at: Timestamp,
+        moment: Moment,
+        out: &mut Vec<NotificationIntent>,
+    ) {
+        let object = &subject.object;
+        let mode = self.scopes.rules().object_mode(object, moment.now);
+        if mode == Some(ObjectMode::Mute) {
+            debug!(%object, "event not notified: muted");
+            return;
+        }
+        let watched = mode == Some(ObjectMode::Watch);
+        let candidates = match (label, self.tracked.get(object)) {
+            // Like Icinga: an acknowledgement concerns the users who were
+            // told about the problem.
+            (Label::Acknowledged | Label::AckCleared, Some(tracked)) => {
+                if tracked.episode.notified_by.is_empty() {
+                    debug!(%object, "acknowledgement of a problem that didn't notify");
+                    return;
+                }
+                self.scopes
+                    .followup_candidates(&tracked.episode.notified_by, watched)
+            }
+            _ => self.scopes.candidates(memberships, watched),
+        };
+        let draft = candidates
+            .iter()
+            .find(|candidate| candidate.enabled && label.event_enabled(candidate.rule.events))
+            .map(|candidate| Draft {
+                id: text::event_id(object, label, at),
+                object: object.clone(),
+                label,
+                title: subject.title(label),
+                subtitle: candidate.subtitle.to_owned(),
+                body,
+                sound: candidate.rule.sound,
+                at,
+            });
+        if let Some(draft) = draft {
+            self.emit(draft, moment, out);
+        }
+    }
+
+    /// Decides what the object's tracked state does now (notify, wait, hold
+    /// back, or nothing) and records the outcome. Delays count as run out
+    /// if due by `cutoff`.
     fn evaluate(
         &mut self,
         object: &ObjectKey,
         moment: Moment,
         cutoff: Timestamp,
-        rearm: bool,
         out: &mut Vec<NotificationIntent>,
     ) {
+        let flapping = self.is_flapping(object, moment.now);
         let rules = self.scopes.rules();
         let muted = rules.object_mode(object, moment.now) == Some(ObjectMode::Mute);
         // Judged with the watch even while a mute wins over it, so a watched
         // problem is held back (not dropped) until the mute ends.
         let watched = rules.is_watched(object, moment.now);
-        let Some(tracked) = self.tracked.get(object) else {
+        let generation = self.generation;
+        let Some(tracked) = self.tracked.get_mut(object) else {
             return;
         };
+        tracked.rejudge = false;
         if tracked.status == Status::Notified {
             return;
         }
-        let was_waiting = matches!(tracked.status, Status::Waiting { .. });
-        let mut not_before = match tracked.status {
-            Status::Waiting { not_before, .. } => not_before,
-            Status::Muted | Status::Idle | Status::Suppressed | Status::Notified => {
-                Timestamp::EPOCH
+        let verdict = if !tracked.last.state.is_problem() {
+            // An OK / UP state kept while the object flapped.
+            if flapping {
+                Verdict::Hold(Status::Flapping)
+            } else {
+                Verdict::Recover
+            }
+        } else if tracked.episode.last_notified == Some(tracked.last.state) {
+            debug!(%object, "state already notified during this problem");
+            Verdict::Hold(Status::Notified)
+        } else if flapping {
+            Verdict::Hold(Status::Flapping)
+        } else {
+            match decide(&self.scopes, tracked, watched, cutoff) {
+                Decision::Notify { .. } | Decision::Wait { .. } if muted => {
+                    Verdict::Hold(Status::Muted)
+                }
+                Decision::Notify { draft, sources } => Verdict::Notify { draft, sources },
+                Decision::Wait { due } => Verdict::Hold(Status::Waiting { due, generation }),
+                Decision::Suppressed => Verdict::Hold(Status::Suppressed),
+                Decision::Idle => Verdict::Hold(Status::Idle),
             }
         };
-        if rearm {
-            not_before = latest(not_before, moment.now.plus(HANDLING_GRACE));
-        }
-        let decision = decide(&self.scopes, tracked, watched, cutoff, not_before);
-
-        let status = match decision {
-            Decision::Notify { .. } | Decision::Wait { .. } if muted => {
-                debug!(%object, "problem held back: muted");
-                Status::Muted
+        match verdict {
+            Verdict::Hold(status) => {
+                if status != tracked.status {
+                    debug!(%object, from = ?tracked.status, to = ?status, "problem status");
+                }
+                tracked.status = status;
             }
-            Decision::Notify { draft, sources } => {
-                self.emit(draft, moment, out);
+            Verdict::Recover => {
+                if let Some(tracked) = self.tracked.remove(object) {
+                    self.recover(&tracked.last, &tracked.episode, moment, out);
+                }
+            }
+            Verdict::Notify { draft, sources } => {
+                let emitted = self.emit(draft, moment, out);
                 if let Some(tracked) = self.tracked.get_mut(object) {
-                    for source in sources {
-                        if !tracked.notified_by.contains(&source) {
-                            tracked.notified_by.push(source);
+                    // An id emitted before means an old state came back
+                    // (a replay): it doesn't make the problem notified.
+                    if emitted {
+                        for source in sources {
+                            if !tracked.episode.notified_by.contains(&source) {
+                                tracked.episode.notified_by.push(source);
+                            }
                         }
+                        tracked.episode.last_notified = Some(tracked.last.state);
                     }
-                }
-                Status::Notified
-            }
-            Decision::Wait { due } => {
-                if !was_waiting {
-                    debug!(%object, due = due.as_unix_seconds(), "notification delayed");
-                }
-                Status::Waiting {
-                    due,
-                    not_before,
-                    generation: self.generation,
+                    tracked.status = Status::Notified;
                 }
             }
-            Decision::Suppressed => Status::Suppressed,
-            Decision::Idle => Status::Idle,
-        };
-        if was_waiting && matches!(status, Status::Idle | Status::Suppressed) {
-            debug!(%object, "delayed notification cancelled");
-        }
-        if let Some(tracked) = self.tracked.get_mut(object) {
-            tracked.status = status;
         }
     }
 
     /// Records `draft` unless it was emitted before, deciding whether it is
-    /// silent: paused, quiet hours, or absorbed by a storm.
-    fn emit(&mut self, draft: Draft, moment: Moment, out: &mut Vec<NotificationIntent>) {
+    /// silent: paused, quiet hours, or absorbed by a storm. Returns whether
+    /// it was emitted.
+    fn emit(&mut self, draft: Draft, moment: Moment, out: &mut Vec<NotificationIntent>) -> bool {
         if self.dedupe.contains(&draft.id) {
             debug!(id = %draft.id, "already notified");
-            return;
+            return false;
         }
         let storm = self.scopes.rules().settings.storm;
         let silent = self.is_silenced(moment, draft.label.is_critical())
@@ -596,6 +867,7 @@ impl RuleEngine {
             silent,
             at: draft.at,
         });
+        true
     }
 
     /// Whether notifications are silent at `moment` because of a pause or
@@ -609,6 +881,23 @@ impl RuleEngine {
                 && !(quiet_hours.allow_critical && critical))
     }
 
+    /// Whether `object` is flapping at `now`.
+    fn is_flapping(&self, object: &ObjectKey, now: Timestamp) -> bool {
+        self.flapping
+            .get(object)
+            .is_some_and(|evidence| now < evidence.plus(FLAPPING_EXPIRY))
+    }
+
+    /// A state change of a flapping object shows it still flaps; an
+    /// expired flag is dropped.
+    fn note_state_change(&mut self, object: &ObjectKey, now: Timestamp) {
+        if self.is_flapping(object, now) {
+            self.flapping.insert(object.clone(), now);
+        } else {
+            self.flapping.remove(object);
+        }
+    }
+
     /// Starts tracking an object's problem, keeping memory bounded.
     fn track(&mut self, tracked: Tracked) {
         let object = tracked.last.subject.object.clone();
@@ -618,26 +907,29 @@ impl RuleEngine {
         }
     }
 
-    /// Forgets the objects whose state changed longest ago (never `keep`),
-    /// down to seven eighths of the limit, so this runs rarely.
+    /// Forgets objects down to seven eighths of the limit (so this runs
+    /// rarely), never `keep`. Problems that hold nothing (no notification
+    /// pending, no recovery owed) go first; within each kind, those whose
+    /// state changed longest ago.
     fn evict(&mut self, keep: &ObjectKey) {
         let target = self.limits.tracked - self.limits.tracked / 8;
         let excess = self.tracked.len().saturating_sub(target);
-        let mut by_age: Vec<(Timestamp, ObjectKey)> = self
+        let mut by_value: Vec<(bool, Timestamp, ObjectKey)> = self
             .tracked
             .iter()
             .filter(|(object, _)| *object != keep)
-            .map(|(object, tracked)| (tracked.last.at, object.clone()))
+            .map(|(object, tracked)| (tracked.holds_something(), tracked.last.at, object.clone()))
             .collect();
-        by_age.sort_by(|(at_a, object_a), (at_b, object_b)| {
-            at_a.as_unix_seconds()
-                .total_cmp(&at_b.as_unix_seconds())
+        by_value.sort_by(|(holds_a, at_a, object_a), (holds_b, at_b, object_b)| {
+            holds_a
+                .cmp(holds_b)
+                .then_with(|| at_a.as_unix_seconds().total_cmp(&at_b.as_unix_seconds()))
                 .then_with(|| object_a.cmp(object_b))
         });
-        for (_, object) in by_age.into_iter().take(excess) {
+        for (_, _, object) in by_value.into_iter().take(excess) {
             self.tracked.remove(&object);
         }
-        debug!(excess, "tracked too many problems; forgot the oldest");
+        debug!(excess, "tracked too many problems; forgot some");
     }
 }
 
@@ -675,62 +967,122 @@ struct Observation {
     state_type: StateType,
     since: Timestamp,
     at: Timestamp,
-    output: String,
+    /// The notification body: the output's first line, cleaned and cut.
+    body: String,
     handled: bool,
     memberships: Vec<DashboardRef>,
 }
 
 impl Observation {
-    /// Takes in a repeat of the same state (same `state` and `since`).
+    /// Takes in a repeat of the same state. The known `since` stays (it
+    /// names the state in ids); a blank body keeps the previous one.
     fn update(&mut self, newer: Self) {
-        let output = if newer.output.trim().is_empty() {
-            std::mem::take(&mut self.output)
+        let body = if newer.body.is_empty() {
+            std::mem::take(&mut self.body)
         } else {
-            newer.output
+            newer.body
         };
-        *self = Self { output, ..newer };
+        *self = Self {
+            since: self.since,
+            body,
+            ..newer
+        };
     }
 }
 
-/// An object in a problem state.
+/// An object in a problem (or, while it flaps, back to OK / UP with the
+/// problem's recovery still owed).
 #[derive(Clone, Debug)]
 struct Tracked {
     /// The latest state change and what later events told about it.
     last: Observation,
-    /// When the engine first saw the current state. A state can't begin
-    /// after the engine hears of it, so delays count from the earlier of
-    /// this and `since`, which keeps a server clock that runs ahead from
-    /// holding notifications back.
-    first_seen: Timestamp,
-    /// What the current problem state's notification is doing.
+    /// The problem this state belongs to.
+    episode: Episode,
+    /// What the current state's notification is doing.
     status: Status,
-    /// Scopes that notified a problem since the object last left OK / UP;
-    /// non-empty means its recovery may notify.
-    notified_by: Vec<Source>,
+    /// Set when the handling ended: the state awaits a fresh check.
+    settle: Option<Settle>,
+    /// Judge again on the next tick (the object gained a watch).
+    rejudge: bool,
 }
 
-/// The notification of an object's current problem state.
+impl Tracked {
+    fn new(last: Observation, episode: Episode) -> Self {
+        Self {
+            last,
+            episode,
+            status: Status::Idle,
+            settle: None,
+            rejudge: false,
+        }
+    }
+
+    /// Whether forgetting it would lose something: a notification that may
+    /// still come, or a recovery owed.
+    fn holds_something(&self) -> bool {
+        !self.episode.notified_by.is_empty()
+            || self.rejudge
+            || !matches!(self.status, Status::Idle | Status::Notified)
+    }
+}
+
+/// A problem: from leaving OK / UP until back.
+#[derive(Clone, Debug)]
+struct Episode {
+    /// When it began: the earliest of its first state's `since` and when
+    /// the engine first saw it. A state can't begin after the engine hears
+    /// of it, so a server clock that runs ahead can't hold delays back.
+    start: Timestamp,
+    /// Scopes whose rule notified one of its states; non-empty means its
+    /// recovery and acknowledgement may notify.
+    notified_by: Vec<Source>,
+    /// The state notified last.
+    last_notified: Option<CheckableState>,
+}
+
+impl Episode {
+    fn new(start: Timestamp) -> Self {
+        Self {
+            start,
+            notified_by: Vec::new(),
+            last_notified: None,
+        }
+    }
+}
+
+/// A problem whose handling ended, waiting for a fresh check.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Settle {
+    /// Without a confirmation it notifies no earlier than this (engine
+    /// time).
+    until: Timestamp,
+    /// When the handling ended (the input's `at`); a repeat of the state
+    /// that happened later confirms it.
+    after: Timestamp,
+}
+
+/// The notification of an object's current state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Status {
     /// Nothing to notify: no enabled rule matches.
     Idle,
-    /// A rule would match if the problem weren't handled; notifies once it
-    /// isn't.
+    /// A rule would match if the problem weren't handled; judged again
+    /// once the handling ends.
     Suppressed,
     /// A rule matches but the object is muted; notifies once the mute ends
     /// if the object is still in this state.
     Muted,
-    /// Waiting for a delay (`min_duration_secs`, or the grace after
+    /// The object flaps; judged again once it stops.
+    Flapping,
+    /// Waiting for a delay (`min_duration_secs`, or the settling after the
     /// handling ended).
     Waiting {
         /// When it notifies.
         due: Timestamp,
-        /// It never notifies before this.
-        not_before: Timestamp,
         /// The rules generation `due` was computed under.
         generation: u64,
     },
-    /// Notified (or found already notified).
+    /// Notified (or known to be notified already).
     Notified,
 }
 
@@ -747,7 +1099,7 @@ struct Draft {
     at: Timestamp,
 }
 
-/// What a problem state's notification should do.
+/// What a problem state's notification should do, by the rules.
 #[derive(Debug)]
 enum Decision {
     /// No enabled rule matches.
@@ -760,20 +1112,36 @@ enum Decision {
     Notify { draft: Draft, sources: Vec<Source> },
 }
 
+/// How a state change relates to what the engine knows of the object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arrival {
+    /// Older than the known state: ignored.
+    Stale,
+    /// The known state again (same state and `since`).
+    Repeat,
+    /// A new state.
+    New,
+}
+
+/// What [`RuleEngine::evaluate`] does with a tracked state.
+#[derive(Debug)]
+enum Verdict {
+    /// Record this status, notify nothing.
+    Hold(Status),
+    /// Notify the problem.
+    Notify { draft: Draft, sources: Vec<Source> },
+    /// Notify the recovery and forget the object.
+    Recover,
+}
+
 /// Judges a tracked problem state by the scopes of its object. Delays count
-/// as run out if due by `cutoff`; none runs out before `not_before`.
-fn decide(
-    scopes: &Scopes,
-    tracked: &Tracked,
-    watched: bool,
-    cutoff: Timestamp,
-    not_before: Timestamp,
-) -> Decision {
+/// as run out if due by `cutoff`.
+fn decide(scopes: &Scopes, tracked: &Tracked, watched: bool, cutoff: Timestamp) -> Decision {
     let last = &tracked.last;
     let Some(label) = Label::for_problem(last.state) else {
         return Decision::Idle;
     };
-    let candidates = scopes.candidates(&last.memberships, &[], watched);
+    let candidates = scopes.candidates(&last.memberships, watched);
     let matching: Vec<&Candidate<'_>> = candidates
         .iter()
         .filter(|candidate| {
@@ -792,10 +1160,15 @@ fn decide(
         };
     }
 
-    let start = earliest(last.since, tracked.first_seen);
     let due = |candidate: &Candidate<'_>| {
         let delay = Duration::from_secs(u64::from(candidate.rule.min_duration_secs));
-        latest(start.plus(delay), not_before)
+        let delayed = tracked.episode.start.plus(delay);
+        match tracked.settle {
+            // Only rules that skip handled problems were held back by the
+            // handling; for the others it never mattered.
+            Some(settle) if candidate.rule.skip_handled => latest(delayed, settle.until),
+            _ => delayed,
+        }
     };
     if let Some(chosen) = matching.iter().find(|candidate| due(candidate) <= cutoff) {
         let draft = Draft {
@@ -804,7 +1177,7 @@ fn decide(
             label,
             title: last.subject.title(label),
             subtitle: chosen.subtitle.to_owned(),
-            body: text::output_body(&last.output),
+            body: last.body.clone(),
             sound: chosen.rule.sound,
             at: last.at,
         };
@@ -855,6 +1228,26 @@ fn is_up(state: CheckableState) -> bool {
     )
 }
 
+/// Whether `a` and `b` are the same instant, to the millisecond.
+fn same_instant(a: Timestamp, b: Timestamp) -> bool {
+    (a.as_unix_seconds() - b.as_unix_seconds()).abs() < SINCE_TOLERANCE_SECS
+}
+
+/// Whether `a` lies before `b` by more than the tolerance.
+fn is_before(a: Timestamp, b: Timestamp) -> bool {
+    a.as_unix_seconds() < b.as_unix_seconds() - SINCE_TOLERANCE_SECS
+}
+
+/// Whether `a` lies after `b` by more than the tolerance.
+fn is_after(a: Timestamp, b: Timestamp) -> bool {
+    is_before(b, a)
+}
+
+/// Whether `a` and `b` lie less than `span` apart.
+fn within(a: Timestamp, b: Timestamp, span: Duration) -> bool {
+    (a.as_unix_seconds() - b.as_unix_seconds()).abs() < span.as_secs_f64()
+}
+
 fn latest(a: Timestamp, b: Timestamp) -> Timestamp {
     if b > a { b } else { a }
 }
@@ -876,21 +1269,33 @@ mod tests {
         Timestamp::from_unix_seconds(seconds)
     }
 
-    fn critical(service: &str, since: f64) -> RuleInput {
+    fn state_input(service: &str, state: ServiceState, since: f64) -> RuleInput {
         RuleInput {
             object: ObjectKey::service("h", service),
             host_display: "h".to_owned(),
             service_display: Some(service.to_owned()),
             change: Change::State {
-                previous: Some(CheckableState::Service(ServiceState::Ok)),
-                current: CheckableState::Service(ServiceState::Critical),
+                previous: None,
+                current: CheckableState::Service(state),
                 state_type: StateType::Hard,
                 since: at(since),
-                output: "CRITICAL".to_owned(),
+                output: format!("{state:?}"),
             },
             handled: false,
             memberships: Vec::new(),
             at: at(since),
+        }
+    }
+
+    fn critical(service: &str, since: f64) -> RuleInput {
+        state_input(service, ServiceState::Critical, since)
+    }
+
+    fn limits(tracked: usize) -> Limits {
+        Limits {
+            dedupe: 100,
+            tracked,
+            ..Limits::default()
         }
     }
 
@@ -908,10 +1313,7 @@ mod tests {
 
     #[test]
     fn tracking_stays_bounded_and_keeps_the_newest() {
-        let mut engine = engine(Limits {
-            dedupe: 100,
-            tracked: 8,
-        });
+        let mut engine = engine(limits(8));
         for n in 0..20_u32 {
             let intents =
                 engine.on_input(critical(&n.to_string(), f64::from(n + 1)), at(100.0), LOCAL);
@@ -924,10 +1326,7 @@ mod tests {
 
     #[test]
     fn eviction_never_drops_the_object_just_seen() {
-        let mut engine = engine(Limits {
-            dedupe: 100,
-            tracked: 2,
-        });
+        let mut engine = engine(limits(2));
         assert_eq!(
             engine.on_input(critical("a", 50.0), at(100.0), LOCAL).len(),
             1
@@ -944,10 +1343,33 @@ mod tests {
     }
 
     #[test]
+    fn eviction_forgets_problems_that_hold_nothing_first() {
+        let mut rules = RuleSet::default();
+        rules.settings.storm.window_secs = 0;
+        rules.settings.default_rule.min_duration_secs = 300;
+        let mut engine = RuleEngine::with_limits(rules, limits(4));
+        // An old problem waiting for its delay.
+        assert!(
+            engine
+                .on_input(critical("waiting", 0.0), at(0.0), LOCAL)
+                .is_empty()
+        );
+        // Newer warnings no rule selects.
+        for n in 0..8_u32 {
+            let warning = state_input(&format!("w{n}"), ServiceState::Warning, f64::from(n + 1));
+            assert!(engine.on_input(warning, at(10.0), LOCAL).is_empty());
+        }
+        assert!(engine.tracked.len() <= 4);
+        let intents = engine.tick(at(300.0), LOCAL);
+        assert_eq!(intents.len(), 1, "the waiting notification survived");
+        assert_eq!(intents[0].object, Some(ObjectKey::service("h", "waiting")));
+    }
+
+    #[test]
     fn dedupe_memory_is_bounded() {
         let mut engine = engine(Limits {
             dedupe: 3,
-            tracked: 100,
+            ..Limits::default()
         });
         for n in 0..10_u32 {
             let intents =
@@ -958,20 +1380,67 @@ mod tests {
     }
 
     #[test]
+    fn other_memories_are_bounded() {
+        let mut engine = engine(Limits {
+            settled: 3,
+            flapping: 3,
+            downtime_starts: 3,
+            ..Limits::default()
+        });
+        for n in 0..10_u32 {
+            let service = n.to_string();
+            let mut flapping = critical(&service, 0.0);
+            flapping.change = Change::FlappingStarted;
+            let mut downtime = critical(&service, 0.0);
+            downtime.change = Change::DowntimeStarted {
+                author: String::new(),
+                comment: String::new(),
+            };
+            let ok = state_input(&service, ServiceState::Ok, f64::from(n));
+            for input in [flapping, downtime, ok] {
+                let _ = engine.on_input(input, at(100.0), LOCAL);
+            }
+        }
+        assert_eq!(engine.settled.len(), 3);
+        assert_eq!(engine.flapping.len(), 3);
+        assert_eq!(engine.downtime_starts.len(), 3);
+    }
+
+    #[test]
     fn recovered_objects_are_no_longer_tracked() {
         let mut engine = engine(Limits::default());
         assert_eq!(engine.on_input(critical("a", 1.0), at(1.0), LOCAL).len(), 1);
         assert_eq!(engine.tracked.len(), 1);
-        let mut ok = critical("a", 2.0);
-        ok.change = Change::State {
-            previous: Some(CheckableState::Service(ServiceState::Critical)),
-            current: CheckableState::Service(ServiceState::Ok),
-            state_type: StateType::Hard,
-            since: at(2.0),
-            output: "OK".to_owned(),
-        };
+        let ok = state_input("a", ServiceState::Ok, 2.0);
         let intents = engine.on_input(ok, at(2.0), LOCAL);
         assert_eq!(intents.len(), 1);
         assert!(engine.tracked.is_empty());
+    }
+
+    #[test]
+    fn huge_plugin_output_is_not_kept() {
+        let mut engine = engine(Limits::default());
+        let mut input = critical("a", 1.0);
+        if let Change::State { output, .. } = &mut input.change {
+            *output = format!("{}\n{}", "x".repeat(2_000_000), "y".repeat(1_000_000));
+        }
+        let intents = engine.on_input(input, at(1.0), LOCAL);
+        assert_eq!(intents[0].body.chars().count(), 400);
+        let tracked = engine.tracked.values().next().unwrap();
+        assert!(tracked.last.body.len() <= 4 * 400);
+        assert!(format!("{engine:?}").len() < 20_000);
+    }
+
+    #[test]
+    fn instants_compare_to_the_millisecond() {
+        assert!(same_instant(at(100.0004), at(100.0001)));
+        assert!(same_instant(at(100.0004), at(100.0006)));
+        assert!(!same_instant(at(100.0), at(100.002)));
+        assert!(!is_before(at(100.0001), at(100.0004)));
+        assert!(is_before(at(99.998), at(100.0)));
+        assert!(is_after(at(100.002), at(100.0)));
+        assert!(!is_after(at(100.0005), at(100.0)));
+        assert!(within(at(0.0), at(4.9), Duration::from_secs(5)));
+        assert!(!within(at(0.0), at(5.0), Duration::from_secs(5)));
     }
 }

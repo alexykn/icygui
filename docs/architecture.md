@@ -219,7 +219,7 @@ impl Client {
 pub async fn fetch_server_certificate(base_url: &Url, server_name: Option<&str>) -> Result<CertificateInfo, ApiError>;  // trust on first use: sha256, subject, issuer, not_after; accepts any cert, only reads it
 
 pub enum Detail {
-    Lean,   // state, state_type, last_state_change, last_hard_state_change, last_check, next_check, check_attempt, max_check_attempts,
+    Lean,   // state, state_type, last_state_change, last_hard_state_change, last_check, next_check, next_update, check_attempt, max_check_attempts,
             // acknowledgement(+expiry), downtime_depth, flapping, last_reachable, check_interval, retry_interval, groups, vars, display_name, host_name
     Full,   // Lean + last_check_result, check_command, command_endpoint, zone, enable_*, flapping_current, notes, notes_url, action_url, icon_image
 }
@@ -368,15 +368,20 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
    - Several `CheckResult`s for one object within a batch collapse to the last one. Other event types are never collapsed.
    - Objects are re-queried only for `ObjectCreated`/`ObjectModified`/`ObjectDeleted` and for unknown objects.
    - Required throughput: 50 000 recorded events applied in under 3 s; steady state about 110 events/s.
-4. *Hydration on demand:*
+4. *Freshness watchdog:*
+   - Each object's deadline is Icinga's `next_update`: `next_check` + interval + 2 × latency for active checks, last result + 2 × interval for passive ones.
+   - It comes from the lean query and is recomputed from every `CheckResult` event, so manual checks by anyone move it.
+   - Overdue objects are re-queried by name: batches ≤ 200, at most once per object per interval.
+   - Objects Icinga still reports overdue get `late = true` in the snapshot (the UI shows "late").
+5. *Hydration on demand:*
    - `Command::Hydrate(Vec<ObjectKey>)` asks for `Full` details of lean objects. The UI sends it, debounced, for visible rows without output and for an opened pane.
    - Batches hold at most 200 names and requests are deduplicated.
-5. *Reconcile:* a lean reload (tiers 1–3) on connect, after every reconnect (with jitter) and on `Refresh`.
+6. *Reconcile:* a lean reload (tiers 1–3) on connect, after every reconnect (with jitter) and on `Refresh`.
    - Periodically, adaptively: every 5 minutes below 5 000 objects, every 15 minutes above. `General.reconcile_interval_secs = 0` means adaptive; any other value overrides it.
    - Diff the reload against the store; state changes found only by the diff produce rule inputs, as do removals.
    - **Never** periodic full-attribute reloads: they cost the master around 1 GB of memory at this scale.
-6. Poll status every 30 s. A changed `program_start` means Icinga restarted and triggers a reload.
-7. Stream end or error → `Reconnecting` with exponential backoff and jitter (1 s → 60 s, reset after 5 minutes of health). Auth (401) → `AuthFailed`. TLS errors and pin mismatch → `TlsFailed` with the presented certificate (via `fetch_server_certificate`).
+7. Poll status every 30 s. A changed `program_start` means Icinga restarted and triggers a reload.
+8. Stream end or error → `Reconnecting` with exponential backoff and jitter (1 s → 60 s, reset after 5 minutes of health). Auth (401) → `AuthFailed`. TLS errors and pin mismatch → `TlsFailed` with the presented certificate (via `fetch_server_certificate`).
 
 **Store and snapshots:**
 - Objects are `Arc`-shared in `BTreeMap`s and copied on write.

@@ -65,6 +65,15 @@ Run against a real **Icinga 2.15.6** in Docker with **2 005 hosts and 30 006 ser
 - Re-queries happen only for `ObjectCreated`/`ObjectModified`/`ObjectDeleted` and for unknown objects.
 - Snapshots go out at most 4 times per second. Dashboards are re-evaluated only for touched objects and re-sorted only when their rows or sort keys changed.
 
+**Freshness watchdog** (instead of refreshing by schedule):
+- Every object has a deadline: Icinga's own `next_update`.
+  - Active checks: `next_check` + the check or retry interval + 2 × latency.
+  - Passive checks: last result + 2 × interval.
+  - It's loaded with the lean attributes and recomputed locally from every `CheckResult` event using the same formula.
+- Each event, whether a scheduled check, a manual "check now" by anyone, or a passive result, resets that object's deadline. Manual runs by colleagues therefore never desynchronise anything.
+- An object with no result past its deadline is re-queried by name (batches ≤ 200, at most once per interval per object). That cheaply catches missed events, and it corrects deadlines after someone reschedules a check without an event.
+- If Icinga still reports the object overdue after the re-query, the check is genuinely **late**. The UI marks it ("late 12m"), as Icinga DB Web does. A satellite or agent has usually stopped checking.
+
 **Reconciling (keeping the client and Icinga in sync):**
 - A lean reload (tiers 1–3) on connect and reconnect, with jitter so ten clients reconnecting after an Icinga restart don't hit the master at the same instant.
 - A periodic lean reconcile, **adaptive**: every 5 minutes below 5 000 objects, every 15 minutes above. It's configurable.

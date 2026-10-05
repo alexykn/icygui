@@ -33,6 +33,7 @@ Production scale is 2 000 hosts / 30 000 services; the numbers were measured aga
 - **PERF-04** No per-event re-queries (`vars_after` is used). Re-queries happen by name only for config changes, unknown objects and on-demand hydration of visible rows and opened panes.
 - **PERF-05** Master-friendly: one event stream per client; lean reconcile adaptively (5 or 15 minutes), on reconnect with jitter, and on Icinga restart; never periodic full-attribute reloads.
 - **PERF-06** Client memory under 400 MB at production scale; 30 000-row dashboards scroll smoothly; dashboards are evaluated incrementally.
+- **PERF-08** Freshness watchdog: every object's deadline is Icinga's `next_update`, reset by every check result (manual or scheduled, by anyone). Overdue objects are re-queried individually by name, and objects that are still overdue are shown as "late" in rows and panes.
 - **PERF-07** Reproducible benchmarks: `contract/scale/benchmark.sh` (real Icinga) and `ic-mock`'s `large` scenario with burst mode. Release-mode performance tests run in nightly CI.
 
 ## Sidebar and dashboards

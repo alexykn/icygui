@@ -310,6 +310,7 @@ pub enum Command {
     LoadHistory { object: Option<ObjectKey>, limit: usize, reply: oneshot::Sender<Vec<LogEntry>> },
     LoadNotifications { limit: usize, reply: oneshot::Sender<Vec<NotificationRecord>> },
     MarkNotificationsRead,
+    PreviewDashboard { view: ic_config::View, reply: oneshot::Sender<Result<DashboardResult, String>> },   // dashboard editor: live match count and rows
 }
 pub enum CoreEvent {
     Connection(ConnectionState),
@@ -333,7 +334,9 @@ pub enum LogKind { State { state: CheckableState, state_type: StateType }, Ackno
 pub struct NotificationRecord { pub intent: NotificationIntent, pub read: bool }
 ```
 
-The `Snapshot` contract type gains `last_event_at: Option<Timestamp>`, which the footer shows as "master-01 · 2s". This is an allowed additive change.
+The `Snapshot` contract type gains two fields; both are allowed additive changes:
+- `last_event_at: Option<Timestamp>`, which the footer shows as "master-01 · 2s";
+- `overall: Summary`, over all hosts and services, which drives the tray icon and its tooltip.
 
 **Sync engine:**
 1. Connect: build an `ic_api::Client` from the environment.

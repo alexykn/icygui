@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value as Json};
 
 use super::World;
-use super::types::{CheckResultData, Checkable, CommandData, GroupData};
+use super::types::{CheckResultData, Checkable, CommandData, GroupData, NotificationData};
 use crate::filter::{Frame, Item, Value};
 use crate::json::{int, num};
 
@@ -25,6 +25,7 @@ pub(crate) enum ObjKind {
     Endpoint,
     Zone,
     User,
+    Notification,
     CheckCommand,
     EventCommand,
 }
@@ -247,10 +248,40 @@ const USER: &[&str] = &[
     "types",
     "vars",
 ];
+/// `lib/icinga/notification.ti`, as Icinga 2.15.6 serializes it
+/// (`contract/samples/notifications.json`).
+const NOTIFICATION: &[&str] = &[
+    "command",
+    "command_endpoint",
+    "host_name",
+    "interval",
+    "last_notification",
+    "last_problem_notification",
+    "next_notification",
+    "no_more_notifications",
+    "notification_number",
+    "notified_problem_users",
+    "period",
+    "service_name",
+    "states",
+    "times",
+    "types",
+    "user_groups",
+    "users",
+    "vars",
+];
+/// Notification fields that exist but are `no_user_view`.
+const NOTIFICATION_HIDDEN: &[&str] = &[
+    "type_filter_real",
+    "state_filter_real",
+    "stashed_notifications",
+    "suppressed_notifications",
+    "last_notified_state_per_user",
+];
 const COMMAND: &[&str] = &["arguments", "command", "env", "execute", "timeout", "vars"];
 
 impl ObjKind {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Host,
         Self::Service,
         Self::HostGroup,
@@ -261,6 +292,7 @@ impl ObjKind {
         Self::Endpoint,
         Self::Zone,
         Self::User,
+        Self::Notification,
         Self::CheckCommand,
         Self::EventCommand,
     ];
@@ -277,6 +309,7 @@ impl ObjKind {
             Self::Endpoint => "Endpoint",
             Self::Zone => "Zone",
             Self::User => "User",
+            Self::Notification => "Notification",
             Self::CheckCommand => "CheckCommand",
             Self::EventCommand => "EventCommand",
         }
@@ -294,6 +327,7 @@ impl ObjKind {
             Self::Endpoint => "endpoints",
             Self::Zone => "zones",
             Self::User => "users",
+            Self::Notification => "notifications",
             Self::CheckCommand => "checkcommands",
             Self::EventCommand => "eventcommands",
         }
@@ -326,6 +360,7 @@ impl ObjKind {
             Self::Endpoint => CONFIG_OBJECT.iter().chain(ENDPOINT).copied().collect(),
             Self::Zone => CONFIG_OBJECT.iter().chain(ZONE).copied().collect(),
             Self::User => CONFIG_OBJECT.iter().chain(USER).copied().collect(),
+            Self::Notification => CONFIG_OBJECT.iter().chain(NOTIFICATION).copied().collect(),
             Self::CheckCommand | Self::EventCommand => {
                 CONFIG_OBJECT.iter().chain(COMMAND).copied().collect()
             }
@@ -361,6 +396,7 @@ impl ObjKind {
             Self::Host | Self::Service => CHECKABLE_HIDDEN,
             Self::Comment => COMMENT_HIDDEN,
             Self::Downtime => &["removed_by"],
+            Self::Notification => NOTIFICATION_HIDDEN,
             _ => &[],
         }
     }
@@ -398,6 +434,11 @@ impl ObjKind {
                 ("parent_service", Self::Service),
             ],
             Self::Zone => &[("parent", Self::Zone)],
+            Self::Notification => &[
+                ("host", Self::Host),
+                ("service", Self::Service),
+                ("command_endpoint", Self::Endpoint),
+            ],
             _ => &[],
         }
     }
@@ -408,6 +449,8 @@ impl ObjKind {
         match self {
             Self::Host | Self::Service => &["check_period"],
             Self::Dependency | Self::User => &["period"],
+            // The mock has no notification commands or time periods.
+            Self::Notification => &["command", "period"],
             _ => &[],
         }
     }
@@ -434,7 +477,6 @@ pub(crate) const EMPTY_TYPES: &[(&str, &str)] = &[
     ("influxdb2writers", "Influxdb2Writer"),
     ("journaldloggers", "JournaldLogger"),
     ("livestatuslisteners", "LivestatusListener"),
-    ("notifications", "Notification"),
     ("notificationcommands", "NotificationCommand"),
     ("notificationcomponents", "NotificationComponent"),
     ("opentsdbwriters", "OpenTsdbWriter"),
@@ -508,6 +550,7 @@ impl World {
             ObjKind::Endpoint => self.endpoints.contains_key(name),
             ObjKind::Zone => self.zones.contains_key(name),
             ObjKind::User => self.users.contains_key(name),
+            ObjKind::Notification => self.notifications.contains_key(name),
             ObjKind::CheckCommand => self.check_commands.contains_key(name),
             ObjKind::EventCommand => self.event_commands.contains_key(name),
         }
@@ -526,6 +569,7 @@ impl World {
             ObjKind::Endpoint => self.endpoints.keys().cloned().collect(),
             ObjKind::Zone => self.zones.keys().cloned().collect(),
             ObjKind::User => self.users.keys().cloned().collect(),
+            ObjKind::Notification => self.notifications.keys().cloned().collect(),
             ObjKind::CheckCommand => self.check_commands.keys().cloned().collect(),
             ObjKind::EventCommand => self.event_commands.keys().cloned().collect(),
         }
@@ -573,6 +617,15 @@ impl World {
                 }
             }
             ObjKind::Zone => self.zones.get(name)?.parent.clone(),
+            ObjKind::Notification => {
+                let notification = self.notifications.get(name)?;
+                match join {
+                    "host" => notification.host_name.clone(),
+                    "service" if !notification.service_name.is_empty() => notification.object(),
+                    "command_endpoint" => String::new(),
+                    _ => return None,
+                }
+            }
             _ => return None,
         };
         (!target_name.is_empty() && self.exists(*target, &target_name)).then_some(ObjRef {
@@ -773,6 +826,10 @@ impl World {
                     })
                 })
             }),
+            ObjKind::Notification => self
+                .notifications
+                .get(&object.name)
+                .map(|n| notification_attr(n, name)),
             ObjKind::CheckCommand => self
                 .check_commands
                 .get(&object.name)
@@ -904,6 +961,58 @@ fn group_attr(group: &GroupData, name: &str, type_name: &str) -> Option<Json> {
             "notes_url" => string(&group.notes_url),
             "action_url" => string(&group.action_url),
             "vars" => vars(group.vars.as_ref()),
+            _ => return None,
+        })
+    })
+}
+
+fn notification_attr(notification: &NotificationData, name: &str) -> Option<Json> {
+    common(
+        &notification.meta,
+        name,
+        &notification.name,
+        &notification.short_name,
+        "Notification",
+    )
+    .or_else(|| {
+        Some(match name {
+            "command" => string(&notification.command),
+            "command_endpoint" | "period" => string(""),
+            "host_name" => string(&notification.host_name),
+            "service_name" => string(&notification.service_name),
+            "interval" => num(notification.interval),
+            "last_notification" => num(notification.last_notification),
+            "last_problem_notification" => num(notification.last_problem_notification),
+            "next_notification" => num(notification.next_notification),
+            "no_more_notifications" => Json::Bool(false),
+            "notification_number" => {
+                int(i64::try_from(notification.notification_number).unwrap_or(i64::MAX))
+            }
+            "notified_problem_users" => strings(&notification.notified_problem_users),
+            "states" => strings(&if notification.service_name.is_empty() {
+                vec!["Up".to_owned(), "Down".to_owned()]
+            } else {
+                ["OK", "Warning", "Critical", "Unknown"]
+                    .map(str::to_owned)
+                    .to_vec()
+            }),
+            "types" => strings(
+                &[
+                    "Problem",
+                    "Acknowledgement",
+                    "Recovery",
+                    "Custom",
+                    "FlappingStart",
+                    "FlappingEnd",
+                    "DowntimeStart",
+                    "DowntimeEnd",
+                    "DowntimeRemoved",
+                ]
+                .map(str::to_owned),
+            ),
+            "times" | "vars" => Json::Null,
+            "user_groups" => strings_or_null(&notification.user_groups),
+            "users" => strings_or_null(&notification.users),
             _ => return None,
         })
     })

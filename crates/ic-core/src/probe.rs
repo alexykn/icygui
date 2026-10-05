@@ -43,6 +43,7 @@ pub const REQUIRED_PERMISSIONS: &[&str] = &[
     "events/ObjectCreated",
     "events/ObjectModified",
     "events/ObjectDeleted",
+    "events/Notification",
     "actions/reschedule-check",
     "actions/acknowledge-problem",
     "actions/remove-acknowledgement",

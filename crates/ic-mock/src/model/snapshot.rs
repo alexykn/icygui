@@ -2,8 +2,8 @@
 
 use ic_model::{
     AckKind, CheckInfo, CheckResult, Comment, CommentKind, Dependency, Downtime, Endpoint,
-    Features, Host, HostGroup, HostName, HostState, InstanceStatus, Links, Service, ServiceGroup,
-    ServiceKey, ServiceState, StateType, Timestamp, parse_perfdata_entry,
+    Features, Host, HostGroup, HostName, HostState, InstanceStatus, Links, Notification, ObjectKey,
+    Service, ServiceGroup, ServiceKey, ServiceState, StateType, Timestamp, parse_perfdata_entry,
 };
 
 use super::World;
@@ -189,6 +189,22 @@ impl World {
         self.downtimes
             .values()
             .map(|d| self.downtime_snapshot(d))
+            .collect()
+    }
+
+    pub(crate) fn notifications_snapshot(&self) -> Vec<Notification> {
+        self.notifications
+            .values()
+            .map(|n| Notification {
+                name: n.name.clone(),
+                object: if n.service_name.is_empty() {
+                    ObjectKey::host(&n.host_name)
+                } else {
+                    ObjectKey::service(&n.host_name, &n.service_name)
+                },
+                last_notification: non_zero(n.last_notification),
+                notified_problem_users: n.notified_problem_users.clone(),
+            })
             .collect()
     }
 

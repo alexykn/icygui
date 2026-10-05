@@ -16,14 +16,19 @@
 //!   hydration, the periodic reconcile and the jittered reload after a
 //!   reconnect.
 //!
-//! Extension points for stage 3 are marked with `Stage 3:` comments: the
-//! rule engine and the event log plug into [`Engine::record_applied`] and
-//! [`Engine::record_discovered`], and the one-second tick into
-//! [`Engine::run_due`].
+//! - Notifications and the event log (`notify.rs`, `crate::event_log`):
+//!   every applied change becomes rule inputs and log entries
+//!   ([`Engine::record_applied`], [`Engine::record_discovered`]); the rule
+//!   engine judges them once the dashboards' memberships are known and
+//!   ticks every second; intents are logged, then emitted.
+//! - Icinga's own `Notification` objects (who Icinga notified, and when)
+//!   load in the background after the problem lists and follow Icinga's
+//!   `Notification` events.
 
 mod actions;
 mod fetch;
 mod load;
+mod notify;
 mod publish;
 mod stream;
 mod sync;
@@ -35,24 +40,27 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ic_api::{ApiError, ApiInfo, Client, Detail};
 use ic_model::{
-    Event, Host, InstanceStatus, ObjectChange, ObjectKey, Service, ServiceKey, Timestamp,
+    Event, EventKind, Host, InstanceStatus, Notification, ObjectChange, ObjectKey, Service,
+    ServiceKey, Timestamp,
 };
-use ic_rules::DashboardRef;
+use ic_rules::{DashboardRef, NotificationIntent};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::backoff::Backoff;
-use crate::command::{ActionOutcome, Command, ConnectionState, CoreEvent, LoadPhase};
+use crate::command::{ActionOutcome, Command, ConnectionState, CoreEvent, LoadPhase, LogEntry};
 use crate::connect::{self, Connected, Failure};
 use crate::dashboards::Dashboards;
+use crate::event_log::{EventLog, event_log_path};
 use crate::snapshot::{DashboardResult, Snapshot};
 use crate::spec::{EnvironmentSpec, Ports, Tuning};
-use crate::store::{Applied, Discovered, ObjectView, Overview, Store};
+use crate::store::{Applied, Discovered, ObjectView, Overview, Store, notification_object};
 
 use fetch::{Answers, FetchQueue, FetchTask, Lists};
 use load::LoadTask;
+use notify::Notify;
 use publish::Previews;
 use stream::ReaderMsg;
 use watchdog::Watchdog;
@@ -97,6 +105,16 @@ pub(crate) enum Internal {
     },
     /// A dashboard preview was answered.
     PreviewDone,
+    /// Notifications are in the event log (the new ones; an id already
+    /// there from an earlier run is dropped): emit them.
+    Logged(Vec<NotificationIntent>),
+    /// Every `Notification` object (Icinga's own notifications), queried
+    /// when the reader had read `started` lines.
+    IcingaNotifications {
+        session: u64,
+        started: u64,
+        result: Result<Vec<Notification>, ApiError>,
+    },
 }
 
 /// A load's progress and answers.
@@ -149,6 +167,10 @@ pub(crate) struct AppliedEvent {
     pub(crate) before: Option<ObjectView>,
     /// The object after it.
     pub(crate) after: Option<ObjectView>,
+    /// For a removed downtime: whether the store had it in effect.
+    pub(crate) downtime_was_in_effect: bool,
+    /// For a check result: the object's previous check, if known.
+    pub(crate) previous_check: Option<Timestamp>,
 }
 
 /// Where the connection is.
@@ -167,6 +189,10 @@ enum Phase {
 }
 
 /// The established connection of the current session.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the session and its requests"
+)]
 struct Conn {
     client: Client,
     info: ApiInfo,
@@ -175,6 +201,17 @@ struct Conn {
     /// The next status poll; `None` without `status/query` permission.
     next_status: Option<Instant>,
     status_in_flight: bool,
+    /// The API user may read `Notification` objects (cleared when Icinga
+    /// refuses them after all).
+    notifications_allowed: bool,
+    /// The stream carries Icinga's `Notification` events, which keep the
+    /// `Notification` objects current between reloads.
+    notification_events: bool,
+    /// The notification list query is running.
+    notifications_in_flight: bool,
+    /// `Notification` events read while it runs: the objects whose
+    /// notifications to re-read if the list turns out older.
+    notification_events_waiting: Vec<(u64, ObjectKey)>,
 }
 
 /// The engine.
@@ -240,6 +277,19 @@ pub(crate) struct Engine {
     last_load_done: Option<Instant>,
     /// The connection state last emitted.
     state: Option<ConnectionState>,
+    /// Notifications: the rule engine and its inputs.
+    notify: Notify,
+    /// The rule engine's next tick.
+    tick_at: Instant,
+    /// The local event log.
+    event_log: EventLog,
+    /// The next pruning of the event log.
+    prune_at: Instant,
+    /// The `Notification` objects in the store are current: loaded in this
+    /// session, whose stream carries `Notification` events since. Periodic
+    /// reconciles then skip them; a reconnect, a restart or `Refresh`
+    /// reloads them.
+    notifications_current: bool,
 }
 
 /// Why the select loop woke up.
@@ -261,7 +311,17 @@ impl Engine {
     ) -> Self {
         let mut dashboards = Dashboards::default();
         dashboards.configure(&spec.environment);
+        let event_log = EventLog::open(event_log_path(&spec.data_dir, &spec.environment.id));
+        let notify = Notify::new(&spec.environment);
+        let now = Instant::now();
         Self {
+            notify,
+            tick_at: now + tuning.rule_tick,
+            event_log,
+            // Pruned when the engine starts running, then every
+            // `prune_interval`.
+            prune_at: now,
+            notifications_current: false,
             backoff: Backoff::new(tuning.backoff_initial, tuning.backoff_max),
             fetch: FetchQueue::new(tuning.missing_ttl),
             spec,
@@ -308,6 +368,8 @@ impl Engine {
         mut shutdown: oneshot::Receiver<()>,
     ) {
         self.connect();
+        // Pruned before any query can reach the log.
+        self.prune(Instant::now());
         let mut lines = Vec::new();
         loop {
             while self.tasks.try_join_next().is_some() {}
@@ -396,6 +458,8 @@ impl Engine {
             self.fetch_at(),
             self.reload_due(),
             self.sweep_at(now),
+            Some(self.tick_at),
+            Some(self.prune_at),
         ]
         .into_iter()
         .flatten()
@@ -421,7 +485,12 @@ impl Engine {
         if self.fetch_at().is_some_and(|at| at <= now) {
             self.start_fetch(now);
         }
-        // Stage 3: the rule engine's one-second tick.
+        if self.tick_at <= now {
+            self.tick(now);
+        }
+        if self.prune_at <= now {
+            self.prune(now);
+        }
         if self.publish_at(now).is_some_and(|at| at <= now) {
             self.publish();
         }
@@ -466,6 +535,10 @@ impl Engine {
         self.reload_at = None;
         self.reconcile_at = None;
         self.store.end_annotation_query();
+        // The stream gap may have missed `Notification` events.
+        self.notifications_current = false;
+        // What an aborted load found is real all the same.
+        self.finish_discovered();
     }
 
     /// The session failed: back off and retry, or wait for the user.
@@ -540,12 +613,19 @@ impl Engine {
         let next_status = info
             .allows("status/query")
             .then(|| Instant::now() + self.tuning.status_interval);
+        let notifications_allowed = info.allows("objects/query/Notification");
+        let notification_events = self.lines.is_some()
+            && info.allows(&format!("events/{}", EventKind::Notification.api_name()));
         self.conn = Some(Conn {
             client,
             info,
             live_since: None,
             next_status,
             status_in_flight: false,
+            notifications_allowed,
+            notification_events,
+            notifications_in_flight: false,
+            notification_events_waiting: Vec::new(),
         });
         if self.loaded {
             // A reconnect: live at once on the objects we have (the stream
@@ -640,14 +720,19 @@ impl Engine {
                 self.fetch.release_deferred(now);
                 self.watchdog.loaded(&self.store);
                 self.schedule_reconcile();
+                self.finish_discovered();
                 if first {
                     self.go_live();
+                }
+                if !self.notifications_current {
+                    self.load_notifications();
                 }
                 self.publish_changes();
             }
             LoadStep::Failed(failure) => {
                 self.load = None;
                 self.store.end_annotation_query();
+                self.finish_discovered();
                 if first || matches!(failure, Failure::Auth(_)) {
                     self.fail(failure);
                 } else if let Failure::Transient(error) = failure {
@@ -720,6 +805,7 @@ impl Engine {
                 let previous = self.store.set_status(status);
                 if previous.is_some_and(|previous| previous.program_start != program_start) {
                     tracing::info!("Icinga restarted; reloading");
+                    self.notifications_current = false;
                     self.start_load(false);
                 }
             }
@@ -756,6 +842,7 @@ impl Engine {
             lean,
             lists: round.lists,
             urgent: round.urgent,
+            notifications: round.notifications,
         };
         self.tasks.spawn(task.run());
     }
@@ -798,6 +885,20 @@ impl Engine {
         apply_list(answers.endpoints, "endpoints", |endpoints| {
             self.store.set_endpoints(endpoints);
         });
+        if let Some((started, result)) = answers.notifications {
+            match result {
+                Ok(fetched) => self.store.apply_fetched_notifications(
+                    fetched.notifications,
+                    &fetched.missing,
+                    started,
+                ),
+                Err(ApiError::Unauthorized) => {
+                    self.fail(Failure::Auth(ApiError::Unauthorized.to_string()));
+                    return;
+                }
+                Err(error) => self.notifications_refused(&error),
+            }
+        }
         self.fetch.finished(&missing, Instant::now());
         if answers.urgent {
             self.publish_changes();
@@ -827,8 +928,7 @@ impl Engine {
             {
                 self.watchdog.clock().observe(latest, Instant::now());
             }
-            let applied = self.apply_events(events);
-            self.record_applied(&applied);
+            self.apply_events(events);
         }
         if let Some(error) = end {
             let error = error.map_or_else(
@@ -839,27 +939,53 @@ impl Engine {
         }
     }
 
-    fn apply_events(&mut self, events: Vec<(u64, Event)>) -> Vec<AppliedEvent> {
+    /// Applies events in order; each applied change is recorded at once
+    /// (rule inputs, log entries), while the store shows its result.
+    fn apply_events(&mut self, events: Vec<(u64, Event)>) {
         let now = Instant::now();
-        let mut applied = Vec::with_capacity(events.len());
+        let mut log = Vec::new();
         for (seq, event) in events {
-            if let Event::ObjectLifecycle {
-                change,
-                object_type,
-                name,
-                ..
-            } = &event
-            {
-                self.on_lifecycle(*change, object_type, name, now);
-                continue;
+            match &event {
+                Event::ObjectLifecycle {
+                    change,
+                    object_type,
+                    name,
+                    ..
+                } => {
+                    self.on_lifecycle(*change, object_type, name, now);
+                    continue;
+                }
+                Event::Notification { object, .. } => {
+                    self.on_icinga_notification(seq, object, now);
+                    continue;
+                }
+                _ => {}
             }
+            let downtime_was_in_effect = match &event {
+                Event::DowntimeRemoved { downtime, .. } => self
+                    .store
+                    .downtime_of(&downtime.object, &downtime.name)
+                    .is_some_and(|stored| stored.in_effect),
+                _ => false,
+            };
+            let previous_check = match &event {
+                Event::CheckResult { object, .. } => {
+                    self.store.check(object).and_then(|check| check.last_check)
+                }
+                _ => None,
+            };
             match self.store.apply(seq, &event) {
-                Applied::Changed { before, after } => applied.push(AppliedEvent {
-                    seq,
-                    event,
-                    before,
-                    after,
-                }),
+                Applied::Changed { before, after } => {
+                    let entry = AppliedEvent {
+                        seq,
+                        event,
+                        before,
+                        after,
+                        downtime_was_in_effect,
+                        previous_check,
+                    };
+                    self.record_applied(&entry, &mut log);
+                }
                 Applied::Stale | Applied::Ignored => {}
                 Applied::Unknown(key) => {
                     if self.load.is_some() {
@@ -870,7 +996,7 @@ impl Engine {
                 }
             }
         }
-        applied
+        self.event_log.record(log);
     }
 
     /// A config object was created, modified or deleted: re-query hosts and
@@ -890,6 +1016,19 @@ impl Engine {
             }
             return;
         }
+        if object_type == "Notification" {
+            // Created, changed or deleted by name (a deleted one comes back
+            // missing and leaves the store).
+            if self
+                .conn
+                .as_ref()
+                .is_some_and(|conn| conn.notifications_allowed)
+                && notification_object(name).is_some()
+            {
+                self.fetch.mark_notifications([name.to_owned()], now);
+            }
+            return;
+        }
         let lists = Lists {
             host_groups: object_type == "HostGroup",
             service_groups: object_type == "ServiceGroup",
@@ -899,32 +1038,23 @@ impl Engine {
         self.fetch.mark_lists(lists, now);
     }
 
-    /// What the applied events mean beyond the store.
-    ///
-    /// Stage 3: turn them into rule inputs (previous state from `before`,
-    /// `handled` from the store after applying, memberships from the
-    /// dashboards) and event-log entries; also repeat states whose
-    /// `handled` changed without an event of their own.
-    #[expect(
-        clippy::unused_self,
-        reason = "the extension point for stage 3, which records into the engine"
-    )]
-    fn record_applied(&mut self, applied: &[AppliedEvent]) {
-        for entry in applied {
-            let (Some(before), Some(after)) = (entry.before, entry.after) else {
-                continue;
-            };
-            if before.state != after.state || before.state_type != after.state_type {
-                tracing::debug!(
-                    seq = entry.seq,
-                    object = ?entry.event.object(),
-                    from = ?before.state,
-                    to = ?after.state,
-                    state_type = ?after.state_type,
-                    "state changed"
-                );
-            }
+    /// What an applied event means beyond the store: rule inputs (judged
+    /// once the dashboards' memberships are known) and log entries,
+    /// appended to `log`.
+    fn record_applied(&mut self, entry: &AppliedEvent, log: &mut Vec<LogEntry>) {
+        if let (Some(before), Some(after)) = (entry.before, entry.after)
+            && (before.state != after.state || before.state_type != after.state_type)
+        {
+            tracing::debug!(
+                seq = entry.seq,
+                object = ?entry.event.object(),
+                from = ?before.state,
+                to = ?after.state,
+                state_type = ?after.state_type,
+                "state changed"
+            );
         }
+        self.notify.applied(&self.store, entry, log);
     }
 
     /// What query answers revealed without an event: state changes the
@@ -937,10 +1067,12 @@ impl Engine {
     /// the output matches the state within a second (problems found by a
     /// load come with its tier 3).
     ///
-    /// Stage 3: turn them into rule inputs (missed problems and recoveries
-    /// notify, removals end what the rule engine remembers), except during
-    /// the session's first load (`self.load` is `Some((_, true))`), which
-    /// may follow a partial one: the initial load produces no rule inputs.
+    /// They become rule inputs (missed problems and recoveries notify,
+    /// removals end what the rule engine remembers) and log entries; a
+    /// load's wait until it is over, when its last tier brought the
+    /// problems' output. Not during the session's first load
+    /// (`self.load` is `Some((_, true))`), which may follow a partial one:
+    /// the initial load produces no rule inputs.
     fn record_discovered(&mut self, load: bool) {
         let found = self.store.take_discovered();
         if found.is_empty() {
@@ -975,6 +1107,22 @@ impl Engine {
         if !stale.is_empty() {
             self.fetch.mark_full(stale, Instant::now());
         }
+        if matches!(self.load, Some((_, true))) {
+            return;
+        }
+        let mut log = Vec::new();
+        let at = self.evaluation_time();
+        self.notify
+            .discovered(&self.store, found, load, at, &mut log);
+        self.event_log.record(log);
+    }
+
+    /// A load is over (or cut off): what it found is judged now.
+    fn finish_discovered(&mut self) {
+        let mut log = Vec::new();
+        let at = self.evaluation_time();
+        self.notify.load_finished(&self.store, at, &mut log);
+        self.event_log.record(log);
     }
 
     // --- commands ---------------------------------------------------------------------
@@ -985,21 +1133,21 @@ impl Engine {
             Command::Refresh => self.refresh(),
             Command::UpdateEnvironment(environment) => self.update_environment(environment),
             Command::UpdateGeneral(general) => self.update_general(general),
-            Command::LoadHistory { reply, .. } => {
-                // Stage 3: the event log.
-                tracing::debug!("LoadHistory is not implemented yet");
-                let _ = reply.send(Vec::new());
-            }
-            Command::LoadNotifications { reply, .. } => {
-                // Stage 3: the event log.
-                tracing::debug!("LoadNotifications is not implemented yet");
-                let _ = reply.send(Vec::new());
+            Command::LoadHistory {
+                object,
+                limit,
+                reply,
+            } => self.event_log.history(object, limit, reply),
+            Command::LoadNotifications { limit, reply } => {
+                self.event_log.notifications(limit, reply);
             }
             Command::PreviewDashboard { view, reply } => self.preview(view, reply),
-            Command::PauseNotifications(_) | Command::MarkNotificationsRead => {
-                // Stage 3: notifications.
-                tracing::debug!("notification commands are not implemented yet");
+            Command::PauseNotifications(until) => {
+                let paused = self.notify.pause(until);
+                tracing::info!(?paused, "notifications paused");
+                self.emit(CoreEvent::NotificationsPaused(paused));
             }
+            Command::MarkNotificationsRead => self.event_log.mark_read(),
             Command::Hydrate(keys) => self.hydrate(keys),
         }
     }
@@ -1017,7 +1165,10 @@ impl Engine {
             Phase::Connecting | Phase::Loading => {
                 tracing::debug!("refresh: a connection attempt or load is already running");
             }
-            Phase::Live => self.start_load(false),
+            Phase::Live => {
+                self.notifications_current = false;
+                self.start_load(false);
+            }
         }
     }
 
@@ -1028,19 +1179,34 @@ impl Engine {
             || old.auth != environment.auth
             || old.tls != environment.tls;
         let other_server = old.id != environment.id || old.url != environment.url;
+        let other_log = old.id != environment.id;
         let dashboards_changed = old.groups != environment.groups;
         self.spec.environment = environment;
-        // Stage 3: rebuild the rule set.
         if dashboards_changed {
             self.dashboards_configured = true;
         }
+        if other_log {
+            // Each environment has its own log; the old one finishes its
+            // work on its own thread.
+            self.event_log = EventLog::open(event_log_path(
+                &self.spec.data_dir,
+                &self.spec.environment.id,
+            ));
+            self.prune(Instant::now());
+        }
         if other_server {
+            // Nothing the rule engine remembers is about this server.
+            self.notify.reset(&self.spec.environment);
+            self.notifications_current = false;
             self.store.clear();
             self.watchdog.clear();
             self.loaded = false;
             self.publish();
-        } else if dashboards_changed {
-            self.publish_changes();
+        } else {
+            self.notify.set_rules(&self.spec.environment);
+            if dashboards_changed {
+                self.publish_changes();
+            }
         }
         let waiting_for_user = matches!(self.phase, Phase::Idle { .. });
         if reconnect || waiting_for_user {
@@ -1079,27 +1245,39 @@ impl Engine {
                 broken,
             } => self.on_evaluated(dashboards, *snapshot, quiet, broken),
             Internal::PreviewDone => self.on_preview_done(),
+            Internal::Logged(intents) => self.on_logged(intents),
+            Internal::IcingaNotifications {
+                session,
+                started,
+                result,
+            } if session == self.session => self.on_icinga_notifications(started, result),
             // An older session's late answer.
             Internal::Connected { .. }
             | Internal::ConnectFailed { .. }
             | Internal::Load { .. }
             | Internal::Status { .. }
-            | Internal::Fetched { .. } => {}
+            | Internal::Fetched { .. }
+            | Internal::IcingaNotifications { .. } => {}
         }
     }
 
-    /// Stops: ends the session (closing the stream).
-    ///
-    /// Stage 3: flush the event log here.
+    /// Stops: ends the session (closing the stream) and lets the event log
+    /// write what it was given (a bounded wait).
     fn stop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         for event in std::mem::take(&mut self.outbox) {
             self.send_event(event);
         }
         self.teardown();
+        let flush = (self.tuning.shutdown_timeout / 2).min(LOG_FLUSH_TIMEOUT);
+        self.event_log.close(flush);
         tracing::debug!("engine stopped");
     }
 }
+
+/// How long stopping waits at most for the event log to write what it was
+/// given.
+const LOG_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Applies a reloaded small list, if it was reloaded and allowed.
 fn apply_list<T>(answer: Option<Result<Vec<T>, ApiError>>, what: &str, apply: impl FnOnce(Vec<T>)) {

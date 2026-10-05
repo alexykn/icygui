@@ -834,3 +834,101 @@ fn group_list_changes_are_flagged() {
     assert_eq!(store.object_count(), 3);
     assert_eq!(store.latest_check(), Some(t(100.0)));
 }
+
+fn notification(name: &str, last: f64, users: &[&str]) -> ic_model::Notification {
+    ic_model::Notification {
+        name: name.to_owned(),
+        object: super::notification_object(name).unwrap(),
+        last_notification: t(last).non_zero(),
+        notified_problem_users: users.iter().map(|user| (*user).to_owned()).collect(),
+    }
+}
+
+#[test]
+fn notification_names_belong_to_their_object() {
+    use super::notification_object;
+    assert_eq!(notification_object("h!a!mail"), Some(key("h", "a")));
+    assert_eq!(notification_object("h!mail"), Some(ObjectKey::host("h")));
+    assert_eq!(notification_object("mail"), None);
+    assert_eq!(notification_object("h!"), None);
+    assert_eq!(notification_object("!mail"), None);
+}
+
+#[test]
+fn notification_lists_and_by_name_answers_converge() {
+    let mut store = loaded();
+    // The list, queried at 20.
+    store.replace_notifications(
+        vec![
+            notification("h!b!mail", 50.0, &["oncall"]),
+            notification("h!b!sms", 0.0, &[]),
+            notification("h!mail", 0.0, &[]),
+        ],
+        20,
+    );
+    assert!(store.take_changes().any);
+    assert_eq!(store.notifications_listed(), 20);
+    assert_eq!(
+        store.notification_names(&key("h", "b")),
+        ["h!b!mail", "h!b!sms"]
+    );
+    let snapshot = store.snapshot(1, t(0.0), Arc::default(), Arc::default());
+    let notified = snapshot.notified(&key("h", "b"));
+    assert_eq!(notified.last_notification, Some(t(50.0)));
+    assert_eq!(notified.users, ["oncall"]);
+    assert!(snapshot.notified(&ObjectKey::host("h")).is_never());
+    assert!(
+        snapshot.notified(&key("h", "a")).is_never(),
+        "no notifications"
+    );
+
+    // A by-name answer (sent at 30) after a new notification.
+    store.apply_fetched_notifications(
+        vec![notification("h!b!mail", 60.0, &["oncall", "m.keller"])],
+        &["h!b!sms".to_owned()],
+        30,
+    );
+    assert!(store.take_changes().any);
+    assert_eq!(store.notification_names(&key("h", "b")), ["h!b!mail"]);
+    // An older list (sent at 25, answered late) changes nothing it covers
+    // newer, and isn't applied at all: the list at 20 is older still, but
+    // a list older than the stored one is ignored too.
+    store.replace_notifications(vec![notification("h!b!sms", 0.0, &[])], 25);
+    let list = &store.icinga_notifications()[&key("h", "b")];
+    assert_eq!(list.len(), 1, "the by-name answer at 30 is newer");
+    assert_eq!(list[0].notified_problem_users, ["oncall", "m.keller"]);
+    assert!(
+        !store
+            .icinga_notifications()
+            .contains_key(&ObjectKey::host("h")),
+        "gone from the list at 25"
+    );
+    store.replace_notifications(Vec::new(), 10);
+    assert_eq!(store.notifications_listed(), 25, "an older list is ignored");
+
+    // A by-name answer older than the list in the store is ignored.
+    store.apply_fetched_notifications(vec![notification("h!mail", 5.0, &["x"])], &[], 24);
+    assert!(
+        !store
+            .icinga_notifications()
+            .contains_key(&ObjectKey::host("h"))
+    );
+
+    // A newer list replaces everything; the recovery cleared the users.
+    store.replace_notifications(vec![notification("h!b!mail", 70.0, &[])], 40);
+    let snapshot = store.snapshot(2, t(0.0), Arc::default(), Arc::default());
+    let notified = snapshot.notified(&key("h", "b"));
+    assert_eq!(notified.last_notification, Some(t(70.0)));
+    assert!(notified.users.is_empty());
+    assert!(!notified.is_never());
+
+    // Unchanged answers change nothing.
+    store.take_changes();
+    store.replace_notifications(vec![notification("h!b!mail", 70.0, &[])], 41);
+    store.apply_fetched_notifications(vec![notification("h!b!mail", 70.0, &[])], &[], 42);
+    assert!(!store.take_changes().any);
+
+    // An object's notifications go with it.
+    store.replace_services(vec![service("h", "a", ServiceState::Ok)], Detail::Lean, 50);
+    assert!(store.icinga_notifications().is_empty());
+}

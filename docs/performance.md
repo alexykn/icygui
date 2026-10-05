@@ -57,6 +57,7 @@ The lean list the client loads (`ic_api::Detail::Lean`) keeps the check configur
 4. From here, every `CheckResult` event carries its object's full result, so outputs fill in by themselves within one check interval.
 5. *Hydration on demand:* rows on screen whose output isn't loaded yet (an "all services" dashboard, a host pane's service list) are fetched by name in debounced batches (≤ 200 names). Opening a pane fetches that object in full (output, perfdata, notes and links).
 6. Never `filter` expressions (permissions, D6), only name lists. A name list containing a deleted object fails as a whole (404), so retry by halves to find the deleted names.
+7. Icinga's own `Notification` objects (whom Icinga notified, and when: the panes' "notified" row) load last, in the background, with four attributes each (about 200 bytes per object). Icinga's `Notification` events keep them current (the object's notifications are re-read by name), so periodic reconciles leave them out; reconnects, restarts and `Refresh` reload them.
 
 **Event pipeline:**
 - A *reader* task only reads and splits lines and hands them over; it never waits for processing, so Icinga's send buffer never backs up.
@@ -92,7 +93,7 @@ The lean list the client loads (`ic_api::Detail::Lean`) keeps the check configur
 | Replaying a burst of 50 000 recorded events | < 3 s, no dropped events |
 | Client memory | < 400 MB |
 | Scrolling a 30 000-row dashboard | smooth; nothing per frame scales with the object count |
-| Load on the master per client | one event stream (~75 KB/s), ~28 MB on connect, ~28 MB every 15 minutes |
+| Load on the master per client | one event stream (~75 KB/s), ~35 MB on connect (~28 MB of objects, ~7 MB of Icinga's `Notification` objects at one per host and service), ~28 MB every 15 minutes |
 
 These budgets are tested: `ic-mock` has a `large` scenario of the same size with a burst mode, and release-mode performance tests (nightly CI) replay bursts and time loads and dashboard evaluation.
 
@@ -100,9 +101,9 @@ These budgets are tested: `ic-mock` has a `large` scenario of the same size with
 
 | What | Result |
 |---|---|
-| Initial load until the problem lists are complete (tiers 1–3, 2 000 hosts, 30 000 lean services, 1 448 problems in full, the three default dashboards evaluated for every tier) | 3.80 s (hosts after 0.59 s, services after 3.77 s); `cargo test -p ic-core --test scale -- --ignored --nocapture` |
-| Applying 50 000 recorded burst events (parse, collapse, apply, a snapshot per 5 000) | 2.96 s, ~16 900 events/s, none lost; `cargo test -p ic-core --lib perf_tests::fifty -- --ignored --nocapture` |
-| The same with ten dashboards updated incrementally after every batch of 5 000 | + 2.85 s of evaluation (the engine runs it on a blocking thread next to the applier, at most once per snapshot) |
+| Initial load until the problem lists are complete (tiers 1–3, 2 000 hosts, 30 000 lean services, 1 448 problems in full, the three default dashboards evaluated for every tier) | 3.80 s (hosts after 0.59 s, services after 3.77 s); `cargo test -p ic-core --test engine scale -- --ignored --nocapture` |
+| Applying 50 000 recorded burst events (parse, collapse, apply, rule inputs and log entries for every applied event, a snapshot per 5 000) | 2.57 s, ~19 500 events/s, none lost (stage 2, without the rule inputs: 2.96 s on a busier machine); `cargo test -p ic-core --lib perf_tests::fifty -- --ignored --nocapture` |
+| The same with ten dashboards updated incrementally after every batch of 5 000 | + 2.41 s of evaluation (the engine runs it on a blocking thread next to the applier, at most once per snapshot) |
 | A burst of every object (32 000 checks at Icinga's ~5 000/s) | absorbed as it arrives: the store matches the mock 6.4 s after the burst started |
 | 20 000 services × 10 dashboards (filters on vars, groups, globs, regexes, output; group-by), full evaluation | 0.48 s; `cargo test -p ic-core --lib perf_tests::twenty -- --ignored --nocapture` |
 | The same, incremental: 100 changed services / 1 changed service | 13.5 ms / 5.5 ms (rows and summaries of the dashboards they are in rebuilt) |
@@ -112,5 +113,7 @@ These budgets are tested: `ic-mock` has a `large` scenario of the same size with
 | A snapshot the UI holds while the store changes (copy on write of the maps) | 2 MB per snapshot held |
 | 6 400 recorded events on 3 000 services (in the normal test suite) | ~0.28 s, ten dashboards updated per batch ~0.10 s |
 | 2 000 services × 10 dashboards (in the normal test suite) | full 40 ms, 100 changed services 4 ms |
+| Icinga's `Notification` objects (one per host and service: 32 000), loaded in the background after the problem lists | 7.1 MB on the wire (222 bytes each, four attributes), complete 0.76 s after `Connected` (3.98 s after the start); 2.0 MB in the store, 1.5 MB copied on write when one changes while the UI holds a snapshot. Not reloaded by periodic reconciles while the stream carries `Notification` events; `cargo test -p ic-api --test mock large -- --include-ignored --nocapture`, `cargo test -p ic-core --test engine scale -- --ignored --nocapture` |
+| A notification storm: every OK service of the `large` scenario failing at once (28 500 hard state changes) | rule inputs and log entries 0.21 s, judged by the rule engine with ten dashboards' memberships 0.64 s (28 100 intents, nearly all silenced by storm control), written to the SQLite log 0.23 s; `cargo test -p ic-core --lib perf_tests::notifications_in -- --ignored --nocapture` |
 
 The dev-profile numbers above already meet the release budgets (50 000 events in under 3 s; a full evaluation of 20 000 × 10 well under a second; memory far below 400 MB), so release builds have a wide margin.

@@ -80,6 +80,13 @@ pub struct Tuning {
     /// 15 minutes above), else the setting but at least
     /// `ic_config::MIN_RECONCILE_INTERVAL_SECS`.
     pub reconcile_interval: Option<Duration>,
+    /// How often the notification rule engine ticks (1 s): delayed
+    /// notifications, storm summaries, pauses and mutes ending.
+    pub rule_tick: Duration,
+    /// How often the event log is pruned to
+    /// `General::event_log_retention_hours` (1 hour); also when the engine
+    /// starts.
+    pub prune_interval: Duration,
 }
 
 impl Default for Tuning {
@@ -97,6 +104,8 @@ impl Default for Tuning {
             watchdog_interval: Duration::from_secs(5),
             reload_jitter: Duration::from_secs(10),
             reconcile_interval: None,
+            rule_tick: Duration::from_secs(1),
+            prune_interval: Duration::from_hours(1),
         }
     }
 }

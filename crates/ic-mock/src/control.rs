@@ -580,6 +580,11 @@ impl MockControl {
         self.world().downtimes_snapshot()
     }
 
+    /// Icinga's own notifications (`Notification` objects), by name.
+    pub fn notifications(&self) -> Vec<ic_model::Notification> {
+        self.world().notifications_snapshot()
+    }
+
     /// All host groups.
     pub fn host_groups(&self) -> Vec<HostGroup> {
         self.world().host_groups_snapshot()

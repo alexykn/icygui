@@ -35,7 +35,10 @@ pub(super) struct Previews {
 impl Engine {
     /// Whether a snapshot should go out.
     fn needs_publish(&self) -> bool {
-        self.store.has_changes() || self.dashboards_configured || self.watchdog.has_changes()
+        self.store.has_changes()
+            || self.dashboards_configured
+            || self.watchdog.has_changes()
+            || self.notify.has_pending()
     }
 
     /// When the next throttled snapshot (or the time-dependent dashboards'
@@ -91,8 +94,13 @@ impl Engine {
         if !evaluate {
             self.dashboards = Some(dashboards);
             self.emit_snapshot(snapshot);
+            // The memberships are current: judge the changes now.
+            self.judge(false);
             return;
         }
+        // The rule inputs so far are judged with this evaluation's
+        // memberships.
+        self.notify.begin_evaluation();
         if refresh_time {
             self.time_refreshed = Instant::now();
         }
@@ -150,6 +158,12 @@ impl Engine {
         if !(quiet && unchanged) {
             self.emit_snapshot(snapshot);
         }
+        if broken {
+            // Judged after the next (full) evaluation.
+            self.notify.evaluation_failed();
+        } else {
+            self.judge(true);
+        }
         if std::mem::take(&mut self.publish_soon) {
             self.publish_changes();
         }
@@ -171,7 +185,7 @@ impl Engine {
 
     /// What `get_time()` returns in dashboard filters: Icinga's clock as
     /// far as it is known, else the local one.
-    fn evaluation_time(&self) -> Timestamp {
+    pub(super) fn evaluation_time(&self) -> Timestamp {
         self.watchdog
             .icinga_now()
             .map_or_else(|| self.ports.clock.now(), Timestamp::from_unix_seconds)

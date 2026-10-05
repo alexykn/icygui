@@ -9,18 +9,18 @@
     reason = "test helpers fail the test loudly"
 )]
 
-mod support;
-
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::support::{
+    ENV_ID, FakeSecrets, NOW, PASSWORD, environment, mock, start, start_for, tuning, wait_until,
+};
 use ic_api::Detail;
 use ic_config::AuthConfig;
 use ic_core::{Command, ConnectionState, CoreEvent, LoadPhase, Tuning};
 use ic_mock::{MockConfig, MockTls, MockUser, scenarios};
 use ic_model::ServiceState;
-use support::{ENV_ID, FakeSecrets, NOW, PASSWORD, environment, mock, start, start_for, tuning};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[expect(clippy::too_many_lines, reason = "one end-to-end scenario")]
@@ -178,7 +178,7 @@ async fn the_initial_load_fills_in_tier_by_tier() {
     engine.shutdown();
 }
 
-fn engine_version(engine: &support::Engine) -> String {
+fn engine_version(engine: &crate::support::Engine) -> String {
     engine
         .seen
         .iter()
@@ -256,7 +256,7 @@ async fn a_pin_mismatch_shows_both_fingerprints_and_the_certificate() {
     assert_eq!(certificate.fingerprint(), server.cert_fingerprint());
 
     // Trust on first use: pin the presented certificate.
-    let mut trusted = support::environment(&server);
+    let mut trusted = crate::support::environment(&server);
     trusted.tls.pinned_sha256 = Some(certificate.fingerprint());
     engine.send(Command::UpdateEnvironment(trusted));
     engine.connected().await;
@@ -293,7 +293,7 @@ async fn unusable_settings_are_misconfigured() {
     };
     assert!(message.contains("/nonexistent/icinga-ca.crt"), "{message}");
 
-    let mut environment = support::environment(&server);
+    let mut environment = crate::support::environment(&server);
     environment.url = "http://plain.example".to_owned();
     engine.send(Command::UpdateEnvironment(environment));
     engine
@@ -529,7 +529,7 @@ async fn shutdown_closes_the_stream_and_joins() {
     assert!(wait_until(|| control.event_streams() == 0).await);
     // The event channel ends once the engine is gone.
     let rest: Vec<CoreEvent> = tokio::time::timeout(
-        support::WAIT,
+        crate::support::WAIT,
         futures::StreamExt::collect(&mut engine.events),
     )
     .await
@@ -538,16 +538,6 @@ async fn shutdown_closes_the_stream_and_joins() {
 }
 
 /// Polls `condition` for up to five seconds.
-async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
-    for _ in 0..500 {
-        if condition() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    false
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restart_found_by_the_status_poll_reloads() {
     let server = mock(MockConfig::with_scenario(scenarios::lab())).await;
@@ -618,21 +608,33 @@ async fn refresh_reloads_while_connected() {
     let control = server.control();
     let mut engine = start_for(&server);
     engine.connected().await;
-    let revision = engine.latest().unwrap().revision;
+    // Icinga's notifications load after the problem lists.
+    engine
+        .snapshot(|snapshot| !snapshot.icinga_notifications.is_empty())
+        .await;
     control.clear_requests();
     engine.send(Command::Refresh);
-    engine
-        .snapshot(|snapshot| snapshot.revision > revision + 1)
-        .await;
-    let paths: BTreeSet<String> = control
-        .requests()
-        .into_iter()
-        .map(|request| request.path)
-        .collect();
+    let paths = || -> BTreeSet<String> {
+        control
+            .requests()
+            .into_iter()
+            .map(|request| request.path)
+            .collect()
+    };
+    // A refresh reloads everything a connect loads, Icinga's
+    // notifications included.
     assert!(
-        paths.contains("/v1/objects/hosts") && paths.contains("/v1/objects/services"),
-        "{paths:?}"
+        wait_until(|| {
+            let paths = paths();
+            ["hosts", "services", "notifications"]
+                .iter()
+                .all(|kind| paths.contains(&format!("/v1/objects/{kind}")))
+        })
+        .await,
+        "{:?}",
+        paths()
     );
+    let paths = paths();
     assert!(!paths.contains("/v1/events"), "the stream stays");
     assert_eq!(control.event_streams(), 1);
     let after_connected: Vec<ConnectionState> = engine

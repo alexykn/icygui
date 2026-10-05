@@ -96,7 +96,7 @@ Every action flows through one `Command` type (§3.3): optimistic UI state ("ack
 - Stored as versioned TOML per environment. Import and export are file-based (handy for sharing dashboards across the team).
 
 ### 2.6 Live events (no Icinga DB)
-- The connection runtime subscribes to `/v1/events` for `CheckResult`, `StateChange`, `Flapping`, `AcknowledgementSet/Cleared`, `CommentAdded/Removed`, `DowntimeAdded/Removed/Started/Triggered`, `ObjectCreated/Modified/Deleted`.
+- The connection runtime subscribes to `/v1/events` for `CheckResult`, `StateChange`, `Flapping`, `AcknowledgementSet/Cleared`, `CommentAdded/Removed`, `DowntimeAdded/Removed/Started/Triggered`, `ObjectCreated/Modified/Deleted`, and `Notification` (Icinga's own notifications: they keep the panes' "notified" row current).
 - Events update the in-memory store. A trimmed copy (state changes, acks, downtimes, flapping) goes into a local SQLite log with **48h retention** (configurable). The log feeds the notification centre, the "recent events" view and the host/service history tab. Nothing more ambitious than that (D3).
 
 ### 2.7 Native notifications

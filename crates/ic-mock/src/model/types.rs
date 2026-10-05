@@ -589,6 +589,38 @@ pub(crate) struct UserData {
     pub(crate) meta: ObjMeta,
 }
 
+/// An Icinga `Notification` object (`lib/icinga/notification.ti`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NotificationData {
+    /// Full name: `host!name` or `host!service!name`.
+    pub(crate) name: String,
+    pub(crate) short_name: String,
+    pub(crate) host_name: String,
+    /// Empty for host notifications.
+    pub(crate) service_name: String,
+    pub(crate) command: String,
+    pub(crate) users: Vec<String>,
+    pub(crate) user_groups: Vec<String>,
+    pub(crate) interval: f64,
+    pub(crate) last_notification: f64,
+    pub(crate) last_problem_notification: f64,
+    pub(crate) next_notification: f64,
+    pub(crate) notification_number: u64,
+    pub(crate) notified_problem_users: Vec<String>,
+    pub(crate) meta: ObjMeta,
+}
+
+impl NotificationData {
+    /// The full name of the host or service it belongs to.
+    pub(crate) fn object(&self) -> String {
+        if self.service_name.is_empty() {
+            self.host_name.clone()
+        } else {
+            format!("{}!{}", self.host_name, self.service_name)
+        }
+    }
+}
+
 /// A `CheckCommand` or `EventCommand`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CommandData {

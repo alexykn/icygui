@@ -442,6 +442,24 @@ impl World {
                 world.checkable_event(object, true).unwrap_or_default()
             });
         }
+        // Notifications (`ProcessCheckResult`): on a hard state change (not
+        // soft OK to hard OK), or every hard result of a volatile object;
+        // held back while flapping, in downtime, acknowledged or
+        // unreachable. (Icinga then stashes them as suppressed; the mock
+        // drops them.)
+        let mut send_notification =
+            (hard_change && !(old_type == SOFT && new_ok)) || (volatile && new_state_type == HARD);
+        if (old_ok && old_type == SOFT) || (volatile && old_ok && new_ok) {
+            send_notification = false;
+        }
+        let suppressed = !reachable
+            || self.downtime_depth(object) > 0
+            || self
+                .checkable(object)
+                .is_some_and(|c| self.is_acknowledged(c));
+        if send_notification && !is_flapping && !suppressed {
+            self.send_notifications(object, if new_ok { "RECOVERY" } else { "PROBLEM" });
+        }
         if recovery {
             // Icinga re-checks problem children of a recovered parent soon.
             let children = self.children_of(object);
@@ -455,6 +473,88 @@ impl World {
             }
         }
         Some(ProcessOutcome::Processed)
+    }
+
+    /// `Checkable::SendNotifications` → `Notification::BeginExecuteNotification`
+    /// for a `PROBLEM` or `RECOVERY` (Icinga's compat type names): every
+    /// notification of the object notifies its users (and the members of
+    /// its user groups); a recovery only those told about the problem, and
+    /// it clears that list. Each sends a `Notification` event. User
+    /// filters, time periods and `times` are not modelled.
+    pub(crate) fn send_notifications(&mut self, object: &str, kind: &'static str) {
+        let Some(checkable) = self.checkable(object) else {
+            return;
+        };
+        if !self.app.enable_notifications || !checkable.enable_notifications {
+            return;
+        }
+        let recovery = kind == "RECOVERY";
+        let now = self.now();
+        for name in self.notifications_of(object) {
+            let members: Vec<String> = match self.notifications.get(&name) {
+                Some(notification) => self
+                    .users
+                    .values()
+                    .filter(|user| {
+                        notification.users.contains(&user.name)
+                            || user
+                                .groups
+                                .iter()
+                                .any(|group| notification.user_groups.contains(group))
+                    })
+                    .map(|user| user.name.clone())
+                    .collect(),
+                None => continue,
+            };
+            let Some(notification) = self.notifications.get_mut(&name) else {
+                continue;
+            };
+            let users: Vec<String> = if recovery {
+                members
+                    .into_iter()
+                    .filter(|user| notification.notified_problem_users.contains(user))
+                    .collect()
+            } else {
+                members
+            };
+            notification.last_notification = now;
+            if recovery {
+                notification.notification_number = 0;
+                notification.notified_problem_users.clear();
+            } else {
+                notification.notification_number += 1;
+                notification.last_problem_notification = now;
+                notification.next_notification = now + notification.interval;
+                for user in &users {
+                    if !notification.notified_problem_users.contains(user) {
+                        notification.notified_problem_users.push(user.clone());
+                    }
+                }
+            }
+            let command = notification.command.clone();
+            self.emit(EventType::Notification, |world| {
+                let mut event = Map::new();
+                if let Some(checkable) = world.checkable(object) {
+                    Self::event_object_fields(&mut event, checkable);
+                    event.insert(
+                        "check_result".into(),
+                        checkable
+                            .cr
+                            .as_ref()
+                            .map_or(Json::Null, CheckResultData::to_json),
+                    );
+                }
+                event.insert("command".into(), Json::String(command));
+                event.insert(
+                    "users".into(),
+                    Json::Array(users.into_iter().map(Json::String).collect()),
+                );
+                event.insert("notification_type".into(), Json::String(kind.to_owned()));
+                event.insert("author".into(), Json::String(String::new()));
+                event.insert("text".into(), Json::String(String::new()));
+                event
+            });
+        }
     }
 
     /// `IsFlapping`: the flag, but only with flap detection enabled.

@@ -10,7 +10,8 @@ use serde_json::{Map, Value as Json};
 use super::logic::plugin_command;
 use super::types::{
     CheckResultData, Checkable, CommandData, CommentData, DependencyData, DowntimeData,
-    EndpointData, GroupData, ObjMeta, SourceLocation, UserData, VarsState, ZoneData,
+    EndpointData, GroupData, NotificationData, ObjMeta, SourceLocation, UserData, VarsState,
+    ZoneData,
 };
 use super::{AppInfo, CheckStats, World};
 use crate::config::NumberFormat;
@@ -117,10 +118,12 @@ impl World {
             endpoints: BTreeMap::new(),
             zones: BTreeMap::new(),
             users: BTreeMap::new(),
+            notifications: BTreeMap::new(),
             check_commands: BTreeMap::new(),
             event_commands: BTreeMap::new(),
             comments_by_object: BTreeMap::new(),
             downtimes_by_object: BTreeMap::new(),
+            notifications_by_object: BTreeMap::new(),
             deps_by_child: BTreeMap::new(),
             deps_by_parent: BTreeMap::new(),
             next_comment_id: 1,
@@ -282,6 +285,52 @@ impl World {
                     ),
                 },
             );
+        }
+
+        for notification in &scenario.notifications {
+            let object = notification.object.full_name();
+            if world.checkable(&object).is_none() {
+                return Err(invalid(format!(
+                    "notification {} for unknown object {object}",
+                    notification.name
+                )));
+            }
+            let service_name = notification
+                .object
+                .as_service()
+                .map(|key| key.name.to_string())
+                .unwrap_or_default();
+            let template = if service_name.is_empty() {
+                "mail-host-notification"
+            } else {
+                "mail-service-notification"
+            };
+            let last_notification = shift.opt(notification.last_notification);
+            let notified = !notification.notified_problem_users.is_empty();
+            world.insert_notification(NotificationData {
+                name: notification.full_name(),
+                short_name: notification.name.clone(),
+                host_name: notification.object.host_name().to_string(),
+                service_name,
+                command: notification.command.clone(),
+                users: notification.users.clone(),
+                user_groups: notification.user_groups.clone(),
+                interval: 1_800.0,
+                last_notification,
+                last_problem_notification: if notified { last_notification } else { 0.0 },
+                next_notification: if notified {
+                    last_notification + 1_800.0
+                } else {
+                    0.0
+                },
+                notification_number: u64::from(notified),
+                notified_problem_users: notification.notified_problem_users.clone(),
+                meta: ObjMeta::config(
+                    vec![notification.name.clone(), template.to_owned()],
+                    &local_zone,
+                    SourceLocation::file("/etc/icinga2/conf.d/notifications.conf", 23, 0),
+                ),
+            });
         }
 
         // Commands referenced by checkables.

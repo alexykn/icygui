@@ -2,10 +2,11 @@
 //! (2 000 hosts × 15 services, docs/performance.md): the tiered initial
 //! load until the problem lists are complete, and a burst of every object
 //! re-checked at Icinga's pace (about 5 000 events/s) until the snapshot
-//! matches Icinga again.
+//! matches Icinga again. Icinga's 32 000 `Notification` objects load in
+//! the background after the problem lists.
 //!
 //! Ignored by default (slow in unoptimised builds); prints its timings:
-//! `cargo test -p ic-core --test scale -- --ignored --nocapture`.
+//! `cargo test -p ic-core --test engine scale -- --ignored --nocapture`.
 
 #![allow(
     clippy::unwrap_used,
@@ -14,13 +15,12 @@
     reason = "test helpers fail the test loudly"
 )]
 
-mod support;
-
 use std::time::{Duration, Instant};
 
 use ic_core::{ConnectionState, CoreEvent, LoadPhase};
 use ic_mock::{MockConfig, scenarios};
-use support::{mock, start_for};
+
+use crate::support::{mock, start_for};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "production size; run with --ignored --nocapture"]
@@ -81,6 +81,20 @@ async fn production_scale_load_and_burst() {
         .count();
     assert_eq!(problems, with_output, "every problem has its details");
     eprintln!("{problems} problems with details");
+    // Icinga's notifications follow in the background.
+    let snapshot = engine
+        .snapshot(|snapshot| !snapshot.icinga_notifications.is_empty())
+        .await;
+    let count: usize = snapshot
+        .icinga_notifications
+        .values()
+        .map(|list| list.len())
+        .sum();
+    eprintln!(
+        "Icinga's {count} notifications loaded after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(count, 32_000);
 
     let burst = Instant::now();
     let queued = control.burst();

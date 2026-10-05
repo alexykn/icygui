@@ -6,6 +6,14 @@
 //! - [`start`] runs the engine of one environment on its own thread and
 //!   returns a [`CoreHandle`]: [`Command`]s go in, [`CoreEvent`]s come out,
 //!   among them immutable [`snapshot::Snapshot`]s for the UI to render.
+//! - Notifications: every change the engine applies is judged by the
+//!   environment's rules (`ic-rules`); every decision is logged and
+//!   emitted as [`CoreEvent::Notification`], the audible ones also shown
+//!   through the [`ports::Notifier`].
+//! - The local event log (`SQLite`, one file per environment:
+//!   [`event_log_path`]) keeps state changes, acknowledgements, comments,
+//!   downtimes, flapping and notifications for the retention period;
+//!   [`delete_event_log`] removes it with its environment.
 //! - [`test_connection`] and [`fetch_certificate`] serve the settings
 //!   dialog without a running engine.
 //!
@@ -23,6 +31,7 @@ mod connect;
 mod dashboards;
 mod engine;
 mod error;
+mod event_log;
 mod handle;
 pub mod ports;
 mod probe;
@@ -36,6 +45,7 @@ pub use command::{
     NotificationRecord,
 };
 pub use error::CoreError;
+pub use event_log::{delete_event_log, event_log_path};
 pub use handle::{CoreHandle, start, start_with_tuning};
 pub use ports::SystemClock;
 pub use probe::{

@@ -5,8 +5,8 @@ use std::time::Duration;
 use ic_model::ServiceState;
 use serde_json::json;
 
-use super::Scenario;
 use super::build::{Builder, vars};
+use super::{Scenario, User};
 
 /// Builds the `staging` scenario: ten hosts, three warnings.
 #[must_use]
@@ -82,5 +82,8 @@ pub fn staging() -> Scenario {
         Duration::from_mins(13),
         None,
     );
+    b.scenario.users = vec![User::new("qa-oncall", "QA on-call", "qa@example.com")];
+    b.scenario
+        .apply_notification("mail-qa", |_| vec!["qa-oncall".to_owned()]);
     b.finish()
 }

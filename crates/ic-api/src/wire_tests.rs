@@ -328,7 +328,7 @@ fn recorded_attributes(name: &str) -> BTreeSet<String> {
 /// objects instead.
 #[test]
 fn every_requested_attribute_exists_in_icinga() {
-    let lists: [(&str, &[&str]); 11] = [
+    let lists: [(&str, &[&str]); 12] = [
         ("hosts.json", Detail::Lean.host_attrs()),
         ("hosts.json", Detail::Full.host_attrs()),
         ("services.json", Detail::Lean.service_attrs()),
@@ -340,6 +340,7 @@ fn every_requested_attribute_exists_in_icinga() {
         ("dependencies.json", DEPENDENCY_ATTRS),
         ("endpoints.json", ENDPOINT_ATTRS),
         ("zones.json", ZONE_ATTRS),
+        ("notifications.json", NOTIFICATION_ATTRS),
     ];
     for (name, attrs) in lists {
         let known = recorded_attributes(name);
@@ -872,4 +873,69 @@ fn recorded_action_results() {
         serde_json::from_str(r#"{"results":[{"code":200.0,"status":"ok","legacy_id":26.0}]}"#)
             .unwrap();
     assert!((results.results[0].code.0 - 200.0).abs() < f64::EPSILON);
+}
+
+fn notifications(json: &str) -> Vec<Notification> {
+    let results: Results<QueryResult<NotificationAttrs>> = serde_json::from_str(json).unwrap();
+    results
+        .results
+        .into_iter()
+        .filter_map(|entry| entry.attrs?.into_model(&entry.name.0))
+        .collect()
+}
+
+#[test]
+fn recorded_notifications_map_to_their_objects() {
+    // The contract instance's `mail-icingaadmin` (Icinga's default
+    // conf.d), for its own host and its `icinga` service; never sent.
+    let notifications = notifications(&sample("notifications.json"));
+    assert_eq!(
+        notifications,
+        [
+            Notification {
+                name: "icinga-master!icinga!mail-icingaadmin".to_owned(),
+                object: ObjectKey::service("icinga-master", "icinga"),
+                last_notification: None,
+                notified_problem_users: Vec::new(),
+            },
+            Notification {
+                name: "icinga-master!mail-icingaadmin".to_owned(),
+                object: ObjectKey::host("icinga-master"),
+                last_notification: None,
+                notified_problem_users: Vec::new(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn sent_notifications_keep_time_and_users() {
+    let json = json!({ "results": [
+        { "name": "db-prod-03!postgres-replication!mail", "type": "Notification", "attrs": {
+            "host_name": "db-prod-03", "service_name": "postgres-replication",
+            "last_notification": 1_791_230_000.5,
+            "notified_problem_users": ["oncall", "", "m.keller", 7]
+        }},
+        // No host: skipped. No name: skipped.
+        { "name": "x!y", "type": "Notification", "attrs": { "host_name": "" } },
+        { "name": "", "type": "Notification", "attrs": { "host_name": "h" } },
+        // Odd values fall back to defaults.
+        { "name": "h!sms", "type": "Notification", "attrs": {
+            "host_name": "h", "service_name": null, "last_notification": "soon",
+            "notified_problem_users": null
+        }},
+    ]});
+    let notifications = notifications(&json.to_string());
+    assert_eq!(notifications.len(), 2);
+    assert_eq!(
+        notifications[0].last_notification,
+        Some(Timestamp::from_unix_seconds(1_791_230_000.5))
+    );
+    assert_eq!(
+        notifications[0].notified_problem_users,
+        ["oncall", "m.keller"]
+    );
+    assert_eq!(notifications[1].object, ObjectKey::host("h"));
+    assert_eq!(notifications[1].last_notification, None);
+    assert!(notifications[1].notified_problem_users.is_empty());
 }

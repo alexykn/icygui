@@ -33,7 +33,7 @@ use std::sync::Arc;
 use ic_api::Detail;
 use ic_model::{
     CheckInfo, CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
-    InstanceStatus, ObjectKey, Service, ServiceGroup, ServiceKey, Timestamp,
+    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, ServiceKey, Timestamp,
 };
 use ic_rules::DashboardRef;
 
@@ -121,6 +121,15 @@ pub(crate) struct Store {
     dependencies: Arc<Vec<Dependency>>,
     endpoints: Arc<Vec<Endpoint>>,
     status: Option<Arc<InstanceStatus>>,
+    /// Icinga's own `Notification` objects, by host or service, each list
+    /// by name.
+    icinga_notifications: Arc<BTreeMap<ObjectKey, Arc<[Notification]>>>,
+    /// `started` of the complete notification list in the store (0: none).
+    notifications_listed: u64,
+    /// `started` of the by-name query that last wrote (or found gone) a
+    /// notification since that list, so an older answer never replaces a
+    /// newer one. Only names re-queried since the list are here.
+    notifications_fetched: HashMap<String, u64>,
     last_event_at: Option<Timestamp>,
     /// Services whose links were loaded ([`Detail::Full`]).
     full: HashSet<ServiceKey>,
@@ -239,6 +248,94 @@ impl Store {
             .find(|comment| comment.name == name)
     }
 
+    /// Whether a host is down or unreachable (its services' problems are
+    /// handled then).
+    pub(crate) fn host_problem(&self, host: &HostName) -> bool {
+        self.hosts.get(host).is_some_and(|host| host.is_problem())
+    }
+
+    /// The display names of a host or service: the host's, and the
+    /// service's for a service (names when unknown).
+    pub(crate) fn display_names(&self, key: &ObjectKey) -> (String, Option<String>) {
+        let host_name = key.host_name();
+        let host = self.hosts.get(host_name).map_or_else(
+            || host_name.as_str().to_owned(),
+            |host| host.display_name.clone(),
+        );
+        let service = key.as_service().map(|service_key| {
+            self.services.get(service_key).map_or_else(
+                || service_key.name.to_string(),
+                |service| service.display_name.clone(),
+            )
+        });
+        (host, service)
+    }
+
+    /// The first line of a host's or service's latest check output, if
+    /// it is loaded and belongs to the current state (a lean answer can
+    /// move a service's state on while its stored result is older).
+    pub(crate) fn current_output(&self, key: &ObjectKey) -> Option<&str> {
+        if key
+            .as_service()
+            .is_some_and(|service| self.result_is_stale(service))
+        {
+            return None;
+        }
+        self.check(key)?
+            .result
+            .as_ref()
+            .map(|result| result.output.as_str())
+    }
+
+    /// The services of a host that are in a problem state, with their
+    /// views.
+    pub(crate) fn problem_services_of(&self, host: &HostName) -> Vec<(ObjectKey, ObjectView)> {
+        self.services
+            .range(
+                ServiceKey {
+                    host: host.clone(),
+                    name: Arc::from(""),
+                }..,
+            )
+            .take_while(|(key, _)| &key.host == host)
+            .filter(|(_, service)| service.is_problem())
+            .map(|(key, service)| {
+                (
+                    ObjectKey::Service { key: key.clone() },
+                    ObjectView::of(CheckableState::Service(service.state), &service.check),
+                )
+            })
+            .collect()
+    }
+
+    /// One of an object's downtimes, by full name.
+    pub(crate) fn downtime_of(&self, object: &ObjectKey, name: &str) -> Option<&Downtime> {
+        self.downtimes
+            .get(object)?
+            .iter()
+            .find(|downtime| downtime.name == name)
+    }
+
+    /// The full names of the `Notification` objects of a host or service.
+    pub(crate) fn notification_names(&self, key: &ObjectKey) -> Vec<String> {
+        self.icinga_notifications
+            .get(key)
+            .map(|list| list.iter().map(|n| n.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// `started` of the complete notification list in the store (0: none
+    /// yet): it reflects every `Notification` event read before that.
+    pub(crate) fn notifications_listed(&self) -> u64 {
+        self.notifications_listed
+    }
+
+    /// The `Notification` objects of every host and service.
+    #[cfg(test)]
+    pub(crate) fn icinga_notifications(&self) -> &BTreeMap<ObjectKey, Arc<[Notification]>> {
+        &self.icinga_notifications
+    }
+
     /// The instance status, once known.
     pub(crate) fn status(&self) -> Option<&InstanceStatus> {
         self.status.as_deref()
@@ -315,6 +412,7 @@ impl Store {
             dependencies: Arc::clone(&self.dependencies),
             endpoints: Arc::clone(&self.endpoints),
             status: self.status.clone(),
+            icinga_notifications: Arc::clone(&self.icinga_notifications),
             dashboards,
             last_event_at: self.last_event_at,
             overall: self.overall(),
@@ -486,6 +584,132 @@ impl Store {
         self.remove_objects(missing, started)
     }
 
+    /// Applies the complete list of `Notification` objects, queried at
+    /// `started`: notifications missing from it are gone, unless a by-name
+    /// answer newer than the list wrote them. A list older than the one in
+    /// the store is ignored.
+    pub(crate) fn replace_notifications(&mut self, notifications: Vec<Notification>, started: u64) {
+        if started < self.notifications_listed {
+            return;
+        }
+        let newer = |name: &str| {
+            self.notifications_fetched
+                .get(name)
+                .is_some_and(|fetched| *fetched > started)
+        };
+        let mut lists: BTreeMap<ObjectKey, Vec<Notification>> = BTreeMap::new();
+        for notification in notifications {
+            if !newer(&notification.name) {
+                lists
+                    .entry(notification.object.clone())
+                    .or_default()
+                    .push(notification);
+            }
+        }
+        // What by-name answers newer than the list brought stays.
+        for (object, list) in self.icinga_notifications.iter() {
+            for notification in list.iter().filter(|n| newer(&n.name)) {
+                lists
+                    .entry(object.clone())
+                    .or_default()
+                    .push(notification.clone());
+            }
+        }
+        let lists: BTreeMap<ObjectKey, Arc<[Notification]>> = lists
+            .into_iter()
+            .map(|(object, mut list)| {
+                sort_notifications(&mut list);
+                // Unchanged lists keep their allocation.
+                let list = match self.icinga_notifications.get(&object) {
+                    Some(stored) if **stored == *list => Arc::clone(stored),
+                    _ => Arc::from(list),
+                };
+                (object, list)
+            })
+            .collect();
+        if *self.icinga_notifications != lists {
+            self.icinga_notifications = Arc::new(lists);
+            self.changes.any = true;
+        }
+        self.notifications_listed = started;
+        self.notifications_fetched
+            .retain(|_, fetched| *fetched > started);
+    }
+
+    /// Applies `Notification` objects queried by name at `started`;
+    /// `missing` (names Icinga doesn't know) are gone. Names a newer answer
+    /// (a list or another by-name query) already wrote are left alone.
+    pub(crate) fn apply_fetched_notifications(
+        &mut self,
+        found: Vec<Notification>,
+        missing: &[String],
+        started: u64,
+    ) {
+        for notification in found {
+            if self.may_write_notification(&notification.name, started) {
+                self.notifications_fetched
+                    .insert(notification.name.clone(), started);
+                self.put_notification(notification);
+            }
+        }
+        for name in missing {
+            if self.may_write_notification(name, started) {
+                self.notifications_fetched.insert(name.clone(), started);
+                if let Some(object) = notification_object(name) {
+                    self.remove_notification(&object, name);
+                }
+            }
+        }
+    }
+
+    /// Whether a by-name answer sent at `started` is at least as new as
+    /// whatever last wrote the notification `name`.
+    fn may_write_notification(&self, name: &str, started: u64) -> bool {
+        started >= self.notifications_listed
+            && self
+                .notifications_fetched
+                .get(name)
+                .is_none_or(|fetched| started >= *fetched)
+    }
+
+    fn put_notification(&mut self, notification: Notification) {
+        let current = self
+            .icinga_notifications
+            .get(&notification.object)
+            .and_then(|list| list.iter().find(|n| n.name == notification.name));
+        if current == Some(&notification) {
+            return;
+        }
+        let map = Arc::make_mut(&mut self.icinga_notifications);
+        let mut list = map
+            .get(&notification.object)
+            .map(|list| list.to_vec())
+            .unwrap_or_default();
+        list.retain(|n| n.name != notification.name);
+        let object = notification.object.clone();
+        list.push(notification);
+        sort_notifications(&mut list);
+        map.insert(object, Arc::from(list));
+        self.changes.any = true;
+    }
+
+    fn remove_notification(&mut self, object: &ObjectKey, name: &str) {
+        let Some(stored) = self.icinga_notifications.get(object) else {
+            return;
+        };
+        if !stored.iter().any(|n| n.name == name) {
+            return;
+        }
+        let list: Vec<Notification> = stored.iter().filter(|n| n.name != name).cloned().collect();
+        let map = Arc::make_mut(&mut self.icinga_notifications);
+        if list.is_empty() {
+            map.remove(object);
+        } else {
+            map.insert(object.clone(), Arc::from(list));
+        }
+        self.changes.any = true;
+    }
+
     /// Replaces the host groups.
     pub(crate) fn set_host_groups(&mut self, groups: Vec<HostGroup>) {
         if set_list(&mut self.host_groups, groups, &mut self.changes) {
@@ -653,6 +877,13 @@ impl Store {
         if self.downtimes.contains_key(key) {
             Arc::make_mut(&mut self.downtimes).remove(key);
         }
+        // Icinga deletes an object's notifications with it.
+        if let Some(list) = self.icinga_notifications.get(key) {
+            for notification in list.iter() {
+                self.notifications_fetched.remove(&notification.name);
+            }
+            Arc::make_mut(&mut self.icinga_notifications).remove(key);
+        }
         self.seqs.remove(key);
         self.changes.any = true;
         self.changes.objects.insert(key.clone());
@@ -726,6 +957,25 @@ fn sort_comments(list: &mut [Comment]) {
 /// Downtimes by start time (`Snapshot::downtimes`).
 fn sort_downtimes(list: &mut [Downtime]) {
     list.sort_by(|a, b| cmp_time(a.start_time, b.start_time).then_with(|| a.name.cmp(&b.name)));
+}
+
+/// Notifications by name (`Snapshot::icinga_notifications`).
+fn sort_notifications(list: &mut Vec<Notification>) {
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    list.dedup_by(|a, b| a.name == b.name);
+}
+
+/// The host or service a `Notification` belongs to, from its full name
+/// (`host!service!name` or `host!name`; Icinga allows no `!` in names).
+pub(crate) fn notification_object(name: &str) -> Option<ObjectKey> {
+    let (object, short) = name.rsplit_once('!')?;
+    if object.is_empty() || short.is_empty() {
+        return None;
+    }
+    match object.split_once('!') {
+        Some(_) => ServiceKey::parse(object).map(ObjectKey::from),
+        None => Some(ObjectKey::host(object)),
+    }
 }
 
 /// Removes the item named `name` from `object`'s list (and the list, once

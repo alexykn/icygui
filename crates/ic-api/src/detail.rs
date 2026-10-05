@@ -1,5 +1,5 @@
-//! How much of a host or service to load ([`Detail`]) and the result of a
-//! targeted re-query ([`Fetched`]).
+//! How much of a host or service to load ([`Detail`]) and the results of
+//! targeted re-queries ([`Fetched`], [`FetchedNotifications`]).
 //!
 //! At production scale (30 000 services) `last_check_result` is about two
 //! thirds of a service's bytes, so the initial load asks for services
@@ -7,7 +7,7 @@
 //! they're needed (problems, rows on screen, an opened pane). See
 //! `docs/performance.md`.
 
-use ic_model::{Host, ObjectKey, Service};
+use ic_model::{Host, Notification, ObjectKey, Service};
 
 /// Which attributes a host or service query asks for.
 ///
@@ -82,6 +82,17 @@ pub struct Fetched {
     /// hidden from this API user by a filtered `objects/query/*`
     /// permission (Icinga answers both alike). In request order, each once.
     pub missing: Vec<ObjectKey>,
+}
+
+/// The result of [`crate::Client::notifications_named`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FetchedNotifications {
+    /// The notifications that were found.
+    pub notifications: Vec<Notification>,
+    /// The requested names Icinga doesn't know (any more): deleted, or
+    /// hidden by a filtered `objects/query/Notification` permission. In
+    /// request order, each once.
+    pub missing: Vec<String>,
 }
 
 /// [`Detail::Lean`] for hosts. Hosts are identified by the result's

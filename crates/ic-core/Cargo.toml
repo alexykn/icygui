@@ -25,6 +25,8 @@ tracing.workspace = true
 fastrand = "2.5.0"
 # Local wall-clock time for quiet hours (`SystemClock::local`).
 jiff = "0.2.37"
+# The local event log (SQLite, compiled in: no system library needed).
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
 # Unique event stream queue names (`icygui-<uuid>`).
 uuid = { version = "1.27.0", features = ["v4"] }

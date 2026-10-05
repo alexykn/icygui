@@ -183,7 +183,7 @@ impl Store {
             | Event::DowntimeStarted { downtime, .. }
             | Event::DowntimeTriggered { downtime, .. } => self.on_downtime(seq, downtime, true),
             Event::DowntimeRemoved { downtime, .. } => self.on_downtime(seq, downtime, false),
-            Event::ObjectLifecycle { .. } => Applied::Ignored,
+            Event::ObjectLifecycle { .. } | Event::Notification { .. } => Applied::Ignored,
         }
     }
 
@@ -231,7 +231,7 @@ impl Store {
     }
 
     /// The view of a known object.
-    fn view_of(&self, key: &ObjectKey) -> Option<ObjectView> {
+    pub(crate) fn view_of(&self, key: &ObjectKey) -> Option<ObjectView> {
         match key {
             ObjectKey::Host { name } => self
                 .hosts

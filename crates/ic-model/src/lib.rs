@@ -6,6 +6,7 @@
 mod action;
 mod event;
 mod name;
+mod notification;
 mod object;
 mod perfdata;
 pub mod severity;
@@ -16,6 +17,7 @@ mod time;
 pub use action::{Action, ActionTarget, ChildOptions, CommandType, DowntimeMode};
 pub use event::{CheckableState, Event, EventKind, ObjectChange, StateAfter};
 pub use name::{HostName, ObjectKey, ServiceKey};
+pub use notification::{Notification, Notified};
 pub use object::{
     AckKind, CheckInfo, CheckResult, Comment, CommentKind, Dependency, Downtime, Endpoint,
     Features, Host, HostGroup, Links, Service, ServiceGroup, Vars,

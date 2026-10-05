@@ -8,7 +8,8 @@
 //! - `GET /v1/objects/<type>[/<name>]` (also `POST` with
 //!   `X-HTTP-Method-Override: GET`) with `attrs`, `joins`, `meta`, `filter`
 //!   and `filter_vars`, for hosts, services, host and service groups,
-//!   comments, downtimes, dependencies, endpoints, zones, users and commands
+//!   comments, downtimes, dependencies, endpoints, zones, users, Icinga's own
+//!   notifications and commands
 //! - `POST /v1/actions/<name>` for the runtime actions (checks,
 //!   acknowledgements, comments, downtimes, passive results, command
 //!   execution), with Icinga's effects and events
@@ -74,7 +75,7 @@ mod tls;
 pub use config::{MockConfig, MockTls, MockUser, NumberFormat, SimulationConfig, StormConfig};
 pub use control::{MockControl, RecordedRequest};
 pub use error::MockError;
-pub use scenario::{Scenario, Summary, User, Zone, raw_check_result};
+pub use scenario::{Notification, Scenario, Summary, User, Zone, raw_check_result};
 pub use server::MockServer;
 pub use tls::{TlsMaterial, format_fingerprint};
 

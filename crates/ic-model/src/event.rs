@@ -89,11 +89,13 @@ pub enum EventKind {
     ObjectModified,
     /// `ObjectDeleted`.
     ObjectDeleted,
+    /// `Notification`: Icinga sent one of its own notifications.
+    Notification,
 }
 
 impl EventKind {
     /// Every kind, in the order the client subscribes to them.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::CheckResult,
         Self::StateChange,
         Self::AcknowledgementSet,
@@ -108,6 +110,7 @@ impl EventKind {
         Self::ObjectCreated,
         Self::ObjectModified,
         Self::ObjectDeleted,
+        Self::Notification,
     ];
 
     /// The API's name for the type.
@@ -128,6 +131,7 @@ impl EventKind {
             Self::ObjectCreated => "ObjectCreated",
             Self::ObjectModified => "ObjectModified",
             Self::ObjectDeleted => "ObjectDeleted",
+            Self::Notification => "Notification",
         }
     }
 
@@ -261,6 +265,23 @@ pub enum Event {
         /// When it happened.
         at: Timestamp,
     },
+    /// Icinga sent one of its own notifications (through its
+    /// `Notification` objects) about a host or service. The client doesn't
+    /// judge these (its own rules do); it re-reads the object's
+    /// notifications to show who was notified and when.
+    Notification {
+        /// The host or service.
+        object: ObjectKey,
+        /// The users Icinga notified (empty if every user's filters held it
+        /// back).
+        users: Vec<String>,
+        /// Icinga's type name: `PROBLEM`, `RECOVERY`, `ACKNOWLEDGEMENT`,
+        /// `CUSTOM`, `FLAPPINGSTART`, `FLAPPINGEND`, `DOWNTIMESTART`,
+        /// `DOWNTIMEEND` or `DOWNTIMECANCELLED`.
+        notification_type: String,
+        /// When it happened.
+        at: Timestamp,
+    },
 }
 
 /// What happened to a config object.
@@ -290,7 +311,8 @@ impl Event {
             | Self::DowntimeStarted { at, .. }
             | Self::DowntimeTriggered { at, .. }
             | Self::Flapping { at, .. }
-            | Self::ObjectLifecycle { at, .. } => *at,
+            | Self::ObjectLifecycle { at, .. }
+            | Self::Notification { at, .. } => *at,
         }
     }
 
@@ -302,7 +324,8 @@ impl Event {
             | Self::StateChange { object, .. }
             | Self::AcknowledgementSet { object, .. }
             | Self::AcknowledgementCleared { object, .. }
-            | Self::Flapping { object, .. } => Some(object),
+            | Self::Flapping { object, .. }
+            | Self::Notification { object, .. } => Some(object),
             Self::CommentAdded { comment, .. } | Self::CommentRemoved { comment, .. } => {
                 Some(&comment.object)
             }

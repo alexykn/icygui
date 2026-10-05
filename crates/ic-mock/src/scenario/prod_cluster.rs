@@ -929,5 +929,24 @@ pub fn prod_cluster() -> Scenario {
     pinned.sort();
     pinned.dedup();
     b.scenario.pinned = pinned;
+    // Icinga's own notifications: the DBAs for the databases, the
+    // infrastructure on-call for everything else.
+    let databases: std::collections::HashSet<String> = b
+        .scenario
+        .hosts
+        .iter()
+        .filter(|host| host.groups.iter().any(|group| group == "databases"))
+        .map(|host| host.name.to_string())
+        .collect();
+    b.scenario.apply_notification("mail-oncall", |object| {
+        let names: &[&str] = match object {
+            ObjectKey::Host { .. } => &["infra-oncall", "infra-lead"],
+            ObjectKey::Service { key } if databases.contains(key.host.as_str()) => {
+                &["dba-oncall", "m.keller"]
+            }
+            ObjectKey::Service { .. } => &["infra-oncall"],
+        };
+        names.iter().map(|name| (*name).to_owned()).collect()
+    });
     b.finish()
 }

@@ -10,10 +10,9 @@
     reason = "test helpers fail the test loudly"
 )]
 
-mod support;
-
 use std::time::Duration;
 
+use crate::support::{mock, start_for, wait_until};
 use ic_core::snapshot::Snapshot;
 use ic_core::{ConnectionState, LoadPhase};
 use ic_mock::{MockConfig, MockControl, scenarios};
@@ -21,7 +20,6 @@ use ic_model::{
     AckKind, CommentKind, HostState, ObjectKey, ServiceKey, ServiceState, StateType, Timestamp,
 };
 use serde_json::{Value, json};
-use support::{mock, start_for};
 
 fn service<'a>(snapshot: &'a Snapshot, host: &str, name: &str) -> &'a ic_model::Service {
     &snapshot.services[&ServiceKey::new(host, name)]
@@ -47,17 +45,6 @@ fn requeried(control: &MockControl) -> Vec<(String, Vec<String>)> {
             })
         })
         .collect()
-}
-
-/// Polls `condition` for up to ten seconds.
-async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
-    for _ in 0..1_000 {
-        if condition() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    false
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -442,12 +429,12 @@ async fn snapshots_are_throttled_while_events_pour_in() {
     .await;
     let control = server.control();
     let interval = Duration::from_millis(200);
-    let mut engine = support::start(
-        support::environment(&server),
-        support::FakeSecrets::with(support::ENV_ID, support::PASSWORD),
+    let mut engine = crate::support::start(
+        crate::support::environment(&server),
+        crate::support::FakeSecrets::with(crate::support::ENV_ID, crate::support::PASSWORD),
         ic_core::Tuning {
             publish_interval: interval,
-            ..support::tuning()
+            ..crate::support::tuning()
         },
     );
     engine.connected().await;
@@ -489,14 +476,14 @@ async fn without_event_permissions_there_is_no_stream() {
         ..MockConfig::with_scenario(scenarios::lab())
     })
     .await;
-    let mut environment = support::environment(&server);
+    let mut environment = crate::support::environment(&server);
     environment.auth = ic_config::AuthConfig::Basic {
         username: "reader".to_owned(),
     };
-    let mut engine = support::start(
+    let mut engine = crate::support::start(
         environment,
-        support::FakeSecrets::with(support::ENV_ID, "secret"),
-        support::tuning(),
+        crate::support::FakeSecrets::with(crate::support::ENV_ID, "secret"),
+        crate::support::tuning(),
     );
     engine.connected().await;
     assert_eq!(server.control().event_streams(), 0);

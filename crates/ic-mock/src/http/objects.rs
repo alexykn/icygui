@@ -464,18 +464,16 @@ fn used_by_of(world: &World, target: &ObjRef) -> Vec<Json> {
                     .services_of(&target.name)
                     .map(|s| (ObjKind::Service, s.full_name())),
             );
+            // Every notification of the host and of its services names it
+            // (`host_name`).
             refs.extend(
                 world
-                    .comments_of(&target.name)
-                    .into_iter()
-                    .map(|c| (ObjKind::Comment, c)),
+                    .notifications
+                    .values()
+                    .filter(|n| n.host_name == target.name)
+                    .map(|n| (ObjKind::Notification, n.name.clone())),
             );
-            refs.extend(
-                world
-                    .downtimes_of(&target.name)
-                    .into_iter()
-                    .map(|d| (ObjKind::Downtime, d)),
-            );
+            annotation_refs(world, &target.name, &mut refs);
             refs.extend(
                 world
                     .dependencies
@@ -490,16 +488,11 @@ fn used_by_of(world: &World, target: &ObjRef) -> Vec<Json> {
         ObjKind::Service => {
             refs.extend(
                 world
-                    .comments_of(&target.name)
+                    .notifications_of(&target.name)
                     .into_iter()
-                    .map(|c| (ObjKind::Comment, c)),
+                    .map(|n| (ObjKind::Notification, n)),
             );
-            refs.extend(
-                world
-                    .downtimes_of(&target.name)
-                    .into_iter()
-                    .map(|d| (ObjKind::Downtime, d)),
-            );
+            annotation_refs(world, &target.name, &mut refs);
             refs.extend(
                 world
                     .dependencies
@@ -552,6 +545,22 @@ fn used_by_of(world: &World, target: &ObjRef) -> Vec<Json> {
             Json::Object(map)
         })
         .collect()
+}
+
+/// The comments and downtimes of an object, for `used_by`.
+fn annotation_refs(world: &World, object: &str, refs: &mut Vec<(ObjKind, String)>) {
+    refs.extend(
+        world
+            .comments_of(object)
+            .into_iter()
+            .map(|c| (ObjKind::Comment, c)),
+    );
+    refs.extend(
+        world
+            .downtimes_of(object)
+            .into_iter()
+            .map(|d| (ObjKind::Downtime, d)),
+    );
 }
 
 fn c_kind(checkable: &crate::model::Checkable) -> ObjKind {

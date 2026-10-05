@@ -3,8 +3,8 @@
 use ic_model::{Host, HostState, Service, ServiceState};
 use serde_json::json;
 
-use super::Scenario;
 use super::build::{Builder, vars};
+use super::{Scenario, User};
 
 /// Builds the `lab` scenario: one host up, one host never checked.
 #[must_use]
@@ -50,5 +50,13 @@ pub fn lab() -> Scenario {
     service.check.check_interval = 60.0;
     service.check.features.active_checks = false;
     b.scenario.services.push(service);
+    b.scenario.users = vec![User::new("lab-admin", "Lab admin", "lab@example.com")];
+    b.scenario.apply_notification("mail-lab", |object| {
+        if object.host_name().as_str() == "lab-01" {
+            vec!["lab-admin".to_owned()]
+        } else {
+            Vec::new()
+        }
+    });
     b.finish()
 }

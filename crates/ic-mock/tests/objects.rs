@@ -463,6 +463,7 @@ async fn every_supported_type_answers() {
         ("endpoints", 2),
         ("zones", 2),
         ("users", 1),
+        ("notifications", 140),
         ("checkcommands", 3),
         ("apiusers", 0),
     ] {

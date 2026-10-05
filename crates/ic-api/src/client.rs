@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use ic_model::{
     Action, ActionTarget, Comment, Dependency, Downtime, Endpoint, EventKind, Host, HostGroup,
-    InstanceStatus, ObjectKey, Service, ServiceGroup, Timestamp,
+    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, Timestamp,
 };
 use reqwest::header::{ACCEPT, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::actions::{self, Batch, TargetKind};
-use crate::detail::{Detail, Fetched};
+use crate::detail::{Detail, Fetched, FetchedNotifications};
 use crate::error::ApiError;
 use crate::events::EventStream;
 use crate::info::ApiInfo;
@@ -25,7 +25,8 @@ use crate::settings::{CONNECT_TIMEOUT, ConnectionSettings, Credentials};
 use crate::tls;
 use crate::wire::{
     self, ActionResultWire, CheckableAttrs, CommentAttrs, DependencyAttrs, DowntimeAttrs,
-    EndpointAttrs, GroupAttrs, InfoResult, QueryResult, Results, StatusResult, ZoneAttrs,
+    EndpointAttrs, GroupAttrs, InfoResult, NotificationAttrs, QueryResult, Results, StatusResult,
+    ZoneAttrs,
 };
 
 /// How many names one targeted query or action request carries. Icinga
@@ -442,6 +443,62 @@ impl Client {
                 attrs.into_service(name, detail)
             }),
             missing,
+        })
+    }
+
+    /// Every `Notification` object (Icinga's own notifications): the
+    /// object it belongs to, when it last notified and whom it notified
+    /// about the current problem. Only those four attributes are asked for
+    /// (about 150 bytes per object), so even one notification per service
+    /// of a large installation costs a fraction of the lean service list.
+    ///
+    /// Needs `objects/query/Notification`; callers check
+    /// [`ApiInfo::allows`] first instead of provoking a 403.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::hosts`] (`Forbidden` without the permission).
+    pub async fn notifications(&self) -> Result<Vec<Notification>, ApiError> {
+        let results = self
+            .query::<NotificationAttrs>("notifications", None, wire::NOTIFICATION_ATTRS)
+            .await?;
+        Ok(map_results(results, "notification", |attrs, name| {
+            attrs.into_model(name)
+        }))
+    }
+
+    /// Queries specific `Notification` objects by full name
+    /// (`host!service!name`, `host!name`), in batches of
+    /// [`NAMES_PER_REQUEST`]; a batch with an unknown name is split until
+    /// the unknown names are isolated, like [`Client::objects`]. No names,
+    /// no request.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::notifications`].
+    pub async fn notifications_named(
+        &self,
+        names: &[String],
+    ) -> Result<FetchedNotifications, ApiError> {
+        let mut unique = HashSet::new();
+        let names: Vec<String> = names
+            .iter()
+            .filter(|name| !name.is_empty() && unique.insert(name.as_str()))
+            .cloned()
+            .collect();
+        let answer = self
+            .query_names::<NotificationAttrs>(
+                "notifications",
+                "notifications",
+                names,
+                wire::NOTIFICATION_ATTRS,
+            )
+            .await?;
+        Ok(FetchedNotifications {
+            notifications: map_results(answer.found, "notification", |attrs, name| {
+                attrs.into_model(name)
+            }),
+            missing: answer.missing,
         })
     }
 

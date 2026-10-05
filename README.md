@@ -38,15 +38,18 @@ object ApiUser "icygui" {
   permissions = [
     "objects/query/Host", "objects/query/Service", "objects/query/HostGroup",
     "objects/query/ServiceGroup", "objects/query/Comment", "objects/query/Downtime",
-    "objects/query/Dependency", "objects/query/Endpoint", "status/query",
+    "objects/query/Dependency", "objects/query/Endpoint", "objects/query/Notification",
+    "status/query",
     "events/CheckResult", "events/StateChange", "events/AcknowledgementSet",
     "events/AcknowledgementCleared", "events/CommentAdded", "events/CommentRemoved",
     "events/DowntimeAdded", "events/DowntimeRemoved", "events/DowntimeStarted",
     "events/DowntimeTriggered", "events/Flapping", "events/ObjectCreated",
-    "events/ObjectModified", "events/ObjectDeleted",
+    "events/ObjectModified", "events/ObjectDeleted", "events/Notification",
   ]
 }
 ```
+
+`objects/query/Notification` and `events/Notification` let the panes show whom Icinga notified about a problem, and when; without them that row stays empty and everything else works.
 
 For operators, add `actions/reschedule-check`, `actions/acknowledge-problem`, `actions/remove-acknowledgement`, `actions/schedule-downtime`, `actions/remove-downtime`, `actions/add-comment`, `actions/remove-comment`, `actions/process-check-result` and, optionally, `actions/execute-command`. Buttons for actions the user isn't allowed to run are disabled.
 

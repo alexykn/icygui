@@ -11,6 +11,8 @@
 //!   by name.
 //! - *Hydration:* `Command::Hydrate` fetches lean services in full, by name,
 //!   deduplicated.
+//! - *`Command::UpdateGeneral`:* a new reconcile interval or event log
+//!   retention applies at once.
 
 use std::time::Duration;
 
@@ -61,10 +63,15 @@ impl Engine {
     pub(super) fn update_general(&mut self, general: ic_config::General) {
         let interval_changed =
             self.spec.general.reconcile_interval_secs != general.reconcile_interval_secs;
+        let retention_changed =
+            self.spec.general.event_log_retention_hours != general.event_log_retention_hours;
         self.spec.general = general;
-        // Stage 3: the event log's retention.
         if interval_changed && self.reconcile_at.is_some() {
             self.schedule_reconcile();
+        }
+        if retention_changed {
+            // A shorter retention applies at once.
+            self.prune_at = Instant::now();
         }
     }
 

@@ -13,8 +13,8 @@ use std::time::Duration;
 use ic_model::{HostGroup, ObjectKey, ServiceGroup, ServiceState};
 use serde_json::json;
 
-use super::Scenario;
 use super::build::{Builder, vars};
+use super::{Scenario, User};
 
 /// Number of hosts in [`large`].
 const HOSTS: usize = 2_000;
@@ -219,5 +219,10 @@ pub fn large_with_hosts(hosts: usize, seed: u64) -> Scenario {
         );
     }
     b.scenario.pinned = down.iter().map(|name| ObjectKey::host(name)).collect();
+    // One notification per host and service, as `apply Notification … to
+    // Service` gives a production setup.
+    b.scenario.users = vec![User::new("oncall", "On-call", "oncall@example.com")];
+    b.scenario
+        .apply_notification("mail-oncall", |_| vec!["oncall".to_owned()]);
     b.finish()
 }

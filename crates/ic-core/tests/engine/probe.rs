@@ -8,13 +8,11 @@
     reason = "test helpers fail the test loudly"
 )]
 
-mod support;
-
+use crate::support::{PASSWORD, environment, mock};
 use ic_config::AuthConfig;
 use ic_core::{ConnectionFailure, REQUIRED_PERMISSIONS, fetch_certificate, test_connection};
 use ic_mock::{MockConfig, MockUser, scenarios};
 use secrecy::SecretString;
-use support::{PASSWORD, environment, mock};
 
 fn password(text: &str) -> SecretString {
     SecretString::from(text.to_owned())

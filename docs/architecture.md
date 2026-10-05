@@ -3,12 +3,12 @@
 This is the binding contract between crates. `PLAN.md` explains the product and the reasons for these decisions; this file says exactly what each crate exposes and how it must behave. When code and this file disagree, fix one of them in the same change.
 
 Already implemented and binding:
-- `ic-model`: all domain types (names, timestamps, perfdata, objects, severity, events, actions, instance status).
+- `ic-model`: all domain types (names, timestamps, perfdata, objects, severity, events, actions, instance status, Icinga's own `Notification` objects and `Notified`).
 - `ic-filter`, `ic-config`, `ic-rules` (engine included), `ic-platform`: implemented and reviewed, as specified below.
 - `ic-api`: implemented and reviewed, including the tiered loading (`Detail`, `Fetched`), with integration tests against `ic-mock` and contract tests against a real Icinga 2.15.6.
 - `ic-mock`: implemented (wave 2); API filters are evaluated by `ic-filter`.
 - `ic-ui-kit` and `ic-app`: the static UI (chrome, dashboard list, service and host panes, tabs) on demo data.
-- `ic-core`: `ports.rs` (`SecretStore`, `Notifier`, `Clock`, `SystemClock`) and `snapshot.rs` (`Snapshot`, `DashboardResult`, `DashboardRow`, `Summary`). Wave 3, stages 1 and 2 of 3 are built: `start`/`CoreHandle`, `Command`/`CoreEvent`, the whole sync engine (connect, tiered load, event stream, freshness watchdog, hydration, reconcile, status poll, reconnects), the store and snapshots, dashboards (with previews), actions, `test_connection` and `fetch_certificate`. Stage 3 (notifications, event log) follows; the commands it owns are accepted and answered with empty replies until then.
+- `ic-core`: `ports.rs` (`SecretStore`, `Notifier`, `Clock`, `SystemClock`) and `snapshot.rs` (`Snapshot`, `DashboardResult`, `DashboardRow`, `Summary`). Wave 3 is built (stages 1–3): `start`/`CoreHandle`, `Command`/`CoreEvent`, the whole sync engine (connect, tiered load, event stream, freshness watchdog, hydration, reconcile, status poll, reconnects), the store and snapshots, dashboards (with previews), actions, notifications (the rule engine fed from every applied change), the SQLite event log, Icinga's own `Notification` objects (who was notified, and when), `test_connection` and `fetch_certificate`.
 
 Read the existing code before implementing against it. Don't change these types without a strong reason; if you must, explain the change in your report.
 
@@ -248,6 +248,8 @@ impl Client {
     pub async fn dependencies(&self) -> Result<Vec<Dependency>, ApiError>;
     pub async fn endpoints(&self) -> Result<Vec<Endpoint>, ApiError>;
     pub async fn objects(&self, keys: &[ObjectKey], detail: Detail) -> Result<Fetched, ApiError>;   // by name, ≤ 200 per request; a 404 batch is bisected to find deleted names
+    pub async fn notifications(&self) -> Result<Vec<Notification>, ApiError>;   // every `Notification` object: host_name, service_name, last_notification, notified_problem_users only
+    pub async fn notifications_named(&self, names: &[String]) -> Result<FetchedNotifications, ApiError>;   // by full name (`host!service!name`, `host!name`), like `objects`
     pub async fn run_action(&self, action: &Action, target: &ActionTarget, author: &str) -> Result<Vec<ActionResult>, ApiError>;   // Err only if the first request fails as a whole; later failures become per-target results (code 0 for timeout/connect)
     pub async fn events(&self, queue: &str, kinds: &[EventKind]) -> Result<EventStream, ApiError>;
     pub fn unknown_attributes(&self) -> Vec<(&'static str, &'static str)>;   // (type plural, attribute) this Icinga answered "Invalid field specified" for, sorted; empty on a current Icinga
@@ -264,6 +266,7 @@ pub enum Detail {
 }
 impl Detail { pub fn host_attrs(self) -> &'static [&'static str]; pub fn service_attrs(self) -> &'static [&'static str]; }   // the exact lists
 pub struct Fetched { pub hosts: Vec<Host>, pub services: Vec<Service>, pub missing: Vec<ObjectKey> }   // missing: unknown to Icinga (deleted), request order, each once
+pub struct FetchedNotifications { pub notifications: Vec<Notification>, pub missing: Vec<String> }   // the same for `notifications_named`
 pub struct ApiInfo { pub user: String, pub permissions: Vec<String>, pub version: String }
 impl ApiInfo { pub fn allows(&self, permission: &str) -> bool; }       // Icinga wildcard semantics ("*", "actions/*", "objects/query/*"); "(filtered)" entries count as allowed
 pub struct ActionResult { pub code: u16, pub status: String, pub name: Option<String>, pub target: Option<String> }   // name: created comment/downtime; target: the object/downtime/comment the result is for
@@ -294,6 +297,8 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
   - Lean objects carry every attribute dashboard and rule filters can use (ic-filter, "Object attributes") except `last_check_result` and the links (`notes`, `notes_url`, `action_url`, `icon_image`), which keep their defaults (`None`, `""`). The check configuration, the `enable_*` switches and `flapping_current` are lean because no event carries them: a lean object would never learn them, and filters such as `service.check_command == "disk"` or `service.zone == "dmz"` would silently miss it. The check result comes with the next `CheckResult` event (or a full fetch); the links only with a full fetch. So a filter on `last_check_result` or the links sees `null`/`""` for a lean object until then; `ic-core` must not overwrite a hydrated object's result and links with a lean reload's.
   - `next_update` is **not** loaded: `ic_model::CheckInfo` has no field for it. The freshness watchdog computes the deadline with Icinga's formula (`Checkable::GetNextUpdate`): with active checks `next_check + interval + 2 × latency`, without `(end of the last result, or program start) + 2 × interval + 2 × latency`; `interval` is `retry_interval` for a soft problem with active checks and `check_interval` otherwise; `latency` (the last result's `execution_end − schedule_start`) is unknown for a lean object and counts as 0 until a `CheckResult` event or a full fetch brings a result. Request `next_update` once the model can carry it: it exists from 2.12 (`lib/icinga/checkable.ti`), not in 2.11, where the unknown-attribute rule below leaves it out at the cost of one extra request per type and client.
   - Sizes (`Detail::Lean` / `Detail::Full` / all attributes, services): `ic-mock`'s `large` scenario (30 000 services) 26.5 / 46.4 / 75.7 MB (884 / 1 548 / 2 524 bytes per service; its full and all-attribute sizes match the real measurements in docs/performance.md); the contract instance's 6 services 4.6 / 15.9 / 21.5 KB. The check configuration, switches and `flapping_current` add about 210 bytes per service to the lean list (3.4 → 4.6 KB on the contract instance).
+- *Icinga's own notifications* (`Notification` objects, `lib/icinga/notification.ti`; PANE-06): `notifications()` asks for exactly `host_name`, `service_name`, `last_notification` and `notified_problem_users` (verified on 2.15.6: `contract/samples/notifications.json`; about 190–220 bytes per object, 7.1 MB for `ic-mock`'s 32 000), mapped into `ic_model::Notification { name, object, last_notification: Option (0 = never), notified_problem_users }`. An entry without a host or a name is skipped; non-string users are dropped. `notifications_named` targets `{"notifications": [...]}` in batches of 200 with the same 404 bisection as `objects`. Without `objects/query/Notification` Icinga answers `403 Missing permission: objects/query/notification` (`Forbidden`; verified on 2.15.6 with the fixture's `viewer`).
+- *`Notification` events* (`NotificationSentToAllUsersHandler`, fired whenever a `Notification` object sent anything, after `last_notification` and `notified_problem_users` changed) parse into `Event::Notification { object, users, notification_type, at }`; the check result is not kept. They carry no `Notification` object name, so `ic-core` re-reads the object's notifications by name.
 - *`CheckResult` events* carry `check_result.vars_after` (`state`, `state_type`, `attempt`, `reachable`) plus `downtime_depth` and `acknowledgement` (a boolean in events). They are mapped into `Event::CheckResult { after: Option<StateAfter>, .. }` (`ic_model::StateAfter { state: CheckableState, state_type, attempt, reachable }`; `None` without a state and state type) so `ic-core` can update the object without a re-query. For hosts, `vars_after.state` is a *service-style* state (0/1 = up, 2/3 = down; see `Host::CalculateState`); a down host that isn't reachable is `HostState::Unreachable`.
 - *Comments and downtimes:* the object comes from `host_name` / `service_name` (empty string = host).
   - `Downtime.in_effect`: use `is_in_effect` when present, otherwise compute it from fixed/flexible, start/end and `trigger_time`.
@@ -333,7 +338,8 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
   - deserialisation tests from realistic JSON (doc examples plus pending, unreachable, perfdata dict and string forms, comments, downtimes);
   - an in-process HTTPS test server (hyper or axum with a self-signed certificate from `rcgen`) for pinning, CA trust, name override, auth headers, action bodies, event streaming split across chunks, and error mapping.
   - `crates/ic-api/tests/mock.rs` runs against `ic-mock` in-process: pinning to its self-signed certificate (and its CA), `prod_cluster` lean and full against the mock's own state, pending lean objects, `objects()` with unknown names across batches, actions with per-object results (200/409/404, created comment and downtime names), the event stream with a `MockControl::burst`, error mapping (401, 403 with Icinga's lowercased permission, the hidden events 404, 404 and 503), and the tiered load of a tenth of the `large` scenario; the full-size `large` load is `#[ignore]`d (about 20 s in a debug build).
-  - `crates/ic-api/tests/contract.rs` runs read-only checks against a real Icinga when the `ICYGUI_CONTRACT_*` variables from `contract/run-icinga.sh` are set (and passes trivially otherwise): queries, both `Detail` lists verbatim and no unknown attribute in any query, lean against full services, `objects()` with unknown names, the unknown-attribute answer, a refused action and the event stream. Tests that need checked objects first wait (≤ 150 s) until Icinga has checked every object with active checks: a fresh instance runs its first checks within a minute of starting. With `ICYGUI_CONTRACT_REQUIRED` set, missing variables fail instead; `.github/workflows/contract.yml` sets it and runs them nightly (and on demand, with an image tag) against Icinga in Docker.
+  - `crates/ic-api/tests/mock.rs` also loads the `Notification` objects whole and by name (unknown names isolated, a missing permission is `Forbidden`) and measures their size in the `large` scenario.
+  - `crates/ic-api/tests/contract.rs` runs read-only checks against a real Icinga when the `ICYGUI_CONTRACT_*` variables from `contract/run-icinga.sh` are set (and passes trivially otherwise): queries, both `Detail` lists verbatim and no unknown attribute in any query, lean against full services, `objects()` with unknown names, the unknown-attribute answer, a refused action, the `Notification` objects (whole, by name, the `viewer`'s 403) and the event stream. Tests that need checked objects first wait (≤ 150 s) until Icinga has checked every object with active checks: a fresh instance runs its first checks within a minute of starting. With `ICYGUI_CONTRACT_REQUIRED` set, missing variables fail instead; `.github/workflows/contract.yml` sets it and runs them nightly (and on demand, with an image tag) against Icinga in Docker.
 
 ---
 
@@ -346,6 +352,7 @@ See PLAN.md §3.6. `MockServer::start(MockConfig) -> MockServer` serves HTTPS on
 - It honours `Detail`-style `attrs` selection and name lists exactly like Icinga, including the all-or-nothing 404. The binary is `icinga-mock`. It writes its own wire JSON straight from the docs and sources; it never uses `ic-api`'s types.
 - `filter` (queries, actions, status, event streams) is parsed and evaluated by `ic-filter`, with a scope that gives Icinga's frame (the object, its joins, `filter_vars`, globals) and Icinga's errors for undefined variables and unknown attributes. The HTTP behaviour (404 for filters that fail, or don't compile, when evaluated for an object; 403 without `filter-expression`; silent event streams; Icinga's targeted lookup of `host.name == "a" || …` filters in filter order) is Icinga's; the remaining differences, most of them `ic-filter`'s deliberate ones, are listed in `crates/ic-mock/src/filter.rs`.
 - `tests/fidelity.rs` replays exchanges recorded from Icinga 2.15.6 (`contract/record-queries.py`): Lean and Full selections, joins, meta, name lists, unknown attributes, filters.
+- *Icinga's own notifications* (wave 3, stage 3): `Scenario::notifications` (`ic_mock::Notification { name, object, command, users, user_groups, last_notification, notified_problem_users }`; `Scenario::apply_notification(name, users)` adds one per host and service like `apply Notification … to Host/Service`, marking hard unhandled problems as already notified). Every built-in scenario has them (`large`: one per host and service, 32 000). `/v1/objects/notifications` serves them with Icinga 2.15.6's attribute set (`contract/samples/notifications.json`; no time periods or commands are modelled, `period` and `command_endpoint` are empty), by name and in `meta=used_by`. `ProcessCheckResult` sends them like Icinga: on a hard state change (not soft OK → hard OK), or every hard result of a volatile object, not while flapping, in downtime, acknowledged or unreachable (dropped, not stashed as suppressed); every notification of the object notifies its users and user-group members, a recovery only the users told about the problem and it clears that list; each emits a `Notification` event. `MockControl::notifications()` returns them as `ic_model::Notification`s. `tests/notifications.rs` covers the attributes, the events and the recovery rule.
 
 ---
 
@@ -362,7 +369,8 @@ pub fn start(spec: EnvironmentSpec, ports: Ports) -> Result<CoreHandle, CoreErro
 pub fn start_with_tuning(spec: EnvironmentSpec, ports: Ports, tuning: Tuning) -> Result<CoreHandle, CoreError>;   // other timing (tests)
 pub struct Tuning { backoff_initial: 1 s, backoff_max: 60 s, healthy_after: 5 min, status_interval: 30 s, publish_interval: 250 ms,
                     requery_delay: 200 ms, missing_ttl: 10 min, max_batch: 5 000, shutdown_timeout: 5 s,
-                    watchdog_interval: 5 s, reload_jitter: 10 s, reconcile_interval: None }   // all pub; Default = these
+                    watchdog_interval: 5 s, reload_jitter: 10 s, reconcile_interval: None,
+                    rule_tick: 1 s, prune_interval: 1 h }   // all pub; Default = these
                     // reconcile_interval: Some(d) overrides General.reconcile_interval_secs (tests)
 pub enum CoreError { Runtime(io::Error), Thread(io::Error) }
 pub struct CoreHandle { … }
@@ -371,6 +379,10 @@ impl CoreHandle {
     pub fn take_events(&mut self) -> Option<futures::channel::mpsc::UnboundedReceiver<CoreEvent>>;   // taken once by the UI bridge
     pub fn shutdown(self);                                     // stops streams, flushes the log, joins the thread (bounded wait)
 }
+
+/// The event log of an environment (requirement ENV-03: deleting an environment deletes its event log).
+pub fn event_log_path(data_dir: &Path, environment_id: &str) -> PathBuf;   // <data_dir>/events-<id>.sqlite3; bytes other than ASCII letters, digits and `-` are written `_xx`
+pub fn delete_event_log(data_dir: &Path, environment_id: &str) -> io::Result<()>;   // the database and its -wal/-shm/-journal files; missing files are fine; call after CoreHandle::shutdown
 
 /// Settings dialog helpers, runnable without a started environment.
 /// They run on a shared background runtime and return a oneshot receiver
@@ -419,10 +431,11 @@ pub enum LogKind { State { state: CheckableState, state_type: StateType }, Ackno
 pub struct NotificationRecord { pub intent: NotificationIntent, pub read: bool }
 ```
 
-The `Snapshot` contract type gains three fields; all are allowed additive changes:
+The `Snapshot` contract type gains four fields; all are allowed additive changes:
 - `last_event_at: Option<Timestamp>`, which the footer shows as "master-01 · 2s";
 - `overall: Summary`, over all hosts and services, which drives the tray icon and its tooltip;
 - `late: Arc<BTreeMap<ObjectKey, Timestamp>>`, the objects whose check is late (step 4) with the deadline they missed (Icinga's `next_update`, on Icinga's clock), plus `Snapshot::is_late(&ObjectKey)`. The UI shows "late 12m".
+- `icinga_notifications: Arc<BTreeMap<ObjectKey, Arc<[Notification]>>>`, Icinga's own `Notification` objects by host or service (each list by name), plus `Snapshot::notified(&ObjectKey) -> Notified`: the latest `last_notification` and every user in `notified_problem_users`, combined over the object's notifications (`Notified::is_never()` = "not notified"). The panes' "notified" row (PANE-06). Empty without `objects/query/Notification`.
 
 **Event order:** events reach the UI in the order the engine produced them. While a snapshot's dashboards are being evaluated (a blocking thread, below), other events wait and follow it: `Connected` comes after the snapshot of the load that completed it, an `ActionFinished` after the snapshot cut before it.
 
@@ -437,7 +450,7 @@ The `Snapshot` contract type gains three fields; all are allowed additive change
    2. Services (`Detail::Lean`).
    3. Every service in a problem state, `Full`, by name in batches.
    - Expose progress (`ConnectionState::Loading { phase, done, total }`).
-3. Open the event stream (queue `icygui-<uuid>`, all `EventKind::ALL`). Split it into two tasks:
+3. Open the event stream (queue `icygui-<uuid>`, all `EventKind::ALL`, which includes `Notification` since stage 3). Split it into two tasks:
    - a *reader* that only reads lines into an unbounded channel, so Icinga's send buffer never backs up;
    - an *applier* that parses and applies in batches.
    - `CheckResult` updates the object completely (state, state type, attempt and reachability from `vars_after`; downtime depth; acknowledgement; output and perfdata). `next_check` is estimated from `execution_end` plus the check or retry interval.
@@ -466,8 +479,13 @@ The `Snapshot` contract type gains three fields; all are allowed additive change
    - Periodically, adaptively: every 5 minutes below 5 000 objects, every 15 minutes above, counted from the last completed load with ±10 % jitter (clients drift apart). `General.reconcile_interval_secs = 0` (the default) means adaptive; any other value overrides it, but never below `ic_config::MIN_RECONCILE_INTERVAL_SECS` (60 s). A failed reload waits for the next interval.
    - Query answers are diffed against the store as they are applied: a change no event explains (state, state type, `last_state_change`, acknowledgement, downtime depth, flapping, reachability), and every removal, is recorded (`store::Discovered { object, before, after: Option }`) for stage 3, which turns them into rule inputs. The first load into an empty store finds nothing.
    - **Never** periodic full-attribute reloads: they cost the master around 1 GB of memory at this scale.
-7. Poll status every 30 s (only with `status/query`; a 403 stops the polling). A changed `program_start` means Icinga restarted and triggers a reload; the connection state stays `Connected` during reloads.
-8. Stream end or error → `Reconnecting` with exponential backoff and jitter (1 s → 60 s, reset after 5 minutes of health). Auth (401) → `AuthFailed`. TLS errors and pin mismatch → `TlsFailed` with the presented certificate (via `fetch_server_certificate`).
+7. *Icinga's own notifications* (who Icinga notified, and when; PANE-06):
+   - The whole list (`Client::notifications`, four attributes) loads in the background once a load is complete, so it never delays `Connected` (32 000 objects: 7.1 MB, loaded 0.76 s after the problem lists in the dev profile).
+   - It follows Icinga's `Notification` events: each one re-reads that object's notifications by name through the re-query queue (deduplicated, one round at a time, ≤ 1 000 names per round, 200 per request); events read before the list was queried are already reflected and skipped, events read while it runs are re-checked against it. `ObjectCreated`/`Modified`/`Deleted` of type `Notification` re-read that name (a deleted one comes back missing and leaves the store). Answers are ordered like the other queries (by the reader's line count, per name), so an older answer never replaces a newer one.
+   - Reloaded with every load after a reconnect, a restart, `Refresh` or another server; periodic reconciles skip it while the stream carries `Notification` events (`events/Notification`), because every change of a `Notification` object comes with one. Without that permission every reconcile reloads it.
+   - Without `objects/query/Notification` (from `GET /v1`, or a 403/404 answer) nothing is asked and the map stays empty.
+8. Poll status every 30 s (only with `status/query`; a 403 stops the polling). A changed `program_start` means Icinga restarted and triggers a reload; the connection state stays `Connected` during reloads.
+9. Stream end or error → `Reconnecting` with exponential backoff and jitter (1 s → 60 s, reset after 5 minutes of health). Auth (401) → `AuthFailed`. TLS errors and pin mismatch → `TlsFailed` with the presented certificate (via `fetch_server_certificate`).
    - The delay of the n-th consecutive failure is `1 s × 2^(n−1)` capped at 60 s, of which a random half is jitter (`[d/2, d)`). `Connecting.attempt` counts from 1; `Reconnecting.attempt` is the attempt that runs at `retry_at`.
    - `Refresh` connects at once (after `AuthFailed`, `TlsFailed`, `MissingSecret`, `Misconfigured` with a fresh backoff). `UpdateEnvironment` reconnects when the id, URL, authentication or TLS settings changed, and whenever the engine is waiting to reconnect or for the user; a new id or URL also empties the store first (another server's objects must not linger). Other changes apply in place.
    - The store keeps the last known objects while reconnecting; the reload after the reconnect replaces them.
@@ -495,31 +513,44 @@ The `Snapshot` contract type gains three fields; all are allowed additive change
 - Performance target: 20 000 services × 10 dashboards stays responsive. A full evaluation takes well under a second in release builds; incremental updates take milliseconds. Measured with the `large` mock scenario (docs/performance.md; ignored tests).
 
 **Notifications:**
-- Build an `ic_rules::RuleSet` from the environment (environment name, settings, groups/dashboards with their `ScopeSetting`s) and rebuild it on `UpdateEnvironment`.
-- For every applied change, produce a `RuleInput`:
-  - `StateChange`: previous state from the store before applying, `since` = `last_state_change`. A host that isn't reachable (`vars_after.reachable` / `last_reachable` false) is reported as `Unreachable`, not `Down`: a down notification can't be taken back;
-  - `AcknowledgementSet`/`AcknowledgementCleared`;
+- Build an `ic_rules::RuleSet` from the environment (environment name, settings, groups/dashboards with their `ScopeSetting`s, in sidebar order) and rebuild it on `UpdateEnvironment` (only when it changed: the rule engine re-judges waiting notifications then). Another server (new id or URL) starts a new rule engine; a pause carries over.
+- For every applied change, produce a `RuleInput`, right after the store applied it (the store shows the change's result):
+  - `StateChange`: previous state from the store before applying, `since` = `last_state_change`. A host that isn't reachable (`vars_after.reachable` / `last_reachable` false) is reported as `Unreachable`, not `Down`: a down notification can't be taken back. It comes from whichever event moved the state or the state type (`CheckResult`, or a `StateChange` the collapsed batch kept); the `StateChange` of the same check then changes nothing and adds nothing. Plain check results without a change produce nothing;
+  - `AcknowledgementSet`/`AcknowledgementCleared` (cleared only if the object was acknowledged);
   - `DowntimeStarted`/`DowntimeTriggered` → `DowntimeStarted` (Icinga reports a fixed downtime as both; the engine counts starts within 5 s as one);
-  - `DowntimeRemoved` of an in-effect downtime → `DowntimeEnded`;
-  - `Flapping` → `FlappingStarted`/`FlappingStopped`, also when a reconcile finds the flag changed.
-  - `handled` is computed from the store after applying (acknowledged, in downtime, host problem for services, or unreachable through a dependency, which Icinga suppresses too); `memberships` from the dashboard filters.
-  - When an object's `handled` changes without an event of its own (the services of a host that went down or came back, an object whose parent recovered), a repeat of its state (same `current` and `since`) with the new `handled`.
-  - After an object's `handled` turned false, a repeat of its state on its next `CheckResult`, with `at` = that check's time: it tells the engine the state is current, not left over from the outage or maintenance.
-- Tick the engine every second.
-- Every intent goes into the SQLite log, then `CoreEvent::Notification`; non-silent ones also go to `Notifier::notify`.
+  - `DowntimeRemoved` of a downtime that was in effect (in effect in the store or the event, triggered, or seen starting) → `DowntimeEnded`; one cancelled before it began ends nothing;
+  - `Flapping` → `FlappingStarted`/`FlappingStopped` when the flag changed, also when a reconcile finds it changed.
+  - `handled` is computed from the store after applying, for problems only: acknowledged, in downtime, unreachable through a dependency (which Icinga suppresses too), or for services a host problem; `memberships` from the dashboard filters.
+  - When an object's `handled` changes without an event of its own (the services of a host that went down or came back), a repeat of its state (same `current` and `since`) with the new `handled`.
+  - After an object's `handled` turned false, a repeat of its state on its next `CheckResult`, with `at` = that check's time: it tells the engine the state is current, not left over from the outage or maintenance. When the check result itself shows the handling over (reachable again, or an acknowledgement or downtime gone whose event was missed), the handling ended by the previous check at the latest: the repeat that ends it carries that check's time, and a second repeat with this check's time confirms the state at once.
+  - Query answers that found a change no event announced (`store::Discovered`; reconcile, re-queries) produce the same inputs and log entries: state changes (with the output when the stored result is current, else none), flapping, `handled` changes; a removed object becomes a change to pending, which the rule engine forgets without notifying. A load's findings are judged once it is over (its last tier loads the problems' output); the session's first load produces none.
+  - Inputs wait for their memberships: they are judged when the dashboards were evaluated for the snapshot that includes the change (or at once when no evaluation was needed), in order, so a notification follows the snapshot showing its change. An evaluation that fails keeps them for the next one.
+- Tick the engine every second (`Tuning::rule_tick`), connected or not: delayed notifications, storm summaries, mutes and pauses ending. A pause that ends by itself is announced as `NotificationsPaused(None)`; `PauseNotifications` is announced at once.
+- Every intent goes into the SQLite log, then `CoreEvent::Notification` (`read: false`); non-silent ones also go to `Notifier::notify`. An id the log already has (from an earlier run) is neither emitted nor shown again; a log that can't write lets every intent through. `now` for the rule engine is the local clock (`Clock::now`; pauses and storms count in it), `local` its wall-clock time for quiet hours.
+- Throughput (dev profile): every OK service of the `large` scenario failing at once (28 500 changes) becomes inputs in 0.21 s, is judged with ten dashboards' memberships in 0.64 s and logged (state changes and notifications) in 0.23 s.
 
-**Event log:** SQLite (rusqlite, bundled) at `<data_dir>/events-<environment id>.sqlite3`.
-- WAL mode, schema version table.
-- Tables `events` (at, object, kind, state, state_type, text, author) and `notifications` (id, at, object, title, subtitle, body, tone, silent, read).
-- What gets logged: state changes (hard and soft), acknowledgements, user comments, downtime start/end, flapping. Not plain check results.
-- Prune on start and hourly to `event_log_retention_hours`.
-- All database work happens on blocking threads.
+**Event log:** SQLite (rusqlite, bundled) at `<data_dir>/events-<environment id>.sqlite3` (`event_log_path`; the directory 0700, the file 0600 on Unix).
+- WAL mode, `synchronous = NORMAL`, incremental auto-vacuum (pruned pages go back), schema version table (`schema_version`, version 1). A database from a newer icygui is left alone (the engine runs without a log); a corrupt one is moved aside (`….corrupt-<unix seconds>`) and a new one started; one that can't be opened at all leaves the engine without a log (notifications still go out, queries answer empty).
+- Tables `events` (at, object, kind, state, state_type, text, author; indexes on `at` and `(object, at)`) and `notifications` (id, at, object, title, subtitle, body, tone, sound, silent, read; the intent id is the primary key). States, state types, kinds and tones are stored as words (`critical`, `hard`, `acknowledgement_set`, `recovery`); `at` as Unix seconds.
+- What gets logged: state changes (hard and soft; a new state at its `since`, a soft state turning hard at its check), acknowledgements (author, comment), user comments (added and removed), downtime start (once per downtime) and end, flapping. Not plain check results, not acknowledgement or downtime comments.
+- `LoadHistory`: newest first (`at`, then insertion), at most `limit` (and at most 100 000) entries; for a host, its services' entries too. `LoadNotifications`: newest first, at most `limit`. `MarkNotificationsRead` marks every one read.
+- Prune on start (before any query can reach the log), every `Tuning::prune_interval` (an hour) and when `UpdateGeneral` changes the retention, to `event_log_retention_hours` (at least 1) before the local clock.
+- All database work happens on the log's own thread, in the order the engine asked; the engine never waits for it except when it stops, which flushes the queue (at most 2 s).
+- `delete_event_log(data_dir, environment id)` removes an environment's log (ENV-03); the UI calls it after the environment's engine has stopped.
 
 **Actions:**
 - `Command::Action` runs `Client::run_action` with `author` = `Environment::author_name()`.
 - It reports `ActionFinished` with per-object failures. For example, `execute-command`'s "Can't find a valid endpoint": by default pass the object's `command_endpoint`, else the instance's node name. Without an endpoint, targets with a `command_endpoint` go in one request without one (Icinga's `$command_endpoint$`), the others in a second request with the instance's node name.
 - After success it marks the targets dirty, so their new state shows within a second (removing a downtime or comment re-queries its object); the answer is published at once.
 - Actions run on their own task: one in flight when the connection drops still finishes and reports. Without a connection the answer is immediate (`error: "not connected to Icinga"`).
+
+**Contract changes in wave 3, stage 3** (additive; they only break exhaustive matches and struct literals of the changed types):
+- `ic_model::Notification` and `ic_model::Notified` (who Icinga notified about an object, and when: PANE-06), `EventKind::Notification` (in `EventKind::ALL`, which now has 15 kinds) and `Event::Notification { object, users, notification_type, at }`.
+- `ic_api::Client::notifications`, `Client::notifications_named` and `FetchedNotifications`; `parse_event` maps `Notification` events (they were skipped before).
+- `ic_mock::Notification`, `Scenario::notifications`, `Scenario::apply_notification`, `MockControl::notifications`; `/v1/objects/notifications` serves objects (it was an empty type), and hard state changes send Icinga-style notifications with `Notification` events.
+- `ic-core`: `Snapshot.icinga_notifications` and `Snapshot::notified`; `Tuning.rule_tick` (1 s) and `Tuning.prune_interval` (1 h); `event_log_path` and `delete_event_log`; `REQUIRED_PERMISSIONS` gains `events/Notification` (and the README's `ApiUser` snippet `objects/query/Notification` and `events/Notification`); the `notifications` table has a `sound` column (a `NotificationRecord` carries the whole intent). `ic-core` depends on `rusqlite` (bundled SQLite; MIT, SQLite is public domain).
+- Behaviour: the commands of stage 3 (`PauseNotifications`, `LoadHistory`, `LoadNotifications`, `MarkNotificationsRead`) work; the event stream subscribes to `Notification` events when allowed.
+- Choices beyond the contract text: memberships are taken from the evaluation of the snapshot that includes the change; a check result that shows the handling over confirms the state at once; a load's findings are judged when it is over; an intent id already in the log (an earlier run) isn't emitted again; `LoadHistory` for a host includes its services.
 
 **Contract changes in wave 3, stage 2** (additive unless noted): `Snapshot.late` and `Snapshot::is_late`; `Tuning.watchdog_interval`, `Tuning.reload_jitter` and `Tuning.reconcile_interval`; after a reconnect the engine goes `Connected` without `Loading` and reloads in the background (behaviour); events wait for an in-flight snapshot (ordering); `ic_config::General::reconcile_interval_secs` defaults to 0 (adaptive) instead of 60, and `MIN_RECONCILE_INTERVAL_SECS` is 60 instead of 10 with 0 valid (a 10-second lean reload of 30 000 services would cost the master about 28 MB every 10 s). `ic-core` depends on `ic-filter`.
 
@@ -534,8 +565,9 @@ The `Snapshot` contract type gains three fields; all are allowed additive change
 - 401 → `AuthFailed`; pin mismatch → `TlsFailed` with the fingerprint; missing secret;
 - every action end to end;
 - dashboard evaluation (filters, sort, group-by, summary, hide_handled, problems_only, filter error);
-- notifications end to end with a fake `Notifier` (including no notifications from the initial load);
-- event log write, prune and query;
+- notifications end to end with a fake `Notifier` (including no notifications from the initial load, storms, pauses, recoveries only after notified problems, the handled repeats, missed changes found by a reconcile, delays, rules following `UpdateEnvironment`; `tests/engine/notifications.rs`, unit tests in `engine/notify_tests.rs`);
+- event log write, prune and query (`tests/engine/event_log.rs`, `event_log/tests.rs`: schema, WAL, permissions, history per object and host, notifications and read flags, prune at start, hourly and on a new retention, persistence across engines, corrupt and newer files, deletion);
+- Icinga's `Notification` objects end to end through `ic-mock` (`tests/engine/notified.rs`: the list, re-reads by name on `Notification` events and lifecycle events, recoveries, no reload in periodic reconciles, reload after a reconnect, no permission);
 - shutdown joins cleanly;
 - `test_connection` success, missing permissions and TLS failure.
 

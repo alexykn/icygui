@@ -11,7 +11,7 @@
 )]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,7 +20,10 @@ use futures::channel::mpsc::UnboundedReceiver;
 use ic_config::{AuthConfig, Environment, General};
 use ic_core::ports::{Clock, Notifier, SecretError, SecretStore};
 use ic_core::snapshot::Snapshot;
-use ic_core::{ConnectionState, CoreEvent, CoreHandle, EnvironmentSpec, Ports, Tuning};
+use ic_core::{
+    Command, ConnectionState, CoreEvent, CoreHandle, EnvironmentSpec, LogEntry, NotificationRecord,
+    Ports, Tuning,
+};
 use ic_mock::{MockConfig, MockServer};
 use ic_model::Timestamp;
 use ic_rules::{LocalTime, NotificationIntent};
@@ -111,6 +114,12 @@ impl FakeClock {
             now: Mutex::new(Timestamp::from_unix_seconds(seconds)),
         })
     }
+
+    /// Moves the clock forward.
+    pub(crate) fn advance(&self, by: Duration) {
+        let mut now = self.now.lock().unwrap();
+        *now = now.plus(by);
+    }
 }
 
 impl Clock for FakeClock {
@@ -138,8 +147,21 @@ pub(crate) fn tuning() -> Tuning {
         requery_delay: Duration::from_millis(20),
         watchdog_interval: Duration::from_millis(20),
         reload_jitter: Duration::from_millis(30),
+        rule_tick: Duration::from_millis(20),
         ..Tuning::default()
     }
+}
+
+/// Polls `condition` every 10 ms for at most ten seconds; whether it
+/// held.
+pub(crate) async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
+    for _ in 0..1_000 {
+        if condition() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
 }
 
 /// Starts a mock with `config`.
@@ -173,18 +195,75 @@ pub(crate) struct Engine {
     /// Every event seen so far, in order.
     pub(crate) seen: Vec<CoreEvent>,
     pub(crate) data_dir: PathBuf,
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
+}
+
+/// How to start an engine beyond the defaults of [`start`].
+pub(crate) struct Launch {
+    pub(crate) environment: Environment,
+    pub(crate) secrets: Arc<FakeSecrets>,
+    pub(crate) tuning: Tuning,
+    pub(crate) general: General,
+    /// The fake clock's start (Unix seconds).
+    pub(crate) now: f64,
+    /// Where the event log lives; a fresh temporary directory if `None`.
+    pub(crate) data_dir: Option<PathBuf>,
+}
+
+impl Launch {
+    /// The defaults for `server`: root, fast timing, the fake clock at the
+    /// real time (rule engine delays and storms count from it), a fresh
+    /// data directory.
+    pub(crate) fn new(server: &MockServer) -> Self {
+        Self {
+            environment: environment(server),
+            secrets: FakeSecrets::with(ENV_ID, PASSWORD),
+            tuning: tuning(),
+            general: General::default(),
+            now: Timestamp::now().as_unix_seconds(),
+            data_dir: None,
+        }
+    }
+
+    pub(crate) fn start(self) -> Engine {
+        launch(self)
+    }
 }
 
 /// Starts the engine for `environment` with `secrets`.
 pub(crate) fn start(environment: Environment, secrets: Arc<FakeSecrets>, tuning: Tuning) -> Engine {
-    let dir = tempfile::tempdir().unwrap();
-    let clock = FakeClock::at(NOW);
+    launch(Launch {
+        environment,
+        secrets,
+        tuning,
+        general: General::default(),
+        now: NOW,
+        data_dir: None,
+    })
+}
+
+fn launch(launch: Launch) -> Engine {
+    let Launch {
+        environment,
+        secrets,
+        tuning,
+        general,
+        now,
+        data_dir,
+    } = launch;
+    let (dir, data_dir) = if let Some(data_dir) = data_dir {
+        (None, data_dir)
+    } else {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_owned();
+        (Some(dir), path)
+    };
+    let clock = FakeClock::at(now);
     let notifier = Arc::new(FakeNotifier::default());
     let spec = EnvironmentSpec {
         environment,
-        general: General::default(),
-        data_dir: dir.path().to_owned(),
+        general,
+        data_dir: data_dir.clone(),
     };
     let ports = Ports {
         secrets: Arc::clone(&secrets) as Arc<dyn SecretStore>,
@@ -201,7 +280,7 @@ pub(crate) fn start(environment: Environment, secrets: Arc<FakeSecrets>, tuning:
         clock,
         notifier,
         seen: Vec::new(),
-        data_dir: dir.path().to_owned(),
+        data_dir,
         _dir: dir,
     }
 }
@@ -220,7 +299,7 @@ impl Engine {
         self.handle.as_ref().unwrap()
     }
 
-    pub(crate) fn send(&self, command: ic_core::Command) {
+    pub(crate) fn send(&self, command: Command) {
         self.handle().send(command);
     }
 
@@ -312,6 +391,69 @@ impl Engine {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The notifications (`CoreEvent::Notification`) seen so far, in order.
+    pub(crate) fn notifications(&self) -> Vec<NotificationRecord> {
+        self.seen
+            .iter()
+            .filter_map(|event| match event {
+                CoreEvent::Notification(record) => Some(record.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Waits for the next notification.
+    pub(crate) async fn notification(&mut self) -> NotificationRecord {
+        self.wait_for(|event| match event {
+            CoreEvent::Notification(record) => Some(record.clone()),
+            _ => None,
+        })
+        .await
+    }
+
+    /// The titles of the notifications the fake notifier showed.
+    pub(crate) fn shown(&self) -> Vec<String> {
+        self.notifier
+            .shown
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|intent| intent.title.clone())
+            .collect()
+    }
+
+    /// `Command::LoadHistory`.
+    pub(crate) async fn history(&self, object: Option<ic_model::ObjectKey>) -> Vec<LogEntry> {
+        let (reply, answer) = futures::channel::oneshot::channel();
+        self.send(Command::LoadHistory {
+            object,
+            limit: 1_000,
+            reply,
+        });
+        tokio::time::timeout(WAIT, answer)
+            .await
+            .expect("no history in time")
+            .expect("the engine dropped the request")
+    }
+
+    /// `Command::LoadNotifications`.
+    pub(crate) async fn stored_notifications(&self) -> Vec<NotificationRecord> {
+        let (reply, answer) = futures::channel::oneshot::channel();
+        self.send(Command::LoadNotifications {
+            limit: 1_000,
+            reply,
+        });
+        tokio::time::timeout(WAIT, answer)
+            .await
+            .expect("no notifications in time")
+            .expect("the engine dropped the request")
+    }
+
+    /// The data directory, for a second engine on the same event log.
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
     }
 
     /// Stops the engine and checks it stopped in time.

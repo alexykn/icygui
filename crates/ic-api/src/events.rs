@@ -133,9 +133,22 @@ struct WireEvent {
     current_flapping: L<Option<f64>>,
     object_type: L<String>,
     object_name: L<String>,
+    users: L<Vec<String>>,
+    notification_type: L<String>,
 }
 
 impl WireEvent {
+    /// Icinga's own notifications (`NotificationSentToAllUsersHandler`):
+    /// the object, the users and the type; the check result isn't needed.
+    fn notification(&mut self, at: Timestamp) -> Option<Event> {
+        Some(Event::Notification {
+            object: self.object()?,
+            users: std::mem::take(&mut self.users.0),
+            notification_type: std::mem::take(&mut self.notification_type.0),
+            at,
+        })
+    }
+
     fn into_event(mut self) -> Option<Event> {
         let at = Timestamp::from_unix_seconds(self.timestamp.0);
         let event = match self.kind.0.as_str() {
@@ -236,8 +249,8 @@ impl WireEvent {
             "ObjectCreated" => self.lifecycle(ObjectChange::Created, at)?,
             "ObjectModified" => self.lifecycle(ObjectChange::Modified, at)?,
             "ObjectDeleted" => self.lifecycle(ObjectChange::Deleted, at)?,
-            // `Notification` (Icinga's own notifications; the client doesn't
-            // subscribe to it) and anything newer.
+            "Notification" => self.notification(at)?,
+            // Anything newer.
             _ => return None,
         };
         Some(event)
@@ -829,12 +842,39 @@ mod tests {
     }
 
     #[test]
+    fn notifications_carry_the_users_and_the_type() {
+        // As `ApiEvents::NotificationSentToAllUsersHandler` writes it.
+        let line = br#"{"type":"Notification","timestamp":1791230000.25,"host":"db-prod-03","service":"postgres-replication","command":"mail-service-notification","users":["m.keller","oncall"],"notification_type":"PROBLEM","author":"","text":"","check_result":{"state":2,"output":"CRITICAL - lag 412s"}}"#;
+        assert_eq!(
+            parse_event(line),
+            Some(Event::Notification {
+                object: ObjectKey::service("db-prod-03", "postgres-replication"),
+                users: vec!["m.keller".to_owned(), "oncall".to_owned()],
+                notification_type: "PROBLEM".to_owned(),
+                at: Timestamp::from_unix_seconds(1_791_230_000.25),
+            })
+        );
+        // A host notification nobody's filters let through.
+        let line = br#"{"type":"Notification","timestamp":5,"host":"k8s-node-11","users":[],"notification_type":"RECOVERY"}"#;
+        assert_eq!(
+            parse_event(line),
+            Some(Event::Notification {
+                object: ObjectKey::host("k8s-node-11"),
+                users: Vec::new(),
+                notification_type: "RECOVERY".to_owned(),
+                at: Timestamp::from_unix_seconds(5.0),
+            })
+        );
+    }
+
+    #[test]
     fn skips_unknown_malformed_and_incomplete_events() {
         assert_eq!(parse_event(b"{not json"), None);
         assert_eq!(parse_event(b"[1,2,3]"), None);
         assert_eq!(
-            parse_event(br#"{"type":"Notification","host":"h","users":["a"]}"#),
-            None
+            parse_event(br#"{"type":"Notification","host":"","users":["a"]}"#),
+            None,
+            "no host"
         );
         assert_eq!(parse_event(br#"{"type":"SomethingNew","host":"h"}"#), None);
         assert_eq!(

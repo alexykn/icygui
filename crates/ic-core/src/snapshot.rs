@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use ic_model::{
     CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
-    InstanceStatus, ObjectKey, Service, ServiceGroup, ServiceKey, Timestamp,
+    InstanceStatus, Notification, Notified, ObjectKey, Service, ServiceGroup, ServiceKey,
+    Timestamp,
 };
 use ic_rules::DashboardRef;
 
@@ -38,6 +39,14 @@ pub struct Snapshot {
     pub endpoints: Arc<Vec<Endpoint>>,
     /// Instance status; `None` until first fetched.
     pub status: Option<Arc<InstanceStatus>>,
+    /// Icinga's own `Notification` objects (who Icinga notified, and when)
+    /// by host or service, each list by name. They load in the background
+    /// once the problem lists are complete and follow Icinga's
+    /// `Notification` events; empty without the `objects/query/Notification`
+    /// permission. [`Snapshot::notified`] combines them for the panes'
+    /// "notified" row. (The client's own desktop notifications are
+    /// something else: `CoreEvent::Notification`.)
+    pub icinga_notifications: Arc<BTreeMap<ObjectKey, Arc<[Notification]>>>,
     /// Evaluated dashboards.
     pub dashboards: Arc<BTreeMap<DashboardRef, DashboardResult>>,
     /// When the latest event-stream message arrived (local clock); `None`
@@ -72,6 +81,18 @@ impl Snapshot {
             )
             .take_while(move |(key, _)| &key.host == host)
             .map(|(_, service)| service)
+    }
+
+    /// Who Icinga notified about a host or service, and when (PANE-06):
+    /// its `Notification` objects combined (the latest `last_notification`,
+    /// every user in `notified_problem_users`). [`Notified::is_never`]
+    /// means "not notified".
+    #[must_use]
+    pub fn notified(&self, object: &ObjectKey) -> Notified {
+        self.icinga_notifications
+            .get(object)
+            .map(|list| Notified::of(list.iter()))
+            .unwrap_or_default()
     }
 
     /// Whether a host's or service's check is late (see [`Snapshot::late`]).

@@ -13,6 +13,10 @@
 //!   under a second in release) and incrementally (milliseconds).
 //! - Memory of the store at 30 000 services, and of 10 dashboards over it,
 //!   counted by a counting global allocator (this test binary only).
+//! - Notifications in a storm: every service of the environment failing at
+//!   once becomes rule inputs, is judged with the ten dashboards'
+//!   memberships, and goes into the event log (state changes and
+//!   notifications).
 //!
 //! The small runs are part of the normal test suite; the production-size
 //! ones are ignored. Run each alone (the allocator counts every thread):
@@ -30,8 +34,10 @@ use ic_mock::{MockConfig, MockServer, scenarios};
 use ic_model::{EventKind, ObjectKey, Service, ServiceState, Timestamp};
 use secrecy::SecretString;
 
-use super::stream;
+use super::notify::Notify;
+use super::{AppliedEvent, stream};
 use crate::dashboards::{Dashboards, Data};
+use crate::event_log::EventLog;
 use crate::store::{Applied, Changes, Store};
 
 /// Counts the bytes allocated and not yet freed, for the memory test.
@@ -233,12 +239,31 @@ fn apply(
     let mut applying = Duration::ZERO;
     let mut evaluating = Duration::ZERO;
     let mut applied = 0;
+    // What the engine does with every applied event: rule inputs and log
+    // entries.
+    let mut notify = Notify::new(&ten_dashboards());
+    let mut log = Vec::new();
     for (index, chunk) in numbered.chunks(batch).enumerate() {
         let started = Instant::now();
         let events = stream::prepare(chunk.to_vec());
         for (seq, event) in events {
-            if matches!(store.apply(seq, &event), Applied::Changed { .. }) {
+            let previous_check = match &event {
+                ic_model::Event::CheckResult { object, .. } => {
+                    store.check(object).and_then(|check| check.last_check)
+                }
+                _ => None,
+            };
+            if let Applied::Changed { before, after } = store.apply(seq, &event) {
                 applied += 1;
+                let entry = AppliedEvent {
+                    seq,
+                    event,
+                    before,
+                    after,
+                    downtime_was_in_effect: false,
+                    previous_check,
+                };
+                notify.applied(&store, &entry, &mut log);
             }
         }
         let changes = store.take_changes();
@@ -470,5 +495,150 @@ fn memory_at_production_scale() {
         megabytes(copy)
     );
     drop(held);
-    assert!(steady + boards < 400 * 1_024 * 1_024, "the 400 MB budget");
+
+    // Icinga's notifications, one per host and service.
+    let notifications: Vec<ic_model::Notification> = scenarios::large_with_hosts(2_000, 7)
+        .notifications
+        .iter()
+        .map(|notification| ic_model::Notification {
+            name: notification.full_name(),
+            object: notification.object.clone(),
+            last_notification: notification.last_notification,
+            notified_problem_users: notification.notified_problem_users.clone(),
+        })
+        .collect();
+    let count = notifications.len();
+    let base = live_bytes();
+    store.replace_notifications(notifications, 20);
+    let icinga = live_bytes().saturating_sub(base);
+    eprintln!(
+        "Icinga's notifications ({count}): {:.1} MB ({} bytes each)",
+        megabytes(icinga),
+        icinga / count.max(1)
+    );
+    // A by-name answer while a snapshot is held copies the map's pointers.
+    let held = store.snapshot(0, Timestamp::EPOCH, Arc::default(), Arc::default());
+    let base = live_bytes();
+    let mut one = held
+        .icinga_notifications
+        .values()
+        .next()
+        .map(|list| list[0].clone())
+        .unwrap();
+    one.notified_problem_users = vec!["oncall".to_owned()];
+    store.apply_fetched_notifications(vec![one], &[], 30);
+    let copy = live_bytes().saturating_sub(base);
+    eprintln!(
+        "copy on write of the notifications while a snapshot is held: {:.1} MB",
+        megabytes(copy)
+    );
+    drop(held);
+    assert!(
+        steady + boards + icinga < 400 * 1_024 * 1_024,
+        "the 400 MB budget"
+    );
+}
+
+/// Every OK service of a production-like store fails at once (hard
+/// critical): the rule inputs and log entries for each change, the rule
+/// engine judging them with the ten dashboards' memberships, and the event
+/// log writing everything. Returns the three times and the counts.
+fn storm(hosts: usize) -> (Duration, Duration, Duration, usize, usize) {
+    let mut store = production_store(hosts);
+    let mut dashboards = Dashboards::default();
+    let environment = ten_dashboards();
+    dashboards.configure(&environment);
+    dashboards.update(&data_of(&store), &all(), false, &AtomicBool::new(false));
+    let mut notify = Notify::new(&environment);
+    let failing: Vec<ObjectKey> = store
+        .services()
+        .values()
+        .filter(|service| service.state == ServiceState::Ok)
+        .map(|service| service.object_key())
+        .collect();
+    let at = Timestamp::now();
+
+    let started = Instant::now();
+    let mut log = Vec::new();
+    for (index, object) in failing.iter().enumerate() {
+        let seq = 10 + u64::try_from(index).unwrap_or(0);
+        let event = ic_model::Event::CheckResult {
+            object: object.clone(),
+            result: ic_model::CheckResult {
+                output: "CRITICAL - storm".to_owned(),
+                execution_end: at,
+                ..ic_model::CheckResult::default()
+            },
+            downtime_depth: Some(0),
+            acknowledgement: None,
+            after: Some(ic_model::StateAfter {
+                state: ic_model::CheckableState::Service(ServiceState::Critical),
+                state_type: ic_model::StateType::Hard,
+                attempt: 3,
+                reachable: true,
+            }),
+            at,
+        };
+        if let Applied::Changed { before, after } = store.apply(seq, &event) {
+            let entry = AppliedEvent {
+                seq,
+                event,
+                before,
+                after,
+                downtime_was_in_effect: false,
+                previous_check: None,
+            };
+            notify.applied(&store, &entry, &mut log);
+        }
+    }
+    let inputs = started.elapsed();
+    let changes = store.take_changes();
+    dashboards.update(&data_of(&store), &changes, false, &AtomicBool::new(false));
+
+    let started = Instant::now();
+    let intents = notify.judge(
+        &dashboards,
+        false,
+        at,
+        ic_rules::LocalTime {
+            weekday: 0,
+            minute_of_day: 600,
+        },
+    );
+    let judging = started.elapsed();
+
+    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let started = Instant::now();
+    let mut event_log = EventLog::open(dir.path().join("events.sqlite3"));
+    let entries = log.len();
+    let count = intents.len();
+    event_log.record(log);
+    event_log.log_notifications(intents, Box::new(|_| {}));
+    event_log.close(Duration::from_mins(1));
+    let logging = started.elapsed();
+    (inputs, judging, logging, entries, count)
+}
+
+#[test]
+fn notifications_keep_up_with_a_storm() {
+    let (inputs, judging, logging, entries, intents) = storm(200);
+    eprintln!(
+        "storm of {entries} failing services: inputs {inputs:?}, judged into {intents} \
+         notifications in {judging:?}, logged in {logging:?}"
+    );
+    assert!(entries > 2_000, "{entries}");
+    assert!(intents > 2_000, "{intents}");
+    assert!(inputs < Duration::from_secs(10), "{inputs:?}");
+    assert!(judging < Duration::from_secs(10), "{judging:?}");
+    assert!(logging < Duration::from_secs(20), "{logging:?}");
+}
+
+#[test]
+#[ignore = "production size; run with --ignored --nocapture"]
+fn notifications_in_a_production_storm() {
+    let (inputs, judging, logging, entries, intents) = storm(2_000);
+    eprintln!(
+        "storm of {entries} failing services: inputs {inputs:?}, judged into {intents} \
+         notifications in {judging:?}, logged in {logging:?}"
+    );
 }

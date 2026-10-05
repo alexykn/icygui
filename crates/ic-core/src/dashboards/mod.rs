@@ -136,13 +136,6 @@ impl Dashboards {
     /// The dashboards whose filter matches `object` (ignoring
     /// `problems_only` and `hide_handled`), as of the last update: the rule
     /// inputs' memberships.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "stage 3 fills the rule inputs' memberships from it"
-        )
-    )]
     pub(crate) fn memberships(&self, object: &ObjectKey) -> Vec<DashboardRef> {
         self.boards
             .iter()

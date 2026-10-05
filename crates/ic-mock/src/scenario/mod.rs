@@ -15,8 +15,8 @@ mod prod_cluster;
 mod staging;
 
 use ic_model::{
-    Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostState, InstanceStatus, ObjectKey,
-    Service, ServiceGroup, ServiceState, Timestamp,
+    CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostState,
+    InstanceStatus, ObjectKey, Service, ServiceGroup, ServiceState, StateType, Timestamp,
 };
 
 pub(crate) use build::format_perfdata;
@@ -73,6 +73,11 @@ pub struct Scenario {
     pub zones: Vec<Zone>,
     /// Icinga `User` objects (notification recipients), served read-only.
     pub users: Vec<User>,
+    /// Icinga's own `Notification` objects: who Icinga notifies about which
+    /// host or service. The server sends them like Icinga does (hard state
+    /// changes, recoveries to the users told about the problem) and
+    /// reports them as `Notification` events.
+    pub notifications: Vec<Notification>,
     /// The reference time of every timestamp in this scenario.
     pub time_base: Timestamp,
     /// Objects the simulator never changes, so a demo keeps showing them.
@@ -128,6 +133,35 @@ impl User {
     }
 }
 
+/// An Icinga `Notification` object (`lib/icinga/notification.ti`): who
+/// Icinga notifies about one host or service, and what it last did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Notification {
+    /// Short name (`mail-oncall`); the full name is `host!name` or
+    /// `host!service!name`.
+    pub name: String,
+    /// The host or service it belongs to.
+    pub object: ObjectKey,
+    /// The `NotificationCommand` (`mail-service-notification`).
+    pub command: String,
+    /// Users notified directly (`users`).
+    pub users: Vec<String>,
+    /// User groups whose members are notified too (`user_groups`).
+    pub user_groups: Vec<String>,
+    /// When Icinga last sent it (`last_notification`); `None` = never.
+    pub last_notification: Option<Timestamp>,
+    /// The users told about the current problem (`notified_problem_users`).
+    pub notified_problem_users: Vec<String>,
+}
+
+impl Notification {
+    /// Icinga's full name: `host!name` or `host!service!name`.
+    #[must_use]
+    pub fn full_name(&self) -> String {
+        format!("{}!{}", self.object.full_name(), self.name)
+    }
+}
+
 /// Object counts by state, for checks on scenarios.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[expect(
@@ -178,6 +212,7 @@ impl Scenario {
             },
             zones: Vec::new(),
             users: Vec::new(),
+            notifications: Vec::new(),
             time_base: Timestamp::now(),
             pinned: Vec::new(),
         }
@@ -195,6 +230,91 @@ impl Scenario {
         self.services
             .iter()
             .find(|s| s.key.host.as_str() == host && &*s.key.name == name)
+    }
+
+    /// Adds a `Notification` called `name` to every host and service, like
+    /// `apply Notification "<name>" to Host` and `… to Service`: `users`
+    /// picks the recipients per object (none: no notification for it).
+    /// Hard problems that Icinga would have notified (unhandled, reachable,
+    /// not flapping) already did, shortly after their hard state began.
+    pub fn apply_notification(
+        &mut self,
+        name: &str,
+        mut users: impl FnMut(&ObjectKey) -> Vec<String>,
+    ) {
+        let now = self.time_base.as_unix_seconds();
+        let in_downtime = |object: &ObjectKey| {
+            self.downtimes.iter().any(|downtime| {
+                &downtime.object == object
+                    && downtime.start_time.as_unix_seconds() <= now
+                    && now < downtime.end_time.as_unix_seconds()
+                    && (downtime.fixed || downtime.trigger_time.is_some())
+            })
+        };
+        let host_problems: std::collections::HashSet<&str> = self
+            .hosts
+            .iter()
+            .filter(|host| host.state.is_problem())
+            .map(|host| host.name.as_str())
+            .collect();
+        let mut added = Vec::new();
+        let checkables = self
+            .hosts
+            .iter()
+            .map(|host| {
+                (
+                    host.key(),
+                    CheckableState::Host(host.state),
+                    &host.check,
+                    false,
+                )
+            })
+            .chain(self.services.iter().map(|service| {
+                let host_problem = host_problems.contains(service.key.host.as_str());
+                (
+                    service.object_key(),
+                    CheckableState::Service(service.state),
+                    &service.check,
+                    host_problem,
+                )
+            }));
+        for (object, state, check, host_problem) in checkables {
+            let recipients = users(&object);
+            if recipients.is_empty() {
+                continue;
+            }
+            let notified = state.is_problem()
+                && check.state_type == StateType::Hard
+                && check.features.notifications
+                && check.reachable
+                && !check.flapping
+                && !check.acknowledgement.is_acknowledged()
+                && !host_problem
+                && !in_downtime(&object);
+            let command = if object.as_service().is_some() {
+                "mail-service-notification"
+            } else {
+                "mail-host-notification"
+            };
+            added.push(Notification {
+                name: name.to_owned(),
+                command: command.to_owned(),
+                last_notification: notified.then(|| {
+                    Timestamp::from_unix_seconds(
+                        check.last_hard_state_change.as_unix_seconds() + 1.5,
+                    )
+                }),
+                notified_problem_users: if notified {
+                    recipients.clone()
+                } else {
+                    Vec::new()
+                },
+                users: recipients,
+                user_groups: Vec::new(),
+                object,
+            });
+        }
+        self.notifications.extend(added);
     }
 
     /// Object counts by state.

@@ -1122,7 +1122,7 @@ async fn event_stream_reassembles_split_lines_and_skips_junk() {
     }
     chunks
         .send(Ok(Bytes::from(format!(
-            "{c}\n{{\"type\": \"StateChange\", broken\n{{\"type\":\"Notification\",\"host\":\"h\",\"users\":[\"a\"]}}\n{}",
+            "{c}\n{{\"type\": \"StateChange\", broken\n{{\"type\":\"SomethingNew\",\"host\":\"h\",\"users\":[\"a\"]}}\n{}",
             &CREATED[..10]
         ))))
         .unwrap();

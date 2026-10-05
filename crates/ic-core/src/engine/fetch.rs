@@ -1,17 +1,19 @@
 //! Re-queries by name: objects that config changes touched
 //! (`ObjectCreated`/`Modified`/`Deleted`), objects events mention that the
 //! store doesn't know, action targets, overdue objects (the freshness
-//! watchdog) and hydration (`Command::Hydrate`: full details of lean
-//! objects). Deduplicated (also against the round in flight), collected for
-//! a moment, one round at a time, at most [`MAX_ROUND`] names per round in
-//! batches of [`ic_api::NAMES_PER_REQUEST`].
+//! watchdog), hydration (`Command::Hydrate`: full details of lean
+//! objects) and Icinga's `Notification` objects of an object Icinga just
+//! notified about. Deduplicated (also against the round in flight),
+//! collected for a moment, one round at a time, at most [`MAX_ROUND`]
+//! names per round (and as many notification names) in batches of
+//! [`ic_api::NAMES_PER_REQUEST`].
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ic_api::{ApiError, Client, Detail, Fetched};
+use ic_api::{ApiError, Client, Detail, Fetched, FetchedNotifications};
 use ic_model::{Dependency, Endpoint, HostGroup, ObjectKey, ServiceGroup};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
@@ -76,6 +78,8 @@ pub(super) struct FetchQueue {
     missing_ttl: Duration,
     /// Unknown objects seen while a load ran: re-queried after it.
     deferred: BTreeSet<ObjectKey>,
+    /// `Notification` objects to re-read, by full name.
+    notifications: BTreeSet<String>,
 }
 
 /// One round of re-queries.
@@ -87,6 +91,8 @@ pub(super) struct Round {
     pub(super) full: Vec<ObjectKey>,
     pub(super) lists: Lists,
     pub(super) urgent: bool,
+    /// `Notification` objects to re-read.
+    pub(super) notifications: Vec<String>,
 }
 
 /// One query of a round: the detail, the names, the reader's line count
@@ -108,6 +114,9 @@ pub(crate) struct Answers {
     pub(super) service_groups: Option<Result<Vec<ServiceGroup>, ApiError>>,
     pub(super) dependencies: Option<Result<Vec<Dependency>, ApiError>>,
     pub(super) endpoints: Option<Result<Vec<Endpoint>, ApiError>>,
+    /// The `Notification` objects re-read: the reader's line count when
+    /// the query was sent, and the answer.
+    pub(super) notifications: Option<(u64, Result<FetchedNotifications, ApiError>)>,
     pub(super) urgent: bool,
 }
 
@@ -124,6 +133,7 @@ impl FetchQueue {
             missing: HashMap::new(),
             missing_ttl,
             deferred: BTreeSet::new(),
+            notifications: BTreeSet::new(),
         }
     }
 
@@ -210,6 +220,22 @@ impl FetchQueue {
         }
     }
 
+    /// Re-reads `Notification` objects by full name. Returns how many were
+    /// added.
+    pub(super) fn mark_notifications(
+        &mut self,
+        names: impl IntoIterator<Item = String>,
+        now: Instant,
+    ) -> usize {
+        let before = self.notifications.len();
+        self.notifications.extend(names);
+        let added = self.notifications.len() - before;
+        if added > 0 {
+            self.touch(now);
+        }
+        added
+    }
+
     /// An unknown object while a load runs: decided after the load.
     pub(super) fn defer(&mut self, key: ObjectKey) {
         self.deferred.insert(key);
@@ -227,7 +253,11 @@ impl FetchQueue {
     /// When the next round may start: `delay` after the oldest mark, never
     /// while a round runs.
     pub(super) fn due(&self, delay: Duration) -> Option<Instant> {
-        if self.in_flight || (self.pending.is_empty() && self.full.is_empty() && !self.lists.any())
+        if self.in_flight
+            || (self.pending.is_empty()
+                && self.full.is_empty()
+                && self.notifications.is_empty()
+                && !self.lists.any())
         {
             return None;
         }
@@ -251,15 +281,25 @@ impl FetchQueue {
                 None => break,
             }
         }
+        let mut notifications = Vec::new();
+        while notifications.len() < MAX_ROUND {
+            match self.notifications.pop_first() {
+                Some(name) => notifications.push(name),
+                None => break,
+            }
+        }
         self.flying = keys.iter().chain(&full).cloned().collect();
         let round = Round {
             keys,
             full,
             lists: std::mem::take(&mut self.lists),
             urgent: std::mem::take(&mut self.urgent),
+            notifications,
         };
         self.in_flight = true;
-        self.since = (!self.pending.is_empty() || !self.full.is_empty()).then_some(now);
+        self.since =
+            (!self.pending.is_empty() || !self.full.is_empty() || !self.notifications.is_empty())
+                .then_some(now);
         round
     }
 
@@ -285,6 +325,7 @@ impl FetchQueue {
         self.urgent = false;
         self.in_flight = false;
         self.deferred.clear();
+        self.notifications.clear();
     }
 }
 
@@ -300,6 +341,8 @@ pub(super) struct FetchTask {
     pub(super) lean: Vec<ObjectKey>,
     pub(super) lists: Lists,
     pub(super) urgent: bool,
+    /// `Notification` objects to re-read.
+    pub(super) notifications: Vec<String>,
 }
 
 impl FetchTask {
@@ -341,6 +384,15 @@ impl FetchTask {
                 Some(self.client.endpoints().await)
             } else {
                 None
+            },
+            notifications: if self.notifications.is_empty() {
+                None
+            } else {
+                let started = self.seq.load(Ordering::SeqCst);
+                Some((
+                    started,
+                    self.client.notifications_named(&self.notifications).await,
+                ))
             },
             urgent: self.urgent,
         };

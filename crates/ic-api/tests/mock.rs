@@ -356,6 +356,83 @@ async fn objects_by_name_report_deleted_names_as_missing() {
     }
 }
 
+/// Icinga's own `Notification` objects: the whole list matches the mock's,
+/// by name in batches with unknown names isolated, and a missing
+/// permission is `Forbidden`.
+#[tokio::test]
+async fn notifications_load_whole_and_by_name() {
+    let server = start(MockConfig::with_scenario(scenarios::prod_cluster())).await;
+    let control = server.control();
+    let client = root(&server);
+    let sorted = |mut list: Vec<ic_model::Notification>| {
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        list
+    };
+    let all = sorted(client.notifications().await.unwrap());
+    let expected = sorted(control.notifications());
+    assert_eq!(all.len(), expected.len());
+    for (got, want) in all.iter().zip(&expected) {
+        // The wire's doubles may differ in the last digits.
+        let near = match (got.last_notification, want.last_notification) {
+            (Some(a), Some(b)) => (a.as_unix_seconds() - b.as_unix_seconds()).abs() < 1e-3,
+            (a, b) => a == b,
+        };
+        assert!(near, "{got:?} {want:?}");
+        assert_eq!(
+            (&got.name, &got.object, &got.notified_problem_users),
+            (&want.name, &want.object, &want.notified_problem_users)
+        );
+    }
+    assert!(all.len() > ic_api::NAMES_PER_REQUEST);
+    assert!(
+        all.iter().any(
+            |notification| !notification.notified_problem_users.is_empty()
+                && notification.last_notification.is_some()
+        ),
+        "the scenario's notified problems"
+    );
+
+    let mut names: Vec<String> = all.iter().map(|n| n.name.clone()).collect();
+    names.insert(5, "gone-host!gone!mail".to_owned());
+    names.push("gone-host!mail".to_owned());
+    names.push(names[0].clone());
+    control.clear_requests();
+    let fetched = client.notifications_named(&names).await.unwrap();
+    assert_eq!(fetched.missing, ["gone-host!gone!mail", "gone-host!mail"]);
+    let found: Vec<String> = sorted(fetched.notifications)
+        .into_iter()
+        .map(|n| n.name)
+        .collect();
+    let names: Vec<String> = expected.iter().map(|n| n.name.clone()).collect();
+    assert_eq!(found, names, "each once");
+    let largest = control
+        .requests()
+        .iter()
+        .filter_map(|r| r.body.as_ref()?["notifications"].as_array().map(Vec::len))
+        .max()
+        .unwrap();
+    assert_eq!(largest, ic_api::NAMES_PER_REQUEST);
+    assert!(
+        client
+            .notifications_named(&[])
+            .await
+            .unwrap()
+            .notifications
+            .is_empty()
+    );
+
+    let server = start(MockConfig {
+        users: vec![MockUser::new("viewer", "secret", &["objects/query/Host"])],
+        ..MockConfig::with_scenario(scenarios::lab())
+    })
+    .await;
+    let viewer = client_as(&server, ("viewer", "secret"), pinned(&server));
+    assert!(matches!(
+        viewer.notifications().await,
+        Err(ApiError::Forbidden(message)) if message.contains("objects/query/notification")
+    ));
+}
+
 // --- Actions -----------------------------------------------------------------
 
 /// An unacknowledged critical service and an OK one.
@@ -715,6 +792,34 @@ async fn a_tenth_of_the_large_scenario_loads_in_tiers() {
     Payloads::measure(&server)
         .await
         .assert_lean_saves_the_results();
+    let (count, bytes) = notification_payload(&server).await;
+    assert_eq!(count, 3_200, "one per host and service");
+    assert!(
+        bytes / count < 250,
+        "{} bytes per notification",
+        bytes / count
+    );
+}
+
+/// Icinga's notifications as `Client::notifications` asks for them: how
+/// many, and the answer's size in bytes.
+async fn notification_payload(server: &MockServer) -> (usize, usize) {
+    let raw = Raw::new(
+        &url(server),
+        None,
+        server.ca_pem().unwrap().as_bytes(),
+        ROOT.0,
+        ROOT.1,
+    );
+    let answer = raw
+        .query(
+            "notifications",
+            &json!({ "attrs": ["host_name", "service_name", "last_notification", "notified_problem_users"] }),
+        )
+        .await;
+    assert_eq!(answer.status, 200);
+    let count = answer.json()["results"].as_array().unwrap().len();
+    (count, answer.body.len())
 }
 
 /// Production scale: 2 000 hosts, 30 000 services (docs/performance.md).
@@ -751,6 +856,13 @@ async fn the_large_scenario_loads_in_tiers() {
         per_service(all, services),
     );
     payloads.assert_lean_saves_the_results();
+    let started = Instant::now();
+    let (count, bytes) = notification_payload(&server).await;
+    println!(
+        "notifications: {count} in {bytes} bytes ({:.0} per notification), {:.2?}",
+        per_service(bytes, count),
+        started.elapsed()
+    );
 }
 
 #[expect(clippy::cast_precision_loss, reason = "a rough average for the report")]

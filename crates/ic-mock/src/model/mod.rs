@@ -28,7 +28,7 @@ pub(crate) use logic::{CheckInput, DepType, ProcessOutcome};
 pub(crate) use stats::CheckStats;
 pub(crate) use types::{
     Checkable, CommandData, CommentData, DependencyData, DowntimeData, EndpointData, GroupData,
-    ObjMeta, UserData, ZoneData,
+    NotificationData, ObjMeta, UserData, ZoneData,
 };
 
 /// What `/v1/status/IcingaApplication` reports.
@@ -80,12 +80,16 @@ pub(crate) struct World {
     pub(crate) endpoints: BTreeMap<String, EndpointData>,
     pub(crate) zones: BTreeMap<String, ZoneData>,
     pub(crate) users: BTreeMap<String, UserData>,
+    /// Icinga's own notifications, by full name.
+    pub(crate) notifications: BTreeMap<String, NotificationData>,
     pub(crate) check_commands: BTreeMap<String, CommandData>,
     pub(crate) event_commands: BTreeMap<String, CommandData>,
     /// Comment names by object full name.
     comments_by_object: BTreeMap<String, BTreeSet<String>>,
     /// Downtime names by object full name.
     downtimes_by_object: BTreeMap<String, BTreeSet<String>>,
+    /// Notification names by object full name.
+    notifications_by_object: BTreeMap<String, BTreeSet<String>>,
     /// Dependency names by child / parent full name.
     deps_by_child: BTreeMap<String, Vec<String>>,
     deps_by_parent: BTreeMap<String, Vec<String>>,
@@ -183,6 +187,25 @@ impl World {
             .get(object)
             .map(|names| names.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Notifications of an object (a host's own, not its services'), by
+    /// name.
+    pub(crate) fn notifications_of(&self, object: &str) -> Vec<String> {
+        self.notifications_by_object
+            .get(object)
+            .map(|names| names.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Adds a notification and indexes it by its object.
+    pub(crate) fn insert_notification(&mut self, notification: NotificationData) {
+        self.notifications_by_object
+            .entry(notification.object())
+            .or_default()
+            .insert(notification.name.clone());
+        self.notifications
+            .insert(notification.name.clone(), notification);
     }
 
     /// Dependencies whose child is `object`.

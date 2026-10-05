@@ -9,12 +9,12 @@
     reason = "test helpers fail the test loudly"
 )]
 
-mod support;
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
+use crate::support::{
+    ENV_ID, FakeSecrets, environment, mock, start, start_for, tuning, wait_until,
+};
 use ic_core::{ActionOutcome, Command, ConnectionState, CoreEvent};
 use ic_mock::{MockConfig, MockControl, MockUser, scenarios};
 use ic_model::{
@@ -22,11 +22,10 @@ use ic_model::{
     ObjectKey, ServiceKey, ServiceState, Timestamp, Vars,
 };
 use serde_json::{Value, json};
-use support::{ENV_ID, FakeSecrets, environment, mock, start, start_for, tuning};
 
 /// Runs an action and waits for its outcome.
 async fn run(
-    engine: &mut support::Engine,
+    engine: &mut crate::support::Engine,
     id: u64,
     target: ActionTarget,
     action: Action,
@@ -59,17 +58,6 @@ fn ok(outcome: &ActionOutcome, count: usize) {
             ..ActionOutcome::default()
         }
     );
-}
-
-/// Polls `condition` for up to ten seconds.
-async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
-    for _ in 0..1_000 {
-        if condition() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    false
 }
 
 fn requeried(control: &MockControl, name: &str) -> bool {
@@ -445,7 +433,7 @@ async fn refused_actions_report_why() {
 
     // Not connected: answered at once.
     let secrets = Arc::new(FakeSecrets::default());
-    let mut engine = start(support::environment(&server), secrets, tuning());
+    let mut engine = start(crate::support::environment(&server), secrets, tuning());
     engine
         .wait_state(|state| *state == ConnectionState::MissingSecret)
         .await;

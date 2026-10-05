@@ -4,9 +4,9 @@
 
 use ic_model::{
     AckKind, CheckInfo, CheckResult, CheckableState, Comment, CommentKind, Dependency, Downtime,
-    Endpoint, Features, Host, HostGroup, HostName, HostState, InstanceStatus, Links, ObjectKey,
-    Perfdata, Service, ServiceGroup, ServiceKey, ServiceState, StateAfter, StateType, Threshold,
-    Timestamp, Vars, parse_perfdata, parse_perfdata_entry,
+    Endpoint, Features, Host, HostGroup, HostName, HostState, InstanceStatus, Links, Notification,
+    ObjectKey, Perfdata, Service, ServiceGroup, ServiceKey, ServiceState, StateAfter, StateType,
+    Threshold, Timestamp, Vars, parse_perfdata, parse_perfdata_entry,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -702,6 +702,48 @@ impl EndpointAttrs {
             name,
             zone,
             connected,
+        })
+    }
+}
+
+/// Attributes of a `Notification` (`lib/icinga/notification.ti`): only
+/// the object it belongs to and what it last did.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct NotificationAttrs {
+    host_name: L<String>,
+    service_name: L<String>,
+    last_notification: L<f64>,
+    notified_problem_users: L<Vec<String>>,
+}
+
+/// Attributes requested for notifications: about 150 bytes per object on
+/// the wire, so even one notification object per service of a large
+/// installation stays a fraction of the lean service list.
+pub(crate) const NOTIFICATION_ATTRS: &[&str] = &[
+    "host_name",
+    "service_name",
+    "last_notification",
+    "notified_problem_users",
+];
+
+impl NotificationAttrs {
+    /// Maps a notification; `full_name` is the query result's name
+    /// (`host!service!name` or `host!name`).
+    pub(crate) fn into_model(self, full_name: &str) -> Option<Notification> {
+        if full_name.is_empty() {
+            return None;
+        }
+        Some(Notification {
+            name: full_name.to_owned(),
+            object: object_key(&self.host_name.0, &self.service_name.0)?,
+            last_notification: Timestamp::from_unix_seconds(self.last_notification.0).non_zero(),
+            notified_problem_users: self
+                .notified_problem_users
+                .0
+                .into_iter()
+                .filter(|user| !user.is_empty())
+                .collect(),
         })
     }
 }

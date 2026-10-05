@@ -16,6 +16,9 @@
 //! - [`Detail`] chooses how much of a host or service to load: at scale the
 //!   services are loaded lean (no check result) and fetched in full by name
 //!   only where needed ([`Client::objects`], [`Fetched`]).
+//! - Icinga's own `Notification` objects (who Icinga notified, and when)
+//!   load with [`Client::notifications`] and by name with
+//!   [`Client::notifications_named`].
 //! - Wire JSON is mapped into `ic-model` types; the wire structs are private.
 
 mod actions;
@@ -30,7 +33,7 @@ mod tls;
 mod wire;
 
 pub use client::{ActionResult, Client, NAMES_PER_REQUEST};
-pub use detail::{Detail, Fetched};
+pub use detail::{Detail, Fetched, FetchedNotifications};
 pub use error::ApiError;
 pub use events::{EventLines, EventStream, parse_event};
 pub use info::ApiInfo;

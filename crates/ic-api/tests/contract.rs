@@ -456,6 +456,48 @@ async fn real_icinga_objects_by_name_with_missing_names() {
     assert_eq!(fetched.missing, gone);
 }
 
+/// Icinga's own `Notification` objects (the default `conf.d` notifies
+/// `icingaadmins` about every host and service): the whole list, by name
+/// with unknown names, and the read-only `viewer`'s missing permission.
+#[tokio::test]
+async fn real_icinga_notifications() {
+    let Some(contract) = fixture().await else {
+        return;
+    };
+    let client = contract.client();
+    let notifications = client.notifications().await.unwrap();
+    assert!(!notifications.is_empty());
+    let hosts: BTreeSet<String> = client
+        .hosts()
+        .await
+        .unwrap()
+        .iter()
+        .map(|host| host.name.as_str().to_owned())
+        .collect();
+    for notification in &notifications {
+        assert!(
+            notification
+                .name
+                .starts_with(&format!("{}!", notification.object.full_name())),
+            "{notification:?}"
+        );
+        assert!(hosts.contains(notification.object.host_name().as_str()));
+    }
+    assert_eq!(client.unknown_attributes(), []);
+
+    let mut names: Vec<String> = notifications.iter().map(|n| n.name.clone()).collect();
+    names.insert(1, "icygui-no-such-host!mail".to_owned());
+    let fetched = client.notifications_named(&names).await.unwrap();
+    assert_eq!(fetched.missing, ["icygui-no-such-host!mail"]);
+    assert_eq!(fetched.notifications.len(), notifications.len());
+
+    let viewer = contract.client_as("viewer", "viewer-test");
+    assert!(
+        matches!(viewer.notifications().await, Err(ApiError::Forbidden(_))),
+        "the viewer lacks objects/query/Notification"
+    );
+}
+
 #[tokio::test]
 async fn real_icinga_refuses_actions_without_permission() {
     let Some(contract) = fixture().await else {

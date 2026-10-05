@@ -9,7 +9,14 @@
 //!
 //! Both are plain files: enabling writes the file (atomically, and only if
 //! its contents change), disabling removes it. Nothing is started or
-//! stopped right away; the entry takes effect at the next login.
+//! stopped right away; the entry takes effect at the next login. Missing
+//! directories are created private to the user (0700), as the XDG Base
+//! Directory spec asks.
+//!
+//! On macOS launchd also keeps a list of disabled jobs outside the file
+//! (`launchctl disable`, and System Settings › General › Login Items when
+//! macOS records the switch there). [`is_enabled`] consults it, and
+//! enabling clears the app's entry on it.
 
 mod desktop;
 mod launch_agent;
@@ -34,15 +41,21 @@ pub const BACKGROUND_ARG: &str = "--background";
 ///   launch (for an `AppImage`, the `AppImage` itself), not a temporary one.
 ///
 /// Enabling again rewrites the entry if `exe` changed and does nothing
-/// otherwise; disabling an entry that doesn't exist succeeds.
+/// otherwise; disabling an entry that doesn't exist succeeds. On macOS,
+/// enabling also clears a `launchctl disable` of the job.
 ///
 /// # Errors
 ///
 /// - [`PlatformError::InvalidArgument`]: `app_id` isn't a plain reverse-DNS
-///   id, or (when enabling) `exe` isn't an absolute UTF-8 path or a name or
-///   path contains control characters.
+///   id, or (when enabling) `exe` isn't an absolute UTF-8 path, a name or
+///   path contains control characters, or (Linux) the path contains `%`,
+///   which GLib-based desktops (GNOME, Cinnamon, MATE) can't start from an
+///   autostart entry.
 /// - [`PlatformError::NoHomeDirectory`]: the home directory is unknown.
 /// - [`PlatformError::Io`]: the entry could not be written or removed.
+/// - [`PlatformError::DisabledBySystem`] (macOS): the entry is written, but
+///   macOS keeps the app from starting at login until the user allows it
+///   in System Settings › General › Login Items.
 /// - [`PlatformError::Unsupported`]: neither macOS nor a freedesktop system.
 pub fn set_enabled(
     enabled: bool,
@@ -52,13 +65,20 @@ pub fn set_enabled(
 ) -> Result<(), PlatformError> {
     let format = Format::current().ok_or(PlatformError::Unsupported)?;
     let dir = format.system_dir()?;
-    set_enabled_in(format, &dir, enabled, app_id, app_name, exe)
+    set_enabled_in(format, &dir, enabled, app_id, app_name, exe)?;
+    #[cfg(target_os = "macos")]
+    if enabled {
+        launch_agent::launchd::enable(app_id)?;
+    }
+    Ok(())
 }
 
 /// Whether launch at login is on: the entry exists and isn't disabled
 /// (`Disabled` in a launch agent, `Hidden=true` or
-/// `X-GNOME-Autostart-enabled=false` in an autostart entry). Any problem
-/// reading it counts as off.
+/// `X-GNOME-Autostart-enabled=false` in an autostart entry), and on macOS
+/// launchd doesn't list the job as disabled (asking it runs `launchctl`,
+/// which takes a few milliseconds). Any problem reading the entry counts as
+/// off; if launchd can't be asked, the entry decides.
 pub fn is_enabled(app_id: &str) -> bool {
     let Some(format) = Format::current() else {
         return false;
@@ -66,6 +86,19 @@ pub fn is_enabled(app_id: &str) -> bool {
     format
         .system_dir()
         .is_ok_and(|dir| is_enabled_in(format, &dir, app_id))
+        && !disabled_by_launchd(app_id)
+}
+
+/// Whether launchd lists the job as disabled; `false` if it can't tell.
+#[cfg(target_os = "macos")]
+fn disabled_by_launchd(app_id: &str) -> bool {
+    launch_agent::launchd::is_disabled(app_id) == Some(true)
+}
+
+/// Only macOS has a list of disabled jobs outside the entry.
+#[cfg(not(target_os = "macos"))]
+fn disabled_by_launchd(_app_id: &str) -> bool {
+    false
 }
 
 /// The kind of login entry.
@@ -167,6 +200,19 @@ fn set_enabled_in(
     }
 
     let exe = validate_exe(exe)?;
+    if format == Format::XdgAutostart && exe.contains('%') {
+        // The spec writes a literal % as %%, but GLib checks that the
+        // program exists before it expands that, so GNOME and the other
+        // desktops built on GLib never start such an entry. There is no
+        // encoding they accept.
+        return Err(PlatformError::invalid(
+            "executable path",
+            format!(
+                "{exe:?} contains '%', which GNOME and other desktops can't start from an \
+                 autostart entry; install the app in a directory without '%'"
+            ),
+        ));
+    }
     validate_text("application name", app_name)?;
     let app_name = if app_name.trim().is_empty() {
         app_id
@@ -196,7 +242,7 @@ fn is_enabled_in(format: Format, dir: &Path, app_id: &str) -> bool {
 /// writable by the user only (launchd rejects group- or world-writable
 /// agents).
 fn write_atomically(dir: &Path, path: &Path, contents: &[u8]) -> Result<(), PlatformError> {
-    fs::create_dir_all(dir).map_err(|error| PlatformError::io("create", dir, error))?;
+    create_private_dirs(dir).map_err(|error| PlatformError::io("create", dir, error))?;
     // The ".tmp" suffix keeps a leftover from matching "*.desktop".
     let mut file = tempfile::Builder::new()
         .prefix(".")
@@ -211,6 +257,23 @@ fn write_atomically(dir: &Path, path: &Path, contents: &[u8]) -> Result<(), Plat
     file.persist(path)
         .map_err(|error| PlatformError::io("write", path, error.error))?;
     Ok(())
+}
+
+/// Creates `dir` and its missing parents with mode 0700, as the XDG Base
+/// Directory spec asks: nobody else may add entries that run as the user
+/// at login. Existing directories are left alone.
+#[cfg(unix)]
+fn create_private_dirs(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_private_dirs(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)
 }
 
 #[cfg(unix)]
@@ -356,6 +419,69 @@ mod tests {
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("Exec=/home/me/Applications/icygui --background\n"));
         assert_eq!(fs::read_dir(dir).unwrap().count(), 1, "no temp files left");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_directories_are_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        // An existing directory keeps its mode.
+        let existing = temp.path().join("existing");
+        fs::create_dir(&existing).unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let config = existing.join("config");
+        let dir = config.join("autostart");
+        for format in [Format::LaunchAgent, Format::XdgAutostart] {
+            set_enabled_in(format, &dir, true, APP_ID, "icygui", &exe()).unwrap();
+        }
+        assert_eq!(mode(&config), 0o700);
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&existing), 0o755);
+    }
+
+    #[test]
+    fn executables_with_a_percent_sign_are_rejected_for_xdg_autostart() {
+        let temp = tempfile::tempdir().unwrap();
+        for exe in ["/opt/100% sure/icygui", "/opt/%f/icygui", "/opt/icygui%"] {
+            let error = set_enabled_in(
+                Format::XdgAutostart,
+                temp.path(),
+                true,
+                APP_ID,
+                "icygui",
+                Path::new(exe),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    PlatformError::InvalidArgument {
+                        what: "executable path",
+                        ..
+                    }
+                ),
+                "{exe}: {error}"
+            );
+            assert!(error.to_string().contains("'%'"), "{error}");
+        }
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+
+        // Launch agents carry any path.
+        let exe = Path::new("/Applications/100% sure/icygui.app/Contents/MacOS/icygui");
+        set_enabled_in(
+            Format::LaunchAgent,
+            temp.path(),
+            true,
+            APP_ID,
+            "icygui",
+            exe,
+        )
+        .unwrap();
+        assert!(is_enabled_in(Format::LaunchAgent, temp.path(), APP_ID));
     }
 
     #[cfg(unix)]

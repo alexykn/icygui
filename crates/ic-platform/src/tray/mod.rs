@@ -1,16 +1,24 @@
 //! The tray / menu-bar icon (PLAN.md D4, BG-02, REL-07).
 //!
 //! The icon is the logo's mark tinted with the worst unhandled state; its
-//! menu has Open, Pause notifications (30 minutes, 1 hour, until tomorrow
-//! morning), Resume while paused, the environments, and Quit. Clicks arrive
-//! as [`TrayCommand`]s on the receiver from [`Tray::commands`].
+//! menu has Open, Pause notifications (30 minutes, 1 hour, until 08:00),
+//! Resume while paused, the environments, and Quit. Clicks arrive as
+//! [`TrayCommand`]s on the receiver from [`Tray::commands`].
 //!
 //! Backends (`tray-icon`): an `NSStatusItem` on macOS; on Linux a
 //! `StatusNotifierItem` over D-Bus (`ksni`), which needs no GTK main loop.
-//! GNOME shows such items only with the `AppIndicator` extension; without a
-//! tray host the icon is simply not shown and the app keeps working.
 //! On Linux a left click on the icon opens the window; on macOS a click
 //! shows the menu.
+//!
+//! # No tray host
+//!
+//! GNOME shows `StatusNotifierItem`s only with the `AppIndicator`
+//! extension. Without a tray host [`Tray::new`] still succeeds and the app
+//! keeps working, but nobody sees the icon or can open its menu. Check
+//! [`host_available`] before relying on the tray: in particular, before
+//! keeping the app running when its last window closes (BG-01), quit
+//! instead or tell the user, or the app runs on invisibly with no way to
+//! open or quit it.
 //!
 //! # Process-wide event handlers
 //!
@@ -20,6 +28,7 @@
 //! whose ids aren't the tray's are ignored. Nothing else in the process
 //! may install `muda`/`tray-icon` event handlers.
 
+mod host;
 mod icon;
 mod menu;
 
@@ -52,7 +61,8 @@ pub enum TrayTone {
 
 impl TrayTone {
     /// The colour as RGB bytes. "No state" (`None` in
-    /// [`Tray::set_state`]) is the design's pending grey, `#3a3f43`.
+    /// [`Tray::set_state`]) is a mid grey, `#7d848a`, that stays visible on
+    /// light and dark panels.
     pub const fn rgb(self) -> [u8; 3] {
         match self {
             Self::Critical => [0xe0, 0x6c, 0x6c],
@@ -93,11 +103,13 @@ pub enum TrayCommand {
     /// Show the main window (create it if it is closed).
     Open,
     /// Pause notifications for this long, counted from the click. "Until
-    /// tomorrow morning" is converted to the time until 08:00 local time.
+    /// 08:00" is converted to the time until the next 08:00 local time
+    /// (later the same day when chosen before 08:00).
     PauseFor(Duration),
     /// Resume notifications.
     Resume,
-    /// Switch to the environment with this id.
+    /// Switch to the environment with this id. Hosts that ignore disabled
+    /// items may send the active environment's id; treat that as a no-op.
     SwitchEnvironment(String),
     /// Quit the app.
     Quit,
@@ -107,7 +119,8 @@ pub enum TrayCommand {
 ///
 /// Create it on the main thread once the event loop runs (macOS requires
 /// both; the type is not `Send`, so it stays there). Dropping it removes
-/// the icon.
+/// the icon. On Linux it is created even if no tray host shows it; see
+/// [`host_available`].
 pub struct Tray {
     icon: TrayIcon,
     /// Our end of the route, to recognise it when dropping.
@@ -221,9 +234,12 @@ impl Tray {
     }
 
     /// Lists the environments, as `(id, name)` pairs in display order, in
-    /// the Environment submenu; `active` is checked. Choosing another one
-    /// sends [`TrayCommand::SwitchEnvironment`]; call this again after
-    /// every switch (successful or not) so the check mark follows.
+    /// the Environment submenu; `active` is marked `✓` (and can't be
+    /// chosen again). Choosing another one sends
+    /// [`TrayCommand::SwitchEnvironment`] and changes nothing in the menu
+    /// by itself, so a switch that is refused or fails leaves the mark on
+    /// the environment that is still active. Call this again once the
+    /// active environment has changed, and whenever the list changes.
     pub fn set_environments(&self, environments: &[(String, String)], active: Option<&str>) {
         self.update_menu(|state| {
             state.environments = environments.to_vec();
@@ -280,6 +296,20 @@ impl fmt::Debug for Tray {
             .field("menu", &self.state.borrow())
             .finish_non_exhaustive()
     }
+}
+
+/// Whether a tray host shows the icon: always on macOS; on Linux and the
+/// BSDs only while a `StatusNotifierWatcher` with a registered host runs on
+/// the session bus (not on stock GNOME, which needs the `AppIndicator`
+/// extension).
+///
+/// Asks the session bus and blocks briefly (milliseconds; at most two
+/// seconds if the bus doesn't answer, which counts as no host). A host can
+/// come and go (a panel restarts, an extension is switched on), so ask
+/// again when it matters, for example each time the window closes. With no
+/// host, closing the window must not leave the app running unseen (BG-01).
+pub fn host_available() -> bool {
+    host::available()
 }
 
 /// The tooltip as one or more plain lines: control characters other than
@@ -466,9 +496,6 @@ mod tests {
                 MenuItemKindSnapshot::MenuItem(item) if item.text() == text => {
                     Some(item.activate.clone())
                 }
-                MenuItemKindSnapshot::Check(item) if item.text() == text => {
-                    Some(item.activate.clone())
-                }
                 _ => None,
             });
             found.unwrap_or_else(|| panic!("no item {text:?}"))();
@@ -485,14 +512,27 @@ mod tests {
                 .unwrap_or_else(|| panic!("no submenu {text:?}"))
         };
 
+        let environments_before = menu::tests::rendered::shown(&submenu("Environment"));
         activate(&items, "Open icygui");
         activate(&items, "Resume notifications");
         activate(&submenu("Pause notifications"), "For 30 minutes");
-        activate(&submenu("Pause notifications"), "Until tomorrow morning");
-        activate(&submenu("Environment"), "staging");
+        activate(&submenu("Pause notifications"), "Until 08:00");
+        activate(&submenu("Environment"), "\u{2003}staging");
         activate(&items, "Paused until 18:30");
         activate(&items, "Quit icygui");
         on_icon_event(&click(MouseButton::Left, MouseButtonState::Up));
+
+        // A click changes nothing in the menu by itself: if the app refuses
+        // the switch, the mark stays on the active environment.
+        assert_eq!(
+            menu::tests::rendered::shown(&submenu("Environment")),
+            environments_before
+        );
+        assert_eq!(
+            environments_before,
+            ["✓ prod (off)", "\u{2003}staging"],
+            "{environments_before:?}"
+        );
 
         let mut commands = Vec::new();
         while let Ok(command) = receiver.try_recv() {
@@ -506,7 +546,7 @@ mod tests {
             panic!("{:?}", commands[3]);
         };
         assert!(
-            morning > Duration::ZERO && morning <= Duration::from_hours(29),
+            morning > Duration::ZERO && morning <= Duration::from_hours(25),
             "{morning:?}"
         );
         assert_eq!(
@@ -536,6 +576,12 @@ mod tests {
         .join()
         .unwrap();
         assert!(outcome.is_ok(), "{outcome:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_menu_bar_always_has_a_host() {
+        assert!(host_available());
     }
 
     #[test]

@@ -42,6 +42,15 @@ pub enum PlatformError {
         source: io::Error,
     },
 
+    /// macOS keeps the app from starting at login although its launch
+    /// agent is in place: the user switched it off under System Settings ›
+    /// General › Login Items, and only they can switch it on again there.
+    #[error(
+        "macOS keeps launch at login switched off for this app; allow it under \
+         System Settings › General › Login Items"
+    )]
+    DisabledBySystem,
+
     /// Launch at login isn't implemented on this platform.
     #[error("launch at login is not supported on this platform")]
     Unsupported,

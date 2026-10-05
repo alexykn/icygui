@@ -2874,11 +2874,13 @@ dependencies = [
  "ic-model",
  "jiff",
  "keyring-core",
+ "rustix",
  "secrecy",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "tray-icon",
+ "zbus",
  "zbus-secret-service-keyring-store",
 ]
 

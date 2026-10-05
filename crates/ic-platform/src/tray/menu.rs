@@ -6,12 +6,20 @@
 //! environments). That is rare, and rebuilding keeps the code free of
 //! in-place bookkeeping; on macOS it closes the menu if it happens to be
 //! open, on Linux the host just reloads the layout.
+//!
+//! Every clickable item is a plain muda `MenuItem`: clicking one changes
+//! nothing in the menu, so the model always describes what is on screen.
+//! muda's `CheckMenuItem` would not: it flips its own check mark when
+//! clicked (on Linux and macOS), before the app has decided anything, so a
+//! refused environment switch would leave two environments checked. On
+//! Linux its snapshots also share a thread-bound `Rc` with the D-Bus
+//! thread.
 
 use std::time::Duration;
 
 use jiff::Zoned;
 use tray_icon::menu::{
-    CheckMenuItem, Error as MenuError, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu,
+    Error as MenuError, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu,
 };
 
 use super::TrayCommand;
@@ -31,11 +39,17 @@ const ENVIRONMENT_MENU_ID: &str = "icygui.tray.environments";
 /// Longest label, in characters; longer names are shortened with "…".
 const MAX_LABEL_CHARS: usize = 60;
 
-/// Local hour at which "until tomorrow morning" ends.
+/// Marks the current choice of a set (the active environment).
+const CURRENT_MARK: &str = "✓ ";
+/// Indents the other choices by about the width of [`CURRENT_MARK`], so
+/// the names line up (an em space).
+const CHOICE_INDENT: &str = "\u{2003}";
+
+/// Local hour at which the morning pause ends.
 const MORNING_HOUR: i8 = 8;
-/// Until this local hour the night still counts as the previous day, so a
-/// pause started at 02:00 ends the same morning.
-const NIGHT_ENDS_HOUR: i8 = 4;
+/// The label of the morning pause; it names the end, so the user knows
+/// what a click does at any time of day.
+const MORNING_LABEL: &str = "Until 08:00";
 /// Used if the end of the morning pause can't be computed (a date beyond
 /// what the calendar library supports).
 const FALLBACK_PAUSE: Duration = Duration::from_hours(8);
@@ -47,7 +61,7 @@ pub(crate) enum PausePreset {
     HalfHour,
     /// 1 hour.
     Hour,
-    /// Until 08:00 local time on the next morning.
+    /// Until the next 08:00 local time.
     UntilMorning,
 }
 
@@ -58,7 +72,7 @@ impl PausePreset {
         match self {
             Self::HalfHour => "30m",
             Self::Hour => "1h",
-            Self::UntilMorning => "tomorrow",
+            Self::UntilMorning => "morning",
         }
     }
 
@@ -66,7 +80,7 @@ impl PausePreset {
         match self {
             Self::HalfHour => "For 30 minutes",
             Self::Hour => "For 1 hour",
-            Self::UntilMorning => "Until tomorrow morning",
+            Self::UntilMorning => MORNING_LABEL,
         }
     }
 
@@ -81,15 +95,15 @@ impl PausePreset {
     }
 }
 
-/// The time until the next morning's [`MORNING_HOUR`], in the time zone of
-/// `now`, so daylight-saving changes in between are accounted for.
+/// The time until the next [`MORNING_HOUR`] o'clock in the time zone of
+/// `now`: later today when chosen in the night or early morning, otherwise
+/// tomorrow. Daylight-saving changes in between are accounted for.
 ///
-/// "Tomorrow" is the next calendar day, except that the hours before
-/// [`NIGHT_ENDS_HOUR`] still belong to the previous day: pausing at 02:00
-/// ends at 08:00 the same morning, not 30 hours later. For an on-call
-/// engineer a pause that is too long is worse than one that is too short.
+/// The end is never more than a day away. For an on-call engineer a pause
+/// that is too long is worse than one that is too short: pausing at 05:30
+/// after a night incident ends at 08:00 that morning, not 26 hours later.
 fn until_morning(now: &Zoned) -> Duration {
-    let duration = morning_after(now).map(|end| Duration::try_from(now.duration_until(&end)));
+    let duration = next_morning(now).map(|end| Duration::try_from(now.duration_until(&end)));
     match duration {
         Ok(Ok(duration)) if !duration.is_zero() => duration,
         _ => {
@@ -99,14 +113,20 @@ fn until_morning(now: &Zoned) -> Duration {
     }
 }
 
-fn morning_after(now: &Zoned) -> Result<Zoned, jiff::Error> {
-    let day = if now.hour() < NIGHT_ENDS_HOUR {
-        now.date()
-    } else {
-        now.date().tomorrow()?
-    };
-    day.at(MORNING_HOUR, 0, 0, 0)
-        .to_zoned(now.time_zone().clone())
+/// The first [`MORNING_HOUR`] o'clock after `now`.
+fn next_morning(now: &Zoned) -> Result<Zoned, jiff::Error> {
+    let zone = now.time_zone();
+    let today = now
+        .date()
+        .at(MORNING_HOUR, 0, 0, 0)
+        .to_zoned(zone.clone())?;
+    if today.timestamp() > now.timestamp() {
+        return Ok(today);
+    }
+    now.date()
+        .tomorrow()?
+        .at(MORNING_HOUR, 0, 0, 0)
+        .to_zoned(zone.clone())
 }
 
 /// What a menu item does when clicked.
@@ -197,8 +217,9 @@ pub(crate) enum Entry {
         action: MenuAction,
         label: String,
     },
-    /// One of a set of choices. The current one is checked and disabled,
-    /// so clicking it can't untick it; the others are unchecked.
+    /// One of a set of choices, as a plain item whose label carries the
+    /// mark: the current one reads `✓ name` and is disabled, the others are
+    /// indented to line up with it.
     Choice {
         action: MenuAction,
         label: String,
@@ -222,7 +243,7 @@ pub(crate) enum Entry {
 /// ─────────────
 /// Paused until 18:30          (while paused)
 /// Resume notifications        (while paused)
-/// Pause notifications       ▸ For 30 minutes / For 1 hour / Until tomorrow morning
+/// Pause notifications       ▸ For 30 minutes / For 1 hour / Until 08:00
 /// ─────────────               (with environments)
 /// Environment               ▸ ✓ prod-cluster / staging / …
 /// ─────────────
@@ -311,6 +332,13 @@ pub(crate) fn clean_label(text: &str) -> String {
     short
 }
 
+/// The label of a choice: marked if it is the current one, indented
+/// otherwise.
+fn choice_label(label: &str, current: bool) -> String {
+    let prefix = if current { CURRENT_MARK } else { CHOICE_INDENT };
+    format!("{prefix}{label}")
+}
+
 /// Text for muda, which treats `&` as a mnemonic marker (`&&` is a
 /// literal `&`).
 fn muda_text(label: &str) -> String {
@@ -336,15 +364,17 @@ fn item(entry: &Entry) -> Result<Box<dyn IsMenuItem>, MenuError> {
         Entry::Item { action, label } => {
             Box::new(MenuItem::with_id(action.id(), muda_text(label), true, None))
         }
+        // Clicking the current choice again would change nothing, so it is
+        // disabled; hosts that ignore that send a switch to the active
+        // environment, which the app treats as a no-op.
         Entry::Choice {
             action,
             label,
             current,
-        } => Box::new(CheckMenuItem::with_id(
+        } => Box::new(MenuItem::with_id(
             action.id(),
-            muda_text(label),
+            muda_text(&choice_label(label, *current)),
             !current,
-            *current,
             None,
         )),
         Entry::Status(text) => Box::new(MenuItem::with_id(STATUS_ID, muda_text(text), false, None)),
@@ -360,7 +390,7 @@ fn item(entry: &Entry) -> Result<Box<dyn IsMenuItem>, MenuError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use jiff::civil::date;
     use jiff::tz::TimeZone;
 
@@ -480,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn morning_pause_ends_at_eight() {
+    fn morning_pause_ends_at_the_next_eight_o_clock() {
         let tz = central_europe();
         for ((hour, minute), expected) in [
             ((22, 0), 10.0),
@@ -488,8 +518,10 @@ mod tests {
             ((0, 0), 8.0),
             ((2, 0), 6.0),
             ((3, 59), 4.0 + 1.0 / 60.0),
-            ((4, 0), 28.0),
-            ((7, 59), 24.0 + 1.0 / 60.0),
+            // After a night incident: the same morning, never the next day.
+            ((4, 0), 4.0),
+            ((5, 30), 2.5),
+            ((7, 59), 1.0 / 60.0),
             ((8, 0), 24.0),
             ((12, 30), 19.5),
         ] {
@@ -503,17 +535,51 @@ mod tests {
     }
 
     #[test]
+    fn morning_pause_is_never_longer_than_a_day() {
+        let tz = central_europe();
+        for hour in 0..24 {
+            for minute in [0, 1, 29, 59] {
+                let now = at(&tz, 2026, 10, 7, hour, minute);
+                let pause = morning_pause(&now);
+                assert!(
+                    pause > Duration::ZERO && pause <= Duration::from_hours(24),
+                    "{hour:02}:{minute:02}: {pause:?}"
+                );
+            }
+        }
+        // Exactly at eight: the next one, not a zero-length pause.
+        let eight = date(2026, 10, 7)
+            .at(8, 0, 0, 0)
+            .to_zoned(tz.clone())
+            .unwrap();
+        assert_eq!(morning_pause(&eight), hours(24.0));
+        let just_before = date(2026, 10, 7)
+            .at(7, 59, 59, 999_000_000)
+            .to_zoned(tz)
+            .unwrap();
+        assert_eq!(morning_pause(&just_before), Duration::from_millis(1));
+    }
+
+    #[test]
     fn morning_pause_follows_daylight_saving_changes() {
         let tz = central_europe();
         // Clocks go forward on 2026-03-29 at 02:00: one hour less.
         let now = at(&tz, 2026, 3, 28, 22, 0);
         assert_eq!(morning_pause(&now), hours(9.0));
+        let now = at(&tz, 2026, 3, 29, 1, 0);
+        assert_eq!(morning_pause(&now), hours(6.0));
         // Clocks go back on 2026-10-25 at 03:00: one hour more.
         let now = at(&tz, 2026, 10, 24, 22, 0);
         assert_eq!(morning_pause(&now), hours(11.0));
         // In UTC nothing shifts.
         let now = at(&TimeZone::UTC, 2026, 3, 28, 22, 0);
         assert_eq!(morning_pause(&now), hours(10.0));
+    }
+
+    #[test]
+    fn the_morning_label_names_the_end() {
+        assert_eq!(MORNING_LABEL, format!("Until {MORNING_HOUR:02}:00"));
+        assert_eq!(PausePreset::UntilMorning.label(), "Until 08:00");
     }
 
     #[test]
@@ -556,7 +622,7 @@ mod tests {
             [
                 "Open icygui",
                 "---",
-                "Pause notifications ▸ For 30 minutes / For 1 hour / Until tomorrow morning",
+                "Pause notifications ▸ For 30 minutes / For 1 hour / Until 08:00",
                 "---",
                 "Quit icygui",
             ]
@@ -575,7 +641,7 @@ mod tests {
                 "---",
                 "(Paused until 18:30)",
                 "Resume notifications",
-                "Pause notifications ▸ For 30 minutes / For 1 hour / Until tomorrow morning",
+                "Pause notifications ▸ For 30 minutes / For 1 hour / Until 08:00",
                 "---",
                 "Quit icygui",
             ]
@@ -600,7 +666,7 @@ mod tests {
             [
                 "Open icygui",
                 "---",
-                "Pause notifications ▸ For 30 minutes / For 1 hour / Until tomorrow morning",
+                "Pause notifications ▸ For 30 minutes / For 1 hour / Until 08:00",
                 "---",
                 "Environment ▸   prod-cluster / ✓ staging /   id-lab",
                 "---",
@@ -650,6 +716,18 @@ mod tests {
     }
 
     #[test]
+    fn choices_carry_their_mark_in_the_label() {
+        assert_eq!(choice_label("prod", true), "✓ prod");
+        assert_eq!(choice_label("staging", false), "\u{2003}staging");
+        // The mark goes in front of the cleaned name, so cleaning can't
+        // remove the indentation.
+        assert_eq!(
+            choice_label(&environment_label("id", "  lab "), false),
+            "\u{2003}lab"
+        );
+    }
+
+    #[test]
     fn ampersands_are_escaped_for_muda() {
         assert_eq!(muda_text("R&D && ops"), "R&&D &&&& ops");
         assert_eq!(muda_text("plain_name"), "plain_name");
@@ -658,12 +736,12 @@ mod tests {
     /// The menu as the Linux tray host sees it (muda's snapshot, which the
     /// ksni backend turns into a D-Bus menu).
     #[cfg(target_os = "linux")]
-    mod rendered {
+    pub(in crate::tray) mod rendered {
         use tray_icon::menu::{ContextMenu as _, MenuItemKindSnapshot};
 
         use super::*;
 
-        pub(super) fn shown(items: &[MenuItemKindSnapshot]) -> Vec<String> {
+        pub(in crate::tray) fn shown(items: &[MenuItemKindSnapshot]) -> Vec<String> {
             items
                 .iter()
                 .map(|item| match item {
@@ -674,19 +752,14 @@ mod tests {
                             if item.is_enabled() { "" } else { " (off)" }
                         )
                     }
-                    MenuItemKindSnapshot::Check(item) => format!(
-                        "[{}] {}{}",
-                        if item.is_checked() { "x" } else { " " },
-                        item.text(),
-                        if item.is_enabled() { "" } else { " (off)" }
-                    ),
                     MenuItemKindSnapshot::Submenu(item) => {
                         format!("{} ▸ {}", item.text(), shown(&item.items()).join(" / "))
                     }
                     MenuItemKindSnapshot::Predefined(item) if item.is_separator() => {
                         "---".to_owned()
                     }
-                    _ => panic!("the tray menu has no icon or predefined items"),
+                    // No check items: muda ticks them itself when clicked.
+                    _ => panic!("the tray menu has only plain items, submenus and separators"),
                 })
                 .collect()
         }
@@ -709,9 +782,9 @@ mod tests {
                     "---",
                     "Paused until tomorrow 08:00 (off)",
                     "Resume notifications",
-                    "Pause notifications ▸ For 30 minutes / For 1 hour / Until tomorrow morning",
+                    "Pause notifications ▸ For 30 minutes / For 1 hour / Until 08:00",
                     "---",
-                    "Environment ▸ [ ] R&&D / [x] prod_cluster (off)",
+                    "Environment ▸ \u{2003}R&&D / ✓ prod_cluster (off)",
                     "---",
                     "Quit icygui",
                 ]
@@ -745,7 +818,7 @@ mod tests {
                     PAUSE_MENU_ID,
                     "icygui.tray.pause.30m",
                     "icygui.tray.pause.1h",
-                    "icygui.tray.pause.tomorrow",
+                    "icygui.tray.pause.morning",
                     ENVIRONMENT_MENU_ID,
                     "icygui.tray.environment.env-1",
                     QUIT_ID,

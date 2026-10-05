@@ -30,8 +30,13 @@ tray-icon.workspace = true
 # unsigned and ad-hoc signed apps; the "protected" store needs entitlements).
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+# The user id, for launchd's `gui/<uid>` domain (launch at login).
+rustix = { version = "1.1.5", features = ["process"] }
 
 # Linux and the BSDs: the freedesktop Secret Service over D-Bus via zbus,
 # with pure-Rust session crypto (no libdbus, no OpenSSL).
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+# Asks the session bus whether a tray host runs (`tray::host_available`);
+# the same zbus the tray and the Secret Service already use.
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }

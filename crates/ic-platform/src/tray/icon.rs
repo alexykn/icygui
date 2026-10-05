@@ -22,9 +22,13 @@ pub(crate) const SIZE: u32 = 64;
 const BYTES: usize = 4 * 64 * 64;
 const _: () = assert!(BYTES == 4 * (SIZE as usize) * (SIZE as usize));
 
-/// The colour for "no state" (not connected, no environment): the design's
-/// pending grey.
-pub(crate) const NO_STATE: [u8; 3] = [0x3a, 0x3f, 0x43];
+/// The colour for "no state" (not connected, no environment): a mid grey
+/// between the design's muted and faint text colours. The design's pending
+/// grey (`#3a3f43`) is made for dots on the dark window and all but
+/// vanishes on dark panels and menu bars, which would make "not connected"
+/// look like a missing icon; this one keeps at least 3:1 contrast on light
+/// and dark ones alike.
+pub(crate) const NO_STATE: [u8; 3] = [0x7d, 0x84, 0x8a];
 
 /// The design's accent blue, for the node.
 pub(crate) const ACCENT: [u8; 3] = [0x74, 0xad, 0xe8];
@@ -188,7 +192,59 @@ mod tests {
         assert_eq!(TrayTone::Warning.rgb(), [0xe5, 0xb0, 0x4a]);
         assert_eq!(TrayTone::Unknown.rgb(), [0xa9, 0x7f, 0xdb]);
         assert_eq!(TrayTone::Ok.rgb(), [0x56, 0xb8, 0x70]);
-        assert_eq!(NO_STATE, [0x3a, 0x3f, 0x43]);
+        assert_eq!(NO_STATE, [0x7d, 0x84, 0x8a]);
+    }
+
+    /// WCAG 2 relative luminance of an sRGB colour.
+    fn luminance(rgb: [u8; 3]) -> f64 {
+        let linear = |channel: u8| {
+            let c = f64::from(channel) / 255.0;
+            if c <= 0.040_45 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2])
+    }
+
+    /// WCAG 2 contrast ratio, from 1 (none) to 21.
+    fn contrast(a: [u8; 3], b: [u8; 3]) -> f64 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn the_no_state_grey_reads_on_light_and_dark_panels() {
+        // WCAG asks for 3:1 for graphical objects.
+        for (panel, rgb) in [
+            ("white", [0xff, 0xff, 0xff]),
+            ("macOS light menu bar", [0xf6, 0xf6, 0xf6]),
+            ("KDE Breeze light panel", [0xef, 0xf0, 0xf1]),
+            ("GNOME top bar", [0x00, 0x00, 0x00]),
+            ("Yaru dark panel", [0x1d, 0x1d, 0x1d]),
+            ("macOS dark menu bar", [0x2c, 0x2c, 0x2e]),
+            ("KDE Breeze dark panel", [0x31, 0x36, 0x3b]),
+        ] {
+            let ratio = contrast(NO_STATE, rgb);
+            assert!(ratio >= 3.0, "{panel}: {ratio:.2}:1");
+        }
+        // The design's pending grey, the colour this replaces, doesn't.
+        assert!(contrast([0x3a, 0x3f, 0x43], [0x2c, 0x2c, 0x2e]) < 1.5);
+        // Sanity checks of the formula.
+        assert!((contrast([0, 0, 0], [0xff, 0xff, 0xff]) - 21.0).abs() < 1e-9);
+        assert!((contrast(NO_STATE, NO_STATE) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_no_state_grey_is_a_neutral_grey() {
+        // No hue, so it can't be mistaken for a state colour.
+        let [r, g, b] = NO_STATE;
+        assert!(r.max(g).max(b) - r.min(g).min(b) <= 0x10, "{NO_STATE:x?}");
+        for tone in TONES.into_iter().flatten() {
+            assert_ne!(NO_STATE, tone.rgb());
+        }
+        assert_ne!(NO_STATE, ACCENT);
     }
 
     #[test]

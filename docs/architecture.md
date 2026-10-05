@@ -424,6 +424,7 @@ pub mod tray {
         pub fn set_environments(&self, environments: &[(String, String)], active: Option<&str>);   // (id, name) submenu
         pub fn set_paused(&self, paused_until: Option<String>);   // menu shows "Paused until …" / Resume
     }
+    pub fn host_available() -> bool;         // a tray host shows the icon (Linux: StatusNotifierWatcher with a host on the session bus; macOS: always). Check before keeping the app running without a window (BG-01)
 }
 pub mod autostart {
     pub fn set_enabled(enabled: bool, app_id: &str, app_name: &str, exe: &Path) -> Result<(), PlatformError>;   // LaunchAgent plist / XDG autostart .desktop

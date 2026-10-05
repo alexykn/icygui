@@ -12,4 +12,6 @@ workspace = true
 
 [dependencies]
 icns = "0.3"
-png = "0.18"
+resvg = "0.46"
+serde_json.workspace = true
+sha2 = "0.11"

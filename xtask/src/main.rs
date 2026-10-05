@@ -1,10 +1,21 @@
 //! Project automation (`cargo xtask <task>`).
 //!
-//! - `icons`: regenerate the app icon PNGs and `.icns` in `assets/icons/`
-//! - `bundle [--release]`: macOS `.app` (ad-hoc signed) or a Linux install tree
-//! - `package`: release bundle plus `.dmg` (macOS) or `.tar.gz` + `.deb` (Linux)
-//! - `install`: Linux only, installs the bundle into `~/.local`
+//! - `icons`: render the logo SVGs into icon PNGs, the `.icns` and the banner
+//! - `render <svg> <png> <size>`: render one SVG to a square PNG
+//! - `bundle [--release] [--universal] [--sign IDENTITY]`: macOS `.app` or a
+//!   Linux install tree in `target/bundle`
+//! - `package [--universal] [--sign IDENTITY] [--notarize]`: release
+//!   artifacts in `target/dist` (macOS `.dmg`; Linux `.tar.gz` + `.deb`)
+//!   plus `SHA256SUMS`
+//! - `notarize <path>`: notarize and staple an `.app` or `.dmg`
+//! - `homebrew --dist DIR --out TAP_DIR [--repo OWNER/NAME]`: write the
+//!   Homebrew cask (macOS) and formula (Linux) for the artifacts in `DIR`
+//! - `version`: print the workspace version (CI compares it with the tag)
+//! - `install`: Linux only, install into `~/.local`
 //! - `mock [args…]`: start the mock Icinga environments (`icinga-mock`)
+//!
+//! Signing and notarization read their secrets from the environment; see
+//! `docs/releasing.md`.
 
 #![expect(
     clippy::print_stdout,
@@ -12,36 +23,101 @@
     reason = "xtask is a command-line tool that reports progress"
 )]
 
+mod bundle;
+mod homebrew;
 mod icon;
+mod release;
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-const APP_ID: &str = "io.github.alexykn.icygui";
-const APP_NAME: &str = "icygui";
-const BINARY: &str = "icygui";
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const APP_ID: &str = "io.github.alexykn.icygui";
+pub(crate) const APP_NAME: &str = "icygui";
+pub(crate) const BINARY: &str = "icygui";
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const DEFAULT_REPO: &str = "alexykn/icygui";
 const ICON_SIZES: [u32; 7] = [16, 32, 64, 128, 256, 512, 1024];
 
-type Result<T, E = String> = std::result::Result<T, E>;
+pub(crate) type Result<T, E = String> = std::result::Result<T, E>;
+
+/// Flags shared by the commands. Unknown flags are errors.
+#[derive(Debug, Default)]
+pub(crate) struct Flags {
+    pub(crate) release: bool,
+    pub(crate) universal: bool,
+    pub(crate) sign: Option<String>,
+    pub(crate) notarize: bool,
+    pub(crate) dist: Option<PathBuf>,
+    pub(crate) out: Option<PathBuf>,
+    pub(crate) repo: Option<String>,
+    pub(crate) positional: Vec<String>,
+}
+
+fn parse_flags(args: &[String]) -> Result<Flags> {
+    let mut flags = Flags::default();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let mut value = |name: &str| {
+            iter.next()
+                .cloned()
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        match arg.as_str() {
+            "--release" => flags.release = true,
+            "--universal" => flags.universal = true,
+            "--notarize" => flags.notarize = true,
+            "--sign" => flags.sign = Some(value("--sign")?),
+            "--dist" => flags.dist = Some(PathBuf::from(value("--dist")?)),
+            "--out" => flags.out = Some(PathBuf::from(value("--out")?)),
+            "--repo" => flags.repo = Some(value("--repo")?),
+            other if other.starts_with("--") => return Err(format!("unknown flag {other}")),
+            other => flags.positional.push(other.to_owned()),
+        }
+    }
+    // An empty identity (an unset CI secret) means "not signing".
+    if flags.sign.as_deref().is_some_and(str::is_empty) {
+        flags.sign = None;
+    }
+    Ok(flags)
+}
+
+const USAGE: &str = "usage: cargo xtask <command>
+  icons                                   render logo, icons, icns, banner
+  render <svg> <png> <size>               render one SVG
+  bundle [--release] [--universal] [--sign IDENTITY]
+  package [--universal] [--sign IDENTITY] [--notarize]
+  notarize <app-or-dmg>
+  homebrew --dist DIR --out TAP_DIR [--repo OWNER/NAME]
+  version
+  install                                 (Linux) install into ~/.local
+  mock [args…]                            start mock Icinga environments";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
-        Some("icons") => icons(),
-        Some("bundle") => bundle(args.iter().any(|a| a == "--release")).map(|_| ()),
-        Some("package") => package(),
-        Some("install") => install(),
-        Some("mock") => mock(&args[1..]),
-        _ => {
-            eprintln!(
-                "usage: cargo xtask <icons | bundle [--release] | package | install | mock [args…]>"
-            );
-            return ExitCode::from(2);
-        }
+    let Some((command, rest)) = args.split_first() else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
     };
+    let result = parse_flags(rest).and_then(|flags| match command.as_str() {
+        "icons" => icons(),
+        "render" => render_command(&flags.positional),
+        "bundle" => bundle::bundle(&flags).map(|_| ()),
+        "package" => release::package(&flags),
+        "notarize" => match flags.positional.as_slice() {
+            [path] => release::notarize(Path::new(path)),
+            _ => Err("usage: cargo xtask notarize <app-or-dmg>".to_owned()),
+        },
+        "homebrew" => homebrew::write_tap(&flags),
+        "version" => {
+            println!("{VERSION}");
+            Ok(())
+        }
+        "install" => install(),
+        "mock" => mock(rest),
+        _ => Err(format!("unknown command {command}\n{USAGE}")),
+    });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -51,13 +127,30 @@ fn main() -> ExitCode {
     }
 }
 
-fn root() -> PathBuf {
+fn render_command(args: &[String]) -> Result<()> {
+    let [svg, png, size] = args else {
+        return Err("usage: cargo xtask render <in.svg> <out.png> <size>".to_owned());
+    };
+    let size: u32 = size.parse().map_err(|_| format!("bad size: {size}"))?;
+    let source = fs::read(svg).map_err(|error| format!("reading {svg}: {error}"))?;
+    write(Path::new(png), icon::render_svg(&source, size)?)
+}
+
+pub(crate) fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
-fn run(command: &mut Command) -> Result<()> {
+pub(crate) fn target_dir() -> PathBuf {
+    env::var_os("CARGO_TARGET_DIR").map_or_else(|| root().join("target"), PathBuf::from)
+}
+
+pub(crate) fn cargo() -> Command {
+    Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()))
+}
+
+pub(crate) fn run(command: &mut Command) -> Result<()> {
     eprintln!("» {command:?}");
     let status = command
         .status()
@@ -69,18 +162,26 @@ fn run(command: &mut Command) -> Result<()> {
     }
 }
 
-fn create_dir(path: &Path) -> Result<()> {
+pub(crate) fn create_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|error| format!("creating {}: {error}", path.display()))
 }
 
-fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+pub(crate) fn remove_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path)
+            .map_err(|error| format!("removing {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     if let Some(parent) = path.parent() {
         create_dir(parent)?;
     }
     fs::write(path, contents).map_err(|error| format!("writing {}: {error}", path.display()))
 }
 
-fn copy(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn copy(from: &Path, to: &Path) -> Result<()> {
     if let Some(parent) = to.parent() {
         create_dir(parent)?;
     }
@@ -89,206 +190,7 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
         .map_err(|error| format!("copying {} to {}: {error}", from.display(), to.display()))
 }
 
-fn icons() -> Result<()> {
-    let dir = root().join("assets/icons");
-    create_dir(&dir)?;
-    for size in ICON_SIZES {
-        let path = dir.join(format!("{APP_NAME}-{size}.png"));
-        write(&path, icon::png(size)?)?;
-        println!("wrote {}", path.display());
-    }
-    let icns = dir.join(format!("{APP_NAME}.icns"));
-    write(&icns, icon::icns()?)?;
-    println!("wrote {}", icns.display());
-    Ok(())
-}
-
-fn build(release: bool) -> Result<PathBuf> {
-    let mut command = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()));
-    command
-        .current_dir(root())
-        .args(["build", "--locked", "-p", "ic-app"]);
-    if release {
-        command.arg("--release");
-    }
-    run(&mut command)?;
-    let target_dir =
-        env::var_os("CARGO_TARGET_DIR").map_or_else(|| root().join("target"), PathBuf::from);
-    Ok(target_dir
-        .join(if release { "release" } else { "debug" })
-        .join(BINARY))
-}
-
-fn bundle(release: bool) -> Result<PathBuf> {
-    let binary = build(release)?;
-    let out = root().join("target/bundle");
-    if cfg!(target_os = "macos") {
-        bundle_macos(&binary, &out)
-    } else {
-        bundle_linux(&binary, &out)
-    }
-}
-
-fn bundle_macos(binary: &Path, out: &Path) -> Result<PathBuf> {
-    let app = out.join(format!("{APP_NAME}.app"));
-    if app.exists() {
-        fs::remove_dir_all(&app).map_err(|error| format!("removing old bundle: {error}"))?;
-    }
-    let contents = app.join("Contents");
-    copy(binary, &contents.join("MacOS").join(BINARY))?;
-    copy(
-        &root().join(format!("assets/icons/{APP_NAME}.icns")),
-        &contents.join("Resources").join(format!("{APP_NAME}.icns")),
-    )?;
-    write(&contents.join("Info.plist"), info_plist())?;
-    write(&contents.join("PkgInfo"), "APPL????")?;
-    // Ad-hoc signature: enough for local use and for notification permission.
-    run(Command::new("codesign")
-        .args(["--force", "--deep", "--sign", "-"])
-        .arg(&app))?;
-    println!("bundle: {}", app.display());
-    Ok(app)
-}
-
-fn info_plist() -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleDevelopmentRegion</key><string>en</string>
-  <key>CFBundleDisplayName</key><string>{APP_NAME}</string>
-  <key>CFBundleExecutable</key><string>{BINARY}</string>
-  <key>CFBundleIconFile</key><string>{APP_NAME}.icns</string>
-  <key>CFBundleIdentifier</key><string>{APP_ID}</string>
-  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>{APP_NAME}</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>{VERSION}</string>
-  <key>CFBundleVersion</key><string>{VERSION}</string>
-  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>NSHighResolutionCapable</key><true/>
-  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
-</dict>
-</plist>
-"#
-    )
-}
-
-fn desktop_entry() -> String {
-    format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name={APP_NAME}\n\
-         GenericName=Icinga 2 client\n\
-         Comment=Monitor Icinga 2 environments\n\
-         Exec={BINARY}\n\
-         Icon={APP_ID}\n\
-         Terminal=false\n\
-         Categories=Network;Monitor;System;\n\
-         Keywords=icinga;monitoring;alerts;\n\
-         StartupWMClass={APP_ID}\n"
-    )
-}
-
-fn bundle_linux(binary: &Path, out: &Path) -> Result<PathBuf> {
-    let tree = out.join(APP_NAME);
-    if tree.exists() {
-        fs::remove_dir_all(&tree).map_err(|error| format!("removing old bundle: {error}"))?;
-    }
-    copy(binary, &tree.join("bin").join(BINARY))?;
-    write(
-        &tree.join(format!("share/applications/{APP_ID}.desktop")),
-        desktop_entry(),
-    )?;
-    for size in ICON_SIZES.into_iter().filter(|size| *size <= 512) {
-        copy(
-            &root().join(format!("assets/icons/{APP_NAME}-{size}.png")),
-            &tree.join(format!(
-                "share/icons/hicolor/{size}x{size}/apps/{APP_ID}.png"
-            )),
-        )?;
-    }
-    println!("bundle: {}", tree.display());
-    Ok(tree)
-}
-
-fn package() -> Result<()> {
-    let bundle = bundle(true)?;
-    let dist = root().join("target/dist");
-    create_dir(&dist)?;
-    let arch = env::consts::ARCH;
-    if cfg!(target_os = "macos") {
-        let dmg = dist.join(format!("{APP_NAME}-{VERSION}-macos-{arch}.dmg"));
-        run(Command::new("hdiutil")
-            .args([
-                "create",
-                "-volname",
-                APP_NAME,
-                "-ov",
-                "-format",
-                "UDZO",
-                "-srcfolder",
-            ])
-            .arg(&bundle)
-            .arg(&dmg))?;
-        println!("package: {}", dmg.display());
-        return Ok(());
-    }
-    let tarball = dist.join(format!("{APP_NAME}-{VERSION}-linux-{arch}.tar.gz"));
-    run(Command::new("tar")
-        .arg("-czf")
-        .arg(&tarball)
-        .arg("-C")
-        .arg(bundle.parent().unwrap_or(&bundle))
-        .arg(APP_NAME))?;
-    println!("package: {}", tarball.display());
-    deb(&bundle, &dist)
-}
-
-fn deb(bundle: &Path, dist: &Path) -> Result<()> {
-    let deb_arch = match env::consts::ARCH {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        other => other,
-    };
-    let staging = root().join("target/deb").join(APP_NAME);
-    if staging.exists() {
-        fs::remove_dir_all(&staging).map_err(|error| format!("removing old staging: {error}"))?;
-    }
-    let usr = staging.join("usr");
-    copy(
-        &bundle.join("bin").join(BINARY),
-        &usr.join("bin").join(BINARY),
-    )?;
-    copy_tree(&bundle.join("share"), &usr.join("share"))?;
-    write(
-        &staging.join("DEBIAN/control"),
-        format!(
-            "Package: {APP_NAME}\n\
-             Version: {VERSION}\n\
-             Section: net\n\
-             Priority: optional\n\
-             Architecture: {deb_arch}\n\
-             Depends: libxkbcommon0, libxkbcommon-x11-0, libxcb1, libfontconfig1, libfreetype6, libvulkan1, libwayland-client0\n\
-             Recommends: mesa-vulkan-drivers, gnome-shell-extension-appindicator | plasma-workspace\n\
-             Maintainer: Alexander Knott\n\
-             Description: Native desktop client for Icinga 2\n \
-             Live problem lists, dashboards, operator actions and native notifications\n \
-             for the Icinga 2 REST API.\n"
-        ),
-    )?;
-    let deb = dist.join(format!("{APP_NAME}_{VERSION}_{deb_arch}.deb"));
-    run(Command::new("dpkg-deb")
-        .args(["--root-owner-group", "--build"])
-        .arg(&staging)
-        .arg(&deb))?;
-    println!("package: {}", deb.display());
-    Ok(())
-}
-
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     let entries =
         fs::read_dir(from).map_err(|error| format!("reading {}: {error}", from.display()))?;
     for entry in entries {
@@ -303,14 +205,46 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+fn icons() -> Result<()> {
+    let root = root();
+    let svg_path = root.join(icon::ICON_SVG);
+    let svg =
+        fs::read(&svg_path).map_err(|error| format!("reading {}: {error}", svg_path.display()))?;
+    let dir = root.join("assets/icons");
+    create_dir(&dir)?;
+    for size in ICON_SIZES {
+        let path = dir.join(format!("{APP_NAME}-{size}.png"));
+        write(&path, icon::render_svg(&svg, size)?)?;
+        println!("wrote {}", path.display());
+    }
+    let icns = dir.join(format!("{APP_NAME}.icns"));
+    write(&icns, icon::icns(&svg)?)?;
+    println!("wrote {}", icns.display());
+
+    let banner_svg = root.join("assets/logo/banner.svg");
+    let banner = fs::read(&banner_svg)
+        .map_err(|error| format!("reading {}: {error}", banner_svg.display()))?;
+    let banner_png = root.join("assets/logo/banner.png");
+    write(
+        &banner_png,
+        icon::render_svg_wide(&banner, 1280, &root.join("crates/ic-ui-kit/fonts"))?,
+    )?;
+    println!("wrote {}", banner_png.display());
+    Ok(())
+}
+
 fn install() -> Result<()> {
     if cfg!(target_os = "macos") {
         return Err(
-            "on macOS, run `cargo xtask bundle --release` and drag the .app into /Applications"
+            "on macOS, install with Homebrew (`brew install --cask alexykn/tap/icygui`) or run \
+             `cargo xtask bundle --release` and move target/bundle/icygui.app to /Applications"
                 .to_owned(),
         );
     }
-    let bundle = bundle(true)?;
+    let bundle = bundle::bundle(&Flags {
+        release: true,
+        ..Flags::default()
+    })?;
     let home = env::var_os("HOME").ok_or("HOME is not set")?;
     let prefix = PathBuf::from(home).join(".local");
     copy(
@@ -323,7 +257,7 @@ fn install() -> Result<()> {
 }
 
 fn mock(extra: &[String]) -> Result<()> {
-    let mut command = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()));
+    let mut command = cargo();
     command
         .current_dir(root())
         .args(["run", "-p", "ic-mock", "--bin", "icinga-mock", "--"]);
@@ -344,4 +278,28 @@ fn mock(extra: &[String]) -> Result<()> {
         command.args(extra);
     }
     run(&mut command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn parses_flags() {
+        let flags = parse_flags(&args(&["--universal", "--sign", "Developer ID", "x"])).unwrap();
+        assert!(flags.universal);
+        assert_eq!(flags.sign.as_deref(), Some("Developer ID"));
+        assert_eq!(flags.positional, ["x"]);
+        assert!(parse_flags(&args(&["--nope"])).is_err());
+        assert!(parse_flags(&args(&["--sign"])).is_err());
+    }
+
+    #[test]
+    fn empty_identity_means_unsigned() {
+        assert_eq!(parse_flags(&args(&["--sign", ""])).unwrap().sign, None);
+    }
 }

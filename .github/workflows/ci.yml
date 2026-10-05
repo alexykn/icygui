@@ -55,6 +55,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: Bundle the app (ad-hoc signed on macOS)
+        run: cargo xtask bundle
+
       - name: Background-mode spike (headless)
         if: runner.os == 'Linux'
         run: |

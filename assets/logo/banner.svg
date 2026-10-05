@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" width="1280" height="320">
+  <title>icygui</title>
+  <!-- README banner: mark + wordmark in IBM Plex Mono, on the design's
+       window colour. Rendered to banner.png by `cargo xtask icons`. -->
+  <defs>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb35c"/>
+      <stop offset="1" stop-color="#f2862f"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="320" rx="28" fill="#1d2125"/>
+  <rect x="1" y="1" width="1278" height="318" rx="27" fill="none" stroke="#33383c" stroke-width="2"/>
+  <g transform="translate(64 40) scale(0.375)">
+    <path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" transform="translate(-190 -190)" fill="none" stroke="url(#orange)" stroke-width="30" stroke-linecap="round"/>
+    <circle cx="322" cy="322" r="178" fill="url(#orange)"/>
+    <circle cx="528.5" cy="115.5" r="44" fill="#74ade8"/>
+  </g>
+  <text x="352" y="168" font-family="IBM Plex Mono" font-weight="600" font-size="96" fill="#eceeef">icygui</text>
+  <text x="356" y="226" font-family="IBM Plex Mono" font-weight="400" font-size="30" fill="#8b9094">native Icinga 2 client · macOS &amp; Linux</text>
+</svg>

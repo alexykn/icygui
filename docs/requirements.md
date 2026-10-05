@@ -90,3 +90,13 @@ Every requirement has a stable ID. The final production-readiness audit checks e
 - **OPS-05** Logs go to a rotating file in the log directory; secrets are never logged.
 - **OPS-06** The config file is written atomically with a backup; corrupt config is reported with restore options; the file is private (0600).
 - **OPS-07** Documentation: README (features, install, ApiUser permissions, TLS setup), user guide, development guide, architecture.
+
+## Brand and distribution
+
+- **REL-01** Logo: inspired by Zed and Delta, built on Icinga's orange warning circle with the design's blue accent; a single SVG source renders the app icon (all sizes, `.icns`), the mark and the README banner.
+- **REL-02** macOS releases are universal binaries signed with a Developer ID, with the hardened runtime, notarized and stapled (app and `.dmg`); Gatekeeper accepts them without warnings.
+- **REL-03** Homebrew tap: the release workflow updates `Casks/icygui.rb` (macOS) and `Formula/icygui.rb` (Linux) in the tap repository; `brew install --cask alexykn/tap/icygui` works; `uninstall quit` and `zap` are correct.
+- **REL-04** Linux releases: `.deb` and `.tar.gz` for x86_64 and aarch64 with desktop entry and icons; `SHA256SUMS` (optionally GPG-signed) and build-provenance attestations for every artifact.
+- **REL-05** One-tag releases: the tag must match the workspace version; the release can be rebuilt by hand for an existing tag.
+- **REL-06** `icygui --version` and `--help` work without opening a window (the Homebrew formula test relies on it).
+- **REL-07** The tray icon uses the logo's mark, tinted with the worst unhandled state.

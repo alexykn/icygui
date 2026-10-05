@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo/banner.png" alt="icygui" width="640"></p>
+
 # icygui
 
 A native desktop client for Icinga 2 on macOS and Linux, written in Rust with [GPUI](https://www.gpui.rs).
@@ -7,6 +9,15 @@ A native desktop client for Icinga 2 on macOS and Linux, written in Rust with [G
 - Custom dashboards ("threads") in sidebar groups, each a filter over hosts or services in Icinga's own filter language.
 - Operator actions: check now, acknowledge, downtimes, comments, passive check results, run commands. All runtime operations; the client never changes Icinga's configuration.
 - Native notifications with per-environment, per-group, per-dashboard and per-object rules, quiet hours and storm control. The app keeps running in the menu bar / tray.
+
+## Install
+
+```sh
+brew install --cask alexykn/tap/icygui    # macOS (signed and notarized)
+brew install alexykn/tap/icygui           # Linux
+```
+
+Linux `.deb` and `.tar.gz` packages are on the [releases page](https://github.com/alexykn/icygui/releases).
 
 Status: in development. See [`PLAN.md`](PLAN.md) for the plan and decisions, and [`docs/architecture.md`](docs/architecture.md) for the crate contracts.
 

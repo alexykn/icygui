@@ -1,7 +1,7 @@
 # Icinga 2 desktop client — Rust + GPUI implementation plan
 
 Status: **plan v3. M0 (foundations + spikes) is done**; spike results are in `docs/spikes.md`.
-Inputs: `project/Icinga Client v2.dc.html` (primary design, screens 2a–2c), `project/Icinga Client.dc.html` (turn 1: command palette, dashboard editor, detail sub-tabs), `chats/chat1.md`, the sidebar screenshot, and the Icinga 2 REST API reference (`doc/12-icinga2-api.md`, Icinga/icinga2 master).
+Inputs: `design/project/Icinga Client v2.dc.html` (primary design, screens 2a–2c), `design/project/Icinga Client.dc.html` (turn 1: command palette, dashboard editor, detail sub-tabs), `design/chats/chat1.md`, the sidebar screenshot, and the Icinga 2 REST API reference (`doc/12-icinga2-api.md`, Icinga/icinga2 master).
 
 ## 0. Decisions
 

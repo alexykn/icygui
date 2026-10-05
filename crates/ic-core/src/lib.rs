@@ -4,3 +4,6 @@
 //!
 //! Platform services (keychain, notifications, tray, autostart) are traits here
 //! and implemented in `ic-platform`.
+
+pub mod ports;
+pub mod snapshot;

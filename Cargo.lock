@@ -2647,10 +2647,20 @@ dependencies = [
 [[package]]
 name = "ic-config"
 version = "0.1.0"
+dependencies = [
+ "ic-rules",
+ "serde",
+]
 
 [[package]]
 name = "ic-core"
 version = "0.1.0"
+dependencies = [
+ "ic-model",
+ "ic-rules",
+ "secrecy",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "ic-filter"
@@ -2671,6 +2681,11 @@ version = "0.1.0"
 [[package]]
 name = "ic-rules"
 version = "0.1.0"
+dependencies = [
+ "ic-model",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "ic-ui-kit"
@@ -4889,6 +4904,15 @@ name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
+
+[[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "self_cell"

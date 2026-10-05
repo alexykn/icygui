@@ -1,25 +1,37 @@
-# CODING AGENTS: READ THIS FIRST
+# icygui
 
-This is a **handoff bundle** from Claude Design (claude.ai/design).
+A native desktop client for Icinga 2 on macOS and Linux, written in Rust with [GPUI](https://www.gpui.rs).
 
-A user mocked up designs in HTML/CSS/JS using an AI design tool, then exported this bundle so a coding agent can implement the designs for real.
+- Live monitoring from the Icinga 2 REST API's event stream, without polling dashboards.
+- Problem lists in the style of Icinga Web: state circles, time in state, `service on host`, plugin output. Click a row for the host or service pane.
+- Custom dashboards ("threads") in sidebar groups, each a filter over hosts or services in Icinga's own filter language.
+- Operator actions: check now, acknowledge, downtimes, comments, passive check results, run commands. All runtime operations; the client never changes Icinga's configuration.
+- Native notifications with per-environment, per-group, per-dashboard and per-object rules, quiet hours and storm control. The app keeps running in the menu bar / tray.
 
-## What you should do — IMPORTANT
+Status: in development. See [`PLAN.md`](PLAN.md) for the plan and decisions, and [`docs/architecture.md`](docs/architecture.md) for the crate contracts.
 
-**Read the chat transcripts first.** There are 1 chat transcript(s) in `chats/`. The transcripts show the full back-and-forth between the user and the design assistant — they tell you **what the user actually wants** and **where they landed** after iterating. Don't skip them. The final HTML files are the output, but the chat is where the intent lives.
+## Icinga API user
 
-**Read `project/Icinga Client v2.dc.html` in full.** The user had this file open when they triggered the handoff, so it's almost certainly the primary design they want built. Read it top to bottom — don't skim. Then **follow its imports**: open every file it pulls in (shared components, CSS, scripts) so you understand how the pieces fit together before you start implementing.
+The client needs an `ApiUser`. Read-only use:
 
-**If anything is ambiguous, ask the user to confirm before you start implementing.** It's much cheaper to clarify scope up front than to build the wrong thing.
+```
+object ApiUser "icygui" {
+  password = "…"
+  permissions = [
+    "objects/query/Host", "objects/query/Service", "objects/query/HostGroup",
+    "objects/query/ServiceGroup", "objects/query/Comment", "objects/query/Downtime",
+    "objects/query/Dependency", "objects/query/Endpoint", "status/query",
+    "events/CheckResult", "events/StateChange", "events/AcknowledgementSet",
+    "events/AcknowledgementCleared", "events/CommentAdded", "events/CommentRemoved",
+    "events/DowntimeAdded", "events/DowntimeRemoved", "events/DowntimeStarted",
+    "events/DowntimeTriggered", "events/Flapping", "events/ObjectCreated",
+    "events/ObjectModified", "events/ObjectDeleted",
+  ]
+}
+```
 
-## About the design files
+For operators, add `actions/reschedule-check`, `actions/acknowledge-problem`, `actions/remove-acknowledgement`, `actions/schedule-downtime`, `actions/remove-downtime`, `actions/add-comment`, `actions/remove-comment`, `actions/process-check-result` and, optionally, `actions/execute-command`. Buttons for actions the user isn't allowed to run are disabled.
 
-The design medium is **HTML/CSS/JS** — these are prototypes, not production code. Your job is to **recreate them pixel-perfectly** in whatever technology makes sense for the target codebase (React, Vue, native, whatever fits). Match the visual output; don't copy the prototype's internal structure unless it happens to fit.
+## Development
 
-**Don't render these files in a browser or take screenshots unless the user asks you to.** Everything you need — dimensions, colors, layout rules — is spelled out in the source. Read the HTML and CSS directly; a screenshot won't tell you anything they don't.
-
-## Bundle contents
-
-- `README.md` — this file
-- `chats/` — conversation transcripts (read these!)
-- `project/` — the `Missing context` project files (HTML prototypes, assets, components)
+See [`docs/development.md`](docs/development.md) for requirements and commands. The original design handoff (HTML prototypes and the design conversation) is in [`design/`](design/).

@@ -11,10 +11,9 @@ use tracing_subscriber::EnvFilter;
 
 use crate::workspace::Workspace;
 
-/// Reverse-DNS application id (Wayland `app_id`, notification identity).
-/// Placeholder until the project has a domain to publish under.
-const APP_ID: &str = "local.icinga-client";
-const APP_NAME: &str = "Icinga Client";
+/// Reverse-DNS application id (Wayland `app_id`, bundle id, notification identity).
+const APP_ID: &str = "io.github.alexykn.icygui";
+const APP_NAME: &str = "icygui";
 
 fn main() {
     tracing_subscriber::fmt()

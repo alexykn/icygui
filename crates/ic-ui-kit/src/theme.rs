@@ -1,4 +1,4 @@
-//! Design tokens from `project/Icinga Client v2.dc.html`.
+//! Design tokens from `design/project/Icinga Client v2.dc.html`.
 //!
 //! Views never hard-code colours or sizes; they read them from the active
 //! [`Theme`] (`cx.theme()`), so a light theme is another `Theme` value.

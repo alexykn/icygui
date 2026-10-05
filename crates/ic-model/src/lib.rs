@@ -10,6 +10,7 @@ mod object;
 mod perfdata;
 pub mod severity;
 mod state;
+mod status;
 mod time;
 
 pub use action::{Action, ActionTarget, ChildOptions, CommandType, DowntimeMode};
@@ -23,4 +24,5 @@ pub use perfdata::{
     Perfdata, PerfdataStatus, Threshold, format_number, parse_perfdata, parse_perfdata_entry,
 };
 pub use state::{HostState, ServiceState, StateType};
+pub use status::InstanceStatus;
 pub use time::{Timestamp, format_compact, format_two_units};

@@ -58,6 +58,23 @@ jobs:
       - name: Bundle the app (ad-hoc signed on macOS)
         run: cargo xtask bundle
 
+      - name: Installer smoke test
+        if: runner.os == 'Linux'
+        run: |
+          shellcheck -s bash install.sh spikes/linux-headless.sh contract/run-icinga.sh
+          version=$(cargo xtask version)
+          release="$RUNNER_TEMP/release/v$version"
+          mkdir -p "$release"
+          tar --owner=0 --group=0 -czf "$release/icygui-$version-linux-x86_64.tar.gz" -C target/bundle icygui
+          (cd "$release" && sha256sum icygui-*.tar.gz > SHA256SUMS)
+          (cd "$RUNNER_TEMP/release" && python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 1
+          home=$(mktemp -d)
+          HOME="$home" ICYGUI_DOWNLOAD_URL=http://127.0.0.1:8765 ./install.sh --version "$version"
+          test -x "$home/.local/bin/icygui"
+          HOME="$home" ./install.sh --uninstall --purge
+          test ! -e "$home/.local/bin/icygui"
+
       - name: Background-mode spike (headless)
         if: runner.os == 'Linux'
         run: |

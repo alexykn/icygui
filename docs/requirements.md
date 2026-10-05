@@ -94,8 +94,15 @@ Every requirement has a stable ID. The final production-readiness audit checks e
 ## Brand and distribution
 
 - **REL-01** Logo: inspired by Zed and Delta, built on Icinga's orange warning circle with the design's blue accent; a single SVG source renders the app icon (all sizes, `.icns`), the mark and the README banner.
-- **REL-02** macOS releases are universal binaries signed with a Developer ID, with the hardened runtime, notarized and stapled (app and `.dmg`); Gatekeeper accepts them without warnings.
-- **REL-03** Homebrew tap: the release workflow updates `Casks/icygui.rb` (macOS) and `Formula/icygui.rb` (Linux) in the tap repository; `brew install --cask alexykn/tap/icygui` works; `uninstall quit` and `zap` are correct.
+- **REL-02** macOS releases are universal binaries with the hardened runtime. Without a Developer ID (current state) they're ad-hoc signed; with the Developer ID secrets set, they're signed, notarized and stapled (app and `.dmg`) with no code changes.
+- **REL-03** Optional Homebrew tap: when a tap token is configured, the release workflow updates `Casks/icygui.rb` (macOS; clears quarantine while builds aren't notarized) and `Formula/icygui.rb` (Linux); `uninstall quit` and `zap` are correct.
+- **REL-08** `install.sh` (`curl … | bash`):
+  - macOS and Linux, x86_64 and arm64; latest or pinned version;
+  - SHA-256 verification against `SHA256SUMS`;
+  - macOS: install into `/Applications` (or `~/Applications`), quit a running instance first, re-sign with a per-machine self-signed identity (falling back to ad-hoc), needs no Xcode or Command Line Tools;
+  - Linux: user-local install with desktop entry and icons, plus hints for missing libraries;
+  - `--uninstall` and `--purge`;
+  - never runs a partially downloaded script.
 - **REL-04** Linux releases: `.deb` and `.tar.gz` for x86_64 and aarch64 with desktop entry and icons; `SHA256SUMS` (optionally GPG-signed) and build-provenance attestations for every artifact.
 - **REL-05** One-tag releases: the tag must match the workspace version; the release can be rebuilt by hand for an existing tag.
 - **REL-06** `icygui --version` and `--help` work without opening a window (the Homebrew formula test relies on it).

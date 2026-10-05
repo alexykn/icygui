@@ -5,11 +5,12 @@
 //! - `bundle [--release] [--universal] [--sign IDENTITY]`: macOS `.app` or a
 //!   Linux install tree in `target/bundle`
 //! - `package [--universal] [--sign IDENTITY] [--notarize]`: release
-//!   artifacts in `target/dist` (macOS `.dmg`; Linux `.tar.gz` + `.deb`)
-//!   plus `SHA256SUMS`
+//!   artifacts in `target/dist` (macOS `.zip` + `.dmg`; Linux `.tar.gz` +
+//!   `.deb`) plus `SHA256SUMS`
 //! - `notarize <path>`: notarize and staple an `.app` or `.dmg`
-//! - `homebrew --dist DIR --out TAP_DIR [--repo OWNER/NAME]`: write the
-//!   Homebrew cask (macOS) and formula (Linux) for the artifacts in `DIR`
+//! - `homebrew --dist DIR --out TAP_DIR [--repo OWNER/NAME] [--notarized]`:
+//!   write the Homebrew cask (macOS) and formula (Linux) for the artifacts
+//!   in `DIR`; without `--notarized` the cask clears the quarantine flag
 //! - `version`: print the workspace version (CI compares it with the tag)
 //! - `install`: Linux only, install into `~/.local`
 //! - `mock [args…]`: start the mock Icinga environments (`icinga-mock`)
@@ -44,6 +45,10 @@ pub(crate) type Result<T, E = String> = std::result::Result<T, E>;
 
 /// Flags shared by the commands. Unknown flags are errors.
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one field per command-line switch"
+)]
 pub(crate) struct Flags {
     pub(crate) release: bool,
     pub(crate) universal: bool,
@@ -52,6 +57,7 @@ pub(crate) struct Flags {
     pub(crate) dist: Option<PathBuf>,
     pub(crate) out: Option<PathBuf>,
     pub(crate) repo: Option<String>,
+    pub(crate) notarized: bool,
     pub(crate) positional: Vec<String>,
 }
 
@@ -68,6 +74,7 @@ fn parse_flags(args: &[String]) -> Result<Flags> {
             "--release" => flags.release = true,
             "--universal" => flags.universal = true,
             "--notarize" => flags.notarize = true,
+            "--notarized" => flags.notarized = true,
             "--sign" => flags.sign = Some(value("--sign")?),
             "--dist" => flags.dist = Some(PathBuf::from(value("--dist")?)),
             "--out" => flags.out = Some(PathBuf::from(value("--out")?)),
@@ -89,7 +96,7 @@ const USAGE: &str = "usage: cargo xtask <command>
   bundle [--release] [--universal] [--sign IDENTITY]
   package [--universal] [--sign IDENTITY] [--notarize]
   notarize <app-or-dmg>
-  homebrew --dist DIR --out TAP_DIR [--repo OWNER/NAME]
+  homebrew --dist DIR --out TAP_DIR [--repo OWNER/NAME] [--notarized]
   version
   install                                 (Linux) install into ~/.local
   mock [args…]                            start mock Icinga environments";

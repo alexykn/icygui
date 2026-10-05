@@ -13,11 +13,18 @@ A native desktop client for Icinga 2 on macOS and Linux, written in Rust with [G
 ## Install
 
 ```sh
-brew install --cask alexykn/tap/icygui    # macOS (signed and notarized)
-brew install alexykn/tap/icygui           # Linux
+curl -fsSL https://raw.githubusercontent.com/alexykn/icygui/main/install.sh | bash
 ```
 
-Linux `.deb` and `.tar.gz` packages are on the [releases page](https://github.com/alexykn/icygui/releases).
+On macOS this installs `icygui.app` into `/Applications`. On Linux it installs the binary, desktop entry and icons into `~/.local` (no sudo). The script:
+- verifies the download against the release's checksums;
+- re-runs as an update;
+- takes `--version X.Y.Z` to pin a release;
+- removes the app with `--uninstall` (add `--purge` to drop settings too).
+
+Pass options with `… | bash -s -- --uninstall`.
+
+macOS builds aren't notarized by Apple yet. The installer handles that: it re-signs the app with a local identity created once on your Mac, and Gatekeeper doesn't block a curl download. If you download the `.dmg` from the [releases page](https://github.com/alexykn/icygui/releases) in a browser instead, open the app once via System Settings → Privacy & Security → *Open Anyway*. Linux `.deb` packages are on the releases page too.
 
 Status: in development. See [`PLAN.md`](PLAN.md) for the plan and decisions, and [`docs/architecture.md`](docs/architecture.md) for the crate contracts.
 

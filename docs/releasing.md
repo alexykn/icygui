@@ -2,47 +2,50 @@
 
 A release is one tag push: `.github/workflows/release.yml` then runs these steps:
 1. Build the macOS app as a universal binary (Apple silicon + Intel).
-2. Sign it with your Developer ID and the hardened runtime.
-3. Notarize and staple both the app and the `.dmg`.
-4. Build the Linux `.deb` and `.tar.gz` (x86_64 and aarch64).
-5. Publish everything as a GitHub Release with `SHA256SUMS` and build-provenance attestations.
-6. Update the Homebrew tap.
+2. Build the Linux packages (x86_64 and aarch64).
+3. Publish everything as a GitHub Release with `SHA256SUMS` and build-provenance attestations.
 
-## One-time setup
+Users install and update with `install.sh`.
 
-### Apple: signing and notarization
+## How macOS builds are signed
 
-These steps need an Apple Developer Program membership.
+There is no paid Apple Developer ID yet, so releases are **ad-hoc signed and not notarized**:
 
-1. **Developer ID certificate.** In Xcode, open Settings → Accounts → Manage Certificates → + → *Developer ID Application*. Alternatively, create it at developer.apple.com → Certificates.
-2. **Export it** from Keychain Access as a `.p12` *including the private key*, with a password.
-3. **Notarization key.** In App Store Connect, go to Users and Access → Integrations → App Store Connect API → Team Keys and generate a key with the *Developer* role. Download `AuthKey_XXXXXXXXXX.p8` (only possible once) and note the Key ID and Issuer ID.
-4. **Repository secrets** (GitHub → Settings → Secrets and variables → Actions):
+- Apple silicon only runs signed code. The ad-hoc signature satisfies that on every Mac, at no cost.
+- **`install.sh` is the supported way to install on macOS.**
+  - It downloads with `curl`, so the app carries no quarantine flag and Gatekeeper doesn't block the first launch.
+  - It verifies the download against `SHA256SUMS`.
+  - It re-signs the app with a self-signed identity it creates once per Mac (`icygui local code signing`). That gives the app a stable identity, so macOS remembers across updates that icygui may read its keychain entries. With a plain ad-hoc signature, macOS would ask again after every update.
+  - Everything it uses ships with macOS (`codesign`, `security`, `ditto`, `/usr/bin/openssl`). No Xcode or Command Line Tools are needed.
+- **Manual downloads** of the `.dmg` from a browser are quarantined. Users then open the app once via System Settings → Privacy & Security → *Open Anyway*, or run `xattr -dr com.apple.quarantine /Applications/icygui.app`.
+
+### Later: Developer ID and notarization
+
+The pipeline already supports it. Once you have an Apple Developer Program membership:
+
+1. **Developer ID certificate.** In Xcode, open Settings → Accounts → Manage Certificates → + → *Developer ID Application*. Export it from Keychain Access as a `.p12` with its private key and a password.
+2. **Notarization key.** In App Store Connect, go to Users and Access → Integrations → App Store Connect API → Team Keys and generate a key with the *Developer* role. Download the `.p8` and note the Key ID and Issuer ID.
+3. **Repository secrets** (Settings → Secrets and variables → Actions):
 
    | Secret | Value |
    |---|---|
    | `MACOS_CERTIFICATE` | `base64 -i DeveloperID.p12` |
    | `MACOS_CERTIFICATE_PASSWORD` | the `.p12` password |
-   | `MACOS_SIGNING_IDENTITY` | e.g. `Developer ID Application: Alexander Knott (TEAMID1234)`; list yours with `security find-identity -v -p codesigning` |
+   | `MACOS_SIGNING_IDENTITY` | e.g. `Developer ID Application: Alexander Knott (TEAMID1234)` (`security find-identity -v -p codesigning`) |
    | `APPLE_API_KEY` | `base64 -i AuthKey_XXXXXXXXXX.p8` |
    | `APPLE_API_KEY_ID` | the key ID |
    | `APPLE_API_ISSUER` | the issuer ID |
 
-Without these secrets the workflow still releases, but the macOS app is only ad-hoc signed. Gatekeeper then blocks it on other Macs, so Homebrew users would have to clear the quarantine flag by hand.
+From the next tag on, the app and the `.dmg` are signed with the hardened runtime, notarized and stapled. `install.sh` then keeps Apple's signature instead of re-signing, and browser downloads open without warnings.
 
-### Homebrew tap
+### Optional: Homebrew tap
 
-1. Create a public repository **`alexykn/homebrew-tap`** (any name of the form `homebrew-<something>` works; set the Actions variable `HOMEBREW_TAP_REPO` if you choose another).
-2. Create a fine-grained personal access token with *Contents: read and write* on that repository only, and store it as the secret **`HOMEBREW_TAP_TOKEN`**.
+A personal tap needs no Developer ID either:
 
-On every release the workflow regenerates `Casks/icygui.rb` (macOS) and `Formula/icygui.rb` (Linux) from the release checksums (`cargo xtask homebrew`) and pushes them. Users install with:
+1. Create a public repository `alexykn/homebrew-tap`, or any `homebrew-*` name, and set the Actions variable `HOMEBREW_TAP_REPO`.
+2. Add a fine-grained token with *Contents: read and write* on that repository as the secret `HOMEBREW_TAP_TOKEN`.
 
-```sh
-brew install --cask alexykn/tap/icygui    # macOS app
-brew install alexykn/tap/icygui           # Linux (prebuilt binary)
-```
-
-`brew upgrade` picks up new releases. The cask quits a running app before upgrading. `brew uninstall --zap` also removes settings, logs and the login item; the keychain entries stay.
+The release workflow then writes `Casks/icygui.rb` and `Formula/icygui.rb` (`cargo xtask homebrew`). While builds aren't notarized, the cask clears the quarantine flag after installing and says so in its caveats. Users run `brew install --cask alexykn/tap/icygui`.
 
 ### Optional: GPG-signed checksums
 
@@ -59,14 +62,10 @@ To rebuild an existing tag, run the workflow by hand with that tag.
 ## Verifying a release
 
 ```sh
-# macOS: expect "source=Notarized Developer ID"
-spctl --assess --type execute --verbose=4 /Applications/icygui.app
-codesign --verify --deep --strict --verbose=2 /Applications/icygui.app
-
-# Any platform
-sha256sum -c SHA256SUMS
-gpg --verify SHA256SUMS.asc                            # if GPG signing is set up
+sha256sum -c SHA256SUMS                                  # any platform
 gh attestation verify icygui_0.1.0_amd64.deb --repo alexykn/icygui
+codesign --verify --strict --verbose=2 /Applications/icygui.app
+codesign -dv /Applications/icygui.app 2>&1 | grep Authority   # "icygui local code signing" after install.sh
 ```
 
 ## Local builds
@@ -77,16 +76,16 @@ cargo xtask bundle --release         # ad-hoc signed target/bundle/icygui.app (n
 cargo xtask package                  # Linux: target/dist/*.tar.gz, *.deb, SHA256SUMS
 ```
 
-Signing and notarizing on your own Mac:
+Test the installer against local artifacts without publishing:
 
 ```sh
-xcrun notarytool store-credentials icygui-notary --key AuthKey_XXXXXXXXXX.p8 --key-id XXXXXXXXXX --issuer <issuer-id>
-APPLE_NOTARY_PROFILE=icygui-notary cargo xtask package --universal \
-  --sign "Developer ID Application: Alexander Knott (TEAMID1234)" --notarize
+mkdir -p /tmp/rel/v0.1.0 && cp target/dist/* /tmp/rel/v0.1.0/
+(cd /tmp/rel && python3 -m http.server 8765) &
+ICYGUI_DOWNLOAD_URL=http://127.0.0.1:8765 ./install.sh --version 0.1.0
 ```
 
 ## Notes
 
-- **Logo:** the sources are `assets/logo/icygui.svg` (app icon on Apple's icon grid), `icygui-mark.svg` (mark only) and `banner.svg` (README). Every PNG, the `.icns` and `banner.png` are generated by `cargo xtask icons`; commit the regenerated files.
-- **macOS 26 icon style:** the app ships a classic `.icns` drawn on Apple's grid. A layered Icon Composer icon (`.icon`, compiled with Xcode 26's `actool`) can be added for the "Liquid Glass" look; until then macOS 26 shows the classic icon.
+- **Logo:** the sources are `assets/logo/icygui.svg` (app icon on Apple's icon grid), `icygui-mark.svg` and `banner.svg`. Every PNG, the `.icns` and `banner.png` are generated by `cargo xtask icons`; commit the regenerated files.
+- **macOS 26 icon style:** the app ships a classic `.icns`. A layered Icon Composer icon (`.icon`, compiled with Xcode 26's `actool`) can be added later for the "Liquid Glass" look.
 - **Entitlements:** `packaging/macos/entitlements.plist` is deliberately empty. The app needs no hardened-runtime exceptions.

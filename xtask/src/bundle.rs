@@ -87,7 +87,9 @@ fn bundle_macos(binary: &Path, out: &Path, identity: Option<&str>) -> Result<Pat
 }
 
 /// Signs the executable, then the bundle, with the hardened runtime.
-/// Without an identity the signature is ad hoc (local use only).
+/// Without an identity the signature is ad hoc: valid on every Mac
+/// (Apple silicon refuses unsigned code) but not tied to a developer.
+/// `install.sh` re-signs ad-hoc builds with a per-machine identity.
 fn sign_app(app: &Path, identity: Option<&str>) -> Result<()> {
     let entitlements = root().join("packaging/macos/entitlements.plist");
     let sign = |path: &Path| {
@@ -96,7 +98,12 @@ fn sign_app(app: &Path, identity: Option<&str>) -> Result<()> {
             .args(["--force", "--options", "runtime", "--entitlements"])
             .arg(&entitlements);
         match identity {
-            Some(identity) => command.args(["--timestamp", "--sign", identity]),
+            // Apple's timestamp service only countersigns Apple-issued
+            // certificates; notarization requires the timestamp.
+            Some(identity) if is_developer_id(identity) => {
+                command.args(["--timestamp", "--sign", identity])
+            }
+            Some(identity) => command.args(["--timestamp=none", "--sign", identity]),
             None => command.args(["--sign", "-"]),
         };
         run(command.arg(path))
@@ -106,6 +113,12 @@ fn sign_app(app: &Path, identity: Option<&str>) -> Result<()> {
     run(Command::new("codesign")
         .args(["--verify", "--deep", "--strict", "--verbose=2"])
         .arg(app))
+}
+
+/// Whether `identity` names an Apple Developer ID certificate (the only kind
+/// that can be notarized).
+pub(crate) fn is_developer_id(identity: &str) -> bool {
+    identity.starts_with("Developer ID Application")
 }
 
 pub(crate) fn info_plist() -> String {

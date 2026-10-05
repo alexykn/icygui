@@ -16,8 +16,10 @@ use crate::{
 
 /// Builds release bundles and packages them into `target/dist`.
 pub(crate) fn package(flags: &Flags) -> Result<()> {
-    if flags.notarize && flags.sign.is_none() {
-        return Err("--notarize needs --sign with a Developer ID identity".to_owned());
+    if flags.notarize && !flags.sign.as_deref().is_some_and(bundle::is_developer_id) {
+        return Err(
+            "--notarize needs --sign with a \"Developer ID Application\" identity".to_owned(),
+        );
     }
     let bundle = bundle::bundle(&Flags {
         release: true,
@@ -37,6 +39,13 @@ pub(crate) fn package(flags: &Flags) -> Result<()> {
         } else {
             env::consts::ARCH
         };
+        // The .zip is what install.sh downloads; the .dmg is for manual installs.
+        let zip = dist.join(format!("{APP_NAME}-{VERSION}-macos-{arch}.zip"));
+        run(Command::new("ditto")
+            .args(["-c", "-k", "--keepParent"])
+            .arg(&bundle)
+            .arg(&zip))?;
+        println!("package: {}", zip.display());
         let dmg = dist.join(format!("{APP_NAME}-{VERSION}-macos-{arch}.dmg"));
         make_dmg(&bundle, &dmg, flags.sign.as_deref())?;
         if flags.notarize {

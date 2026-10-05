@@ -92,6 +92,7 @@ impl World {
             .map_or_else(|| "master".to_owned(), |e| e.zone.clone());
         let app = AppInfo {
             node_name: status.node_name.clone(),
+            zone_name: local_zone.clone(),
             version: status.version.clone(),
             program_start,
             pid: 1_729,
@@ -763,6 +764,10 @@ fn build_checkable(seed: CheckableSeed<'_>, shift: Shift, app: &AppInfo, zone: &
     let reachable = check.reachable;
     let last_state_change = if check.last_state_change.as_unix_seconds() > 0.0 {
         shift.at(check.last_state_change)
+    } else if pending {
+        // Without a check result Icinga never changed the state: 0, like
+        // `last_hard_state_change` and `previous_state_change`.
+        0.0
     } else {
         app.program_start
     };

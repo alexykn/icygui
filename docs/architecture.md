@@ -6,7 +6,7 @@ Already implemented and binding:
 - `ic-model`: all domain types (names, timestamps, perfdata, objects, severity, events, actions, instance status).
 - `ic-filter`, `ic-config`, `ic-rules` (engine included), `ic-platform`: implemented and reviewed, as specified below.
 - `ic-api`: implemented and reviewed, including the tiered loading (`Detail`, `Fetched`), with integration tests against `ic-mock` and contract tests against a real Icinga 2.15.6.
-- `ic-mock`: implemented (wave 2); its filter is still a shim, to be replaced by `ic-filter`.
+- `ic-mock`: implemented (wave 2); API filters are evaluated by `ic-filter`.
 - `ic-ui-kit` and `ic-app`: the static UI (chrome, dashboard list, service and host panes, tabs) on demo data.
 - `ic-core`: `ports.rs` (`SecretStore`, `Notifier`, `Clock`) and `snapshot.rs` (`Snapshot`, `DashboardResult`, `DashboardRow`, `Summary`). The runtime is still to be built (wave 3).
 
@@ -340,6 +340,8 @@ See PLAN.md §3.6. `MockServer::start(MockConfig) -> MockServer` serves HTTPS on
 - `large` matches production scale (docs/performance.md): 2 000 hosts × 15 services, realistic payload sizes, 5-minute intervals.
 - Mass re-check bursts are available through `MockControl::burst` (every object, ~5 000 events/s).
 - It honours `Detail`-style `attrs` selection and name lists exactly like Icinga, including the all-or-nothing 404. The binary is `icinga-mock`. It writes its own wire JSON straight from the docs and sources; it never uses `ic-api`'s types.
+- `filter` (queries, actions, status, event streams) is parsed and evaluated by `ic-filter`, with a scope that gives Icinga's frame (the object, its joins, `filter_vars`, globals) and Icinga's errors for undefined variables and unknown attributes. The HTTP behaviour (404 for filters that fail, or don't compile, when evaluated for an object; 403 without `filter-expression`; silent event streams; Icinga's targeted lookup of `host.name == "a" || …` filters in filter order) is Icinga's; the remaining differences, most of them `ic-filter`'s deliberate ones, are listed in `crates/ic-mock/src/filter.rs`.
+- `tests/fidelity.rs` replays exchanges recorded from Icinga 2.15.6 (`contract/record-queries.py`): Lean and Full selections, joins, meta, name lists, unknown attributes, filters.
 
 ---
 

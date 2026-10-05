@@ -28,6 +28,10 @@ pins that down:
   script returns as soon as the API answers; tests that need checked
   objects wait until Icinga has run every active check once (within a
   minute of a fresh start).
+- `record-queries.py` records `samples/queries.json`: read-only object and
+  status queries with their answers (attribute selection, joins, meta,
+  name lists, unknown attributes, filters, flags). `ic-mock`'s
+  `tests/fidelity.rs` replays them against the mock.
 
 Facts learned from the real instance that the client must respect:
 
@@ -41,15 +45,34 @@ Facts learned from the real instance that the client must respect:
   `last_check_result.state` / the object's `state`.
 - `execute-command` fails per object with `Can't find a valid endpoint`
   unless an endpoint is given or the object has `command_endpoint`.
-- An attribute Icinga doesn't know fails the whole query:
-  `400 {"error":400,"status":"Invalid field specified: <attr>"}` (newer
-  versions answer every object with that error instead). Icinga notices it
-  only while serialising an object: a type without objects (no comments,
-  say) answers `200 {"results":[]}` whatever `attrs` holds. `"attrs": []`
-  returns objects without any attribute.
-- A never-checked service has `last_check: -1`, no `last_check_result`
-  and `state` 3 (UNKNOWN, the default raw state); hosts map that default to
-  `state` 1 (`Host::CalculateState`). The state means nothing until the
-  first check.
+- An attribute the type doesn't have, in `attrs` or `joins`, fails the
+  whole query: `400 {"error":400,"status":"Invalid field specified: <name>"}`
+  (newer versions answer every object with that error instead). Icinga
+  notices it only while serialising an object: a type without objects (no
+  comments, say) answers `200 {"results":[]}` whatever `attrs` holds.
+  Attributes users can't see (`state_raw`) and `service.host` are accepted
+  but left out; `"attrs": []` returns objects without any attribute.
+- A never-checked object has `last_check: -1`, no `last_check_result`, and
+  `last_state_change`, `last_hard_state_change` and `previous_state_change`
+  0. Services report `state` 3 (UNKNOWN, the default raw state); hosts map
+  that default to `state` 1 (`Host::CalculateState`). The state means
+  nothing until the first check.
 - A fresh start schedules every object's first check within
   `min(check_interval, 60 s)` (`Checkable::Start`).
+- A filter that fails for any object fails the whole query with
+  `404 No objects found.`; an empty filter matches nothing. A filter that
+  doesn't compile fails only when it is evaluated (Icinga compiles it into
+  a `ThrowExpression`): a type without objects answers `200` with no
+  results, and an invalid `filter_vars` (read first) is the reported
+  error. Event streams treat `filter: ""` as no filter and open silently
+  with a filter that doesn't compile. Status filters see the entry as
+  `dictionary`, not `status`.
+- `last_check_result` is a `CheckResult` object in filters: a field it
+  doesn't have (`last_check_result.outptu`, even `.type`) fails the query.
+- For `type` `Host` or `Service`, a filter that only compares names with
+  constants (`host.name == "a" || host.name == "b"`, or
+  `host.name == "h" && service.name == "s" || …`) is not evaluated: the
+  named objects come in the filter's order, duplicates included, and
+  unknown names are left out.
+- `all_joins`, `pretty` and `verbose` are read through numbers: `"0"` is
+  false and `"true"` an error (`pretty=true` answers 500).

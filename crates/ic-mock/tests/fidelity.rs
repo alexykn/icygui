@@ -3,6 +3,9 @@
 //! `contract/samples`) must have the same shape as the mock's: the same
 //! keys (an object may lack only keys that some sample object lacks too),
 //! the same JSON kinds per key, and whole numbers written as integers.
+//! `queries.json` holds whole exchanges (request, status, answer), which
+//! are replayed against the mock: attribute selection, joins, meta, name
+//! lists, unknown attributes, filters and request flags.
 //!
 //! Every mismatch is collected, so one run lists all of them.
 
@@ -292,26 +295,7 @@ async fn objects_have_the_shape_of_real_icinga() {
     ))
     .check("source_location", &locations(&host_attrs), &mut errors);
 
-    // Pending objects look like Icinga's: no result, last_check -1, and the
-    // default raw state UNKNOWN (3), which a host reports as DOWN (1).
-    for (what, objects, state) in [("service", &service_attrs, 3), ("host", &host_attrs, 1)] {
-        let pending: Vec<&Value> = objects
-            .iter()
-            .filter(|a| a["last_check_result"].is_null())
-            .collect();
-        assert!(!pending.is_empty(), "lab has a pending {what}");
-        for object in pending {
-            if object["last_check"] != json!(-1)
-                || object["state"] != json!(state)
-                || object["state_type"] != json!(0)
-            {
-                errors.push(format!(
-                    "pending {what} {}: last_check {} state {} state_type {} (Icinga: -1, {state}, 0)",
-                    object["__name"], object["last_check"], object["state"], object["state_type"]
-                ));
-            }
-        }
-    }
+    check_pending(&host_attrs, &service_attrs, &services_sample, &mut errors);
 
     // Every other object type.
     for (file, path) in [
@@ -337,6 +321,53 @@ async fn objects_have_the_shape_of_real_icinga() {
         );
     }
     report(&errors);
+}
+
+/// Pending objects look like Icinga's: no result, `last_check` -1, the
+/// default raw state UNKNOWN (3), which a host reports as DOWN (1), and no
+/// state change ever (like the recorded pending service).
+fn check_pending(
+    host_attrs: &[Value],
+    service_attrs: &[Value],
+    services_sample: &Value,
+    errors: &mut Vec<String>,
+) {
+    let recorded_pending = attrs(services_sample)
+        .into_iter()
+        .find(|a| a["last_check_result"].is_null())
+        .expect("a pending service in the recording")
+        .clone();
+    for (what, objects, state) in [("service", service_attrs, 3), ("host", host_attrs, 1)] {
+        let pending: Vec<&Value> = objects
+            .iter()
+            .filter(|a| a["last_check_result"].is_null())
+            .collect();
+        assert!(!pending.is_empty(), "lab has a pending {what}");
+        for object in pending {
+            if object["last_check"] != json!(-1)
+                || object["state"] != json!(state)
+                || object["state_type"] != json!(0)
+            {
+                errors.push(format!(
+                    "pending {what} {}: last_check {} state {} state_type {} (Icinga: -1, {state}, 0)",
+                    object["__name"], object["last_check"], object["state"], object["state_type"]
+                ));
+            }
+            for key in [
+                "last_state_change",
+                "last_hard_state_change",
+                "previous_state_change",
+                "check_attempt",
+            ] {
+                if object[key] != recorded_pending[key] {
+                    errors.push(format!(
+                        "pending {what} {}: {key} {} (Icinga: {})",
+                        object["__name"], object[key], recorded_pending[key]
+                    ));
+                }
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -751,51 +782,323 @@ async fn run_recorded_operations(client: &Client, server: &MockServer, errors: &
     }
 }
 
-/// Lean queries (Icinga's `attrs` selection) only carry the selected
-/// attributes, like the client's tiered loading expects.
+/// The attributes of `ic_api::Detail` (docs/architecture.md), as
+/// `contract/record-queries.py` requests them.
+const LEAN: &[&str] = &[
+    "name",
+    "display_name",
+    "state",
+    "state_type",
+    "last_state_change",
+    "last_hard_state_change",
+    "last_check",
+    "next_check",
+    "next_update",
+    "check_attempt",
+    "max_check_attempts",
+    "acknowledgement",
+    "acknowledgement_expiry",
+    "downtime_depth",
+    "flapping",
+    "last_reachable",
+    "check_interval",
+    "retry_interval",
+    "groups",
+    "vars",
+];
+
+/// What `Detail::Full` adds to [`LEAN`].
+const FULL: &[&str] = &[
+    "last_check_result",
+    "check_command",
+    "command_endpoint",
+    "zone",
+    "enable_active_checks",
+    "enable_passive_checks",
+    "enable_notifications",
+    "enable_event_handler",
+    "enable_flapping",
+    "enable_perfdata",
+    "flapping_current",
+    "notes",
+    "notes_url",
+    "action_url",
+    "icon_image",
+];
+
+/// Lean and Full queries carry exactly the selected attributes for every
+/// object (pending ones included), with no joins and no meta.
 #[tokio::test]
-async fn attribute_selection_is_exact() {
-    let (server, client) = common::prod().await;
-    let lean = [
-        "__name",
-        "host_name",
-        "display_name",
-        "state",
-        "state_type",
-        "last_state_change",
-        "last_hard_state_change",
-        "last_check",
-        "next_check",
-        "check_attempt",
-        "max_check_attempts",
-        "acknowledgement",
-        "acknowledgement_expiry",
-        "downtime_depth",
-        "flapping",
-        "last_reachable",
-        "check_interval",
-        "retry_interval",
-        "groups",
-        "vars",
-    ];
-    let response = request(&client, &server, Method::POST, "/v1/objects/services")
-        .header("X-HTTP-Method-Override", "GET")
-        .json(&json!({"attrs": lean}))
-        .send()
-        .await
-        .unwrap();
-    let (status, body) = json(response).await;
-    assert_eq!(status, StatusCode::OK);
-    let expected: BTreeSet<&str> = lean.into_iter().collect();
-    for entry in results(&body) {
-        let keys: BTreeSet<&str> = entry["attrs"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(keys, expected);
-        assert_eq!(entry["joins"], json!({}));
-        assert_eq!(entry["meta"], json!({}));
+async fn detail_selections_are_exact() {
+    let mut errors = Vec::new();
+    let (prod, prod_client) = common::prod().await;
+    let (lab, lab_client) = common::lab().await;
+    for (plural, own) in [
+        ("hosts", ["address", "address6"].as_slice()),
+        ("services", &["host_name"]),
+    ] {
+        let lean: Vec<&str> = LEAN.iter().chain(own).copied().collect();
+        let full: Vec<&str> = lean.iter().chain(FULL).copied().collect();
+        for attrs in [lean, full] {
+            for (server, client) in [(&prod, &prod_client), (&lab, &lab_client)] {
+                let response = request(
+                    client,
+                    server,
+                    Method::POST,
+                    &format!("/v1/objects/{plural}"),
+                )
+                .header("X-HTTP-Method-Override", "GET")
+                .json(&json!({ "attrs": attrs }))
+                .send()
+                .await
+                .unwrap();
+                let (status, body) = json(response).await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                check_numbers(plural, &body, &mut errors);
+                let expected: BTreeSet<&str> = attrs.iter().copied().collect();
+                for entry in results(&body) {
+                    let keys: BTreeSet<&str> = entry["attrs"]
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(String::as_str)
+                        .collect();
+                    if keys != expected {
+                        errors.push(format!(
+                            "{plural} {}: keys {:?}",
+                            entry["name"],
+                            keys.symmetric_difference(&expected).collect::<Vec<_>>()
+                        ));
+                    }
+                    if entry["joins"] != json!({}) || entry["meta"] != json!({}) {
+                        errors.push(format!("{plural} {}: joins or meta", entry["name"]));
+                    }
+                }
+            }
+        }
     }
+    report(&errors);
+}
+
+/// The users of the contract instance: `root` with every permission and
+/// `icygui` without `filter-expression`.
+fn contract_users() -> MockConfig {
+    MockConfig {
+        users: vec![
+            MockUser::root(),
+            MockUser::new(
+                "icygui",
+                "icygui-test",
+                &["objects/query/*", "status/query", "events/*", "actions/*"],
+            ),
+        ],
+        ..MockConfig::with_scenario(ic_mock::scenarios::prod_cluster())
+    }
+}
+
+/// Object, status and parameter exchanges recorded from Icinga 2.15.6
+/// (`queries.json`, written by `contract/record-queries.py`): attribute
+/// selection with the Lean and Full sets, joins, meta, name lists
+/// (all-or-nothing 404 included), unknown attributes, filters and flags.
+/// Each request is replayed against the mock and the answer compared as
+/// the exchange's `compare` says (see the recorder).
+#[tokio::test]
+async fn queries_answer_like_real_icinga() {
+    let mut errors = Vec::new();
+    let (server, client) = start(contract_users()).await;
+    let exchanges = sample("queries.json");
+    let exchanges = exchanges.as_array().unwrap();
+    assert!(exchanges.len() > 50, "the recording is complete");
+    for exchange in exchanges {
+        let name = exchange["name"].as_str().unwrap();
+        let (user, password) = match exchange["user"].as_str().unwrap() {
+            "root" => ("root", "icinga"),
+            _ => ("icygui", "icygui-test"),
+        };
+        let response = client
+            .post(format!(
+                "{}{}",
+                server.url(),
+                exchange["path"].as_str().unwrap()
+            ))
+            .basic_auth(user, Some(password))
+            .header("Accept", "application/json")
+            .header("X-HTTP-Method-Override", "GET")
+            .json(&exchange["body"])
+            .send()
+            .await
+            .unwrap();
+        let (status, body) = json(response).await;
+        let recorded = &exchange["response"];
+        if u64::from(status.as_u16()) != exchange["status"].as_u64().unwrap() {
+            errors.push(format!(
+                "{name}: HTTP {status}, Icinga {}: {body}",
+                exchange["status"]
+            ));
+            continue;
+        }
+        check_numbers(name, &body, &mut errors);
+        match exchange["compare"].as_str().unwrap() {
+            "exact" => {
+                if body != *recorded {
+                    errors.push(format!("{name}: {body}\n    Icinga: {recorded}"));
+                }
+            }
+            compare @ ("error" | "error-text") => {
+                compare_errors(name, &body, recorded, compare == "error-text", &mut errors);
+            }
+            compare @ ("names" | "shape") => {
+                if compare == "names" {
+                    let names = |body: &Value| -> Vec<Value> {
+                        results(body).iter().map(|r| r["name"].clone()).collect()
+                    };
+                    if names(&body) != names(recorded) {
+                        errors.push(format!(
+                            "{name}: names {:?}, Icinga {:?}",
+                            names(&body),
+                            names(recorded)
+                        ));
+                    }
+                }
+                compare_shapes(name, results(&body), results(recorded), &mut errors);
+            }
+            other => panic!("{name}: unknown comparison {other}"),
+        }
+    }
+    report(&errors);
+}
+
+/// Error bodies: the same apart from the text of `diagnostic_information`
+/// (`ic-filter` words filter errors its own way), which must be there when
+/// Icinga sent it; with `text`, its first line must match too.
+fn compare_errors(
+    name: &str,
+    body: &Value,
+    recorded: &Value,
+    text: bool,
+    errors: &mut Vec<String>,
+) {
+    let without = |body: &Value| {
+        let mut body = body.clone();
+        let diagnostic = body
+            .as_object_mut()
+            .and_then(|map| map.remove("diagnostic_information"));
+        (body, diagnostic)
+    };
+    let (body, diagnostic) = without(body);
+    let (recorded, recorded_diagnostic) = without(recorded);
+    if body != recorded {
+        errors.push(format!("{name}: {body}\n    Icinga: {recorded}"));
+    }
+    match (diagnostic, recorded_diagnostic) {
+        (None, None) => {}
+        (Some(actual), Some(expected)) => {
+            let first = |v: &Value| {
+                v.as_str()
+                    .unwrap_or_default()
+                    .lines()
+                    .next()
+                    .map(str::to_owned)
+            };
+            if !actual.is_string() || (text && first(&actual) != first(&expected)) {
+                errors.push(format!("{name}: diagnostic {actual}, Icinga {expected}"));
+            }
+        }
+        (actual, expected) => errors.push(format!(
+            "{name}: diagnostic_information {actual:?}, Icinga {expected:?}"
+        )),
+    }
+}
+
+/// The shape of result entries and of their `attrs`, `joins` (per joined
+/// object) and `meta` (`used_by` entries and `location` too), learned from
+/// the recorded entries.
+fn compare_shapes(name: &str, actual: &[Value], recorded: &[Value], errors: &mut Vec<String>) {
+    if recorded.is_empty() {
+        if !actual.is_empty() {
+            errors.push(format!("{name}: results, Icinga none"));
+        }
+        return;
+    }
+    if actual.is_empty() {
+        errors.push(format!("{name}: no results, Icinga {}", recorded.len()));
+        return;
+    }
+    Shape::learn(recorded).check(&format!("{name} entry"), actual, errors);
+    let parts = |entries: &[Value], key: &str| -> Vec<Value> {
+        entries
+            .iter()
+            .filter_map(|entry| entry.get(key).filter(|v| v.is_object()).cloned())
+            .collect()
+    };
+    for key in ["attrs", "joins", "meta"] {
+        let expected = parts(recorded, key);
+        if !expected.is_empty() {
+            Shape::learn(&expected).check(&format!("{name} {key}"), &parts(actual, key), errors);
+        }
+    }
+    let nested = |entries: &[Value], outer: &str, inner: &str| -> Vec<Value> {
+        parts(entries, outer)
+            .into_iter()
+            .filter_map(|part| part.get(inner).cloned())
+            .flat_map(|value| match value {
+                Value::Array(items) => items,
+                other => vec![other],
+            })
+            .filter(Value::is_object)
+            .collect()
+    };
+    let joined: BTreeSet<String> = parts(recorded, "joins")
+        .iter()
+        .flat_map(|joins| joins.as_object().unwrap().keys().cloned())
+        .collect();
+    let mut nested_parts: Vec<(&str, String)> =
+        joined.iter().map(|join| ("joins", join.clone())).collect();
+    nested_parts.push(("meta", "used_by".to_owned()));
+    nested_parts.push(("meta", "location".to_owned()));
+    for (outer, inner) in nested_parts {
+        let expected = nested(recorded, outer, &inner);
+        if !expected.is_empty() {
+            Shape::learn(&expected).check(
+                &format!("{name} {outer}.{inner}"),
+                &nested(actual, outer, &inner),
+                errors,
+            );
+        }
+    }
+}
+
+/// When a request flag Icinga reads through a number (`pretty=yes`) makes
+/// its error handling fail, `HttpServerConnection` answers itself: 500
+/// without a `Server` header (recorded with `curl -i`).
+#[tokio::test]
+async fn unhandled_exceptions_come_from_the_connection() {
+    let (server, client) = start(contract_users()).await;
+    let response = request(
+        &client,
+        &server,
+        Method::GET,
+        "/v1/objects/hosts/db-prod-03?attrs=name&pretty=yes",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(response.headers().get("server").is_none());
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let (status, body) = json(response).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, json!({"error": 500, "status": "Unhandled exception"}));
+    let response = request(
+        &client,
+        &server,
+        Method::GET,
+        "/v1/objects/hosts/db-prod-03?pretty=1",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(
+        response.headers().get("server").is_some(),
+        "a normal answer"
+    );
 }

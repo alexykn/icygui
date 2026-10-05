@@ -18,7 +18,7 @@ use super::response::{Body, json_error, path_not_found};
 use crate::auth::Principal;
 use crate::config::NumberFormat;
 use crate::events::{EventType, StreamItem};
-use crate::filter::{self, FilterError};
+use crate::filter;
 use crate::model::World;
 
 /// The body of an event stream. When the bus drops the stream (overflow,
@@ -115,12 +115,19 @@ pub(crate) fn handle(
                 None,
             );
         }
-        match filter::compile(&params.last_string("filter"), None) {
-            Ok(compiled) => Some(compiled),
-            Err(FilterError::Syntax(_)) => return path_not_found(segments, format, Some(params)),
-            Err(error @ FilterError::Unsupported(_)) => {
-                return json_error(400, &error.to_string(), format, Some(params), None);
+        let source = params.last_string("filter");
+        if source.is_empty() {
+            // Icinga treats an empty filter as none.
+            None
+        } else {
+            // A filter that doesn't compile doesn't fail the request in
+            // Icinga 2.15: the stream opens, and every event fails the
+            // filter. Logged once here instead of for every event.
+            let compiled = filter::compile(&source, world.filter_node());
+            if let Some(error) = compiled.compile_error() {
+                tracing::warn!(user = %user.name, %error, "event filter doesn't compile");
             }
+            Some(compiled)
         }
     } else {
         None

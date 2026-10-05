@@ -562,6 +562,89 @@ async fn execute_command_is_accepted_and_reports_back() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
 
+/// Icinga reads `sticky`, `notify`, `persistent`, `fixed` and
+/// `all_services` through numbers (`apiactions.cpp`, like `pretty`):
+/// `"0"` is false, and a string that isn't a number fails the action for
+/// the object with a 500.
+#[tokio::test]
+async fn boolean_parameters_are_read_through_numbers() {
+    let (server, client) = prod().await;
+    let failed = |body: &serde_json::Value, value: &str| {
+        let status = results(body)[0]["status"].as_str().unwrap().to_owned();
+        assert!(
+            status.starts_with("Action execution failed: '")
+                && status.contains(&format!(
+                    "Can't convert '{value}' to a floating point number."
+                )),
+            "{status}"
+        );
+    };
+    let ack = json!({
+        "type": "Service", "service": "db-prod-03!postgres-replication",
+        "author": "tester", "comment": "looking into it"
+    });
+    for key in ["sticky", "notify", "persistent"] {
+        let mut body = ack.clone();
+        body[key] = json!("false");
+        let (status, response) =
+            post(&client, &server, "/v1/actions/acknowledge-problem", &body).await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{key}: {response}"
+        );
+        failed(&response, "false");
+    }
+    let mut body = ack.clone();
+    body["sticky"] = json!("0");
+    let (status, response) = post(&client, &server, "/v1/actions/acknowledge-problem", &body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let (_, body) = get(
+        &client,
+        &server,
+        "/v1/objects/services/db-prod-03!postgres-replication?attrs=acknowledgement",
+    )
+    .await;
+    assert_eq!(
+        results(&body)[0]["attrs"]["acknowledgement"],
+        json!(1),
+        "\"0\" is not sticky"
+    );
+
+    let now = server.control().now().as_unix_seconds();
+    let downtime = json!({
+        "type": "Host", "host": "db-prod-03", "author": "tester", "comment": "patching",
+        "start_time": now + 3_600.0, "end_time": now + 7_200.0
+    });
+    let mut body = downtime.clone();
+    body["fixed"] = json!("0");
+    let (status, response) = post(&client, &server, "/v1/actions/schedule-downtime", &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "flexible: {response}");
+    assert_eq!(
+        results(&response)[0]["status"],
+        "Option 'duration' is required for flexible downtime"
+    );
+    body["fixed"] = json!("false");
+    let (status, response) = post(&client, &server, "/v1/actions/schedule-downtime", &body).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{response}");
+    failed(&response, "false");
+    let count = |body: &serde_json::Value| results(body).len();
+    let (_, before) = get(&client, &server, "/v1/objects/downtimes?attrs=name").await;
+    // `all_services` is read once the host's downtime exists: the action
+    // fails, but that downtime stays.
+    let mut body = downtime.clone();
+    body["all_services"] = json!("yes");
+    let (status, response) = post(&client, &server, "/v1/actions/schedule-downtime", &body).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{response}");
+    failed(&response, "yes");
+    let (_, after) = get(&client, &server, "/v1/objects/downtimes?attrs=name").await;
+    assert_eq!(count(&after), count(&before) + 1);
+    body["all_services"] = json!("0");
+    let (status, response) = post(&client, &server, "/v1/actions/schedule-downtime", &body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(results(&response)[0].get("service_downtimes").is_none());
+}
+
 #[tokio::test]
 async fn action_errors() {
     let (server, client) = lab().await;

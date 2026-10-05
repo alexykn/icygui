@@ -135,7 +135,9 @@ pub(crate) async fn serve(
         "request"
     );
     shared.record(record);
-    if let Ok(value) = HeaderValue::from_str(&shared.server_header) {
+    if response.extensions().get::<response::Bare>().is_none()
+        && let Ok(value) = HeaderValue::from_str(&shared.server_header)
+    {
         response.headers_mut().insert(SERVER, value);
     }
     Ok(response)
@@ -279,6 +281,19 @@ async fn pipeline(
     };
     let enforce = shared.enforce_filter_permission;
     let path: Vec<&str> = segments.iter().map(String::as_str).collect();
+    // Every JSON answer reads `pretty`; Icinga throws on values it can't
+    // convert (`pretty=true`), and the error handler fails the same way.
+    // Event streams only read it for errors, and actions run before they
+    // answer (their handler checks it afterwards).
+    let reads_pretty = match path.as_slice() {
+        [] => false,
+        ["v1"] => accept_json,
+        ["v1", "events"] | ["v1", "actions", _] => method != Method::POST,
+        _ => true,
+    };
+    if reads_pretty && params.flag("pretty").is_err() {
+        return response::unhandled_exception(format);
+    }
     match (path.as_slice(), &method) {
         ([], &Method::GET) => {
             let mut response = Response::new(full(Bytes::new()));

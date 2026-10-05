@@ -46,6 +46,12 @@
 //!   whole request with 404.
 //! - An unknown attribute in `attrs` or `joins` fails the whole request
 //!   with 400, as in 2.15 (newer versions report it per object).
+//! - Filters are parsed and evaluated by `ic-filter`, in a scope with
+//!   Icinga's variables (the object, its joined objects, `filter_vars`,
+//!   global constants) and Icinga's errors for undefined variables and
+//!   unknown attributes. A filter that doesn't compile or fails answers
+//!   404 like Icinga; where `ic-filter` deliberately differs (methods on
+//!   `null`, for example) the mock answers as `ic-filter` evaluates.
 //! - `queue` is required for `/v1/events`, as in 2.15 (newer versions
 //!   ignore it).
 

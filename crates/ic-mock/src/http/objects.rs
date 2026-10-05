@@ -19,7 +19,7 @@ use serde_json::{Map, Value as Json};
 use tokio::sync::mpsc;
 
 use super::params::{Params, to_icinga_string};
-use super::response::{Body, json_bytes, json_error};
+use super::response::{Body, json_bytes, json_error, path_not_found};
 use super::targets::{TargetError, filter_targets};
 use crate::auth::Principal;
 use crate::config::NumberFormat;
@@ -148,7 +148,11 @@ fn query(
             }
         }
     }
-    let all_joins = params.last_bool("all_joins");
+    // Icinga reads it through a number: "0" is false, "yes" throws, and
+    // the exception becomes the generic 404 of the HTTP handler.
+    let Ok(all_joins) = params.flag("all_joins") else {
+        return Err(Box::new(path_not_found(segments, format, Some(params))));
+    };
     let type_name = match &query_type {
         QueryType::Served(kind) => kind.type_name(),
         QueryType::Empty(name) => name,
@@ -192,7 +196,6 @@ fn query(
         Err(TargetError::NotFound(diagnostic)) => {
             return Err(fail(404, "No objects found.", params, Some(&diagnostic)));
         }
-        Err(TargetError::Unsupported(message)) => return Err(fail(400, &message, params, None)),
     };
     let selection = Selection::new(attrs, joins, all_joins);
     if let Err(message) = check_selection(world, user, &targets, &selection) {

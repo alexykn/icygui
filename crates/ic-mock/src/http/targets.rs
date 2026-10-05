@@ -5,8 +5,8 @@ use serde_json::Value as Json;
 
 use super::params::{Params, to_icinga_string};
 use crate::auth::Principal;
-use crate::filter::{self, FilterError};
-use crate::model::attrs::{EMPTY_TYPES, ObjectScope};
+use crate::filter;
+use crate::model::attrs::{EMPTY_TYPES, ObjectScope, ObjectValues};
 use crate::model::{ObjKind, ObjRef, World};
 
 /// Why targets could not be determined.
@@ -14,10 +14,26 @@ use crate::model::{ObjKind, ObjRef, World};
 pub(crate) enum TargetError {
     /// `MissingPermissionError` → 403 with this status.
     Forbidden(String),
-    /// Any other exception → 404 "No objects found." (with diagnostics).
+    /// Any other exception → 404 "No objects found." (with diagnostics),
+    /// filters that fail (or don't compile) for an object included.
     NotFound(String),
-    /// A valid filter the mock can't evaluate → 400.
-    Unsupported(String),
+}
+
+/// `filter_vars`: a dictionary, or nothing.
+///
+/// # Errors
+/// Icinga's conversion error for anything else (a 404 for the request).
+pub(crate) fn filter_vars(
+    params: &Params,
+) -> Result<Option<&serde_json::Map<String, Json>>, String> {
+    match params.get("filter_vars") {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Object(map)) => Ok(Some(map)),
+        Some(other) => Err(format!(
+            "Error: Cannot convert value of type '{}' to an object.",
+            super::params::icinga_type_name(other)
+        )),
+    }
 }
 
 /// Whether Icinga knows a type name (`Type::GetByName` + config object).
@@ -28,10 +44,6 @@ pub(crate) fn is_config_type(name: &str) -> bool {
 /// The target objects of a query or action. `types` must be sorted by type
 /// name (Icinga iterates a `std::set`). Types the mock has no objects of
 /// are passed as `extra_types` so `type` validation still accepts them.
-#[expect(
-    clippy::too_many_lines,
-    reason = "mirrors Icinga's FilterUtility::GetFilterTargets step by step"
-)]
 pub(crate) fn filter_targets(
     world: &World,
     types: &[ObjKind],
@@ -102,44 +114,62 @@ pub(crate) fn filter_targets(
             "Error: Invalid type specified for this query.".into(),
         ));
     }
-    let objects = kind.map(|kind| (kind, world.object_names(kind)));
     if params.contains("filter") {
         if enforce_filter_permission && !user.has_permission("filter-expression") {
             return Err(TargetError::Forbidden(
                 "Missing permission: filter-expression".into(),
             ));
         }
-        let source = params.last_string("filter");
-        let vars = match params.get("filter_vars") {
-            None | Some(Json::Null) => None,
-            Some(Json::Object(map)) => Some(map),
-            Some(other) => {
-                return Err(TargetError::NotFound(format!(
-                    "Error: Cannot convert value of type '{}' to an object.",
-                    super::params::icinga_type_name(other)
-                )));
-            }
+        result.extend(filtered(world, kind, params)?);
+    } else if let Some(kind) = kind {
+        result.extend(
+            world
+                .object_names(kind)
+                .into_iter()
+                .map(|name| ObjRef { kind, name }),
+        );
+    }
+    Ok(result)
+}
+
+/// The objects of type `kind` (`None`: a type the mock has no objects of)
+/// that `filter` selects.
+fn filtered(
+    world: &World,
+    kind: Option<ObjKind>,
+    params: &Params,
+) -> Result<Vec<ObjRef>, TargetError> {
+    // Compiled first, then `filter_vars` are read, as in Icinga. A filter
+    // that doesn't compile fails at the first object it is evaluated for,
+    // like Icinga's `ThrowExpression`.
+    let compiled = filter::compile(&params.last_string("filter"), world.filter_node())
+        .with_vars(filter_vars(params).map_err(TargetError::NotFound)?);
+    let Some(kind) = kind else {
+        return Ok(Vec::new());
+    };
+    if let Some(names) = compiled.targets(kind) {
+        // Icinga's targeted lookup: no evaluation, the filter's order,
+        // duplicates kept, names without an object left out.
+        return Ok(names
+            .into_iter()
+            .filter(|name| world.exists(kind, name))
+            .map(|name| ObjRef { kind, name })
+            .collect());
+    }
+    let values = ObjectValues::default();
+    let mut result = Vec::new();
+    for name in world.object_names(kind) {
+        let object = ObjRef { kind, name };
+        let scope = ObjectScope {
+            world,
+            object: object.clone(),
+            values: &values,
         };
-        let compiled = filter::compile(&source, vars).map_err(|error| match error {
-            FilterError::Syntax(_) => TargetError::NotFound(format!("{error}")),
-            FilterError::Unsupported(_) => TargetError::Unsupported(format!("{error}")),
-        })?;
-        if let Some((kind, names)) = objects {
-            for name in names {
-                let object = ObjRef { kind, name };
-                let scope = ObjectScope {
-                    world,
-                    object: object.clone(),
-                };
-                match compiled.matches(&scope) {
-                    Ok(true) => result.push(object),
-                    Ok(false) => {}
-                    Err(error) => return Err(TargetError::NotFound(format!("{error}"))),
-                }
-            }
+        match compiled.matches(&scope) {
+            Ok(true) => result.push(object),
+            Ok(false) => {}
+            Err(error) => return Err(TargetError::NotFound(error.to_string())),
         }
-    } else if let Some((kind, names)) = objects {
-        result.extend(names.into_iter().map(|name| ObjRef { kind, name }));
     }
     Ok(result)
 }

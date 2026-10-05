@@ -121,12 +121,13 @@ pub(crate) fn handle(
                 Some(&diagnostic),
             );
         }
-        Err(TargetError::Unsupported(message)) => {
-            return json_error(400, &message, format, Some(params), None);
-        }
     };
     if targets.is_empty() {
         return json_error(404, "No objects found.", format, Some(params), None);
+    }
+    // `ActionsHandler` reads `verbose` before running anything.
+    if params.flag("verbose").is_err() {
+        return super::response::unhandled_exception(format);
     }
     let verbose = params.verbose();
     let mut results = Vec::with_capacity(targets.len());
@@ -162,6 +163,10 @@ pub(crate) fn handle(
         (n, 0) if n >= 2 => 200,
         _ => 500,
     };
+    // The actions ran; only the answer fails on a `pretty` Icinga can't read.
+    if params.flag("pretty").is_err() {
+        return super::response::unhandled_exception(format);
+    }
     let mut body = Map::new();
     body.insert(
         "results".into(),
@@ -489,9 +494,10 @@ fn acknowledge(world: &mut World, params: &Params, object: &str) -> Result<Actio
             "Acknowledgements require author and comment.",
         ));
     }
-    let sticky = params.contains("sticky") && params.last_bool("sticky");
-    let notify = params.contains("notify") && params.last_bool("notify");
-    let persistent = params.contains("persistent") && params.last_bool("persistent");
+    // Read through numbers like Icinga (`"0"` is false, `"false"` throws).
+    let sticky = params.flag("sticky")?;
+    let notify = params.flag("notify")?;
+    let persistent = params.flag("persistent")?;
     let expiry = if params.contains("expiry") {
         let expiry = params.last_f64("expiry")?;
         if expiry <= world.now() {
@@ -604,7 +610,7 @@ fn schedule_downtime(
         ));
     }
     let fixed = if params.contains("fixed") {
-        params.last_bool("fixed")
+        params.flag("fixed")?
     } else {
         true
     };
@@ -667,7 +673,9 @@ fn schedule_downtime(
         format!("Successfully scheduled downtime '{name}' for object '{object}'."),
     );
     result.extra = downtime_ref(name.clone(), legacy_id);
-    let all_services = params.contains("all_services") && params.last_bool("all_services");
+    // Read after the host's downtime exists, as in Icinga: a value it can't
+    // convert fails the action, but the downtime stays.
+    let all_services = params.flag("all_services")?;
     let is_host = world.checkable(object).is_some_and(|c| !c.is_service());
     if all_services && is_host {
         let services: Vec<String> = world

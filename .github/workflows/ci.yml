@@ -37,7 +37,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
-            libwayland-dev libfontconfig-dev libfreetype-dev
+            libwayland-dev libfontconfig-dev libfreetype-dev \
+            dbus libglib2.0-bin  # ic-platform's tray, notification and keyring tests run on a private session bus
 
       - name: Make sure the Metal toolchain is available
         if: runner.os == 'macOS'

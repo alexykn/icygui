@@ -50,7 +50,10 @@ pub struct General {
     pub launch_at_login: bool,
     /// How long the local event log keeps events, in hours.
     pub event_log_retention_hours: u32,
-    /// Full re-sync interval, in seconds.
+    /// How often the client reconciles with a lean reload, in seconds. `0`
+    /// (the default) is adaptive: every 5 minutes below 5 000 hosts and
+    /// services, every 15 minutes above. Other values override it; the
+    /// engine never goes below [`crate::MIN_RECONCILE_INTERVAL_SECS`].
     pub reconcile_interval_secs: u32,
 }
 
@@ -61,7 +64,7 @@ impl Default for General {
             close_to_tray: true,
             launch_at_login: false,
             event_log_retention_hours: 48,
-            reconcile_interval_secs: 60,
+            reconcile_interval_secs: 0,
         }
     }
 }

@@ -3531,6 +3531,7 @@ dependencies = [
  "futures",
  "ic-api",
  "ic-config",
+ "ic-filter",
  "ic-mock",
  "ic-model",
  "ic-rules",

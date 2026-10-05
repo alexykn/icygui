@@ -136,6 +136,8 @@ pub(crate) fn tuning() -> Tuning {
         backoff_max: Duration::from_millis(320),
         publish_interval: Duration::from_millis(20),
         requery_delay: Duration::from_millis(20),
+        watchdog_interval: Duration::from_millis(20),
+        reload_jitter: Duration::from_millis(30),
         ..Tuning::default()
     }
 }

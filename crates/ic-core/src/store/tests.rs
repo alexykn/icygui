@@ -704,7 +704,7 @@ fn downtimes_keep_the_depth_in_step() {
 #[test]
 fn snapshots_share_and_stay_unchanged() {
     let mut store = loaded();
-    let before = store.snapshot(1, t(1.0), Arc::default());
+    let before = store.snapshot(1, t(1.0), Arc::default(), Arc::default());
     assert_eq!(before.overall.critical, 1);
     assert_eq!(before.overall.ok, 2, "one up host, one ok service");
     assert_eq!(before.overall.unhandled, 1);
@@ -719,7 +719,7 @@ fn snapshots_share_and_stay_unchanged() {
         ),
     );
     store.set_last_event_at(t(201.0));
-    let after = store.snapshot(2, t(2.0), Arc::default());
+    let after = store.snapshot(2, t(2.0), Arc::default(), Arc::default());
     let b = ServiceKey::new("h", "b");
     assert_eq!(
         before.services[&b].state,
@@ -737,4 +737,100 @@ fn snapshots_share_and_stay_unchanged() {
     assert_eq!(after.overall.critical, 0);
     assert_eq!(after.last_event_at, Some(t(201.0)));
     assert_eq!(after.revision, 2);
+}
+
+#[test]
+fn query_answers_record_what_no_event_explained() {
+    let mut store = loaded();
+    assert!(
+        store.take_discovered().is_empty(),
+        "the first load finds nothing"
+    );
+
+    // An event moves `a`; a later reload shows `b` recovered and flapping
+    // and `a` (as the event left it) unchanged: only `b` was missed.
+    store.apply(
+        20,
+        &check_result(
+            key("h", "a"),
+            svc(ServiceState::Warning),
+            StateType::Soft,
+            1,
+            200.0,
+        ),
+    );
+    let mut b = service("h", "b", ServiceState::Ok);
+    b.check.flapping = true;
+    b.check.last_state_change = t(150.0);
+    let mut a = service("h", "a", ServiceState::Ok);
+    a.check.last_check = Some(t(90.0));
+    store.replace_services(vec![a, b], Detail::Lean, 15);
+    let found = store.take_discovered();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].object, key("h", "b"));
+    assert_eq!(found[0].before.state, svc(ServiceState::Critical));
+    let after = found[0].after.unwrap();
+    assert_eq!(after.state, svc(ServiceState::Ok));
+    assert!(after.flapping);
+    assert_eq!(after.since, t(150.0));
+
+    // The same answer again: nothing new.
+    let mut b = service("h", "b", ServiceState::Ok);
+    b.check.flapping = true;
+    b.check.last_state_change = t(150.0);
+    store.apply_fetched(Vec::new(), vec![b], Detail::Lean, &[], 30);
+    assert!(store.take_discovered().is_empty());
+
+    // Removals: the host and its services.
+    store.apply_fetched(
+        Vec::new(),
+        Vec::new(),
+        Detail::Full,
+        &[ObjectKey::host("h")],
+        40,
+    );
+    let found = store.take_discovered();
+    let gone: Vec<ObjectKey> = found.iter().map(|change| change.object.clone()).collect();
+    assert_eq!(gone, [key("h", "a"), key("h", "b"), ObjectKey::host("h")]);
+    assert!(found.iter().all(|change| change.after.is_none()));
+}
+
+#[test]
+fn a_result_older_than_the_last_check_is_stale() {
+    let mut store = loaded();
+    let b = ServiceKey::new("h", "b");
+    assert!(!store.result_is_stale(&b), "no result at all");
+    let mut full = service("h", "b", ServiceState::Critical);
+    full.check.result = Some(result(2, "CRITICAL - disk full", 100.0));
+    store.apply_fetched(Vec::new(), vec![full], Detail::Full, &[], 11);
+    assert!(!store.result_is_stale(&b));
+    // A lean answer from a later check keeps the result, which is now old.
+    let mut lean = service("h", "b", ServiceState::Ok);
+    lean.check.last_check = Some(t(400.0));
+    store.apply_fetched(Vec::new(), vec![lean], Detail::Lean, &[], 12);
+    assert_eq!(
+        stored(&store, "h", "b").check.output(),
+        "CRITICAL - disk full"
+    );
+    assert!(store.result_is_stale(&b));
+}
+
+#[test]
+fn group_list_changes_are_flagged() {
+    let mut store = loaded();
+    store.set_host_groups(vec![ic_model::HostGroup {
+        name: "db".to_owned(),
+        display_name: "Databases".to_owned(),
+    }]);
+    let changes = store.take_changes();
+    assert!(changes.groups && changes.any);
+    store.set_host_groups(vec![ic_model::HostGroup {
+        name: "db".to_owned(),
+        display_name: "Databases".to_owned(),
+    }]);
+    assert!(!store.take_changes().groups, "unchanged");
+    store.set_service_groups(Vec::new());
+    assert!(!store.has_changes());
+    assert_eq!(store.object_count(), 3);
+    assert_eq!(store.latest_check(), Some(t(100.0)));
 }

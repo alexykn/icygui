@@ -100,7 +100,17 @@ These budgets are tested: `ic-mock` has a `large` scenario of the same size with
 
 | What | Result |
 |---|---|
-| Initial load until the problem lists are complete (tiers 1–3, 2 000 hosts, 30 000 lean services, 1 448 problems in full) | 3.66 s (hosts after 0.56 s, services after 3.46 s); `cargo test -p ic-core --test scale -- --ignored --nocapture` |
-| Applying 64 000 recorded burst events (parse, collapse, apply, a snapshot per 5 000) | 3.58 s, ~17 900 events/s, none lost; `cargo test -p ic-core --lib perf -- --ignored --nocapture` |
+| Initial load until the problem lists are complete (tiers 1–3, 2 000 hosts, 30 000 lean services, 1 448 problems in full, the three default dashboards evaluated for every tier) | 3.80 s (hosts after 0.59 s, services after 3.77 s); `cargo test -p ic-core --test scale -- --ignored --nocapture` |
+| Applying 50 000 recorded burst events (parse, collapse, apply, a snapshot per 5 000) | 2.96 s, ~16 900 events/s, none lost; `cargo test -p ic-core --lib perf_tests::fifty -- --ignored --nocapture` |
+| The same with ten dashboards updated incrementally after every batch of 5 000 | + 2.85 s of evaluation (the engine runs it on a blocking thread next to the applier, at most once per snapshot) |
 | A burst of every object (32 000 checks at Icinga's ~5 000/s) | absorbed as it arrives: the store matches the mock 6.4 s after the burst started |
-| 6 400 recorded events on 3 000 services (in the normal test suite) | ~0.26 s |
+| 20 000 services × 10 dashboards (filters on vars, groups, globs, regexes, output; group-by), full evaluation | 0.48 s; `cargo test -p ic-core --lib perf_tests::twenty -- --ignored --nocapture` |
+| The same, incremental: 100 changed services / 1 changed service | 13.5 ms / 5.5 ms (rows and summaries of the dashboards they are in rebuilt) |
+| Store memory, 2 000 hosts + 30 000 services, after the initial load (services lean, problems in full) | 56 MB (1 840 bytes per object; custom vars are most of it); `cargo test -p ic-core --lib perf_tests::memory -- --ignored --nocapture --test-threads 1` |
+| Store memory once every service has its check result (one interval later) | 66 MB (2 170 bytes per object) |
+| Ten dashboards over it (members, order, rows) | 14 MB |
+| A snapshot the UI holds while the store changes (copy on write of the maps) | 2 MB per snapshot held |
+| 6 400 recorded events on 3 000 services (in the normal test suite) | ~0.28 s, ten dashboards updated per batch ~0.10 s |
+| 2 000 services × 10 dashboards (in the normal test suite) | full 40 ms, 100 changed services 4 ms |
+
+The dev-profile numbers above already meet the release budgets (50 000 events in under 3 s; a full evaluation of 20 000 × 10 well under a second; memory far below 400 MB), so release builds have a wide margin.

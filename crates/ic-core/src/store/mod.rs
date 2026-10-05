@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use ic_api::Detail;
 use ic_model::{
-    CheckInfo, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName, InstanceStatus,
-    ObjectKey, Service, ServiceGroup, ServiceKey, Timestamp,
+    CheckInfo, CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
+    InstanceStatus, ObjectKey, Service, ServiceGroup, ServiceKey, Timestamp,
 };
 use ic_rules::DashboardRef;
 
@@ -52,8 +52,8 @@ struct Seqs {
     evented: u64,
 }
 
-/// What changed since the last snapshot, for publishing and (stage 2) for
-/// incremental dashboard evaluation.
+/// What changed since the last snapshot, for publishing, the incremental
+/// dashboard evaluation and the freshness watchdog.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Changes {
     /// Something changed: publish.
@@ -62,6 +62,23 @@ pub(crate) struct Changes {
     pub(crate) all: bool,
     /// Hosts and services that changed, appeared or disappeared.
     pub(crate) objects: BTreeSet<ObjectKey>,
+    /// The host or service group lists changed (group-by labels).
+    pub(crate) groups: bool,
+}
+
+/// A change only a query answer revealed: no event explained it, so the
+/// stream missed it (a reconnect gap, a dropped event) or it was never
+/// sent (an object deleted while the client was away). `after` is `None`
+/// when the object is gone. The rule engine (stage 3) judges these like
+/// events, so missed problems still notify.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Discovered {
+    /// The host or service.
+    pub(crate) object: ObjectKey,
+    /// What the store knew before the answer.
+    pub(crate) before: ObjectView,
+    /// What the answer says (`None`: Icinga no longer knows the object).
+    pub(crate) after: Option<ObjectView>,
 }
 
 /// A comment or downtime as an event left it.
@@ -114,6 +131,9 @@ pub(crate) struct Store {
     /// comment or downtime since, by name.
     annotation_log: Option<HashMap<String, (u64, Annotation)>>,
     changes: Changes,
+    /// Changes found only by query answers, since the last
+    /// [`Store::take_discovered`].
+    discovered: Vec<Discovered>,
 }
 
 impl Store {
@@ -130,12 +150,77 @@ impl Store {
         self.full.contains(key)
     }
 
+    /// Whether a service's stored check result is older than its last
+    /// check (a lean answer moved the state on but carries no result).
+    pub(crate) fn result_is_stale(&self, key: &ServiceKey) -> bool {
+        self.services.get(key).is_some_and(|service| {
+            let check = &service.check;
+            match (&check.result, check.last_check) {
+                (Some(result), Some(last_check)) => {
+                    result.execution_end.as_unix_seconds() + 1.0 < last_check.as_unix_seconds()
+                }
+                _ => false,
+            }
+        })
+    }
+
     /// The check details of a host or service.
     pub(crate) fn check(&self, key: &ObjectKey) -> Option<&CheckInfo> {
         match key {
             ObjectKey::Host { name } => self.hosts.get(name).map(|host| &host.check),
             ObjectKey::Service { key } => self.services.get(key).map(|service| &service.check),
         }
+    }
+
+    /// The state and check details of a host or service.
+    pub(crate) fn checkable(&self, key: &ObjectKey) -> Option<(CheckableState, &CheckInfo)> {
+        match key {
+            ObjectKey::Host { name } => self
+                .hosts
+                .get(name)
+                .map(|host| (CheckableState::Host(host.state), &host.check)),
+            ObjectKey::Service { key } => self
+                .services
+                .get(key)
+                .map(|service| (CheckableState::Service(service.state), &service.check)),
+        }
+    }
+
+    /// Every host, by name (shared with the snapshots).
+    pub(crate) fn hosts(&self) -> &Arc<BTreeMap<HostName, Arc<Host>>> {
+        &self.hosts
+    }
+
+    /// Every service, by key (shared with the snapshots).
+    pub(crate) fn services(&self) -> &Arc<BTreeMap<ServiceKey, Arc<Service>>> {
+        &self.services
+    }
+
+    /// The host groups.
+    pub(crate) fn host_groups(&self) -> &Arc<Vec<HostGroup>> {
+        &self.host_groups
+    }
+
+    /// The service groups.
+    pub(crate) fn service_groups(&self) -> &Arc<Vec<ServiceGroup>> {
+        &self.service_groups
+    }
+
+    /// How many hosts and services there are.
+    pub(crate) fn object_count(&self) -> usize {
+        self.hosts.len() + self.services.len()
+    }
+
+    /// The latest `last_check` of any host or service: a lower bound of
+    /// Icinga's clock right after a load (with thousands of objects checked
+    /// every few minutes, within a second or so of it).
+    pub(crate) fn latest_check(&self) -> Option<Timestamp> {
+        self.hosts
+            .values()
+            .map(|host| &host.check)
+            .chain(self.services.values().map(|service| &service.check))
+            .filter_map(|check| check.last_check)
+            .max_by(|a, b| a.as_unix_seconds().total_cmp(&b.as_unix_seconds()))
     }
 
     /// The downtime with this full name.
@@ -169,6 +254,17 @@ impl Store {
         self.changes.any
     }
 
+    /// What changed since the last [`Store::take_changes`], without taking
+    /// it.
+    pub(crate) fn changes(&self) -> &Changes {
+        &self.changes
+    }
+
+    /// Takes the changes only query answers revealed since the last call.
+    pub(crate) fn take_discovered(&mut self) -> Vec<Discovered> {
+        std::mem::take(&mut self.discovered)
+    }
+
     /// Forgets everything (the environment now points at another server).
     pub(crate) fn clear(&mut self) {
         *self = Self {
@@ -176,6 +272,7 @@ impl Store {
                 any: true,
                 all: true,
                 objects: BTreeSet::new(),
+                groups: true,
             },
             ..Self::default()
         };
@@ -204,6 +301,7 @@ impl Store {
         revision: u64,
         taken_at: Timestamp,
         dashboards: Arc<BTreeMap<DashboardRef, DashboardResult>>,
+        late: Arc<BTreeMap<ObjectKey, Timestamp>>,
     ) -> Snapshot {
         Snapshot {
             revision,
@@ -220,6 +318,7 @@ impl Store {
             dashboards,
             last_event_at: self.last_event_at,
             overall: self.overall(),
+            late,
         }
     }
 
@@ -256,16 +355,8 @@ impl Store {
         if let Some(status) = overview.status {
             self.set_status(status);
         }
-        set_list(
-            &mut self.host_groups,
-            overview.host_groups,
-            &mut self.changes,
-        );
-        set_list(
-            &mut self.service_groups,
-            overview.service_groups,
-            &mut self.changes,
-        );
+        self.set_host_groups(overview.host_groups);
+        self.set_service_groups(overview.service_groups);
         set_list(
             &mut self.dependencies,
             overview.dependencies,
@@ -397,12 +488,16 @@ impl Store {
 
     /// Replaces the host groups.
     pub(crate) fn set_host_groups(&mut self, groups: Vec<HostGroup>) {
-        set_list(&mut self.host_groups, groups, &mut self.changes);
+        if set_list(&mut self.host_groups, groups, &mut self.changes) {
+            self.changes.groups = true;
+        }
     }
 
     /// Replaces the service groups.
     pub(crate) fn set_service_groups(&mut self, groups: Vec<ServiceGroup>) {
-        set_list(&mut self.service_groups, groups, &mut self.changes);
+        if set_list(&mut self.service_groups, groups, &mut self.changes) {
+            self.changes.groups = true;
+        }
     }
 
     /// Replaces the dependencies.
@@ -432,6 +527,16 @@ impl Store {
             if self.evented_after(&key, started) {
                 keep_event_fields(&mut host.check, &stored.check);
                 host.state = stored.state;
+            } else {
+                let before = ObjectView::of(CheckableState::Host(stored.state), &stored.check);
+                let after = ObjectView::of(CheckableState::Host(host.state), &host.check);
+                if before != after {
+                    self.discovered.push(Discovered {
+                        object: key.clone(),
+                        before,
+                        after: Some(after),
+                    });
+                }
             }
             if **stored == host {
                 self.mark_fetched(key, started);
@@ -450,6 +555,16 @@ impl Store {
             if self.evented_after(&key, started) {
                 keep_event_fields(&mut service.check, &stored.check);
                 service.state = stored.state;
+            } else {
+                let before = ObjectView::of(CheckableState::Service(stored.state), &stored.check);
+                let after = ObjectView::of(CheckableState::Service(service.state), &service.check);
+                if before != after {
+                    self.discovered.push(Discovered {
+                        object: key.clone(),
+                        before,
+                        after: Some(after),
+                    });
+                }
             }
             if detail == Detail::Lean {
                 // A lean answer has no check result and no links: keep what
@@ -516,6 +631,13 @@ impl Store {
     }
 
     fn drop_object(&mut self, key: &ObjectKey) {
+        if let Some((state, check)) = self.checkable(key) {
+            self.discovered.push(Discovered {
+                object: key.clone(),
+                before: ObjectView::of(state, check),
+                after: None,
+            });
+        }
         match key {
             ObjectKey::Host { name } => {
                 Arc::make_mut(&mut self.hosts).remove(name);
@@ -555,11 +677,14 @@ fn keep_event_fields(check: &mut CheckInfo, stored: &CheckInfo) {
     check.reachable = stored.reachable;
 }
 
-fn set_list<T: PartialEq>(list: &mut Arc<Vec<T>>, new: Vec<T>, changes: &mut Changes) {
-    if **list != new {
-        *list = Arc::new(new);
-        changes.any = true;
+/// Replaces `list` if `new` differs; returns whether it did.
+fn set_list<T: PartialEq>(list: &mut Arc<Vec<T>>, new: Vec<T>, changes: &mut Changes) -> bool {
+    if **list == new {
+        return false;
     }
+    *list = Arc::new(new);
+    changes.any = true;
+    true
 }
 
 /// Keys whose lists differ between two maps.

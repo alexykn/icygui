@@ -24,9 +24,11 @@ use crate::model::{
 /// The shortest allowed event log retention, in hours.
 pub const MIN_EVENT_LOG_RETENTION_HOURS: u32 = 1;
 
-/// The shortest allowed full re-sync interval, in seconds. Each re-sync
-/// queries every object, which is expensive on large installations.
-pub const MIN_RECONCILE_INTERVAL_SECS: u32 = 10;
+/// The shortest allowed reconcile interval, in seconds, when one is set
+/// (`0` means adaptive). Each reconcile is a lean reload of every object,
+/// about 28 MB from a master with 30 000 services, so the engine never
+/// reconciles more often than this even if the file says otherwise.
+pub const MIN_RECONCILE_INTERVAL_SECS: u32 = 60;
 
 const MINUTES_PER_DAY: u16 = 24 * 60;
 
@@ -70,10 +72,11 @@ impl Config {
                 format!("must be at least {MIN_EVENT_LOG_RETENTION_HOURS} hour"),
             );
         }
-        if self.general.reconcile_interval_secs < MIN_RECONCILE_INTERVAL_SECS {
+        let reconcile = self.general.reconcile_interval_secs;
+        if reconcile != 0 && reconcile < MIN_RECONCILE_INTERVAL_SECS {
             issues.push(
                 "general.reconcile_interval_secs",
-                format!("must be at least {MIN_RECONCILE_INTERVAL_SECS} seconds"),
+                format!("must be 0 (adaptive) or at least {MIN_RECONCILE_INTERVAL_SECS} seconds"),
             );
         }
         if let Some(active) = &self.active_environment

@@ -16,34 +16,42 @@ pub(crate) struct Tally {
 impl Tally {
     /// Counts a host.
     pub(crate) fn add_host(&mut self, host: &Host) {
-        let state = CheckableState::Host(host.state);
-        let counter = match host.state {
-            HostState::Up => &mut self.summary.ok,
-            HostState::Down => &mut self.summary.down,
-            HostState::Unreachable => &mut self.summary.unreachable,
-            HostState::Pending => &mut self.summary.pending,
-        };
-        *counter += 1;
-        if host.is_problem() {
-            self.problem(host.is_handled(), host.severity(), state);
-        }
+        self.add(
+            CheckableState::Host(host.state),
+            host.is_handled(),
+            host.severity(),
+        );
     }
 
     /// Counts a service; `host` decides whether a problem is handled by a
     /// host problem (Icinga's `handled`).
     pub(crate) fn add_service(&mut self, service: &Service, host: Option<&Host>) {
-        let state = CheckableState::Service(service.state);
-        let counter = match service.state {
-            ServiceState::Ok => &mut self.summary.ok,
-            ServiceState::Warning => &mut self.summary.warning,
-            ServiceState::Critical => &mut self.summary.critical,
-            ServiceState::Unknown => &mut self.summary.unknown,
-            ServiceState::Pending => &mut self.summary.pending,
+        let host_problem = host.is_some_and(Host::is_problem);
+        self.add(
+            CheckableState::Service(service.state),
+            service.is_handled(host_problem),
+            service.severity(),
+        );
+    }
+
+    /// Counts an object in `state`; `handled` and `severity` only matter
+    /// for problems.
+    pub(crate) fn add(&mut self, state: CheckableState, handled: bool, severity: u32) {
+        let counter = match state {
+            CheckableState::Host(HostState::Up) | CheckableState::Service(ServiceState::Ok) => {
+                &mut self.summary.ok
+            }
+            CheckableState::Host(HostState::Down) => &mut self.summary.down,
+            CheckableState::Host(HostState::Unreachable) => &mut self.summary.unreachable,
+            CheckableState::Host(HostState::Pending)
+            | CheckableState::Service(ServiceState::Pending) => &mut self.summary.pending,
+            CheckableState::Service(ServiceState::Warning) => &mut self.summary.warning,
+            CheckableState::Service(ServiceState::Critical) => &mut self.summary.critical,
+            CheckableState::Service(ServiceState::Unknown) => &mut self.summary.unknown,
         };
         *counter += 1;
-        if service.is_problem() {
-            let host_problem = host.is_some_and(Host::is_problem);
-            self.problem(service.is_handled(host_problem), service.severity(), state);
+        if state.is_problem() {
+            self.problem(handled, severity, state);
         }
     }
 

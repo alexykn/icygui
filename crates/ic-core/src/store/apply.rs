@@ -35,7 +35,8 @@ pub(crate) struct ObjectView {
 }
 
 impl ObjectView {
-    fn of(state: CheckableState, check: &CheckInfo) -> Self {
+    /// The view of an object in `state` with `check`.
+    pub(crate) fn of(state: CheckableState, check: &CheckInfo) -> Self {
         Self {
             state,
             state_type: check.state_type,

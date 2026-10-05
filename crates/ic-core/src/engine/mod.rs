@@ -9,22 +9,29 @@
 //! `JoinSet`, so tearing a session down aborts them all (and closes the
 //! event stream).
 //!
-//! Extension points for the later stages are marked with `Stage 2:` and
-//! `Stage 3:` comments: dashboards plug into [`Engine::publish`] (they get
-//! the [`crate::store::Changes`] since the last snapshot), the rule engine
-//! and the event log into [`Engine::record_applied`], the watchdog,
-//! hydration and the periodic reconcile into the fetch queue and
-//! [`Engine::start_load`], and the one-second tick into
+//! - Snapshots and dashboards: [`Engine::publish`] cuts a snapshot and
+//!   evaluates the dashboards for the changes since the last one on a
+//!   blocking thread (`publish.rs`).
+//! - Keeping in sync beyond the stream (`sync.rs`): the freshness watchdog,
+//!   hydration, the periodic reconcile and the jittered reload after a
+//!   reconnect.
+//!
+//! Extension points for stage 3 are marked with `Stage 3:` comments: the
+//! rule engine and the event log plug into [`Engine::record_applied`] and
+//! [`Engine::record_discovered`], and the one-second tick into
 //! [`Engine::run_due`].
 
 mod actions;
 mod fetch;
 mod load;
+mod publish;
 mod stream;
+mod sync;
+mod watchdog;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ic_api::{ApiError, ApiInfo, Client, Detail};
 use ic_model::{
@@ -39,13 +46,16 @@ use tokio::time::Instant;
 use crate::backoff::Backoff;
 use crate::command::{ActionOutcome, Command, ConnectionState, CoreEvent, LoadPhase};
 use crate::connect::{self, Connected, Failure};
-use crate::snapshot::DashboardResult;
+use crate::dashboards::Dashboards;
+use crate::snapshot::{DashboardResult, Snapshot};
 use crate::spec::{EnvironmentSpec, Ports, Tuning};
-use crate::store::{Applied, ObjectView, Overview, Store};
+use crate::store::{Applied, Discovered, ObjectView, Overview, Store};
 
 use fetch::{Answers, FetchQueue, FetchTask, Lists};
 use load::LoadTask;
+use publish::Previews;
 use stream::ReaderMsg;
+use watchdog::Watchdog;
 
 /// Messages from the engine's background tasks.
 #[derive(Debug)]
@@ -76,6 +86,17 @@ pub(crate) enum Internal {
         dirty: Vec<ObjectKey>,
         outcome: ActionOutcome,
     },
+    /// The dashboards were evaluated for `snapshot`, which is ready to go
+    /// out. `quiet`: nothing but the dashboards could have changed.
+    /// `broken`: the evaluation failed (a bug); `dashboards` start over.
+    Evaluated {
+        dashboards: Box<Dashboards>,
+        snapshot: Box<Snapshot>,
+        quiet: bool,
+        broken: bool,
+    },
+    /// A dashboard preview was answered.
+    PreviewDone,
 }
 
 /// A load's progress and answers.
@@ -157,6 +178,10 @@ struct Conn {
 }
 
 /// The engine.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags of the engine's state machine parts"
+)]
 pub(crate) struct Engine {
     spec: EnvironmentSpec,
     ports: Ports,
@@ -182,8 +207,37 @@ pub(crate) struct Engine {
     fetch: FetchQueue,
     revision: u64,
     last_publish: Option<Instant>,
-    /// Stage 2: evaluated dashboards.
-    dashboards: Arc<BTreeMap<DashboardRef, DashboardResult>>,
+    /// The dashboards' state; `None` while an evaluation runs on a
+    /// blocking thread.
+    dashboards: Option<Box<Dashboards>>,
+    /// The latest evaluated dashboards.
+    dashboard_results: Arc<BTreeMap<DashboardRef, DashboardResult>>,
+    /// The environment's dashboards changed since the last evaluation.
+    dashboards_configured: bool,
+    /// Some dashboard filter calls `get_time()`, and when they were last
+    /// evaluated in full.
+    time_dependent: bool,
+    time_refreshed: Instant,
+    /// Publish as soon as the evaluation in flight is back.
+    publish_soon: bool,
+    /// Events produced while a snapshot was being evaluated, in order.
+    outbox: Vec<CoreEvent>,
+    /// Stops evaluations in flight (shutdown).
+    cancel: Arc<AtomicBool>,
+    previews: Previews,
+    watchdog: Watchdog,
+    last_sweep: Option<Instant>,
+    /// The store holds a complete load from this environment's server: a
+    /// reconnect goes live on it at once and reconciles shortly after.
+    loaded: bool,
+    /// The next connect was asked for by the user: reload without jitter.
+    reload_now: bool,
+    /// The reload after a reconnect, jittered.
+    reload_at: Option<Instant>,
+    /// The next periodic reconcile.
+    reconcile_at: Option<Instant>,
+    /// When the last load completed.
+    last_load_done: Option<Instant>,
     /// The connection state last emitted.
     state: Option<ConnectionState>,
 }
@@ -205,6 +259,8 @@ impl Engine {
         events: futures::channel::mpsc::UnboundedSender<CoreEvent>,
         internal_tx: UnboundedSender<Internal>,
     ) -> Self {
+        let mut dashboards = Dashboards::default();
+        dashboards.configure(&spec.environment);
         Self {
             backoff: Backoff::new(tuning.backoff_initial, tuning.backoff_max),
             fetch: FetchQueue::new(tuning.missing_ttl),
@@ -224,7 +280,22 @@ impl Engine {
             loads: 0,
             revision: 0,
             last_publish: None,
-            dashboards: Arc::default(),
+            dashboards: Some(Box::new(dashboards)),
+            dashboard_results: Arc::default(),
+            dashboards_configured: false,
+            time_dependent: false,
+            time_refreshed: Instant::now(),
+            publish_soon: false,
+            outbox: Vec::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            previews: Previews::default(),
+            watchdog: Watchdog::default(),
+            last_sweep: None,
+            loaded: false,
+            reload_now: false,
+            reload_at: None,
+            reconcile_at: None,
+            last_load_done: None,
             state: None,
         }
     }
@@ -240,7 +311,7 @@ impl Engine {
         let mut lines = Vec::new();
         loop {
             while self.tasks.try_join_next().is_some() {}
-            let deadline = self.next_deadline();
+            let deadline = self.next_deadline(Instant::now());
             let live = self.phase == Phase::Live;
             let max_batch = self.tuning.max_batch.max(1);
             let wake = tokio::select! {
@@ -269,7 +340,19 @@ impl Engine {
 
     // --- events out ---------------------------------------------------------------
 
-    fn emit(&self, event: CoreEvent) {
+    /// Emits an event. While a snapshot is being evaluated, events wait
+    /// until it went out, so the UI sees them in the order they happened:
+    /// `Connected` after the snapshot of the load that completed it, an
+    /// action's result after the snapshot cut before it.
+    fn emit(&mut self, event: CoreEvent) {
+        if self.dashboards.is_none() {
+            self.outbox.push(event);
+        } else {
+            self.send_event(event);
+        }
+    }
+
+    fn send_event(&self, event: CoreEvent) {
         // The UI may be gone (closing): nothing to tell.
         let _ = self.events.unbounded_send(event);
     }
@@ -279,40 +362,6 @@ impl Engine {
             self.state = Some(state.clone());
             self.emit(CoreEvent::Connection(state));
         }
-    }
-
-    /// Publishes a snapshot now.
-    fn publish(&mut self) {
-        // Stage 2: re-evaluate the dashboards for these changes (the dirty
-        // objects, or everything after a reload) on a blocking thread
-        // before the snapshot goes out.
-        let _changes = self.store.take_changes();
-        self.revision += 1;
-        let snapshot = self.store.snapshot(
-            self.revision,
-            self.ports.clock.now(),
-            Arc::clone(&self.dashboards),
-        );
-        self.emit(CoreEvent::Snapshot(Arc::new(snapshot)));
-        self.last_publish = Some(Instant::now());
-    }
-
-    /// Publishes now if anything changed.
-    fn publish_changes(&mut self) {
-        if self.store.has_changes() {
-            self.publish();
-        }
-    }
-
-    /// When the next throttled snapshot may go out.
-    fn publish_at(&self) -> Option<Instant> {
-        if !self.store.has_changes() {
-            return None;
-        }
-        Some(
-            self.last_publish
-                .map_or_else(Instant::now, |last| last + self.tuning.publish_interval),
-        )
     }
 
     // --- timers -------------------------------------------------------------------
@@ -339,12 +388,14 @@ impl Engine {
         self.fetch.due(self.tuning.requery_delay)
     }
 
-    fn next_deadline(&self) -> Option<Instant> {
+    fn next_deadline(&self, now: Instant) -> Option<Instant> {
         [
-            self.publish_at(),
+            self.publish_at(now),
             self.retry_at(),
             self.status_at(),
             self.fetch_at(),
+            self.reload_due(),
+            self.sweep_at(now),
         ]
         .into_iter()
         .flatten()
@@ -361,12 +412,17 @@ impl Engine {
         if self.status_at().is_some_and(|at| at <= now) {
             self.poll_status();
         }
+        if self.reload_due().is_some_and(|at| at <= now) {
+            self.start_load(false);
+        }
+        if self.sweep_at(now).is_some_and(|at| at <= now) {
+            self.sweep(now);
+        }
         if self.fetch_at().is_some_and(|at| at <= now) {
             self.start_fetch(now);
         }
-        // Stage 2: the freshness watchdog's deadlines and the periodic
-        // reconcile. Stage 3: the rule engine's one-second tick.
-        if self.publish_at().is_some_and(|at| at <= now) {
+        // Stage 3: the rule engine's one-second tick.
+        if self.publish_at(now).is_some_and(|at| at <= now) {
             self.publish();
         }
     }
@@ -406,6 +462,9 @@ impl Engine {
         self.conn = None;
         self.load = None;
         self.fetch.reset();
+        self.watchdog.reset_awaiting();
+        self.reload_at = None;
+        self.reconcile_at = None;
         self.store.end_annotation_query();
     }
 
@@ -488,15 +547,30 @@ impl Engine {
             next_status,
             status_in_flight: false,
         });
-        self.phase = Phase::Loading;
-        self.start_load(true);
+        if self.loaded {
+            // A reconnect: live at once on the objects we have (the stream
+            // keeps them current), and a reconcile shortly after for what
+            // the gap missed, jittered unless the user asked.
+            self.go_live();
+            let delay = if std::mem::take(&mut self.reload_now) {
+                std::time::Duration::ZERO
+            } else {
+                self.tuning.reload_jitter.mul_f64(fastrand::f64())
+            };
+            self.reload_at = Some(Instant::now() + delay);
+        } else {
+            self.reload_now = false;
+            self.phase = Phase::Loading;
+            self.start_load(true);
+        }
     }
 
     /// Starts a load (tiers 1–3) unless one runs. `first`: the session's
-    /// first load, which ends in `Connected`.
-    ///
-    /// Stage 2: the periodic and post-restart reconcile call this with
-    /// `first = false` and diff the answers against the store.
+    /// first load into an empty store, which ends in `Connected`; other
+    /// loads (reconcile, `Refresh`, a restart, a reconnect) leave the
+    /// connection state alone, and query answers that differ from the
+    /// store without an event explaining it are recorded
+    /// ([`Engine::record_discovered`]).
     fn start_load(&mut self, first: bool) {
         if self.load.is_some() {
             return;
@@ -504,6 +578,8 @@ impl Engine {
         let Some(conn) = &self.conn else {
             return;
         };
+        self.reload_at = None;
+        self.reconcile_at = None;
         self.loads += 1;
         self.load = Some((self.loads, first));
         self.store.begin_annotation_query();
@@ -537,10 +613,12 @@ impl Engine {
             } => {
                 self.store.apply_overview(*overview, started);
                 self.store.replace_hosts(hosts, started);
+                self.record_discovered(true);
                 self.publish();
             }
             LoadStep::Services { started, services } => {
                 self.store.replace_services(services, Detail::Lean, started);
+                self.record_discovered(true);
                 self.publish();
             }
             LoadStep::Details { started, fetched } => {
@@ -551,11 +629,17 @@ impl Engine {
                     &fetched.missing,
                     started,
                 );
+                self.record_discovered(true);
                 self.publish();
             }
             LoadStep::Done => {
+                let now = Instant::now();
                 self.load = None;
-                self.fetch.release_deferred(Instant::now());
+                self.loaded = true;
+                self.last_load_done = Some(now);
+                self.fetch.release_deferred(now);
+                self.watchdog.loaded(&self.store);
+                self.schedule_reconcile();
                 if first {
                     self.go_live();
                 }
@@ -567,8 +651,10 @@ impl Engine {
                 if first || matches!(failure, Failure::Auth(_)) {
                     self.fail(failure);
                 } else if let Failure::Transient(error) = failure {
-                    // The stream decides whether the connection is gone.
+                    // The stream decides whether the connection is gone;
+                    // the next reconcile comes at the usual interval.
                     tracing::warn!(%error, "reload failed");
+                    self.schedule_reconcile();
                 }
             }
         }
@@ -655,11 +741,12 @@ impl Engine {
             return;
         };
         let round = self.fetch.take(now);
-        let (full, lean): (Vec<ObjectKey>, Vec<ObjectKey>) =
+        let (mut full, lean): (Vec<ObjectKey>, Vec<ObjectKey>) =
             round.keys.into_iter().partition(|key| match key {
                 ObjectKey::Host { .. } => true,
                 ObjectKey::Service { key } => self.store.is_full(key),
             });
+        full.extend(round.full);
         let task = FetchTask {
             client: conn.client.clone(),
             seq: Arc::clone(&self.seq),
@@ -675,25 +762,30 @@ impl Engine {
 
     fn on_fetched(&mut self, answers: Answers) {
         let mut missing = Vec::new();
-        for (detail, started, result) in answers.objects {
-            match result {
+        for answer in answers.objects {
+            match answer.result {
                 Ok(fetched) => {
                     self.store.apply_fetched(
                         fetched.hosts,
                         fetched.services,
-                        detail,
+                        answer.detail,
                         &fetched.missing,
-                        started,
+                        answer.started,
                     );
+                    self.watchdog.answered(&self.store, &answer.keys);
                     missing.extend(fetched.missing);
                 }
                 Err(ApiError::Unauthorized) => {
                     self.fail(Failure::Auth(ApiError::Unauthorized.to_string()));
                     return;
                 }
-                Err(error) => tracing::warn!(%error, "re-query failed"),
+                Err(error) => {
+                    tracing::warn!(%error, "re-query failed");
+                    self.watchdog.failed(&answer.keys);
+                }
             }
         }
+        self.record_discovered(false);
         apply_list(answers.host_groups, "host groups", |groups| {
             self.store.set_host_groups(groups);
         });
@@ -728,6 +820,13 @@ impl Engine {
         if !lines.is_empty() {
             self.store.set_last_event_at(self.ports.clock.now());
             let events = stream::prepare(lines);
+            if let Some(latest) = events
+                .iter()
+                .map(|(_, event)| event.at())
+                .max_by(|a, b| a.as_unix_seconds().total_cmp(&b.as_unix_seconds()))
+            {
+                self.watchdog.clock().observe(latest, Instant::now());
+            }
             let applied = self.apply_events(events);
             self.record_applied(&applied);
         }
@@ -828,6 +927,56 @@ impl Engine {
         }
     }
 
+    /// What query answers revealed without an event: state changes the
+    /// stream missed, flapping found by a reconcile, objects gone. `load`:
+    /// from a load, whose tier 3 brings every problem's details anyway.
+    ///
+    /// A service whose state such an answer changed keeps its last check
+    /// result (a lean answer has none, and never replaces one), but that
+    /// result is now older than the state: it is fetched in full again, so
+    /// the output matches the state within a second (problems found by a
+    /// load come with its tier 3).
+    ///
+    /// Stage 3: turn them into rule inputs (missed problems and recoveries
+    /// notify, removals end what the rule engine remembers), except during
+    /// the session's first load (`self.load` is `Some((_, true))`), which
+    /// may follow a partial one: the initial load produces no rule inputs.
+    fn record_discovered(&mut self, load: bool) {
+        let found = self.store.take_discovered();
+        if found.is_empty() {
+            return;
+        }
+        let mut stale = Vec::new();
+        for Discovered {
+            object,
+            before,
+            after,
+        } in &found
+        {
+            tracing::debug!(
+                %object,
+                from = ?before.state,
+                to = ?after.map(|after| after.state),
+                "a query found a change no event announced"
+            );
+            let Some(after) = after else {
+                continue;
+            };
+            let covered = load && after.state.is_problem();
+            if after.state != before.state
+                && !covered
+                && object
+                    .as_service()
+                    .is_some_and(|key| self.store.result_is_stale(key))
+            {
+                stale.push(object.clone());
+            }
+        }
+        if !stale.is_empty() {
+            self.fetch.mark_full(stale, Instant::now());
+        }
+    }
+
     // --- commands ---------------------------------------------------------------------
 
     fn on_command(&mut self, command: Command) {
@@ -835,10 +984,7 @@ impl Engine {
             Command::Action { id, target, action } => self.run_action(id, target, action),
             Command::Refresh => self.refresh(),
             Command::UpdateEnvironment(environment) => self.update_environment(environment),
-            Command::UpdateGeneral(general) => {
-                // Stage 2: the reconcile interval; stage 3: log retention.
-                self.spec.general = general;
-            }
+            Command::UpdateGeneral(general) => self.update_general(general),
             Command::LoadHistory { reply, .. } => {
                 // Stage 3: the event log.
                 tracing::debug!("LoadHistory is not implemented yet");
@@ -849,19 +995,12 @@ impl Engine {
                 tracing::debug!("LoadNotifications is not implemented yet");
                 let _ = reply.send(Vec::new());
             }
-            Command::PreviewDashboard { reply, .. } => {
-                // Stage 2: dashboards.
-                tracing::debug!("PreviewDashboard is not implemented yet");
-                let _ = reply.send(Err("dashboard previews are not available yet".to_owned()));
-            }
+            Command::PreviewDashboard { view, reply } => self.preview(view, reply),
             Command::PauseNotifications(_) | Command::MarkNotificationsRead => {
                 // Stage 3: notifications.
                 tracing::debug!("notification commands are not implemented yet");
             }
-            Command::Hydrate(keys) => {
-                // Stage 2: hydration on demand.
-                tracing::debug!(count = keys.len(), "Hydrate is not implemented yet");
-            }
+            Command::Hydrate(keys) => self.hydrate(keys),
         }
     }
 
@@ -872,6 +1011,7 @@ impl Engine {
                     // After a failure that needed the user: a fresh start.
                     self.backoff.reset();
                 }
+                self.reload_now = true;
                 self.connect();
             }
             Phase::Connecting | Phase::Loading => {
@@ -888,15 +1028,24 @@ impl Engine {
             || old.auth != environment.auth
             || old.tls != environment.tls;
         let other_server = old.id != environment.id || old.url != environment.url;
+        let dashboards_changed = old.groups != environment.groups;
         self.spec.environment = environment;
-        // Stage 2: recompile the dashboards; stage 3: rebuild the rule set.
+        // Stage 3: rebuild the rule set.
+        if dashboards_changed {
+            self.dashboards_configured = true;
+        }
         if other_server {
             self.store.clear();
+            self.watchdog.clear();
+            self.loaded = false;
             self.publish();
+        } else if dashboards_changed {
+            self.publish_changes();
         }
         let waiting_for_user = matches!(self.phase, Phase::Idle { .. });
         if reconnect || waiting_for_user {
             self.backoff.reset();
+            self.reload_now = true;
             self.connect();
         }
     }
@@ -923,6 +1072,13 @@ impl Engine {
             Internal::Fetched { session, answers } if session == self.session => {
                 self.on_fetched(*answers);
             }
+            Internal::Evaluated {
+                dashboards,
+                snapshot,
+                quiet,
+                broken,
+            } => self.on_evaluated(dashboards, *snapshot, quiet, broken),
+            Internal::PreviewDone => self.on_preview_done(),
             // An older session's late answer.
             Internal::Connected { .. }
             | Internal::ConnectFailed { .. }
@@ -936,6 +1092,10 @@ impl Engine {
     ///
     /// Stage 3: flush the event log here.
     fn stop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        for event in std::mem::take(&mut self.outbox) {
+            self.send_event(event);
+        }
         self.teardown();
         tracing::debug!("engine stopped");
     }

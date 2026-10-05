@@ -66,6 +66,20 @@ pub struct Tuning {
     /// How long [`crate::CoreHandle::shutdown`] waits for the runtime
     /// thread (5 s).
     pub shutdown_timeout: Duration,
+    /// The freshness watchdog looks for overdue objects at most this often
+    /// (5 s), re-querying at most 200 of them per look.
+    pub watchdog_interval: Duration,
+    /// After a reconnect the client goes live on the objects it has and
+    /// reconciles with a lean reload after a random delay below this
+    /// (10 s), so clients reconnecting together after an Icinga restart
+    /// don't reload at the same instant. A `Refresh` reloads at once.
+    pub reload_jitter: Duration,
+    /// The periodic reconcile's interval, overriding
+    /// `General::reconcile_interval_secs` (tests); `None` (the default)
+    /// uses the setting: adaptive for 0 (5 minutes below 5 000 objects,
+    /// 15 minutes above), else the setting but at least
+    /// `ic_config::MIN_RECONCILE_INTERVAL_SECS`.
+    pub reconcile_interval: Option<Duration>,
 }
 
 impl Default for Tuning {
@@ -80,6 +94,9 @@ impl Default for Tuning {
             missing_ttl: Duration::from_mins(10),
             max_batch: 5_000,
             shutdown_timeout: Duration::from_secs(5),
+            watchdog_interval: Duration::from_secs(5),
+            reload_jitter: Duration::from_secs(10),
+            reconcile_interval: None,
         }
     }
 }

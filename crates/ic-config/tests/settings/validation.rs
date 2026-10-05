@@ -357,9 +357,16 @@ fn app_wide_settings_have_minimums() {
         issues(&config),
         [
             "general.event_log_retention_hours: must be at least 1 hour",
-            "general.reconcile_interval_secs: must be at least 10 seconds",
+            "general.reconcile_interval_secs: must be 0 (adaptive) or at least 60 seconds",
         ]
     );
+    // 0 is adaptive, and the default.
+    config.general.event_log_retention_hours = 1;
+    config.general.reconcile_interval_secs = 0;
+    assert_eq!(issues(&config), Vec::<String>::new());
+    assert_eq!(ic_config::General::default().reconcile_interval_secs, 0);
+    config.general.reconcile_interval_secs = 60;
+    assert_eq!(issues(&config), Vec::<String>::new());
 }
 
 #[test]

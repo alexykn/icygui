@@ -8,7 +8,7 @@ Already implemented and binding:
 - `ic-api`: implemented and reviewed, including the tiered loading (`Detail`, `Fetched`), with integration tests against `ic-mock` and contract tests against a real Icinga 2.15.6.
 - `ic-mock`: implemented (wave 2); API filters are evaluated by `ic-filter`.
 - `ic-ui-kit` and `ic-app`: the static UI (chrome, dashboard list, service and host panes, tabs) on demo data.
-- `ic-core`: `ports.rs` (`SecretStore`, `Notifier`, `Clock`, `SystemClock`) and `snapshot.rs` (`Snapshot`, `DashboardResult`, `DashboardRow`, `Summary`). Wave 3, stage 1 of 3 is built: `start`/`CoreHandle`, `Command`/`CoreEvent`, sync engine steps 1–3, 7 and 8 (connect, tiered load, event stream, status poll, reconnects), the store and snapshots, actions, `test_connection` and `fetch_certificate`. Stage 2 (dashboards, freshness watchdog, hydration, reconcile) and stage 3 (notifications, event log) follow; the commands they own are accepted and answered with empty replies until then.
+- `ic-core`: `ports.rs` (`SecretStore`, `Notifier`, `Clock`, `SystemClock`) and `snapshot.rs` (`Snapshot`, `DashboardResult`, `DashboardRow`, `Summary`). Wave 3, stages 1 and 2 of 3 are built: `start`/`CoreHandle`, `Command`/`CoreEvent`, the whole sync engine (connect, tiered load, event stream, freshness watchdog, hydration, reconcile, status poll, reconnects), the store and snapshots, dashboards (with previews), actions, `test_connection` and `fetch_certificate`. Stage 3 (notifications, event log) follows; the commands it owns are accepted and answered with empty replies until then.
 
 Read the existing code before implementing against it. Don't change these types without a strong reason; if you must, explain the change in your report.
 
@@ -131,7 +131,7 @@ impl DashboardGroup { pub fn new(name: &str) -> Self; /* + dashboard, dashboard_
 impl Dashboard { pub fn new(name: &str, view: View) -> Self; }                            // fresh id, ScopeSetting::Inherit
 pub struct ValidationIssue { pub path: String, pub message: String }   // "environments[0].tls.pinned_sha256" / "must not be empty"; Display "path: message"
 pub const MIN_EVENT_LOG_RETENTION_HOURS: u32;             // 1
-pub const MIN_RECONCILE_INTERVAL_SECS: u32;               // 10
+pub const MIN_RECONCILE_INTERVAL_SECS: u32;               // 60; General.reconcile_interval_secs is 0 (adaptive, the default) or at least this
 pub fn default_groups() -> Vec<DashboardGroup>;           // "overview": "problems" (services, problems_only, hide_handled), "host problems", "all services"
 pub fn new_id() -> String;                                // UUID v4
 pub fn export_groups(groups: &[DashboardGroup]) -> Result<String, ConfigError>;     // TOML for sharing: format = "icygui-dashboards", version, [[groups]]
@@ -361,7 +361,9 @@ pub struct SystemClock;                                        // impl Clock wit
 pub fn start(spec: EnvironmentSpec, ports: Ports) -> Result<CoreHandle, CoreError>;   // spawns the runtime thread
 pub fn start_with_tuning(spec: EnvironmentSpec, ports: Ports, tuning: Tuning) -> Result<CoreHandle, CoreError>;   // other timing (tests)
 pub struct Tuning { backoff_initial: 1 s, backoff_max: 60 s, healthy_after: 5 min, status_interval: 30 s, publish_interval: 250 ms,
-                    requery_delay: 200 ms, missing_ttl: 10 min, max_batch: 5 000, shutdown_timeout: 5 s }   // all pub; Default = these
+                    requery_delay: 200 ms, missing_ttl: 10 min, max_batch: 5 000, shutdown_timeout: 5 s,
+                    watchdog_interval: 5 s, reload_jitter: 10 s, reconcile_interval: None }   // all pub; Default = these
+                    // reconcile_interval: Some(d) overrides General.reconcile_interval_secs (tests)
 pub enum CoreError { Runtime(io::Error), Thread(io::Error) }
 pub struct CoreHandle { … }
 impl CoreHandle {
@@ -389,8 +391,8 @@ pub enum Command {
     LoadHistory { object: Option<ObjectKey>, limit: usize, reply: oneshot::Sender<Vec<LogEntry>> },
     LoadNotifications { limit: usize, reply: oneshot::Sender<Vec<NotificationRecord>> },
     MarkNotificationsRead,
-    PreviewDashboard { view: ic_config::View, reply: oneshot::Sender<Result<DashboardResult, String>> },   // dashboard editor: live match count and rows
-    Hydrate(Vec<ObjectKey>),                                   // fetch Full details for lean objects (visible rows, opened pane)
+    PreviewDashboard { view: ic_config::View, reply: oneshot::Sender<Result<DashboardResult, String>> },   // dashboard editor: live match count and rows; Err = the filter doesn't parse or fails (with line/column or the object)
+    Hydrate(Vec<ObjectKey>),                                   // fetch Full details for lean services (visible rows, opened pane); hosts are always full
 }
 pub enum CoreEvent {
     Connection(ConnectionState),
@@ -417,9 +419,12 @@ pub enum LogKind { State { state: CheckableState, state_type: StateType }, Ackno
 pub struct NotificationRecord { pub intent: NotificationIntent, pub read: bool }
 ```
 
-The `Snapshot` contract type gains two fields; both are allowed additive changes:
+The `Snapshot` contract type gains three fields; all are allowed additive changes:
 - `last_event_at: Option<Timestamp>`, which the footer shows as "master-01 · 2s";
-- `overall: Summary`, over all hosts and services, which drives the tray icon and its tooltip.
+- `overall: Summary`, over all hosts and services, which drives the tray icon and its tooltip;
+- `late: Arc<BTreeMap<ObjectKey, Timestamp>>`, the objects whose check is late (step 4) with the deadline they missed (Icinga's `next_update`, on Icinga's clock), plus `Snapshot::is_late(&ObjectKey)`. The UI shows "late 12m".
+
+**Event order:** events reach the UI in the order the engine produced them. While a snapshot's dashboards are being evaluated (a blocking thread, below), other events wait and follow it: `Connected` comes after the snapshot of the load that completed it, an `ActionFinished` after the snapshot cut before it.
 
 **Sync engine** (designed for 2 000 hosts / 30 000 services; numbers and reasoning in docs/performance.md):
 1. Connect: build an `ic_api::Client` from the environment.
@@ -445,16 +450,21 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
    - `downtime_depth` follows the downtime events (+1 when one takes effect, −1 when one in effect is removed) until the next `CheckResult` brings Icinga's count.
    - Required throughput: 50 000 recorded events applied in under 3 s; steady state about 110 events/s.
 4. *Freshness watchdog:*
-   - Each object's deadline is Icinga's `next_update`: `next_check` + interval + 2 × latency for active checks, last result + 2 × interval for passive ones.
-   - It is computed locally with Icinga's formula from the lean attributes (`next_update` isn't loaded; see ic-api, *Lean objects*) and recomputed from every `CheckResult` event, so manual checks by anyone move it.
-   - Overdue objects are re-queried by name: batches ≤ 200, at most once per object per interval.
-   - Objects Icinga still reports overdue get `late = true` in the snapshot (the UI shows "late").
+   - Each object's deadline is Icinga's `next_update` (`Checkable::GetNextUpdate`): `next_check` + interval + 2 × latency for active checks, end of the last result + 2 × interval + 2 × latency for passive ones; interval = `retry_interval` for a soft problem with active checks, else `check_interval`; latency = the last result's `execution_end − schedule_start`.
+   - It is computed locally with Icinga's formula from the lean attributes (`next_update` isn't loaded; see ic-api, *Lean objects*) and recomputed from every `CheckResult` event (whose `next_check` the store estimates), so manual checks by anyone move it.
+     - *Lean objects without a result:* latency counts as 0 until a `CheckResult` event or a full fetch brings one. Their deadline is earlier by twice the latency (usually well under a second next to a whole interval of slack), so at worst they are re-queried a little early.
+     - *Never-checked passive objects* have no deadline (nothing is expected of them; Icinga's formula would count from the program start, IDO's `next_update` leaves them out). Active objects get none while `/v1/status` says host or service checks are disabled globally (re-querying can't help).
+     - *Clock:* deadlines are on Icinga's clock, not the laptop's: the engine follows it from the timestamps Icinga sends (every event; a load's latest `last_check`) plus the monotonic time since. It lags rather than leads, so skew errs towards fewer re-queries; an event more than 5 minutes behind the estimate resets it (Icinga's clock was set back).
+   - Overdue objects are re-queried by name through the re-query queue (deduplicated, Lean or Full as loaded): at most 200 per look and one look per `Tuning::watchdog_interval` (5 s), none while a load runs; an object at most once per interval (at least a minute).
+   - Objects Icinga still reports overdue after the re-query, or in a load's answers, are late (`Snapshot.late`); a late object waits twice as long before each further re-query (up to an hour). A check result that moves the deadline clears the flag at once, without a query.
 5. *Hydration on demand:*
-   - `Command::Hydrate(Vec<ObjectKey>)` asks for `Full` details of lean objects. The UI sends it, debounced, for visible rows without output and for an opened pane.
-   - Batches hold at most 200 names and requests are deduplicated.
-6. *Reconcile:* a lean reload (tiers 1–3) on connect, after every reconnect (with jitter) and on `Refresh`.
-   - Periodically, adaptively: every 5 minutes below 5 000 objects, every 15 minutes above. `General.reconcile_interval_secs = 0` means adaptive; any other value overrides it.
-   - Diff the reload against the store; state changes found only by the diff produce rule inputs, as do removals.
+   - `Command::Hydrate(Vec<ObjectKey>)` asks for `Full` details of lean services. The UI sends it, debounced, for visible rows without output and for an opened pane. Hosts (always loaded in full), services already loaded in full and unknown keys are skipped.
+   - The names join the re-query queue, deduplicated against what is queued or in flight (at most 5 000 waiting), in rounds of ≤ 1 000 and requests of ≤ 200 names; the snapshot goes out right after the answer.
+   - A later lean answer never replaces a hydrated object's `Full`-only fields (result, links) with lean defaults. When a lean answer moves a service's state on while its stored result is older than its `last_check` (a change only a reload found, such as a recovery during a reconnect gap), the service is fetched in full again, so the output matches the state (problems come with tier 3 anyway).
+6. *Reconcile:* a lean reload (tiers 1–3) on connect, after every reconnect and on `Refresh`.
+   - After a reconnect (when the store holds a complete load of the same server) the engine goes live at once on the objects it has, `Connecting` → `Connected` without `Loading`, and the stream keeps them current; the reload follows after a random delay below `Tuning::reload_jitter` (10 s), so clients reconnecting together after an Icinga restart spread out. A reconnect the user asked for (`Refresh`, `UpdateEnvironment`) reloads at once. The first connect, and a connect after the store was emptied (another server), still loads before going live, with `Loading` progress.
+   - Periodically, adaptively: every 5 minutes below 5 000 objects, every 15 minutes above, counted from the last completed load with ±10 % jitter (clients drift apart). `General.reconcile_interval_secs = 0` (the default) means adaptive; any other value overrides it, but never below `ic_config::MIN_RECONCILE_INTERVAL_SECS` (60 s). A failed reload waits for the next interval.
+   - Query answers are diffed against the store as they are applied: a change no event explains (state, state type, `last_state_change`, acknowledgement, downtime depth, flapping, reachability), and every removal, is recorded (`store::Discovered { object, before, after: Option }`) for stage 3, which turns them into rule inputs. The first load into an empty store finds nothing.
    - **Never** periodic full-attribute reloads: they cost the master around 1 GB of memory at this scale.
 7. Poll status every 30 s (only with `status/query`; a 403 stops the polling). A changed `program_start` means Icinga restarted and triggers a reload; the connection state stays `Connected` during reloads.
 8. Stream end or error → `Reconnecting` with exponential backoff and jitter (1 s → 60 s, reset after 5 minutes of health). Auth (401) → `AuthFailed`. TLS errors and pin mismatch → `TlsFailed` with the presented certificate (via `fetch_server_certificate`).
@@ -469,18 +479,20 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
 - `Snapshot.last_event_at` is the local time the latest stream batch was applied; `Snapshot.overall` counts every host and service (services' problems are handled by acknowledgement, downtime or a host problem; the worst unhandled state by severity).
 - The UI must keep draining `CoreEvent`s: the channel is unbounded and every queued snapshot keeps its copy of the maps alive.
 
-**Dashboards:** evaluate per dashboard per snapshot, incrementally, on a blocking thread (`spawn_blocking`):
-- Keep a compiled `ic_filter::Filter` per dashboard (recompiled when its source changes) and a per-dashboard match set.
-- Re-evaluate only dirty objects; do a full re-evaluation when dashboards or the object set change wholesale (reload).
+**Dashboards:** evaluate per dashboard per snapshot, incrementally, on a blocking thread (`spawn_blocking`; one evaluation at a time, the snapshot goes out with its results, the stream keeps being applied meanwhile):
+- Keep a compiled `ic_filter::Filter` per dashboard (recompiled when its source or object kind changes) and a per-dashboard match set with the facts rows and summaries need (state, severity, handled, `last_state_change`, a hash of its group-by groups), plus the visible members in sort order (`BTreeSet`), so a changed object costs a removal and an insertion.
+- Re-evaluate only dirty objects (a changed host also re-evaluates its services: their filters can read `host.*`, and their handling depends on it); do a full re-evaluation when dashboards or the object set change wholesale (reload, new or changed filter). Changed display settings (`problems_only`, `hide_handled`, `sort`) only rebuild the rows. A dashboard whose rows didn't change keeps the same `Arc` (the UI can skip re-rendering).
+- Filters calling `get_time()` change with time: those dashboards are re-evaluated in full every 30 s. `get_time()` reads Icinga's clock (step 4) where known.
 - A `Services` view evaluates `ServiceScope { service, host }`; a `Hosts` view evaluates `HostScope`.
-- *Membership* (used for notifications) = filter matches, ignoring `problems_only` and `hide_handled`, so recoveries still match.
+- *Membership* (used for notifications) = filter matches, ignoring `problems_only` and `hide_handled`, so recoveries still match. Stage 3 reads it after the evaluation that includes the change.
 - *Rows:*
-  - apply `problems_only`, then `hide_handled` (Icinga's handled: acknowledged, in downtime, or host problem for services);
-  - sort per `Sort`; ties go to severity desc, then `last_state_change` desc, then host name, then service name;
-  - `GroupBy` inserts `DashboardRow::Group` headers. Groups are ordered by their worst severity (desc), then label; with host groups and service groups an object appears under each of its groups, and objects without groups go under "ungrouped" last.
+  - apply `problems_only`, then `hide_handled` (Icinga's handled: a problem that is acknowledged, in downtime, or for services whose host has a problem; OK objects are never hidden);
+  - sort per `Sort`; ties go to severity desc, then `last_state_change` desc, then host name, then service name (object names, not display names; the `Host` and `Service` sort keys sort by name too);
+  - `GroupBy` inserts `DashboardRow::Group` headers. Groups are ordered by their worst severity (desc), then label (host display name, group display name), then name; with host groups and service groups an object appears under each of its groups, and objects without groups go under "ungrouped" last (hosts have no service groups). Objects keep the sort order within a group; `count` is the rows under the header.
 - *Summary* is computed over all filter matches, *before* `problems_only` and `hide_handled` (it counts OK objects and handled problems too).
-- A filter error sets `DashboardResult.error`.
-- Performance target: 20 000 services × 10 dashboards stays responsive. A full evaluation takes well under a second in release builds; incremental updates take milliseconds. Test this with the `large` mock scenario (ignored test, run in release).
+- A filter error sets `DashboardResult.error` (rows and summary empty): a parse error with line and column, or an evaluation error (a type error such as `"a" < 1`, an unknown function) with the object it failed for and how many others, like an Icinga query with such a filter fails as a whole. The objects it matched still count as memberships. An evaluation that panics (a bug) is contained: the snapshot still goes out with the previous results and the dashboards are evaluated afresh next time.
+- *Previews* (`PreviewDashboard`) evaluate the unsaved view in full over the current objects on a blocking thread: one at a time, the newest request waits, a waiting one replaced by a newer request is dropped (its receiver sees `Canceled`).
+- Performance target: 20 000 services × 10 dashboards stays responsive. A full evaluation takes well under a second in release builds; incremental updates take milliseconds. Measured with the `large` mock scenario (docs/performance.md; ignored tests).
 
 **Notifications:**
 - Build an `ic_rules::RuleSet` from the environment (environment name, settings, groups/dashboards with their `ScopeSetting`s) and rebuild it on `UpdateEnvironment`.
@@ -508,6 +520,8 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
 - It reports `ActionFinished` with per-object failures. For example, `execute-command`'s "Can't find a valid endpoint": by default pass the object's `command_endpoint`, else the instance's node name. Without an endpoint, targets with a `command_endpoint` go in one request without one (Icinga's `$command_endpoint$`), the others in a second request with the instance's node name.
 - After success it marks the targets dirty, so their new state shows within a second (removing a downtime or comment re-queries its object); the answer is published at once.
 - Actions run on their own task: one in flight when the connection drops still finishes and reports. Without a connection the answer is immediate (`error: "not connected to Icinga"`).
+
+**Contract changes in wave 3, stage 2** (additive unless noted): `Snapshot.late` and `Snapshot::is_late`; `Tuning.watchdog_interval`, `Tuning.reload_jitter` and `Tuning.reconcile_interval`; after a reconnect the engine goes `Connected` without `Loading` and reloads in the background (behaviour); events wait for an in-flight snapshot (ordering); `ic_config::General::reconcile_interval_secs` defaults to 0 (adaptive) instead of 60, and `MIN_RECONCILE_INTERVAL_SECS` is 60 instead of 10 with 0 valid (a 10-second lean reload of 30 000 services would cost the master about 28 MB every 10 s). `ic-core` depends on `ic-filter`.
 
 **Contract changes in wave 3, stage 1** (additive; they only break exhaustive matches and struct literals of the changed types): `ic_model::StateAfter` and `Event::CheckResult.after`; `ic_api::EventStream::into_lines`, `EventLines` and `parse_event`; `ConnectionState::Misconfigured`; `LoadPhase`'s variants; `start_with_tuning` and `Tuning`; `REQUIRED_PERMISSIONS` and `missing_permissions`; `SystemClock`; `Snapshot.last_event_at` and `Snapshot.overall` (`ic-app`'s demo builds a `Snapshot` field by field and needs the two new fields in wave 4); `MockControl::set_program_start`.
 

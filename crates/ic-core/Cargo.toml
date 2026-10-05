@@ -14,6 +14,7 @@ workspace = true
 futures.workspace = true
 ic-api.workspace = true
 ic-config.workspace = true
+ic-filter.workspace = true
 ic-model.workspace = true
 ic-rules.workspace = true
 secrecy.workspace = true

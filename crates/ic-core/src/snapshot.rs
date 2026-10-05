@@ -46,6 +46,12 @@ pub struct Snapshot {
     /// Counts over every host and service, for the tray icon and its
     /// tooltip.
     pub overall: Summary,
+    /// Hosts and services whose check is late: Icinga still reported them
+    /// overdue when the freshness watchdog asked (or when a reload brought
+    /// them), with the deadline they missed (Icinga's `next_update`, on
+    /// Icinga's clock). The UI marks them ("late 12m"). An object leaves
+    /// the map as soon as a check result moves its deadline.
+    pub late: Arc<BTreeMap<ObjectKey, Timestamp>>,
 }
 
 impl Snapshot {
@@ -66,6 +72,12 @@ impl Snapshot {
             )
             .take_while(move |(key, _)| &key.host == host)
             .map(|(_, service)| service)
+    }
+
+    /// Whether a host's or service's check is late (see [`Snapshot::late`]).
+    #[must_use]
+    pub fn is_late(&self, object: &ObjectKey) -> bool {
+        self.late.contains_key(object)
     }
 }
 

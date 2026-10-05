@@ -1,6 +1,7 @@
 //! UI-agnostic application engine: the per-environment runtime, the sync
-//! engine (initial load, event stream, re-queries, status polls,
-//! reconnects), the object store, command dispatch and the local event log.
+//! engine (initial load, event stream, re-queries, freshness watchdog,
+//! hydration, reconcile, status polls, reconnects), the object store, the
+//! dashboards evaluated over it, command dispatch and the local event log.
 //!
 //! - [`start`] runs the engine of one environment on its own thread and
 //!   returns a [`CoreHandle`]: [`Command`]s go in, [`CoreEvent`]s come out,
@@ -19,6 +20,7 @@
 mod backoff;
 mod command;
 mod connect;
+mod dashboards;
 mod engine;
 mod error;
 mod handle;

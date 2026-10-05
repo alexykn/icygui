@@ -215,7 +215,7 @@ ic-mock ──► ic-model, ic-filter          (dev-dependency of ic-api, ic-cor
 ```
 
 - **Tokio runtime** on a dedicated background thread, owned by `ic-core`. GPUI keeps its own executor on the main thread. The bridge in `ic-app` is a GPUI task that drains `CoreEvent`s and updates `Entity<…>` models, so views re-render through normal GPUI notifications.
-- **Sync engine**: (1) parallel initial queries for hosts, services, comments, downtimes, groups with explicit `attrs`; (2) open `/v1/events` and apply changes; (3) reconcile every 60s (configurable) with a full query and diff, because the stream has no replay and reconnects leave gaps. Store updates are batched (~100ms) into one new snapshot so a check-result burst doesn't cause a burst of re-renders.
+- **Sync engine**: (1) parallel initial queries for hosts, services, comments, downtimes, groups with explicit `attrs`; (2) open `/v1/events` and apply changes; (3) reconcile with a lean reload and diff (adaptively every 5 or 15 minutes, configurable; after reconnects with jitter), because the stream has no replay and reconnects leave gaps; never periodic full-attribute reloads (docs/performance.md). Store updates are batched (~100ms) into one new snapshot so a check-result burst doesn't cause a burst of re-renders.
 - **Notifications don't need the UI**: the rule engine runs inside the runtime, so background mode works with no window open.
 - **Commands** carry an id. The runtime runs the request, then emits `CommandResult { id, outcome }`. Optimistic UI state is keyed by that id.
 

@@ -67,9 +67,17 @@ impl ActionResult {
     }
 }
 
+/// `DiagnosticInformation(ex, false)` of an exception with a message.
+fn diagnostic(message: &str) -> String {
+    format!("Error: {message}\n")
+}
+
 /// An exception inside an action: Icinga reports it as a 500 result.
 fn failed(message: &str) -> ActionResult {
-    ActionResult::new(500, format!("Action execution failed: '{message}'."))
+    ActionResult::new(
+        500,
+        format!("Action execution failed: '{}'.", diagnostic(message)),
+    )
 }
 
 /// Handles an action request.
@@ -128,9 +136,10 @@ pub(crate) fn handle(
             Err(message) => {
                 let mut result = failed(&message);
                 if verbose {
-                    result
-                        .extra
-                        .insert("diagnostic_information".into(), Json::String(message));
+                    result.extra.insert(
+                        "diagnostic_information".into(),
+                        Json::String(diagnostic(&message)),
+                    );
                 }
                 result
             }
@@ -202,7 +211,8 @@ fn invoke(
                     "A timestamp is required to delay notifications",
                 ));
             }
-            params.last_f64("timestamp")?;
+            // Icinga only converts the timestamp per notification object;
+            // the mock has none, so nothing is converted or stored.
             Ok(ActionResult::new(
                 200,
                 format!(
@@ -502,19 +512,23 @@ fn acknowledge(world: &mut World, params: &Params, object: &str) -> Result<Actio
             "Cannot acknowledge problem for non-existent object.",
         ));
     };
-    if checkable.is_service() {
+    let kind = if checkable.is_service() {
         if checkable.state_raw == 0 {
             return Ok(ActionResult::new(409, format!("Service {object} is OK.")));
         }
-    } else if checkable.state() == 0 {
-        return Ok(ActionResult::new(409, format!("Host {object} is UP.")));
-    }
-    if world.is_acknowledged(checkable) {
-        let kind = if checkable.is_service() {
-            "Service"
-        } else {
-            "Host"
-        };
+        "Service"
+    } else {
+        if checkable.state() == 0 {
+            return Ok(ActionResult::new(409, format!("Host {object} is UP.")));
+        }
+        "Host"
+    };
+    // `IsAcknowledged()` clears an expired acknowledgement on the way.
+    world.expire_acknowledgement(object);
+    if world
+        .checkable(object)
+        .is_some_and(|c| c.acknowledgement != 0)
+    {
         return Ok(ActionResult::new(
             409,
             format!("{kind} {object} is already acknowledged."),
@@ -775,6 +789,12 @@ fn resolve_macros(
     out
 }
 
+/// `MacroProcessor::ResolveMacro` for the `override`, `service` and `host`
+/// resolvers: `host.<attr>` and `service.<attr>` address one object
+/// (dotted paths walk into dictionaries such as `vars`); a bare name is
+/// looked up as a custom variable, then as an attribute, on the service and
+/// then on the host. The first object that has it wins, even when empty.
+/// Unknown macros resolve to the empty string.
 fn resolve_macro(
     world: &World,
     name: &str,
@@ -787,28 +807,46 @@ fn resolve_macro(
     let Some(checkable) = world.checkable(object) else {
         return String::new();
     };
-    let mut chain = vec![checkable];
-    if checkable.is_service()
-        && let Some(host) = world.hosts.get(&checkable.host_name)
-    {
-        chain.push(host);
+    let host = ObjRef {
+        kind: ObjKind::Host,
+        name: checkable.host_name.clone(),
+    };
+    let service = checkable.is_service().then(|| ObjRef {
+        kind: ObjKind::Service,
+        name: object.to_owned(),
+    });
+    if let Some(path) = name.strip_prefix("host.") {
+        return macro_value(world, &host, path).map_or_else(String::new, |v| to_icinga_string(&v));
     }
-    for c in chain {
-        let value = match name {
-            "command_endpoint" => Some(c.command_endpoint.clone()),
-            "check_command" => Some(c.check_command.clone()),
-            "event_command" => Some(c.event_command.clone()),
-            "name" => Some(c.short_name().to_owned()),
-            "address" if !c.is_service() => Some(c.address.clone()),
-            _ => None,
-        };
-        if let Some(value) = value
-            && !value.is_empty()
-        {
-            return value;
+    if let Some(path) = name.strip_prefix("service.") {
+        return service
+            .and_then(|service| macro_value(world, &service, path))
+            .map_or_else(String::new, |v| to_icinga_string(&v));
+    }
+    for target in service.iter().chain(std::iter::once(&host)) {
+        let custom = world
+            .attr(target, "vars")
+            .ok()
+            .flatten()
+            .and_then(|vars| vars.get(name).cloned());
+        if let Some(value) = custom.or_else(|| macro_value(world, target, name)) {
+            return to_icinga_string(&value);
         }
     }
     String::new()
+}
+
+/// An attribute path (`address`, `vars.os`) of an object, if it exists.
+fn macro_value(world: &World, target: &ObjRef, path: &str) -> Option<Json> {
+    let mut parts = path.split('.');
+    let mut value = world.attr(target, parts.next()?).ok().flatten()?;
+    for part in parts {
+        value = match value {
+            Json::Object(mut map) => map.remove(part)?,
+            _ => return None,
+        };
+    }
+    Some(value)
 }
 
 /// `Zone::CanAccessObject`: the object's zone is the zone or a child of it.

@@ -26,7 +26,12 @@ fn status(code: u16) -> StatusCode {
 
 /// A JSON response.
 pub(crate) fn json(code: u16, value: Json, format: NumberFormat, pretty: bool) -> Response<Body> {
-    let mut response = Response::new(full(json::encode(value, format, pretty)));
+    json_bytes(code, json::encode(value, format, pretty))
+}
+
+/// A JSON response from encoded bytes.
+pub(crate) fn json_bytes(code: u16, body: Vec<u8>) -> Response<Body> {
+    let mut response = Response::new(full(body));
     *response.status_mut() = status(code);
     response
         .headers_mut()

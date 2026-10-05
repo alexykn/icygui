@@ -157,12 +157,11 @@ async fn pipeline(
         tokio::time::sleep(latency).await;
     }
     if let Some(code) = failure {
-        let reason = StatusCode::from_u16(code)
-            .ok()
-            .and_then(|s| s.canonical_reason())
-            .unwrap_or("Error");
+        // Codes HTTP can't carry (outside 100..=999) become 500.
+        let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let reason = status.canonical_reason().unwrap_or("Error");
         return json_error(
-            code,
+            status.as_u16(),
             &format!("{reason} (failure injected by ic-mock)"),
             format,
             None,

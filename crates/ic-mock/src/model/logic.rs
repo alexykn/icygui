@@ -277,6 +277,8 @@ impl World {
         let now = self.now();
         let node = self.app.node_name.clone();
         let reachable = self.is_reachable(object, DepType::State);
+        // `GetAcknowledgement()` drops an expired acknowledgement first.
+        self.expire_acknowledgement(object);
         let checkable = self.checkable(object)?;
         let or_now = |t: f64| if t == 0.0 { now } else { t };
         let mut cr = CheckResultData {
@@ -310,7 +312,6 @@ impl World {
         {
             return Some(ProcessOutcome::NewerCheckResultPresent);
         }
-        let acknowledged = self.is_acknowledged(checkable);
         let execution_end = cr.execution_end;
 
         let checkable = self.checkable_mut(object)?;
@@ -359,7 +360,6 @@ impl World {
             checkable.last_state_change = execution_end;
         }
         let clear_ack = state_change
-            && acknowledged
             && (checkable.acknowledgement == 1
                 || (checkable.acknowledgement == 2 && checkable.is_state_ok(new_state)));
         let new_type = checkable.state_type;
@@ -423,6 +423,13 @@ impl World {
         let is_flapping = checkable.enable_flapping && enable_flapping_global && checkable.flapping;
         let new_state_type = checkable.state_type;
 
+        // `OnFlappingChanged` fires inside `UpdateFlappingStatus`, before
+        // `OnNewCheckResult`.
+        if was_flapping != is_flapping {
+            self.emit(EventType::Flapping, |world| {
+                world.flapping_event(object).unwrap_or_default()
+            });
+        }
         self.emit(EventType::CheckResult, |world| {
             world.checkable_event(object, false).unwrap_or_default()
         });
@@ -433,11 +440,6 @@ impl World {
         if state_change_event {
             self.emit(EventType::StateChange, |world| {
                 world.checkable_event(object, true).unwrap_or_default()
-            });
-        }
-        if was_flapping != is_flapping {
-            self.emit(EventType::Flapping, |world| {
-                world.flapping_event(object).unwrap_or_default()
             });
         }
         if recovery {
@@ -615,7 +617,8 @@ impl World {
         }
     }
 
-    /// `ClearAcknowledgement`: emits `AcknowledgementCleared` if it was set.
+    /// `ClearAcknowledgement`: emits `AcknowledgementCleared` if it was set
+    /// (the last-change time moves either way, as in Icinga).
     pub(crate) fn clear_acknowledgement(&mut self, object: &str, _removed_by: &str) {
         let now = self.now();
         let Some(checkable) = self.checkable_mut(object) else {
@@ -624,6 +627,7 @@ impl World {
         let was_acked = checkable.acknowledgement != 0;
         checkable.acknowledgement = 0;
         checkable.acknowledgement_expiry = 0.0;
+        checkable.acknowledgement_last_change = now;
         if was_acked {
             self.emit(EventType::AcknowledgementCleared, |world| {
                 let mut event = Map::new();
@@ -635,9 +639,20 @@ impl World {
                 event.insert("acknowledgement_type".into(), int(0));
                 event
             });
-            if let Some(checkable) = self.checkable_mut(object) {
-                checkable.acknowledgement_last_change = now;
-            }
+        }
+    }
+
+    /// Clears an acknowledgement whose expiry passed (what Icinga's
+    /// `GetAcknowledgement()` does whenever it is asked).
+    pub(crate) fn expire_acknowledgement(&mut self, object: &str) {
+        let now = self.now();
+        let expired = self.checkable(object).is_some_and(|c| {
+            c.acknowledgement != 0
+                && c.acknowledgement_expiry != 0.0
+                && c.acknowledgement_expiry < now
+        });
+        if expired {
+            self.clear_acknowledgement(object, "");
         }
     }
 

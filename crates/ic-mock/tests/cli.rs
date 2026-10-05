@@ -118,6 +118,69 @@ async fn serves_with_banner_and_reuses_certificates() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Switching `--tls` modes over one `--cert-dir` replaces the certificate
+/// that no longer fits, then keeps reusing the new one.
+#[tokio::test]
+async fn cert_dir_follows_the_tls_mode() {
+    let dir = temp_dir("modes");
+    let dir_arg = dir.to_str().unwrap().to_owned();
+    let self_signed = ["--env", "lab:0", "--no-sim", "--cert-dir", &dir_arg];
+    let with_ca = [
+        "--env",
+        "lab:0",
+        "--no-sim",
+        "--tls",
+        "ca",
+        "--cert-dir",
+        &dir_arg,
+    ];
+    let (mut child, first) = launch(&self_signed).await;
+    child.kill().await.unwrap();
+    let (mut child, ca_run) = launch(&with_ca).await;
+    child.kill().await.unwrap();
+    assert_ne!(ca_run.fingerprint, first.fingerprint, "re-issued by the CA");
+    assert!(dir.join("ca.crt").exists());
+    let (mut child, again) = launch(&with_ca).await;
+    child.kill().await.unwrap();
+    assert_eq!(again.fingerprint, ca_run.fingerprint, "reused under the CA");
+
+    // The reused certificate verifies against the CA file.
+    let ca = std::fs::read_to_string(dir.join("ca.crt")).unwrap();
+    let (mut child, served) = launch(&with_ca).await;
+    let client = common::client_from(common::ca_config(&ca, None));
+    let response = client
+        .get(format!("{}/v1", served.url))
+        .basic_auth("root", Some("icinga"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    child.kill().await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `icinga-mock | head`: a closed stdout must not stop the servers.
+#[tokio::test]
+async fn survives_a_closed_stdout() {
+    // The second environment's banner is written after the reader is gone.
+    let (mut child, banner) = launch(&["--env", "lab:0", "--env", "staging:0", "--no-sim"]).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "icinga-mock exited after its stdout was closed"
+    );
+    let client = common::client_from(common::pinned_config(banner.fingerprint));
+    let response = client
+        .get(format!("{}/v1", banner.url))
+        .basic_auth("root", Some("icinga"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    child.kill().await.unwrap();
+}
+
 #[tokio::test]
 async fn rejects_unknown_environments() {
     let output = Command::new(env!("CARGO_BIN_EXE_icinga-mock"))

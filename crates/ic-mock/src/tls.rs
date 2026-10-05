@@ -9,10 +9,12 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
-use rustls::RootCertStore;
+use rustls::client::danger::HandshakeSignatureValid;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::server::WebPkiClientVerifier;
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
 use time::{Duration as TimeDuration, OffsetDateTime};
 
 use crate::error::MockError;
@@ -93,10 +95,8 @@ fn leaf_params(node_name: &str) -> Result<CertificateParams, MockError> {
     params
         .subject_alt_names
         .push(SanType::IpAddress(IpAddr::V6(Ipv6Addr::LOCALHOST)));
-    params.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyEncipherment,
-    ];
+    // ECDSA keys sign; `keyEncipherment` would be wrong for them.
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![
         ExtendedKeyUsagePurpose::ServerAuth,
         ExtendedKeyUsagePurpose::ClientAuth,
@@ -200,6 +200,61 @@ impl TlsMaterial {
         Ok((cert.pem(), key.serialize_pem()))
     }
 
+    /// Checks that the material can serve: certificate and key parse and
+    /// belong together, the certificate is valid for at least another day,
+    /// and it is either self-signed (no CA) or chains to the CA for
+    /// `localhost`. Useful before reusing certificates from disk.
+    ///
+    /// # Errors
+    /// What is wrong, as [`MockError::Certificate`] or [`MockError::Tls`].
+    pub fn validate(&self) -> Result<(), MockError> {
+        server_state(self.clone())?;
+        let der = CertificateDer::from_pem_slice(self.cert_pem.as_bytes()).map_err(cert_error)?;
+        let (_, cert) = x509_parser::parse_x509_certificate(&der).map_err(cert_error)?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        if cert.validity().not_after.timestamp() < now + 86_400 {
+            return Err(MockError::Certificate(
+                "the certificate has expired or expires within a day".to_owned(),
+            ));
+        }
+        let Some(ca_pem) = &self.ca_pem else {
+            return if cert.issuer().as_raw() == cert.subject().as_raw() {
+                Ok(())
+            } else {
+                Err(MockError::Certificate(
+                    "the certificate is not self-signed but there is no CA".to_owned(),
+                ))
+            };
+        };
+        let mut roots = RootCertStore::empty();
+        for ca in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
+            roots
+                .add(ca.map_err(cert_error)?)
+                .map_err(|e| MockError::Tls(e.to_string()))?;
+        }
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier =
+            rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+                .build()
+                .map_err(|e| MockError::Tls(e.to_string()))?;
+        let localhost = rustls::pki_types::ServerName::try_from("localhost")
+            .map_err(|e| MockError::Tls(e.to_string()))?;
+        rustls::client::danger::ServerCertVerifier::verify_server_cert(
+            verifier.as_ref(),
+            &der,
+            &[],
+            &localhost,
+            &[],
+            UnixTime::now(),
+        )
+        .map_err(|e| {
+            MockError::Certificate(format!(
+                "the certificate doesn't verify against the CA: {e}"
+            ))
+        })?;
+        Ok(())
+    }
+
     /// SHA-256 of the server certificate's DER encoding.
     ///
     /// # Errors
@@ -233,6 +288,8 @@ pub(crate) struct TlsState {
     pub(crate) material: TlsMaterial,
     pub(crate) acceptor: tokio_rustls::TlsAcceptor,
     pub(crate) fingerprint: [u8; 32],
+    /// Verifies client certificates against the CA (when there is one).
+    client_verifier: Option<Arc<dyn ClientCertVerifier>>,
 }
 
 impl fmt::Debug for TlsState {
@@ -240,6 +297,78 @@ impl fmt::Debug for TlsState {
         f.debug_struct("TlsState")
             .field("fingerprint", &format_fingerprint(&self.fingerprint))
             .finish_non_exhaustive()
+    }
+}
+
+impl TlsState {
+    /// The common name of a client certificate chain signed by the CA, or
+    /// `None` (no CA, no certificate, or one that doesn't verify).
+    pub(crate) fn verified_client_cn(&self, chain: &[CertificateDer<'_>]) -> Option<String> {
+        let verifier = self.client_verifier.as_ref()?;
+        let (leaf, intermediates) = chain.split_first()?;
+        match verifier.verify_client_cert(leaf, intermediates, UnixTime::now()) {
+            Ok(_) => common_name(leaf),
+            Err(error) => {
+                tracing::debug!(%error, "client certificate not accepted for authentication");
+                None
+            }
+        }
+    }
+}
+
+/// Asks for client certificates and accepts any during the handshake, like
+/// Icinga, which records the verification result instead of failing the
+/// connection: a client with a foreign certificate still connects and can
+/// log in with a password. Only certificates that verify against the CA
+/// authenticate a user ([`TlsState::verified_client_cn`]). Handshake
+/// signatures are still checked, so the client owns the key.
+#[derive(Debug)]
+struct LenientClientVerifier {
+    inner: Arc<dyn ClientCertVerifier>,
+}
+
+impl ClientCertVerifier for LenientClientVerifier {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
     }
 }
 
@@ -261,7 +390,7 @@ pub(crate) fn server_state(material: TlsMaterial) -> Result<TlsState, MockError>
     let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(|e| MockError::Tls(e.to_string()))?;
-    let builder = match &material.ca_pem {
+    let (builder, client_verifier) = match &material.ca_pem {
         Some(ca_pem) => {
             let mut roots = RootCertStore::empty();
             for ca in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
@@ -273,9 +402,12 @@ pub(crate) fn server_state(material: TlsMaterial) -> Result<TlsState, MockError>
                 .allow_unauthenticated()
                 .build()
                 .map_err(|e| MockError::Tls(e.to_string()))?;
-            builder.with_client_cert_verifier(verifier)
+            let lenient = Arc::new(LenientClientVerifier {
+                inner: Arc::clone(&verifier),
+            });
+            (builder.with_client_cert_verifier(lenient), Some(verifier))
         }
-        None => builder.with_no_client_auth(),
+        None => (builder.with_no_client_auth(), None),
     };
     let config = builder
         .with_single_cert(chain, key)
@@ -284,6 +416,7 @@ pub(crate) fn server_state(material: TlsMaterial) -> Result<TlsState, MockError>
         material,
         acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(config)),
         fingerprint,
+        client_verifier,
     })
 }
 
@@ -331,6 +464,34 @@ mod tests {
                 .client_certificate("y")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn validation_catches_mismatched_material() {
+        let self_signed = TlsMaterial::self_signed("master-01").unwrap();
+        self_signed.validate().unwrap();
+        let ca_signed = TlsMaterial::ca_signed("master-01").unwrap();
+        ca_signed.validate().unwrap();
+
+        // A CA-signed certificate without its CA, or with another CA.
+        let mut orphan = ca_signed.clone();
+        orphan.ca_pem = None;
+        orphan.ca_key_pem = None;
+        assert!(orphan.validate().is_err());
+        let other = TlsMaterial::ca_signed("master-01").unwrap();
+        let mut foreign = ca_signed.clone();
+        foreign.ca_pem.clone_from(&other.ca_pem);
+        assert!(foreign.validate().is_err());
+
+        // A self-signed certificate with a CA.
+        let mut mixed = self_signed.clone();
+        mixed.ca_pem.clone_from(&ca_signed.ca_pem);
+        assert!(mixed.validate().is_err());
+
+        // A key that belongs to another certificate.
+        let mut swapped = self_signed;
+        swapped.key_pem = ca_signed.key_pem;
+        assert!(swapped.validate().is_err());
     }
 
     #[test]

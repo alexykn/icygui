@@ -113,6 +113,7 @@ async fn client_certificates_authenticate_api_users() {
         tls: MockTls::CaSigned,
         users: vec![
             MockUser::new("cert-user", "", &["objects/query/Host"]).with_client_cn("ops-client"),
+            MockUser::root(),
         ],
         ..MockConfig::default()
     };
@@ -154,6 +155,31 @@ async fn client_certificates_authenticate_api_users() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // A certificate from another CA still connects (Icinga only records the
+    // failed verification), logs nobody in, and basic auth works alongside.
+    let elsewhere = TlsMaterial::ca_signed("elsewhere").unwrap();
+    let (cert, key) = elsewhere.client_certificate("ops-client").unwrap();
+    let foreign = client_from(ca_config(&ca, Some((&cert, &key))));
+    let response = foreign
+        .get(format!("{}/v1/objects/hosts", server.url()))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = foreign
+        .get(format!("{}/v1/objects/hosts", server.url()))
+        .basic_auth("root", Some("icinga"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        server.control().requests().last().unwrap().user.as_deref(),
+        Some("root")
+    );
 }
 
 #[tokio::test]

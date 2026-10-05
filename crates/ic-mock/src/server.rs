@@ -329,7 +329,8 @@ async fn connection(
 ) {
     let mut kill = shared.kill.subscribe();
     kill.mark_unchanged();
-    let acceptor = shared.tls().acceptor.clone();
+    let tls_state = shared.tls();
+    let acceptor = tls_state.acceptor.clone();
     let tls = match tokio::time::timeout(Duration::from_secs(15), acceptor.accept(stream)).await {
         Ok(Ok(tls)) => tls,
         Ok(Err(error)) => {
@@ -341,13 +342,15 @@ async fn connection(
             return;
         }
     };
+    // Like Icinga: a client certificate signed by the CA logs in the API
+    // user with that `client_cn`; any other certificate is ignored.
     let cert_user = tls
         .get_ref()
         .1
         .peer_certificates()
-        .and_then(|certs| certs.first())
-        .and_then(|cert| tls::common_name(cert))
+        .and_then(|chain| tls_state.verified_client_cn(chain))
         .and_then(|cn| shared.users.by_client_cn(&cn));
+    drop(tls_state);
     let info = Arc::new(ConnInfo { cert_user, peer });
     let service_shared = Arc::clone(&shared);
     let service = service_fn(move |request| {

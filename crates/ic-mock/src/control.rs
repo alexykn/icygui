@@ -220,7 +220,11 @@ impl MockControl {
         if ok {
             return Err(MockError::Rejected(format!("{name} has no problem")));
         }
-        if world.is_acknowledged(checkable) {
+        world.expire_acknowledgement(&name);
+        if world
+            .checkable(&name)
+            .is_some_and(|c| c.acknowledgement != 0)
+        {
             return Err(MockError::Rejected(format!(
                 "{name} is already acknowledged"
             )));
@@ -375,7 +379,9 @@ impl MockControl {
 
     // --- faults -------------------------------------------------------------
 
-    /// Fails the next `count` requests with `status` (e.g. 500, 503).
+    /// Fails the next `count` requests with `status` (e.g. 500, 503) and an
+    /// Icinga-style error body, before authentication. Codes outside
+    /// `100..=999` become 500. `count = 0` cancels pending failures.
     pub fn fail_next(&self, count: u32, status: u16) {
         self.shared.set_failures(count, status);
     }

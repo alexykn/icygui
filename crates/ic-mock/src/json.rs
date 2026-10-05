@@ -25,7 +25,10 @@ pub(crate) fn int(value: impl Into<i64>) -> Value {
     num(value.into() as f64)
 }
 
-/// Rewrites every number in `value` to the given style.
+/// Rewrites every number in `value` to the given style and sorts object
+/// keys (Icinga's dictionaries are ordered maps). Sorting matters when
+/// another crate in the build enables `serde_json/preserve_order`, which
+/// would otherwise keep insertion order.
 pub(crate) fn normalize(value: &mut Value, format: NumberFormat) {
     match value {
         Value::Number(number) => {
@@ -43,6 +46,7 @@ pub(crate) fn normalize(value: &mut Value, format: NumberFormat) {
             }
         }
         Value::Object(map) => {
+            map.sort_keys();
             for item in map.values_mut() {
                 normalize(item, format);
             }
@@ -81,6 +85,35 @@ pub(crate) fn encode(mut value: Value, format: NumberFormat, pretty: bool) -> Ve
     serde_json::to_vec(&value).unwrap_or_else(|_| b"null".to_vec())
 }
 
+/// Serializes `{"results": [...]}` one entry at a time, so a large answer
+/// (all services of a big installation) never exists as a value tree and
+/// as text at once. Pretty output takes the simple route.
+pub(crate) fn encode_results<I>(entries: I, format: NumberFormat, pretty: bool) -> Vec<u8>
+where
+    I: IntoIterator<Item = Value>,
+{
+    if pretty {
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "results".into(),
+            Value::Array(entries.into_iter().collect()),
+        );
+        return encode(Value::Object(body), format, true);
+    }
+    let mut out = b"{\"results\":[".to_vec();
+    for (index, mut entry) in entries.into_iter().enumerate() {
+        if index > 0 {
+            out.push(b',');
+        }
+        normalize(&mut entry, format);
+        if serde_json::to_writer(&mut out, &entry).is_err() {
+            out.extend_from_slice(b"null");
+        }
+    }
+    out.extend_from_slice(b"]}");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +149,33 @@ mod tests {
     fn non_finite_numbers_become_null() {
         assert_eq!(num(f64::NAN), Value::Null);
         assert_eq!(int(5), json!(5.0));
+    }
+
+    #[test]
+    fn keys_are_sorted_whatever_the_map_order() {
+        let mut map = serde_json::Map::new();
+        map.insert("type".into(), json!("x"));
+        map.insert("b".into(), json!({ "z": 1, "a": 2 }));
+        map.insert("a".into(), json!(1));
+        let body = encode(Value::Object(map), NumberFormat::Integral, false);
+        assert_eq!(
+            String::from_utf8(body).unwrap(),
+            r#"{"a":1,"b":{"a":2,"z":1},"type":"x"}"#
+        );
+    }
+
+    #[test]
+    fn results_stream_like_the_whole_document() {
+        let entries = vec![json!({ "name": "a", "code": 1 }), json!({ "name": "b" })];
+        for pretty in [false, true] {
+            let streamed = encode_results(entries.clone(), NumberFormat::Float, pretty);
+            let whole = encode(json!({ "results": entries }), NumberFormat::Float, pretty);
+            assert_eq!(streamed, whole);
+        }
+        assert_eq!(
+            encode_results(Vec::new(), NumberFormat::Float, false),
+            b"{\"results\":[]}"
+        );
     }
 
     #[test]

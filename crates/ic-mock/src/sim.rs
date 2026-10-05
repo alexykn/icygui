@@ -58,6 +58,10 @@ pub(crate) struct SimState {
     targets: BTreeMap<String, Target>,
     outage: Option<Outage>,
     storm_until: Option<u64>,
+    /// Hosts in a simulated maintenance window, until the given tick. The
+    /// simulator tracks these itself: whether the downtime objects still
+    /// exist depends on the wall clock, which must not steer decisions.
+    maintenance: BTreeMap<String, u64>,
 }
 
 impl Default for SimState {
@@ -71,6 +75,7 @@ impl Default for SimState {
             targets: BTreeMap::new(),
             outage: None,
             storm_until: None,
+            maintenance: BTreeMap::new(),
         }
     }
 }
@@ -122,6 +127,7 @@ impl World {
         self.sim.targets.clear();
         self.sim.outage = None;
         self.sim.storm_until = None;
+        self.sim.maintenance.clear();
         let objects: Vec<(String, f64)> = self
             .all_checkables()
             .filter(|c| c.enable_active_checks)
@@ -147,7 +153,7 @@ impl World {
             self.sim_outage(tick);
         }
         if self.sim.config.downtimes {
-            self.sim_downtime();
+            self.sim_downtime(tick);
         }
         self.sim_storm(tick);
         if self.sim.config.checks {
@@ -197,6 +203,7 @@ impl World {
         if self.sim.storm_until.is_some_and(|until| until <= tick) {
             self.sim.storm_until = None;
         }
+        self.sim.maintenance.retain(|_, until| *until > tick);
     }
 
     /// Non-pinned, untargeted services in `state`, whose host is up.
@@ -338,22 +345,27 @@ impl World {
         });
     }
 
-    fn sim_downtime(&mut self) {
+    fn sim_downtime(&mut self, tick: u64) {
         if !self.sim.rng.chance(self.sim.per_tick(1.0)) {
             return;
         }
         let hosts: Vec<String> = self
             .hosts
             .keys()
-            .filter(|name| !self.pinned.contains(*name) && self.downtimes_of(name).is_empty())
+            .filter(|name| {
+                !self.pinned.contains(*name) && !self.sim.maintenance.contains_key(*name)
+            })
             .cloned()
             .collect();
         let Some(host) = self.sim.rng.pick(&hosts).cloned() else {
             return;
         };
         let minutes = 5.0 + self.sim.rng.range(0.0, 25.0);
+        let ticks = self.sim.ticks(minutes * 60.0);
+        self.sim.maintenance.insert(host.clone(), tick + ticks);
         let now = self.now();
-        let length = minutes * 60.0 / self.sim.config.speed.max(0.001);
+        #[expect(clippy::cast_precision_loss, reason = "tick counts are small")]
+        let length = ticks as f64 * self.sim.real_tick_seconds();
         self.add_downtime(
             &host,
             DowntimeSpec {

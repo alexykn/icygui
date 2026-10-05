@@ -199,12 +199,22 @@ fn material_for(
     let cert_path = dir.join(format!("{env}.crt"));
     let key_path = dir.join(format!("{env}.key"));
     if let Some((cert_pem, key_pem)) = read_pair(&cert_path, &key_path)? {
-        return Ok(MockTls::Provided(TlsMaterial {
+        let stored = TlsMaterial {
             cert_pem,
             key_pem,
             ca_pem: ca.map(|(pem, _)| pem.clone()),
             ca_key_pem: ca.map(|(_, key)| key.clone()),
-        }));
+        };
+        // Reuse what still fits (same fingerprint as last time); replace
+        // certificates that expired or belong to another mode or CA.
+        match stored.validate() {
+            Ok(()) => return Ok(MockTls::Provided(stored)),
+            Err(error) => tracing::warn!(
+                path = %cert_path.display(),
+                %error,
+                "not reusing the stored certificate; writing a new one"
+            ),
+        }
     }
     let material = match (mode, ca) {
         (TlsMode::Ca, Some((ca_pem, ca_key))) => {
@@ -235,48 +245,67 @@ fn shared_ca(dir: Option<&Path>) -> Result<(String, String), MockError> {
     Ok((ca_pem, ca_key))
 }
 
-#[expect(
-    clippy::print_stdout,
-    reason = "the startup banner is the binary's user interface"
-)]
-fn print_banner(
+/// The startup banner of one environment.
+fn banner(
     env: &str,
     server: &MockServer,
     users: &[MockUser],
     ca_path: Option<&Path>,
     cert_path: Option<&Path>,
     simulation: &SimulationConfig,
-) {
+) -> String {
+    use std::fmt::Write as _;
     let status = server.control().status();
-    println!("icinga-mock · {env}");
-    println!("  URL          {}", server.url());
+    let mut text = String::new();
+    let _ = writeln!(text, "icinga-mock · {env}");
+    let _ = writeln!(text, "  URL          {}", server.url());
     for user in users {
-        println!(
+        let _ = writeln!(
+            text,
             "  User         {}:{} ({})",
             user.username,
             user.password,
             user.permissions.join(", ")
         );
     }
-    println!("  SHA-256      {}", server.cert_fingerprint());
-    match (ca_path, cert_path) {
-        (Some(ca), _) => println!("  CA file      {}", ca.display()),
-        (None, Some(cert)) => println!("  Certificate  {} (self-signed)", cert.display()),
-        (None, None) => println!("  CA file      none (self-signed; use --cert-dir to write it)"),
-    }
-    println!(
+    let _ = writeln!(text, "  SHA-256      {}", server.cert_fingerprint());
+    let _ = match (ca_path, cert_path) {
+        (Some(ca), _) => writeln!(text, "  CA file      {}", ca.display()),
+        (None, Some(cert)) => writeln!(text, "  Certificate  {} (self-signed)", cert.display()),
+        (None, None) => writeln!(
+            text,
+            "  CA file      none (self-signed; use --cert-dir to write it)"
+        ),
+    };
+    let _ = writeln!(
+        text,
         "  Node         {} (Icinga {})",
         status.node_name, status.version
     );
-    if simulation.enabled {
-        println!(
+    let _ = if simulation.enabled {
+        writeln!(
+            text,
             "  Simulator    running (seed {}, speed {})",
             simulation.seed, simulation.speed
-        );
+        )
     } else {
-        println!("  Simulator    off");
+        writeln!(text, "  Simulator    off")
+    };
+    text.push('\n');
+    text
+}
+
+/// Writes the banner to stdout. A closed stdout (`icinga-mock | head`) must
+/// not take the servers down, so write errors are only logged.
+fn print_banner(text: &str) {
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    if let Err(error) = stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        tracing::debug!(%error, "can't write the banner to stdout");
     }
-    println!();
 }
 
 async fn run(args: Args) -> Result<(), String> {
@@ -334,14 +363,14 @@ async fn run(args: Args) -> Result<(), String> {
             .then(|| dir.map(|d| d.join("ca.crt")))
             .flatten();
         let cert_path = dir.map(|d| d.join(format!("{}.crt", env.name)));
-        print_banner(
+        print_banner(&banner(
             &env.name,
             &server,
             &users,
             ca_path.as_deref(),
             cert_path.as_deref(),
             &simulation,
-        );
+        ));
         servers.push(server);
     }
     wait_for_signal().await;

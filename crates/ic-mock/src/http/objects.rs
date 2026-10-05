@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde_json::{Map, Value as Json};
 
 use super::params::{Params, to_icinga_string};
-use super::response::{Body, json, json_error};
+use super::response::{Body, json_bytes, json_error};
 use super::targets::{TargetError, filter_targets};
 use crate::auth::Principal;
 use crate::config::NumberFormat;
@@ -146,24 +146,22 @@ pub(crate) fn handle(
         .flatten()
         .map(|join| join.split('.').next().unwrap_or_default().to_owned())
         .collect();
-    let results: Vec<Json> = targets
-        .iter()
-        .map(|target| {
-            serialize(
-                world,
-                user,
-                target,
-                attrs.as_deref(),
-                joins.as_deref(),
-                &join_prefixes,
-                all_joins,
-                (used_by, location),
-            )
-        })
-        .collect();
-    let mut body = Map::new();
-    body.insert("results".into(), Json::Array(results));
-    json(200, Json::Object(body), format, params.pretty())
+    let results = targets.iter().map(|target| {
+        serialize(
+            world,
+            user,
+            target,
+            attrs.as_deref(),
+            joins.as_deref(),
+            &join_prefixes,
+            all_joins,
+            (used_by, location),
+        )
+    });
+    json_bytes(
+        200,
+        crate::json::encode_results(results, format, params.pretty()),
+    )
 }
 
 #[expect(

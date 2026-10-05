@@ -312,7 +312,11 @@ pub(crate) fn compile(
     filter_vars: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<CompiledFilter, FilterError> {
     let tokens = lex(source)?;
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let expr = parser.parse_program()?;
     let vars = filter_vars
         .map(|map| {
@@ -653,12 +657,23 @@ enum Expr {
     Index(Box<Expr>, Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
     Unary(&'static str, Box<Expr>),
+    /// `in` and `!in` (the right side is evaluated first).
     Binary(&'static str, Box<Expr>, Box<Expr>),
+    /// A left-associative run of one operator (`a || b || c`), evaluated
+    /// iteratively so long generated filters can't exhaust the stack.
+    Chain(&'static str, Vec<Expr>),
 }
+
+/// How deep expressions may nest (parentheses, unary operators, member
+/// and index chains). Real filters stay far below; much deeper input would
+/// exhaust the stack of the evaluating thread.
+const MAX_DEPTH: usize = 256;
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Current nesting, see [`MAX_DEPTH`].
+    depth: usize,
 }
 
 /// Binary operator precedence (higher binds tighter), from `config_parser.yy`.
@@ -712,7 +727,27 @@ impl Parser {
         }
     }
 
+    /// Enters one level of nesting.
+    fn enter(&mut self) -> Result<(), FilterError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(FilterError::Unsupported(format!(
+                "expressions nested deeper than {MAX_DEPTH} levels"
+            )));
+        }
+        Ok(())
+    }
+
     fn parse_binary(&mut self, min_prec: u8) -> Result<Expr, FilterError> {
+        let start = self.depth;
+        let result = self
+            .enter()
+            .and_then(|()| self.parse_binary_inner(min_prec));
+        self.depth = start;
+        result
+    }
+
+    fn parse_binary_inner(&mut self, min_prec: u8) -> Result<Expr, FilterError> {
         let mut lhs = self.parse_unary()?;
         while let Some(Token::Op(op)) = self.peek() {
             let op = *op;
@@ -723,7 +758,14 @@ impl Parser {
             self.pos += 1;
             self.skip_newlines_in_expression();
             let rhs = self.parse_binary(prec + 1)?;
-            lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs));
+            lhs = match lhs {
+                _ if matches!(op, "in" | "!in") => Expr::Binary(op, Box::new(lhs), Box::new(rhs)),
+                Expr::Chain(chain_op, mut operands) if chain_op == op => {
+                    operands.push(rhs);
+                    Expr::Chain(op, operands)
+                }
+                lhs => Expr::Chain(op, vec![lhs, rhs]),
+            };
         }
         Ok(lhs)
     }
@@ -740,8 +782,10 @@ impl Parser {
             Some(Token::Op(op @ ("!" | "-" | "+" | "~"))) => {
                 let op = *op;
                 self.pos += 1;
-                let operand = self.parse_unary()?;
-                Ok(Expr::Unary(op, Box::new(operand)))
+                let start = self.depth;
+                let operand = self.enter().and_then(|()| self.parse_unary());
+                self.depth = start;
+                Ok(Expr::Unary(op, Box::new(operand?)))
             }
             Some(Token::Op("&" | "*")) => Err(FilterError::Unsupported(
                 "reference operators (`&x`, `*x`)".into(),
@@ -752,40 +796,53 @@ impl Parser {
 
     fn parse_postfix(&mut self) -> Result<Expr, FilterError> {
         let mut expr = self.parse_primary()?;
-        loop {
-            match self.peek() {
-                Some(Token::Dot) => {
-                    self.pos += 1;
-                    match self.next() {
-                        Some(Token::Ident(name) | Token::Keyword(name)) => {
-                            expr = Expr::Member(Box::new(expr), name);
-                        }
-                        Some(Token::Op("in")) => {
-                            expr = Expr::Member(Box::new(expr), "in".to_owned());
-                        }
-                        Some(token) => return Err(unexpected(&token)),
-                        None => return Err(eof()),
-                    }
-                }
-                Some(Token::LBracket) => {
-                    self.pos += 1;
-                    let index = self.parse_binary(1)?;
-                    match self.next() {
-                        Some(Token::RBracket) => {}
-                        Some(token) => return Err(unexpected(&token)),
-                        None => return Err(eof()),
-                    }
-                    expr = Expr::Index(Box::new(expr), Box::new(index));
-                }
-                Some(Token::LParen) => {
-                    self.pos += 1;
-                    let args = self.parse_list(&Token::RParen)?;
-                    expr = Expr::Call(Box::new(expr), args);
-                }
-                _ => break,
+        // Every postfix operation nests the expression one level deeper.
+        let start = self.depth;
+        let result = loop {
+            if !matches!(
+                self.peek(),
+                Some(Token::Dot | Token::LBracket | Token::LParen)
+            ) {
+                break Ok(expr);
             }
+            if let Err(error) = self.enter() {
+                break Err(error);
+            }
+            expr = match self.parse_postfix_op(expr) {
+                Ok(next) => next,
+                Err(error) => break Err(error),
+            };
+        };
+        self.depth = start;
+        result
+    }
+
+    /// One `.name`, `[index]` or `(args)` applied to `expr`.
+    fn parse_postfix_op(&mut self, expr: Expr) -> Result<Expr, FilterError> {
+        match self.next() {
+            Some(Token::Dot) => match self.next() {
+                Some(Token::Ident(name) | Token::Keyword(name)) => {
+                    Ok(Expr::Member(Box::new(expr), name))
+                }
+                Some(Token::Op("in")) => Ok(Expr::Member(Box::new(expr), "in".to_owned())),
+                Some(token) => Err(unexpected(&token)),
+                None => Err(eof()),
+            },
+            Some(Token::LBracket) => {
+                let index = self.parse_binary(1)?;
+                match self.next() {
+                    Some(Token::RBracket) => Ok(Expr::Index(Box::new(expr), Box::new(index))),
+                    Some(token) => Err(unexpected(&token)),
+                    None => Err(eof()),
+                }
+            }
+            Some(Token::LParen) => {
+                let args = self.parse_list(&Token::RParen)?;
+                Ok(Expr::Call(Box::new(expr), args))
+            }
+            Some(token) => Err(unexpected(&token)),
+            None => Err(eof()),
         }
-        Ok(expr)
     }
 
     fn parse_list(&mut self, close: &Token) -> Result<Vec<Expr>, FilterError> {
@@ -1040,22 +1097,7 @@ impl Evaluator<'_> {
                 let value = self.eval(operand)?;
                 unary(op, &value)
             }
-            Expr::Binary("&&", lhs, rhs) => {
-                let left = self.eval(lhs)?;
-                if left.is_truthy() {
-                    self.eval(rhs)
-                } else {
-                    Ok(left)
-                }
-            }
-            Expr::Binary("||", lhs, rhs) => {
-                let left = self.eval(lhs)?;
-                if left.is_truthy() {
-                    Ok(left)
-                } else {
-                    self.eval(rhs)
-                }
-            }
+            Expr::Chain(op, operands) => self.chain(op, operands),
             Expr::Binary(op @ ("in" | "!in"), lhs, rhs) => {
                 let haystack = self.eval(rhs)?;
                 let negate = *op == "!in";
@@ -1077,6 +1119,27 @@ impl Evaluator<'_> {
                 binary(op, &left, &right)
             }
         }
+    }
+
+    /// A left-associative operator run: `&&` and `||` short-circuit and
+    /// yield the deciding operand (like Icinga), the others fold left.
+    fn chain(&self, op: &str, operands: &[Expr]) -> Result<Value, EvalError> {
+        let Some((first, rest)) = operands.split_first() else {
+            return Ok(Value::Null);
+        };
+        let mut acc = self.eval(first)?;
+        for operand in rest {
+            acc = match op {
+                "&&" if !acc.is_truthy() => return Ok(acc),
+                "||" if acc.is_truthy() => return Ok(acc),
+                "&&" | "||" => self.eval(operand)?,
+                _ => {
+                    let right = self.eval(operand)?;
+                    binary(op, &acc, &right)?
+                }
+            };
+        }
+        Ok(acc)
     }
 
     fn variable(&self, name: &str) -> Result<Value, EvalError> {
@@ -1791,5 +1854,37 @@ mod tests {
         assert!(!glob_match("web-?", "web-01"));
         assert!(glob_match("*replication*", "postgres-replication"));
         assert!(!glob_match("db*", "web"));
+    }
+
+    #[test]
+    fn long_generated_filters_run_without_deep_recursion() {
+        let mut terms: Vec<String> = (0..20_000)
+            .map(|i| format!("host.name == \"h{i}\""))
+            .collect();
+        terms.push("host.name == \"web-01\"".to_owned());
+        assert!(eval(&terms.join(" || ")).unwrap());
+        let sum = vec!["1"; 50_000].join(" + ");
+        assert!(eval(&format!("{sum} == 50000")).unwrap());
+        // Chains keep Icinga's left associativity and short-circuiting.
+        assert!(eval("10 - 4 - 3 == 3").unwrap());
+        assert!(eval("false && nothing || true").unwrap());
+        assert!(eval("true || nothing").unwrap());
+    }
+
+    #[test]
+    fn deep_nesting_is_refused_cleanly() {
+        for source in [
+            "(".repeat(10_000) + "true" + &")".repeat(10_000),
+            "!".repeat(10_000) + "true",
+            "host".to_owned() + &".vars".repeat(10_000),
+            "[".repeat(10_000) + &"]".repeat(10_000),
+        ] {
+            assert!(matches!(
+                compile(&source, None),
+                Err(FilterError::Unsupported(_))
+            ));
+        }
+        let nested = "(".repeat(100) + "true" + &")".repeat(100);
+        assert!(eval(&nested).unwrap());
     }
 }

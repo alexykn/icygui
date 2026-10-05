@@ -63,3 +63,70 @@ pub trait Clock: Send + Sync + 'static {
     /// Local weekday and time of day, for quiet hours.
     fn local(&self) -> LocalTime;
 }
+
+/// The system clock, with local time in the system's time zone.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::now()
+    }
+
+    fn local(&self) -> LocalTime {
+        local_time(&jiff::Zoned::now())
+    }
+}
+
+/// Weekday (Monday = 0) and minute of the day of a zoned time.
+fn local_time(time: &jiff::Zoned) -> LocalTime {
+    let weekday = u8::try_from(time.weekday().to_monday_zero_offset()).unwrap_or(0);
+    let minutes = i32::from(time.hour()) * 60 + i32::from(time.minute());
+    LocalTime {
+        weekday,
+        minute_of_day: u16::try_from(minutes).unwrap_or(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jiff::civil::date;
+    use jiff::tz::TimeZone;
+
+    use super::*;
+
+    #[test]
+    fn local_time_counts_from_monday_and_midnight() {
+        let zone = TimeZone::fixed(jiff::tz::offset(2));
+        // 2026-10-05 is a Monday.
+        let monday = date(2026, 10, 5)
+            .at(0, 0, 0, 0)
+            .to_zoned(zone.clone())
+            .unwrap();
+        assert_eq!(
+            local_time(&monday),
+            LocalTime {
+                weekday: 0,
+                minute_of_day: 0
+            }
+        );
+        let sunday = date(2026, 10, 11).at(23, 59, 30, 0).to_zoned(zone).unwrap();
+        assert_eq!(
+            local_time(&sunday),
+            LocalTime {
+                weekday: 6,
+                minute_of_day: 23 * 60 + 59
+            }
+        );
+    }
+
+    #[test]
+    fn system_clock_is_now() {
+        let before = Timestamp::now();
+        let now = SystemClock.now();
+        assert!(now >= before);
+        let local = SystemClock.local();
+        assert!(local.weekday < 7);
+        assert!(local.minute_of_day < 24 * 60);
+    }
+}

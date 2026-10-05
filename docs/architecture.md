@@ -8,7 +8,7 @@ Already implemented and binding:
 - `ic-api`: implemented and reviewed, including the tiered loading (`Detail`, `Fetched`), with integration tests against `ic-mock` and contract tests against a real Icinga 2.15.6.
 - `ic-mock`: implemented (wave 2); API filters are evaluated by `ic-filter`.
 - `ic-ui-kit` and `ic-app`: the static UI (chrome, dashboard list, service and host panes, tabs) on demo data.
-- `ic-core`: `ports.rs` (`SecretStore`, `Notifier`, `Clock`) and `snapshot.rs` (`Snapshot`, `DashboardResult`, `DashboardRow`, `Summary`). The runtime is still to be built (wave 3).
+- `ic-core`: `ports.rs` (`SecretStore`, `Notifier`, `Clock`, `SystemClock`) and `snapshot.rs` (`Snapshot`, `DashboardResult`, `DashboardRow`, `Summary`). Wave 3, stage 1 of 3 is built: `start`/`CoreHandle`, `Command`/`CoreEvent`, sync engine steps 1–3, 7 and 8 (connect, tiered load, event stream, status poll, reconnects), the store and snapshots, actions, `test_connection` and `fetch_certificate`. Stage 2 (dashboards, freshness watchdog, hydration, reconcile) and stage 3 (notifications, event log) follow; the commands they own are accepted and answered with empty replies until then.
 
 Read the existing code before implementing against it. Don't change these types without a strong reason; if you must, explain the change in your report.
 
@@ -269,6 +269,9 @@ impl ApiInfo { pub fn allows(&self, permission: &str) -> bool; }       // Icinga
 pub struct ActionResult { pub code: u16, pub status: String, pub name: Option<String>, pub target: Option<String> }   // name: created comment/downtime; target: the object/downtime/comment the result is for
 impl ActionResult { pub fn is_success(&self) -> bool; }              // 2xx
 pub struct EventStream { … }                                            // impl Stream<Item = Result<Event, ApiError>>; ends on disconnect
+impl EventStream { pub fn into_lines(self) -> EventLines; }             // the same stream as raw lines (trimmed, never empty), for a reader that leaves parsing to another task
+pub struct EventLines { … }                                             // impl Stream<Item = Result<Vec<u8>, ApiError>>; a transport error once, then the end
+pub fn parse_event(line: &[u8]) -> Option<Event>;                       // one line per icinga2-apievents.cpp; malformed lines and unknown types: None (logged)
 pub enum ApiError {
     Connect(String), Tls(String), CertificateMismatch { expected: String, actual: String },
     Unauthorized, Forbidden(String), NotFound(String), Http { status: u16, message: String },
@@ -291,7 +294,7 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
   - Lean objects carry every attribute dashboard and rule filters can use (ic-filter, "Object attributes") except `last_check_result` and the links (`notes`, `notes_url`, `action_url`, `icon_image`), which keep their defaults (`None`, `""`). The check configuration, the `enable_*` switches and `flapping_current` are lean because no event carries them: a lean object would never learn them, and filters such as `service.check_command == "disk"` or `service.zone == "dmz"` would silently miss it. The check result comes with the next `CheckResult` event (or a full fetch); the links only with a full fetch. So a filter on `last_check_result` or the links sees `null`/`""` for a lean object until then; `ic-core` must not overwrite a hydrated object's result and links with a lean reload's.
   - `next_update` is **not** loaded: `ic_model::CheckInfo` has no field for it. The freshness watchdog computes the deadline with Icinga's formula (`Checkable::GetNextUpdate`): with active checks `next_check + interval + 2 × latency`, without `(end of the last result, or program start) + 2 × interval + 2 × latency`; `interval` is `retry_interval` for a soft problem with active checks and `check_interval` otherwise; `latency` (the last result's `execution_end − schedule_start`) is unknown for a lean object and counts as 0 until a `CheckResult` event or a full fetch brings a result. Request `next_update` once the model can carry it: it exists from 2.12 (`lib/icinga/checkable.ti`), not in 2.11, where the unknown-attribute rule below leaves it out at the cost of one extra request per type and client.
   - Sizes (`Detail::Lean` / `Detail::Full` / all attributes, services): `ic-mock`'s `large` scenario (30 000 services) 26.5 / 46.4 / 75.7 MB (884 / 1 548 / 2 524 bytes per service; its full and all-attribute sizes match the real measurements in docs/performance.md); the contract instance's 6 services 4.6 / 15.9 / 21.5 KB. The check configuration, switches and `flapping_current` add about 210 bytes per service to the lean list (3.4 → 4.6 KB on the contract instance).
-- *`CheckResult` events* carry `check_result.vars_after` (`state`, `state_type`, `attempt`, `reachable`) plus `downtime_depth` and `acknowledgement` (a boolean in events). Map them into the event so `ic-core` can update the object without a re-query. For hosts, `vars_after.state` is a *service-style* state (0/1 = up, 2/3 = down; see `Host::CalculateState`).
+- *`CheckResult` events* carry `check_result.vars_after` (`state`, `state_type`, `attempt`, `reachable`) plus `downtime_depth` and `acknowledgement` (a boolean in events). They are mapped into `Event::CheckResult { after: Option<StateAfter>, .. }` (`ic_model::StateAfter { state: CheckableState, state_type, attempt, reachable }`; `None` without a state and state type) so `ic-core` can update the object without a re-query. For hosts, `vars_after.state` is a *service-style* state (0/1 = up, 2/3 = down; see `Host::CalculateState`); a down host that isn't reachable is `HostState::Unreachable`.
 - *Comments and downtimes:* the object comes from `host_name` / `service_name` (empty string = host).
   - `Downtime.in_effect`: use `is_in_effect` when present, otherwise compute it from fixed/flexible, start/end and `trigger_time`.
   - `config_owned`: `config_owner` is non-empty, or `scheduled_by` is non-empty.
@@ -339,6 +342,7 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
 See PLAN.md §3.6. `MockServer::start(MockConfig) -> MockServer` serves HTTPS on `127.0.0.1:<port>` with a self-signed certificate and Basic auth. It exposes `url()`, `cert_pem()`, `cert_sha256()`, `control() -> MockControl` and `shutdown()`. It has built-in scenarios (`prod_cluster`, `staging`, `lab`, `large(seed)`) and a seedable simulator.
 - `large` matches production scale (docs/performance.md): 2 000 hosts × 15 services, realistic payload sizes, 5-minute intervals.
 - Mass re-check bursts are available through `MockControl::burst` (every object, ~5 000 events/s).
+- `MockControl::set_program_start(at)` pretends a restart (a new `program_start` in `/v1/status`) without dropping connections, for clients' restart detection.
 - It honours `Detail`-style `attrs` selection and name lists exactly like Icinga, including the all-or-nothing 404. The binary is `icinga-mock`. It writes its own wire JSON straight from the docs and sources; it never uses `ic-api`'s types.
 - `filter` (queries, actions, status, event streams) is parsed and evaluated by `ic-filter`, with a scope that gives Icinga's frame (the object, its joins, `filter_vars`, globals) and Icinga's errors for undefined variables and unknown attributes. The HTTP behaviour (404 for filters that fail, or don't compile, when evaluated for an object; 403 without `filter-expression`; silent event streams; Icinga's targeted lookup of `host.name == "a" || …` filters in filter order) is Icinga's; the remaining differences, most of them `ic-filter`'s deliberate ones, are listed in `crates/ic-mock/src/filter.rs`.
 - `tests/fidelity.rs` replays exchanges recorded from Icinga 2.15.6 (`contract/record-queries.py`): Lean and Full selections, joins, meta, name lists, unknown attributes, filters.
@@ -355,6 +359,10 @@ pub struct Ports { pub secrets: Arc<dyn SecretStore>, pub notifier: Arc<dyn Noti
 pub struct SystemClock;                                        // impl Clock with the local time zone (jiff)
 
 pub fn start(spec: EnvironmentSpec, ports: Ports) -> Result<CoreHandle, CoreError>;   // spawns the runtime thread
+pub fn start_with_tuning(spec: EnvironmentSpec, ports: Ports, tuning: Tuning) -> Result<CoreHandle, CoreError>;   // other timing (tests)
+pub struct Tuning { backoff_initial: 1 s, backoff_max: 60 s, healthy_after: 5 min, status_interval: 30 s, publish_interval: 250 ms,
+                    requery_delay: 200 ms, missing_ttl: 10 min, max_batch: 5 000, shutdown_timeout: 5 s }   // all pub; Default = these
+pub enum CoreError { Runtime(io::Error), Thread(io::Error) }
 pub struct CoreHandle { … }
 impl CoreHandle {
     pub fn send(&self, command: Command);                      // never blocks
@@ -367,7 +375,9 @@ impl CoreHandle {
 /// the UI can await.
 pub fn test_connection(environment: ic_config::Environment, password: Option<SecretString>) -> oneshot::Receiver<Result<ConnectionReport, ConnectionFailure>>;
 pub fn fetch_certificate(url: String, server_name: Option<String>) -> oneshot::Receiver<Result<CertificateInfo, String>>;
-pub struct ConnectionReport { pub info: ApiInfo, pub status: InstanceStatus, pub missing_permissions: Vec<String> }
+pub struct ConnectionReport { pub info: ApiInfo, pub status: InstanceStatus, pub missing_permissions: Vec<String> }   // status: defaults without status/query
+pub const REQUIRED_PERMISSIONS: &[&str];                       // PLAN.md §5, in that order
+pub fn missing_permissions(info: &ApiInfo) -> Vec<String>;     // REQUIRED_PERMISSIONS the user lacks (ApiInfo::allows)
 pub enum ConnectionFailure { Unauthorized, Tls { message: String, certificate: Option<CertificateInfo> }, CertificateMismatch { expected: String, actual: String }, Unreachable(String), Other(String) }
 
 pub enum Command {
@@ -398,7 +408,9 @@ pub enum ConnectionState {
     AuthFailed { message: String },                            // no automatic retry; Refresh or UpdateEnvironment retries
     TlsFailed { message: String, certificate: Option<CertificateInfo> },   // no automatic retry; offers trust-on-first-use
     MissingSecret,                                             // no password in the keychain
+    Misconfigured { message: String },                         // invalid URL or pin, unreadable/invalid CA, certificate or key file; no automatic retry
 }
+pub enum LoadPhase { Hosts, Services, Details }                // tier 1 (done/total = its 8 queries), tier 2 (one query, total None), tier 3 (done/total = problem services)
 pub struct ActionOutcome { pub ok: usize, pub failed: Vec<(String, String)>, pub error: Option<String> }   // per-object failures, or a request error
 pub struct LogEntry { pub at: Timestamp, pub object: ObjectKey, pub kind: LogKind, pub text: String, pub author: Option<String> }
 pub enum LogKind { State { state: CheckableState, state_type: StateType }, AcknowledgementSet, AcknowledgementCleared, CommentAdded, CommentRemoved, DowntimeStarted, DowntimeEnded, FlappingStarted, FlappingStopped }
@@ -411,9 +423,10 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
 
 **Sync engine** (designed for 2 000 hosts / 30 000 services; numbers and reasoning in docs/performance.md):
 1. Connect: build an `ic_api::Client` from the environment.
-   - The password comes from `SecretStore` with account = environment id; `MissingSecret` if absent.
+   - The password comes from `SecretStore` with account = environment id (read on a blocking thread); `MissingSecret` if absent. A secret store that fails (a keyring daemon still starting at login) is transient: `Reconnecting`.
    - Client certificates are read from their files.
-   - The CA file is read; the pin is parsed with `ic_config::parse_fingerprint`.
+   - The CA file is read; the pin is parsed with `ic_config::parse_fingerprint`. Unusable settings (URL, pin, files) are `Misconfigured`.
+   - `GET /v1` checks the credentials (`Permissions(info)` is emitted), then the event stream opens for the event kinds the user may read (none: no stream, the rest still works).
 2. Tiered initial load, with no rule inputs. Publish a snapshot after each tier so the UI fills in progressively.
    1. `info`, `status`, groups, dependencies, endpoints, comments, downtimes and hosts (`Full`).
    2. Services (`Detail::Lean`).
@@ -425,6 +438,11 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
    - `CheckResult` updates the object completely (state, state type, attempt and reachability from `vars_after`; downtime depth; acknowledgement; output and perfdata). `next_check` is estimated from `execution_end` plus the check or retry interval.
    - Several `CheckResult`s for one object within a batch collapse to the last one. Other event types are never collapsed.
    - Objects are re-queried only for `ObjectCreated`/`ObjectModified`/`ObjectDeleted` and for unknown objects.
+     - Re-queries are collected for `requery_delay`, deduplicated and sent one round at a time (≤ 1 000 names per round, batches of 200; hosts and services loaded in full before with `Full`, other services `Lean`). Lifecycle events of `HostGroup`, `ServiceGroup`, `Dependency`, `Endpoint`/`Zone` reload that list; `Comment` and `Downtime` lifecycle events are ignored (they have events of their own).
+     - Names Icinga answers as unknown (deleted, or hidden by a filtered permission) aren't re-queried for events again within `missing_ttl` (10 minutes) unless `ObjectCreated` names them, so events about hidden objects can't cause a request storm.
+     - Unknown objects seen while a load runs are re-queried after it.
+   - *Ordering:* the stream opens right after `GET /v1`, before the initial load; its lines wait in the reader's channel until the session's first load is complete, then are applied in order. The reader numbers every line when it reads it, and every query records that count when it is sent. An event read before the query that last wrote its object is already reflected there and is skipped; a query answer older than an event applied since keeps the fields events maintain (state, state type, attempt, state-change times, last/next check, result, acknowledgement, downtime depth, flapping, reachability) and takes the rest (config, vars, groups, links) from the answer; comment and downtime lists keep the changes of events newer than their query. Reloads while connected (`Refresh`, a restart, stage 2's reconcile) therefore never pause the stream, and the store converges whatever order answers and events arrive in.
+   - `downtime_depth` follows the downtime events (+1 when one takes effect, −1 when one in effect is removed) until the next `CheckResult` brings Icinga's count.
    - Required throughput: 50 000 recorded events applied in under 3 s; steady state about 110 events/s.
 4. *Freshness watchdog:*
    - Each object's deadline is Icinga's `next_update`: `next_check` + interval + 2 × latency for active checks, last result + 2 × interval for passive ones.
@@ -438,13 +456,18 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
    - Periodically, adaptively: every 5 minutes below 5 000 objects, every 15 minutes above. `General.reconcile_interval_secs = 0` means adaptive; any other value overrides it.
    - Diff the reload against the store; state changes found only by the diff produce rule inputs, as do removals.
    - **Never** periodic full-attribute reloads: they cost the master around 1 GB of memory at this scale.
-7. Poll status every 30 s. A changed `program_start` means Icinga restarted and triggers a reload.
+7. Poll status every 30 s (only with `status/query`; a 403 stops the polling). A changed `program_start` means Icinga restarted and triggers a reload; the connection state stays `Connected` during reloads.
 8. Stream end or error → `Reconnecting` with exponential backoff and jitter (1 s → 60 s, reset after 5 minutes of health). Auth (401) → `AuthFailed`. TLS errors and pin mismatch → `TlsFailed` with the presented certificate (via `fetch_server_certificate`).
+   - The delay of the n-th consecutive failure is `1 s × 2^(n−1)` capped at 60 s, of which a random half is jitter (`[d/2, d)`). `Connecting.attempt` counts from 1; `Reconnecting.attempt` is the attempt that runs at `retry_at`.
+   - `Refresh` connects at once (after `AuthFailed`, `TlsFailed`, `MissingSecret`, `Misconfigured` with a fresh backoff). `UpdateEnvironment` reconnects when the id, URL, authentication or TLS settings changed, and whenever the engine is waiting to reconnect or for the user; a new id or URL also empties the store first (another server's objects must not linger). Other changes apply in place.
+   - The store keeps the last known objects while reconnecting; the reload after the reconnect replaces them.
 
 **Store and snapshots:**
 - Objects are `Arc`-shared in `BTreeMap`s and copied on write.
 - A snapshot is published at most every 250 ms while there are changes, and immediately after the initial load and after actions.
 - `Snapshot.revision` increases monotonically.
+- `Snapshot.last_event_at` is the local time the latest stream batch was applied; `Snapshot.overall` counts every host and service (services' problems are handled by acknowledgement, downtime or a host problem; the worst unhandled state by severity).
+- The UI must keep draining `CoreEvent`s: the channel is unbounded and every queued snapshot keeps its copy of the maps alive.
 
 **Dashboards:** evaluate per dashboard per snapshot, incrementally, on a blocking thread (`spawn_blocking`):
 - Keep a compiled `ic_filter::Filter` per dashboard (recompiled when its source changes) and a per-dashboard match set.
@@ -482,8 +505,11 @@ The `Snapshot` contract type gains two fields; both are allowed additive changes
 
 **Actions:**
 - `Command::Action` runs `Client::run_action` with `author` = `Environment::author_name()`.
-- It reports `ActionFinished` with per-object failures. For example, `execute-command`'s "Can't find a valid endpoint": by default pass the object's `command_endpoint`, else the instance's node name.
-- After success it marks the targets dirty, so their new state shows within a second.
+- It reports `ActionFinished` with per-object failures. For example, `execute-command`'s "Can't find a valid endpoint": by default pass the object's `command_endpoint`, else the instance's node name. Without an endpoint, targets with a `command_endpoint` go in one request without one (Icinga's `$command_endpoint$`), the others in a second request with the instance's node name.
+- After success it marks the targets dirty, so their new state shows within a second (removing a downtime or comment re-queries its object); the answer is published at once.
+- Actions run on their own task: one in flight when the connection drops still finishes and reports. Without a connection the answer is immediate (`error: "not connected to Icinga"`).
+
+**Contract changes in wave 3, stage 1** (additive; they only break exhaustive matches and struct literals of the changed types): `ic_model::StateAfter` and `Event::CheckResult.after`; `ic_api::EventStream::into_lines`, `EventLines` and `parse_event`; `ConnectionState::Misconfigured`; `LoadPhase`'s variants; `start_with_tuning` and `Tuning`; `REQUIRED_PERMISSIONS` and `missing_permissions`; `SystemClock`; `Snapshot.last_event_at` and `Snapshot.overall` (`ic-app`'s demo builds a `Snapshot` field by field and needs the two new fields in wave 4); `MockControl::set_program_start`.
 
 **Tests** (integration, against `ic_mock::MockServer` in-process, no sleeps beyond small bounded waits on channels):
 - initial load → snapshot contents;

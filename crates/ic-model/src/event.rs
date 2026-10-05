@@ -1,8 +1,10 @@
 //! Events from Icinga's `/v1/events` stream, in domain terms.
 //!
-//! Events carry only what Icinga sends. Fields the stream doesn't include
-//! (attempt counters, next check, reachability) are refreshed by re-querying
-//! the object, which `ic-core` does after every event.
+//! Events carry only what Icinga sends. A `CheckResult` event carries the
+//! object's state after processing ([`StateAfter`], from the result's
+//! `vars_after`), its downtime depth and acknowledgement, so `ic-core` can
+//! update the object without re-querying it; it estimates the next check
+//! itself.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +40,22 @@ impl CheckableState {
             Self::Service(state) => state.short_label(),
         }
     }
+}
+
+/// An object's state right after Icinga processed a check result: the
+/// result's `vars_after` (`state`, `state_type`, `attempt`, `reachable`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StateAfter {
+    /// The new state. For hosts, `vars_after.state` is a service-style state
+    /// (0 and 1 are up, 2 and 3 down); a down host that isn't reachable is
+    /// [`HostState::Unreachable`].
+    pub state: CheckableState,
+    /// Soft or hard.
+    pub state_type: StateType,
+    /// The check attempt (`check_attempt`).
+    pub attempt: u32,
+    /// Whether every dependency allowed the check (`last_reachable`).
+    pub reachable: bool,
 }
 
 /// The kinds of events the client subscribes to (the API's `types`).
@@ -133,6 +151,9 @@ pub enum Event {
         downtime_depth: Option<u32>,
         /// Acknowledgement after processing (Icinga 2.11+).
         acknowledgement: Option<AckKind>,
+        /// The object's state after processing (`check_result.vars_after`),
+        /// when Icinga sent it.
+        after: Option<StateAfter>,
         /// When it happened.
         at: Timestamp,
     },

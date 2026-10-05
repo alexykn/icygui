@@ -35,7 +35,7 @@ use ic_api::{
     fetch_server_certificate,
 };
 use ic_model::{
-    Action, ActionTarget, EventKind, HostState, Links, ObjectKey, Service, ServiceState,
+    Action, ActionTarget, Event, EventKind, HostState, Links, ObjectKey, Service, ServiceState,
 };
 use raw::Raw;
 use secrecy::SecretString;
@@ -495,11 +495,20 @@ async fn real_icinga_event_stream() {
         .events("icygui-contract-ic-api", &EventKind::ALL)
         .await
         .unwrap();
-    // Active checks run every 20–30 s in the fixtures.
-    let event = tokio::time::timeout(Duration::from_secs(90), stream.next())
-        .await
-        .expect("an event within 90 s")
-        .expect("the stream is open")
-        .unwrap();
-    assert!(event.at().as_unix_seconds() > 0.0);
+    // Active checks run every 20–30 s in the fixtures. Every check result
+    // carries the object's state after processing (`vars_after`).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let event = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .expect("a check result within 90 s")
+            .expect("the stream is open")
+            .unwrap();
+        assert!(event.at().as_unix_seconds() > 0.0);
+        if let Event::CheckResult { after, .. } = &event {
+            let after = after.unwrap_or_else(|| panic!("no vars_after: {event:?}"));
+            assert!(after.attempt >= 1, "{event:?}");
+            break;
+        }
+    }
 }

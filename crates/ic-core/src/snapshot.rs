@@ -40,6 +40,12 @@ pub struct Snapshot {
     pub status: Option<Arc<InstanceStatus>>,
     /// Evaluated dashboards.
     pub dashboards: Arc<BTreeMap<DashboardRef, DashboardResult>>,
+    /// When the latest event-stream message arrived (local clock); `None`
+    /// before the first. The footer shows its age (`master-01 · 2s`).
+    pub last_event_at: Option<Timestamp>,
+    /// Counts over every host and service, for the tray icon and its
+    /// tooltip.
+    pub overall: Summary,
 }
 
 impl Snapshot {

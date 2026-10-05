@@ -95,3 +95,12 @@ The lean list the client loads (`ic_api::Detail::Lean`) keeps the check configur
 | Load on the master per client | one event stream (~75 KB/s), ~28 MB on connect, ~28 MB every 15 minutes |
 
 These budgets are tested: `ic-mock` has a `large` scenario of the same size with a burst mode, and release-mode performance tests (nightly CI) replay bursts and time loads and dashboard evaluation.
+
+**Engine measurements** (`ic-core`, against `ic-mock`'s `large` scenario in the same process; dev profile, so the workspace crates are unoptimised and release builds are several times faster):
+
+| What | Result |
+|---|---|
+| Initial load until the problem lists are complete (tiers 1–3, 2 000 hosts, 30 000 lean services, 1 448 problems in full) | 3.66 s (hosts after 0.56 s, services after 3.46 s); `cargo test -p ic-core --test scale -- --ignored --nocapture` |
+| Applying 64 000 recorded burst events (parse, collapse, apply, a snapshot per 5 000) | 3.58 s, ~17 900 events/s, none lost; `cargo test -p ic-core --lib perf -- --ignored --nocapture` |
+| A burst of every object (32 000 checks at Icinga's ~5 000/s) | absorbed as it arrives: the store matches the mock 6.4 s after the burst started |
+| 6 400 recorded events on 3 000 services (in the normal test suite) | ~0.26 s |

@@ -3,10 +3,10 @@
 //! and objects that can't be identified are skipped, never panicking.
 
 use ic_model::{
-    AckKind, CheckInfo, CheckResult, Comment, CommentKind, Dependency, Downtime, Endpoint,
-    Features, Host, HostGroup, HostName, HostState, InstanceStatus, Links, ObjectKey, Perfdata,
-    Service, ServiceGroup, ServiceKey, ServiceState, StateType, Threshold, Timestamp, Vars,
-    parse_perfdata, parse_perfdata_entry,
+    AckKind, CheckInfo, CheckResult, CheckableState, Comment, CommentKind, Dependency, Downtime,
+    Endpoint, Features, Host, HostGroup, HostName, HostState, InstanceStatus, Links, ObjectKey,
+    Perfdata, Service, ServiceGroup, ServiceKey, ServiceState, StateAfter, StateType, Threshold,
+    Timestamp, Vars, parse_perfdata, parse_perfdata_entry,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -72,6 +72,36 @@ impl WireCheckResult {
     pub(crate) fn state_type_after(&self) -> Option<StateType> {
         let code = number(self.vars_after.0.as_ref()?.get("state_type")?)?;
         state_type(Some(code))
+    }
+
+    /// `vars_after` as the state of `object` after Icinga processed this
+    /// result: `None` without a state or a state type. For hosts the state
+    /// is service-style (`Host::CalculateState`: 0 and 1 are up, 2 and 3
+    /// down), and a down host that isn't reachable is unreachable.
+    pub(crate) fn state_after(&self, object: &ObjectKey) -> Option<StateAfter> {
+        let vars = self.vars_after.0.as_ref()?;
+        let code = number(vars.get("state")?)?;
+        let state_type = state_type(Some(number(vars.get("state_type")?)?))?;
+        let reachable = vars
+            .get("reachable")
+            .cloned()
+            .and_then(Option::<bool>::from_json)
+            .unwrap_or(true);
+        let attempt = vars.get("attempt").and_then(number).map_or(1, clamp_u32);
+        let state = match object {
+            ObjectKey::Host { .. } => CheckableState::Host(match clamp_u8(code) {
+                0 | 1 => HostState::Up,
+                _ if reachable => HostState::Down,
+                _ => HostState::Unreachable,
+            }),
+            ObjectKey::Service { .. } => CheckableState::Service(service_state(Some(code))),
+        };
+        Some(StateAfter {
+            state,
+            state_type,
+            attempt,
+            reachable,
+        })
     }
 
     /// Maps into the domain type. The result's `state` wins over

@@ -517,6 +517,14 @@ impl MockControl {
         world.run_queued_checks(usize::MAX);
     }
 
+    /// Sets `program_start`, as if the Icinga process had restarted at
+    /// `at`, without dropping any connection: clients polling `/v1/status`
+    /// see the new start time. (A real restart also drops every connection;
+    /// add [`Self::drop_connections`] for that.)
+    pub fn set_program_start(&self, at: Timestamp) {
+        self.world().app.program_start = at.as_unix_seconds();
+    }
+
     /// The mock's current time.
     pub fn now(&self) -> Timestamp {
         Timestamp::from_unix_seconds(self.world().now())

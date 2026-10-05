@@ -32,7 +32,7 @@ mod wire;
 pub use client::{ActionResult, Client, NAMES_PER_REQUEST};
 pub use detail::{Detail, Fetched};
 pub use error::ApiError;
-pub use events::EventStream;
+pub use events::{EventLines, EventStream, parse_event};
 pub use info::ApiInfo;
 pub use settings::{
     CONNECT_TIMEOUT, ConnectionSettings, Credentials, DEFAULT_REQUEST_TIMEOUT, TlsSettings,

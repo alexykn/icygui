@@ -85,9 +85,11 @@ fn trimmed(line: &[u8]) -> Option<Vec<u8>> {
     Some(line[start..=end].to_vec())
 }
 
-/// Parses one line of the stream. Malformed lines and unknown or
-/// unusable events are logged and skipped (`None`).
-pub(crate) fn parse_line(line: &[u8]) -> Option<Event> {
+/// Parses one line of the event stream (as [`EventLines`] yields them)
+/// into an event, mapped per `icinga2-apievents.cpp`. Malformed lines and
+/// unknown or unusable events are logged and skipped (`None`).
+#[must_use]
+pub fn parse_event(line: &[u8]) -> Option<Event> {
     let wire: WireEvent = match serde_json::from_slice(line) {
         Ok(wire) => wire,
         Err(error) => {
@@ -137,13 +139,18 @@ impl WireEvent {
     fn into_event(mut self) -> Option<Event> {
         let at = Timestamp::from_unix_seconds(self.timestamp.0);
         let event = match self.kind.0.as_str() {
-            "CheckResult" => Event::CheckResult {
-                object: self.object()?,
-                downtime_depth: self.downtime_depth.0.map(clamp_u32),
-                acknowledgement: self.acknowledgement(),
-                result: self.check_result.0.take()?.into_model(),
-                at,
-            },
+            "CheckResult" => {
+                let object = self.object()?;
+                let check_result = self.check_result.0.take()?;
+                Event::CheckResult {
+                    after: check_result.state_after(&object),
+                    downtime_depth: self.downtime_depth.0.map(clamp_u32),
+                    acknowledgement: self.acknowledgement(),
+                    result: check_result.into_model(),
+                    object,
+                    at,
+                }
+            }
             "StateChange" => {
                 let object = self.object()?;
                 let check_result = self.check_result.0.take()?;
@@ -285,18 +292,20 @@ impl WireEvent {
 /// skipped with a warning. A transport error is yielded once, then the
 /// stream ends; it also ends when the server closes the connection. There
 /// is no read timeout: Icinga may stay silent for a long time.
+///
+/// [`EventStream::into_lines`] yields the raw lines instead, so a reader
+/// can hand them to another task for parsing ([`parse_event`]) without
+/// ever slowing down the connection.
 pub struct EventStream {
-    chunks: BoxStream<'static, Result<Bytes, ApiError>>,
-    lines: LineBuffer,
+    lines: EventLines,
     pending: VecDeque<Event>,
-    done: bool,
 }
 
 impl fmt::Debug for EventStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EventStream")
             .field("pending", &self.pending.len())
-            .field("done", &self.done)
+            .field("done", &self.lines.done)
             .finish_non_exhaustive()
     }
 }
@@ -304,16 +313,18 @@ impl fmt::Debug for EventStream {
 impl EventStream {
     pub(crate) fn new(chunks: BoxStream<'static, Result<Bytes, ApiError>>) -> Self {
         Self {
-            chunks,
-            lines: LineBuffer::default(),
+            lines: EventLines::new(chunks),
             pending: VecDeque::new(),
-            done: false,
         }
     }
 
-    fn take_lines(&mut self, lines: &[Vec<u8>]) {
-        self.pending
-            .extend(lines.iter().filter_map(|line| parse_line(line)));
+    /// The same stream as raw lines: each item is one complete line
+    /// (without the newline, trimmed; empty lines skipped), not parsed.
+    /// Events already parsed but not yet taken are dropped, so call this
+    /// before reading any event.
+    #[must_use]
+    pub fn into_lines(self) -> EventLines {
+        self.lines
     }
 }
 
@@ -326,24 +337,72 @@ impl Stream for EventStream {
             if let Some(event) = this.pending.pop_front() {
                 return Poll::Ready(Some(Ok(event)));
             }
+            match Pin::new(&mut this.lines).poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(line))) => this.pending.extend(parse_event(&line)),
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(None) => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
+/// The event stream's raw lines ([`EventStream::into_lines`]), for a
+/// reader that only moves bytes and leaves parsing ([`parse_event`]) to
+/// someone else. Each item is one line without its newline, trimmed, never
+/// empty; over-long lines (16 MiB) are dropped with a warning. A transport
+/// error is yielded once, then the stream ends; it also ends when the
+/// server closes the connection (an unterminated last line is yielded
+/// first).
+pub struct EventLines {
+    chunks: BoxStream<'static, Result<Bytes, ApiError>>,
+    lines: LineBuffer,
+    pending: VecDeque<Vec<u8>>,
+    done: bool,
+}
+
+impl fmt::Debug for EventLines {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EventLines")
+            .field("pending", &self.pending.len())
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EventLines {
+    fn new(chunks: BoxStream<'static, Result<Bytes, ApiError>>) -> Self {
+        Self {
+            chunks,
+            lines: LineBuffer::default(),
+            pending: VecDeque::new(),
+            done: false,
+        }
+    }
+}
+
+impl Stream for EventLines {
+    type Item = Result<Vec<u8>, ApiError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(line) = this.pending.pop_front() {
+                return Poll::Ready(Some(Ok(line)));
+            }
             if this.done {
                 return Poll::Ready(None);
             }
             match this.chunks.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(Ok(chunk))) => {
-                    let lines = this.lines.push(&chunk);
-                    this.take_lines(&lines);
-                }
+                Poll::Ready(Some(Ok(chunk))) => this.pending.extend(this.lines.push(&chunk)),
                 Poll::Ready(Some(Err(error))) => {
                     this.done = true;
                     return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Ready(None) => {
                     this.done = true;
-                    if let Some(last) = this.lines.finish() {
-                        this.take_lines(&[last]);
-                    }
+                    this.pending.extend(this.lines.finish());
                 }
             }
         }
@@ -353,7 +412,7 @@ impl Stream for EventStream {
 #[cfg(test)]
 mod tests {
     use futures::StreamExt;
-    use ic_model::{CommentKind, HostState, ServiceState};
+    use ic_model::{CommentKind, HostState, ServiceState, StateAfter};
 
     use super::*;
 
@@ -383,7 +442,7 @@ mod tests {
     }
 
     fn one(line: &str) -> Event {
-        parse_line(line.as_bytes()).unwrap_or_else(|| panic!("not parsed: {line}"))
+        parse_event(line.as_bytes()).unwrap_or_else(|| panic!("not parsed: {line}"))
     }
 
     #[test]
@@ -396,12 +455,22 @@ mod tests {
             result,
             downtime_depth,
             acknowledgement,
+            after,
             at,
         } = event
         else {
             panic!("wrong event: {event:?}");
         };
         assert_eq!(object, ObjectKey::service("db-prod-03", "load"));
+        assert_eq!(
+            after,
+            Some(StateAfter {
+                state: CheckableState::Service(ServiceState::Warning),
+                state_type: StateType::Hard,
+                attempt: 1,
+                reachable: true,
+            })
+        );
         assert_eq!(result.output, "WARNING - load average 14.2, 12.8, 11.1");
         assert_eq!(result.exit_status, 1);
         assert_eq!(result.perfdata.len(), 1);
@@ -420,6 +489,7 @@ mod tests {
         let Event::CheckResult {
             downtime_depth,
             acknowledgement,
+            after,
             ..
         } = event
         else {
@@ -427,6 +497,78 @@ mod tests {
         };
         assert_eq!(downtime_depth, None, "older Icinga versions don't send it");
         assert_eq!(acknowledgement, Some(AckKind::Normal));
+        assert_eq!(after, None, "no vars_after");
+    }
+
+    #[test]
+    fn host_check_result_state_after_is_service_style() {
+        let line = |state: u8, reachable: bool| {
+            format!(
+                r#"{{"type":"CheckResult","timestamp":1,"host":"h","check_result":{{"output":"x","state":{state},"vars_after":{{"attempt":2,"reachable":{reachable},"state":{state},"state_type":0}}}}}}"#
+            )
+        };
+        let after = |state, reachable| {
+            let Event::CheckResult { after, .. } = one(&line(state, reachable)) else {
+                panic!();
+            };
+            after.map(|after| (after.state, after.attempt, after.state_type))
+        };
+        let soft = |state| Some((CheckableState::Host(state), 2, StateType::Soft));
+        assert_eq!(after(0, true), soft(HostState::Up));
+        assert_eq!(after(1, true), soft(HostState::Up), "warning is up");
+        assert_eq!(after(2, true), soft(HostState::Down));
+        assert_eq!(after(3, true), soft(HostState::Down));
+        assert_eq!(after(2, false), soft(HostState::Unreachable));
+        assert_eq!(after(0, false), soft(HostState::Up));
+
+        // Without a state type there is no usable state.
+        let Event::CheckResult { after, .. } = one(
+            r#"{"type":"CheckResult","timestamp":1,"host":"h","service":"s","check_result":{"state":2,"vars_after":{"state":2}}}"#,
+        ) else {
+            panic!();
+        };
+        assert_eq!(after, None);
+    }
+
+    #[tokio::test]
+    async fn raw_lines_span_chunks_and_end_with_the_stream() {
+        let chunks: Vec<Result<Bytes, ApiError>> = vec![
+            Ok(Bytes::from_static(b"{\"type\":\"Flapping\",")),
+            Ok(Bytes::from_static(
+                b"\"host\":\"h\"}\n\n  \nnot json\n{\"tail\"",
+            )),
+            Ok(Bytes::from_static(b":1}")),
+        ];
+        let lines: Vec<Vec<u8>> = EventStream::new(futures::stream::iter(chunks).boxed())
+            .into_lines()
+            .map(|line| line.unwrap())
+            .collect()
+            .await;
+        assert_eq!(
+            lines,
+            vec![
+                br#"{"type":"Flapping","host":"h"}"#.to_vec(),
+                b"not json".to_vec(),
+                br#"{"tail":1}"#.to_vec(),
+            ]
+        );
+        assert!(parse_event(&lines[0]).is_some());
+        assert_eq!(parse_event(&lines[1]), None);
+
+        let failing: Vec<Result<Bytes, ApiError>> = vec![
+            Ok(Bytes::from_static(b"{\"a\":1}\n")),
+            Err(ApiError::Timeout),
+            Ok(Bytes::from_static(b"{\"never\":1}\n")),
+        ];
+        let items: Vec<Result<Vec<u8>, ApiError>> =
+            EventStream::new(futures::stream::iter(failing).boxed())
+                .into_lines()
+                .collect()
+                .await;
+        assert_eq!(
+            items,
+            vec![Ok(br#"{"a":1}"#.to_vec()), Err(ApiError::Timeout)]
+        );
     }
 
     #[test]
@@ -626,7 +768,7 @@ mod tests {
         let recorded = include_str!("../../../contract/samples/events.ndjson");
         let removed: Vec<ic_model::Downtime> = recorded
             .lines()
-            .filter_map(|line| parse_line(line.as_bytes()))
+            .filter_map(|line| parse_event(line.as_bytes()))
             .filter_map(|event| match event {
                 Event::DowntimeRemoved { downtime, .. } => Some(downtime),
                 _ => None,
@@ -688,24 +830,24 @@ mod tests {
 
     #[test]
     fn skips_unknown_malformed_and_incomplete_events() {
-        assert_eq!(parse_line(b"{not json"), None);
-        assert_eq!(parse_line(b"[1,2,3]"), None);
+        assert_eq!(parse_event(b"{not json"), None);
+        assert_eq!(parse_event(b"[1,2,3]"), None);
         assert_eq!(
-            parse_line(br#"{"type":"Notification","host":"h","users":["a"]}"#),
+            parse_event(br#"{"type":"Notification","host":"h","users":["a"]}"#),
             None
         );
-        assert_eq!(parse_line(br#"{"type":"SomethingNew","host":"h"}"#), None);
+        assert_eq!(parse_event(br#"{"type":"SomethingNew","host":"h"}"#), None);
         assert_eq!(
-            parse_line(br#"{"type":"StateChange","host":"","state":2}"#),
+            parse_event(br#"{"type":"StateChange","host":"","state":2}"#),
             None,
             "no host"
         );
         assert_eq!(
-            parse_line(br#"{"type":"CheckResult","host":"h"}"#),
+            parse_event(br#"{"type":"CheckResult","host":"h"}"#),
             None,
             "no check result"
         );
-        assert_eq!(parse_line(br#"{"type":"ObjectCreated"}"#), None);
+        assert_eq!(parse_event(br#"{"type":"ObjectCreated"}"#), None);
     }
 
     #[test]
@@ -717,7 +859,7 @@ mod tests {
             .collect();
         let events: Vec<Event> = lines
             .iter()
-            .filter_map(|line| parse_line(line.as_bytes()))
+            .filter_map(|line| parse_event(line.as_bytes()))
             .collect();
         assert_eq!(events.len(), lines.len(), "every recorded event maps");
     }

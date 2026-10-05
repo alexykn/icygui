@@ -1,0 +1,740 @@
+use std::sync::Arc;
+
+use ic_api::Detail;
+use ic_model::{
+    AckKind, CheckResult, CheckableState, Comment, CommentKind, Downtime, Event, Host, HostState,
+    Links, ObjectKey, Service, ServiceKey, ServiceState, StateAfter, StateType, Timestamp,
+};
+use serde_json::json;
+
+use super::{Applied, Overview, Store};
+
+fn t(seconds: f64) -> Timestamp {
+    Timestamp::from_unix_seconds(seconds)
+}
+
+fn host(name: &str, state: HostState) -> Host {
+    let mut host = Host::new(name);
+    host.state = state;
+    host.check.last_check = Some(t(100.0));
+    host
+}
+
+fn service(host: &str, name: &str, state: ServiceState) -> Service {
+    let mut service = Service::new(host, name);
+    service.state = state;
+    service.check.max_attempts = 3;
+    service.check.check_interval = 300.0;
+    service.check.retry_interval = 60.0;
+    service.check.last_check = Some(t(100.0));
+    service
+}
+
+fn key(host: &str, name: &str) -> ObjectKey {
+    ObjectKey::service(host, name)
+}
+
+/// A store with host `h` (up) and services `h!a` (OK), `h!b` (critical),
+/// loaded at sequence number 10.
+fn loaded() -> Store {
+    let mut store = Store::default();
+    store.replace_hosts(vec![host("h", HostState::Up)], 10);
+    store.replace_services(
+        vec![
+            service("h", "a", ServiceState::Ok),
+            service("h", "b", ServiceState::Critical),
+        ],
+        Detail::Lean,
+        10,
+    );
+    store.take_changes();
+    store
+}
+
+fn result(state: i32, output: &str, end: f64) -> CheckResult {
+    CheckResult {
+        output: output.to_owned(),
+        exit_status: state,
+        execution_start: t(end - 1.0),
+        execution_end: t(end),
+        schedule_start: t(end - 1.0),
+        active: true,
+        ..CheckResult::default()
+    }
+}
+
+fn check_result(
+    object: ObjectKey,
+    state: CheckableState,
+    state_type: StateType,
+    attempt: u32,
+    end: f64,
+) -> Event {
+    let code = match state {
+        CheckableState::Service(ServiceState::Ok) | CheckableState::Host(HostState::Up) => 0,
+        CheckableState::Service(ServiceState::Warning) => 1,
+        CheckableState::Service(ServiceState::Unknown) => 3,
+        _ => 2,
+    };
+    Event::CheckResult {
+        object,
+        result: result(code, "output", end),
+        downtime_depth: Some(0),
+        acknowledgement: None,
+        after: Some(StateAfter {
+            state,
+            state_type,
+            attempt,
+            reachable: !matches!(state, CheckableState::Host(HostState::Unreachable)),
+        }),
+        at: t(end + 0.1),
+    }
+}
+
+fn svc(state: ServiceState) -> CheckableState {
+    CheckableState::Service(state)
+}
+
+fn stored(store: &Store, host: &str, name: &str) -> Service {
+    (**store.services.get(&ServiceKey::new(host, name)).unwrap()).clone()
+}
+
+#[test]
+fn a_check_result_updates_the_whole_object() {
+    let mut store = loaded();
+    let applied = store.apply(
+        11,
+        &check_result(
+            key("h", "a"),
+            svc(ServiceState::Warning),
+            StateType::Soft,
+            1,
+            200.0,
+        ),
+    );
+    let Applied::Changed { before, after } = applied else {
+        panic!("{applied:?}");
+    };
+    assert_eq!(before.unwrap().state, svc(ServiceState::Ok));
+    assert_eq!(after.unwrap().state, svc(ServiceState::Warning));
+    let a = stored(&store, "h", "a");
+    assert_eq!(a.state, ServiceState::Warning);
+    assert_eq!(a.check.state_type, StateType::Soft);
+    assert_eq!(a.check.attempt, 1);
+    assert_eq!(a.check.last_state_change, t(200.0));
+    assert_eq!(a.check.last_hard_state_change, Timestamp::EPOCH, "soft");
+    assert_eq!(a.check.last_check, Some(t(200.0)));
+    assert_eq!(
+        a.check.next_check,
+        Some(t(260.0)),
+        "retry interval while soft"
+    );
+    assert_eq!(a.check.output(), "output");
+    let changes = store.take_changes();
+    assert!(changes.any);
+    assert!(changes.objects.contains(&key("h", "a")));
+
+    // The next attempt: same state, attempt 2; no state change.
+    store.apply(
+        12,
+        &check_result(
+            key("h", "a"),
+            svc(ServiceState::Warning),
+            StateType::Soft,
+            2,
+            260.0,
+        ),
+    );
+    let a = stored(&store, "h", "a");
+    assert_eq!(a.check.attempt, 2);
+    assert_eq!(a.check.last_state_change, t(200.0));
+
+    // Hard now.
+    store.apply(
+        13,
+        &check_result(
+            key("h", "a"),
+            svc(ServiceState::Warning),
+            StateType::Hard,
+            1,
+            320.0,
+        ),
+    );
+    let a = stored(&store, "h", "a");
+    assert_eq!(a.check.state_type, StateType::Hard);
+    assert_eq!(a.check.last_hard_state_change, t(320.0));
+    assert_eq!(a.check.last_state_change, t(200.0));
+    assert_eq!(
+        a.check.next_check,
+        Some(t(620.0)),
+        "check interval when hard"
+    );
+
+    // Recovery: a hard state change.
+    store.apply(
+        14,
+        &check_result(
+            key("h", "a"),
+            svc(ServiceState::Ok),
+            StateType::Hard,
+            1,
+            400.0,
+        ),
+    );
+    let a = stored(&store, "h", "a");
+    assert_eq!(a.state, ServiceState::Ok);
+    assert_eq!(a.check.last_state_change, t(400.0));
+    assert_eq!(a.check.last_hard_state_change, t(400.0));
+}
+
+#[test]
+fn without_vars_after_the_result_state_decides() {
+    let mut store = loaded();
+    store.apply(
+        11,
+        &Event::CheckResult {
+            object: key("h", "b"),
+            result: result(0, "OK now", 200.0),
+            downtime_depth: None,
+            acknowledgement: None,
+            after: None,
+            at: t(200.0),
+        },
+    );
+    let b = stored(&store, "h", "b");
+    assert_eq!(b.state, ServiceState::Ok);
+    assert_eq!(b.check.state_type, StateType::Hard);
+
+    store.apply(
+        12,
+        &Event::CheckResult {
+            object: ObjectKey::host("h"),
+            result: result(1, "warning is up for hosts", 200.0),
+            downtime_depth: None,
+            acknowledgement: None,
+            after: None,
+            at: t(200.0),
+        },
+    );
+    assert_eq!(store.hosts.get(&"h".into()).unwrap().state, HostState::Up);
+}
+
+#[test]
+fn hosts_become_unreachable_without_a_state_change() {
+    let mut store = loaded();
+    let down = |store: &mut Store, seq, state, end| {
+        store.apply(
+            seq,
+            &check_result(
+                ObjectKey::host("h"),
+                CheckableState::Host(state),
+                StateType::Hard,
+                1,
+                end,
+            ),
+        );
+        (**store.hosts.get(&"h".into()).unwrap()).clone()
+    };
+    let host = down(&mut store, 11, HostState::Down, 200.0);
+    assert_eq!(host.state, HostState::Down);
+    assert!(host.check.reachable);
+    assert_eq!(host.check.last_state_change, t(200.0));
+    let host = down(&mut store, 12, HostState::Unreachable, 300.0);
+    assert_eq!(host.state, HostState::Unreachable);
+    assert!(!host.check.reachable);
+    assert_eq!(
+        host.check.last_state_change,
+        t(200.0),
+        "down and unreachable are the same raw state"
+    );
+}
+
+#[test]
+fn acknowledgements_end_like_in_icinga() {
+    let mut store = loaded();
+    let set = |kind| Event::AcknowledgementSet {
+        object: key("h", "b"),
+        author: "a".to_owned(),
+        comment: "c".to_owned(),
+        kind,
+        expiry: Some(t(9_999.0)),
+        at: t(150.0),
+    };
+    store.apply(11, &set(AckKind::Normal));
+    let b = stored(&store, "h", "b");
+    assert_eq!(b.check.acknowledgement, AckKind::Normal);
+    assert_eq!(b.check.acknowledgement_expiry, Some(t(9_999.0)));
+    // A normal acknowledgement ends with any state change.
+    store.apply(
+        12,
+        &check_result(
+            key("h", "b"),
+            svc(ServiceState::Warning),
+            StateType::Hard,
+            1,
+            200.0,
+        ),
+    );
+    assert_eq!(
+        stored(&store, "h", "b").check.acknowledgement,
+        AckKind::None
+    );
+
+    // A sticky one survives problem changes, ends with the recovery.
+    store.apply(13, &set(AckKind::Sticky));
+    store.apply(
+        14,
+        &check_result(
+            key("h", "b"),
+            svc(ServiceState::Critical),
+            StateType::Hard,
+            1,
+            300.0,
+        ),
+    );
+    assert_eq!(
+        stored(&store, "h", "b").check.acknowledgement,
+        AckKind::Sticky
+    );
+    // The event's boolean doesn't turn sticky into normal.
+    let mut event = check_result(
+        key("h", "b"),
+        svc(ServiceState::Critical),
+        StateType::Hard,
+        1,
+        350.0,
+    );
+    if let Event::CheckResult {
+        acknowledgement, ..
+    } = &mut event
+    {
+        *acknowledgement = Some(AckKind::Normal);
+    }
+    store.apply(15, &event);
+    assert_eq!(
+        stored(&store, "h", "b").check.acknowledgement,
+        AckKind::Sticky
+    );
+    store.apply(
+        16,
+        &check_result(
+            key("h", "b"),
+            svc(ServiceState::Ok),
+            StateType::Hard,
+            1,
+            400.0,
+        ),
+    );
+    assert_eq!(
+        stored(&store, "h", "b").check.acknowledgement,
+        AckKind::None
+    );
+
+    store.apply(17, &set(AckKind::Normal));
+    store.apply(
+        18,
+        &Event::AcknowledgementCleared {
+            object: key("h", "b"),
+            at: t(500.0),
+        },
+    );
+    let b = stored(&store, "h", "b");
+    assert_eq!(b.check.acknowledgement, AckKind::None);
+    assert_eq!(b.check.acknowledgement_expiry, None);
+}
+
+#[test]
+fn a_state_change_after_its_check_result_changes_nothing_more() {
+    let mut store = loaded();
+    let check = check_result(
+        key("h", "a"),
+        svc(ServiceState::Critical),
+        StateType::Hard,
+        1,
+        200.0,
+    );
+    store.apply(11, &check);
+    let after_check = stored(&store, "h", "a");
+    let Event::CheckResult { result, .. } = check else {
+        unreachable!()
+    };
+    store.apply(
+        12,
+        &Event::StateChange {
+            object: key("h", "a"),
+            state: svc(ServiceState::Critical),
+            state_type: StateType::Hard,
+            result,
+            downtime_depth: Some(0),
+            acknowledgement: Some(AckKind::None),
+            at: t(200.1),
+        },
+    );
+    assert_eq!(stored(&store, "h", "a"), after_check);
+}
+
+#[test]
+fn flapping_and_unknown_objects() {
+    let mut store = loaded();
+    store.apply(
+        11,
+        &Event::Flapping {
+            object: key("h", "a"),
+            flapping: true,
+            current: 42.0,
+            at: t(1.0),
+        },
+    );
+    let a = stored(&store, "h", "a");
+    assert!(a.check.flapping);
+    assert!((a.check.flapping_current - 42.0).abs() < f64::EPSILON);
+
+    let unknown = key("h", "new");
+    assert_eq!(
+        store.apply(
+            12,
+            &check_result(
+                unknown.clone(),
+                svc(ServiceState::Ok),
+                StateType::Hard,
+                1,
+                1.0
+            )
+        ),
+        Applied::Unknown(unknown)
+    );
+    assert_eq!(
+        store.apply(
+            13,
+            &Event::ObjectLifecycle {
+                change: ic_model::ObjectChange::Created,
+                object_type: "Host".to_owned(),
+                name: "x".to_owned(),
+                at: t(1.0),
+            }
+        ),
+        Applied::Ignored
+    );
+}
+
+#[test]
+fn events_already_reflected_in_a_query_answer_are_skipped() {
+    let mut store = loaded();
+    // Loaded at 10: line 9 was read before the query went out.
+    assert_eq!(
+        store.apply(
+            9,
+            &check_result(
+                key("h", "a"),
+                svc(ServiceState::Critical),
+                StateType::Hard,
+                1,
+                50.0
+            )
+        ),
+        Applied::Stale
+    );
+    assert_eq!(stored(&store, "h", "a").state, ServiceState::Ok);
+}
+
+#[test]
+fn answers_older_than_an_applied_event_keep_the_event_state() {
+    let mut store = loaded();
+    // Line 12 (critical) is applied; then an answer of a query sent at 11
+    // arrives, still saying OK but with new vars.
+    store.apply(
+        12,
+        &check_result(
+            key("h", "a"),
+            svc(ServiceState::Critical),
+            StateType::Hard,
+            1,
+            200.0,
+        ),
+    );
+    let mut old = service("h", "a", ServiceState::Ok);
+    old.vars.insert("role".to_owned(), json!("db"));
+    store.apply_fetched(Vec::new(), vec![old.clone()], Detail::Lean, &[], 11);
+    let a = stored(&store, "h", "a");
+    assert_eq!(a.state, ServiceState::Critical, "the event is newer");
+    assert_eq!(a.check.output(), "output");
+    assert_eq!(
+        a.vars.get("role"),
+        Some(&json!("db")),
+        "config comes from the answer"
+    );
+
+    // An answer sent after the event wins.
+    store.apply_fetched(Vec::new(), vec![old], Detail::Lean, &[], 12);
+    assert_eq!(stored(&store, "h", "a").state, ServiceState::Ok);
+    // And makes older lines stale.
+    assert_eq!(
+        store.apply(
+            12,
+            &check_result(
+                key("h", "a"),
+                svc(ServiceState::Critical),
+                StateType::Hard,
+                1,
+                200.0
+            )
+        ),
+        Applied::Stale
+    );
+}
+
+#[test]
+fn lean_answers_keep_results_and_links() {
+    let mut store = loaded();
+    let mut full = service("h", "b", ServiceState::Critical);
+    full.check.result = Some(result(2, "CRITICAL - disk full", 90.0));
+    full.links = Links {
+        notes_url: "https://wiki/disk".to_owned(),
+        ..Links::default()
+    };
+    store.apply_fetched(Vec::new(), vec![full], Detail::Full, &[], 11);
+    assert!(store.is_full(&ServiceKey::new("h", "b")));
+
+    let mut lean = service("h", "b", ServiceState::Critical);
+    lean.check.last_check = Some(t(110.0));
+    store.replace_services(
+        vec![lean, service("h", "a", ServiceState::Ok)],
+        Detail::Lean,
+        12,
+    );
+    let b = stored(&store, "h", "b");
+    assert_eq!(b.check.output(), "CRITICAL - disk full");
+    assert_eq!(b.links.notes_url, "https://wiki/disk");
+    assert_eq!(b.check.last_check, Some(t(110.0)));
+}
+
+#[test]
+fn reloads_remove_what_is_gone_unless_an_event_saw_it() {
+    let mut store = loaded();
+    store.apply(
+        20,
+        &check_result(
+            key("h", "b"),
+            svc(ServiceState::Critical),
+            StateType::Hard,
+            1,
+            200.0,
+        ),
+    );
+    // A reload sent at 15 lacks both services: `a` is gone, `b` had an
+    // event after the query went out, so it stays.
+    store.replace_services(Vec::new(), Detail::Lean, 15);
+    assert!(!store.contains(&key("h", "a")));
+    assert!(store.contains(&key("h", "b")));
+    let changes = store.take_changes();
+    assert!(changes.all);
+    assert!(changes.objects.contains(&key("h", "a")));
+
+    // A host that is gone takes its services and their comments along.
+    store.apply(
+        21,
+        &Event::CommentAdded {
+            comment: comment("h!b!c1", key("h", "b"), 1.0),
+            at: t(1.0),
+        },
+    );
+    let removed = store.apply_fetched(
+        Vec::new(),
+        Vec::new(),
+        Detail::Full,
+        &[ObjectKey::host("h")],
+        30,
+    );
+    assert_eq!(removed, [key("h", "b"), ObjectKey::host("h")]);
+    assert!(store.services.is_empty());
+    assert!(store.comments.is_empty());
+}
+
+fn comment(name: &str, object: ObjectKey, entry: f64) -> Comment {
+    Comment {
+        name: name.to_owned(),
+        object,
+        author: "me".to_owned(),
+        text: "text".to_owned(),
+        kind: CommentKind::User,
+        entry_time: t(entry),
+        expire_time: None,
+        persistent: false,
+    }
+}
+
+fn downtime(name: &str, object: ObjectKey, in_effect: bool) -> Downtime {
+    Downtime {
+        name: name.to_owned(),
+        object,
+        author: "me".to_owned(),
+        comment: "maintenance".to_owned(),
+        start_time: t(100.0),
+        end_time: t(200.0),
+        fixed: true,
+        duration: 0.0,
+        entry_time: t(90.0),
+        trigger_time: None,
+        triggered_by: None,
+        parent: None,
+        in_effect,
+        config_owned: false,
+    }
+}
+
+#[test]
+fn comment_and_downtime_lists_keep_newer_events() {
+    let mut store = loaded();
+    let b = key("h", "b");
+    store.apply_overview(
+        Overview {
+            comments: vec![
+                comment("h!b!old", b.clone(), 1.0),
+                comment("h!b!gone", b.clone(), 2.0),
+            ],
+            ..Overview::default()
+        },
+        10,
+    );
+    assert_eq!(store.comments.get(&b).map(Vec::len), Some(2));
+
+    // A reload's comment query goes out at 20; meanwhile events at 21 and
+    // 22 add one and remove one. The answer (without either change)
+    // arrives after them.
+    store.begin_annotation_query();
+    store.apply(
+        21,
+        &Event::CommentAdded {
+            comment: comment("h!b!new", b.clone(), 3.0),
+            at: t(3.0),
+        },
+    );
+    store.apply(
+        22,
+        &Event::CommentRemoved {
+            comment: comment("h!b!gone", b.clone(), 2.0),
+            at: t(4.0),
+        },
+    );
+    store.apply_overview(
+        Overview {
+            comments: vec![
+                comment("h!b!old", b.clone(), 1.0),
+                comment("h!b!gone", b.clone(), 2.0),
+            ],
+            ..Overview::default()
+        },
+        20,
+    );
+    let names: Vec<&str> = store.comments[&b].iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["h!b!old", "h!b!new"]);
+
+    // Lines read before the list's query are already in it.
+    assert_eq!(
+        store.apply(
+            19,
+            &Event::CommentRemoved {
+                comment: comment("h!b!old", b.clone(), 1.0),
+                at: t(4.0),
+            },
+        ),
+        Applied::Stale
+    );
+}
+
+#[test]
+fn downtimes_keep_the_depth_in_step() {
+    let mut store = loaded();
+    let b = key("h", "b");
+    let depth = |store: &Store| stored(store, "h", "b").check.downtime_depth;
+    // Fixed downtime added inside its window: in effect at once.
+    store.apply(
+        11,
+        &Event::DowntimeAdded {
+            downtime: downtime("h!b!d1", b.clone(), true),
+            at: t(1.0),
+        },
+    );
+    assert_eq!(depth(&store), 1);
+    // Started and triggered for the same downtime: still one.
+    for (seq, event) in [
+        (
+            12,
+            Event::DowntimeStarted {
+                downtime: downtime("h!b!d1", b.clone(), true),
+                at: t(1.0),
+            },
+        ),
+        (
+            13,
+            Event::DowntimeTriggered {
+                downtime: downtime("h!b!d1", b.clone(), true),
+                at: t(1.0),
+            },
+        ),
+    ] {
+        store.apply(seq, &event);
+    }
+    assert_eq!(depth(&store), 1);
+    // A flexible one waiting for a problem: not yet.
+    store.apply(
+        14,
+        &Event::DowntimeAdded {
+            downtime: downtime("h!b!d2", b.clone(), false),
+            at: t(1.0),
+        },
+    );
+    assert_eq!(depth(&store), 1);
+    assert_eq!(store.downtimes[&b].len(), 2);
+    store.apply(
+        15,
+        &Event::DowntimeRemoved {
+            downtime: downtime("h!b!d1", b.clone(), true),
+            at: t(1.0),
+        },
+    );
+    assert_eq!(depth(&store), 0);
+    assert_eq!(
+        store.downtime("h!b!d2").map(|d| d.object.clone()),
+        Some(b.clone())
+    );
+    assert!(store.downtime("h!b!d1").is_none());
+}
+
+#[test]
+fn snapshots_share_and_stay_unchanged() {
+    let mut store = loaded();
+    let before = store.snapshot(1, t(1.0), Arc::default());
+    assert_eq!(before.overall.critical, 1);
+    assert_eq!(before.overall.ok, 2, "one up host, one ok service");
+    assert_eq!(before.overall.unhandled, 1);
+    store.apply(
+        11,
+        &check_result(
+            key("h", "b"),
+            svc(ServiceState::Ok),
+            StateType::Hard,
+            1,
+            200.0,
+        ),
+    );
+    store.set_last_event_at(t(201.0));
+    let after = store.snapshot(2, t(2.0), Arc::default());
+    let b = ServiceKey::new("h", "b");
+    assert_eq!(
+        before.services[&b].state,
+        ServiceState::Critical,
+        "copied on write"
+    );
+    assert_eq!(after.services[&b].state, ServiceState::Ok);
+    assert!(
+        Arc::ptr_eq(
+            &before.services[&ServiceKey::new("h", "a")],
+            &after.services[&ServiceKey::new("h", "a")]
+        ),
+        "unchanged objects are shared"
+    );
+    assert_eq!(after.overall.critical, 0);
+    assert_eq!(after.last_event_at, Some(t(201.0)));
+    assert_eq!(after.revision, 2);
+}

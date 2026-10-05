@@ -14,7 +14,7 @@ mod status;
 mod time;
 
 pub use action::{Action, ActionTarget, ChildOptions, CommandType, DowntimeMode};
-pub use event::{CheckableState, Event, EventKind, ObjectChange};
+pub use event::{CheckableState, Event, EventKind, ObjectChange, StateAfter};
 pub use name::{HostName, ObjectKey, ServiceKey};
 pub use object::{
     AckKind, CheckInfo, CheckResult, Comment, CommentKind, Dependency, Downtime, Endpoint,

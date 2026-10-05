@@ -99,6 +99,17 @@ async fn status_lists_every_component() {
     assert_eq!(app["node_name"], "master-01");
     assert_eq!(app["version"], "r2.14.3-1");
     assert!(app["program_start"].as_f64().unwrap() > 1.0e9);
+    // A pretended restart moves the start time.
+    server
+        .control()
+        .set_program_start(ic_model::Timestamp::from_unix_seconds(2.0e9));
+    let (_, body) = get(&client, &server, "/v1/status/IcingaApplication").await;
+    let app = &results(&body)[0]["status"]["icingaapplication"]["app"];
+    assert_eq!(app["program_start"], json!(2_000_000_000));
+    assert_eq!(
+        server.control().status().program_start,
+        ic_model::Timestamp::from_unix_seconds(2.0e9)
+    );
 
     let (status, body) = get(&client, &server, "/v1/status/CIB").await;
     assert_eq!(status, StatusCode::OK);

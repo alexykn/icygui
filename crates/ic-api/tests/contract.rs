@@ -7,6 +7,13 @@
 //! test. They only read: queries, status, the event stream, and a refused
 //! action as the read-only `viewer` user.
 //!
+//! They load every object several times, which is fine for the small
+//! disposable instance but is load a production Icinga must not get from a
+//! test run. So [`fixture`] refuses any other instance before sending a
+//! single query: the URL must point to this machine and the fixture-only
+//! `viewer` user must log in. Load and scale tests belong against `ic-mock`
+//! or `contract/scale/benchmark.sh`'s own local Icinga.
+//!
 //! A freshly started Icinga runs its first checks within a minute (see
 //! [`wait_for_first_checks`]); tests that need checked objects wait for
 //! them.
@@ -61,6 +68,29 @@ fn contract() -> Option<Contract> {
         ca_pem: std::fs::read(var("ICYGUI_CONTRACT_CA_FILE")).expect("CA file"),
         server_name: var("ICYGUI_CONTRACT_SERVER_NAME"),
     })
+}
+
+/// [`contract`], after making sure it is the disposable Icinga from
+/// `contract/run-icinga.sh` and never a real one (see the module docs).
+/// Panics otherwise, before any query is sent.
+async fn fixture() -> Option<Contract> {
+    const REFUSED: &str = "ICYGUI_CONTRACT_URL is not the disposable Icinga from \
+                           contract/run-icinga.sh; contract tests never run against \
+                           other instances";
+    let contract = contract()?;
+    let host = contract.url.host_str().unwrap_or_default();
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    assert!(loopback, "{REFUSED}: {host} is not this machine");
+    let viewer = contract.client_as("viewer", "viewer-test").info().await;
+    assert!(
+        matches!(&viewer, Ok(info) if info.user == "viewer"),
+        "{REFUSED}: its fixture-only `viewer` user can't log in ({viewer:?})"
+    );
+    Some(contract)
 }
 
 impl Contract {
@@ -136,7 +166,7 @@ async fn wait_for_first_checks(raw: &Raw) {
 
 #[tokio::test]
 async fn real_icinga_ca_and_pin() {
-    let Some(contract) = contract() else {
+    let Some(contract) = fixture().await else {
         return;
     };
     let info = contract.client().info().await.unwrap();
@@ -166,7 +196,7 @@ async fn real_icinga_ca_and_pin() {
 
 #[tokio::test]
 async fn real_icinga_queries() {
-    let Some(contract) = contract() else {
+    let Some(contract) = fixture().await else {
         return;
     };
     wait_for_first_checks(&contract.raw()).await;
@@ -197,7 +227,7 @@ async fn real_icinga_queries() {
 /// not come to that). Both [`Detail`] lists come back verbatim.
 #[tokio::test]
 async fn real_icinga_knows_every_requested_attribute() {
-    let Some(contract) = contract() else {
+    let Some(contract) = fixture().await else {
         return;
     };
     // Every query the client makes. Icinga only notices an unknown
@@ -290,7 +320,7 @@ fn unchanged<'a>(lean: &'a [Service], full: &'a [Service]) -> Vec<(&'a Service, 
 
 #[tokio::test]
 async fn real_icinga_lean_and_full_services() {
-    let Some(contract) = contract() else {
+    let Some(contract) = fixture().await else {
         return;
     };
     let raw = contract.raw();
@@ -378,7 +408,7 @@ async fn real_icinga_lean_and_full_services() {
 
 #[tokio::test]
 async fn real_icinga_objects_by_name_with_missing_names() {
-    let Some(contract) = contract() else {
+    let Some(contract) = fixture().await else {
         return;
     };
     let client = contract.client();
@@ -428,7 +458,7 @@ async fn real_icinga_objects_by_name_with_missing_names() {
 
 #[tokio::test]
 async fn real_icinga_refuses_actions_without_permission() {
-    let Some(contract) = contract() else {
+    let Some(contract) = fixture().await else {
         return;
     };
     let viewer = contract.client_as("viewer", "viewer-test");
@@ -457,7 +487,7 @@ async fn real_icinga_refuses_actions_without_permission() {
 
 #[tokio::test]
 async fn real_icinga_event_stream() {
-    let Some(contract) = contract() else {
+    let Some(contract) = fixture().await else {
         return;
     };
     let mut stream = contract

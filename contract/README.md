@@ -21,6 +21,12 @@ pins that down:
   cargo test -p ic-api --test contract
   ```
 
+  The tests refuse any instance but this disposable one before sending a
+  query (the URL must point to this machine and the fixture-only `viewer`
+  user must log in): they load every object several times, which a
+  production Icinga must not get from a test run. Load and scale tests run
+  only against `ic-mock` or `scale/benchmark.sh`'s own local Icinga.
+
   Without the variables the tests pass without checking anything, unless
   `ICYGUI_CONTRACT_REQUIRED` is set. The nightly `Contract` workflow
   (`.github/workflows/contract.yml`, also runnable by hand with another

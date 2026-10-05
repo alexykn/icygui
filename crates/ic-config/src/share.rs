@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use toml::{Table, Value};
 
 use crate::config::new_id;
-use crate::error::ConfigError;
+use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::migrate::{
     deserialize, deserialize_text, format_version, parse_table, strip_bom, upgrade_groups,
 };
@@ -45,6 +45,13 @@ struct ExportFile<'a> {
 
 #[derive(Deserialize)]
 struct ImportFile {
+    /// Checked by [`check_export`] before; declared so that it isn't
+    /// reported as an unknown key.
+    #[serde(default, rename = "format")]
+    _format: Option<Value>,
+    /// Read by [`format_version`] before; declared for the same reason.
+    #[serde(default, rename = "version")]
+    _version: Option<Value>,
     groups: Vec<DashboardGroup>,
 }
 
@@ -118,7 +125,8 @@ fn check_export(table: &Table) -> Result<(), ConfigError> {
         Some(Value::String(format)) if format == EXPORT_FORMAT => {}
         Some(other) => {
             return Err(ConfigError::NotAnExport(format!(
-                "its `format` is {other}, not \"{EXPORT_FORMAT}\""
+                "its `format` is {}, not \"{EXPORT_FORMAT}\"",
+                excerpt(&other.to_string(), MAX_VALUE_CHARS)
             )));
         }
     }
@@ -184,5 +192,26 @@ mod tests {
     #[test]
     fn an_empty_export_imports_nothing() {
         assert_eq!(import_groups(&export_groups(&[]).unwrap()).unwrap(), []);
+    }
+
+    #[test]
+    fn long_format_values_are_quoted_in_part() {
+        let text = format!("format = \"{}\"\ngroups = []\n", "x".repeat(1_000_000));
+        let reason = reason(&text);
+        assert!(reason.len() < 300, "{} bytes", reason.len());
+        assert!(reason.starts_with("its `format` is \"xxx"), "{reason}");
+    }
+
+    #[test]
+    fn files_that_are_one_long_line_give_a_short_error() {
+        // A minified JSON file picked by mistake.
+        let text = format!("{{\"groups\": [{}]}}", "{\"name\": \"x\"},".repeat(200_000));
+        match import_groups(&text) {
+            Err(ConfigError::Parse { message }) => {
+                assert!(message.len() < 1_000, "{} bytes", message.len());
+                assert!(message.contains("line 1, column 1"), "{message}");
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
     }
 }

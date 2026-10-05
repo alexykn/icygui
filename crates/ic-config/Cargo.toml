@@ -21,4 +21,4 @@ thiserror.workspace = true
 toml = "1.1.6"
 tracing.workspace = true
 url = "2.5.8"
-uuid = { version = "1.27.0", features = ["v4"] }
+uuid = { version = "1.27.0", features = ["v4", "v5"] }

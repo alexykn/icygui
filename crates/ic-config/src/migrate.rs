@@ -5,11 +5,11 @@
 //! icygui that only *added* settings still load. Changes older versions
 //! can't read bump [`CONFIG_VERSION`] and add a step to [`MIGRATIONS`].
 
-use serde::Deserializer;
 use serde::de::DeserializeOwned;
+use serde::{Deserializer, Serialize};
 use toml::{Table, Value};
 
-use crate::error::ConfigError;
+use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::model::{CONFIG_VERSION, Config};
 
 /// Names the settings in log messages.
@@ -24,11 +24,24 @@ pub(crate) type Migration = fn(&mut Table) -> Result<(), ConfigError>;
 /// doesn't compile.
 const MIGRATIONS: [Migration; CONFIG_VERSION as usize] = [v0_to_v1];
 
+/// Settings read from text, and what reading them noticed. Nothing is
+/// logged yet, so the caller decides whether it is worth reporting.
+#[derive(Debug)]
+pub(crate) struct Parsed {
+    /// The settings, upgraded to the current format.
+    pub(crate) config: Config,
+    /// The keys that were ignored because the settings don't have them, as
+    /// sorted dotted paths (`environments.0.nmae`).
+    pub(crate) unknown_keys: Vec<String>,
+    /// The format version the text declared (0 without a `version` key).
+    pub(crate) version: u64,
+}
+
 /// Upgrades a parsed settings table to the current format and reads it.
 ///
 /// A missing `version` key means version 0. Keys this version doesn't know
-/// are ignored. [`ConfigStore::load`](crate::ConfigStore::load) runs the
-/// same steps on the file it reads.
+/// are ignored and logged. [`ConfigStore::load`](crate::ConfigStore::load)
+/// runs the same steps on the file it reads.
 ///
 /// # Errors
 ///
@@ -39,28 +52,77 @@ const MIGRATIONS: [Migration; CONFIG_VERSION as usize] = [v0_to_v1];
 /// - [`ConfigError::Parse`] when the content doesn't fit the settings
 ///   (wrong types, unknown enum values, missing required keys).
 pub fn migrate(raw: Table) -> Result<Config, ConfigError> {
+    let version = format_version(&raw)?;
     let upgraded = upgrade(raw, &MIGRATIONS)?;
-    let mut config: Config = deserialize(upgraded, SETTINGS)?;
+    let (mut config, unknown_keys) = read_upgraded(&upgraded, None)?;
     config.version = CONFIG_VERSION;
-    Ok(config)
+    let parsed = Parsed {
+        config,
+        unknown_keys,
+        version,
+    };
+    parsed.report(SETTINGS);
+    Ok(parsed.config)
 }
 
-/// Parses settings text in any supported format version.
+/// Parses settings text in any supported format version, without logging
+/// anything (see [`Parsed::report`]).
 ///
 /// When the migrations leave the content as it was (always for the current
 /// version), the typed settings are read straight from the text, so errors
 /// point at a line and column.
-pub(crate) fn parse_config(text: &str) -> Result<Config, ConfigError> {
+pub(crate) fn parse_config(text: &str) -> Result<Parsed, ConfigError> {
     let text = strip_bom(text);
     let table = parse_table(text)?;
+    let version = format_version(&table)?;
     let upgraded = upgrade(table.clone(), &MIGRATIONS)?;
-    let mut config: Config = if same_content(&table, &upgraded) {
-        deserialize_text(text, SETTINGS)?
-    } else {
-        deserialize(upgraded, SETTINGS)?
-    };
+    let same = same_content(&table, &upgraded);
+    let (mut config, unknown_keys) = read_upgraded(&upgraded, same.then_some(text))?;
     config.version = CONFIG_VERSION;
-    Ok(config)
+    Ok(Parsed {
+        config,
+        unknown_keys,
+        version,
+    })
+}
+
+impl Parsed {
+    /// Logs what reading the `what` noticed: the keys it ignored, with a
+    /// warning of its own for ones that look like passwords, and an
+    /// upgrade from an older format.
+    pub(crate) fn report(&self, what: &str) {
+        log_unknown_keys(&self.unknown_keys, what);
+        if self.version < u64::from(CONFIG_VERSION) {
+            tracing::info!(
+                from = self.version,
+                to = CONFIG_VERSION,
+                "upgraded the {what} format; the next save writes the new format"
+            );
+        }
+    }
+}
+
+/// Reads settings from a table already in the current layout, and the keys
+/// it ignored. `text`, if given, holds the same content and is read
+/// instead, so that errors have a line and column.
+fn read_upgraded(
+    upgraded: &Table,
+    text: Option<&str>,
+) -> Result<(Config, Vec<String>), ConfigError> {
+    let (config, mut unknown_keys): (Config, _) = match text {
+        Some(text) => {
+            let deserializer = toml::Deserializer::parse(text)
+                .map_err(|error| ConfigError::parse(&error, Some(text)))?;
+            deserialize_collecting(deserializer)
+                .map_err(|error| ConfigError::parse(&error, Some(text)))?
+        }
+        None => deserialize_collecting(upgraded.clone())
+            .map_err(|error| ConfigError::parse(&error, None))?,
+    };
+    unknown_keys.extend(unknown_tagged_keys(upgraded, &config));
+    unknown_keys.sort();
+    unknown_keys.dedup();
+    Ok((config, unknown_keys))
 }
 
 /// Upgrades a dashboard export's `groups` array from format `version` to
@@ -93,7 +155,7 @@ pub(crate) fn upgrade_groups(groups: Value, version: u64) -> Result<Value, Confi
 
 /// Parses TOML text into a table; syntax errors carry line and column.
 pub(crate) fn parse_table(text: &str) -> Result<Table, ConfigError> {
-    toml::from_str(text).map_err(|error| ConfigError::parse(&error))
+    toml::from_str(text).map_err(|error| ConfigError::parse(&error, Some(text)))
 }
 
 /// The format version a table declares; 0 when it has no `version` key.
@@ -103,8 +165,9 @@ pub(crate) fn format_version(table: &Table) -> Result<u64, ConfigError> {
         Some(Value::Integer(version)) => u64::try_from(*version)
             .map_err(|_| ConfigError::InvalidVersion(format!("{version} is negative"))),
         Some(other) => Err(ConfigError::InvalidVersion(format!(
-            "expected a whole number, found {} `{other}`",
-            other.type_str()
+            "expected a whole number, found {} `{}`",
+            other.type_str(),
+            excerpt(&other.to_string(), MAX_VALUE_CHARS)
         ))),
     }
 }
@@ -116,8 +179,11 @@ pub(crate) fn deserialize_text<T: DeserializeOwned>(
     what: &str,
 ) -> Result<T, ConfigError> {
     let deserializer =
-        toml::Deserializer::parse(text).map_err(|error| ConfigError::parse(&error))?;
-    deserialize(deserializer, what)
+        toml::Deserializer::parse(text).map_err(|error| ConfigError::parse(&error, Some(text)))?;
+    let (value, unknown_keys) = deserialize_collecting(deserializer)
+        .map_err(|error| ConfigError::parse(&error, Some(text)))?;
+    log_unknown_keys(&unknown_keys, what);
+    Ok(value)
 }
 
 /// Reads `T` from parsed TOML (a [`Table`] or a [`Value`]). Unknown keys
@@ -127,24 +193,128 @@ where
     T: DeserializeOwned,
     D: Deserializer<'de, Error = toml::de::Error>,
 {
-    let (value, unknown) = deserialize_collecting(deserializer)?;
-    for key in unknown {
-        tracing::warn!(%key, "ignoring unknown key in the {what}");
-    }
+    let (value, unknown_keys) =
+        deserialize_collecting(deserializer).map_err(|error| ConfigError::parse(&error, None))?;
+    log_unknown_keys(&unknown_keys, what);
     Ok(value)
 }
 
 /// Reads `T` and returns the keys it ignored, as dotted paths with array
 /// indices (`environments.0.nmae`).
-fn deserialize_collecting<'de, T, D>(deserializer: D) -> Result<(T, Vec<String>), ConfigError>
+///
+/// Keys inside internally tagged enums (`auth`, see
+/// [`unknown_tagged_keys`]) are not among them: serde buffers those tables
+/// before the ignored keys could be seen.
+fn deserialize_collecting<'de, T, D>(deserializer: D) -> Result<(T, Vec<String>), toml::de::Error>
 where
     T: DeserializeOwned,
     D: Deserializer<'de, Error = toml::de::Error>,
 {
     let mut unknown = Vec::new();
-    let value = serde_ignored::deserialize(deserializer, |path| unknown.push(path.to_string()))
-        .map_err(|error| ConfigError::parse(&error))?;
+    let value = serde_ignored::deserialize(deserializer, |path| unknown.push(path.to_string()))?;
     Ok((value, unknown))
+}
+
+/// The unknown keys inside the settings' internally tagged tables, which
+/// [`deserialize_collecting`] can't see: each environment's `auth` and the
+/// `object` of each notification override. They are the keys of the table
+/// in the file that the settings read from it don't have when written
+/// back. `auth` is where a password is most likely to be put by mistake.
+fn unknown_tagged_keys(upgraded: &Table, config: &Config) -> Vec<String> {
+    let mut unknown = Vec::new();
+    let Some(Value::Array(environments)) = upgraded.get("environments") else {
+        return unknown;
+    };
+    for (index, (raw, environment)) in environments.iter().zip(&config.environments).enumerate() {
+        let path = format!("environments.{index}");
+        if let Some(Value::Table(auth)) = raw.get("auth") {
+            missing_keys(
+                auth,
+                &environment.auth,
+                &format!("{path}.auth"),
+                &mut unknown,
+            );
+        }
+        let objects = raw
+            .get("notifications")
+            .and_then(|notifications| notifications.get("objects"))
+            .and_then(Value::as_array);
+        for (entry_index, (raw, entry)) in objects
+            .into_iter()
+            .flatten()
+            .zip(&environment.notifications.objects)
+            .enumerate()
+        {
+            if let Some(Value::Table(object)) = raw.get("object") {
+                let object_path = format!("{path}.notifications.objects.{entry_index}.object");
+                missing_keys(object, &entry.object, &object_path, &mut unknown);
+            }
+        }
+    }
+    unknown
+}
+
+/// Adds to `unknown` the keys of `raw` (and of its nested tables) that
+/// `typed`, written as TOML, doesn't have.
+fn missing_keys(raw: &Table, typed: &impl Serialize, path: &str, unknown: &mut Vec<String>) {
+    if let Ok(written) = Table::try_from(typed) {
+        compare_keys(raw, &written, path, unknown);
+    }
+}
+
+fn compare_keys(raw: &Table, written: &Table, path: &str, unknown: &mut Vec<String>) {
+    for (key, value) in raw {
+        let key_path = format!("{path}.{key}");
+        match (value, written.get(key)) {
+            (_, None) => unknown.push(key_path),
+            (Value::Table(raw), Some(Value::Table(written))) => {
+                compare_keys(raw, written, &key_path, unknown);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Logs each ignored key of the `what`. Keys that look like they hold a
+/// password get a warning of their own: icygui never reads secrets from
+/// its files, and the value should not stay in one.
+pub(crate) fn log_unknown_keys(keys: &[String], what: &str) {
+    for key in keys {
+        if looks_secret(key) {
+            tracing::warn!(
+                %key,
+                "ignoring a password-like key in the {what}: icygui keeps passwords in the \
+                 system keychain and never reads them from files; remove it from the file"
+            );
+        } else {
+            tracing::warn!(%key, "ignoring unknown key in the {what}");
+        }
+    }
+}
+
+/// Whether the last part of a dotted key path names a secret
+/// (`environments.0.auth.password`, `api_token`, `client-secret`).
+fn looks_secret(path: &str) -> bool {
+    let name = path
+        .rsplit('.')
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    matches!(name.as_str(), "pass" | "pw" | "pwd")
+        || [
+            "password",
+            "passwd",
+            "passphrase",
+            "secret",
+            "token",
+            "apikey",
+            "api_key",
+            "credential",
+            "private_key",
+        ]
+        .iter()
+        .any(|word| name.contains(word))
 }
 
 /// Drops a leading byte order mark, which some editors write.
@@ -163,12 +333,10 @@ fn upgrade(mut table: Table, steps: &[Migration]) -> Result<Table, ConfigError> 
         .ok_or(ConfigError::UnsupportedVersion { found, supported })?;
     for (from, step) in steps.iter().enumerate().skip(start) {
         step(&mut table)?;
-        let to = from + 1;
         table.insert(
             "version".to_owned(),
-            version_value(u64::try_from(to).unwrap_or(u64::MAX)),
+            version_value(u64::try_from(from + 1).unwrap_or(u64::MAX)),
         );
-        tracing::info!(from, to, "upgraded the settings format");
     }
     Ok(table)
 }
@@ -390,5 +558,113 @@ mod tests {
         assert!(error.to_string().contains("line 4"), "{error}");
         let error = migrate(table("version = 1\n\n[general]\ntheme = \"sepia\"\n")).unwrap_err();
         assert!(error.to_string().contains("general.theme"), "{error}");
+    }
+
+    #[test]
+    fn parsing_reports_the_version_and_unknown_keys() {
+        let parsed = parse_config("[general]\nthem = \"light\"\n").unwrap();
+        assert_eq!(parsed.version, 0);
+        assert_eq!(parsed.config.version, CONFIG_VERSION);
+        assert_eq!(parsed.unknown_keys, ["general.them"]);
+        let parsed = parse_config("version = 1\n").unwrap();
+        assert_eq!(parsed.version, 1);
+        assert!(parsed.unknown_keys.is_empty());
+    }
+
+    #[test]
+    fn unknown_keys_in_tagged_tables_are_found() {
+        let text = r#"
+version = 1
+
+[[environments]]
+name = "prod"
+
+[environments.auth]
+kind = "basic"
+username = "root"
+password = "hunter2"
+
+[[environments.notifications.objects]]
+mode = "mute"
+object = { type = "service", key = { host = "h", name = "s", port = 1 }, colour = "red" }
+
+[[environments.notifications.objects]]
+mode = "watch"
+object = { type = "host", name = "h" }
+
+[[environments]]
+name = "staging"
+auth = { kind = "client_certificate", cert_path = "/c.pem", key_path = "/k.pem", key_password = "x" }
+"#;
+        let expected = [
+            "environments.0.auth.password",
+            "environments.0.notifications.objects.0.object.colour",
+            "environments.0.notifications.objects.0.object.key.port",
+            "environments.1.auth.key_password",
+        ];
+        assert_eq!(parse_config(text).unwrap().unknown_keys, expected);
+        // Migrating the parsed table finds the same, without positions.
+        let (_, unknown) = read_upgraded(&table(text), None).unwrap();
+        assert_eq!(unknown, expected);
+    }
+
+    #[test]
+    fn files_written_by_icygui_have_no_unknown_keys() {
+        let mut config = Config::default();
+        let mut prod = crate::Environment::new(
+            "prod",
+            "https://master-01:5665",
+            crate::AuthConfig::Basic {
+                username: "icygui".to_owned(),
+            },
+        );
+        prod.notifications.objects.push(ic_rules::ObjectOverride {
+            object: ic_model::ObjectKey::service("h", "s"),
+            mode: ic_rules::ObjectMode::Mute,
+            until: None,
+        });
+        prod.notifications.objects.push(ic_rules::ObjectOverride {
+            object: ic_model::ObjectKey::host("h"),
+            mode: ic_rules::ObjectMode::Watch,
+            until: None,
+        });
+        let mut staging = prod.clone();
+        staging.auth = crate::AuthConfig::ClientCertificate {
+            cert_path: "/c.pem".into(),
+            key_path: "/k.pem".into(),
+        };
+        config.environments = vec![prod, staging];
+        let text = toml::to_string(&config).unwrap();
+        assert_eq!(
+            parse_config(&text).unwrap().unknown_keys,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn password_like_keys_are_recognised() {
+        for key in [
+            "environments.0.auth.password",
+            "environments.0.auth.Password",
+            "environments.0.tls.key_password",
+            "environments.0.passwd",
+            "environments.0.pass",
+            "environments.0.api-token",
+            "environments.0.client_secret",
+            "environments.0.apikey",
+            "environments.0.credentials",
+            "environments.0.tls.private_key",
+            "password",
+        ] {
+            assert!(looks_secret(key), "{key}");
+        }
+        for key in [
+            "environments.0.nmae",
+            "environments.0.passive",
+            "environments.0.tls.ca_fil",
+            "general.close_to_try",
+        ] {
+            assert!(!looks_secret(key), "{key}");
+        }
     }
 }

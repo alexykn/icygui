@@ -102,23 +102,23 @@ impl ConfigStore {
     pub fn new(path: PathBuf) -> Self;
     pub fn path(&self) -> &Path;
     pub fn backup_path(&self) -> PathBuf;                 // "<file name>.bak" next to the file
-    pub fn load(&self) -> Result<Config, ConfigError>;    // missing file → Config::default(); runs migrations; repairs ids (below)
+    pub fn load(&self) -> Result<Config, ConfigError>;    // missing file → Config::default() (a dangling symlink → Io error); runs migrations; repairs ids (below)
     pub fn load_backup(&self) -> Result<Option<Config>, ConfigError>;   // the `.bak` copy, for "restore"; never writes
-    pub fn save(&self, config: &Config) -> Result<(), ConfigError>;   // atomic: temp file in same dir, fsync, rename; keeps one `.bak`
+    pub fn save(&self, config: &Config) -> Result<(), ConfigError>;   // atomic: temp file in same dir, fsync, rename; keeps one `.bak`; refuses secrets (Invalid)
 }
 pub fn migrate(raw: toml::Table) -> Result<Config, ConfigError>;     // version 0/absent → 1, future versions → error
 impl Config {
     pub fn validate(&self) -> Vec<ValidationIssue>;       // ids unique, URLs are https with host, names non-empty, …
     pub fn environment(&self, id: &str) -> Option<&Environment>;
     pub fn environment_mut(&mut self, id: &str) -> Option<&mut Environment>;
-    pub fn repair_ids(&mut self) -> usize;                // fresh ids for blank or duplicate ones; returns how many changed
+    pub fn repair_ids(&mut self) -> usize;                // ids derived from content (UUID v5) for blank or duplicate ones; returns how many changed
 }
 impl Environment {
     pub fn new(name: &str, url: &str, auth: AuthConfig) -> Environment;   // fresh UUID, default dashboards, trusts the system roots
-    pub fn author_name(&self) -> &str;                    // author (unless blank) or the basic-auth username; "" for a client certificate without author
+    pub fn author_name(&self) -> &str;                    // author (unless blank) or the basic-auth username, trimmed; "" for a client certificate without author
     pub fn group(&self, group_id: &str) -> Option<&DashboardGroup>;      // + group_mut
     pub fn dashboard(&self, group_id: &str, dashboard_id: &str) -> Option<&Dashboard>;   // + dashboard_mut
-    pub fn api_url(&self) -> Result<Url, ConfigError>;    // checked like validate(); the path always ends in "/", so join("v1/…") keeps a proxy prefix
+    pub fn api_url(&self) -> Result<Url, ConfigError>;    // checked like validate(); the path always ends in "/", so join("v1/…") keeps a proxy prefix; InvalidUrl masks credentials, query and fragment
     pub fn validate(&self) -> Vec<ValidationIssue>;       // paths relative to the environment, for the environment editor
 }
 impl TlsConfig { pub fn pinned_fingerprint(&self) -> Result<Option<[u8; 32]>, ConfigError>; }
@@ -141,12 +141,13 @@ pub enum ConfigError {
 ```
 
 - File permissions: `0600` for the config file and its `.bak` on Unix.
-- Unknown keys in the file are ignored without failing the load (and logged).
-- A corrupt file is reported, not silently replaced: `load` returns an error (`Parse`, with line and column) and the app offers to restore the `.bak` copy (`load_backup`, then `save`) or start fresh (`save(&Config::default())`); either way the corrupt file becomes the `.bak`. A file from a newer version gives `UnsupportedVersion`; don't save over it without asking.
-- `load` gives fresh ids to entries without a unique id (hand-written files) and saves at once, so the ids stay stable: environment ids are keychain accounts.
-- `save` writes nothing when the contents are unchanged, replaces the target of a symlinked config file (keeping the link), and stamps `version = CONFIG_VERSION`.
-- Validation is advisory and pure: `load` never fails because of it.
-- Tests: round trips, migrations, atomicity (an interrupted write leaves the old file intact), validation, import/export, path layout.
+- Unknown keys in the file are ignored without failing the load (and logged; keys that look like passwords get a warning of their own, also inside the tagged `auth` and override `object` tables). Logs never contain values.
+- A corrupt file is reported, not silently replaced: `load` returns an error (`Parse`, with line and column and at most a short excerpt of the line) and the app offers to restore the `.bak` copy (`load_backup`, then `save`) or start fresh (`save(&Config::default())`); either way the corrupt file becomes the `.bak`, and `save` also keeps any file this version can't read (corrupt or newer) as `<name>.unreadable-<unix seconds>`, which later saves never replace. A file from a newer version gives `UnsupportedVersion`; don't save over it without asking.
+- A config file that is a symlink (or below one) whose target is missing is an `Io` error, not a missing file: the volume may not be mounted yet, and defaults would silently drop every environment. `save` never replaces such a link: it writes through it when the target's directory exists and fails otherwise.
+- `load` gives entries without a unique id (hand-written files) ids derived from their content: environment from name and URL, group from environment id and name, dashboard from environment id, group id and name (UUID v5, fixed namespace; never change the derivation). The same file therefore gets the same ids at every start even when it can't be written (read-only, managed by Nix or Ansible), so keychain accounts (environment ids) stay stable. It also saves at once to record them; a failed save is only logged.
+- `save` writes nothing when the contents are unchanged, replaces the target of a symlinked config file (keeping the link), and stamps `version = CONFIG_VERSION`. It refuses (`Invalid`, nothing written) settings that would put a secret into the file: a user name or password in an environment URL, or a basic-auth username containing `:` (curl's `user:password`, which Icinga can never match).
+- Validation is advisory and pure: `load` never fails because of it, and `save` refuses only the secret issues above. Error messages and validation issues quote user values only in short excerpts and never quote URL credentials.
+- Tests: round trips, migrations, atomicity (an interrupted write leaves the old file intact, concurrent saves and loads never see a partial file), stable derived ids, secrets, symlinks, validation, import/export (with log capture), path layout.
 
 ---
 

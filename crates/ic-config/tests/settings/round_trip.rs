@@ -7,6 +7,7 @@ use ic_model::{ObjectKey, Timestamp};
 use ic_rules::{ObjectMode, ObjectOverride, Rule, ScopeSetting};
 
 use crate::fixtures::{THEMES, full_config};
+use crate::logs::capture;
 
 /// Saves `config` in a fresh directory and loads it back.
 fn save_and_load(config: &Config) -> Config {
@@ -92,6 +93,17 @@ fn full_config_survives_save_and_load() {
         store.save(&config).unwrap();
         assert_eq!(store.load().unwrap(), config, "theme {theme:?}");
     }
+}
+
+#[test]
+fn saved_files_load_without_a_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(dir.path().join("config.toml"));
+    let config = full_config();
+    store.save(&config).unwrap();
+    let (loaded, events) = capture(|| store.load().unwrap());
+    assert_eq!(loaded, config);
+    assert_eq!(events, []);
 }
 
 #[test]

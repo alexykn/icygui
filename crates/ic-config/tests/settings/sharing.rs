@@ -6,6 +6,7 @@ use ic_config::{CONFIG_VERSION, ConfigError, DashboardGroup, export_groups, impo
 use ic_rules::ScopeSetting;
 
 use crate::fixtures::full_config;
+use crate::logs::{capture, warnings};
 
 /// Groups with their ids cleared, for comparing content.
 fn without_ids(groups: &[DashboardGroup]) -> Vec<DashboardGroup> {
@@ -155,4 +156,23 @@ fn settings_files_are_not_exports() {
         import_groups(&settings),
         Err(ConfigError::NotAnExport(_))
     ));
+}
+
+#[test]
+fn importing_an_export_logs_nothing() {
+    let text = export_groups(&full_config().environments[0].groups).unwrap();
+    let (imported, events) = capture(|| import_groups(&text).unwrap());
+    assert_eq!(imported.len(), 2);
+    assert_eq!(warnings(&events), Vec::<&str>::new());
+}
+
+#[test]
+fn unknown_keys_in_imports_are_logged() {
+    let text = "format = \"icygui-dashboards\"\nversion = 1\n\n[[groups]]\nname = \"web\"\ncolapsed = true\n";
+    let (imported, events) = capture(|| import_groups(text).unwrap());
+    assert!(!imported[0].collapsed);
+    assert_eq!(
+        warnings(&events),
+        ["ignoring unknown key in the dashboard export key=groups.0.colapsed"]
+    );
 }

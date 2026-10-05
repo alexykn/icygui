@@ -131,7 +131,15 @@ fn other_bad_urls_are_rejected() {
         ),
         (
             "https://master-01:5665/v1",
-            "must not end in /v1: icygui adds the API paths itself",
+            "must not include /v1 or an API path: icygui adds them itself",
+        ),
+        (
+            "https://master-01:5665/v1/objects/hosts",
+            "must not include /v1 or an API path: icygui adds them itself",
+        ),
+        (
+            "https://master-01:5665/V1/status/",
+            "must not include /v1 or an API path: icygui adds them itself",
         ),
         (
             "https://icygui:secret@master-01:5665",
@@ -145,6 +153,19 @@ fn other_bad_urls_are_rejected() {
             [format!("environments[0].url: {message}")],
             "{url}"
         );
+    }
+}
+
+#[test]
+fn proxy_prefixes_are_fine() {
+    for url in [
+        "https://proxy.example.com/icinga",
+        "https://gateway.example.com/v1/icinga/",
+        "https://[2001:db8::1]:5665",
+    ] {
+        let mut config = full_config();
+        config.environments[0].url = url.to_owned();
+        assert_eq!(issues(&config), Vec::<String>::new(), "{url}");
     }
 }
 
@@ -214,6 +235,32 @@ fn authentication_needs_its_details() {
 }
 
 #[test]
+fn usernames_icinga_cannot_match_are_reported() {
+    for (username, message) in [
+        (
+            "icygui:secret",
+            "must not contain `:`; enter the password separately, icygui keeps it in the system \
+             keychain",
+        ),
+        (
+            ":",
+            "must not contain `:`; enter the password separately, icygui keeps it in the system keychain",
+        ),
+        (" icygui", "must not start or end with whitespace"),
+        ("icygui\n", "must not start or end with whitespace"),
+        ("\t", "must not be empty"),
+    ] {
+        let mut config = full_config();
+        config.environments[0].auth = basic(username);
+        assert_eq!(
+            issues(&config),
+            [format!("environments[0].auth.username: {message}")],
+            "{username:?}"
+        );
+    }
+}
+
+#[test]
 fn tls_settings_are_checked() {
     let mut config = full_config();
     config.environments[0].tls.ca_file = Some("ca.crt".into());
@@ -223,10 +270,70 @@ fn tls_settings_are_checked() {
         issues(&config),
         [
             "environments[0].tls.ca_file: must be an absolute path",
-            "environments[0].tls.server_name: must be a host name or an IP address",
+            "environments[0].tls.server_name: must be a host name or an IP address, not a URL",
             "environments[1].tls.server_name: must not be empty when set",
         ]
     );
+}
+
+#[test]
+fn server_names_are_bare_host_names_or_addresses() {
+    for name in [
+        "master-01",
+        "master-01.example.com",
+        "master-01.example.com.",
+        "icinga_master",
+        "10.0.0.1",
+        "::1",
+        "2001:db8::1",
+        "xn--mnchen-3ya.example",
+    ] {
+        let mut config = full_config();
+        config.environments[0].tls.server_name = Some(name.to_owned());
+        assert_eq!(issues(&config), Vec::<String>::new(), "{name}");
+    }
+    for (name, message) in [
+        (" master-01", "must not start or end with whitespace"),
+        ("master-01\n", "must not start or end with whitespace"),
+        ("master-01:5665", "must not contain a port"),
+        ("[::1]", "must be an IP address without brackets"),
+        (
+            "[2001:db8::1]:5665",
+            "must be an IP address without brackets",
+        ),
+        (
+            "master-01/",
+            "must be a host name or an IP address, not a URL",
+        ),
+        ("master 01", "must be a host name or an IP address"),
+        ("*.example.com", "must be a host name or an IP address"),
+        (
+            "münchen.example",
+            "must be a host name in ASCII (international names in their xn-- form)",
+        ),
+    ] {
+        let mut config = full_config();
+        config.environments[0].tls.server_name = Some(name.to_owned());
+        assert_eq!(
+            issues(&config),
+            [format!("environments[0].tls.server_name: {message}")],
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
+fn long_values_are_quoted_in_part() {
+    let mut config = full_config();
+    let id = "x".repeat(100_000);
+    config.environments[0].id.clone_from(&id);
+    config.environments[1].id = id;
+    config.active_environment = Some("y".repeat(100_000));
+    let issues = config.validate();
+    assert_eq!(issues.len(), 2, "{issues:?}");
+    for issue in issues {
+        assert!(issue.message.len() < 300, "{} bytes", issue.message.len());
+    }
 }
 
 #[test]

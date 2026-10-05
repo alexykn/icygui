@@ -46,12 +46,23 @@ impl Paths {
     pub fn from_system() -> Result<Self, ConfigError> {
         let project = ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
             .ok_or(ConfigError::NoHomeDirectory)?;
-        let log_dir = system_log_dir(&project).ok_or(ConfigError::NoHomeDirectory)?;
-        Ok(Self {
-            config_file: project.config_dir().join(CONFIG_FILE),
-            data_dir: project.data_dir().to_path_buf(),
-            log_dir,
-        })
+        let base = BaseDirs::new().ok_or(ConfigError::NoHomeDirectory)?;
+        let platform = if cfg!(target_os = "macos") {
+            Platform::MacOs
+        } else {
+            Platform::Other
+        };
+        Ok(layout(
+            &SystemDirs {
+                home: base.home_dir(),
+                config: project.config_dir(),
+                data: project.data_dir(),
+                state: project.state_dir(),
+                data_local: project.data_local_dir(),
+                project: project.project_path(),
+            },
+            platform,
+        ))
     }
 
     /// Everything under one directory, for tests and portable installs:
@@ -89,24 +100,43 @@ impl Paths {
     }
 }
 
-/// Logs go where each platform's tools look for them: `~/Library/Logs` on
-/// macOS (Console.app), the XDG state directory elsewhere.
-fn system_log_dir(project: &ProjectDirs) -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
-        let base = BaseDirs::new()?;
-        Some(
-            base.home_dir()
-                .join("Library")
-                .join("Logs")
-                .join(project.project_path()),
-        )
-    } else {
-        Some(
-            project
-                .state_dir()
-                .unwrap_or_else(|| project.data_local_dir())
-                .join("logs"),
-        )
+/// The directories the system reports, as the `directories` crate finds
+/// them (following the XDG variables on Linux).
+struct SystemDirs<'a> {
+    /// The user's home directory.
+    home: &'a Path,
+    /// icygui's settings directory.
+    config: &'a Path,
+    /// icygui's data directory.
+    data: &'a Path,
+    /// icygui's state directory, where the platform has one (Linux).
+    state: Option<&'a Path>,
+    /// icygui's local (non-roaming) data directory.
+    data_local: &'a Path,
+    /// icygui's directory name below the platform's base directories
+    /// (`io.github.alexykn.icygui` on macOS, `icygui` on Linux).
+    project: &'a Path,
+}
+
+/// The platforms whose layouts differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Platform {
+    /// macOS: logs go to `~/Library/Logs`, where Console.app looks.
+    MacOs,
+    /// Linux and the rest: logs go to the XDG state directory.
+    Other,
+}
+
+/// Where icygui's files go, given the system's directories.
+fn layout(dirs: &SystemDirs<'_>, platform: Platform) -> Paths {
+    let log_dir = match platform {
+        Platform::MacOs => dirs.home.join("Library").join("Logs").join(dirs.project),
+        Platform::Other => dirs.state.unwrap_or(dirs.data_local).join("logs"),
+    };
+    Paths {
+        config_file: dirs.config.join(CONFIG_FILE),
+        data_dir: dirs.data.to_path_buf(),
+        log_dir,
     }
 }
 
@@ -162,6 +192,70 @@ mod tests {
         };
         paths.create_dirs().unwrap();
         assert!(paths.data_dir.is_dir() && paths.log_dir.is_dir());
+    }
+
+    #[test]
+    fn linux_follows_the_xdg_layout() {
+        let paths = layout(
+            &SystemDirs {
+                home: Path::new("/home/m"),
+                config: Path::new("/home/m/.config/icygui"),
+                data: Path::new("/home/m/.local/share/icygui"),
+                state: Some(Path::new("/home/m/.local/state/icygui")),
+                data_local: Path::new("/home/m/.local/share/icygui"),
+                project: Path::new("icygui"),
+            },
+            Platform::Other,
+        );
+        assert_eq!(
+            paths,
+            Paths {
+                config_file: PathBuf::from("/home/m/.config/icygui/config.toml"),
+                data_dir: PathBuf::from("/home/m/.local/share/icygui"),
+                log_dir: PathBuf::from("/home/m/.local/state/icygui/logs"),
+            }
+        );
+        // Without a state directory, logs go with the local data.
+        let paths = layout(
+            &SystemDirs {
+                home: Path::new("/home/m"),
+                config: Path::new("/xdg/config/icygui"),
+                data: Path::new("/xdg/data/icygui"),
+                state: None,
+                data_local: Path::new("/xdg/data/icygui"),
+                project: Path::new("icygui"),
+            },
+            Platform::Other,
+        );
+        assert_eq!(
+            paths.config_file,
+            Path::new("/xdg/config/icygui/config.toml")
+        );
+        assert_eq!(paths.log_dir, Path::new("/xdg/data/icygui/logs"));
+    }
+
+    #[test]
+    fn macos_keeps_logs_where_console_looks() {
+        let support = "/Users/m/Library/Application Support/io.github.alexykn.icygui";
+        let paths = layout(
+            &SystemDirs {
+                home: Path::new("/Users/m"),
+                config: Path::new(support),
+                data: Path::new(support),
+                state: None,
+                data_local: Path::new(support),
+                project: Path::new("io.github.alexykn.icygui"),
+            },
+            Platform::MacOs,
+        );
+        assert_eq!(
+            paths,
+            Paths {
+                config_file: Path::new(support).join("config.toml"),
+                data_dir: PathBuf::from(support),
+                log_dir: PathBuf::from("/Users/m/Library/Logs/io.github.alexykn.icygui"),
+            }
+        );
     }
 
     #[test]

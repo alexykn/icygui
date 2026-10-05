@@ -9,8 +9,9 @@
 //! - [`export_groups`] and [`import_groups`] share dashboards as files.
 //!
 //! Secrets never appear here: passwords live in the OS keychain under the
-//! environment's id. Apart from reading and writing its files this crate
-//! does no I/O, and it has no async runtime.
+//! environment's id, saving refuses settings that would write one into the
+//! file, and errors never quote one. Apart from reading and writing its
+//! files this crate does no I/O, and it has no async runtime.
 
 mod config;
 mod environment;

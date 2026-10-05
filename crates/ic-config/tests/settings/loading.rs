@@ -2,6 +2,9 @@
 //! corrupt; restoring the backup.
 
 use std::fs;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
 use ic_config::{
     AuthConfig, CONFIG_VERSION, Config, ConfigError, ConfigStore, General, ThemeChoice, TlsConfig,
@@ -10,6 +13,7 @@ use ic_config::{
 use ic_rules::{NotificationSettings, ScopeSetting};
 
 use crate::fixtures::{full_config, ids, store_with};
+use crate::logs::{capture, warnings};
 
 const PROD_ID: &str = "6f1c2a8e-0b7d-4c1e-9a3f-2d5b8c7e1f40";
 const GROUP_ID: &str = "0c9e2f4a-5b6d-4e7f-8a9b-1c2d3e4f5a6b";
@@ -358,6 +362,232 @@ name = "hosts"
     assert_eq!(fs::read_to_string(store.backup_path()).unwrap(), text);
 }
 
+/// A hand-written file without ids, as a configuration management tool
+/// would write it.
+const WITHOUT_IDS: &str = r#"
+[[environments]]
+name = "prod-cluster"
+url = "https://master-01.example.com:5665"
+auth = { kind = "basic", username = "icygui" }
+
+[[environments.groups]]
+name = "databases"
+
+[[environments.groups.dashboards]]
+name = "replication"
+
+[[environments]]
+name = "staging"
+url = "https://staging.example.com:5665"
+auth = { kind = "basic", username = "icygui" }
+"#;
+
+/// The names of the files in `dir`, sorted.
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn repaired_ids_stay_the_same_when_the_file_cannot_be_saved() {
+    // A file managed elsewhere (a read-only link into the Nix store, say):
+    // a directory where the backup goes makes every save fail.
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path(), WITHOUT_IDS);
+    fs::create_dir(store.backup_path()).unwrap();
+
+    let (first, events) = capture(|| store.load().unwrap());
+    assert!(first.validate().is_empty(), "{:?}", first.validate());
+    assert!(
+        warnings(&events)
+            .iter()
+            .any(|warning| warning.starts_with("could not save the repaired ids")),
+        "{events:?}"
+    );
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), WITHOUT_IDS);
+    // The ids are the keychain accounts: every start must find the same.
+    for _ in 0..3 {
+        assert_eq!(store.load().unwrap(), first);
+    }
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), WITHOUT_IDS);
+}
+
+#[test]
+fn rewritten_files_get_the_same_ids_again() {
+    // Ansible or chezmoi writes the same id-less template again after
+    // icygui saved its ids into the file.
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path(), WITHOUT_IDS);
+    let first = store.load().unwrap();
+    assert_ne!(fs::read_to_string(store.path()).unwrap(), WITHOUT_IDS);
+    fs::write(store.path(), WITHOUT_IDS).unwrap();
+    assert_eq!(store.load().unwrap(), first);
+}
+
+#[test]
+fn restoring_an_id_less_backup_keeps_the_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path(), WITHOUT_IDS);
+    let first = store.load().unwrap();
+    // The repair saved the ids; the original is the backup.
+    assert_eq!(
+        fs::read_to_string(store.backup_path()).unwrap(),
+        WITHOUT_IDS
+    );
+    fs::write(store.path(), "version = 1\n[general\n").unwrap();
+    assert!(store.load().is_err());
+
+    let restored = store.load_backup().unwrap().unwrap();
+    assert_eq!(restored, first);
+    store.save(&restored).unwrap();
+    assert_eq!(store.load().unwrap(), first);
+}
+
+#[test]
+fn backups_are_read_but_never_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path(), "version = 1\n");
+    let check = |backup: &str| -> Result<Option<Config>, ConfigError> {
+        fs::write(store.backup_path(), backup).unwrap();
+        let result = store.load_backup();
+        assert_eq!(fs::read_to_string(store.backup_path()).unwrap(), backup);
+        assert_eq!(fs::read_to_string(store.path()).unwrap(), "version = 1\n");
+        assert_eq!(entries(dir.path()), ["config.toml", "config.toml.bak"]);
+        result
+    };
+
+    let message = parse_message(check("version = 1\n[general\n").map(Option::unwrap_or_default));
+    assert!(message.contains("line 2"), "{message}");
+    assert!(matches!(
+        check(&format!("version = {}\n", CONFIG_VERSION + 1)),
+        Err(ConfigError::UnsupportedVersion { .. })
+    ));
+    // Blank ids are repaired in memory only, to the ids `load` would give.
+    let repaired = check(WITHOUT_IDS).unwrap().unwrap();
+    assert!(repaired.validate().is_empty(), "{:?}", repaired.validate());
+    let elsewhere = tempfile::tempdir().unwrap();
+    let loaded = store_with(elsewhere.path(), WITHOUT_IDS).load();
+    assert_eq!(loaded.unwrap(), repaired);
+}
+
+#[test]
+fn files_this_version_cannot_read_survive_starting_fresh() {
+    let newer = format!(
+        "version = {}\n\n[[environments]]\nname = \"prod\"\n",
+        CONFIG_VERSION + 1
+    );
+    for text in [
+        newer.as_str(),
+        "version = 1\n[general]\ntheme = = \"dark\"\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with(dir.path(), text);
+        assert!(store.load().is_err());
+
+        // Start fresh, then keep working: every later save rotates the
+        // backup, but the unreadable file is kept apart.
+        let mut config = Config::default();
+        store.save(&config).unwrap();
+        for theme in [ThemeChoice::Light, ThemeChoice::System, ThemeChoice::Dark] {
+            config.general.theme = theme;
+            store.save(&config).unwrap();
+        }
+        let kept: Vec<String> = entries(dir.path())
+            .into_iter()
+            .filter(|name| name.starts_with("config.toml.unreadable-"))
+            .collect();
+        assert_eq!(kept.len(), 1, "{:?}", entries(dir.path()));
+        assert_eq!(fs::read_to_string(dir.path().join(&kept[0])).unwrap(), text);
+        assert_eq!(store.load().unwrap(), config);
+    }
+}
+
+#[test]
+fn readable_files_are_not_kept_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path(), WITHOUT_IDS);
+    let mut config = store.load().unwrap();
+    config.general.theme = ThemeChoice::Light;
+    store.save(&config).unwrap();
+    assert_eq!(entries(dir.path()), ["config.toml", "config.toml.bak"]);
+}
+
+#[test]
+fn saves_and_loads_at_the_same_time_never_see_a_partial_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(dir.path().join("config.toml"));
+    let first = full_config();
+    let mut second = first.clone();
+    second.general.theme = ThemeChoice::Light;
+    second.environments.truncate(1);
+    store.save(&first).unwrap();
+
+    let done = AtomicBool::new(false);
+    thread::scope(|scope| {
+        let writers: Vec<_> = [&first, &second]
+            .into_iter()
+            .map(|config| {
+                let store = store.clone();
+                let other = if config == &first { &second } else { &first };
+                scope.spawn(move || {
+                    for _ in 0..40 {
+                        store.save(config).unwrap();
+                        store.save(other).unwrap();
+                    }
+                })
+            })
+            .collect();
+        let reader = scope.spawn(|| {
+            let mut loads = 0;
+            while !done.load(Ordering::Acquire) || loads == 0 {
+                let loaded = store.load().unwrap();
+                assert!(loaded == first || loaded == second);
+                loads += 1;
+            }
+            loads
+        });
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        done.store(true, Ordering::Release);
+        assert!(reader.join().unwrap() > 0);
+    });
+    assert_eq!(entries(dir.path()), ["config.toml", "config.toml.bak"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn settings_behind_a_broken_link_are_an_error_not_defaults() {
+    use std::os::unix::fs::symlink;
+
+    // The dotfiles repository moved, or its volume isn't mounted yet.
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("config.toml");
+    let target = dir.path().join("dotfiles/icygui.toml");
+    symlink(&target, &link).unwrap();
+    let store = ConfigStore::new(link.clone());
+    match store.load() {
+        Err(ConfigError::Io { path, .. }) => assert_eq!(path, link),
+        other => panic!("expected an I/O error, got {other:?}"),
+    }
+    assert!(store.save(&Config::default()).is_err());
+    assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    assert!(!dir.path().join("dotfiles").exists());
+
+    // Once the directory is back, starting fresh writes through the link.
+    fs::create_dir(dir.path().join("dotfiles")).unwrap();
+    assert!(store.load().is_err(), "the file itself is still missing");
+    let config = full_config();
+    store.save(&config).unwrap();
+    assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    assert!(target.is_file());
+    assert_eq!(store.load().unwrap(), config);
+}
+
 #[test]
 fn duplicate_ids_are_repaired_on_load() {
     let dir = tempfile::tempdir().unwrap();
@@ -425,7 +655,7 @@ fn saved_files_are_private() {
     let store = ConfigStore::new(dir.path().join("icygui/config.toml"));
     store.save(&full_config()).unwrap();
     store.save(&Config::default()).unwrap();
-    let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(store.path()), 0o600);
     assert_eq!(mode(&store.backup_path()), 0o600);
     assert_eq!(mode(&dir.path().join("icygui")), 0o700);

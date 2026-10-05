@@ -3,17 +3,19 @@
 //!
 //! Validation is advisory and pure (no file system access): the settings UI
 //! shows the issues next to the fields named by their paths. Loading never
-//! fails because of them.
+//! fails because of them. Saving refuses only the issues that would put a
+//! secret into the file ([`secret_issues`]).
 
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::path::Path;
 
 use ic_model::ObjectKey;
 use ic_rules::{NotificationSettings, QuietHours};
 
-use crate::environment::parse_api_url;
-use crate::error::ConfigError;
+use crate::environment::{CREDENTIALS_REASON, has_credentials, parse_api_url};
+use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::fingerprint::parse_fingerprint;
 use crate::model::{
     AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind, TlsConfig,
@@ -27,6 +29,12 @@ pub const MIN_EVENT_LOG_RETENTION_HOURS: u32 = 1;
 pub const MIN_RECONCILE_INTERVAL_SECS: u32 = 10;
 
 const MINUTES_PER_DAY: u16 = 24 * 60;
+
+/// Why a basic-auth username with a `:` is rejected. Icinga splits Basic
+/// credentials at the first `:` (`ApiUser::GetByAuthHeader`), so such a
+/// name never matches an API user; it is usually curl's `user:password`.
+const USERNAME_COLON_REASON: &str =
+    "must not contain `:`; enter the password separately, icygui keeps it in the system keychain";
 
 /// One problem found by [`Config::validate`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -73,7 +81,10 @@ impl Config {
         {
             issues.push(
                 "active_environment",
-                format!("no environment has the id `{active}`"),
+                format!(
+                    "no environment has the id `{}`",
+                    excerpt(active, MAX_VALUE_CHARS)
+                ),
             );
         }
         let mut ids = UniqueIds::default();
@@ -111,6 +122,29 @@ pub(crate) fn validate_groups(groups: &[DashboardGroup]) -> Vec<ValidationIssue>
     issues.0
 }
 
+/// The issues that would put a secret into the settings file: a user name
+/// or password in an environment's URL, or a basic-auth username with a
+/// `:` (curl's `user:password`). [`ConfigStore::save`] refuses settings
+/// with any of them; [`Config::validate`] reports them with the same paths
+/// and messages.
+///
+/// [`ConfigStore::save`]: crate::ConfigStore::save
+pub(crate) fn secret_issues(config: &Config) -> Vec<ValidationIssue> {
+    let mut issues = Issues::default();
+    for (index, environment) in config.environments.iter().enumerate() {
+        let path = format!("environments[{index}]");
+        if has_credentials(&environment.url) {
+            issues.push(join(&path, "url"), CREDENTIALS_REASON);
+        }
+        if let AuthConfig::Basic { username } = &environment.auth
+            && username.contains(':')
+        {
+            issues.push(join(&path, "auth.username"), USERNAME_COLON_REASON);
+        }
+    }
+    issues.0
+}
+
 #[derive(Default)]
 struct Issues(Vec<ValidationIssue>);
 
@@ -136,7 +170,13 @@ impl<'a> UniqueIds<'a> {
         if id.trim().is_empty() {
             issues.push(field, "must not be empty");
         } else if let Some(first) = self.seen.get(id) {
-            issues.push(field, format!("`{id}` is already used by {first}"));
+            issues.push(
+                field,
+                format!(
+                    "`{}` is already used by {first}",
+                    excerpt(id, MAX_VALUE_CHARS)
+                ),
+            );
         } else {
             self.seen.insert(id, path.to_owned());
         }
@@ -176,8 +216,8 @@ fn check_name(name: &str, path: &str, issues: &mut Issues) {
 fn check_auth(environment: &Environment, path: &str, issues: &mut Issues) {
     match &environment.auth {
         AuthConfig::Basic { username } => {
-            if username.trim().is_empty() {
-                issues.push(join(path, "auth.username"), "must not be empty");
+            if let Some(reason) = username_problem(username) {
+                issues.push(join(path, "auth.username"), reason);
             }
         }
         AuthConfig::ClientCertificate {
@@ -194,6 +234,20 @@ fn check_auth(environment: &Environment, path: &str, issues: &mut Issues) {
                 );
             }
         }
+    }
+}
+
+/// Why a basic-auth username can't work, if it can't. Icinga looks the
+/// API user up by exactly this name.
+fn username_problem(username: &str) -> Option<&'static str> {
+    if username.trim().is_empty() {
+        Some("must not be empty")
+    } else if username.contains(':') {
+        Some(USERNAME_COLON_REASON)
+    } else if username.trim() != username {
+        Some("must not start or end with whitespace")
+    } else {
+        None
     }
 }
 
@@ -228,16 +282,41 @@ fn check_tls(tls: &TlsConfig, path: &str, issues: &mut Issues) {
             format!("is not a SHA-256 fingerprint: {reason}"),
         );
     }
-    if let Some(server_name) = &tls.server_name {
-        let name = server_name.trim();
-        if name.is_empty() {
-            issues.push(join(path, "server_name"), "must not be empty when set");
-        } else if name.contains(|c: char| c.is_whitespace() || c == '/') {
-            issues.push(
-                join(path, "server_name"),
-                "must be a host name or an IP address",
-            );
-        }
+    if let Some(server_name) = &tls.server_name
+        && let Some(reason) = server_name_problem(server_name)
+    {
+        issues.push(join(path, "server_name"), reason);
+    }
+}
+
+/// Why a TLS server name can't be used, if it can't. The certificate is
+/// checked against a bare DNS name or IP address: no scheme, port,
+/// brackets or spaces.
+fn server_name_problem(name: &str) -> Option<&'static str> {
+    if name.trim().is_empty() {
+        return Some("must not be empty when set");
+    }
+    if name.trim() != name {
+        return Some("must not start or end with whitespace");
+    }
+    if name.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    if name.contains('/') {
+        Some("must be a host name or an IP address, not a URL")
+    } else if name.starts_with('[') {
+        Some("must be an IP address without brackets")
+    } else if name.contains(':') {
+        Some("must not contain a port")
+    } else if !name.is_ascii() {
+        Some("must be a host name in ASCII (international names in their xn-- form)")
+    } else if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        Some("must be a host name or an IP address")
+    } else {
+        None
     }
 }
 
@@ -283,7 +362,7 @@ fn check_notifications(settings: &NotificationSettings, path: &str, issues: &mut
                 entry_path,
                 format!(
                     "`{}` already has an override at objects[{first}]",
-                    entry.object
+                    excerpt(&entry.object.to_string(), MAX_VALUE_CHARS)
                 ),
             );
         } else {

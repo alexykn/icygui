@@ -5,10 +5,14 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::NamedTempFile;
 
 use crate::error::ConfigError;
+
+/// How many symbolic links a chain may have, like Linux's `MAXSYMLINKS`.
+const MAX_LINKS: usize = 40;
 
 /// Points where [`write_atomic`] can be interrupted. Tests inject failures
 /// there to check that an interrupted save leaves the old file in place.
@@ -21,10 +25,20 @@ pub(crate) enum Step {
 }
 
 /// Reads a UTF-8 text file; `None` if it doesn't exist.
+///
+/// A symbolic link whose target doesn't exist, or a path below such a
+/// link, is an error rather than a missing file: the file is probably on a
+/// volume that isn't mounted yet or in a dotfiles repository that moved,
+/// and treating it as missing would hide that.
 pub(crate) fn read_text(path: &Path) -> Result<Option<String>, ConfigError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return match dangling_link(path) {
+                Some(link) => Err(dangling_link_error(&link)),
+                None => Ok(None),
+            };
+        }
         Err(error) => return Err(ConfigError::io("reading", path, error)),
     };
     String::from_utf8(bytes)
@@ -39,10 +53,15 @@ pub(crate) fn read_text(path: &Path) -> Result<Option<String>, ConfigError> {
 }
 
 /// Creates `dir` and missing parents, readable only by the user on Unix.
-/// Existing directories keep their permissions.
+/// Existing directories keep their permissions. A symbolic link whose
+/// target doesn't exist, at `dir` or above it, is an error: creating the
+/// directory would replace or bypass the link.
 pub(crate) fn create_private_dir(dir: &Path) -> Result<(), ConfigError> {
     if dir.is_dir() {
         return Ok(());
+    }
+    if let Some(link) = dangling_link(dir) {
+        return Err(dangling_link_error(&link));
     }
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -61,16 +80,21 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<(), ConfigError> {
 ///
 /// 1. write the contents to a temporary file in the target's directory and
 ///    sync it to disk;
-/// 2. copy the previous contents to `backup` the same way (temporary file,
+/// 2. if `keep_previous` says the previous contents deserve it, copy them
+///    to a new file next to `backup` that later saves never replace
+///    (`<name>.unreadable-<unix seconds>`);
+/// 3. copy the previous contents to `backup` the same way (temporary file,
 ///    sync, rename), keeping exactly one backup;
-/// 3. rename the temporary file over the target (atomic on POSIX), then sync
+/// 4. rename the temporary file over the target (atomic on POSIX), then sync
 ///    the directory so the rename itself is durable.
 ///
-/// If `path` is a symbolic link, the file it points to is replaced and the
-/// link is kept (dotfile managers link settings into a repository). The
-/// result is readable only by the user on Unix. When the target already
-/// has exactly these contents nothing is written, which keeps the backup
-/// one real change behind.
+/// If `path` is a symbolic link, the file at the end of the chain of links
+/// is replaced and the link is kept (dotfile managers link settings into a
+/// repository), also when that file doesn't exist yet. Directories are
+/// only created when no link is involved: a link into a missing directory
+/// (a volume that isn't mounted) is an error. The result is readable only
+/// by the user on Unix. When the target already has exactly these contents
+/// nothing is written, which keeps the backup one real change behind.
 ///
 /// `checkpoint` runs after each [`Step`]; an error there aborts the save
 /// like a failure of the step itself would.
@@ -78,11 +102,16 @@ pub(crate) fn write_atomic(
     path: &Path,
     backup: &Path,
     contents: &[u8],
+    keep_previous: impl FnOnce(&[u8]) -> bool,
     mut checkpoint: impl FnMut(Step) -> io::Result<()>,
 ) -> Result<(), ConfigError> {
-    let target = resolve_symlink(path);
+    let target = follow_links(path).map_err(|error| ConfigError::io("resolving", path, error))?;
     let dir = parent_dir(&target);
-    create_private_dir(dir)?;
+    if target == path {
+        create_private_dir(dir)?;
+    } else if !dir.is_dir() {
+        return Err(dangling_link_error(path));
+    }
     let previous = match fs::read(&target) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -101,11 +130,22 @@ pub(crate) fn write_atomic(
     checkpoint(Step::TempWritten)
         .map_err(|error| ConfigError::io("writing", temp.path(), error))?;
 
+    let backup_dir = parent_dir(backup);
     if let Some(previous) = &previous {
-        let backup_temp = write_temp(parent_dir(backup), backup, previous)?;
+        if keep_previous(previous) {
+            let kept = keep_copy(path, backup_dir, previous)?;
+            tracing::warn!(
+                path = %kept.display(),
+                "kept a copy of the replaced settings file, which this version can't read"
+            );
+        }
+        let backup_temp = write_temp(backup_dir, backup, previous)?;
         backup_temp
             .persist(backup)
             .map_err(|error| ConfigError::io("replacing", backup, error.error))?;
+        if backup_dir != dir {
+            sync_dir(backup_dir);
+        }
     }
     checkpoint(Step::BackedUp).map_err(|error| ConfigError::io("replacing", &target, error))?;
 
@@ -115,15 +155,58 @@ pub(crate) fn write_atomic(
     Ok(())
 }
 
-/// The file a symbolic link points to, or `path` itself. A dangling link is
-/// replaced like a missing file.
-fn resolve_symlink(path: &Path) -> PathBuf {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+/// The file `path` refers to: `path` itself, or for a symbolic link the
+/// end of its chain of links, which may not exist. Relative targets are
+/// resolved against the directory of the link that holds them.
+fn follow_links(path: &Path) -> io::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_LINKS {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = fs::read_link(&current)?;
+                current = parent_dir(&current).join(target);
+            }
+            // Nothing there (or a file where a directory should be): no
+            // link to follow, and writing reports what is wrong.
+            Ok(_) => return Ok(current),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(current);
+            }
+            Err(error) => return Err(error),
         }
-        _ => path.to_path_buf(),
     }
+    Err(io::Error::other("too many levels of symbolic links"))
+}
+
+/// The deepest of `path` and its ancestors that is a symbolic link whose
+/// target doesn't exist.
+fn dangling_link(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .find(|ancestor| {
+            fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && fs::metadata(ancestor)
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        })
+        .map(Path::to_path_buf)
+}
+
+/// The error for the symbolic link `link`, whose target doesn't exist.
+fn dangling_link_error(link: &Path) -> ConfigError {
+    let target = follow_links(link).unwrap_or_else(|_| link.to_path_buf());
+    ConfigError::io(
+        "following the symbolic link",
+        link,
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("its target {} does not exist", target.display()),
+        ),
+    )
 }
 
 /// The directory a file is in; `.` for a bare file name.
@@ -132,6 +215,46 @@ fn parent_dir(path: &Path) -> &Path {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     }
+}
+
+/// Copies `contents` into `dir` under a name no other file has and no save
+/// replaces: `<name of path>.unreadable-<unix seconds>`, with `-2`, `-3`, …
+/// appended when that is taken. Returns the copy's path.
+fn keep_copy(path: &Path, dir: &Path, contents: &[u8]) -> Result<PathBuf, ConfigError> {
+    let name = path.file_name().unwrap_or_else(|| OsStr::new("settings"));
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let copy = (1..=1000_u32)
+        .map(|number| {
+            let mut file_name = name.to_os_string();
+            file_name.push(format!(".unreadable-{seconds}"));
+            if number > 1 {
+                file_name.push(format!("-{number}"));
+            }
+            dir.join(file_name)
+        })
+        .find(|candidate| {
+            fs::symlink_metadata(candidate)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        })
+        .ok_or_else(|| {
+            ConfigError::io(
+                "finding a free name for a copy of the unreadable settings in",
+                dir,
+                io::Error::from(io::ErrorKind::AlreadyExists),
+            )
+        })?;
+    write_temp(dir, &copy, contents)?
+        .persist(&copy)
+        .map_err(|error| {
+            ConfigError::io(
+                "keeping a copy of the unreadable settings as",
+                &copy,
+                error.error,
+            )
+        })?;
+    Ok(copy)
 }
 
 /// Writes `contents` to a new, synced, user-only temporary file in `dir`,
@@ -224,12 +347,16 @@ mod tests {
         Ok(())
     }
 
+    fn keep_nothing(_: &[u8]) -> bool {
+        false
+    }
+
     #[test]
     fn writes_a_new_file_without_a_backup() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let backup = dir.path().join("config.toml.bak");
-        write_atomic(&path, &backup, b"one", no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"one", keep_nothing, no_checkpoint).unwrap();
         assert_eq!(read(&path), "one");
         assert!(!backup.exists());
         assert_eq!(entries(dir.path()), ["config.toml"]);
@@ -240,13 +367,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let backup = dir.path().join("config.toml.bak");
-        write_atomic(&path, &backup, b"one", no_checkpoint).unwrap();
-        write_atomic(&path, &backup, b"two", no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"one", keep_nothing, no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"two", keep_nothing, no_checkpoint).unwrap();
         assert_eq!(
             (read(&path).as_str(), read(&backup).as_str()),
             ("two", "one")
         );
-        write_atomic(&path, &backup, b"three", no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"three", keep_nothing, no_checkpoint).unwrap();
         assert_eq!(
             (read(&path).as_str(), read(&backup).as_str()),
             ("three", "two")
@@ -259,10 +386,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let backup = dir.path().join("config.toml.bak");
-        write_atomic(&path, &backup, b"one", no_checkpoint).unwrap();
-        write_atomic(&path, &backup, b"two", no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"one", keep_nothing, no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"two", keep_nothing, no_checkpoint).unwrap();
         let mut steps = Vec::new();
-        write_atomic(&path, &backup, b"two", |step| {
+        write_atomic(&path, &backup, b"two", keep_nothing, |step| {
             steps.push(step);
             Ok(())
         })
@@ -279,10 +406,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let backup = dir.path().join("config.toml.bak");
-        write_atomic(&path, &backup, b"one", no_checkpoint).unwrap();
-        write_atomic(&path, &backup, b"two", no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"one", keep_nothing, no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"two", keep_nothing, no_checkpoint).unwrap();
 
-        let error = write_atomic(&path, &backup, b"three", |step| match step {
+        let error = write_atomic(&path, &backup, b"three", keep_nothing, |step| match step {
             Step::TempWritten => Err(io::Error::other("simulated crash")),
             Step::BackedUp => Ok(()),
         })
@@ -300,11 +427,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let backup = dir.path().join("config.toml.bak");
-        write_atomic(&path, &backup, b"one", no_checkpoint).unwrap();
-        write_atomic(&path, &backup, b"two", no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"one", keep_nothing, no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"two", keep_nothing, no_checkpoint).unwrap();
 
         let mut steps = Vec::new();
-        let result = write_atomic(&path, &backup, b"three", |step| {
+        let result = write_atomic(&path, &backup, b"three", keep_nothing, |step| {
             steps.push(step);
             match step {
                 Step::TempWritten => Ok(()),
@@ -321,7 +448,7 @@ mod tests {
         assert_eq!(entries(dir.path()), ["config.toml", "config.toml.bak"]);
 
         // The next save works normally.
-        write_atomic(&path, &backup, b"three", no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"three", keep_nothing, no_checkpoint).unwrap();
         assert_eq!(
             (read(&path).as_str(), read(&backup).as_str()),
             ("three", "two")
@@ -333,12 +460,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let backup = dir.path().join("config.toml.bak");
-        write_atomic(&path, &backup, b"one", no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"one", keep_nothing, no_checkpoint).unwrap();
         // A directory where the backup should go makes the backup rename fail.
         fs::create_dir(&backup).unwrap();
         fs::write(backup.join("keep"), b"x").unwrap();
 
-        let error = write_atomic(&path, &backup, b"two", no_checkpoint).unwrap_err();
+        let error = write_atomic(&path, &backup, b"two", keep_nothing, no_checkpoint).unwrap_err();
         assert!(
             matches!(
                 error,
@@ -354,13 +481,38 @@ mod tests {
     }
 
     #[test]
+    fn readable_previous_contents_are_only_backed_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let backup = dir.path().join("config.toml.bak");
+        let mut asked = 0;
+        // Nothing to judge for a new file, or for unchanged contents.
+        for contents in [b"one", b"one"] {
+            write_atomic(
+                &path,
+                &backup,
+                contents,
+                |_: &[u8]| {
+                    asked += 1;
+                    false
+                },
+                no_checkpoint,
+            )
+            .unwrap();
+        }
+        assert_eq!(asked, 0);
+        write_atomic(&path, &backup, b"two", keep_nothing, no_checkpoint).unwrap();
+        assert_eq!(entries(dir.path()), ["config.toml", "config.toml.bak"]);
+    }
+
+    #[test]
     fn stale_temporary_files_do_not_matter() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let backup = dir.path().join("config.toml.bak");
         // What a crash between writing and renaming leaves behind.
         fs::write(dir.path().join(".config.toml.Ab12Cd.tmp"), b"half").unwrap();
-        write_atomic(&path, &backup, b"one", no_checkpoint).unwrap();
+        write_atomic(&path, &backup, b"one", keep_nothing, no_checkpoint).unwrap();
         assert_eq!(read(&path), "one");
     }
 
@@ -372,6 +524,7 @@ mod tests {
             &path,
             &dir.path().join("a/b/config.toml.bak"),
             b"one",
+            keep_nothing,
             no_checkpoint,
         )
         .unwrap();
@@ -387,6 +540,7 @@ mod tests {
             &path,
             &dir.path().join("file/config.toml.bak"),
             b"one",
+            keep_nothing,
             no_checkpoint,
         )
         .unwrap_err();
@@ -443,10 +597,10 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.toml");
             let backup = dir.path().join("config.toml.bak");
-            write_atomic(&path, &backup, b"one", no_checkpoint).unwrap();
+            write_atomic(&path, &backup, b"one", keep_nothing, no_checkpoint).unwrap();
             assert_eq!(mode(&path), 0o600);
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-            write_atomic(&path, &backup, b"two", no_checkpoint).unwrap();
+            write_atomic(&path, &backup, b"two", keep_nothing, no_checkpoint).unwrap();
             assert_eq!(mode(&path), 0o600);
             assert_eq!(mode(&backup), 0o600);
         }
@@ -461,6 +615,7 @@ mod tests {
                 &path,
                 &dir.path().join("config.toml.bak"),
                 b"one",
+                keep_nothing,
                 no_checkpoint,
             )
             .unwrap();
@@ -491,7 +646,7 @@ mod tests {
             symlink(&real, &link).unwrap();
             let backup = dir.path().join("config.toml.bak");
 
-            write_atomic(&link, &backup, b"two", no_checkpoint).unwrap();
+            write_atomic(&link, &backup, b"two", keep_nothing, no_checkpoint).unwrap();
             assert!(
                 fs::symlink_metadata(&link)
                     .unwrap()
@@ -507,20 +662,156 @@ mod tests {
             );
         }
 
+        fn is_link(path: &Path) -> bool {
+            fs::symlink_metadata(path).unwrap().file_type().is_symlink()
+        }
+
         #[test]
-        fn dangling_links_are_replaced() {
+        fn links_to_files_that_do_not_exist_yet_are_written_through() {
+            let dir = tempfile::tempdir().unwrap();
+            let dotfiles = dir.path().join("dotfiles");
+            fs::create_dir(&dotfiles).unwrap();
+            let link = dir.path().join("config.toml");
+            // A relative target, resolved against the link's directory.
+            symlink("dotfiles/icygui.toml", &link).unwrap();
+            let backup = dir.path().join("config.toml.bak");
+            write_atomic(&link, &backup, b"one", keep_nothing, no_checkpoint).unwrap();
+            assert!(is_link(&link));
+            assert_eq!(read(&dotfiles.join("icygui.toml")), "one");
+            assert!(!backup.exists());
+        }
+
+        #[test]
+        fn chains_of_links_are_followed_to_the_end() {
+            let dir = tempfile::tempdir().unwrap();
+            let real = dir.path().join("real.toml");
+            fs::write(&real, b"one").unwrap();
+            let middle = dir.path().join("middle.toml");
+            symlink(&real, &middle).unwrap();
+            let link = dir.path().join("config.toml");
+            symlink(&middle, &link).unwrap();
+            let backup = dir.path().join("config.toml.bak");
+            write_atomic(&link, &backup, b"two", keep_nothing, no_checkpoint).unwrap();
+            assert!(is_link(&link) && is_link(&middle));
+            assert_eq!(read(&real), "two");
+            assert_eq!(read(&backup), "one");
+        }
+
+        #[test]
+        fn links_into_missing_directories_are_left_alone() {
+            // A dotfiles repository that moved, or a volume that isn't
+            // mounted yet: neither the link nor the missing directory may
+            // be replaced by a new file.
             let dir = tempfile::tempdir().unwrap();
             let link = dir.path().join("config.toml");
-            symlink(dir.path().join("missing/target.toml"), &link).unwrap();
-            write_atomic(
+            let target = dir.path().join("missing/target.toml");
+            symlink(&target, &link).unwrap();
+            let error = write_atomic(
                 &link,
                 &dir.path().join("config.toml.bak"),
                 b"one",
+                keep_nothing,
+                no_checkpoint,
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.starts_with(&format!(
+                    "following the symbolic link {}: its target {} does not exist",
+                    link.display(),
+                    target.display()
+                )),
+                "{message}"
+            );
+            assert!(is_link(&link));
+            assert!(!dir.path().join("missing").exists());
+            assert_eq!(entries(dir.path()), ["config.toml"]);
+        }
+
+        #[test]
+        fn dangling_links_are_not_missing_files() {
+            let dir = tempfile::tempdir().unwrap();
+            let link = dir.path().join("config.toml");
+            let target = dir.path().join("dotfiles/icygui.toml");
+            symlink(&target, &link).unwrap();
+            match read_text(&link) {
+                Err(ConfigError::Io { action, path, .. }) => {
+                    assert_eq!(action, "following the symbolic link");
+                    assert_eq!(path, link);
+                }
+                other => panic!("expected an I/O error, got {other:?}"),
+            }
+
+            // The same for a file below a dangling directory link (GNU
+            // Stow links whole directories).
+            let config_dir = dir.path().join("icygui");
+            symlink(dir.path().join("stow/icygui"), &config_dir).unwrap();
+            let below = config_dir.join("config.toml");
+            match read_text(&below) {
+                Err(ConfigError::Io { path, .. }) => assert_eq!(path, config_dir),
+                other => panic!("expected an I/O error, got {other:?}"),
+            }
+            match create_private_dir(&config_dir) {
+                Err(ConfigError::Io { action, path, .. }) => {
+                    assert_eq!(
+                        (action, path),
+                        ("following the symbolic link", config_dir.clone())
+                    );
+                }
+                other => panic!("expected an I/O error, got {other:?}"),
+            }
+            assert!(
+                write_atomic(
+                    &below,
+                    &config_dir.join("config.toml.bak"),
+                    b"one",
+                    keep_nothing,
+                    no_checkpoint
+                )
+                .is_err()
+            );
+            assert!(is_link(&config_dir));
+            assert!(!dir.path().join("stow").exists());
+        }
+
+        #[test]
+        fn copies_of_unreadable_files_are_private_and_never_replaced() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let backup = dir.path().join("config.toml.bak");
+            fs::write(&path, b"broken").unwrap();
+            let mut offered = Vec::new();
+            write_atomic(
+                &path,
+                &backup,
+                b"one",
+                |previous: &[u8]| {
+                    offered.push(previous.to_vec());
+                    true
+                },
                 no_checkpoint,
             )
             .unwrap();
-            assert!(fs::symlink_metadata(&link).unwrap().is_file());
-            assert_eq!(read(&link), "one");
+            assert_eq!(offered, [b"broken".to_vec()]);
+            fs::write(&path, b"broken again").unwrap();
+            write_atomic(&path, &backup, b"two", |_: &[u8]| true, no_checkpoint).unwrap();
+
+            let copies: Vec<String> = entries(dir.path())
+                .into_iter()
+                .filter(|name| name.starts_with("config.toml.unreadable-"))
+                .collect();
+            assert_eq!(copies.len(), 2, "{copies:?}");
+            let mut contents: Vec<String> = copies
+                .iter()
+                .map(|name| read(&dir.path().join(name)))
+                .collect();
+            contents.sort();
+            assert_eq!(contents, ["broken", "broken again"]);
+            for name in &copies {
+                assert_eq!(mode(&dir.path().join(name)), 0o600);
+            }
+            assert_eq!(read(&path), "two");
+            assert_eq!(read(&backup), "broken again");
         }
     }
 }

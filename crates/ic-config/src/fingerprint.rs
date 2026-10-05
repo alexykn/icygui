@@ -1,7 +1,7 @@
 //! SHA-256 certificate fingerprints, as users paste them and as the config
 //! stores them (`TlsConfig::pinned_sha256`).
 
-use crate::error::ConfigError;
+use crate::error::{ConfigError, excerpt};
 
 /// The label `openssl x509 -noout -fingerprint -sha256` prints before the
 /// value (`sha256 Fingerprint=` in OpenSSL 3, `SHA256 Fingerprint=` before).
@@ -44,7 +44,8 @@ pub fn parse_fingerprint(text: &str) -> Result<[u8; 32], ConfigError> {
                     invalid("it has an empty byte between two separators")
                 } else {
                     invalid(format!(
-                        "each byte must be two hex digits, but `{group}` isn't"
+                        "each byte must be two hex digits, but `{}` isn't",
+                        excerpt(group, 16)
                     ))
                 });
             }
@@ -232,5 +233,13 @@ mod tests {
         );
         // Mixed separators leave a group with a space in it.
         assert!(parse_fingerprint(&colons.replacen(':', " ", 1)).is_err());
+        // A huge group is quoted only in part.
+        assert_eq!(
+            reason(&format!("{}:AB", "C".repeat(100_000))),
+            format!(
+                "each byte must be two hex digits, but `{}…` isn't",
+                "C".repeat(16)
+            )
+        );
     }
 }

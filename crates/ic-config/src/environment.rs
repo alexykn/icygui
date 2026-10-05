@@ -1,11 +1,13 @@
 //! Constructors and accessors for environments, dashboard groups and
 //! dashboards, and the dashboards a new environment starts with.
 
+use std::borrow::Cow;
+
 use ic_rules::{NotificationSettings, ScopeSetting};
 use url::Url;
 
 use crate::config::new_id;
-use crate::error::ConfigError;
+use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::fingerprint::parse_fingerprint;
 use crate::model::{
     AuthConfig, Dashboard, DashboardGroup, Environment, ObjectKind, TlsConfig, View,
@@ -40,7 +42,8 @@ impl Environment {
 
     /// The name recorded as the author of acknowledgements, downtimes and
     /// comments: [`Environment::author`] when it is set and not blank,
-    /// otherwise the basic-auth username.
+    /// otherwise the basic-auth username, both without surrounding
+    /// whitespace.
     ///
     /// Empty for client-certificate authentication without an author;
     /// [`Config::validate`](crate::Config::validate) reports that case.
@@ -48,7 +51,7 @@ impl Environment {
         match self.author.as_deref().map(str::trim) {
             Some(author) if !author.is_empty() => author,
             _ => match &self.auth {
-                AuthConfig::Basic { username } => username,
+                AuthConfig::Basic { username } => username.trim(),
                 AuthConfig::ClientCertificate { .. } => "",
             },
         }
@@ -82,12 +85,14 @@ impl Environment {
     ///
     /// [`ConfigError::InvalidUrl`] when the URL is empty, malformed, not
     /// `https`, has no host, contains credentials, a query or a fragment,
-    /// or already ends in `/v1`.
+    /// or already contains the API path (`/v1`, `/v1/objects/…`). The URL
+    /// in the error has any user name, password, query and fragment masked,
+    /// so the error can be logged and shown.
     ///
     /// [`Config::validate`]: crate::Config::validate
     pub fn api_url(&self) -> Result<Url, ConfigError> {
         parse_api_url(&self.url).map_err(|reason| ConfigError::InvalidUrl {
-            url: self.url.clone(),
+            url: redact_url(&self.url),
             reason,
         })
     }
@@ -185,11 +190,35 @@ pub fn default_groups() -> Vec<DashboardGroup> {
     vec![overview]
 }
 
+/// Why a URL with a user name or password is rejected.
+pub(crate) const CREDENTIALS_REASON: &str =
+    "must not contain a user name or password; set them in the authentication settings";
+
+/// The URL endpoints of the Icinga 2 API, the segment after `/v1/` (from the
+/// API documentation's permission table).
+const API_ENDPOINTS: [&str; 10] = [
+    "actions",
+    "config",
+    "console",
+    "debug",
+    "events",
+    "objects",
+    "status",
+    "templates",
+    "types",
+    "variables",
+];
+
 /// Checks an environment URL; the error is a reason for the settings UI.
 pub(crate) fn parse_api_url(text: &str) -> Result<Url, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("must not be empty".to_owned());
+    }
+    // Before anything else, so a password is reported as such even in text
+    // that is no valid URL.
+    if has_credentials(text) {
+        return Err(CREDENTIALS_REASON.to_owned());
     }
     let mut url = Url::parse(text).map_err(|error| match error {
         url::ParseError::RelativeUrlWithoutBase => {
@@ -208,23 +237,136 @@ pub(crate) fn parse_api_url(text: &str) -> Result<Url, String> {
     if url.host_str().is_none_or(str::is_empty) {
         return Err("has no host name".to_owned());
     }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(
-            "must not contain a user name or password; set them in the authentication settings"
-                .to_owned(),
-        );
-    }
     if url.query().is_some() || url.fragment().is_some() {
         return Err("must not contain a query (?…) or fragment (#…)".to_owned());
     }
-    if url.path().trim_end_matches('/').ends_with("/v1") {
-        return Err("must not end in /v1: icygui adds the API paths itself".to_owned());
+    if has_api_path(&url) {
+        return Err("must not include /v1 or an API path: icygui adds them itself".to_owned());
     }
     if !url.path().ends_with('/') {
         let path = format!("{}/", url.path());
         url.set_path(&path);
     }
     Ok(url)
+}
+
+/// Whether the URL's path contains Icinga's API path: a `v1` segment (in
+/// any case) at the end or followed by an API endpoint, as in URLs copied
+/// from the API documentation (`https://master-01:5665/v1/objects/hosts`).
+/// Other segments are a reverse proxy's prefix and are kept, even one named
+/// `v1` (`https://gateway.example.com/v1/icinga/`).
+fn has_api_path(url: &Url) -> bool {
+    let segments: Vec<&str> = url
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    segments.iter().enumerate().any(|(index, segment)| {
+        segment.eq_ignore_ascii_case("v1")
+            && segments.get(index + 1).is_none_or(|next| {
+                API_ENDPOINTS
+                    .iter()
+                    .any(|endpoint| next.eq_ignore_ascii_case(endpoint))
+            })
+    })
+}
+
+/// Whether URL text contains a user name or password
+/// (`https://root:secret@master-01:5665`). Also catches them in text that
+/// is no valid URL, or has no scheme (`root:secret@master-01:5665`), so
+/// that no password is ever written to the settings file.
+pub(crate) fn has_credentials(text: &str) -> bool {
+    let text = url_text(text);
+    userinfo(&text).is_some()
+        || Url::parse(&text).is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
+}
+
+/// URL text made safe to show and log: a user name and password are
+/// replaced by `***`, a query and fragment by `?…` and `#…`, and very long
+/// text is cut short. Text that isn't a valid URL is masked the same way.
+pub(crate) fn redact_url(text: &str) -> String {
+    let text = url_text(text);
+    let Some(authority) = authority(&text) else {
+        return excerpt(&text, MAX_VALUE_CHARS).into_owned();
+    };
+    let mut redacted = String::with_capacity(text.len());
+    redacted.push_str(&text[..authority.start]);
+    let host = match userinfo(&text) {
+        Some(userinfo) => {
+            redacted.push_str("***");
+            userinfo.end
+        }
+        None if has_credentials(&text) => {
+            // Credentials only the URL parser finds; hide everything.
+            return "<hidden>".to_owned();
+        }
+        None => authority.start,
+    };
+    let rest = &text[host..];
+    match rest.find(['?', '#']) {
+        Some(cut) => {
+            redacted.push_str(&rest[..cut]);
+            redacted.push_str(if rest[cut..].starts_with('?') {
+                "?…"
+            } else {
+                "#…"
+            });
+        }
+        None => redacted.push_str(rest),
+    }
+    excerpt(&redacted, MAX_VALUE_CHARS).into_owned()
+}
+
+/// URL text as the URL parser reads it: without surrounding whitespace and
+/// control characters, and without tabs and line breaks anywhere.
+fn url_text(text: &str) -> Cow<'_, str> {
+    let text = text.trim_matches(|c: char| c.is_whitespace() || c.is_control());
+    if text.contains(['\t', '\n', '\r']) {
+        Cow::Owned(
+            text.chars()
+                .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// Where the authority of URL text starts and ends (byte offsets): after
+/// the scheme (if any) and any slashes, up to the path, query or fragment.
+/// It holds the user name and password, if any, then the host and port.
+fn authority(text: &str) -> Option<std::ops::Range<usize>> {
+    let after_scheme = match text.split_once(':') {
+        Some((scheme, _)) if is_scheme(scheme) => scheme.len() + 1,
+        _ => 0,
+    };
+    let rest = text.get(after_scheme..)?;
+    let start = after_scheme + (rest.len() - rest.trim_start_matches(['/', '\\']).len());
+    let end = text
+        .get(start..)?
+        .find(['/', '\\', '?', '#'])
+        .map_or(text.len(), |offset| start + offset);
+    Some(start..end)
+}
+
+/// Where the user name and password of URL text are (byte offsets,
+/// without the `@` that ends them), if it has any. Like the URL parser,
+/// the last `@` in the authority ends them.
+fn userinfo(text: &str) -> Option<std::ops::Range<usize>> {
+    let authority = authority(text)?;
+    let at = text.get(authority.clone())?.rfind('@')?;
+    Some(authority.start..authority.start + at)
+}
+
+/// Whether `text` is a URL scheme: a letter, then letters, digits, `+`,
+/// `-` or `.`.
+fn is_scheme(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 #[cfg(test)]
@@ -308,6 +450,11 @@ mod tests {
         assert_eq!(environment.author_name(), "m.keller");
         environment.author = Some("   ".to_owned());
         assert_eq!(environment.author_name(), "icygui-api");
+
+        let mut environment = Environment::new("prod", "https://m:5665", basic(" icygui-api\t"));
+        assert_eq!(environment.author_name(), "icygui-api");
+        environment.auth = basic("  ");
+        assert_eq!(environment.author_name(), "");
 
         let mut environment = Environment::new("prod", "https://m:5665", certificate());
         assert_eq!(environment.author_name(), "");
@@ -393,14 +540,143 @@ mod tests {
         assert_eq!(reason("master-01:5665"), "must start with https://");
         assert_eq!(reason("https://"), "has no host name");
         assert_eq!(reason("https://:5665"), "has no host name");
-        assert!(reason("https://user:secret@master-01:5665").contains("user name or password"));
-        assert!(reason("https://user@master-01:5665").contains("user name or password"));
+        assert_eq!(
+            reason("https://user:secret@master-01:5665"),
+            CREDENTIALS_REASON
+        );
+        assert_eq!(reason("https://user@master-01:5665"), CREDENTIALS_REASON);
         assert!(reason("https://master-01:5665/?x=1").contains("query"));
         assert!(reason("https://master-01:5665/#top").contains("fragment"));
         assert!(reason("https://master-01:5665/v1").contains("/v1"));
         assert!(reason("https://master-01:5665/v1/").contains("/v1"));
         assert!(reason("https://exa mple.com").starts_with("is not a valid URL"));
         assert!(reason("https://master-01:99999").starts_with("is not a valid URL"));
+    }
+
+    #[test]
+    fn credentials_are_reported_before_anything_else() {
+        // Even where the text is no usable URL, a password is the problem
+        // to report, and the one that keeps the settings from being saved.
+        for text in [
+            "http://root:icinga@master-01:5665",
+            "root:icinga@master-01:5665",
+            "https:/root:icinga@master-01:5665",
+            "https://root:icinga@exa mple.com",
+            "https://ro\tot:icinga@master-01:5665",
+            " \u{1}https://root:icinga@master-01:5665",
+            "https://root:p@ss@master-01:5665/v1",
+            "https://master-01:5665@evil.example.com",
+        ] {
+            assert_eq!(
+                parse_api_url(text).unwrap_err(),
+                CREDENTIALS_REASON,
+                "{text:?}"
+            );
+            assert!(has_credentials(text), "{text:?}");
+        }
+        for text in [
+            "https://master-01:5665",
+            "master-01:5665",
+            "https://[::1]:5665/icinga/",
+            "https://master-01:5665/?q=a@b",
+            "https://master-01:5665/path/@x",
+            "",
+        ] {
+            assert!(!has_credentials(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn api_paths_are_rejected_but_proxy_prefixes_kept() {
+        let reason = "must not include /v1 or an API path: icygui adds them itself";
+        for text in [
+            "https://master-01:5665/v1",
+            "https://master-01:5665/V1/",
+            "https://master-01:5665/v1/objects/hosts",
+            "https://master-01:5665/v1/status/",
+            "https://master-01:5665/v1/Events",
+            "https://proxy.example.com/icinga/v1",
+            "https://proxy.example.com/icinga/v1/actions/acknowledge-problem",
+        ] {
+            assert_eq!(parse_api_url(text).unwrap_err(), reason, "{text}");
+        }
+        for (text, base) in [
+            (
+                "https://gateway.example.com/v1/icinga",
+                "https://gateway.example.com/v1/icinga/",
+            ),
+            (
+                "https://proxy.example.com/v1-icinga/",
+                "https://proxy.example.com/v1-icinga/",
+            ),
+            (
+                "https://proxy.example.com/icinga/v2",
+                "https://proxy.example.com/icinga/v2/",
+            ),
+        ] {
+            let url = parse_api_url(text).unwrap();
+            assert_eq!(url.as_str(), base);
+            assert_eq!(
+                url.join("v1/status").unwrap().as_str(),
+                format!("{base}v1/status")
+            );
+        }
+    }
+
+    #[test]
+    fn redacted_urls_hide_credentials_queries_and_fragments() {
+        for (text, redacted) in [
+            ("https://master-01:5665", "https://master-01:5665"),
+            (
+                "  https://master-01:5665/icinga/ \n",
+                "https://master-01:5665/icinga/",
+            ),
+            (
+                "https://root:icinga@master-01:5665",
+                "https://***@master-01:5665",
+            ),
+            (
+                "https://root@master-01:5665/x",
+                "https://***@master-01:5665/x",
+            ),
+            ("https://a:b@c@master-01", "https://***@master-01"),
+            ("root:icinga@master-01:5665", "root:***@master-01:5665"),
+            (
+                "https://root:icinga@exa mple.com",
+                "https://***@exa mple.com",
+            ),
+            ("https://ro\tot:pw@master-01", "https://***@master-01"),
+            ("https://master-01/?api_key=s3cret", "https://master-01/?…"),
+            ("https://master-01/#token=s3cret", "https://master-01/#…"),
+            ("https://u:p@master-01/?k=v#f", "https://***@master-01/?…"),
+            ("not a url", "not a url"),
+            ("", ""),
+        ] {
+            assert_eq!(redact_url(text), redacted, "{text:?}");
+        }
+        let long = format!("https://master-01/{}", "a".repeat(10_000));
+        let redacted = redact_url(&long);
+        assert_eq!(redacted.chars().count(), MAX_VALUE_CHARS + 1);
+        assert!(redacted.ends_with('…'));
+    }
+
+    #[test]
+    fn invalid_url_errors_never_show_the_password() {
+        for url in [
+            "https://icygui:hunter2@master-01:5665",
+            "http://icygui:hunter2@master-01:5665",
+            "icygui:hunter2@master-01:5665",
+            "https://icygui:hunter2@master-01:56 65",
+            "https://master-01:5665/?password=hunter2",
+            "https://master-01:5665/#hunter2",
+        ] {
+            let environment = Environment::new("prod", url, basic("icygui"));
+            let error = environment.api_url().unwrap_err();
+            for text in [error.to_string(), format!("{error:?}")] {
+                assert!(!text.contains("hunter2"), "{text}");
+                assert!(text.contains("master-01"), "{text}");
+            }
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Icinga 2 desktop client — Rust + GPUI implementation plan
 
-Status: **plan v3. M0 (foundations + spikes) is done**; spike results are in `docs/spikes.md`.
+Status: **plan v3.** M0 is done (spike results in `docs/spikes.md`); the crates of M1–M5 are built and reviewed, and the `ic-core` runtime and app integration are next (see §4 for rc1 and v1).
 Inputs: `design/project/Icinga Client v2.dc.html` (primary design, screens 2a–2c), `design/project/Icinga Client.dc.html` (turn 1: command palette, dashboard editor, detail sub-tabs), `design/chats/chat1.md`, the sidebar screenshot, and the Icinga 2 REST API reference (`doc/12-icinga2-api.md`, Icinga/icinga2 master).
 
 ## 0. Decisions
@@ -295,6 +295,10 @@ There's no real Icinga to develop against, so the project gets its own: a small 
 6. **M5 Notifications + background**: `ic-rules`, GPUI notifier, `QuitMode::Explicit` + tray, launch at login, notification centre, event log, dev `.app` bundle for testing on macOS.
 7. **M6 Packaging**: signed `.app`/`.dmg`, AppImage + `.deb`, notification categories on macOS.
 8. **M7 Polish**: multi-view dashboards, host-group grid, cluster health, light theme.
+
+**Releases:**
+- **rc1** = M0–M6: every requirement in `docs/requirements.md` except those marked *(v1)*, after a general review and fix pass over the whole project. rc1 is merged into `main`, then tried against a real production Icinga.
+- **v1** = rc1 + M7 + the fixes from that production trial. M7 is built after rc1, not squeezed into the rc1 work.
 
 ---
 

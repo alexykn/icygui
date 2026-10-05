@@ -1,6 +1,6 @@
 # Requirements checklist
 
-Every requirement has a stable ID. The final production-readiness audit checks each one against code and tests and records evidence. Sources: PLAN.md (decisions D1–D9, sections 1–3), the design (`design/project/*.html`, `design/chats/chat1.md`), docs/architecture.md, and the user's instructions in the planning conversation.
+Every requirement has a stable ID. The final production-readiness audit checks each one against code and tests and records evidence. Requirements marked *(v1)* belong to M7 and come after rc1 (PLAN.md §4); everything else is required for rc1. Sources: PLAN.md (decisions D1–D9, sections 1–3), the design (`design/project/*.html`, `design/chats/chat1.md`), docs/architecture.md, and the user's instructions in the planning conversation.
 
 ## Connection and environments
 
@@ -57,6 +57,7 @@ Production scale is 2 000 hosts / 30 000 services; the numbers were measured aga
 - **PANE-03** "↗ open as tab" pins an object in the sidebar's "open" section; pinned tabs persist.
 - **PANE-04** History tab from the local event log ("recorded locally since …").
 - **PANE-05** Copy name, output and filter expression; open notes/action URLs in the browser.
+- **PANE-06** Service and host panes show who was notified and when (design 2b "notified" row): the last notification time and its recipients from Icinga's `Notification` objects (`last_notification`, `notified_problem_users`), or "not notified".
 
 ## Actions (runtime operations only; D6)
 
@@ -91,7 +92,7 @@ Production scale is 2 000 hosts / 30 000 services; the numbers were measured aga
 ## Look and feel
 
 - **UI-01** Dark theme exactly per the design tokens (PLAN.md §1); IBM Plex Mono bundled.
-- **UI-02** Light theme and "follow system" option.
+- **UI-02** *(v1)* Light theme and "follow system" option.
 - **UI-03** ⌘K / ctrl-K command palette: dashboards, hosts, services, actions, environment switch, settings, pause.
 - **UI-04** Relative times refresh (footer every second, rows periodically).
 - **UI-05** Empty, loading and error states for every view (no environment, connecting, no permission, filter error, empty dashboard).

@@ -257,12 +257,19 @@ impl AppState {
             self.apply(event);
             return;
         }
-        if self.config.environment(id).is_none() {
+        let Some(name) = self
+            .config
+            .environment(id)
+            .map(|environment| environment.name.clone())
+        else {
             tracing::debug!(environment = %id, "an event of a removed environment was dropped");
             return;
-        }
+        };
         match event {
-            CoreEvent::ActionFinished { id: action, outcome } => {
+            CoreEvent::ActionFinished {
+                id: action,
+                outcome,
+            } => {
                 // An action sent from another environment's notification.
                 self.action_finished(action, &outcome);
             }
@@ -279,7 +286,7 @@ impl AppState {
                     }
                     CoreEvent::Connection(state) => {
                         if let ConnectionState::Connected { node, .. } = &state {
-                            tracing::info!(environment = %id, node = %node.name, "connected in the background");
+                            tracing::info!(environment = %name, node = %node.name, view = %node.view.label(), "connected in the background");
                         }
                         slot.connection.on_state(state);
                         update = slot.update_pending && !slot.connection.is_waiting();
@@ -330,6 +337,15 @@ impl AppState {
         self.config.active_environment = id;
     }
 
+    /// Sends a command to every environment's engine (`command` makes each
+    /// one's copy): app-wide settings.
+    pub(super) fn send_to_every_engine(&self, command: impl Fn() -> Command) {
+        self.engine.send(command());
+        for slot in self.parked.values() {
+            slot.send(command());
+        }
+    }
+
     /// Tells every engine whether its environment is the one on screen.
     pub(super) fn announce_active(&self) {
         self.engine.send(Command::SetActive(true));
@@ -350,9 +366,6 @@ impl AppState {
         id: &str,
         action: &crate::actions::ObjectAction,
     ) -> Option<String> {
-        super::permissions::action_denial(
-            self.slot(id).and_then(EngineSlot::permissions),
-            action,
-        )
+        super::permissions::action_denial(self.slot(id).and_then(EngineSlot::permissions), action)
     }
 }

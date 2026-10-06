@@ -88,7 +88,7 @@ Reload Icinga afterwards (`systemctl reload icinga2`).
 - Permissions restricted with a `filter` in the `ApiUser` work too: icygui then shows and acts on only the objects the user may see.
 - **Read-only:** leave out the `actions/*` lines. Action buttons are then disabled, and hovering one says which permission is missing.
 - **Run command is opt-in, and it is remote code execution.** `actions/execute-command` runs a check or event command on an endpoint, and icygui's *run command* sends whatever macros you type. With a command such as the ITL's `by_ssh` (its `by_ssh_command` is free text), or any command with a free-form argument, whoever holds this API user's password can run arbitrary commands as the `icinga` user on every agent and satellite the master reaches, and that password sits in the keychain of every on-call laptop. Without the permission, *run command* is disabled and says which permission is missing. If you do need it:
-  - give it to a **separate `ApiUser`** that only the people who need it have (in icygui, a second environment with the same URL, switched to only to run a command: only the active environment notifies), and/or
+  - give it to a **separate `ApiUser`** that only the people who need it have (in icygui, a second environment with the same URL, switched to only to run a command; mute its notifications from the switcher, or both environments notify about the same problems), and/or
   - **restrict it with a filter** to the objects it may target, for example `{ permission = "actions/execute-command", filter = {{ "lab" in host.groups }} }` (`host` is the host itself or the service's host). A filter limits *which* hosts and services, not *what* runs on them.
 - `objects/query/Notification` and `events/Notification` let the panes show whom Icinga notified about a problem, and when. Without them, that row says it can't tell; everything else works.
 - `status/query` lets icygui notice an Icinga restart and a stalled event stream. Without it, the periodic reconcile still catches up.
@@ -137,11 +137,12 @@ More settings:
 
 ## Environments
 
-An environment is one Icinga cluster (one or more API URLs, see below) with its own dashboards, groups and notification rules. Several can be configured; one is active.
+An environment is one Icinga cluster (one or more API URLs, see below) with its own dashboards, groups and notification rules. Several can be configured; one is active: the one the window shows.
 
-**Only the active environment is connected and notifies.** Switching closes the connection to the previous one: nothing from it notifies until you switch back, wherever you switched (the footer, the palette or the tray menu). After a switch a notice names the environment that went quiet, and the switcher says it too. On call for production, switch back to it before you close the window.
+**Every environment stays connected and notifies**, whichever one is on screen, also while the window is closed: each keeps its own event stream, rules, event log and notifications from the moment icygui starts. Switching only changes what the window shows, so it is instant: the other environment's dashboards are current already. Each Icinga sees the same load as when it was the only environment (one event stream, one lean load on connect and the periodic reconcile), whether it is on screen or not.
 
-- **Switch** from the footer: click `● master-01 · 2s` to open the connection details (environment, URL, state, the node and how much of the cluster it sees, the URLs it passed over and why, version, last event, API user, missing permissions, *Reload from Icinga*) with the switcher under them. The palette has *Switch to <name>*. The sidebar always belongs to the active environment.
+- **Switch** from the footer: click `● master-01 · 2s` to open the connection details (environment, URL, state, the node and how much of the cluster it sees, the URLs it passed over and why, version, last event, API user, missing permissions, *Reload from Icinga*) with the switcher under them. The palette has *Switch to <name>*, the tray its environments menu. The sidebar always belongs to the active environment.
+- **Mute** one environment for 30 minutes, an hour or until 08:00 from the switcher (*mute <name>*, for the one on screen) or the palette (*Mute <name> …*, for any); a muted environment has a bell-off in the switcher, and *unmute* ends it. Its notifications are still recorded in the notification centre, marked silent. To silence all of them, pause notifications (see [Notifications](#notifications)).
 - **Add** from the switcher (*add environment…*) or the palette (*Add environment…*).
 - **Edit** from the switcher (*edit <name>…*) or the palette. Changing the URLs (or their order), the login or TLS reconnects. The stored password stays unless you type a new one.
 - **Delete** from the editor (*delete environment…*, after a confirmation). It also deletes the environment's password from the keychain and its local event log.
@@ -279,9 +280,9 @@ All actions are runtime operations through Icinga's `/v1/actions`. icygui never 
 
 icygui decides about notifications **on your machine**, from the live event stream, with your rules. It doesn't depend on Icinga's notification users, and nothing you set here changes Icinga.
 
-Notifications come from the **active environment only** (see [Environments](#environments)): while you look at staging, production doesn't notify.
+Notifications come from **every environment** (see [Environments](#environments)): while you look at staging, production still notifies.
 
-**What a notification looks like:** `CRITICAL · postgres-replication on db-prod-03`, the first line of the output, and the group and dashboard. *Acknowledge* opens the acknowledge dialog; *Open* (or a click) brings the window back (it is recreated if you closed it) with the object's pane.
+**What a notification looks like:** `CRITICAL · postgres-replication on db-prod-03`, the first line of the output, and the group and dashboard; with more than one environment the environment's name comes first (`production · CRITICAL · postgres-replication on db-prod-03`). *Open* (or a click) brings the window back (it is recreated if you closed it), switches to the notification's environment and shows the object's pane. *Acknowledge* opens the acknowledge dialog for the object in its own environment without switching (its title names the environment), and the acknowledgement goes to that environment's Icinga, never to the one on screen.
 
 **Rules** are inherited from top to bottom, and the most specific one wins:
 1. **Environment default rule** (Settings → *notifications*).
@@ -305,21 +306,19 @@ Recoveries only notify for problems that notified.
 
 **Storm control:** when more notifications than the threshold arrive within the window [5 within 10 seconds], the rest become one summary (`14 new problems in prod-cluster`). They are all in the centre, marked *silent*.
 
-**Pause:** 30 minutes, 1 hour, or until 08:00, from the notification centre, the palette, the settings or the tray; *resume* ends it. While paused, the footer's clock turns into a bell-off.
+**Pause:** 30 minutes, 1 hour, or until 08:00, from the notification centre, the palette, the settings or the tray; *resume* ends it. A pause holds for every environment (with several, the chips say *pause all*). One environment can be muted on its own instead (see [Environments](#environments)). While the environment on screen is paused or muted, the footer's clock turns into a bell-off.
 
-**The notification centre** (the clock icon in the footer) lists recent notifications, silent ones included, with an unread badge; *mark all read*; click one to open its object.
+**The notification centre** (the clock icon in the footer) lists the recent notifications of the environment on screen, silent ones included, with an unread badge; *mark all read*; click one to open its object. Each environment keeps its own list: switch to see another's.
 
-No notifications are sent for what's already wrong when icygui connects, but icygui keeps track of it: a service still critical from before its host went down waits for a fresh check (or five minutes) once the host is back, and an object that is flapping stays quiet until it stops. A problem that notified before icygui restarted (or before you switched environments and back) still notifies its recovery, as long as the event log keeps it. Problems that a reconcile finds after a reconnect do notify, also one that recovered and failed again while your laptop slept.
+No notifications are sent for what's already wrong when icygui connects, but icygui keeps track of it: a service still critical from before its host went down waits for a fresh check (or five minutes) once the host is back, and an object that is flapping stays quiet until it stops. A problem that notified before icygui restarted (or before the environment's connection settings changed) still notifies its recovery, as long as the event log keeps it. Problems that a reconcile finds after a reconnect do notify, also one that recovered and failed again while your laptop slept.
 
 Platform notes: on macOS, notifications come from the app bundle (allow them in System Settings → Notifications the first time, with sounds); a rule's sound is the system's alert sound, also while icygui is in front. On Linux they go to your desktop's notification server, with a sound by state (critical, warning, recovery) where the server plays sounds.
 
-Clicking a notification from another environment than the active one opens nothing: icygui says which environment it is from, so an acknowledgement never goes to the wrong Icinga.
-
 ## In the background
 
-- **Closing the window** keeps icygui running in the tray (Linux) or the menu bar (macOS), still connected to the active environment and notifying for it (Settings → general → *keep running in the tray when the window closes*, on by default). Where no tray icon can be shown (stock GNOME without the AppIndicator extension), closing the window quits, and the settings say so. With unsaved work in the window (dashboard editor changes, text typed in an action dialog) it asks first.
-- **The tray icon** is the logo mark tinted with the worst unhandled state of the active environment; its tooltip has the counts; its menu has *Open*, *Pause notifications*, the environments and *Quit*. Choosing another environment there switches like the footer does: the previous one stops notifying.
-- **Launch at login** (Settings → general) starts icygui in the background, without a window (a launch agent on macOS, an XDG autostart entry on Linux). If no tray shows its icon within 20 seconds (a panel that starts after icygui gets that long), the window opens instead.
+- **Closing the window** keeps icygui running in the tray (Linux) or the menu bar (macOS), still connected to every environment and notifying for each (Settings → general → *keep running in the tray when the window closes*, on by default). Where no tray icon can be shown (stock GNOME without the AppIndicator extension), closing the window quits, and the settings say so. With unsaved work in the window (dashboard editor changes, text typed in an action dialog) it asks first.
+- **The tray icon** is the logo mark tinted with the worst unhandled state across all environments; its tooltip has a line per environment with its connection (*muted* when muted on its own) and its counts; its menu has *Open*, *Pause notifications* (every environment), the environments and *Quit*. Choosing another environment there switches like the footer does.
+- **Launch at login** (Settings → general) starts icygui in the background, without a window, with every environment connected (a launch agent on macOS, an XDG autostart entry on Linux). If no tray shows its icon within 20 seconds (a panel that starts after icygui gets that long), the window opens instead.
 - **One instance:** starting icygui again brings the running one's window forward.
 - **Quit** from the tray, the app menu or <kbd>⌘Q</kbd>.
 

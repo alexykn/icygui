@@ -97,6 +97,9 @@ pub(crate) enum PaletteCommand {
     Pause(PauseChoice),
     /// Resume paused notifications.
     Resume,
+    /// Mute one environment's notifications for a while (A5), or unmute
+    /// them (`None`).
+    MuteEnvironment(String, Option<PauseChoice>),
     /// Watch, mute or unmute these objects (NOTE-02).
     Override(OverrideChange, Vec<ObjectKey>),
     /// Open the notification centre (NOTE-05).
@@ -166,7 +169,15 @@ struct Candidate {
     /// For objects: whether it's in a problem state (only problems can be
     /// acknowledged).
     problem: bool,
+    /// Ranks below equal matches by [`SECONDARY_PENALTY`]: muting an
+    /// environment never outranks switching to it (`staging` selects
+    /// "Switch to staging").
+    secondary: bool,
 }
+
+/// How far a secondary command ranks below an equal match: more than a
+/// label's length or start can make up.
+const SECONDARY_PENALTY: i64 = 16;
 
 /// What the palette searches, built when it opens.
 #[derive(Clone, Debug, Default)]
@@ -207,7 +218,13 @@ impl PaletteIndex {
         Self {
             commands: commands(state, focus, now)
                 .into_iter()
-                .map(|item| candidate(item, 0))
+                .map(|item| {
+                    let secondary = matches!(item.command, PaletteCommand::MuteEnvironment(..));
+                    Candidate {
+                        secondary,
+                        ..candidate(item, 0)
+                    }
+                })
                 .collect(),
             dashboards: dashboard_candidates(state),
             hosts: host_candidates(state),
@@ -412,7 +429,14 @@ fn best(candidates: &[Candidate], query: &Query, limit: usize, rank: Rank) -> Fo
         .filter_map(|(index, candidate)| {
             let found = query.matches(&candidate.haystack)?;
             let rank = match rank {
-                Rank::Score => i64::from(found.score),
+                Rank::Score => {
+                    i64::from(found.score)
+                        - if candidate.secondary {
+                            SECONDARY_PENALTY
+                        } else {
+                            0
+                        }
+                }
                 // A verb's objects: those named as typed before fuzzy
                 // near-misses (`ack db-prod` lists db-prod's problems
                 // before web-prod's), then the more severe.
@@ -473,6 +497,7 @@ fn object_candidate(item: PaletteItem, severity: u32, problem: bool) -> Candidat
         label_chars,
         severity,
         problem,
+        secondary: false,
     }
 }
 
@@ -837,10 +862,12 @@ fn dashboard_commands(state: &AppState) -> Vec<PaletteItem> {
 /// Resuming paused notifications, or pausing them; the notification
 /// centre, its read marks and the settings.
 fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Vec<PaletteItem> {
+    let environments = state.environments();
+    let several = environments.len() > 1;
     let mut items = match state.paused_until().filter(|until| *until > now) {
         Some(until) => vec![command(
             "Resume notifications",
-            format!("paused until {}", crate::notifications::when(until, now)),
+            crate::notifications::paused_text(environments.len(), until, now),
             None,
             PaletteCommand::Resume,
         )],
@@ -849,7 +876,11 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
             .map(|choice| {
                 command(
                     &format!("Pause notifications {}", choice.label(now)),
-                    String::new(),
+                    if several {
+                        "every environment".to_owned()
+                    } else {
+                        String::new()
+                    },
                     None,
                     PaletteCommand::Pause(choice),
                 )
@@ -857,6 +888,28 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
             .collect(),
         None => Vec::new(),
     };
+    // With several environments each one mutes on its own too (A5).
+    if several {
+        for environment in environments {
+            let id = &environment.id;
+            match state.environment_paused_until(id, now) {
+                Some(until) => items.push(command(
+                    &format!("Unmute {}", environment.name),
+                    format!("muted until {}", crate::notifications::when(until, now)),
+                    None,
+                    PaletteCommand::MuteEnvironment(id.clone(), None),
+                )),
+                None => items.extend(PauseChoice::ALL.into_iter().map(|choice| {
+                    command(
+                        &format!("Mute {} {}", environment.name, choice.label(now)),
+                        "the other environments still notify".to_owned(),
+                        None,
+                        PaletteCommand::MuteEnvironment(id.clone(), Some(choice)),
+                    )
+                })),
+            }
+        }
+    }
     let unread = state.unread_notifications();
     items.push(command(
         "Notifications",
@@ -1207,9 +1260,7 @@ mod tests {
                 .iter()
                 .any(|item| item.command == PaletteCommand::Pause(PauseChoice::UntilMorning))
         );
-        state.apply(ic_core::CoreEvent::NotificationsPaused(Some(
-            Timestamp::from_unix_seconds(1_790_003_600.),
-        )));
+        state.pause_notifications(Some(Timestamp::from_unix_seconds(1_790_003_600.)));
         let items = PaletteIndex::build(&state, &Focus::default(), now()).search("notif");
         assert!(
             items
@@ -1221,6 +1272,60 @@ mod tests {
                 .iter()
                 .all(|item| !matches!(item.command, PaletteCommand::Pause(_)))
         );
+    }
+
+    #[test]
+    fn each_environment_mutes_on_its_own() {
+        let mut state = AppState::fixture(now());
+        let mute = |state: &AppState| -> Vec<PaletteCommand> {
+            PaletteIndex::build(state, &Focus::default(), now())
+                .search("mute")
+                .into_iter()
+                .filter(|item| matches!(item.command, PaletteCommand::MuteEnvironment(..)))
+                .map(|item| item.command)
+                .collect()
+        };
+        assert!(
+            mute(&state).is_empty(),
+            "one environment: the pause is enough"
+        );
+        let staging = ic_config::Environment::new(
+            "staging",
+            "https://stg-master:5665",
+            ic_config::AuthConfig::Basic {
+                username: "icygui".to_owned(),
+            },
+        );
+        let staging_id = staging.id.clone();
+        state.save_environment(staging, false);
+        assert!(mute(&state).contains(&PaletteCommand::MuteEnvironment(
+            staging_id.clone(),
+            Some(PauseChoice::Hour)
+        )));
+        let items = PaletteIndex::build(&state, &Focus::default(), now()).search("mute staging");
+        assert!(
+            items[0].label.starts_with("Mute staging "),
+            "{}",
+            items[0].label
+        );
+        assert_eq!(items[0].detail, "the other environments still notify");
+        // Its name alone still switches to it.
+        let items = PaletteIndex::build(&state, &Focus::default(), now()).search("staging");
+        assert_eq!(
+            items[0].command,
+            PaletteCommand::SwitchEnvironment(staging_id.clone())
+        );
+
+        let later = Timestamp::from_unix_seconds(Timestamp::now().as_unix_seconds() + 3600.);
+        assert!(state.pause_environment(&staging_id, Some(later)));
+        let items = PaletteIndex::build(&state, &Focus::default(), Timestamp::now())
+            .search("unmute staging");
+        assert_eq!(items[0].label, "Unmute staging");
+        assert_eq!(
+            items[0].command,
+            PaletteCommand::MuteEnvironment(staging_id, None)
+        );
+        assert!(items[0].detail.starts_with("muted until "));
     }
 
     #[test]

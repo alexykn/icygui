@@ -23,7 +23,7 @@ mod tooltip;
 pub use banner::{Banner, BannerTone, ProgressBar};
 pub use button::{Button, ButtonColors, ButtonVariant, GlyphButton, IconButton, KeyHint};
 pub use divider::{Divider, DividerColor};
-pub use form::{Chip, Field, FieldTone, Segmented, Switch, TextArea};
+pub use form::{CHIP_HEIGHT, Chip, Field, FieldTone, Segmented, Switch, TextArea};
 pub use header::{PaneHeader, SubTabs};
 pub use link::{Link, LinkStyle};
 pub use list::{CompactRow, ListRow, RowEmphasis};

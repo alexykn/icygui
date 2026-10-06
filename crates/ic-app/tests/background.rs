@@ -3,13 +3,14 @@
 //! fake tray host (`StatusNotifierWatcher`) and a fake notification
 //! server, without a display (GPUI runs headless).
 //!
-//! - `icygui --demo --background` starts in the tray without a window; the
-//!   tray item's tooltip names the environment, its connection and its
-//!   counts, and the icon's core takes the worst unhandled state's colour;
-//!   a problem storm reaches the notification server with the critical
-//!   urgency, a sound or silence, the desktop entry and *Acknowledge* and
-//!   *Open*; *Open* on a notification opens the window; the tray's *Quit*
-//!   quits.
+//! - `icygui --demo --background` starts in the tray without a window,
+//!   with every environment's engine running (PLAN.md D2); the tray item's
+//!   tooltip names each environment, its connection and its counts, and
+//!   the icon's core takes the worst unhandled state's colour; a problem
+//!   storm reaches the notification server with the environment's name in
+//!   front of the title, the critical urgency, a sound or silence, the
+//!   desktop entry and *Acknowledge* and *Open*; *Open* on a notification
+//!   opens the window; the tray's *Quit* quits.
 //! - Two launches of the real app: the second hands over to the first,
 //!   whose window comes forward, and exits.
 //! - Without a notification server, notifications cost one warning and no
@@ -471,6 +472,11 @@ fn the_demo_runs_in_the_tray_and_notifies_the_desktop() {
     wait_until("the demo to load", 60, || {
         tooltip(&bus, &item).starts_with("prod-cluster (demo) · connected")
     });
+    // Every environment connects in the background too.
+    wait_until("every environment", 60, || {
+        let text = tooltip(&bus, &item);
+        text.contains("\nstaging (demo) · connected") && text.contains("\nlab (demo) · connected")
+    });
     let text = tooltip(&bus, &item);
     assert!(text.contains("unhandled"), "{text}");
     assert_ne!(icon_core(&bus, &item), GREY, "tinted with the worst state");
@@ -492,19 +498,20 @@ fn the_demo_runs_in_the_tray_and_notifies_the_desktop() {
     assert!(!log.contains("main window opened"), "no window yet");
 
     // A storm: the first problems reach the desktop, critical, with
-    // Acknowledge and Open.
+    // Acknowledge and Open, and the environment's name in front.
+    let prod_critical = "prod-cluster · CRITICAL · ";
     wait_until("a notification", 90, || {
         received
             .lock()
             .unwrap()
             .iter()
-            .any(|notification| notification.summary.starts_with("CRITICAL · "))
+            .any(|notification| notification.summary.starts_with(prod_critical))
     });
     let (id, problem) = {
         let received = received.lock().unwrap();
         let notification = received
             .iter()
-            .find(|notification| notification.summary.starts_with("CRITICAL · "))
+            .find(|notification| notification.summary.starts_with(prod_critical))
             .unwrap();
         check_problem_notification(notification);
         (notification.id, notification.summary.clone())
@@ -527,10 +534,11 @@ fn the_demo_runs_in_the_tray_and_notifies_the_desktop() {
         !tooltip(&bus, &item).contains("paused")
     });
 
-    // Switch environments from the tray.
+    // Switch environments from the tray: at once, its engine runs.
     click(&bus, &item, "staging");
-    wait_until("staging", 60, || {
-        tooltip(&bus, &item).starts_with("staging (demo) · connected")
+    wait_until("staging", 20, || {
+        let log = log_of(&home, &args);
+        log.contains("switching environment") && log.contains("\"staging\"")
     });
 
     // Quit from the tray.

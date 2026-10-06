@@ -985,6 +985,27 @@ impl Workspace {
                 state.inform("Notifications resumed", None);
                 cx.notify();
             }),
+            PaletteCommand::MuteEnvironment(id, choice) => self.state.update(cx, |state, cx| {
+                let now = Timestamp::now();
+                let name = state
+                    .environment_by_id(&id)
+                    .map(|environment| environment.name.clone())
+                    .unwrap_or_default();
+                if state.pause_environment(&id, choice.map(|choice| choice.until(now))) {
+                    match choice {
+                        Some(choice) => state.inform(
+                            format!("Muted {name} {}", choice.label(now)),
+                            Some(
+                                "Its notifications are recorded in the notification centre \
+                                 meanwhile; the other environments still notify."
+                                    .to_owned(),
+                            ),
+                        ),
+                        None => state.inform(format!("Unmuted {name}"), None),
+                    }
+                }
+                cx.notify();
+            }),
             PaletteCommand::Override(change, targets) => self.change_override(change, &targets, cx),
             PaletteCommand::OpenNotifications => self.open_notifications(window, cx),
             PaletteCommand::MarkNotificationsRead => self.state.update(cx, |state, cx| {
@@ -1073,8 +1094,7 @@ impl Workspace {
         if let Some(kind) = DialogKind::for_action(&action) {
             let state = self.state.clone();
             let bound = elsewhere.clone();
-            let dialog =
-                cx.new(|cx| ActionDialog::new(state, kind, eligible, bound, window, cx));
+            let dialog = cx.new(|cx| ActionDialog::new(state, kind, eligible, bound, window, cx));
             let events = cx.subscribe_in(
                 &dialog,
                 window,

@@ -14,11 +14,13 @@ use gpui::{
 use gpui::{BoxShadow, point};
 use ic_model::Timestamp;
 use ic_rules::Tone;
-use ic_ui_kit::{ActiveTheme as _, Chip, Dismissable, Dismissal, Link, StateDot, Theme, Tooltip};
+use ic_ui_kit::{
+    ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissable, Dismissal, Link, StateDot, Theme, Tooltip,
+};
 
 use super::{Sidebar, SidebarEvent, SidebarMenu};
 use crate::notifications::entry::{self, CentreEntry, SILENT_HINT};
-use crate::notifications::{PauseChoice, when};
+use crate::notifications::{PauseChoice, pause_label, paused_text, when};
 use crate::settings::SettingsTab;
 
 /// The centre's width.
@@ -138,14 +140,21 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// Pausing (30 minutes, an hour, until 08:00), or resuming.
+    /// Pausing every environment (30 minutes, an hour, until 08:00), or
+    /// resuming (A5: the pause is global by default); while the
+    /// environment on screen is muted on its own, until when, and
+    /// *unmute*. One line of a chip's height in every case, so the centre
+    /// (anchored above the footer) never moves when it changes.
     fn centre_pause(&self, now: Timestamp, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let colors = theme.colors;
-        let paused = self
-            .state
-            .read(cx)
-            .paused_until()
-            .filter(|until| *until > now);
+        let state = self.state.read(cx);
+        let environments = state.environments().len();
+        let paused = state.paused_until().filter(|until| *until > now);
+        let muted = state.environment().and_then(|environment| {
+            state
+                .environment_paused_until(&environment.id, now)
+                .map(|until| (environment.id.clone(), environment.name.clone(), until))
+        });
         let row = div()
             .flex()
             .flex_none()
@@ -156,13 +165,17 @@ impl Sidebar {
             .border_b_1()
             .border_color(colors.border_row)
             .text_size(theme.text.small);
-        match paused {
-            Some(until) => row
+        if let Some(until) = paused {
+            return row
                 .child(
                     div()
                         .flex_1()
+                        .line_height(px(CHIP_HEIGHT))
                         .text_color(theme.states.warning)
-                        .child(format!("paused until {}: shown silently", when(until, now))),
+                        .child(format!(
+                            "{}: shown silently",
+                            paused_text(environments, until, now)
+                        )),
                 )
                 .child(
                     Link::new("centre-resume", "resume")
@@ -174,25 +187,55 @@ impl Sidebar {
                             });
                         })),
                 )
-                .into_any_element(),
-            None => row
-                .child(div().flex_1().text_color(colors.text_faint).child("pause"))
-                .children(PauseChoice::ALL.map(|choice| {
-                    Chip::new(
-                        SharedString::from(format!("centre-pause-{choice:?}")),
-                        choice.short_label(),
-                    )
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.state.update(cx, |state, cx| {
-                                state.pause_notifications(Some(choice.until(Timestamp::now())));
-                                cx.notify();
-                            });
-                        },
-                    ))
-                }))
-                .into_any_element(),
+                .into_any_element();
         }
+        if let Some((id, name, until)) = muted {
+            return row
+                .child(
+                    div()
+                        .flex_1()
+                        .line_height(px(CHIP_HEIGHT))
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.states.warning)
+                        .child(format!(
+                            "{name} muted until {}: shown silently",
+                            when(until, now)
+                        )),
+                )
+                .child(
+                    Link::new("centre-unmute", "unmute")
+                        .text_size(theme.text.small)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.state.update(cx, |state, cx| {
+                                if state.pause_environment(&id, None) {
+                                    cx.notify();
+                                }
+                            });
+                        })),
+                )
+                .into_any_element();
+        }
+        row.child(
+            div()
+                .flex_1()
+                .line_height(px(CHIP_HEIGHT))
+                .text_color(colors.text_faint)
+                .child(pause_label(environments)),
+        )
+        .children(PauseChoice::ALL.map(|choice| {
+            Chip::new(
+                SharedString::from(format!("centre-pause-{choice:?}")),
+                choice.short_label(),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.state.update(cx, |state, cx| {
+                    state.pause_notifications(Some(choice.until(Timestamp::now())));
+                    cx.notify();
+                });
+            }))
+        }))
+        .into_any_element()
     }
 
     /// The entries, newest first, or why there are none.

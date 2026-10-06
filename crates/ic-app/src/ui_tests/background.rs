@@ -202,6 +202,10 @@ fn demo_with_storms(storm_every: Option<u64>, cx: &mut App) -> Entity<AppState> 
     state
 }
 
+/// A critical problem of `prod-cluster` on the desktop: the demo has
+/// several environments, so the title starts with its name (A1).
+const PROD_CRITICAL: &str = "prod-cluster · CRITICAL · ";
+
 #[test]
 fn desktop_notifications_open_and_acknowledge_their_object() {
     run_app(
@@ -220,7 +224,7 @@ fn desktop_notifications_open_and_acknowledge_their_object() {
                             .read(cx)
                             .shown_notifications()
                             .iter()
-                            .any(|posted| posted.title.starts_with("CRITICAL · "))
+                            .any(|posted| posted.title.starts_with(PROD_CRITICAL))
                     },
                 )
                 .await;
@@ -229,7 +233,7 @@ fn desktop_notifications_open_and_acknowledge_their_object() {
                         .read(cx)
                         .shown_notifications()
                         .into_iter()
-                        .find(|posted| posted.title.starts_with("CRITICAL · "))
+                        .find(|posted| posted.title.starts_with(PROD_CRITICAL))
                         .unwrap()
                 });
                 assert_eq!(posted.urgency, Urgency::Critical);
@@ -296,16 +300,35 @@ fn desktop_notifications_open_and_acknowledge_their_object() {
     );
 }
 
+/// A1: a notification raised by `prod-cluster` and still queued when the
+/// user switched to `staging` keeps its environment: its title names it,
+/// and *Acknowledge* opens the dialog for prod-cluster's object without
+/// switching back (the dialog sends to prod-cluster's engine).
 #[test]
-fn a_notification_of_the_previous_environment_never_acts_on_the_next() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one story: queued, switched, posted, acknowledged where it came from"
+)]
+fn a_notification_keeps_its_environment_after_a_switch() {
     run_app(
         crate::WINDOW_SIZE,
         |cx| demo_with_storms(None, cx),
         Body::Async(Box::new(|app, cx| {
             async move {
                 let session = cx.update(|cx| live::session(cx).unwrap());
-                // prod-cluster's engine raised a problem that is still
-                // queued for the UI when the user switches to staging.
+                wait_for(&app, &cx, "prod-cluster", LOAD, |app, cx| {
+                    let state = app.state.read(cx);
+                    state.connection().is_connected()
+                        && state
+                            .snapshot_of(demo::ENVIRONMENT_ID)
+                            .is_some_and(|snapshot| {
+                                snapshot.services.contains_key(&ic_model::ServiceKey::new(
+                                    "db-prod-03",
+                                    "postgres-replication",
+                                ))
+                            })
+                })
+                .await;
                 cx.update(|cx| {
                     session.update(cx, |session, cx| {
                         session
@@ -329,7 +352,13 @@ fn a_notification_of_the_previous_environment_never_acts_on_the_next() {
                     &cx,
                     "the queued notification",
                     Duration::from_secs(5),
-                    |_, cx| !session.read(cx).shown_notifications().is_empty(),
+                    |_, cx| {
+                        session
+                            .read(cx)
+                            .shown_notifications()
+                            .iter()
+                            .any(|posted| posted.tag.ends_with(":critical:1"))
+                    },
                 )
                 .await;
                 let posted = cx.update(|cx| {
@@ -341,12 +370,14 @@ fn a_notification_of_the_previous_environment_never_acts_on_the_next() {
                         .unwrap()
                 });
                 assert_eq!(
-                    posted.actions,
-                    [("open", "Open")],
-                    "no Acknowledge for an environment that isn't active"
+                    posted.title,
+                    "prod-cluster · CRITICAL · postgres-replication on db-prod-03"
                 );
-                // Acknowledge anyway (a button shown before the switch):
-                // nothing opens in staging; a toast says where it is from.
+                assert_eq!(
+                    posted.actions,
+                    [(ACKNOWLEDGE_ACTION, "Acknowledge"), ("open", "Open")],
+                    "Acknowledge goes to its own environment"
+                );
                 cx.update(|cx| {
                     session.update(cx, |session, cx| {
                         session.notification_clicked(
@@ -357,17 +388,27 @@ fn a_notification_of_the_previous_environment_never_acts_on_the_next() {
                             cx,
                         );
                     });
-                    app.draw(cx);
+                });
+                cx.update(|cx| app.draw(cx));
+                wait_for(
+                    &app,
+                    &cx,
+                    "the acknowledge dialog",
+                    Duration::from_secs(5),
+                    |app, cx| {
+                        app.workspace.read(cx).modal(cx)
+                            == Some(ModalKind::Action(DialogKind::Acknowledge))
+                    },
+                )
+                .await;
+                cx.update(|cx| {
                     let state = app.state.read(cx);
-                    assert_eq!(state.active_environment_id(), Some(demo::STAGING_ID));
-                    assert_eq!(app.workspace.read(cx).modal(cx), None, "no dialog");
-                    assert_eq!(app.pane_object(cx), None, "nothing revealed");
-                    let toast = state.toasts().last().expect("a toast");
-                    assert_eq!(toast.title, "That notification is from prod-cluster");
                     assert_eq!(
-                        toast.lines,
-                        ["Switch to prod-cluster to see postgres-replication on db-prod-03."]
+                        state.active_environment_id(),
+                        Some(demo::STAGING_ID),
+                        "no switch"
                     );
+                    assert_eq!(app.pane_object(cx), None, "nothing revealed in staging");
                 });
             }
             .boxed_local()

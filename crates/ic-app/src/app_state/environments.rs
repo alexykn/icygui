@@ -241,6 +241,8 @@ mod tests {
     use ic_config::{AuthConfig, Paths, UiState};
     use ic_model::Timestamp;
 
+    use std::sync::Arc;
+
     use super::*;
     use crate::app_state::testing::Recorder;
     use crate::persist::Persistence;
@@ -300,14 +302,11 @@ mod tests {
 
     #[test]
     fn edits_reconnect_only_for_connection_changes() {
-        let (mut state, recorder) = {
-            let mut state = AppState::live(ic_config::Config::default(), UiState::default(), now());
-            let recorder = Recorder::default();
-            state.set_core(Box::new(recorder.clone()));
-            (state, recorder)
-        };
+        let mut state = AppState::live(ic_config::Config::default(), UiState::default(), now());
         let prod = basic("prod", "https://master-01:5665");
         state.save_environment(prod.clone(), false);
+        let recorder = Recorder::default();
+        state.set_core(Box::new(recorder.clone()));
         let groups = state.environment().unwrap().groups.clone();
 
         // Only the name: in place, the core is told.
@@ -356,12 +355,11 @@ mod tests {
             name: "lab-2".to_owned(),
             ..other
         };
+        // Another environment's engine runs too: it is told in place.
         assert_eq!(
             state.save_environment(other_renamed, false),
-            EnvironmentSaved::Inactive
+            EnvironmentSaved::InPlace
         );
-        assert!(EnvironmentSaved::Reconnect.needs_engine());
-        assert!(!EnvironmentSaved::InPlace.needs_engine());
     }
 
     #[test]
@@ -386,48 +384,269 @@ mod tests {
         assert!(!state.switch_environment(&staging_id), "already active");
         assert!(!state.switch_environment("missing"));
         assert_eq!(state.active_environment_id(), Some(staging_id.as_str()));
-        assert_eq!(state.snapshot().revision, 0, "the old objects are gone");
+        assert_eq!(
+            state.snapshot().revision,
+            0,
+            "staging's engine sent nothing yet"
+        );
         assert!(state.tabs().is_empty());
         assert_eq!(state.selected(), state.dashboard_at(1).as_ref());
         assert!(state.connection().is_starting());
+        assert!(state.notice().is_none(), "nothing stops notifying (D2)");
 
         assert!(state.switch_environment(&prod_id));
         assert_eq!(state.selected(), Some(&second), "prod's selection is back");
         assert_eq!(state.tabs(), [ic_model::ObjectKey::host("db-prod-03")]);
+        assert_eq!(
+            state.snapshot().revision,
+            7,
+            "prod's objects are back at once"
+        );
     }
 
-    /// Only the active environment notifies (D2): a switch says which
-    /// environment went quiet, every time.
+    /// Every environment's engine runs (D2): what the inactive one
+    /// reports is kept for it, and shows as soon as it is switched to.
     #[test]
-    fn switching_says_which_environment_stopped_notifying() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut state, _) = live(dir.path());
-        let prod = basic("prod", "https://master-01:5665");
+    fn an_inactive_environment_keeps_what_its_engine_reports() {
+        let mut state = AppState::live(ic_config::Config::default(), UiState::default(), now());
+        let production = basic("prod", "https://master-01:5665");
         let staging = basic("staging", "https://staging:5665");
-        let (prod_id, staging_id) = (prod.id.clone(), staging.id.clone());
-        state.save_environment(prod, false);
+        let (prod_id, staging_id) = (production.id.clone(), staging.id.clone());
+        state.save_environment(production, false);
         state.save_environment(staging, false);
-        assert!(state.notice().is_none());
+        let prod = Recorder::default();
+        state.set_core_for(&prod_id, Box::new(prod.clone()));
+        assert!(prod.sent().is_empty(), "the active engine stays on screen");
+        let staging_core = Recorder::default();
+        state.set_core_for(&staging_id, Box::new(staging_core.clone()));
+        assert_eq!(
+            staging_core.sent(),
+            ["SetActive(false)"],
+            "an engine off screen is told so"
+        );
+        state.apply_from(
+            &staging_id,
+            ic_core::CoreEvent::Snapshot(Arc::new(ic_core::snapshot::Snapshot {
+                revision: 3,
+                ..ic_core::snapshot::Snapshot::default()
+            })),
+        );
+        state.apply_from(
+            &staging_id,
+            ic_core::CoreEvent::Connection(ic_core::ConnectionState::Connected {
+                node: crate::app_state::connection::full_node("staging"),
+                version: "r2.15.6-1".to_owned(),
+                since: now(),
+            }),
+        );
+        assert_eq!(state.snapshot().revision, 0, "the window still shows prod");
+        assert!(!state.connection().is_connected());
+        assert_eq!(state.snapshot_of(&staging_id).unwrap().revision, 3);
 
         assert!(state.switch_environment(&staging_id));
-        let notice = state.notice().unwrap();
-        assert_eq!(notice.title, "prod is no longer watched.");
-        assert!(!notice.problem);
-        let detail = notice.detail.as_deref().unwrap();
-        assert!(detail.contains("Only the active environment"), "{detail}");
-        assert!(detail.contains("nothing from prod notifies"), "{detail}");
+        assert_eq!(state.snapshot().revision, 3, "staging shows at once");
+        assert!(state.connection().is_connected());
+        assert_eq!(staging_core.sent(), ["SetActive(false)", "SetActive(true)"]);
+        assert_eq!(
+            prod.sent().last().map(String::as_str),
+            Some("SetActive(false)")
+        );
+        // Events of the environment now off screen go to its slot.
+        state.apply_from(
+            &prod_id,
+            ic_core::CoreEvent::Snapshot(Arc::new(ic_core::snapshot::Snapshot {
+                revision: 9,
+                ..ic_core::snapshot::Snapshot::default()
+            })),
+        );
+        assert_eq!(state.snapshot().revision, 3);
+        assert_eq!(state.snapshot_of(&prod_id).unwrap().revision, 9);
+        // At quit every engine's link goes.
+        assert_eq!(state.take_all_cores().len(), 2);
+    }
 
-        assert!(!state.switch_environment(&staging_id));
-        assert_eq!(
-            state.notice().unwrap().title,
-            "prod is no longer watched.",
-            "no switch, no new notice"
+    /// Two environments with a recording engine each, prod on screen and
+    /// both connected.
+    fn two_engines() -> (AppState, (String, Recorder), (String, Recorder)) {
+        let mut state = AppState::live(ic_config::Config::default(), UiState::default(), now());
+        let production = basic("prod", "https://master-01:5665");
+        let staging = basic("staging", "https://staging:5665");
+        let (prod_id, staging_id) = (production.id.clone(), staging.id.clone());
+        state.save_environment(production, false);
+        state.save_environment(staging, false);
+        let (prod_core, staging_core) = (Recorder::default(), Recorder::default());
+        state.set_core_for(&prod_id, Box::new(prod_core.clone()));
+        state.set_core_for(&staging_id, Box::new(staging_core.clone()));
+        for id in [&prod_id, &staging_id] {
+            state.apply_from(
+                id,
+                ic_core::CoreEvent::Connection(ic_core::ConnectionState::Connected {
+                    node: crate::app_state::connection::full_node("master"),
+                    version: "r2.15.6-1".to_owned(),
+                    since: now(),
+                }),
+            );
+        }
+        prod_core.clear();
+        staging_core.clear();
+        (state, (prod_id, prod_core), (staging_id, staging_core))
+    }
+
+    fn pause(until: Option<Timestamp>) -> String {
+        format!("{:?}", ic_core::Command::PauseNotifications(until))
+    }
+
+    /// A5: the pause holds for every environment; an environment's own
+    /// mute only for it. Each engine always gets the later of the two,
+    /// also an engine that starts later.
+    #[test]
+    fn pauses_cover_every_environment_or_one() {
+        let (mut state, (prod_id, prod), (staging_id, staging)) = two_engines();
+        let real_now = Timestamp::now();
+        let at = |seconds: f64| Timestamp::from_unix_seconds(real_now.as_unix_seconds() + seconds);
+        let (hour, two_hours) = (at(3600.), at(7200.));
+
+        state.pause_notifications(Some(hour));
+        assert_eq!(prod.sent(), [pause(Some(hour))]);
+        assert_eq!(staging.sent(), [pause(Some(hour))]);
+        assert_eq!(state.active_pause(real_now), Some(hour));
+
+        assert!(state.pause_environment(&staging_id, Some(two_hours)));
+        assert!(
+            !state.pause_environment(&staging_id, Some(two_hours)),
+            "no change"
         );
-        assert!(state.switch_environment(&prod_id));
+        assert!(!state.pause_environment("missing", Some(hour)));
+        assert_eq!(staging.sent().last(), Some(&pause(Some(two_hours))));
+        assert_eq!(prod.sent().len(), 1, "prod isn't touched");
         assert_eq!(
-            state.notice().unwrap().title,
-            "staging is no longer watched."
+            state.environment_paused_until(&staging_id, real_now),
+            Some(two_hours)
         );
+        assert_eq!(state.environment_paused_until(&prod_id, real_now), None);
+
+        // Resuming every environment leaves staging's own mute.
+        state.pause_notifications(None);
+        assert_eq!(prod.sent().last(), Some(&pause(None)));
+        assert_eq!(staging.sent().last(), Some(&pause(Some(two_hours))));
+        assert_eq!(state.active_pause(real_now), None, "prod notifies");
+        assert_eq!(
+            state.effective_pause(&staging_id, real_now),
+            Some(two_hours)
+        );
+
+        // Staging's next engine (its connection changed) is muted too.
+        let next = Recorder::default();
+        state.set_core_for(&staging_id, Box::new(next.clone()));
+        assert_eq!(
+            next.sent(),
+            ["SetActive(false)".to_owned(), pause(Some(two_hours))]
+        );
+        // On screen, the clock shows staging's mute.
+        assert!(state.switch_environment(&staging_id));
+        assert_eq!(state.active_pause(real_now), Some(two_hours));
+
+        assert!(state.pause_environment(&staging_id, None));
+        assert_eq!(next.sent().last(), Some(&pause(None)));
+        assert_eq!(state.active_pause(real_now), None);
+
+        // A mute that is over is forgotten; a removed environment's too.
+        assert!(state.pause_environment(&prod_id, Some(hour)));
+        state.expire_pauses(at(3601.));
+        assert_eq!(state.environment_paused_until(&prod_id, real_now), None);
+        assert!(state.pause_environment(&prod_id, Some(hour)));
+        assert_eq!(state.remove_environment(&prod_id), Some(false));
+        assert!(!state.pause_environment(&prod_id, None));
+    }
+
+    /// App-wide settings (the event log's retention, the reconcile
+    /// interval) reach every environment's engine.
+    #[test]
+    fn app_wide_settings_reach_every_engine() {
+        let (mut state, (_, prod), (_, staging)) = two_engines();
+        let general = ic_config::General {
+            event_log_retention_hours: 72,
+            ..state.config().general.clone()
+        };
+        assert!(state.set_general(&general));
+        for engine in [&prod, &staging] {
+            assert_eq!(engine.sent().len(), 1);
+            assert!(engine.sent()[0].starts_with("UpdateGeneral("));
+        }
+    }
+
+    /// A1: an acknowledgement asked for from another environment's
+    /// notification goes to that environment's engine, never to the one
+    /// on screen, without switching.
+    #[test]
+    fn an_acknowledgement_goes_to_the_engine_of_its_environment() {
+        let (mut state, (prod_id, prod), (staging_id, staging)) = two_engines();
+        let object = ic_model::ObjectKey::service("stg-db-01", "disk");
+        let request = crate::actions::ActionRequest {
+            action: crate::actions::ObjectAction::Acknowledge,
+            targets: vec![object.clone()],
+        };
+        assert!(state.request_in(&staging_id, request.clone()).is_ok());
+        assert_eq!(
+            state.take_request(),
+            Some((request.clone(), Some(staging_id.clone())))
+        );
+        // A request for the environment on screen stays unbound.
+        assert!(state.request_in(&prod_id, request.clone()).is_ok());
+        assert_eq!(state.take_request(), Some((request.clone(), None)));
+
+        // A request bound to staging survives a switch; an unbound one not.
+        assert!(state.request_in(&staging_id, request.clone()).is_ok());
+        assert_eq!(state.drop_unbound_request(), None);
+        assert!(state.has_request());
+        let _ = state.take_request();
+
+        let spec = crate::operate::ActionSpec::for_objects(
+            crate::actions::ObjectAction::Acknowledge,
+            ic_model::Action::Acknowledge {
+                comment: "on it".to_owned(),
+                sticky: false,
+                persistent: false,
+                expiry: None,
+            },
+            vec![object.clone()],
+        );
+        let id = state.submit_in(&staging_id, spec.clone()).unwrap();
+        assert_eq!(staging.actions().len(), 1);
+        assert_eq!(staging.actions()[0].0, id);
+        assert!(prod.actions().is_empty(), "nothing goes to prod");
+        assert_eq!(state.active_environment_id(), Some(prod_id.as_str()));
+        assert_eq!(
+            state.pending_label(&object),
+            None,
+            "no marker on prod's rows"
+        );
+        let toast = state.toasts().last().unwrap();
+        assert_eq!(toast.title, "Acknowledging disk on stg-db-01 in staging…");
+        state.apply_from(
+            &staging_id,
+            ic_core::CoreEvent::ActionFinished {
+                id,
+                outcome: ic_core::ActionOutcome {
+                    ok: 1,
+                    failed: Vec::new(),
+                    error: None,
+                },
+            },
+        );
+        let toast = state.toasts().last().unwrap();
+        assert_eq!(toast.title, "Acknowledged disk on stg-db-01 in staging");
+
+        // Not connected, or gone: nothing is sent.
+        state.apply_from(
+            &staging_id,
+            ic_core::CoreEvent::Connection(ic_core::ConnectionState::Connecting { attempt: 1 }),
+        );
+        assert!(state.submit_in(&staging_id, spec.clone()).is_err());
+        assert!(state.remove_environment(&staging_id).is_some());
+        assert!(state.submit_in(&staging_id, spec).is_err());
+        assert!(state.request_in(&staging_id, request).is_err());
+        assert_eq!(staging.actions().len(), 1);
     }
 
     #[test]

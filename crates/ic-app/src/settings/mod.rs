@@ -36,8 +36,8 @@ use ic_model::Timestamp;
 use ic_rules::{ObjectMode, Rule, ScopeSetting};
 use ic_ui_kit::input::{InputEvent, InputState};
 use ic_ui_kit::{
-    ActiveTheme as _, Button, Chip, DialogBody, Field, Link, Segmented, Switch, TextField, Theme,
-    Tooltip,
+    ActiveTheme as _, Button, CHIP_HEIGHT, Chip, DialogBody, Field, Link, Segmented, Switch,
+    TextField, Theme, Tooltip,
 };
 
 pub(crate) use self::model::{FieldId, RuleFlag, ScopeKey, SettingsTab};
@@ -46,7 +46,7 @@ use self::model::{
     parse_reconcile, parse_retention, parse_threshold, parse_window, scope_choice, scope_meaning,
 };
 use crate::app_state::{AppState, NotificationPlan};
-use crate::notifications::{PauseChoice, override_text, when};
+use crate::notifications::{PauseChoice, override_text, pause_label, paused_text};
 use crate::operate::dialog::{NextField, PreviousField};
 
 /// Key context of the dialog.
@@ -489,7 +489,7 @@ impl SettingsDialog {
             != self.state.read(cx).config().general.launch_at_login)
             .then_some(general.launch_at_login);
         self.state.update(cx, |state, cx| {
-            let mut changed = state.set_general(general);
+            let mut changed = state.set_general(&general);
             if let Some(plan) = plan {
                 changed |= state.apply_notification_plan(plan);
             }
@@ -934,6 +934,7 @@ impl SettingsDialog {
     ) -> AnyElement {
         let colors = theme.colors;
         let now = Timestamp::now();
+        let environments = self.state.read(cx).environments().len();
         let paused = self
             .state
             .read(cx)
@@ -946,7 +947,11 @@ impl SettingsDialog {
                 .gap(px(8.))
                 .text_size(theme.text.small)
                 .text_color(theme.states.warning)
-                .child(format!("paused until {}", when(until, now)))
+                .child(div().line_height(px(CHIP_HEIGHT)).child(paused_text(
+                    environments,
+                    until,
+                    now,
+                )))
                 .child(Link::new("settings-resume", "resume").on_click(cx.listener(
                     |this, _: &ClickEvent, _, cx| {
                         this.state.update(cx, |state, cx| {
@@ -964,7 +969,7 @@ impl SettingsDialog {
                     div()
                         .text_size(theme.text.small)
                         .text_color(colors.text_faint)
-                        .child("pause"),
+                        .child(pause_label(environments)),
                 )
                 .children(PauseChoice::ALL.map(|choice| {
                     Chip::new(

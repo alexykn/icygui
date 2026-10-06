@@ -6,6 +6,9 @@
 //! - [`start`] runs the engine of one environment on its own thread and
 //!   returns a [`CoreHandle`]: [`Command`]s go in, [`CoreEvent`]s come out,
 //!   among them immutable [`snapshot::Snapshot`]s for the UI to render.
+//!   An app runs one engine per environment side by side and tells each
+//!   whether its environment is on screen ([`Command::SetActive`]): one off
+//!   screen publishes less often and costs Icinga nothing more.
 //! - Notifications: every change the engine applies is judged by the
 //!   environment's rules (`ic-rules`); every decision is logged and
 //!   emitted as [`CoreEvent::Notification`], the audible ones also shown

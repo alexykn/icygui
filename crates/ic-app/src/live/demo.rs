@@ -472,18 +472,23 @@ pub(crate) fn is_built_in(environment_id: &str) -> bool {
 /// seed and fault chosen at start); `staging` and `lab` serve those
 /// scenarios without faults. Environments added while the demo runs are
 /// real ones (`None`).
+///
+/// Every demo environment runs from the start and notifies in the
+/// background (PLAN.md D2); `staging` and `lab` storm less often than
+/// `prod-cluster` (every 15 and 30 minutes), so their storms don't come
+/// all at once.
 pub(crate) fn options_for(environment_id: &str, prod_cluster: &DemoOptions) -> Option<DemoOptions> {
-    let scenario = match environment_id {
+    let (scenario, storm_every) = match environment_id {
         ENVIRONMENT_ID => return Some(prod_cluster.clone()),
-        STAGING_ID => "staging",
-        LAB_ID => "lab",
+        STAGING_ID => ("staging", 3 * STORM_EVERY),
+        LAB_ID => ("lab", 6 * STORM_EVERY),
         _ => return None,
     };
     Some(DemoOptions {
         scenario: scenario.to_owned(),
         seed: prod_cluster.seed,
         fault: None,
-        storm_every: None,
+        storm_every: Some(storm_every),
     })
 }
 
@@ -722,10 +727,19 @@ mod tests {
         assert_eq!(options_for(ENVIRONMENT_ID, &prod), Some(prod.clone()));
         let staging = options_for(STAGING_ID, &prod).unwrap();
         assert_eq!(
-            (staging.scenario.as_str(), staging.seed, staging.fault),
-            ("staging", 9, None)
+            (
+                staging.scenario.as_str(),
+                staging.seed,
+                staging.fault,
+                staging.storm_every
+            ),
+            ("staging", 9, None, Some(900))
         );
-        assert_eq!(options_for(LAB_ID, &prod).unwrap().scenario, "lab");
+        let lab = options_for(LAB_ID, &prod).unwrap();
+        assert_eq!(
+            (lab.scenario.as_str(), lab.storm_every),
+            ("lab", Some(1800))
+        );
         assert_eq!(options_for("added-in-the-editor", &prod), None);
     }
 

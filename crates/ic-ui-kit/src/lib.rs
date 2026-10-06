@@ -17,13 +17,13 @@ mod theme;
 
 pub use assets::Assets;
 pub use components::{
-    Banner, BannerTone, Button, ButtonColors, ButtonVariant, Chip, CircleSize, CodeBlock,
-    CompactRow, DialogBody, Dismissable, Dismissal, Divider, DividerColor, EmptyState, Field,
-    FieldTone, GlyphButton, IconButton, KeyHint, KvTable, Link, LinkStyle, ListRow, Menu, MenuItem,
-    Modal, ModalPlacement, NoteEntry, Paint, PaneHeader, PerfdataRow, PerfdataTable, Popover,
-    ProgressBar, RowEmphasis, SectionLabel, Segmented, StateCircle, StateDot, SubTabs, SummaryBar,
-    SummaryItem, Switch, TOAST_WIDTH, TextArea, TextField, Toast, ToastTone, Tooltip, TreeLine,
-    TreeTable,
+    Banner, BannerTone, Button, ButtonColors, ButtonVariant, CHIP_HEIGHT, Chip, CircleSize,
+    CodeBlock, CompactRow, DialogBody, Dismissable, Dismissal, Divider, DividerColor, EmptyState,
+    Field, FieldTone, GlyphButton, IconButton, KeyHint, KvTable, Link, LinkStyle, ListRow, Menu,
+    MenuItem, Modal, ModalPlacement, NoteEntry, Paint, PaneHeader, PerfdataRow, PerfdataTable,
+    Popover, ProgressBar, RowEmphasis, SectionLabel, Segmented, StateCircle, StateDot, SubTabs,
+    SummaryBar, SummaryItem, Switch, TOAST_WIDTH, TextArea, TextField, Toast, ToastTone, Tooltip,
+    TreeLine, TreeTable,
 };
 pub use fonts::FontError;
 pub use icon::{Icon, IconName};

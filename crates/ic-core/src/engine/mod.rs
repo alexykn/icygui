@@ -1,7 +1,7 @@
-//! The engine of the active environment: one task on the core's runtime
-//! that owns the [`Store`] and reacts to commands, to its own background
-//! tasks (connect, loads, re-queries, status polls, actions) and to the
-//! event stream.
+//! The engine of one environment (the app runs one per environment): one
+//! task on the core's runtime that owns the [`Store`] and reacts to
+//! commands, to its own background tasks (connect, loads, re-queries,
+//! status polls, actions) and to the event stream.
 //!
 //! Background tasks never touch the store: they send [`Internal`] messages
 //! tagged with the connection session they belong to, and answers of an

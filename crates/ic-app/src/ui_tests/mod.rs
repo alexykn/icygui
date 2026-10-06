@@ -45,6 +45,7 @@ mod actions;
 mod background;
 mod editing;
 mod environments;
+mod every_environment;
 mod live;
 mod live_actions;
 mod notifications;

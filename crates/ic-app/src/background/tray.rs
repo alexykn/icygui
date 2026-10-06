@@ -398,7 +398,7 @@ mod tests {
         state.apply_from(
             &staging_id,
             ic_core::CoreEvent::Snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
-                overall: overall.clone(),
+                overall,
                 ..ic_core::snapshot::Snapshot::default()
             })),
         );

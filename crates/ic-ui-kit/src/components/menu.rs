@@ -44,6 +44,7 @@ pub struct MenuItem {
     label: SharedString,
     checked: Option<bool>,
     key: Option<SharedString>,
+    trailing_icon: Option<IconName>,
     disabled: bool,
     tooltip: Option<Tooltip>,
     on_click: Option<ClickHandler>,
@@ -57,6 +58,7 @@ impl MenuItem {
             label: label.into(),
             checked: None,
             key: None,
+            trailing_icon: None,
             disabled: false,
             tooltip: None,
             on_click: None,
@@ -80,6 +82,14 @@ impl MenuItem {
     /// Shows the key that runs the same command.
     pub fn key_hint(mut self, key: impl Into<SharedString>) -> Self {
         self.key = Some(key.into());
+        self
+    }
+
+    /// Shows a small faint icon after the label, as the sidebar's rows
+    /// show a muted dashboard's bell-off (`None`: none). It takes no room
+    /// from the label, so the label never moves when it comes or goes.
+    pub fn trailing_icon(mut self, icon: Option<IconName>) -> Self {
+        self.trailing_icon = icon;
         self
     }
 
@@ -161,6 +171,9 @@ impl RenderOnce for MenuItem {
                 )
             })
             .child(div().flex_1().child(self.label))
+            .when_some(self.trailing_icon, |item, icon| {
+                item.child(Icon::new(icon).size(px(11.)).color(colors.text_faint))
+            })
             .when_some(self.key, |item, key| item.child(KeyHint::new(key)))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .when(enabled, |item| {

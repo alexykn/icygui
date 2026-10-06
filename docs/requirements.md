@@ -4,7 +4,7 @@ Every requirement has a stable ID. The final production-readiness audit checks e
 
 ## Connection and environments
 
-- **ENV-01** Several environments can be configured; exactly one is active. Switching happens from the footer status (environment switcher), never from the sidebar (D1, D2).
+- **ENV-01** Several environments can be configured; every one runs its own engine in the background (NOTE-08) and exactly one is active: the one the window shows. Switching happens from the footer status (environment switcher), the palette or the tray, never from the sidebar (D1, D2), and is instant: the environment's objects, connection and notifications are there already, nothing reconnects or reloads.
 - **ENV-02** Add/edit/delete environment: name, URLs (https only; ENV-12), auth (basic username + password, or client certificate and key files), TLS (CA file and system roots for every URL; pinned SHA-256 and server-name override per URL), author name.
 - **ENV-03** Passwords live in the OS keychain (macOS Keychain, Secret Service); never in config files or logs. Deleting an environment deletes its secret and its event log.
 - **ENV-04** "Test connection" shows user, version, permissions and missing permissions, and per URL the node that answers and how much of the cluster it sees (ENV-12).
@@ -73,18 +73,19 @@ Production scale is 2 000 hosts / 30 000 services; the numbers were measured aga
 
 ## Notifications (D4, D5)
 
-- **NOTE-01** Native OS notifications (macOS UNUserNotificationCenter from the app bundle; Linux XDG via D-Bus) with Acknowledge and Open buttons; clicking opens the object's pane (window recreated if closed).
+- **NOTE-01** Native OS notifications (macOS UNUserNotificationCenter from the app bundle; Linux XDG via D-Bus) with Acknowledge and Open buttons, from every environment (NOTE-08); clicking switches to the notification's environment and opens the object's pane (window recreated if closed); *Acknowledge* opens the acknowledge dialog for the object in its own environment, without switching, and the acknowledgement goes to that environment's Icinga.
 - **NOTE-02** Rules per environment (default), group, dashboard ("thread") and object (watch / mute with expiry), with inheritance as specified in docs/architecture.md (ic-rules).
 - **NOTE-03** Conditions: states, hard only, skip handled, acknowledgement/downtime/flapping events, minimum duration, sound.
 - **NOTE-04** Recoveries only for notified problems; dedupe across dashboards; storm control with summary; quiet hours (midnight-crossing, days, allow critical); pause (30 m, 1 h, until tomorrow, resume).
-- **NOTE-05** Notification centre (footer clock icon): recent notifications including silent ones, unread badge, mark all read, open the object.
+- **NOTE-05** Notification centre (footer clock icon): recent notifications including silent ones, unread badge, mark all read, open the object. Each environment keeps its own list; the centre and the badge show the environment on screen. Its pause row pauses every environment, or shows that the environment on screen is muted on its own (with *unmute*).
 - **NOTE-06** Notification settings UI for every rule field, quiet hours, storm control, and the watched/muted list.
 - **NOTE-07** No notifications for the initial load; missed changes found by reconcile do notify.
+- **NOTE-08** Every saved environment runs its own engine (event stream, rules, event log, notifications) from the app's start, also with `--background`, until it is deleted (its engine stops, then its event log goes); a change of its URLs, login or TLS restarts it. The active one drives the window; the others publish their snapshots less often (nobody looks at them) but notify as promptly, and cost Icinga no more than the active one: one event stream and one lean load per environment, as before. Native notifications come from every environment for every enabled rule; with more than one environment the title starts with the environment's name (`staging · CRITICAL · disk on stg-db-01`). Pausing holds for every environment (the default); one environment can be muted on its own from the switcher or the palette, and the switcher shows it as muted (a bell-off, like a muted dashboard).
 
 ## Background and platform
 
 - **BG-01** Closing the window keeps the app running in the tray / menu bar (configurable). Quit from the tray or the menu quits.
-- **BG-02** The tray icon shows the worst unhandled state of the active environment; the tooltip has counts; the menu has Open, Pause notifications, Environments, Quit.
+- **BG-02** The tray icon shows the worst unhandled state across all environments (NOTE-08); the tooltip has a line per environment (its connection, *muted* when muted on its own) with its counts; the menu has Open, Pause notifications (every environment), Environments, Quit.
 - **BG-03** Optional launch at login (LaunchAgent / XDG autostart) starts in background mode (`--background`).
 - **BG-04** Single instance: a second launch brings the running instance's window forward.
 - **BG-05** macOS app menu (About, Settings ⌘,, Quit), Edit menu for text inputs, keyboard shortcuts with cmd on macOS and ctrl on Linux.

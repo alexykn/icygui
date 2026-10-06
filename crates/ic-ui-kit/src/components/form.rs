@@ -401,6 +401,10 @@ impl RenderOnce for Segmented {
     }
 }
 
+/// A [`Chip`]'s height. A row that shows chips in one state and text in
+/// another gives the text this height too, so the row keeps its height.
+pub const CHIP_HEIGHT: f32 = 22.;
+
 /// A small pill for a quick choice next to a field (`1h`, `2h`, `08:00
 /// tomorrow`): it fills the field in, it doesn't hold a state of its own
 /// (`selected` shows the choice the field holds).
@@ -476,7 +480,7 @@ impl RenderOnce for Chip {
             .flex()
             .flex_none()
             .items_center()
-            .h(px(22.))
+            .h(px(CHIP_HEIGHT))
             .px(px(8.))
             .rounded(theme.metrics.small_radius)
             .border_1()

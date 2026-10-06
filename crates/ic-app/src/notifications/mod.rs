@@ -68,9 +68,37 @@ pub(crate) fn override_text(entry: &ic_rules::ObjectOverride, now: Timestamp) ->
     }
 }
 
+/// What the pause chips are labelled: `pause`, or `pause all` with
+/// several environments (the pause holds for every one; an environment
+/// is muted on its own from the switcher or the palette, A5).
+pub(crate) fn pause_label(environments: usize) -> &'static str {
+    if environments > 1 {
+        "pause all"
+    } else {
+        "pause"
+    }
+}
+
+/// How a running pause of every environment reads: `paused until 08:00`,
+/// or `all paused until 08:00` with several environments.
+pub(crate) fn paused_text(environments: usize, until: Timestamp, now: Timestamp) -> String {
+    let all = if environments > 1 { "all " } else { "" };
+    format!("{all}paused until {}", when(until, now))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_several_environments_the_pause_says_it_holds_for_all() {
+        assert_eq!(pause_label(1), "pause");
+        assert_eq!(pause_label(3), "pause all");
+        let at = now();
+        let until = Timestamp::from_unix_seconds(at.as_unix_seconds() + 1800.);
+        assert!(paused_text(1, until, at).starts_with("paused until "));
+        assert!(paused_text(2, until, at).starts_with("all paused until "));
+    }
 
     fn now() -> Timestamp {
         Timestamp::from_unix_seconds(1_790_000_000.)

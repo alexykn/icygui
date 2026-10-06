@@ -8,7 +8,7 @@ Inputs: `design/project/Icinga Client v2.dc.html` (primary design, screens 2a–
 | # | Question | Decision |
 |---|---|---|
 | D1 | What is a sidebar group? | A **folder of dashboards inside one environment**. The sidebar never switches servers. |
-| D2 | Switching Icinga servers | Separate **environment switcher**: click `● master-01 · 2s` in the sidebar footer (or ⌘K → "Switch environment"). One environment is active at a time. Every environment has its own groups and dashboards. |
+| D2 | Switching Icinga servers | Separate **environment switcher**: click `● master-01 · 2s` in the sidebar footer (or ⌘K → "Switch environment"). **Every saved environment runs its own engine in the background** (event stream, rules, event log, notifications); the active one is the one the window shows, so switching is instant. Each Icinga cluster sees one stream and one lean load per environment, as before; engines off screen cost it no more than the one on screen. Every environment has its own groups and dashboards. *(Changed before rc1 was merged: it was "one environment is active at a time" and only that one was connected.)* |
 | D3 | History | **Live monitoring first.** No Icinga DB integration. A small local event log (default 48h) feeds the notification centre and a "recent events" view. |
 | D4 | Background | The app **keeps running in the menu bar / system tray** after the window closes and keeps notifying. Optional launch at login. |
 | D5 | Notification source | **Client-side rules** on the live event stream. They don't depend on Icinga notification users or contacts. |
@@ -52,7 +52,7 @@ Everything below is backed by the Icinga 2 REST API (`https://<endpoint>:5665/v1
 ### 2.1 Environments
 - An **environment** = one Icinga cluster: its API URLs in order of preference (one for a single master or a load balancer; one per node for an HA pair or a master with satellites; ENV-12), TLS (system roots or Icinga's CA for every URL; a pinned certificate per URL), auth by API user + password **or** client certificate. Secrets live in the OS keychain (macOS Keychain, Secret Service on Linux), never in config files.
 - **Topology (ENV-12):** every connect finds the node behind the URL (`node_name` → endpoint → zone). A node of the top-level zone sees the whole cluster; one in a child zone only its zone (a *partial view*, used only while no master answers, always labelled); without permission to read the zones the view is *not verified*. The engine keeps trying the preferred URLs gently and switches back.
-- **One active environment at a time** (D2). Switching tears down the old connection runtime and starts the new one. Dashboards, groups and notification rules are stored per environment.
+- **Every environment runs** (D2): each saved environment has its own connection runtime from the app's start (also in the background, `--background`) until it is deleted; a change of its URLs, login or TLS restarts it. One of them is **active**: the window, the footer and the palette show it, and switching only changes which one that is (instant, no reconnect, no reload). Engines off screen publish their snapshots less often (nobody looks at them) but notify as promptly. Dashboards, groups and notification rules are stored per environment.
 - On connect: auth check `GET /v1`, the node and its zone (`/v1/status/IcingaApplication`, `/v1/objects/zones`), version and app state from `GET /v1/status`, permission probe (§5).
 - Footer status `master-01 · 2s` = endpoint + age of the last event-stream message. Yellow when stale (> 30s), red when disconnected (with retry countdown).
 
@@ -117,13 +117,15 @@ Bell controls live in the group and dashboard `···` menus. Muted items show a
 
 **Storm control**: more than N matching events within a few seconds → one summary notification ("14 new problems in databases/production").
 
-**Content**: title `CRITICAL · postgres-replication on db-prod-03`, body = first line of the output, subtitle = group / dashboard. Click → bring the window back (or create it) and open the object pane. **Acknowledge** / **Open** action buttons on both platforms.
+**Content**: title `CRITICAL · postgres-replication on db-prod-03` (with several environments, the environment's name in front: `staging · CRITICAL · …`), body = first line of the output, subtitle = group / dashboard. Click → bring the window back (or create it), switch to the notification's environment and open the object pane. **Acknowledge** / **Open** action buttons on both platforms; *Acknowledge* acts in the notification's own environment without switching. Every environment notifies, whichever is on screen (NOTE-08).
 
 **Delivery**: GPUI's built-in `cx.show_system_notification` (XDG notifications via `notify-rust` on Linux, `UNUserNotificationCenter` on macOS, action responses come back on the main thread). It's verified on Linux (`docs/spikes.md`). macOS only delivers from an app bundle, so dev builds on a Mac run from a dev `.app` (`cargo xtask bundle`: a debug build unless `--release`). The adapter sits behind a `Notifier` port, so a richer Linux backend (urgency, replace) can be swapped in later.
 
 **Notification centre**: the clock icon in the footer lists recent notifications from the local log, with unread state, "mark all read", and snooze.
 
-**Background mode (D4)**: closing the window keeps the process and the connection runtime alive (GPUI `QuitMode::Explicit`, verified on Linux). A tray / menu-bar icon (`tray-icon`: StatusNotifierItem over D-Bus on Linux without GTK, `NSStatusItem` on macOS) shows the worst state (coloured dot) and has a menu with Open, Pause notifications (30m / 1h / until tomorrow), Environment, and Quit. Optional launch at login (LaunchAgent on macOS, XDG autostart `.desktop` on Linux).
+**Pause**: pausing (30m / 1h / until 08:00) holds for every environment; one environment can also be muted on its own (from the switcher or the palette), shown there as muted.
+
+**Background mode (D4)**: closing the window keeps the process and every environment's connection runtime alive (GPUI `QuitMode::Explicit`, verified on Linux). A tray / menu-bar icon (`tray-icon`: StatusNotifierItem over D-Bus on Linux without GTK, `NSStatusItem` on macOS) shows the worst unhandled state across all environments (coloured dot), a tooltip with a line per environment, and has a menu with Open, Pause notifications (30m / 1h / until tomorrow), Environment, and Quit. Optional launch at login (LaunchAgent on macOS, XDG autostart `.desktop` on Linux).
 
 ### 2.8 Other
 - **⌘K command palette**: objects, dashboards, actions on the focused or selected objects, pause/mute notifications, environment switch.
@@ -137,7 +139,7 @@ Bell controls live in the group and dashboard `···` menus. Muted items show a
 ### 3.1 Principles
 1. **Layered, one-way dependencies.** Pure domain at the bottom, I/O in the middle, UI on top. The UI never talks HTTP. The core never imports GPUI.
 2. **Functional core, imperative shell.** Filter evaluation, severity sorting, perfdata parsing, rule matching, dedupe and storm control are pure functions over plain data, so they're unit-testable without network, OS or UI.
-3. **Single source of truth per environment.** One `ObjectStore` per active environment, changed only by the sync engine. Views are derived from it.
+3. **Single source of truth per environment.** One `ObjectStore` per environment (every environment's engine runs, D2), changed only by its sync engine. Views are derived from the active one's.
 4. **Commands in, events out.** The UI sends `Command`s (acknowledge, schedule downtime, …) to the core. The core publishes `CoreEvent`s (store changed, connection state, command result, notification raised). No shared mutable state across the boundary except an immutable store snapshot (`Arc`).
 5. **Ports and adapters for the OS.** Keychain, notifications, tray, autostart and file paths are traits in core. Implementations live in `ic-platform` (keychain, tray, autostart) and `ic-app` (notifications, which go through GPUI). Tests use in-memory fakes.
 6. **Typed errors in libraries, context at the edge.** `thiserror` enums in every library crate. `anyhow` only in the binary's `main`. No `unwrap`/`expect` outside tests (enforced by lints).

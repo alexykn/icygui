@@ -6,17 +6,31 @@
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use gpui::{ClickEvent, Context, FontWeight, ParentElement as _, Styled as _, div, px};
+use gpui::{
+    ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    SharedString, Styled as _, div, px,
+};
 use ic_config::DashboardGroup;
 use ic_model::{Timestamp, format_compact};
 use ic_rules::{DashboardRef, ScopeSetting};
-use ic_ui_kit::{ActiveTheme as _, Dismissal, Menu, MenuItem};
+use ic_ui_kit::{ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissal, IconName, Link, Menu, MenuItem};
 
 use super::{RenameTarget, Sidebar, SidebarEvent};
 use crate::app_state::connection::ViewMarker;
 use crate::app_state::environments::url_summary;
 use crate::app_state::{AppState, permissions};
+use crate::notifications::{PauseChoice, when};
 use crate::settings::ScopeKey;
+
+/// The connection details' least width.
+const DETAILS_WIDTH: f32 = 320.;
+/// The same with several environments (the switcher's mute row).
+const DETAILS_WIDTH_SEVERAL: f32 = 360.;
+
+/// How far the switcher's mute row is indented inside a menu element, so
+/// its text starts where the items' labels do (the menu's check column
+/// and its gap).
+const MUTE_ROW_INDENT: f32 = 22.;
 
 /// The notification settings a scope can take here (a custom rule is
 /// edited in the notification settings).
@@ -55,7 +69,7 @@ impl Sidebar {
     /// `change`.
     fn state_item(
         id: impl Into<gpui::ElementId>,
-        label: impl Into<gpui::SharedString>,
+        label: impl Into<SharedString>,
         cx: &Context<Self>,
         change: impl Fn(&mut AppState) -> bool + 'static,
     ) -> MenuItem {
@@ -343,7 +357,14 @@ impl Sidebar {
                         .child(value),
                 )
         };
-        let mut menu = Menu::new("connection-details").min_width(px(320.));
+        // With several environments, room for the mute row's name next to
+        // its pause chips.
+        let width = if state.environments().len() > 1 {
+            DETAILS_WIDTH_SEVERAL
+        } else {
+            DETAILS_WIDTH
+        };
+        let mut menu = Menu::new("connection-details").min_width(px(width));
         match state.environment() {
             Some(environment) => {
                 let title = if state.is_demo_environment() {
@@ -402,31 +423,31 @@ impl Sidebar {
                 );
             }
         }
-        Self::with_switcher(menu, state, cx).on_dismiss(Self::dismiss_listener(cx))
+        Self::with_switcher(menu, state, now, cx).on_dismiss(Self::dismiss_listener(cx))
     }
 
     /// The environment switcher (ENV-01) under the details: every
-    /// environment, the active one checked, then "add environment…" and
-    /// "edit …".
-    fn with_switcher(mut menu: Menu, state: &AppState, cx: &Context<Self>) -> Menu {
+    /// environment, the active one checked and a muted one with a bell-off
+    /// (A5); with several, the row that mutes the one on screen; then
+    /// "add environment…" and "edit …".
+    fn with_switcher(mut menu: Menu, state: &AppState, now: Timestamp, cx: &Context<Self>) -> Menu {
         let active = state.active_environment_id().map(str::to_owned);
         let environments = state.environments();
         if !environments.is_empty() {
             menu = menu.separator().label("environments");
         }
-        if environments.len() > 1 {
-            // D2: switching stops the other environment's notifications.
-            menu = menu.label("only the active one is connected and notifies");
-        }
+        let several = environments.len() > 1;
         for environment in environments {
             let id = environment.id.clone();
             let is_active = active.as_deref() == Some(id.as_str());
+            let muted = several && state.environment_paused_until(&id, now).is_some();
             menu = menu.item(
                 MenuItem::new(
                     gpui::ElementId::Name(format!("environment-{id}").into()),
                     environment.name.clone(),
                 )
                 .checked(is_active)
+                .trailing_icon(muted.then_some(IconName::BellOff))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.menus.close();
                     if !is_active {
@@ -435,6 +456,9 @@ impl Sidebar {
                     cx.notify();
                 })),
             );
+        }
+        if several && let Some(environment) = state.environment() {
+            menu = menu.element(Self::mute_row(environment, state, now, cx));
         }
         menu = menu.separator().item(Self::emit_item(
             "add-environment",
@@ -455,6 +479,95 @@ impl Sidebar {
             );
         }
         menu
+    }
+
+    /// Mutes the environment on screen (A5; every environment's pause is
+    /// in the notification centre, the palette and the tray): `mute
+    /// staging` with the pause chips, or `staging muted until 18:30` with
+    /// *unmute*. One line of a chip's height either way, like the
+    /// notification centre's pause row, so nothing moves when it changes.
+    fn mute_row(
+        environment: &ic_config::Environment,
+        state: &AppState,
+        now: Timestamp,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let id = environment.id.clone();
+        // Its text lines up with the environments' names (after the
+        // menu's check column). It takes the menu's width rather than
+        // setting it (zero width, at least all of it), so the menu keeps
+        // its width whether the environment is muted or not; the name
+        // truncates instead.
+        let row = div()
+            .id("environment-mute")
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .w(px(0.))
+            .min_w_full()
+            .pl(px(MUTE_ROW_INDENT))
+            .text_size(theme.text.small);
+        match state.environment_paused_until(&id, now) {
+            Some(until) => row
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .line_height(px(CHIP_HEIGHT))
+                        .text_color(theme.states.warning)
+                        .child(format!(
+                            "{} muted until {}",
+                            environment.name,
+                            when(until, now)
+                        )),
+                )
+                .child(
+                    Link::new("environment-unmute", "unmute")
+                        .text_size(theme.text.small)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.state.update(cx, |state, cx| {
+                                if state.pause_environment(&id, None) {
+                                    cx.notify();
+                                }
+                            });
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+            None => row
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .line_height(px(CHIP_HEIGHT))
+                        .text_color(colors.text_faint)
+                        .child(format!("mute {}", environment.name)),
+                )
+                .children(PauseChoice::ALL.map(|choice| {
+                    let id = id.clone();
+                    Chip::new(
+                        SharedString::from(format!("environment-mute-{choice:?}")),
+                        choice.short_label(),
+                    )
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.state.update(cx, |state, cx| {
+                                if state
+                                    .pause_environment(&id, Some(choice.until(Timestamp::now())))
+                                {
+                                    cx.notify();
+                                }
+                            });
+                            cx.notify();
+                        },
+                    ))
+                }))
+                .into_any_element(),
+        }
     }
 }
 

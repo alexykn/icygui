@@ -86,6 +86,7 @@ The lean list the client loads (`ic_api::Detail::Lean`) keeps the check configur
 - An Icinga restart (a node's `program_start` changes in `/v1/status`, polled every 30 s) triggers a reload, at most every 30 s; another node of an HA zone answering behind a load balancer doesn't, and neither does the second master of a deploy that restarted both once a reload since the reconnect brought everything. `Refresh` reloads like a reconcile (Icinga's notifications stay while the stream keeps them current) at once, then spaced 30 s, 2 min and 5 min apart while it keeps being pressed; more requests coalesce.
 - An action's effect comes with Icinga's events; its targets are queried by name only when the stream lacks those event types (a forced check of 5 000 services would otherwise cost 25 by-name queries of the state from before the checks, while Icinga runs them).
 - Never periodic full-attribute reloads.
+- **Several environments** (PLAN.md D2): every saved environment runs its own engine all the time, so each Icinga cluster sees exactly what it saw when it was the only environment: one event stream and the loads above. Engines off screen do nothing more: no hydration (only the window asks for full details of rows on screen), no extra reloads, and switching environments reloads nothing. They publish their snapshots at most every 2 s instead of every 250 ms (only the tray and the switcher read them), except when a notification waits for its dashboards, which keeps their notifications as prompt as the active one's. The client's own cost grows per environment (a store, a log and the dashboards' evaluation each); the master's doesn't.
 
 **Budgets** (2 000 hosts / 30 000 services, release build):
 
@@ -97,7 +98,7 @@ The lean list the client loads (`ic_api::Detail::Lean`) keeps the check configur
 | Replaying a burst of 50 000 recorded events | < 3 s, no dropped events |
 | Client memory | < 400 MB |
 | Scrolling a 30 000-row dashboard | smooth; nothing per frame scales with the object count |
-| Load on the master per client | one event stream (~75 KB/s), ~35 MB on connect (~28 MB of objects, ~7 MB of Icinga's `Notification` objects at one per host and service), ~28 MB every 15 minutes |
+| Load on the master per client | one event stream (~75 KB/s), ~35 MB on connect (~28 MB of objects, ~7 MB of Icinga's `Notification` objects at one per host and service), ~28 MB every 15 minutes; the same for every environment of a client, whether on screen or not |
 
 These budgets are tested: `ic-mock` has a `large` scenario of the same size with a burst mode, and release-mode performance tests replay bursts and time loads, filters, dashboard evaluation, memory and the steady-state CPU, failing when a budget above is missed. They are `#[ignore]`d in the normal suite (too slow unoptimised) and run with `--release` in the `Performance` workflow (`.github/workflows/perf.yml`: nightly and on demand); its steps are the commands to run them by hand.
 

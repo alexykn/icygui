@@ -177,6 +177,7 @@ impl AppState {
     }
 
     /// Whether notifications are paused in every environment at `now`.
+    #[cfg(test)]
     pub(crate) fn is_paused(&self, now: Timestamp) -> bool {
         self.paused_until.is_some_and(|until| until > now)
     }
@@ -197,11 +198,13 @@ impl AppState {
         let global = self.paused_until.filter(|until| *until > now);
         let own = self.environment_paused_until(id, now);
         match (global, own) {
-            (Some(global), Some(own)) => Some(if own.as_unix_seconds() > global.as_unix_seconds() {
-                own
-            } else {
-                global
-            }),
+            (Some(global), Some(own)) => {
+                Some(if own.as_unix_seconds() > global.as_unix_seconds() {
+                    own
+                } else {
+                    global
+                })
+            }
             (pause, None) | (None, pause) => pause,
         }
     }
@@ -209,10 +212,10 @@ impl AppState {
     /// Until when the active environment's notifications are paused at
     /// `now` (by the pause of every environment, or its own).
     pub(crate) fn active_pause(&self, now: Timestamp) -> Option<Timestamp> {
-        self.active_environment_id()
-            .map_or_else(|| self.paused_until.filter(|until| *until > now), |id| {
-                self.effective_pause(id, now)
-            })
+        self.active_environment_id().map_or_else(
+            || self.paused_until.filter(|until| *until > now),
+            |id| self.effective_pause(id, now),
+        )
     }
 
     /// Pauses notifications in every environment until `until`, or
@@ -220,7 +223,10 @@ impl AppState {
     /// pause shows at once and every engine, also those started later,
     /// gets it.
     pub(crate) fn pause_notifications(&mut self, until: Option<Timestamp>) {
-        tracing::info!(?until, "notifications paused by the user (every environment)");
+        tracing::info!(
+            ?until,
+            "notifications paused by the user (every environment)"
+        );
         self.paused_until = until;
         self.send_pauses();
     }
@@ -412,15 +418,15 @@ impl AppState {
     }
 
     /// Takes new app-wide settings (keep running in the tray, launch at
-    /// login, event log retention, reconcile interval): saved, and the
-    /// engine told. Returns whether they changed.
-    pub(crate) fn set_general(&mut self, general: General) -> bool {
-        if self.config.general == general {
+    /// login, event log retention, reconcile interval): saved, and every
+    /// environment's engine told. Returns whether they changed.
+    pub(crate) fn set_general(&mut self, general: &General) -> bool {
+        if self.config.general == *general {
             return false;
         }
         self.config.general = general.clone();
         self.save_config();
-        self.send(Command::UpdateGeneral(general));
+        self.send_to_every_engine(|| Command::UpdateGeneral(general.clone()));
         true
     }
 }
@@ -676,8 +682,8 @@ mod tests {
             event_log_retention_hours: 72,
             ..state.config().general.clone()
         };
-        assert!(state.set_general(general.clone()));
-        assert!(!state.set_general(general), "unchanged");
+        assert!(state.set_general(&general));
+        assert!(!state.set_general(&general), "unchanged");
         assert_eq!(state.config().general.event_log_retention_hours, 72);
         let sent = recorder.sent();
         assert_eq!(sent.len(), 1);

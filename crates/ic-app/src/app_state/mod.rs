@@ -1019,12 +1019,16 @@ impl AppState {
         state.engine.snapshot = Arc::new(fixture.snapshot);
         state.selected = Some(fixture.selected);
         state.evaluator = Some(fixture.evaluator);
-        state.engine.connection = ConnectionStatus::starting(fixture::ENDPOINT, Some("icygui".into()));
-        state.engine.connection.on_state(ConnectionState::Connected {
-            node: connection::full_node(fixture::ENDPOINT),
-            version: "r2.15.6-1".to_owned(),
-            since: now,
-        });
+        state.engine.connection =
+            ConnectionStatus::starting(fixture::ENDPOINT, Some("icygui".into()));
+        state
+            .engine
+            .connection
+            .on_state(ConnectionState::Connected {
+                node: connection::full_node(fixture::ENDPOINT),
+                version: "r2.15.6-1".to_owned(),
+                since: now,
+            });
         state.engine.connection.last_event_at = Some(now);
         state
     }
@@ -1052,11 +1056,13 @@ impl AppState {
 
     /// The connection drops (the engine waits to reconnect).
     pub(crate) fn set_connection_lost(&mut self) {
-        self.engine.connection.on_state(ConnectionState::Reconnecting {
-            error: "connect: connection refused".to_owned(),
-            attempt: 1,
-            retry_at: Timestamp::now(),
-        });
+        self.engine
+            .connection
+            .on_state(ConnectionState::Reconnecting {
+                error: "connect: connection refused".to_owned(),
+                attempt: 1,
+                retry_at: Timestamp::now(),
+            });
     }
 }
 

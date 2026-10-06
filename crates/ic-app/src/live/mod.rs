@@ -1202,7 +1202,7 @@ impl Session {
         let count = cores.len();
         let stopping: Vec<_> = cores
             .into_iter()
-            .map(|core| core.shutdown_in_background())
+            .map(crate::app_state::CoreLink::shutdown_in_background)
             .collect();
         wait_for_all(stopping, ENGINES_STOP_TIMEOUT);
         if !self.state.read(cx).flush_persistence(FLUSH_TIMEOUT) {
@@ -1260,6 +1260,12 @@ impl Session {
     /// Whether environment `id` has an engine run (started, or stopping).
     pub(crate) fn has_engine(&self, id: &str) -> bool {
         self.engines.contains_key(id)
+    }
+
+    /// Where environment `id`'s event log is (or would be).
+    pub(crate) fn event_log_of(&self, id: &str) -> Option<PathBuf> {
+        self.event_log_dir()
+            .map(|dir| ic_core::event_log_path(&dir, id))
     }
 }
 

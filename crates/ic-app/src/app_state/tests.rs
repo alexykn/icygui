@@ -216,8 +216,16 @@ fn core_events_update_the_state() {
     }));
     assert_eq!(state.unread_notifications(), 1);
     assert_eq!(state.notification_records().count(), 1);
-    state.apply(CoreEvent::NotificationsPaused(Some(now())));
-    assert_eq!(state.paused_until(), Some(now()));
+    // The pauses are the app's: an engine saying its pause ended lets the
+    // app forget the ones that are over, and only those.
+    let real_now = Timestamp::now().as_unix_seconds();
+    let later = Timestamp::from_unix_seconds(real_now + 3600.);
+    state.pause_notifications(Some(later));
+    state.apply(CoreEvent::NotificationsPaused(None));
+    assert_eq!(state.paused_until(), Some(later));
+    state.pause_notifications(Some(Timestamp::from_unix_seconds(real_now - 1.)));
+    state.apply(CoreEvent::NotificationsPaused(None));
+    assert_eq!(state.paused_until(), None);
 }
 
 #[test]

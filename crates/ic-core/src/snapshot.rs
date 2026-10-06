@@ -16,7 +16,7 @@ use ic_rules::DashboardRef;
 
 use crate::topology::ConnectedNode;
 
-/// Everything known about the active environment at one point in time.
+/// Everything known about an environment at one point in time.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     /// Increases with every published snapshot.

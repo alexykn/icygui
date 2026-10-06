@@ -235,8 +235,9 @@ fn environments_are_switched_from_the_footer_and_the_palette() {
                 cx.update(|cx| {
                     let sidebar = app.workspace.read(cx).sidebar().clone();
                     assert!(sidebar.read(cx).details_open());
-                    // `staging`, third from the bottom of the menu.
-                    app.click(cx, point(px(130.), px(750.)), Modifiers::default());
+                    // `staging`, above `lab` and the row that mutes the
+                    // environment on screen (30 px).
+                    app.click(cx, point(px(130.), px(720.)), Modifiers::default());
                 });
                 wait_for(&app, &cx, "staging", CONNECT, |app, cx| {
                     let state = app.state.read(cx);

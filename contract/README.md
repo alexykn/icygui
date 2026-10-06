@@ -28,9 +28,10 @@ pins that down:
   only against `ic-mock` or `scale/benchmark.sh`'s own local Icinga.
 
   Without the variables the tests pass without checking anything, unless
-  `ICYGUI_CONTRACT_REQUIRED` is set. The nightly `Contract` workflow
-  (`.github/workflows/contract.yml`, also runnable by hand with another
-  image tag) sets it, so a broken setup fails instead of passing. The
+  `ICYGUI_CONTRACT_REQUIRED` is set. The `Contract` workflow
+  (`.github/workflows/contract.yml`: nightly, on pull requests and pushes
+  to `main` that change `ic-api`, `ic-model`, `contract/` or `Cargo.lock`,
+  and by hand with another image tag) sets it, so a broken setup fails instead of passing. The
   script returns as soon as the API answers; tests that need checked
   objects wait until Icinga has run every active check once (within a
   minute of a fresh start).

@@ -2,11 +2,27 @@ name: Contract
 
 # ic-api against a real Icinga 2 in Docker (contract/run-icinga.sh): the
 # attributes, name lists, errors and event stream the client relies on.
-# Read-only; nightly and on demand.
+# Read-only; nightly, on demand, and for changes to the API client, the
+# model it fills, the fixtures or this workflow.
 
 on:
   schedule:
     - cron: "17 3 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "crates/ic-api/**"
+      - "crates/ic-model/**"
+      - "contract/**"
+      - "Cargo.lock"
+      - ".github/workflows/contract.yml"
+  pull_request:
+    paths:
+      - "crates/ic-api/**"
+      - "crates/ic-model/**"
+      - "contract/**"
+      - "Cargo.lock"
+      - ".github/workflows/contract.yml"
   workflow_dispatch:
     inputs:
       icinga_tag:

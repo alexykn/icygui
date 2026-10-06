@@ -106,6 +106,16 @@ jobs:
           cargo xtask "${args[@]}"
           echo "notarized=$notarized" >> "$GITHUB_OUTPUT"
 
+      - name: Universal binary with the hardened runtime (REL-02)
+        run: |
+          app=target/bundle/icygui.app
+          lipo "$app/Contents/MacOS/icygui" -verify_arch arm64 x86_64
+          codesign --verify --strict --verbose=2 "$app"
+          codesign --display --verbose=2 "$app" 2>&1 | tee codesign.txt
+          grep -q '^CodeDirectory .*flags=.*runtime' codesign.txt
+          test "$("$app/Contents/MacOS/icygui" --version)" = "icygui ${{ needs.version.outputs.version }}"
+          rm codesign.txt
+
       - name: Check the signature and Gatekeeper verdict
         if: env.MACOS_CERTIFICATE != '' && env.APPLE_API_KEY != ''
         run: |
@@ -147,6 +157,10 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask package
+      - name: Show the packages
+        run: |
+          for deb in target/dist/*.deb; do dpkg-deb --info "$deb"; dpkg-deb --contents "$deb"; done
+          tar -tvzf target/dist/icygui-*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: dist-linux-${{ matrix.arch }}
@@ -192,13 +206,23 @@ jobs:
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
-            --title "icygui ${{ needs.version.outputs.version }}" --generate-notes --verify-tag
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # A rebuild of an existing tag replaces the release's files.
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            prerelease=()
+            case $VERSION in *-*) prerelease=(--prerelease) ;; esac
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+              --title "icygui $VERSION" --generate-notes --verify-tag "${prerelease[@]}"
+          fi
 
   # Optional: only runs once a tap repository and HOMEBREW_TAP_TOKEN exist.
   homebrew:
     needs: [version, macos, publish]
+    # Prereleases (versions like 0.2.0-rc.1) don't update the tap.
+    if: ${{ !contains(needs.version.outputs.version, '-') }}
     runs-on: ubuntu-24.04
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

@@ -330,6 +330,59 @@ mod tests {
         assert!((800..2000).contains(&covered), "{covered} of 4096 pixels");
     }
 
+    /// REL-07: the shapes drawn here are the logo's mark
+    /// (`assets/logo/icygui-mark.svg`): the same orbit radius and opening,
+    /// core and node position. Only the orbit and the node are bolder.
+    #[test]
+    fn geometry_follows_the_logo() {
+        const SVG: &str = include_str!("../../../../assets/logo/icygui-mark.svg");
+        const CENTRE: f64 = 512.0;
+        let elements: Vec<&str> = SVG.split('<').collect();
+        let attribute = |element: &str, name: &str| -> f64 {
+            let key = format!(" {name}=\"");
+            let start = element.find(&key).unwrap() + key.len();
+            let len = element[start..].find('"').unwrap();
+            element[start..start + len].parse().unwrap()
+        };
+        let close = |a: f64, b: f64, what: &str| assert!((a - b).abs() < 0.1, "{what}: {a} ≠ {b}");
+        let angle = |x: f64, y: f64| (y - CENTRE).atan2(x - CENTRE).to_degrees();
+
+        let path = elements.iter().find(|e| e.starts_with("path ")).unwrap();
+        let start = path.find(" d=\"").unwrap() + 4;
+        let d: Vec<f64> = path[start..start + path[start..].find('"').unwrap()]
+            .split(|c: char| c == ' ' || c.is_ascii_alphabetic())
+            .filter(|token| !token.is_empty())
+            .map(|token| token.parse().unwrap())
+            .collect();
+        // M x0 y0 A rx ry rotation large-arc sweep x1 y1
+        let [x0, y0, rx, ry, _, _, _, x1, y1] = d[..] else {
+            panic!("unexpected orbit path {d:?}");
+        };
+        close(rx, ORBIT_RADIUS, "orbit radius");
+        close(ry, ORBIT_RADIUS, "orbit radius");
+        close(angle(x0, y0), GAP_TO_DEGREES, "orbit opening end");
+        close(angle(x1, y1), GAP_FROM_DEGREES, "orbit opening start");
+        assert!(attribute(path, "stroke-width") / 2.0 <= ORBIT_HALF_WIDTH);
+
+        let circles: Vec<&&str> = elements
+            .iter()
+            .filter(|e| e.starts_with("circle "))
+            .collect();
+        let [core, node] = circles[..] else {
+            panic!("expected the core and the node, got {circles:?}");
+        };
+        close(attribute(core, "cx"), CENTRE, "core x");
+        close(attribute(core, "cy"), CENTRE, "core y");
+        close(attribute(core, "r"), CORE_RADIUS, "core radius");
+        let (nx, ny) = (attribute(node, "cx"), attribute(node, "cy"));
+        close(angle(nx, ny), NODE_DEGREES, "node angle");
+        assert!(((nx - CENTRE).hypot(ny - CENTRE) - ORBIT_RADIUS).abs() < 0.5);
+        assert!(attribute(node, "r") <= NODE_RADIUS);
+        assert!(node.contains("fill=\"#74ade8\""), "the node is accent blue");
+        let [r, g, b] = ACCENT;
+        assert!(node.contains(&format!("#{r:02x}{g:02x}{b:02x}")));
+    }
+
     #[test]
     fn tones_are_distinguishable() {
         let icons: Vec<Vec<u8>> = TONES.iter().map(|&tone| render(tone)).collect();

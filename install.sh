@@ -295,9 +295,13 @@ linux_install() {
     install -m 0644 "$dir/$APP_NAME/share/$file" "$share/$file"
   done
   # Desktop sessions often don't have ~/.local/bin on PATH: use an absolute Exec.
-  local desktop="$share/applications/$APP_ID.desktop"
+  local desktop="$share/applications/$APP_ID.desktop" exec
   if [ -f "$desktop" ]; then
-    sed -i.bak "s|^Exec=.*|Exec=$PREFIX/bin/$APP_NAME|" "$desktop" && rm -f "$desktop.bak"
+    exec="$PREFIX/bin/$APP_NAME"
+    # The Desktop Entry spec wants paths with spaces quoted.
+    case $exec in *' '*) exec="\"$exec\"" ;; esac
+    exec=$(printf '%s' "$exec" | sed 's/[&|\\]/\\&/g')
+    sed -i.bak "s|^Exec=.*|Exec=$exec|" "$desktop" && rm -f "$desktop.bak"
   fi
   linux_refresh_desktop "$share"
   linux_check_libraries "$PREFIX/bin/$APP_NAME"

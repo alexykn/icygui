@@ -83,3 +83,109 @@ pub(crate) fn icns(svg: &[u8]) -> Result<Vec<u8>, String> {
     family.write(&mut out).map_err(|error| error.to_string())?;
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::{APP_NAME, ICON_SIZES, root};
+
+    fn logo(name: &str) -> String {
+        fs::read_to_string(root().join("assets/logo").join(name)).unwrap()
+    }
+
+    /// The mark's drawing: the orange gradient, the orbit, the core and the
+    /// node, one trimmed line each.
+    fn mark_lines(svg: &str) -> Vec<&str> {
+        let mut lines = Vec::new();
+        let mut in_orange = false;
+        for line in svg.lines().map(str::trim) {
+            if line.starts_with(r#"<linearGradient id="orange""#) {
+                in_orange = true;
+            }
+            if in_orange || line.starts_with("<path ") || line.starts_with("<circle ") {
+                lines.push(line);
+            }
+            if line == "</linearGradient>" {
+                in_orange = false;
+            }
+        }
+        lines
+    }
+
+    /// REL-01: the app icon, the bare mark and the banner draw the same
+    /// mark, so `icygui.svg` stays the single source of its shape.
+    #[test]
+    fn every_logo_file_draws_the_same_mark() {
+        let icon = logo("icygui.svg");
+        let reference = mark_lines(&icon);
+        assert_eq!(reference.len(), 7, "{reference:#?}");
+        for name in ["icygui-mark.svg", "banner.svg"] {
+            assert_eq!(mark_lines(&logo(name)), reference, "{name}");
+        }
+    }
+
+    /// `committed` and `rendered` are the same image. Rounding in
+    /// tiny-skia's SIMD code differs a little between CPU architectures,
+    /// so pixels may differ by a few levels.
+    fn assert_same_image(committed: &[u8], rendered: &[u8], what: &str) {
+        if committed == rendered {
+            return;
+        }
+        let committed = tiny_skia::Pixmap::decode_png(committed).unwrap();
+        let rendered = tiny_skia::Pixmap::decode_png(rendered).unwrap();
+        assert_eq!(
+            (committed.width(), committed.height()),
+            (rendered.width(), rendered.height()),
+            "{what} is stale: run `cargo xtask icons`"
+        );
+        let worst = committed
+            .data()
+            .iter()
+            .zip(rendered.data())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            worst <= 4,
+            "{what} is stale (pixels differ by up to {worst}): run `cargo xtask icons`"
+        );
+    }
+
+    /// The committed icons and banner are what `cargo xtask icons` renders
+    /// from the SVGs today (rerun it after editing `assets/logo`).
+    #[test]
+    fn committed_images_are_rendered_from_the_svgs() {
+        let icon = logo("icygui.svg");
+        let icons = root().join("assets/icons");
+        for size in ICON_SIZES {
+            let name = format!("{APP_NAME}-{size}.png");
+            assert_same_image(
+                &fs::read(icons.join(&name)).unwrap(),
+                &render_svg(icon.as_bytes(), size).unwrap(),
+                &format!("assets/icons/{name}"),
+            );
+        }
+        // The `.icns` is generated on x86_64 (the development machine);
+        // elsewhere the PNG checks above stand in for it.
+        if cfg!(target_arch = "x86_64") {
+            let committed = fs::read(icons.join(format!("{APP_NAME}.icns"))).unwrap();
+            assert!(
+                committed == icns(icon.as_bytes()).unwrap(),
+                "assets/icons/{APP_NAME}.icns is stale: run `cargo xtask icons`"
+            );
+        }
+        let banner = render_svg_wide(
+            logo("banner.svg").as_bytes(),
+            1280,
+            &root().join("crates/ic-ui-kit/fonts"),
+        )
+        .unwrap();
+        assert_same_image(
+            &fs::read(root().join("assets/logo/banner.png")).unwrap(),
+            &banner,
+            "assets/logo/banner.png",
+        );
+    }
+}

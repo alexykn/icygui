@@ -43,7 +43,7 @@ pub(crate) const APP_NAME: &str = "icygui";
 pub(crate) const BINARY: &str = "icygui";
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const DEFAULT_REPO: &str = "alexykn/icygui";
-const ICON_SIZES: [u32; 7] = [16, 32, 64, 128, 256, 512, 1024];
+pub(crate) const ICON_SIZES: [u32; 7] = [16, 32, 64, 128, 256, 512, 1024];
 
 pub(crate) type Result<T, E = String> = std::result::Result<T, E>;
 
@@ -222,6 +222,39 @@ pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Gives a package tree the usual modes whatever the umask: directories
+/// 0755, executables 0755, other files 0644 (dpkg refuses a control
+/// directory that isn't 0755, and a 0700 directory would lock users out).
+#[cfg(unix)]
+pub(crate) fn normalise_modes(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let meta = fs::symlink_metadata(path)
+        .map_err(|error| format!("reading {}: {error}", path.display()))?;
+    let mode = if meta.is_dir() || meta.permissions().mode() & 0o111 != 0 {
+        0o755
+    } else {
+        0o644
+    };
+    if !meta.file_type().is_symlink() {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("setting the mode of {}: {error}", path.display()))?;
+    }
+    if meta.is_dir() {
+        let entries =
+            fs::read_dir(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("reading {}: {error}", path.display()))?;
+            normalise_modes(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn normalise_modes(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn icons() -> Result<()> {
     let root = root();
     let svg_path = root.join(icon::ICON_SVG);
@@ -264,11 +297,25 @@ fn install() -> Result<()> {
     })?;
     let home = env::var_os("HOME").ok_or("HOME is not set")?;
     let prefix = PathBuf::from(home).join(".local");
-    copy(
-        &bundle.join("bin").join(BINARY),
-        &prefix.join("bin").join(BINARY),
+    let binary = prefix.join("bin").join(BINARY);
+    copy(&bundle.join("bin").join(BINARY), &binary)?;
+    let share = prefix.join("share");
+    copy_tree(&bundle.join("share"), &share)?;
+    // Desktop sessions often don't have ~/.local/bin on PATH: the menu
+    // entry names the binary by its absolute path (as install.sh does).
+    write(
+        &share.join(format!("applications/{APP_ID}.desktop")),
+        bundle::desktop_entry(&bundle::exec_path(&binary)?),
     )?;
-    copy_tree(&bundle.join("share"), &prefix.join("share"))?;
+    // Best effort, as in install.sh: menus and icon themes pick the files
+    // up sooner where these tools exist.
+    let _ = Command::new("update-desktop-database")
+        .arg(share.join("applications"))
+        .status();
+    let _ = Command::new("gtk-update-icon-cache")
+        .args(["-q", "-t"])
+        .arg(share.join("icons/hicolor"))
+        .status();
     println!("installed into {}", prefix.display());
     Ok(())
 }

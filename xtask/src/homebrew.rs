@@ -45,11 +45,14 @@ pub(crate) fn write_tap(flags: &Flags) -> Result<()> {
 /// (Gatekeeper would refuse the first launch otherwise); the download is
 /// still pinned by `sha256`.
 pub(crate) fn cask(repo: &str, version: &str, sha256: &str, notarized: bool) -> String {
-    let unnotarized = if notarized {
-        String::new()
+    // Stanzas in Homebrew's order (`brew style`): app, postflight,
+    // uninstall, zap, caveats.
+    let (postflight, caveats) = if notarized {
+        (String::new(), String::new())
     } else {
-        format!(
-            r##"
+        (
+            format!(
+                r##"
   # Not notarized (no Apple Developer ID yet): clear the quarantine flag so
   # Gatekeeper allows the first launch. The download is pinned by sha256.
   postflight do
@@ -57,12 +60,16 @@ pub(crate) fn cask(repo: &str, version: &str, sha256: &str, notarized: bool) -> 
                    args: ["-dr", "com.apple.quarantine", "#{{appdir}}/{APP_NAME}.app"],
                    must_succeed: false
   end
-
+"##
+            ),
+            format!(
+                r"
   caveats <<~EOS
     {APP_NAME} is not notarized by Apple. This cask removes the quarantine
     flag after installing so macOS lets it start.
   EOS
-"##
+"
+            ),
         )
     };
     format!(
@@ -84,18 +91,18 @@ cask "{APP_NAME}" do
   depends_on macos: ">= :ventura"
 
   app "{APP_NAME}.app"
-
+{postflight}
   uninstall quit: "{APP_ID}"
-{unnotarized}
+
   zap trash: [
     "~/Library/Application Support/{APP_ID}",
     "~/Library/Caches/{APP_ID}",
     "~/Library/LaunchAgents/{APP_ID}.plist",
-    "~/Library/Logs/{APP_NAME}",
+    "~/Library/Logs/{APP_ID}",
     "~/Library/Preferences/{APP_ID}.plist",
     "~/Library/Saved Application State/{APP_ID}.savedState",
   ]
-end
+{caveats}end
 "#
     )
 }
@@ -133,6 +140,8 @@ class {class} < Formula
   def install
     bin.install "bin/{APP_NAME}"
     share.install Dir["share/*"]
+    # Desktop sessions rarely have Homebrew's bin on PATH.
+    inreplace share/"applications/{APP_ID}.desktop", /^Exec=.*$/, "Exec=#{{opt_bin}}/{APP_NAME}"
   end
 
   test do
@@ -173,6 +182,25 @@ mod tests {
         assert!(cask.contains(r#"uninstall quit: "io.github.alexykn.icygui""#));
     }
 
+    /// `zap` removes what the app writes on macOS (ic-config's paths, the
+    /// login item from ic-platform's autostart) and nothing else.
+    #[test]
+    fn zap_removes_the_apps_files() {
+        let cask = cask("alexykn/icygui", "1.2.3", "abc", false);
+        let zap = &cask[cask.find("zap trash:").unwrap()..];
+        for path in [
+            "~/Library/Application Support/io.github.alexykn.icygui",
+            "~/Library/Logs/io.github.alexykn.icygui",
+            "~/Library/LaunchAgents/io.github.alexykn.icygui.plist",
+        ] {
+            assert!(zap.contains(&format!("\"{path}\"")), "{path}");
+        }
+        assert!(
+            !zap.contains("Logs/icygui\""),
+            "the log directory is named by the app id"
+        );
+    }
+
     #[test]
     fn unnotarized_casks_clear_the_quarantine_flag() {
         let cask = cask("alexykn/icygui", "1.2.3", "abc", false);
@@ -188,5 +216,8 @@ mod tests {
         assert!(formula.contains(r#"sha256 "x86""#));
         assert!(!formula.contains("on_arm do"));
         assert!(formula.contains("#{bin}/icygui --version"));
+        assert!(formula.contains(
+            r#"inreplace share/"applications/io.github.alexykn.icygui.desktop", /^Exec=.*$/, "Exec=#{opt_bin}/icygui""#
+        ));
     }
 }

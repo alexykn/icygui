@@ -10,8 +10,8 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    APP_NAME, BINARY, Flags, Result, VERSION, bundle, copy, copy_tree, create_dir, remove_dir, run,
-    target_dir, write,
+    APP_NAME, BINARY, Flags, Result, VERSION, bundle, copy, copy_tree, create_dir, normalise_modes,
+    remove_dir, run, target_dir, write,
 };
 
 /// Builds release bundles and packages them into `target/dist`.
@@ -52,20 +52,28 @@ pub(crate) fn package(flags: &Flags) -> Result<()> {
             notarize(&dmg)?;
         }
     } else {
-        let arch = env::consts::ARCH;
-        let tarball = dist.join(format!("{APP_NAME}-{VERSION}-linux-{arch}.tar.gz"));
-        run(Command::new("tar")
-            .arg("--owner=0")
-            .arg("--group=0")
-            .arg("-czf")
-            .arg(&tarball)
-            .arg("-C")
-            .arg(bundle.parent().unwrap_or(&bundle))
-            .arg(APP_NAME))?;
-        println!("package: {}", tarball.display());
-        deb(&bundle, &dist)?;
+        linux_packages(&bundle, &dist, &target_dir().join("deb"))?;
     }
     write_checksums(&dist)
+}
+
+/// The Linux `.tar.gz` (the install tree under `icygui/`, what `install.sh`
+/// and the Homebrew formula unpack) and `.deb` (the same tree below `/usr`)
+/// for the install tree `bundle`, into `dist`. `work` is scratch space for
+/// the `.deb`'s staging tree.
+fn linux_packages(bundle: &Path, dist: &Path, work: &Path) -> Result<()> {
+    let arch = env::consts::ARCH;
+    let tarball = dist.join(format!("{APP_NAME}-{VERSION}-linux-{arch}.tar.gz"));
+    run(Command::new("tar")
+        .arg("--owner=0")
+        .arg("--group=0")
+        .arg("-czf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(bundle.parent().unwrap_or(bundle))
+        .arg(bundle.file_name().unwrap_or_default()))?;
+    println!("package: {}", tarball.display());
+    deb(bundle, dist, &work.join(APP_NAME))
 }
 
 /// A drag-to-install disk image with an `/Applications` link, signed when
@@ -94,8 +102,14 @@ fn make_dmg(app: &Path, dmg: &Path, identity: Option<&str>) -> Result<()> {
         .arg(&staging)
         .arg(dmg))?;
     if let Some(identity) = identity {
+        // As for the app: only Developer ID signatures get Apple's timestamp.
+        let timestamp = if bundle::is_developer_id(identity) {
+            "--timestamp"
+        } else {
+            "--timestamp=none"
+        };
         run(Command::new("codesign")
-            .args(["--force", "--timestamp", "--sign", identity])
+            .args(["--force", timestamp, "--sign", identity])
             .arg(dmg))?;
     }
     println!("package: {}", dmg.display());
@@ -208,14 +222,18 @@ fn notary_credentials() -> Result<Vec<String>> {
     )
 }
 
-fn deb(bundle: &Path, dist: &Path) -> Result<()> {
-    let deb_arch = match env::consts::ARCH {
+/// The Debian architecture name of the CPU this runs on.
+fn deb_arch() -> &'static str {
+    match env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         other => other,
-    };
-    let staging = target_dir().join("deb").join(APP_NAME);
-    remove_dir(&staging)?;
+    }
+}
+
+fn deb(bundle: &Path, dist: &Path, staging: &Path) -> Result<()> {
+    let deb_arch = deb_arch();
+    remove_dir(staging)?;
     let usr = staging.join("usr");
     copy(
         &bundle.join("bin").join(BINARY),
@@ -242,10 +260,11 @@ fn deb(bundle: &Path, dist: &Path) -> Result<()> {
             repo = crate::DEFAULT_REPO,
         ),
     )?;
+    normalise_modes(staging)?;
     let deb = dist.join(format!("{APP_NAME}_{VERSION}_{deb_arch}.deb"));
     run(Command::new("dpkg-deb")
         .args(["--root-owner-group", "--build"])
-        .arg(&staging)
+        .arg(staging)
         .arg(&deb))?;
     println!("package: {}", deb.display());
     Ok(())
@@ -310,4 +329,153 @@ fn write_checksums(dist: &Path) -> Result<()> {
     write(&dist.join("SHA256SUMS"), sums)?;
     println!("wrote {}", dist.join("SHA256SUMS").display());
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+    use crate::APP_ID;
+
+    /// A scratch directory removed when the test ends.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The lines a command prints; it must succeed.
+    fn lines(command: &mut Command) -> Vec<String> {
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{command:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The files of the install tree, relative to it.
+    fn install_tree() -> Vec<String> {
+        let mut files = vec![
+            format!("bin/{BINARY}"),
+            format!("share/applications/{APP_ID}.desktop"),
+            format!("share/icons/hicolor/scalable/apps/{APP_ID}.svg"),
+            format!("share/doc/{APP_NAME}/LICENSE"),
+            format!("share/doc/{APP_NAME}/THIRD_PARTY_NOTICES.md"),
+        ];
+        for size in [16, 32, 64, 128, 256, 512] {
+            files.push(format!(
+                "share/icons/hicolor/{size}x{size}/apps/{APP_ID}.png"
+            ));
+        }
+        files.sort();
+        files
+    }
+
+    /// OPS-04, REL-04: the `.tar.gz` holds the install tree under `icygui/`
+    /// (what install.sh and the Homebrew formula unpack), the `.deb` holds
+    /// it below `/usr`, both owned by root with an executable binary, and
+    /// `SHA256SUMS` lists both.
+    #[test]
+    fn linux_packages_have_the_install_layout() {
+        if Command::new("dpkg-deb").arg("--version").output().is_err() {
+            eprintln!("skipped: dpkg-deb is not installed");
+            return;
+        }
+        let scratch =
+            Scratch(env::temp_dir().join(format!("icygui-xtask-packages-{}", std::process::id())));
+        let fake = scratch.0.join("fake-binary");
+        write(&fake, "#!/bin/sh\necho icygui\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let tree = bundle::bundle_linux(&fake, &scratch.0.join("bundle")).unwrap();
+        let dist = scratch.0.join("dist");
+        create_dir(&dist).unwrap();
+        linux_packages(&tree, &dist, &scratch.0.join("work")).unwrap();
+        write_checksums(&dist).unwrap();
+
+        let arch = env::consts::ARCH;
+        let tarball = dist.join(format!("{APP_NAME}-{VERSION}-linux-{arch}.tar.gz"));
+        let listing = lines(Command::new("tar").arg("-tvzf").arg(&tarball));
+        let mut files: Vec<String> = listing
+            .iter()
+            .filter(|line| line.starts_with('-'))
+            .filter_map(|line| line.split_whitespace().last())
+            .map(str::to_owned)
+            .collect();
+        files.sort();
+        let expected: Vec<String> = install_tree()
+            .iter()
+            .map(|file| format!("{APP_NAME}/{file}"))
+            .collect();
+        assert_eq!(files, expected);
+        for line in &listing {
+            assert!(line.contains(" root/root "), "{line}");
+        }
+        let binary = format!("{APP_NAME}/bin/{BINARY}");
+        assert!(
+            listing
+                .iter()
+                .any(|line| line.starts_with("-rwxr-xr-x") && line.ends_with(&binary))
+        );
+
+        let deb = dist.join(format!("{APP_NAME}_{VERSION}_{}.deb", deb_arch()));
+        let listing = lines(Command::new("dpkg-deb").arg("--contents").arg(&deb));
+        let mut files: Vec<String> = listing
+            .iter()
+            .filter(|line| line.starts_with('-'))
+            .filter_map(|line| line.split_whitespace().last())
+            .map(str::to_owned)
+            .collect();
+        files.sort();
+        let expected: Vec<String> = install_tree()
+            .iter()
+            .map(|file| format!("./usr/{file}"))
+            .collect();
+        assert_eq!(files, expected);
+        for line in &listing {
+            assert!(line.contains(" root/root "), "{line}");
+        }
+        let binary = format!("./usr/bin/{BINARY}");
+        assert!(
+            listing
+                .iter()
+                .any(|line| line.starts_with("-rwxr-xr-x") && line.ends_with(&binary))
+        );
+        let fields = lines(Command::new("dpkg-deb").arg("--field").arg(&deb).args([
+            "Package",
+            "Version",
+            "Architecture",
+        ]));
+        assert_eq!(
+            fields,
+            [
+                format!("Package: {APP_NAME}"),
+                format!("Version: {VERSION}"),
+                format!("Architecture: {}", deb_arch()),
+            ]
+        );
+
+        let sums = fs::read_to_string(dist.join("SHA256SUMS")).unwrap();
+        let expected = format!(
+            "{}  {}\n{}  {}\n",
+            sha256_hex(&tarball).unwrap(),
+            tarball.file_name().unwrap().to_string_lossy(),
+            sha256_hex(&deb).unwrap(),
+            deb.file_name().unwrap().to_string_lossy(),
+        );
+        let mut got: Vec<&str> = sums.lines().collect();
+        let mut want: Vec<&str> = expected.lines().collect();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
 }

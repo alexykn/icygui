@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{
-    APP_ID, APP_NAME, BINARY, Flags, Result, VERSION, cargo, copy, create_dir, remove_dir, root,
-    run, target_dir, write,
+    APP_ID, APP_NAME, BINARY, Flags, Result, VERSION, cargo, copy, create_dir, normalise_modes,
+    remove_dir, root, run, target_dir, write,
 };
 
 /// The licence and the notices for what the app bundles (the font, the
@@ -23,6 +23,7 @@ pub(crate) fn bundle(flags: &Flags) -> Result<PathBuf> {
     } else {
         build(flags.release, None)?
     };
+    check_version(&binary)?;
     let out = target_dir().join("bundle");
     if cfg!(target_os = "macos") {
         bundle_macos(&binary, &out, flags.sign.as_deref())
@@ -55,6 +56,34 @@ fn build(release: bool, target: Option<&str>) -> Result<PathBuf> {
         .join(BINARY))
 }
 
+/// REL-05, REL-06: the binary answers `--version` without a display (CI and
+/// the Homebrew formula test run it headless) and reports the workspace
+/// version, which the release tag must match.
+fn check_version(binary: &Path) -> Result<()> {
+    let output = Command::new(binary)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("running {} --version: {error}", binary.display()))?;
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let expected = version_line();
+    if output.status.success() && printed.trim_end() == expected {
+        eprintln!("» {} --version: {expected}", binary.display());
+        Ok(())
+    } else {
+        Err(format!(
+            "{} --version printed {:?} ({}), expected {expected:?}",
+            binary.display(),
+            printed.trim_end(),
+            output.status
+        ))
+    }
+}
+
+/// What `icygui --version` prints.
+fn version_line() -> String {
+    format!("{BINARY} {VERSION}")
+}
+
 /// Release builds for Apple silicon and Intel, merged with `lipo`.
 fn build_universal() -> Result<PathBuf> {
     if !cfg!(target_os = "macos") {
@@ -71,6 +100,10 @@ fn build_universal() -> Result<PathBuf> {
         .arg("-output")
         .arg(&out)
         .args(&slices))?;
+    // REL-02: both slices made it into the universal binary.
+    run(Command::new("lipo")
+        .arg(&out)
+        .args(["-verify_arch", "arm64", "x86_64"]))?;
     Ok(out)
 }
 
@@ -158,14 +191,18 @@ pub(crate) fn info_plist() -> String {
     )
 }
 
-pub(crate) fn desktop_entry() -> String {
+/// The menu entry. `exec` is the program as the `Exec` key wants it: the
+/// bare name for packages that install into `PATH` (`/usr/bin`), or an
+/// [`exec_path`] for installs below the home directory, which desktop
+/// sessions often don't have on `PATH`.
+pub(crate) fn desktop_entry(exec: &str) -> String {
     format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name={APP_NAME}\n\
          GenericName=Icinga 2 client\n\
          Comment=Monitor Icinga 2 environments\n\
-         Exec={BINARY}\n\
+         Exec={exec}\n\
          Icon={APP_ID}\n\
          Terminal=false\n\
          Categories=Network;Monitor;System;\n\
@@ -174,13 +211,40 @@ pub(crate) fn desktop_entry() -> String {
     )
 }
 
-fn bundle_linux(binary: &Path, out: &Path) -> Result<PathBuf> {
+/// An absolute program path for a desktop entry's `Exec` key, quoted as
+/// the Desktop Entry Specification asks when it holds a space or another
+/// reserved character. `%` (field codes) can't be expressed reliably and is
+/// refused.
+pub(crate) fn exec_path(path: &Path) -> Result<String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| format!("{} is not UTF-8", path.display()))?;
+    if path.contains('%') || path.chars().any(char::is_control) {
+        return Err(format!("{path:?} can't be used in a desktop entry"));
+    }
+    let reserved = |c: char| " \t\"'\\><~|&;$*?#()`".contains(c);
+    if !path.contains(reserved) {
+        return Ok(path.to_owned());
+    }
+    let mut quoted = String::from('"');
+    for c in path.chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    // The desktop file's own string escaping doubles each backslash.
+    Ok(quoted.replace('\\', "\\\\"))
+}
+
+pub(crate) fn bundle_linux(binary: &Path, out: &Path) -> Result<PathBuf> {
     let tree = out.join(APP_NAME);
     remove_dir(&tree)?;
     copy(binary, &tree.join("bin").join(BINARY))?;
     write(
         &tree.join(format!("share/applications/{APP_ID}.desktop")),
-        desktop_entry(),
+        desktop_entry(BINARY),
     )?;
     for size in [16, 32, 64, 128, 256, 512] {
         copy(
@@ -200,6 +264,43 @@ fn bundle_linux(binary: &Path, out: &Path) -> Result<PathBuf> {
             &tree.join(format!("share/doc/{APP_NAME}")).join(notice),
         )?;
     }
+    normalise_modes(&tree)?;
     println!("bundle: {}", tree.display());
     Ok(tree)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_entry_names_the_app_and_its_icon() {
+        let entry = desktop_entry(BINARY);
+        assert!(entry.starts_with("[Desktop Entry]\n"));
+        assert!(entry.contains("\nExec=icygui\n"));
+        assert!(entry.contains("\nIcon=io.github.alexykn.icygui\n"));
+        // GPUI sets the window's app id (Wayland) and class (X11) to the
+        // app id, which ties the window to this entry.
+        assert!(entry.contains("\nStartupWMClass=io.github.alexykn.icygui\n"));
+        assert!(entry.lines().all(|line| !line.ends_with(' ')));
+    }
+
+    #[test]
+    fn exec_paths_are_quoted_when_needed() {
+        assert_eq!(
+            exec_path(Path::new("/home/me/.local/bin/icygui")).unwrap(),
+            "/home/me/.local/bin/icygui"
+        );
+        assert_eq!(
+            exec_path(Path::new("/home/my user/.local/bin/icygui")).unwrap(),
+            r#""/home/my user/.local/bin/icygui""#
+        );
+        // Quoting escapes `$`; the desktop file's string escaping then
+        // doubles the backslash.
+        assert_eq!(
+            exec_path(Path::new("/opt/a$b/icygui")).unwrap(),
+            r#""/opt/a\\$b/icygui""#
+        );
+        assert!(exec_path(Path::new("/opt/100%/icygui")).is_err());
+    }
 }

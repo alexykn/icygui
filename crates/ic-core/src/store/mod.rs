@@ -142,6 +142,8 @@ pub(crate) struct Store {
     /// newer one. Only names re-queried since the list are here.
     notifications_fetched: HashMap<String, u64>,
     last_event_at: Option<Timestamp>,
+    /// The node the objects come from (`Snapshot::node`).
+    node: Option<Arc<crate::topology::ConnectedNode>>,
     /// Services whose links were loaded ([`Detail::Full`]).
     full: HashSet<ServiceKey>,
     seqs: HashMap<ObjectKey, Seqs>,
@@ -406,6 +408,21 @@ impl Store {
         self.changes.any = true;
     }
 
+    /// Records the node the objects come from. `announce`: the next
+    /// snapshot goes out for it (otherwise it rides along with the next
+    /// change: the first load's tiers).
+    pub(crate) fn set_node(&mut self, node: Arc<crate::topology::ConnectedNode>, announce: bool) {
+        if self.node.as_deref() != Some(&*node) {
+            self.node = Some(node);
+            self.changes.any |= announce;
+        }
+    }
+
+    /// The node the objects come from, if any.
+    pub(crate) fn node(&self) -> Option<&Arc<crate::topology::ConnectedNode>> {
+        self.node.as_ref()
+    }
+
     /// Stores a new instance status; returns the previous one.
     pub(crate) fn set_status(&mut self, status: InstanceStatus) -> Option<Arc<InstanceStatus>> {
         let changed = self.status.as_deref() != Some(&status);
@@ -442,6 +459,7 @@ impl Store {
             last_event_at: self.last_event_at,
             overall: self.overall(),
             late,
+            node: self.node.clone(),
         }
     }
 

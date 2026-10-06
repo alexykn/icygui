@@ -462,6 +462,24 @@ pub struct Dependency {
     pub parent: ObjectKey,
 }
 
+/// A cluster zone (`Zone` object, `lib/remote/zone.ti`): its member
+/// endpoints and its place in the zone tree. An endpoint is a member of
+/// exactly one zone (Icinga refuses a configuration where it isn't); a node
+/// in a top-level zone (no parent, not global) has every object of the
+/// cluster, a node in a child zone only its zone's and those below.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Zone {
+    /// Zone name (`master`, `ams`).
+    pub name: String,
+    /// The parent zone; `None` for a top-level zone.
+    pub parent: Option<String>,
+    /// The member endpoints' names.
+    pub endpoints: Vec<String>,
+    /// A global zone: configuration synced to every node; it has no
+    /// endpoints.
+    pub global: bool,
+}
+
 /// A cluster endpoint and whether the API sees it connected.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoint {

@@ -3,9 +3,9 @@
 //! and the load progress. Built from the core's `ConnectionState` and the
 //! snapshots; pure, so it's tested without a window.
 
-use ic_core::ConnectionState;
 use ic_core::LoadPhase;
 use ic_core::snapshot::Snapshot;
+use ic_core::{ClusterView, ConnectedNode, ConnectionState};
 use ic_model::{Timestamp, format_compact};
 
 /// Events older than this make a live connection look stale (PLAN.md §2.1),
@@ -109,12 +109,54 @@ pub(crate) struct Progress {
     pub(crate) text: String,
 }
 
+/// How much of its cluster the data on screen covers, when that is short
+/// of all of it (ENV-12): labels for the summary bar, the footer's tooltip
+/// and the connection details, and what it means.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ViewMarker {
+    /// `partial view: zone ams`, `view not verified`.
+    pub(crate) label: String,
+    /// The label with a few words more, for the connection details:
+    /// `partial view: zone ams · only that zone and below`.
+    pub(crate) short: String,
+    /// What it means: the zone's objects only, or why the view isn't known.
+    pub(crate) detail: String,
+    /// Known to be partial (shown as a warning), not just unknown.
+    pub(crate) partial: bool,
+}
+
+impl ViewMarker {
+    /// The marker for `view`; `None` for the full view.
+    pub(crate) fn of(view: &ClusterView) -> Option<Self> {
+        match view {
+            ClusterView::Full => None,
+            ClusterView::Partial { zone } => Some(Self {
+                label: view.label(),
+                short: format!("{} · only that zone and below", view.label()),
+                detail: format!(
+                    "The node is in the child zone {zone}: only the objects of {zone} and the                      zones below it are shown. icygui switches to a node of the top-level zone                      as soon as one answers."
+                ),
+                partial: true,
+            }),
+            ClusterView::Unverified { reason } => Some(Self {
+                label: view.label(),
+                short: format!("{} · {reason}", view.label()),
+                detail: format!("Whether the node sees the whole cluster isn't known: {reason}."),
+                partial: false,
+            }),
+        }
+    }
+}
+
 /// The connection to the active environment.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ConnectionStatus {
     /// The endpoint's name: Icinga's node name once known, else the URL's
     /// host.
     pub(crate) endpoint: String,
+    /// The node of the latest connection (kept while reconnecting): its
+    /// URL, zone, view and the URLs passed over on the way (ENV-12).
+    pub(crate) node: Option<ConnectedNode>,
     /// The API user, for messages (`None` for client certificates).
     pub(crate) user: Option<String>,
     /// The core's latest state; `None` without an environment.
@@ -140,6 +182,7 @@ impl ConnectionStatus {
     pub(crate) fn idle() -> Self {
         Self {
             endpoint: String::new(),
+            node: None,
             user: None,
             state: None,
             last_event_at: None,
@@ -163,13 +206,11 @@ impl ConnectionStatus {
 
     /// The core reported `state`.
     pub(crate) fn on_state(&mut self, state: ConnectionState) {
-        if let ConnectionState::Connected {
-            endpoint, version, ..
-        } = &state
-        {
-            if !endpoint.trim().is_empty() {
-                endpoint.clone_into(&mut self.endpoint);
+        if let ConnectionState::Connected { node, version, .. } = &state {
+            if !node.name.trim().is_empty() {
+                node.name.clone_into(&mut self.endpoint);
             }
+            self.node = Some(node.clone());
             if !version.trim().is_empty() {
                 self.version = Some(version.clone());
             }
@@ -329,6 +370,16 @@ impl ConnectionStatus {
         (endpoint, Some(status))
     }
 
+    /// The connected node's view when it is short of the whole cluster:
+    /// for the footer, only while connected (otherwise the footer says
+    /// what the connection does).
+    pub(crate) fn view_marker(&self) -> Option<ViewMarker> {
+        if !self.is_connected() || self.engine_error.is_some() {
+            return None;
+        }
+        ViewMarker::of(&self.node.as_ref()?.view)
+    }
+
     /// The state in a word or two, without times (the tray's tooltip):
     /// `connected`, `reconnecting`, `login refused`, …
     pub(crate) fn short_state(&self) -> &'static str {
@@ -479,12 +530,16 @@ impl ConnectionStatus {
                 actions: vec![NoticeAction::EditEnvironment, NoticeAction::RetryNow],
             },
             ConnectionState::TlsFailed {
+                url,
                 message,
                 certificate,
             } => ConnectionNotice {
                 kind: NoticeKind::TlsFailed,
                 tone: Tone::Critical,
-                title: format!("The certificate of {endpoint} isn't trusted."),
+                title: format!(
+                    "The certificate of {} isn't trusted.",
+                    ic_config::ApiUrl::new(url).label()
+                ),
                 detail: Some(match certificate {
                     Some(certificate) => format!(
                         "{message} · {} · SHA-256 {}",
@@ -519,6 +574,19 @@ impl ConnectionStatus {
             | ConnectionState::Connected { .. } => return None,
         };
         Some(notice)
+    }
+}
+
+/// A node with the full view, reached at its first URL (tests).
+#[cfg(test)]
+pub(crate) fn full_node(name: &str) -> ConnectedNode {
+    ConnectedNode {
+        url: format!("https://{name}:5665"),
+        url_index: 0,
+        name: name.to_owned(),
+        zone: Some("master".to_owned()),
+        view: ClusterView::Full,
+        passed_over: Vec::new(),
     }
 }
 
@@ -557,7 +625,7 @@ mod tests {
     fn connected() -> ConnectionStatus {
         let mut status = ConnectionStatus::starting("master-01.example.com", Some("icygui".into()));
         status.on_state(ConnectionState::Connected {
-            endpoint: "master-01".to_owned(),
+            node: full_node("master-01"),
             version: "r2.15.6-1".to_owned(),
             since: at(0.),
         });
@@ -716,6 +784,7 @@ mod tests {
         );
 
         status.on_state(ConnectionState::TlsFailed {
+            url: "https://master-01:5665".to_owned(),
             message: "unknown issuer".to_owned(),
             certificate: Some(CertificateInfo {
                 sha256: [0xab; 32],
@@ -812,7 +881,7 @@ mod tests {
         assert_eq!(details.text, "Loading problem details (400/400)…");
         assert!(status.is_starting());
         status.on_state(ConnectionState::Connected {
-            endpoint: String::new(),
+            node: full_node(""),
             version: String::new(),
             since: at(0.),
         });

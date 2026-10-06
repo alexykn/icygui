@@ -22,7 +22,7 @@ pub(crate) type Migration = fn(&mut Table) -> Result<(), ConfigError>;
 /// `MIGRATIONS[n]` upgrades format version `n` to `n + 1`. The length is
 /// tied to [`CONFIG_VERSION`], so bumping the version without adding a step
 /// doesn't compile.
-const MIGRATIONS: [Migration; CONFIG_VERSION as usize] = [v0_to_v1];
+const MIGRATIONS: [Migration; CONFIG_VERSION as usize] = [v0_to_v1, v1_to_v2];
 
 /// Settings read from text, and what reading them noticed. Nothing is
 /// logged yet, so the caller decides whether it is worth reporting.
@@ -365,6 +365,55 @@ fn v0_to_v1(_table: &mut Table) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Version 2 lists an environment's API URLs (ENV-12): version 1's `url`
+/// becomes the only entry of `urls`, and the pin and server name, which
+/// belonged to that one server, move from `tls` into the entry. The CA
+/// file and the system roots stay in `tls` (they hold for every URL).
+///
+/// Environments that aren't tables, or already have `urls`, are left as
+/// they are; reading the settings reports what doesn't fit.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "every migration step has the same signature"
+)]
+fn v1_to_v2(table: &mut Table) -> Result<(), ConfigError> {
+    let Some(Value::Array(environments)) = table.get_mut("environments") else {
+        return Ok(());
+    };
+    for environment in environments {
+        if let Value::Table(environment) = environment
+            && !environment.contains_key("urls")
+        {
+            move_url_into_urls(environment);
+        }
+    }
+    Ok(())
+}
+
+/// [`v1_to_v2`] for one environment table.
+fn move_url_into_urls(environment: &mut Table) {
+    let url = environment.remove("url");
+    let (pin, server_name) = match environment.get_mut("tls") {
+        Some(Value::Table(tls)) => (tls.remove("pinned_sha256"), tls.remove("server_name")),
+        _ => (None, None),
+    };
+    if url.is_none() && pin.is_none() && server_name.is_none() {
+        return;
+    }
+    let mut entry = Table::new();
+    entry.insert(
+        "url".to_owned(),
+        url.unwrap_or_else(|| Value::String(String::new())),
+    );
+    if let Some(pin) = pin {
+        entry.insert("pinned_sha256".to_owned(), pin);
+    }
+    if let Some(server_name) = server_name {
+        entry.insert("server_name".to_owned(), server_name);
+    }
+    environment.insert("urls".to_owned(), Value::Array(vec![Value::Table(entry)]));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,10 +603,112 @@ mod tests {
     #[test]
     fn current_files_are_read_from_the_text() {
         // Same content, so errors come with a line number.
+        let error = parse_config("version = 2\n\n[general]\ntheme = \"sepia\"\n").unwrap_err();
+        assert!(error.to_string().contains("line 4"), "{error}");
+        let error = migrate(table("version = 2\n\n[general]\ntheme = \"sepia\"\n")).unwrap_err();
+        assert!(error.to_string().contains("general.theme"), "{error}");
+        // Without environments the upgrade changes nothing either.
         let error = parse_config("version = 1\n\n[general]\ntheme = \"sepia\"\n").unwrap_err();
         assert!(error.to_string().contains("line 4"), "{error}");
-        let error = migrate(table("version = 1\n\n[general]\ntheme = \"sepia\"\n")).unwrap_err();
-        assert!(error.to_string().contains("general.theme"), "{error}");
+    }
+
+    #[test]
+    fn version_1_urls_move_into_the_url_list() {
+        let text = r#"
+version = 1
+
+[[environments]]
+name = "prod"
+url = "https://master-01:5665"
+
+[environments.tls]
+ca_file = "/etc/icinga2/ca.crt"
+pinned_sha256 = "AB:CD"
+server_name = "master-01.example.com"
+use_system_roots = false
+
+[[environments]]
+name = "staging"
+url = "https://staging:5665"
+
+[[environments]]
+name = "no url"
+"#;
+        let parsed = parse_config(text).unwrap();
+        assert_eq!(parsed.version, 1);
+        assert!(parsed.unknown_keys.is_empty(), "{:?}", parsed.unknown_keys);
+        let [prod, staging, bare] = &parsed.config.environments[..] else {
+            panic!("three environments");
+        };
+        assert_eq!(
+            prod.urls,
+            [crate::ApiUrl {
+                url: "https://master-01:5665".to_owned(),
+                pinned_sha256: Some("AB:CD".to_owned()),
+                server_name: Some("master-01.example.com".to_owned()),
+            }]
+        );
+        assert_eq!(
+            prod.tls.ca_file.as_deref(),
+            Some(std::path::Path::new("/etc/icinga2/ca.crt"))
+        );
+        assert!(!prod.tls.use_system_roots);
+        assert_eq!(staging.urls, [crate::ApiUrl::new("https://staging:5665")]);
+        assert!(bare.urls.is_empty());
+        // Errors in a migrated environment still name the key.
+        let error = parse_config("version = 1\n[[environments]]\nurl = 5665\n").unwrap_err();
+        assert!(error.to_string().contains("urls"), "{error}");
+    }
+
+    #[test]
+    fn version_0_files_reach_the_url_list_too() {
+        let parsed = parse_config(
+            "[[environments]]\nname = \"prod\"\nurl = \"https://m:5665\"\n\n\
+             [environments.tls]\npinned_sha256 = \"AB\"\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.version, 0);
+        let urls = &parsed.config.environments[0].urls;
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].url, "https://m:5665");
+        assert_eq!(urls[0].pinned_sha256.as_deref(), Some("AB"));
+    }
+
+    #[test]
+    fn a_pin_without_a_url_is_kept() {
+        let mut settings = table(
+            "version = 1\n[[environments]]\nname = \"x\"\n[environments.tls]\nserver_name = \"m\"\n",
+        );
+        v1_to_v2(&mut settings).unwrap();
+        let environment = settings["environments"][0].as_table().unwrap();
+        assert_eq!(
+            environment["urls"][0]["url"].as_str(),
+            Some(""),
+            "an empty URL validation reports"
+        );
+        assert_eq!(environment["urls"][0]["server_name"].as_str(), Some("m"));
+        assert!(
+            !environment["tls"]
+                .as_table()
+                .unwrap()
+                .contains_key("server_name")
+        );
+    }
+
+    #[test]
+    fn url_lists_may_be_written_as_strings() {
+        let parsed = parse_config(
+            "version = 2\n[[environments]]\nname = \"prod\"\n\
+             urls = [\"https://master-01:5665\", { url = \"https://master-02:5665\", pinned_sha256 = \"AB\", bogus = 1 }]\n",
+        )
+        .unwrap();
+        let urls = &parsed.config.environments[0].urls;
+        assert_eq!(urls[0], crate::ApiUrl::new("https://master-01:5665"));
+        assert_eq!(urls[1].url, "https://master-02:5665");
+        assert_eq!(urls[1].pinned_sha256.as_deref(), Some("AB"));
+        assert_eq!(parsed.unknown_keys, ["environments.0.urls.1.bogus"]);
+        let error = parse_config("version = 2\n[[environments]]\nurls = [5665]\n").unwrap_err();
+        assert!(error.to_string().contains("a URL, or a table"), "{error}");
     }
 
     #[test]
@@ -566,8 +717,8 @@ mod tests {
         assert_eq!(parsed.version, 0);
         assert_eq!(parsed.config.version, CONFIG_VERSION);
         assert_eq!(parsed.unknown_keys, ["general.them"]);
-        let parsed = parse_config("version = 1\n").unwrap();
-        assert_eq!(parsed.version, 1);
+        let parsed = parse_config("version = 2\n").unwrap();
+        assert_eq!(parsed.version, 2);
         assert!(parsed.unknown_keys.is_empty());
     }
 

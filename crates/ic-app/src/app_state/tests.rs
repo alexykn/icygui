@@ -190,7 +190,7 @@ fn core_events_update_the_state() {
     assert_eq!(state.snapshot().revision, 7);
     assert!(!state.has_no_objects());
     state.apply(CoreEvent::Connection(ConnectionState::Connected {
-        endpoint: "master-01".to_owned(),
+        node: connection::full_node("master-01"),
         version: "r2.15.6-1".to_owned(),
         since: now(),
     }));
@@ -481,19 +481,26 @@ fn recovery_adopts_the_settings_and_connects() {
 #[test]
 fn the_demo_server_address_goes_into_its_environment() {
     let mut state = AppState::demo(crate::live::demo::config(), now());
-    state.set_demo_server(
+    state.set_demo_servers(
         crate::live::demo::STAGING_ID,
-        "https://127.0.0.1:41234",
-        Some("AB:CD"),
+        &[
+            (
+                "https://127.0.0.1:41234".to_owned(),
+                Some("AB:CD".to_owned()),
+            ),
+            ("https://127.0.0.1:41235".to_owned(), None),
+        ],
     );
     let staging = state
         .environment_by_id(crate::live::demo::STAGING_ID)
         .unwrap();
-    assert_eq!(staging.url, "https://127.0.0.1:41234");
-    assert_eq!(staging.tls.pinned_sha256.as_deref(), Some("AB:CD"));
+    assert_eq!(staging.urls.len(), 2);
+    assert_eq!(staging.urls[0].url, "https://127.0.0.1:41234");
+    assert_eq!(staging.urls[0].pinned_sha256.as_deref(), Some("AB:CD"));
+    assert_eq!(staging.urls[1].url, "https://127.0.0.1:41235");
     assert!(!staging.tls.use_system_roots);
     assert_ne!(
-        state.environment().unwrap().url,
+        state.environment().unwrap().primary_url(),
         "https://127.0.0.1:41234",
         "the other environments keep theirs"
     );
@@ -563,7 +570,7 @@ fn view_changes_wait_while_the_engine_waits_to_reconnect() {
     }));
     assert_eq!(recorder.sent(), ["UpdateEnvironment(prod-cluster)"]);
     state.apply(CoreEvent::Connection(ConnectionState::Connected {
-        endpoint: "master-01".to_owned(),
+        node: connection::full_node("master-01"),
         version: String::new(),
         since: now(),
     }));

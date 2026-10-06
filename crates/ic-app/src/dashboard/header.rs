@@ -16,6 +16,7 @@ use ic_ui_kit::{
 };
 
 use super::DashboardView;
+use crate::app_state::connection::ViewMarker;
 use crate::chrome::Controls;
 use crate::workspace::sidebar_reopen;
 
@@ -349,8 +350,19 @@ impl DashboardView {
         let toggle_reference = reference.clone();
         let hide = !view.hide_handled;
         let toggle_text = handled_label(view.hide_handled, result.summary.handled);
+        // Counts from a node that sees part of the cluster never look
+        // complete (ENV-12): the view's label before the toggle.
+        let marker = state
+            .snapshot()
+            .node
+            .as_ref()
+            .and_then(|node| ViewMarker::of(&node.view));
         // The selection bar under the list counts marked rows.
-        let end_text = toggle_text.clone();
+        let end_text = match &marker {
+            // The 14 px gap is about two characters wide.
+            Some(marker) => format!("{}  {toggle_text}", marker.label),
+            None => toggle_text.clone(),
+        };
         let texts: Vec<String> = items
             .iter()
             .map(|(state, count, label)| SummaryItem::new(*state, *count, *label).text())
@@ -361,27 +373,43 @@ impl DashboardView {
             list_width,
             theme,
         );
-        let end = div().flex().items_center().gap(gpui::px(14.)).child(
+        let view_label = marker.map(|marker| {
             div()
-                .id("handled-toggle")
-                .cursor_pointer()
-                .hover(|style| style.text_color(colors.text_muted))
-                .child(toggle_text)
-                .tooltip(Tooltip::text(if view.hide_handled {
-                    "Show acknowledged problems, downtimes and problems on down hosts"
+                .id("view-marker")
+                .text_color(if marker.partial {
+                    cx.theme().states.warning
                 } else {
-                    "Hide acknowledged problems, downtimes and problems on down hosts"
-                }))
-                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    let reference = toggle_reference.clone();
-                    this.state.update(cx, |state, cx| {
-                        if state.update_view(&reference, |view| view.hide_handled = hide) {
-                            cx.notify();
-                        }
-                    });
-                })),
-        );
+                    colors.text_faint
+                })
+                .child(marker.label)
+                .tooltip(Tooltip::text(marker.detail))
+        });
+        let end = div()
+            .flex()
+            .items_center()
+            .gap(gpui::px(14.))
+            .children(view_label)
+            .child(
+                div()
+                    .id("handled-toggle")
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(colors.text_muted))
+                    .child(toggle_text)
+                    .tooltip(Tooltip::text(if view.hide_handled {
+                        "Show acknowledged problems, downtimes and problems on down hosts"
+                    } else {
+                        "Hide acknowledged problems, downtimes and problems on down hosts"
+                    }))
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        let reference = toggle_reference.clone();
+                        this.state.update(cx, |state, cx| {
+                            if state.update_view(&reference, |view| view.hide_handled = hide) {
+                                cx.notify();
+                            }
+                        });
+                    })),
+            );
         Some(
             SummaryBar::new()
                 .children(items.into_iter().map(|(state, count, label)| {

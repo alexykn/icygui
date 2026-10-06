@@ -25,7 +25,7 @@ use crate::live::{self, Launch, Session};
 use crate::workspace::{Confirmed, ModalKind};
 
 /// Generous: the debug build connects to the mock in about a second.
-const CONNECT: Duration = Duration::from_secs(40);
+pub(super) const CONNECT: Duration = Duration::from_secs(40);
 
 /// A running mock Icinga (the demo's `lab` scenario) and where it is.
 fn mock_icinga() -> (DemoServer, DemoEndpoint, SecretString) {
@@ -58,7 +58,9 @@ fn live_app(
 }
 
 /// The demo, started (`fault` shows a connection failure).
-fn demo_app(fault: Option<DemoFault>) -> impl FnOnce(&mut App) -> Entity<AppState> + 'static {
+pub(super) fn demo_app(
+    fault: Option<DemoFault>,
+) -> impl FnOnce(&mut App) -> Entity<AppState> + 'static {
     move |cx| {
         let state = cx.new(|_| AppState::demo(demo::config(), Timestamp::now()));
         let session = Session::install(
@@ -87,13 +89,13 @@ fn fill(
     field: FormField,
     text: &str,
 ) {
-    let input = editor.read(cx).input(field).clone();
+    let input = editor.read(cx).input(field).expect("the field").clone();
     app.in_window(cx, |window, cx| {
         input.update(cx, |input, cx| input.replace_all(text, window, cx));
     });
 }
 
-fn connected_to(state: &AppState, endpoint: &str) -> bool {
+pub(super) fn connected_to(state: &AppState, endpoint: &str) -> bool {
     state.connection().is_connected() && state.connection().endpoint == endpoint
 }
 
@@ -129,7 +131,7 @@ fn the_first_environment_is_added_from_the_onboarding_form() {
                 });
                 cx.update(|cx| {
                     fill(&app, cx, &editor, FormField::Name, "lab");
-                    fill(&app, cx, &editor, FormField::Url, &endpoint.url);
+                    fill(&app, cx, &editor, FormField::Url(0), &endpoint.url);
                     fill(&app, cx, &editor, FormField::Username, "icygui");
                     fill(
                         &app,
@@ -159,10 +161,10 @@ fn the_first_environment_is_added_from_the_onboarding_form() {
                     let fingerprint = endpoint.fingerprint.clone();
                     app.in_window(cx, |window, cx| {
                         editor.update(cx, |editor, cx| {
-                            editor.trust_presented(fingerprint, window, cx);
+                            editor.trust_presented(0, fingerprint, window, cx);
                         });
                     });
-                    assert_eq!(editor.read(cx).form().pinned, endpoint.fingerprint);
+                    assert_eq!(editor.read(cx).form().urls[0].pinned, endpoint.fingerprint);
                 });
                 cx.update(|cx| editor.update(cx, EnvironmentEditor::test));
                 wait_for(&app, &cx, "a successful test", CONNECT, |_, cx| {
@@ -342,7 +344,7 @@ fn an_untrusted_certificate_is_trusted_after_review() {
                     assert_eq!(app.workspace.read(cx).modal(cx), None);
                     let environment = app.state.read(cx).environment().unwrap().clone();
                     assert_eq!(
-                        environment.tls.pinned_sha256.as_deref(),
+                        environment.urls[0].pinned_sha256.as_deref(),
                         Some(fingerprint.as_str())
                     );
                 });
@@ -467,7 +469,7 @@ fn a_pin_mismatch_shows_both_fingerprints_and_trusts_the_new_certificate() {
                     };
                     let environment = state.environment().unwrap();
                     assert_eq!(
-                        environment.tls.pinned_sha256.as_deref(),
+                        environment.urls[0].pinned_sha256.as_deref(),
                         Some(demo::other_pin().as_str())
                     );
                     (certificate.fingerprint(), environment.id.clone())
@@ -533,7 +535,7 @@ fn a_pin_mismatch_shows_both_fingerprints_and_trusts_the_new_certificate() {
                         Some(ModalKind::Certificate)
                     );
                     let review = app.workspace.read(cx).certificate_review().unwrap().clone();
-                    let (environment, offer) = review.read(cx).offer(cx).unwrap();
+                    let (environment, _url, offer) = review.read(cx).offer(cx).unwrap();
                     assert_eq!(environment, id);
                     assert_eq!(offer.fingerprint, presented);
                     assert_eq!(offer.replaces, Some(demo::other_pin()));
@@ -554,7 +556,7 @@ fn a_pin_mismatch_shows_both_fingerprints_and_trusts_the_new_certificate() {
                     assert_eq!(app.workspace.read(cx).modal(cx), None);
                     let environment = app.state.read(cx).environment().unwrap().clone();
                     assert_eq!(
-                        environment.tls.pinned_sha256.as_deref(),
+                        environment.urls[0].pinned_sha256.as_deref(),
                         Some(presented.as_str()),
                         "the new certificate replaced the pin"
                     );
@@ -579,7 +581,7 @@ fn a_deleted_environment_takes_its_password_and_event_log_along() {
                 username: "icygui".to_owned(),
             },
         );
-        environment.tls.pinned_sha256 = Some(endpoint.fingerprint.clone());
+        environment.urls[0].pinned_sha256 = Some(endpoint.fingerprint.clone());
         environment.tls.use_system_roots = false;
         environment
     };
@@ -678,7 +680,7 @@ fn the_environment_editor_names_what_is_missing() {
         let issues = editor.read(cx).shown_issues();
         for field in [
             FormField::Name,
-            FormField::Url,
+            FormField::Url(0),
             FormField::Username,
             FormField::Password,
         ] {
@@ -741,7 +743,7 @@ fn a_password_the_keychain_refuses_keeps_the_form_open() {
                 let editor = cx.update(|cx| app.workspace.read(cx).onboarding().unwrap().clone());
                 cx.update(|cx| {
                     fill(&app, cx, &editor, FormField::Name, "prod");
-                    fill(&app, cx, &editor, FormField::Url, "https://127.0.0.1:1");
+                    fill(&app, cx, &editor, FormField::Url(0), "https://127.0.0.1:1");
                     fill(&app, cx, &editor, FormField::Username, "icygui");
                     fill(&app, cx, &editor, FormField::Password, "secret");
                 });
@@ -876,7 +878,7 @@ fn keychain_failures_are_named_not_swallowed() {
                 let test = cx.update(|cx| {
                     let session = live::session(cx).unwrap();
                     session.update(cx, |session, cx| {
-                        session.test_environment(environment.clone(), None, cx)
+                        session.test_environment(environment.clone(), 0, None, cx)
                     })
                 });
                 match test.await {

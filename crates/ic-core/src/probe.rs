@@ -6,11 +6,12 @@
 use std::sync::OnceLock;
 
 use futures::channel::oneshot;
-use ic_api::{ApiError, ApiInfo, CertificateInfo, Client, Url, fetch_server_certificate};
+use ic_api::{ApiError, ApiInfo, CertificateInfo, Url, fetch_server_certificate};
 use ic_model::InstanceStatus;
 use secrecy::SecretString;
 
-use crate::connect::{self, Failure, Password};
+use crate::connect::{self, Failure, Login, Password};
+use crate::topology::ConnectedNode;
 
 /// Every permission the client uses (PLAN.md §5), and nothing more: the
 /// object types it queries, status, the event types it subscribes to, and
@@ -64,7 +65,7 @@ pub fn missing_permissions(info: &ApiInfo) -> Vec<String> {
         .collect()
 }
 
-/// What "test connection" found.
+/// What "test connection" found at one URL.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConnectionReport {
     /// The API user, its permissions and Icinga's version.
@@ -73,6 +74,9 @@ pub struct ConnectionReport {
     pub status: InstanceStatus,
     /// [`REQUIRED_PERMISSIONS`] the user lacks.
     pub missing_permissions: Vec<String>,
+    /// The node that answered, its zone and how much of the cluster it
+    /// sees (ENV-12); `passed_over` is empty.
+    pub node: ConnectedNode,
 }
 
 /// Why "test connection" failed.
@@ -122,9 +126,10 @@ impl From<Failure> for ConnectionFailure {
                 message,
                 certificate,
                 mismatch: None,
+                ..
             } => Self::Tls {
                 message,
-                certificate,
+                certificate: certificate.map(|certificate| *certificate),
             },
         }
     }
@@ -169,20 +174,22 @@ fn spawn<T: Send + 'static>(
     receiver
 }
 
-/// Tests an environment's settings, as edited (not saved yet): connects
-/// with `password` (basic authentication; ignored for client
-/// certificates), reads the API user's permissions and the instance status,
-/// and lists the permissions the client would miss. Sends no other
-/// request.
+/// Tests one URL of an environment's settings, as edited (not saved
+/// yet): `environment.urls[url]`, with `password` (basic authentication;
+/// ignored for client certificates). Logs in, finds out which node answers
+/// and how much of the cluster it sees (`/v1/status/IcingaApplication`,
+/// `/v1/objects/zones`; ENV-12), reads the instance status, and lists the
+/// permissions the client would miss. Sends no other request.
 #[expect(
     clippy::result_large_err,
     reason = "the contract's type; answered once per click, never on a hot path"
 )]
 pub fn test_connection(
     environment: ic_config::Environment,
+    url: usize,
     password: Option<SecretString>,
 ) -> oneshot::Receiver<Result<ConnectionReport, ConnectionFailure>> {
-    spawn(probe(environment, password), || {
+    spawn(probe(environment, url, password), || {
         Err(ConnectionFailure::Other(
             "the background runtime isn't available".to_owned(),
         ))
@@ -191,39 +198,39 @@ pub fn test_connection(
 
 async fn probe(
     environment: ic_config::Environment,
+    url: usize,
     password: Option<SecretString>,
 ) -> Result<ConnectionReport, ConnectionFailure> {
-    let settings = connect::settings(&environment, Password::Given(password)).await?;
-    let url = settings.base_url.clone();
-    let server_name = settings.tls.server_name.clone();
-    let client =
-        Client::new(settings).map_err(|error| ConnectionFailure::Other(error.to_string()))?;
-    let classify = |error: ApiError| {
-        let url = url.clone();
-        let server_name = server_name.clone();
-        async move {
-            match error {
-                ApiError::Connect(message) => ConnectionFailure::Unreachable(message),
-                ApiError::Timeout => ConnectionFailure::Unreachable(error.to_string()),
-                other => Failure::from_api(other, &url, server_name.as_deref())
-                    .await
-                    .into(),
-            }
-        }
+    let login = Login::read(&environment, Password::Given(password)).await?;
+    let reached = match connect::reach(
+        &login,
+        &environment.urls,
+        url,
+        ic_api::DEFAULT_ACTION_TIMEOUT,
+    )
+    .await
+    {
+        Ok(reached) => reached,
+        Err(Failure::Transient(message)) => return Err(ConnectionFailure::Unreachable(message)),
+        Err(failure) => return Err(failure.into()),
     };
-    let info = match client.info().await {
-        Ok(info) => info,
-        Err(error) => return Err(classify(error).await),
-    };
-    let status = match client.status().await {
+    let status = match reached.client.status().await {
         Ok(status) => status,
         Err(ApiError::Forbidden(_) | ApiError::NotFound(_)) => InstanceStatus::default(),
-        Err(error) => return Err(classify(error).await),
+        Err(error) => {
+            let base = reached.client.base_url().clone();
+            let failure = Failure::from_api(error, &reached.node.url, &base, None).await;
+            return Err(match failure {
+                Failure::Transient(message) => ConnectionFailure::Unreachable(message),
+                other => other.into(),
+            });
+        }
     };
     Ok(ConnectionReport {
-        missing_permissions: missing_permissions(&info),
-        info,
+        missing_permissions: missing_permissions(&reached.info),
+        info: reached.info,
         status,
+        node: reached.node,
     })
 }
 
@@ -401,6 +408,7 @@ mod tests {
         );
         assert_eq!(
             ConnectionFailure::from(Failure::Tls {
+                url: "https://m:5665".to_owned(),
                 message: "pin".to_owned(),
                 mismatch: Some(("AA".to_owned(), "BB".to_owned())),
                 certificate: None,

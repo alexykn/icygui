@@ -1,7 +1,7 @@
 //! `Config::validate` and `Environment::validate`.
 
 use ic_config::{
-    AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind,
+    ApiUrl, AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind,
     ValidationIssue, View,
 };
 use ic_model::{ObjectKey, Timestamp};
@@ -101,10 +101,12 @@ fn ids_may_repeat_across_environments() {
 #[test]
 fn plain_http_urls_are_rejected() {
     let mut config = full_config();
-    config.environments[0].url = "http://master-01.example.com:5665".to_owned();
+    config.environments[0].urls[0].url = "http://master-01.example.com:5665".to_owned();
     assert_eq!(
         issues(&config),
-        ["environments[0].url: must use https: the Icinga 2 API only accepts TLS connections"]
+        [
+            "environments[0].urls[0].url: must use https: the Icinga 2 API only accepts TLS connections"
+        ]
     );
 }
 
@@ -112,10 +114,10 @@ fn plain_http_urls_are_rejected() {
 fn urls_need_a_host() {
     for url in ["https://", "https://:5665", "https:///"] {
         let mut config = full_config();
-        config.environments[0].url = url.to_owned();
+        config.environments[0].urls[0].url = url.to_owned();
         assert_eq!(
             issues(&config),
-            ["environments[0].url: has no host name"],
+            ["environments[0].urls[0].url: has no host name"],
             "{url}"
         );
     }
@@ -147,10 +149,10 @@ fn other_bad_urls_are_rejected() {
         ),
     ] {
         let mut config = full_config();
-        config.environments[0].url = url.to_owned();
+        config.environments[0].urls[0].url = url.to_owned();
         assert_eq!(
             issues(&config),
-            [format!("environments[0].url: {message}")],
+            [format!("environments[0].urls[0].url: {message}")],
             "{url}"
         );
     }
@@ -164,9 +166,54 @@ fn proxy_prefixes_are_fine() {
         "https://[2001:db8::1]:5665",
     ] {
         let mut config = full_config();
-        config.environments[0].url = url.to_owned();
+        config.environments[0].urls[0].url = url.to_owned();
         assert_eq!(issues(&config), Vec::<String>::new(), "{url}");
     }
+}
+
+#[test]
+fn environments_list_one_to_sixteen_distinct_urls() {
+    let mut config = full_config();
+    config.environments[0].urls.clear();
+    assert_eq!(
+        issues(&config),
+        ["environments[0].urls: must list at least one URL"]
+    );
+
+    config.environments[0].urls = (0..=ic_config::MAX_API_URLS)
+        .map(|index| ApiUrl::new(&format!("https://master-{index:02}:5665")))
+        .collect();
+    assert_eq!(
+        issues(&config),
+        ["environments[0].urls: must list at most 16 URLs"]
+    );
+
+    // The same URL twice, also written differently, is listed once.
+    config.environments[0].urls = vec![
+        ApiUrl::new("https://master-01:5665"),
+        ApiUrl::new("https://master-02:5665"),
+        ApiUrl::new("HTTPS://Master-01:5665/"),
+    ];
+    assert_eq!(
+        issues(&config),
+        ["environments[0].urls[2].url: is already listed as URL 1"]
+    );
+}
+
+#[test]
+fn each_url_is_checked_on_its_own() {
+    let mut config = full_config();
+    config.environments[0].urls[1].url = "http://master-02:5665".to_owned();
+    config.environments[0].urls[1].pinned_sha256 = Some("AB".to_owned());
+    assert_eq!(
+        issues(&config),
+        [
+            "environments[0].urls[1].url: must use https: the Icinga 2 API only accepts TLS \
+             connections",
+            "environments[0].urls[1].pinned_sha256: is not a SHA-256 fingerprint: expected 64 \
+             hex digits (32 bytes), found 2",
+        ]
+    );
 }
 
 #[test]
@@ -188,18 +235,18 @@ fn names_must_not_be_empty() {
 #[test]
 fn bad_fingerprints_are_reported() {
     let mut config = full_config();
-    config.environments[0].tls.pinned_sha256 = Some("AB:CD:EF".to_owned());
+    config.environments[0].urls[0].pinned_sha256 = Some("AB:CD:EF".to_owned());
     assert_eq!(
         issues(&config),
         [
-            "environments[0].tls.pinned_sha256: is not a SHA-256 fingerprint: expected 64 hex \
+            "environments[0].urls[0].pinned_sha256: is not a SHA-256 fingerprint: expected 64 hex \
              digits (32 bytes), found 6"
         ]
     );
-    config.environments[0].tls.pinned_sha256 = Some(String::new());
+    config.environments[0].urls[0].pinned_sha256 = Some(String::new());
     assert_eq!(
         issues(&config),
-        ["environments[0].tls.pinned_sha256: is not a SHA-256 fingerprint: it is empty"]
+        ["environments[0].urls[0].pinned_sha256: is not a SHA-256 fingerprint: it is empty"]
     );
 }
 
@@ -264,14 +311,14 @@ fn usernames_icinga_cannot_match_are_reported() {
 fn tls_settings_are_checked() {
     let mut config = full_config();
     config.environments[0].tls.ca_file = Some("ca.crt".into());
-    config.environments[0].tls.server_name = Some("https://master-01".to_owned());
-    config.environments[1].tls.server_name = Some(" ".to_owned());
+    config.environments[0].urls[1].server_name = Some("https://master-01".to_owned());
+    config.environments[1].urls[0].server_name = Some(" ".to_owned());
     assert_eq!(
         issues(&config),
         [
+            "environments[0].urls[1].server_name: must be a host name or an IP address, not a URL",
             "environments[0].tls.ca_file: must be an absolute path",
-            "environments[0].tls.server_name: must be a host name or an IP address, not a URL",
-            "environments[1].tls.server_name: must not be empty when set",
+            "environments[1].urls[0].server_name: must not be empty when set",
         ]
     );
 }
@@ -289,7 +336,7 @@ fn server_names_are_bare_host_names_or_addresses() {
         "xn--mnchen-3ya.example",
     ] {
         let mut config = full_config();
-        config.environments[0].tls.server_name = Some(name.to_owned());
+        config.environments[0].urls[0].server_name = Some(name.to_owned());
         assert_eq!(issues(&config), Vec::<String>::new(), "{name}");
     }
     for (name, message) in [
@@ -313,10 +360,10 @@ fn server_names_are_bare_host_names_or_addresses() {
         ),
     ] {
         let mut config = full_config();
-        config.environments[0].tls.server_name = Some(name.to_owned());
+        config.environments[0].urls[0].server_name = Some(name.to_owned());
         assert_eq!(
             issues(&config),
-            [format!("environments[0].tls.server_name: {message}")],
+            [format!("environments[0].urls[0].server_name: {message}")],
             "{name:?}"
         );
     }
@@ -407,7 +454,7 @@ fn override_times_must_be_real() {
 [[environments]]
 id = "a"
 name = "prod"
-url = "https://master-01:5665"
+urls = ["https://master-01:5665"]
 auth = { kind = "basic", username = "icygui" }
 
 [[environments.notifications.objects]]
@@ -454,7 +501,7 @@ fn environment_validation_uses_relative_paths() {
         [
             "id: must not be empty",
             "name: must not be empty",
-            "url: must use https: the Icinga 2 API only accepts TLS connections",
+            "urls[0].url: must use https: the Icinga 2 API only accepts TLS connections",
             "groups[1].dashboards[0].name: must not be empty",
         ]
     );

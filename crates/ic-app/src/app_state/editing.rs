@@ -658,7 +658,7 @@ mod tests {
         assert!(recorder.sent().is_empty(), "held back");
         state.apply(ic_core::CoreEvent::Connection(
             ic_core::ConnectionState::Connected {
-                endpoint: "master-01".to_owned(),
+                node: crate::app_state::connection::full_node("master-01"),
                 version: "v2.15.6".to_owned(),
                 since: now(),
             },

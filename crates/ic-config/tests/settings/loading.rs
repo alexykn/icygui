@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use ic_config::{
-    AuthConfig, CONFIG_VERSION, Config, ConfigError, ConfigStore, General, ThemeChoice, TlsConfig,
-    migrate,
+    ApiUrl, AuthConfig, CONFIG_VERSION, Config, ConfigError, ConfigStore, General, ThemeChoice,
+    TlsConfig, format_fingerprint, migrate,
 };
 use ic_rules::{NotificationSettings, ScopeSetting};
 
@@ -204,6 +204,65 @@ fn unversioned_files_are_upgraded_in_memory() {
 }
 
 #[test]
+fn version_1_files_get_url_lists_with_their_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = format!(
+        r#"version = 1
+active_environment = "{PROD_ID}"
+
+[[environments]]
+id = "{PROD_ID}"
+name = "prod-cluster"
+url = "https://10.0.0.5:5665"
+
+[environments.auth]
+kind = "basic"
+username = "icygui"
+
+[environments.tls]
+ca_file = "/etc/icinga2/ca.crt"
+pinned_sha256 = "{pin}"
+server_name = "master-01.example.com"
+use_system_roots = false
+"#,
+        pin = format_fingerprint(&[0xab; 32]),
+    );
+    let store = store_with(dir.path(), &text);
+    let config = store.load().unwrap();
+    let environment = &config.environments[0];
+    assert_eq!(environment.id, PROD_ID, "the id, and so the password, stay");
+    assert_eq!(
+        environment.urls,
+        [ApiUrl {
+            url: "https://10.0.0.5:5665".to_owned(),
+            pinned_sha256: Some(format_fingerprint(&[0xab; 32])),
+            server_name: Some("master-01.example.com".to_owned()),
+        }]
+    );
+    assert_eq!(
+        environment.tls,
+        TlsConfig {
+            ca_file: Some("/etc/icinga2/ca.crt".into()),
+            use_system_roots: false,
+        }
+    );
+    assert!(config.validate().is_empty(), "{:?}", config.validate());
+
+    // The next save writes the new layout and keeps the old file as the
+    // backup; the result reads back the same.
+    store.save(&config).unwrap();
+    let saved = fs::read_to_string(store.path()).unwrap();
+    assert!(
+        saved.contains(&format!("\nversion = {CONFIG_VERSION}\n")),
+        "{saved}"
+    );
+    assert!(saved.contains("[[environments.urls]]"), "{saved}");
+    assert!(!saved.contains("\nurl = \"https://10.0.0.5:5665\"\n[environments.tls]"));
+    assert_eq!(fs::read_to_string(store.backup_path()).unwrap(), text);
+    assert_eq!(store.load().unwrap(), config);
+}
+
+#[test]
 fn migrate_upgrades_an_unversioned_table() {
     let table: toml::Table = toml::from_str(&unversioned()).unwrap();
     let config = migrate(table).unwrap();
@@ -381,6 +440,41 @@ name = "staging"
 url = "https://staging.example.com:5665"
 auth = { kind = "basic", username = "icygui" }
 "#;
+
+#[test]
+fn derived_ids_survive_the_move_to_url_lists() {
+    // Keychain accounts are environment ids: a hand-written file keeps its
+    // derived ids when it is rewritten in the current format, with the old
+    // `url` as the first of its `urls` and more URLs after it.
+    let dir = tempfile::tempdir().unwrap();
+    let old = ConfigStore::new(dir.path().join("old.toml"));
+    fs::write(old.path(), WITHOUT_IDS).unwrap();
+    let new = ConfigStore::new(dir.path().join("new.toml"));
+    let rewritten = WITHOUT_IDS
+        .replace(
+            "url = \"https://master-01.example.com:5665\"",
+            "urls = [\"https://master-01.example.com:5665\", \"https://master-02.example.com:5665\"]",
+        )
+        .replace(
+            "url = \"https://staging.example.com:5665\"",
+            "urls = [{ url = \"https://staging.example.com:5665\" }]",
+        );
+    fs::write(
+        new.path(),
+        format!("version = {CONFIG_VERSION}\n{rewritten}"),
+    )
+    .unwrap();
+    let (old, new) = (old.load().unwrap(), new.load().unwrap());
+    let ids = |config: &Config| -> Vec<String> {
+        config
+            .environments
+            .iter()
+            .flat_map(|environment| std::iter::once(environment.id.clone()).chain(ids(environment)))
+            .collect()
+    };
+    assert_eq!(ids(&old), ids(&new));
+    assert_eq!(new.environments[0].urls.len(), 2);
+}
 
 /// The names of the files in `dir`, sorted.
 fn entries(dir: &Path) -> Vec<String> {

@@ -103,14 +103,14 @@ Start icygui. Without an environment, the window shows the onboarding form:
 | Field | |
 |---|---|
 | name | Shown in the footer and the switcher, e.g. `prod` |
-| URL | `https://<master or load balancer>:5665`. https only. Behind a load balancer, read [TLS](#tls) first: a pinned certificate doesn't work there |
+| URL | `https://<master>:5665`. https only. An HA pair or a master with satellites: *+ add URL* for each further node, in order of preference (see [Clusters: which URLs to list](#clusters-which-urls-to-list)). Behind a load balancer, read [TLS](#tls) first: a pinned certificate doesn't work there |
 | login | *password*: the API user and its password, or *client certificate*: a PEM certificate and its unencrypted PEM key (*browse…* or type the paths; `~` works) |
 | author | Recorded on acknowledgements, downtimes and comments; defaults to the API user. Use your own name |
-| TLS | Folded away until needed: CA file, pinned SHA-256, server name, *also trust the system's root certificates*. See [TLS](#tls) |
+| TLS | Folded away until needed: CA file (for every URL), pinned SHA-256 and server name (per URL), *also trust the system's root certificates*. See [TLS](#tls) |
 
-*test connection* logs in and reads what the user may do: it shows the API user, Icinga's version, the permissions, and which of icygui's permissions are missing. It changes nothing. *connect* saves the environment (the password goes to the system keychain, never into the settings file) and connects.
+*test connection* logs in and reads what the user may do: it shows the node that answered (`master-01 · zone master · full view`), the API user, Icinga's version, the permissions, and which of icygui's permissions are missing. With several URLs it tests each in turn (*test all URLs*), and each URL's *test* tests that one: the answer shows under the URL. It changes nothing. *connect* saves the environment (the password goes to the system keychain, never into the settings file) and connects.
 
-What happens on connect: icygui loads hosts in full, services with lean attributes, and problems in detail by name (the problem lists are complete within a few seconds even at 30 000 services; a thin progress bar shows under the header meanwhile), then follows Icinga's event stream. The footer shows `● <endpoint> · <age of the last event>`.
+What happens on connect: icygui loads hosts in full, services with lean attributes, and problems in detail by name (the problem lists are complete within a few seconds even at 30 000 services; a thin progress bar shows under the header meanwhile), then follows Icinga's event stream. The footer shows `● <node> · <age of the last event>`: the node icygui is connected to.
 
 A new environment starts with one group, *overview*: **problems** (unhandled service problems, worst first), **host problems** and **all services**.
 
@@ -118,18 +118,18 @@ A new environment starts with one group, *overview*: **problems** (unhandled ser
 
 Icinga signs its API certificate with its own CA, so the operating system's roots don't trust it. Pick one of these:
 
-1. **The CA file** (recommended). Copy `/var/lib/icinga2/certs/ca.crt` from the master and set it as *CA file*. icygui then verifies the certificate chain and the host name like any TLS client. Certificates renewed by Icinga's CA keep working.
-2. **A pinned SHA-256 fingerprint.** icygui accepts exactly the certificate with that fingerprint and skips the CA and name checks. Get it on the master with
+1. **The CA file** (recommended). Copy `/var/lib/icinga2/certs/ca.crt` from the master and set it as *CA file*. icygui then verifies the certificate chain and the host name like any TLS client. Certificates renewed by Icinga's CA keep working, and the CA covers every node of the cluster, so one file serves every URL of an environment.
+2. **A pinned SHA-256 fingerprint**, per URL. icygui accepts exactly the certificate with that fingerprint at that URL and skips the CA and name checks. Get it on each node with
    ```sh
    openssl x509 -noout -fingerprint -sha256 -in /var/lib/icinga2/certs/$(hostname -f).crt
    ```
    Colons are optional. When the master's certificate is renewed the pin no longer matches, and icygui shows both fingerprints (see below).
 
    **Not with several masters behind one address.** A pin names exactly one certificate, and each master of an HA zone has its own. Behind a load balancer or round-robin DNS, the first connection that reaches the other master fails as a changed certificate, and icygui stops (it never retries against a certificate it doesn't trust), so notifications stop too. Use the CA file there. Icinga's node certificates name only their own node, so with the CA file either have the masters' certificates include the load balancer's name, or set the environment's URL to one master's own name (*server name* checks one name, not several).
-3. **Trust on first use.** Leave both empty and press *test connection*. When the certificate isn't trusted, icygui shows the certificate it was offered: SHA-256 fingerprint, subject, issuer, names and expiry. Compare the fingerprint with the master's (the `openssl` command above) and press *trust this certificate*: icygui pins it. Never trust a fingerprint you haven't compared.
+3. **Trust on first use.** Leave both empty and press *test connection*. When the certificate isn't trusted, icygui shows the certificate it was offered: SHA-256 fingerprint, subject, issuer, names and expiry. Compare the fingerprint with the node's (the `openssl` command above) and press *trust this certificate*: icygui pins it for that URL. Never trust a fingerprint you haven't compared. With several URLs, test them all before you rely on them: a URL whose certificate isn't trusted can't take over when the others fail.
 
 More settings:
-- **Server name:** check the certificate against this name instead of the URL's host. Use it when you connect by IP address, through an SSH tunnel (`https://localhost:5665`) or through an alias that isn't in the certificate.
+- **Server name** (per URL): check the certificate against this name instead of the URL's host. Use it when you connect by IP address, through an SSH tunnel (`https://localhost:5665`) or through an alias that isn't in the certificate.
 - **Also trust the system's root certificates:** for an API behind a reverse proxy with a public certificate.
 - **Client certificates:** a PEM certificate and an unencrypted PEM key, for an `ApiUser` with `client_cn`. The key file should be readable only by you.
 
@@ -137,16 +137,35 @@ More settings:
 
 ## Environments
 
-An environment is one Icinga API endpoint with its own dashboards, groups and notification rules. Several can be configured; one is active.
+An environment is one Icinga cluster (one or more API URLs, see below) with its own dashboards, groups and notification rules. Several can be configured; one is active.
 
 **Only the active environment is connected and notifies.** Switching closes the connection to the previous one: nothing from it notifies until you switch back, wherever you switched (the footer, the palette or the tray menu). After a switch a notice names the environment that went quiet, and the switcher says it too. On call for production, switch back to it before you close the window.
 
-- **Switch** from the footer: click `● master-01 · 2s` to open the connection details (environment, URL, state, endpoint, version, last event, API user, missing permissions, *Reload from Icinga*) with the switcher under them. The palette has *Switch to <name>*. The sidebar always belongs to the active environment.
+- **Switch** from the footer: click `● master-01 · 2s` to open the connection details (environment, URL, state, the node and how much of the cluster it sees, the URLs it passed over and why, version, last event, API user, missing permissions, *Reload from Icinga*) with the switcher under them. The palette has *Switch to <name>*. The sidebar always belongs to the active environment.
 - **Add** from the switcher (*add environment…*) or the palette (*Add environment…*).
-- **Edit** from the switcher (*edit <name>…*) or the palette. Changing the URL, the login or TLS reconnects. The stored password stays unless you type a new one.
+- **Edit** from the switcher (*edit <name>…*) or the palette. Changing the URLs (or their order), the login or TLS reconnects. The stored password stays unless you type a new one.
 - **Delete** from the editor (*delete environment…*, after a confirmation). It also deletes the environment's password from the keychain and its local event log.
 
 The footer's colour says how the connection is: green while events arrive; yellow when none arrived for 30 seconds while Icinga reports checks running; red while reconnecting (`retry in 12s`) or stopped (`login refused`, `not trusted`, `no password`, `invalid settings`); grey while connecting or loading.
+
+### Clusters: which URLs to list
+
+An environment lists its cluster's API URLs in order of preference, and icygui finds out on every connect which node answers and how much of the cluster it sees:
+- A node of the **top-level zone** (the masters: no parent zone) has every object: the *full view*.
+- A node of a **child zone** (a satellite) has only the objects of its zone and the zones below it: a *partial view*. icygui uses one only while no master answers, and says so wherever it matters: the node's name in the footer turns yellow, every dashboard's summary bar says `partial view: zone ams`, and the connection details name the view and the masters it couldn't reach. Meanwhile it asks the preferred URLs again, after 30 seconds and then less and less often (up to every 10 minutes), and switches back as soon as a master answers; the dashboards then fill in again.
+- If the API user may not read the status or the zones (`status/query`, `objects/query/Zone`), icygui can't tell and says *view not verified* instead of guessing.
+
+What to list, by layout:
+
+| Your cluster | URLs to list | Notes |
+|---|---|---|
+| A single master | `https://master:5665` | One URL, as always. |
+| Two masters (an HA zone) | `https://master-01:5665`, `https://master-02:5665` | Both see everything. When the first is down icygui connects to the second and stays there when the first comes back (switching back would only cost a new event stream). Use the CA file, or pin each URL. |
+| Masters with satellites | the masters first, then a satellite if you want a fallback: `https://master-01:5665`, `https://master-02:5665`, `https://sat-ams-01:5665` | A satellite is only used while no master answers, labelled *partial view*. The `ApiUser` must exist on the satellite too (define it in a global zone, or in the satellite's zone). Don't list satellites first: icygui walks past them to a master anyway. |
+| A load balancer or round-robin DNS in front of the masters | `https://icinga-api.example.com:5665` | One URL. Put only the masters (the top-level zone) behind it, and use the CA file with certificates that name the balanced address (a pin names one master's certificate). Listing each master's own URL instead lets icygui fail over by itself. |
+| Agents | none | An agent's API sees only itself, and agents usually have no `ApiUser`. |
+
+The footer always shows the node icygui is connected to, and *test connection* shows for each URL which node answered and its view. All URLs share the login and the CA file; each URL has its own pinned certificate and server name. icygui keeps one event stream, on the node it is connected to; the other URLs cost three small requests each when it tries them (on connect, and while it waits for a master to come back).
 
 ## Dashboards and filters
 
@@ -324,7 +343,7 @@ The Linux paths follow `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME`.
 ## How icygui talks to Icinga
 
 It's built to be gentle on the master, also when the whole on-call team runs it:
-- **On connect:** one lean load: hosts, services without their check results, comments, downtimes, groups, dependencies and endpoints, then problems in detail by name, and Icinga's `Notification` objects in the background. At 2 000 hosts and 30 000 services that is about 35 MB, comparable to opening a large page in Icinga Web once.
+- **On connect:** a login, the node's name and the zone tree at each URL it tries (in order of preference, until a node that sees the whole cluster answers; see [Clusters](#clusters-which-urls-to-list)), then one lean load: hosts, services without their check results, comments, downtimes, groups, dependencies and endpoints, then problems in detail by name, and Icinga's `Notification` objects in the background. At 2 000 hosts and 30 000 services that is about 35 MB, comparable to opening a large page in Icinga Web once.
 - **Then one event stream** (`/v1/events`, about 75 KB/s at that size). Changes are applied from the events themselves; nothing is re-queried per event. Objects are queried by name only when the events can't tell (a configuration change, an unknown object, a pane you open, rows that come into view).
 - **Reconcile:** a lean reload every 5 or 15 minutes, after an Icinga restart (once, also when both masters of an HA zone restart), and after a reconnect that followed a gap of two minutes or more (a laptop that slept; with jitter, so a team doesn't reload at once). After a shorter gap the events since catch up: a proxy that ends the stream every few minutes doesn't cause a reload each time. Never a periodic full reload.
 - **Reload from Icinga** (and *Retry now* while connected) reloads at once; pressed again it waits 30 seconds, then 2 minutes, then 5 minutes between reloads, until you leave it for 10 minutes.
@@ -344,7 +363,11 @@ Details and measurements: [performance.md](performance.md).
 
 **Missing permissions.** *test connection* and the connection details list them. Without a query permission a dashboard shows *No permission*; without an action permission its button is disabled with the reason. Add the lines from [the API user](#the-api-user), reload Icinga, then restart icygui: it reads the user's permissions when it connects.
 
-**Reconnecting.** A banner shows the countdown and *Retry now*; icygui backs off up to a minute between attempts and catches up with a reconcile once connected. Persistent: check the URL and port (5665), firewalls and VPN, and that the Icinga API feature is enabled (`icinga2 feature list`). The log says why each attempt failed.
+**Reconnecting.** A banner shows the countdown and *Retry now*; icygui backs off up to a minute between attempts (trying every URL each time) and catches up with a reconcile once connected. With several URLs the banner names each URL's problem. Persistent: check the URL and port (5665), firewalls and VPN, and that the Icinga API feature is enabled (`icinga2 feature list`). The log says why each attempt failed.
+
+**Partial view** (the node's name in the footer is yellow, dashboards say `partial view: zone …`). No master answered, so icygui connected to a satellite, which only has its zone's objects. The connection details say why each master was passed over. icygui switches back by itself once a master answers; *Reload from Icinga* in the connection details asks the masters at once.
+
+**View not verified.** The API user may not read the status or the zones (`status/query`, `objects/query/Zone`; both are in the [API user](#the-api-user) snippet), so icygui can't tell whether the node sees the whole cluster.
 
 **The footer turns yellow.** No event arrived for 30 seconds although Icinga reports checks running. A proxy or load balancer may be holding the stream; after two minutes without a line icygui reconnects by itself.
 

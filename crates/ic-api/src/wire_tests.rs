@@ -328,7 +328,7 @@ fn recorded_attributes(name: &str) -> BTreeSet<String> {
 /// objects instead.
 #[test]
 fn every_requested_attribute_exists_in_icinga() {
-    let lists: [(&str, &[&str]); 12] = [
+    let lists: [(&str, &[&str]); 13] = [
         ("hosts.json", Detail::Lean.host_attrs()),
         ("hosts.json", Detail::Full.host_attrs()),
         ("services.json", Detail::Lean.service_attrs()),
@@ -340,6 +340,7 @@ fn every_requested_attribute_exists_in_icinga() {
         ("dependencies.json", DEPENDENCY_ATTRS),
         ("endpoints.json", ENDPOINT_ATTRS),
         ("zones.json", ZONE_ATTRS),
+        ("zones.json", ZONE_TREE_ATTRS),
         ("notifications.json", NOTIFICATION_ATTRS),
     ];
     for (name, attrs) in lists {
@@ -938,4 +939,63 @@ fn sent_notifications_keep_time_and_users() {
     assert_eq!(notifications[1].object, ObjectKey::host("h"));
     assert_eq!(notifications[1].last_notification, None);
     assert!(notifications[1].notified_problem_users.is_empty());
+}
+
+#[test]
+fn zones_map_into_the_zone_tree() {
+    let zones: Results<QueryResult<ZoneAttrs>> =
+        serde_json::from_str(&sample("zones.json")).unwrap();
+    let mut zones: Vec<Zone> = zones
+        .results
+        .into_iter()
+        .filter_map(|entry| entry.attrs?.into_model(&entry.name.0))
+        .collect();
+    zones.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(
+        zones,
+        [
+            Zone {
+                name: "director-global".to_owned(),
+                parent: None,
+                endpoints: Vec::new(),
+                global: true,
+            },
+            Zone {
+                name: "global-templates".to_owned(),
+                parent: None,
+                endpoints: Vec::new(),
+                global: true,
+            },
+            Zone {
+                name: "master".to_owned(),
+                parent: None,
+                endpoints: vec!["icinga-master".to_owned()],
+                global: false,
+            },
+        ],
+        "recorded from Icinga 2.15.6: global zones have `endpoints: null`"
+    );
+
+    let satellite = json!({ "results": [{
+        "name": "ams", "type": "Zone",
+        "attrs": { "endpoints": ["sat-ams-01", "", "sat-ams-02"], "parent": "master", "global": false }
+    }, {
+        "name": "", "type": "Zone", "attrs": { "endpoints": [] }
+    }]});
+    let zones: Results<QueryResult<ZoneAttrs>> =
+        serde_json::from_str(&satellite.to_string()).unwrap();
+    let zones: Vec<Zone> = zones
+        .results
+        .into_iter()
+        .filter_map(|entry| entry.attrs?.into_model(&entry.name.0))
+        .collect();
+    assert_eq!(
+        zones,
+        [Zone {
+            name: "ams".to_owned(),
+            parent: Some("master".to_owned()),
+            endpoints: vec!["sat-ams-01".to_owned(), "sat-ams-02".to_owned()],
+            global: false,
+        }]
+    );
 }

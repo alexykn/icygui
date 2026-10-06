@@ -183,7 +183,7 @@ pub(crate) fn environment(server: &MockServer) -> Environment {
     );
     ENV_ID.clone_into(&mut environment.id);
     environment.tls.use_system_roots = false;
-    environment.tls.pinned_sha256 = Some(server.cert_fingerprint());
+    environment.urls[0].pinned_sha256 = Some(server.cert_fingerprint());
     environment.author = Some("icygui-test".to_owned());
     environment
 }

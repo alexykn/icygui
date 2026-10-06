@@ -49,6 +49,7 @@ mod live;
 mod live_actions;
 mod notifications;
 mod states;
+mod topology;
 
 /// One headless app at a time.
 static HEADLESS: Mutex<()> = Mutex::new(());

@@ -4,8 +4,9 @@ use std::fs;
 use std::path::Path;
 
 use ic_config::{
-    AuthConfig, CONFIG_VERSION, Config, ConfigStore, Dashboard, DashboardGroup, Environment,
-    General, GroupBy, ObjectKind, Sort, SortKey, ThemeChoice, TlsConfig, View, format_fingerprint,
+    ApiUrl, AuthConfig, CONFIG_VERSION, Config, ConfigStore, Dashboard, DashboardGroup,
+    Environment, General, GroupBy, ObjectKind, Sort, SortKey, ThemeChoice, TlsConfig, View,
+    format_fingerprint,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::{
@@ -35,8 +36,9 @@ pub(crate) fn full_config() -> Config {
     }
 }
 
-/// Basic auth, a pinned certificate, custom notification rules and a group
-/// using every scope setting, object kind, sort key and grouping.
+/// Basic auth, two URLs (the first pinned, with a server name), custom
+/// notification rules and a group using every scope setting, object kind,
+/// sort key and grouping.
 fn prod_cluster() -> Environment {
     let mut prod = Environment::new(
         "prod-cluster",
@@ -46,10 +48,12 @@ fn prod_cluster() -> Environment {
         },
     );
     prod.author = Some("m.keller".to_owned());
+    prod.urls[0].pinned_sha256 = Some(format_fingerprint(&[0xab; 32]));
+    prod.urls[0].server_name = Some("master-01".to_owned());
+    prod.urls
+        .push(ApiUrl::new("https://master-02.example.com:5665"));
     prod.tls = TlsConfig {
         ca_file: Some("/etc/icinga2/pki/ca.crt".into()),
-        pinned_sha256: Some(format_fingerprint(&[0xab; 32])),
-        server_name: Some("master-01".to_owned()),
         use_system_roots: false,
     };
     prod.notifications = custom_notifications();

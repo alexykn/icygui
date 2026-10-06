@@ -6,7 +6,7 @@ use ic_model::{
     AckKind, CheckInfo, CheckResult, CheckableState, Comment, CommentKind, Dependency, Downtime,
     Endpoint, Features, Host, HostGroup, HostName, HostState, InstanceStatus, Links, Notification,
     ObjectKey, Perfdata, Service, ServiceGroup, ServiceKey, ServiceState, StateAfter, StateType,
-    Threshold, Timestamp, Vars, parse_perfdata, parse_perfdata_entry,
+    Threshold, Timestamp, Vars, Zone, parse_perfdata, parse_perfdata_entry,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -748,15 +748,41 @@ impl NotificationAttrs {
     }
 }
 
-/// Attributes of a `Zone` (only its member endpoints).
+/// Attributes of a `Zone` (`lib/remote/zone.ti`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct ZoneAttrs {
     pub(crate) endpoints: L<Vec<String>>,
+    parent: L<String>,
+    global: L<bool>,
 }
 
-/// Attributes requested for zones.
+/// Attributes requested for zones to find each endpoint's zone.
 pub(crate) const ZONE_ATTRS: &[&str] = &["endpoints"];
+
+/// Attributes requested for the zone tree ([`crate::Client::zones`]).
+pub(crate) const ZONE_TREE_ATTRS: &[&str] = &["endpoints", "global", "parent"];
+
+impl ZoneAttrs {
+    /// Maps a zone; `full_name` is the query result's name. Blank entries
+    /// in `endpoints` are dropped, a blank parent is none.
+    pub(crate) fn into_model(self, full_name: &str) -> Option<Zone> {
+        if full_name.is_empty() {
+            return None;
+        }
+        Some(Zone {
+            name: full_name.to_owned(),
+            parent: Some(self.parent.0).filter(|parent| !parent.is_empty()),
+            endpoints: self
+                .endpoints
+                .0
+                .into_iter()
+                .filter(|endpoint| !endpoint.is_empty())
+                .collect(),
+            global: self.global.0,
+        })
+    }
+}
 
 /// `GET /v1` (`Accept: application/json`).
 #[derive(Debug, Default, Deserialize)]

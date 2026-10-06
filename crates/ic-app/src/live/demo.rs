@@ -79,6 +79,11 @@ pub(crate) enum DemoFault {
     /// `frozen`: the simulated Icinga stops checking, so checks become
     /// late (within about two minutes for the one-minute checks).
     Frozen,
+    /// `partial`: the master answers 503 from the start, so the engine
+    /// connects to the satellite `sat-ams-01` in the child zone `ams` (the
+    /// `prod-cluster` environment's second URL): a partial view, labelled
+    /// as such, while the engine keeps asking the master (ENV-12).
+    Partial,
 }
 
 impl DemoFault {
@@ -94,6 +99,7 @@ impl DemoFault {
             "outage" => Some(Self::Outage),
             "slow" => Some(Self::Slow),
             "frozen" => Some(Self::Frozen),
+            "partial" => Some(Self::Partial),
             _ => None,
         }
     }
@@ -137,6 +143,21 @@ pub(crate) struct DemoEndpoint {
     pub(crate) url: String,
     /// Its self-signed certificate's SHA-256, pinned by the environment.
     pub(crate) fingerprint: String,
+    /// The cluster's other nodes the demo serves, each by its own server:
+    /// `prod-cluster`'s satellite `sat-ams-01` in the child zone `ams`,
+    /// the environment's second URL (ENV-12).
+    pub(crate) others: Vec<DemoNode>,
+}
+
+/// Another node of the demo's cluster.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DemoNode {
+    /// Its node name (`sat-ams-01`).
+    pub(crate) name: String,
+    /// `https://127.0.0.1:<port>`.
+    pub(crate) url: String,
+    /// Its certificate's SHA-256, pinned by the environment.
+    pub(crate) fingerprint: String,
 }
 
 /// The running demo server. Dropping it stops the server.
@@ -171,10 +192,17 @@ impl DemoServer {
         }
     }
 
-    /// Where the environment should point, and the pin it should have,
-    /// for `endpoint` (both bent by the faults that need it).
-    pub(crate) fn environment_target(&self, endpoint: &DemoEndpoint) -> (String, Option<String>) {
-        match self.fault {
+    /// The URLs the environment should list, in order of preference, and
+    /// the pin each should have, for `endpoint` (bent by the faults that
+    /// need it). The other nodes follow the master only without a fault
+    /// or with one they don't hide (`partial`, `slow`, `frozen`): a
+    /// connection failure shows as such only when there is nothing to
+    /// fall back on.
+    pub(crate) fn environment_target(
+        &self,
+        endpoint: &DemoEndpoint,
+    ) -> Vec<(String, Option<String>)> {
+        let master = match self.fault {
             // Port 1 on the loopback: refused at once.
             Some(DemoFault::Offline) => (
                 "https://127.0.0.1:1".to_owned(),
@@ -186,7 +214,20 @@ impl DemoServer {
             }
             Some(DemoFault::PinMismatch) => (endpoint.url.clone(), Some(other_pin())),
             _ => (endpoint.url.clone(), Some(endpoint.fingerprint.clone())),
-        }
+        };
+        let others = matches!(
+            self.fault,
+            None | Some(DemoFault::Partial | DemoFault::Slow | DemoFault::Frozen)
+        );
+        std::iter::once(master)
+            .chain(
+                endpoint
+                    .others
+                    .iter()
+                    .filter(|_| others)
+                    .map(|node| (node.url.clone(), Some(node.fingerprint.clone()))),
+            )
+            .collect()
     }
 }
 
@@ -236,12 +277,23 @@ pub(crate) fn start(
         },
         ..MockConfig::with_scenario(scenario)
     };
+    // The cluster's nodes in child zones get servers of their own, each
+    // serving its zone (ENV-12): `prod-cluster`'s satellite.
+    let satellites: Vec<MockConfig> = child_zone_nodes(&config.scenario)
+        .into_iter()
+        .map(|node| MockConfig {
+            scenario: config.scenario.for_node(&node),
+            users: config.users.clone(),
+            simulation: config.simulation.clone(),
+            ..MockConfig::default()
+        })
+        .collect();
     let (ready, endpoint) = oneshot::channel();
     let (stop, stopped) = oneshot::channel::<()>();
     let fault = options.fault;
     let thread = std::thread::Builder::new()
         .name("icygui-demo".to_owned())
-        .spawn(move || serve(config, fault, ready, stopped))?;
+        .spawn(move || serve(config, satellites, fault, ready, stopped))?;
     tracing::info!(scenario = %options.scenario, seed = options.seed, ?fault, "starting the demo server");
     Ok((
         DemoServer {
@@ -255,9 +307,27 @@ pub(crate) fn start(
     ))
 }
 
-/// Runs the mock server until `stopped` fires.
+/// The endpoints of `scenario` in a child zone (a zone with a parent):
+/// the satellites.
+fn child_zone_nodes(scenario: &ic_mock::Scenario) -> Vec<String> {
+    scenario
+        .endpoints
+        .iter()
+        .filter(|endpoint| {
+            scenario
+                .zones
+                .iter()
+                .any(|zone| zone.name == endpoint.zone && zone.parent.is_some())
+        })
+        .map(|endpoint| endpoint.name.clone())
+        .collect()
+}
+
+/// Runs the mock server (and the satellites' servers) until `stopped`
+/// fires.
 fn serve(
     config: MockConfig,
+    satellites: Vec<MockConfig>,
     fault: Option<DemoFault>,
     ready: oneshot::Sender<Ready>,
     stopped: oneshot::Receiver<()>,
@@ -277,13 +347,37 @@ fn serve(
     runtime.block_on(async move {
         match MockServer::start(config).await {
             Ok(server) => {
+                let mut others = Vec::new();
+                let mut nodes = Vec::new();
+                for satellite in satellites {
+                    let name = satellite.scenario.status.node_name.clone();
+                    match MockServer::start(satellite).await {
+                        Ok(node) => {
+                            others.push(DemoNode {
+                                name,
+                                url: node.url(),
+                                fingerprint: node.cert_fingerprint(),
+                            });
+                            nodes.push(node);
+                        }
+                        // The demo works without it.
+                        Err(error) => {
+                            tracing::warn!(%name, %error, "a demo satellite couldn't start");
+                        }
+                    }
+                }
                 let endpoint = DemoEndpoint {
                     url: server.url(),
                     fingerprint: server.cert_fingerprint(),
+                    others,
                 };
                 tracing::info!(url = %endpoint.url, "the demo server is up");
                 let control = server.control();
                 match fault {
+                    Some(DemoFault::Partial) => {
+                        tracing::info!("the demo's master answers 503: the satellite takes over");
+                        control.fail_next(u32::MAX, 503);
+                    }
                     Some(DemoFault::Slow) => control.set_latency(SLOW_LATENCY),
                     Some(DemoFault::Frozen) => control.pause_simulation(),
                     Some(DemoFault::Outage) => {
@@ -301,6 +395,9 @@ fn serve(
                 // A dropped sender (the app is gone) stops it as well.
                 let _ = stopped.await;
                 server.shutdown().await;
+                for node in nodes {
+                    node.shutdown().await;
+                }
             }
             Err(error) => {
                 let _ = ready.send(Err(error.to_string()));
@@ -394,13 +491,14 @@ pub(crate) fn options_for(environment_id: &str, prod_cluster: &DemoOptions) -> O
 /// `prod-cluster` (active) has the design's folders of dashboards;
 /// `staging` and `lab` start with the default dashboards of a new
 /// environment (DASH-05). Their URLs and pins are filled in when their
-/// servers are up (`AppState::set_demo_server`).
+/// servers are up (`AppState::set_demo_servers`): `prod-cluster` lists its
+/// master and its satellite (ENV-12).
 pub(crate) fn config() -> Config {
     let environment = |id: &str, name: &str, groups: Vec<DashboardGroup>| Environment {
         id: id.to_owned(),
         name: name.to_owned(),
         // Replaced once the demo server listens.
-        url: "https://127.0.0.1:5665".to_owned(),
+        urls: vec![ic_config::ApiUrl::new("https://127.0.0.1:5665")],
         auth: AuthConfig::Basic {
             username: USER.to_owned(),
         },
@@ -657,6 +755,11 @@ mod tests {
         let endpoint = DemoEndpoint {
             url: "https://127.0.0.1:4000".to_owned(),
             fingerprint: "AB".to_owned(),
+            others: vec![DemoNode {
+                name: "sat-ams-01".to_owned(),
+                url: "https://127.0.0.1:4001".to_owned(),
+                fingerprint: "CD".to_owned(),
+            }],
         };
         let password = |fault| {
             server(fault)
@@ -671,18 +774,29 @@ mod tests {
         assert_eq!(password(Some(DemoFault::MissingSecret)), None);
         assert_eq!(
             server(None).environment_target(&endpoint),
-            (endpoint.url.clone(), Some("AB".to_owned()))
+            [
+                (endpoint.url.clone(), Some("AB".to_owned())),
+                ("https://127.0.0.1:4001".to_owned(), Some("CD".to_owned()))
+            ],
+            "the master, then the satellite"
         );
         assert_eq!(
-            server(Some(DemoFault::Tls)).environment_target(&endpoint).1,
-            None
+            server(Some(DemoFault::Partial))
+                .environment_target(&endpoint)
+                .len(),
+            2
+        );
+        assert_eq!(
+            server(Some(DemoFault::Tls)).environment_target(&endpoint),
+            [(endpoint.url.clone(), None)],
+            "nothing to fall back on"
         );
         assert!(
-            server(Some(DemoFault::Offline))
-                .environment_target(&endpoint)
+            server(Some(DemoFault::Offline)).environment_target(&endpoint)[0]
                 .0
                 .ends_with(":1")
         );
+        assert_eq!(DemoFault::parse("partial"), Some(DemoFault::Partial));
         assert_eq!(
             DemoFault::parse(" Missing-Secret "),
             Some(DemoFault::MissingSecret)
@@ -695,7 +809,7 @@ mod tests {
         );
         assert_eq!(
             server(Some(DemoFault::PinMismatch)).environment_target(&endpoint),
-            (endpoint.url.clone(), Some(other_pin()))
+            [(endpoint.url.clone(), Some(other_pin()))]
         );
         assert!(ic_config::parse_fingerprint(&other_pin()).is_ok());
         assert_eq!(DemoFault::parse("nope"), None);
@@ -737,6 +851,24 @@ mod tests {
             "{endpoint:?}"
         );
         assert_eq!(endpoint.fingerprint.len(), 95, "colon hex SHA-256");
+        assert!(endpoint.others.is_empty(), "lab is a single master");
+        drop(server);
+    }
+
+    #[test]
+    fn prod_cluster_serves_its_satellite_too() {
+        let options = DemoOptions {
+            scenario: "prod-cluster".to_owned(),
+            seed: 7,
+            fault: None,
+            storm_every: None,
+        };
+        let (server, endpoint) = start(&options).unwrap();
+        let (endpoint, _control) = futures::executor::block_on(endpoint).unwrap().unwrap();
+        assert_eq!(endpoint.others.len(), 1);
+        assert_eq!(endpoint.others[0].name, "sat-ams-01");
+        assert_ne!(endpoint.others[0].url, endpoint.url);
+        assert_eq!(child_zone_nodes(&scenarios::prod_cluster()), ["sat-ams-01"]);
         drop(server);
     }
 }

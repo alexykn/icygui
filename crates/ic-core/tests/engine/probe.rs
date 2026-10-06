@@ -12,7 +12,9 @@ use std::collections::BTreeSet;
 
 use crate::support::{Launch, PASSWORD, USER, environment, mock};
 use ic_config::AuthConfig;
-use ic_core::{ConnectionFailure, REQUIRED_PERMISSIONS, fetch_certificate, test_connection};
+use ic_core::{
+    ClusterView, ConnectionFailure, REQUIRED_PERMISSIONS, fetch_certificate, test_connection,
+};
 use ic_mock::{MockConfig, MockUser, scenarios};
 use secrecy::SecretString;
 
@@ -23,7 +25,7 @@ fn password(text: &str) -> SecretString {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_good_connection_reports_user_version_and_status() {
     let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
-    let report = test_connection(environment(&server), Some(password(PASSWORD)))
+    let report = test_connection(environment(&server), 0, Some(password(PASSWORD)))
         .await
         .unwrap()
         .unwrap();
@@ -31,7 +33,12 @@ async fn a_good_connection_reports_user_version_and_status() {
     assert!(!report.info.version.is_empty());
     assert_eq!(report.status.node_name, "stg-master-01");
     assert!(report.missing_permissions.is_empty());
-    // Two cheap requests: GET /v1 and the status.
+    // The node, its zone and its view (ENV-12).
+    assert_eq!(report.node.name, "stg-master-01");
+    assert_eq!(report.node.zone.as_deref(), Some("master"));
+    assert_eq!(report.node.view, ClusterView::Full);
+    assert_eq!(report.node.url, server.url());
+    // Cheap requests only: GET /v1, the status and the zones.
     let paths: Vec<String> = server
         .control()
         .requests()
@@ -39,9 +46,9 @@ async fn a_good_connection_reports_user_version_and_status() {
         .map(|request| request.path)
         .collect();
     assert!(
-        paths
-            .iter()
-            .all(|path| path == "/v1" || path.starts_with("/v1/status")),
+        paths.iter().all(|path| path == "/v1"
+            || path.starts_with("/v1/status")
+            || path == "/v1/objects/zones"),
         "{paths:?}"
     );
 }
@@ -60,7 +67,7 @@ async fn missing_permissions_are_listed() {
     viewer.auth = AuthConfig::Basic {
         username: "viewer".to_owned(),
     };
-    let report = test_connection(viewer, Some(password("secret")))
+    let report = test_connection(viewer, 0, Some(password("secret")))
         .await
         .unwrap()
         .unwrap();
@@ -87,7 +94,7 @@ async fn missing_permissions_are_listed() {
     nobody.auth = AuthConfig::Basic {
         username: "nobody".to_owned(),
     };
-    let report = test_connection(nobody, Some(password("secret")))
+    let report = test_connection(nobody, 0, Some(password("secret")))
         .await
         .unwrap()
         .unwrap();
@@ -99,21 +106,23 @@ async fn missing_permissions_are_listed() {
 async fn failures_say_what_to_fix() {
     let server = mock(MockConfig::default()).await;
 
-    let wrong = test_connection(environment(&server), Some(password("wrong")))
+    let wrong = test_connection(environment(&server), 0, Some(password("wrong")))
         .await
         .unwrap();
     assert_eq!(wrong, Err(ConnectionFailure::Unauthorized));
 
-    let no_password = test_connection(environment(&server), None).await.unwrap();
+    let no_password = test_connection(environment(&server), 0, None)
+        .await
+        .unwrap();
     assert!(matches!(no_password, Err(ConnectionFailure::Other(_))));
 
     // Untrusted: the certificate comes along for trust on first use.
     let mut untrusted = environment(&server);
-    untrusted.tls.pinned_sha256 = None;
+    untrusted.urls[0].pinned_sha256 = None;
     let Err(ConnectionFailure::Tls {
         message,
         certificate,
-    }) = test_connection(untrusted, Some(password(PASSWORD)))
+    }) = test_connection(untrusted, 0, Some(password(PASSWORD)))
         .await
         .unwrap()
     else {
@@ -125,9 +134,9 @@ async fn failures_say_what_to_fix() {
     // Pinned to another certificate: both fingerprints.
     let mut pinned = environment(&server);
     let other = ic_config::format_fingerprint(&[1; 32]);
-    pinned.tls.pinned_sha256 = Some(other.clone());
+    pinned.urls[0].pinned_sha256 = Some(other.clone());
     assert_eq!(
-        test_connection(pinned, Some(password(PASSWORD)))
+        test_connection(pinned, 0, Some(password(PASSWORD)))
             .await
             .unwrap(),
         Err(ConnectionFailure::CertificateMismatch {
@@ -140,7 +149,7 @@ async fn failures_say_what_to_fix() {
     let gone = environment(&server);
     server.shutdown().await;
     assert!(matches!(
-        test_connection(gone, Some(password(PASSWORD)))
+        test_connection(gone, 0, Some(password(PASSWORD)))
             .await
             .unwrap(),
         Err(ConnectionFailure::Unreachable(_))

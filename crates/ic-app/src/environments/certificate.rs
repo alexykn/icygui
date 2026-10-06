@@ -24,10 +24,12 @@ use crate::format;
 pub(crate) enum CertificateEvent {
     /// Close it.
     Close,
-    /// Pin `fingerprint` for the environment and reconnect.
+    /// Pin `fingerprint` for the environment's URL `url` and reconnect.
     Trust {
         /// The environment's id.
         environment_id: String,
+        /// The URL (as configured) whose server presented it.
+        url: String,
         /// The certificate's SHA-256, colon hex.
         fingerprint: String,
     },
@@ -203,30 +205,40 @@ impl CertificateReview {
         }
     }
 
-    /// The environment and what trusting its presented certificate means,
-    /// while the connection fails on a certificate that could be read.
-    pub(crate) fn offer(&self, cx: &App) -> Option<(String, TrustOffer)> {
+    /// The environment, the URL whose server presented the certificate,
+    /// and what trusting it means, while the connection fails on a
+    /// certificate that could be read. Pins are per URL (ENV-12).
+    pub(crate) fn offer(&self, cx: &App) -> Option<(String, String, TrustOffer)> {
         let state = self.state.read(cx);
         let environment = state.environment()?;
         let Some(ConnectionState::TlsFailed {
+            url,
             certificate: Some(certificate),
             ..
         }) = &state.connection().state
         else {
             return None;
         };
+        let pinned = environment
+            .urls
+            .iter()
+            .find(|entry| entry.url.trim() == url.trim())?
+            .pinned_sha256
+            .as_deref();
         Some((
             environment.id.clone(),
-            trust_offer(environment.tls.pinned_sha256.as_deref(), certificate),
+            url.clone(),
+            trust_offer(pinned, certificate),
         ))
     }
 
     /// Trusts the presented certificate ("trust this certificate", or
     /// "trust the new certificate" after a mismatch).
     pub(crate) fn trust(&mut self, cx: &mut Context<Self>) {
-        if let Some((environment_id, offer)) = self.offer(cx) {
+        if let Some((environment_id, url, offer)) = self.offer(cx) {
             cx.emit(CertificateEvent::Trust {
                 environment_id,
+                url,
                 fingerprint: offer.fingerprint,
             });
         }
@@ -288,13 +300,17 @@ impl Render for CertificateReview {
         let environment_id = state
             .environment()
             .map(|environment| environment.id.clone());
-        let offer = self.offer(cx).map(|(_, offer)| offer);
-        let endpoint = state.connection().endpoint.clone();
+        let offer = self.offer(cx).map(|(_, _, offer)| offer);
+        let mut endpoint = state.connection().endpoint.clone();
         let failure = match &state.connection().state {
             Some(ConnectionState::TlsFailed {
+                url,
                 message,
                 certificate,
-            }) => Some((message.clone(), certificate.clone())),
+            }) => {
+                endpoint = ic_config::ApiUrl::new(url).label();
+                Some((message.clone(), certificate.clone()))
+            }
             _ => None,
         };
         let title = format!("Certificate of {endpoint}");

@@ -497,9 +497,9 @@ impl Session {
                 };
                 server.set_endpoint(endpoint.clone());
                 session.demo_secrets.put(&id, server.core_password());
-                let (url, pin) = server.environment_target(&endpoint);
+                let targets = server.environment_target(&endpoint);
                 session.state.update(cx, |state, _| {
-                    state.set_demo_server(&id, &url, pin.as_deref());
+                    state.set_demo_servers(&id, &targets);
                 });
                 // Another environment may have been chosen meanwhile.
                 let still_wanted = session.generation == generation
@@ -850,16 +850,18 @@ impl Session {
         true
     }
 
-    /// Trusts `fingerprint` for environment `id` (ENV-05, trust on first
-    /// use): pins it and reconnects if it's the active environment.
+    /// Trusts `fingerprint` for environment `id`'s URL `url` (ENV-05,
+    /// trust on first use; pins are per URL): pins it and reconnects if
+    /// it's the active environment.
     pub(crate) fn trust_certificate(
         &mut self,
         id: &str,
+        url: &str,
         fingerprint: &str,
         cx: &mut Context<Self>,
     ) {
         let reconnect = self.state.update(cx, |state, cx| {
-            let pinned = state.pin_certificate(id, fingerprint);
+            let pinned = state.pin_certificate(id, url, fingerprint);
             let active = state.active_environment_id() == Some(id);
             if pinned && active {
                 state.reset_connection();
@@ -872,11 +874,13 @@ impl Session {
         }
     }
 
-    /// Tests an environment's settings as edited (ENV-04): with the typed
-    /// password, else the one stored for it.
+    /// Tests one URL (`environment.urls[url]`) of an environment's
+    /// settings as edited (ENV-04, ENV-12): with the typed password, else
+    /// the one stored for it.
     pub(crate) fn test_environment(
         &self,
         environment: Environment,
+        url: usize,
         typed: Option<SecretString>,
         cx: &mut Context<Self>,
     ) -> Task<Result<ConnectionReport, ConnectionFailure>> {
@@ -904,7 +908,7 @@ impl Session {
                 }
                 None => None,
             };
-            match ic_core::test_connection(environment, password).await {
+            match ic_core::test_connection(environment, url, password).await {
                 Ok(outcome) => outcome,
                 Err(_) => Err(ConnectionFailure::Other(
                     "the test stopped before it finished".to_owned(),

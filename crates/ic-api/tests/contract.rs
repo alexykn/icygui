@@ -219,6 +219,22 @@ async fn real_icinga_queries() {
     client.dependencies().await.unwrap();
     let endpoints = client.endpoints().await.unwrap();
     assert!(endpoints.iter().any(|endpoint| !endpoint.zone.is_empty()));
+    // The node, its endpoint and its zone (ENV-12): the fixture is a
+    // single master in the top-level zone `master`.
+    let node = client.node_name().await.unwrap();
+    assert_eq!(node.as_deref(), Some(status.node_name.as_str()));
+    let zones = client.zones().await.unwrap();
+    let zone = zones
+        .iter()
+        .find(|zone| zone.endpoints.contains(&status.node_name))
+        .expect("the node is a member of a zone");
+    assert_eq!(zone.parent, None);
+    assert!(!zone.global);
+    assert!(
+        zones
+            .iter()
+            .any(|zone| zone.global && zone.endpoints.is_empty())
+    );
 }
 
 /// Every attribute the client asks for exists: Icinga 2.15 rejects a
@@ -247,6 +263,7 @@ async fn real_icinga_knows_every_requested_attribute() {
     assert!(!client.service_groups().await.unwrap().is_empty());
     assert!(!client.dependencies().await.unwrap().is_empty());
     assert!(!client.endpoints().await.unwrap().is_empty());
+    assert!(!client.zones().await.unwrap().is_empty());
     assert_eq!(client.unknown_attributes(), []);
 
     let raw = contract.raw();

@@ -317,6 +317,93 @@ impl Scenario {
         self.notifications.extend(added);
     }
 
+    /// The scenario as the cluster node `node_name` serves it, so that
+    /// several mock servers form one cluster: a single master, an HA pair
+    /// in one zone (both serve everything), or a master with a child zone.
+    ///
+    /// `/v1/status` reports `node_name`; the zones and endpoints stay as
+    /// they are (every node knows the zone tree around it). A node in a
+    /// top-level zone serves every object. A node in a child zone serves
+    /// only the hosts and services whose `zone` is its zone or one below it
+    /// (Icinga's config sync gives a satellite only those), with their
+    /// comments, downtimes, Icinga notifications and the dependencies
+    /// between them. A `node_name` that isn't one of the scenario's
+    /// endpoints serves everything.
+    ///
+    /// Each server runs its own copy: changes made through one aren't seen
+    /// by the others (Icinga's cluster would replicate them).
+    #[must_use]
+    pub fn for_node(&self, node_name: &str) -> Self {
+        let mut scenario = self.clone();
+        node_name.clone_into(&mut scenario.status.node_name);
+        let Some(zone) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == node_name)
+            .map(|endpoint| endpoint.zone.clone())
+        else {
+            return scenario;
+        };
+        let has_parent = self
+            .zones
+            .iter()
+            .any(|candidate| candidate.name == zone && candidate.parent.is_some());
+        if !has_parent {
+            return scenario;
+        }
+        // The node's zone and every zone below it.
+        let mut below = std::collections::BTreeSet::from([zone]);
+        loop {
+            let children: Vec<String> = self
+                .zones
+                .iter()
+                .filter(|candidate| {
+                    !below.contains(&candidate.name)
+                        && candidate
+                            .parent
+                            .as_ref()
+                            .is_some_and(|parent| below.contains(parent))
+                })
+                .map(|candidate| candidate.name.clone())
+                .collect();
+            if children.is_empty() {
+                break;
+            }
+            below.extend(children);
+        }
+        let in_zone = |zone: Option<&String>| zone.is_some_and(|zone| below.contains(zone));
+        scenario
+            .hosts
+            .retain(|host| in_zone(host.check.zone.as_ref()));
+        let hosts: std::collections::BTreeSet<_> = scenario
+            .hosts
+            .iter()
+            .map(|host| host.name.clone())
+            .collect();
+        scenario
+            .services
+            .retain(|service| hosts.contains(&service.key.host));
+        let services: std::collections::BTreeSet<_> = scenario
+            .services
+            .iter()
+            .map(|service| service.key.clone())
+            .collect();
+        let kept = |object: &ObjectKey| match object {
+            ObjectKey::Host { name } => hosts.contains(name),
+            ObjectKey::Service { key } => services.contains(key),
+        };
+        scenario.comments.retain(|comment| kept(&comment.object));
+        scenario.downtimes.retain(|downtime| kept(&downtime.object));
+        scenario
+            .dependencies
+            .retain(|dependency| kept(&dependency.child) && kept(&dependency.parent));
+        scenario
+            .notifications
+            .retain(|notification| kept(&notification.object));
+        scenario.pinned.retain(|object| kept(object));
+        scenario
+    }
+
     /// Object counts by state.
     #[must_use]
     pub fn summary(&self) -> Summary {
@@ -477,5 +564,65 @@ mod tests {
         assert_eq!(summary.hosts, 2_000);
         assert_eq!(summary.services, 30_000);
         assert!((5..=40).contains(&summary.hosts_down), "{summary:?}");
+    }
+
+    #[test]
+    fn nodes_serve_their_zone_and_below() {
+        let mut cluster = prod_cluster();
+        cluster.endpoints.push(Endpoint {
+            name: "master-02".to_owned(),
+            zone: "master".to_owned(),
+            connected: true,
+        });
+        // A top-level node serves everything, under its own name.
+        for node in ["master-01", "master-02", "not-an-endpoint"] {
+            let served = cluster.for_node(node);
+            assert_eq!(served.status.node_name, node);
+            assert_eq!(served.hosts.len(), cluster.hosts.len(), "{node}");
+            assert_eq!(served.services.len(), cluster.services.len(), "{node}");
+            assert_eq!(served.zones, cluster.zones);
+            assert_eq!(served.endpoints, cluster.endpoints);
+        }
+
+        // The satellite serves the hosts in `ams` and nothing else.
+        let satellite = cluster.for_node("sat-ams-01");
+        assert_eq!(satellite.status.node_name, "sat-ams-01");
+        assert!(!satellite.hosts.is_empty());
+        assert!(satellite.hosts.len() < cluster.hosts.len());
+        assert!(
+            satellite
+                .hosts
+                .iter()
+                .all(|host| host.check.zone.as_deref() == Some("ams"))
+        );
+        let hosts: HashSet<_> = satellite.hosts.iter().map(|host| &host.name).collect();
+        assert!(
+            satellite
+                .services
+                .iter()
+                .all(|service| hosts.contains(&service.key.host))
+        );
+        assert_eq!(
+            satellite.services.len(),
+            cluster
+                .services
+                .iter()
+                .filter(|service| hosts.contains(&service.key.host))
+                .count()
+        );
+        assert!(
+            satellite
+                .comments
+                .iter()
+                .all(|comment| hosts.contains(comment.object.host_name()))
+        );
+        assert!(
+            satellite
+                .notifications
+                .iter()
+                .all(|notification| hosts.contains(notification.object.host_name()))
+        );
+        assert_eq!(satellite.zones, cluster.zones);
+        check_consistency(&satellite);
     }
 }

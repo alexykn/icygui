@@ -875,8 +875,14 @@ impl Sidebar {
         let connection = state.connection();
         let health = connection.health(now);
         let (endpoint, suffix) = connection.label_parts(now);
+        // A node that doesn't see the whole cluster says so (ENV-12).
+        let marker = connection.view_marker();
         // The whole label, for an endpoint the footer shortens.
-        let full = connection.label(now);
+        let full = match &marker {
+            Some(marker) => format!("{} · {}", connection.label(now), marker.label),
+            None => connection.label(now),
+        };
+        let partial = marker.as_ref().is_some_and(|marker| marker.partial);
         let demo = state.is_demo_environment();
         let open = self.menus.is_open(&SidebarMenu::Status);
         let status = div()
@@ -899,7 +905,16 @@ impl Sidebar {
             .child(StateDot::with_color(health_color(health, theme)).size(metrics.status_dot))
             // A long endpoint (an FQDN) is shortened, never the age or
             // state after it (ENV-06); the details popover has it in full.
-            .child(div().min_w_0().truncate().child(endpoint))
+            // A node that sees only part of the cluster (a satellite) is
+            // coloured, nothing more (ENV-12): the tooltip, the details and
+            // the summary bar say what it means.
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .when(partial, |name| name.text_color(theme.states.warning))
+                    .child(endpoint),
+            )
             .when_some(suffix, |status, suffix| {
                 status.child(div().flex_none().ml(px(-2.)).child(format!("· {suffix}")))
             })

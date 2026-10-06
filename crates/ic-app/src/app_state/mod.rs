@@ -464,12 +464,17 @@ impl AppState {
         self.config.environment(active)
     }
 
-    /// Points the demo environment `id` at its demo server once it runs,
-    /// pinned to its certificate.
-    pub(crate) fn set_demo_server(&mut self, id: &str, url: &str, fingerprint: Option<&str>) {
+    /// Points the demo environment `id` at its demo servers once they
+    /// run: `(URL, pinned certificate)` in order of preference.
+    pub(crate) fn set_demo_servers(&mut self, id: &str, servers: &[(String, Option<String>)]) {
         if let Some(environment) = self.config.environment_mut(id) {
-            url.clone_into(&mut environment.url);
-            environment.tls.pinned_sha256 = fingerprint.map(str::to_owned);
+            environment.urls = servers
+                .iter()
+                .map(|(url, fingerprint)| ic_config::ApiUrl {
+                    pinned_sha256: fingerprint.clone(),
+                    ..ic_config::ApiUrl::new(url)
+                })
+                .collect();
             environment.tls.use_system_roots = false;
         }
     }
@@ -860,11 +865,8 @@ impl AppState {
         match event {
             CoreEvent::Snapshot(snapshot) => self.set_snapshot(snapshot),
             CoreEvent::Connection(state) => {
-                if let ConnectionState::Connected {
-                    endpoint, version, ..
-                } = &state
-                {
-                    tracing::info!(%endpoint, %version, "connected");
+                if let ConnectionState::Connected { node, version, .. } = &state {
+                    tracing::info!(node = %node.name, view = %node.view.label(), %version, "connected");
                 }
                 self.connection.on_state(state);
                 if self.update_pending && !self.connection.is_waiting() {
@@ -991,8 +993,9 @@ impl AppState {
 /// The endpoint to name before Icinga said its node name: the URL's host.
 fn endpoint_of(environment: &Environment) -> String {
     environment
-        .api_url()
-        .ok()
+        .urls
+        .first()
+        .and_then(|url| url.api_url().ok())
         .and_then(|url| url.host_str().map(str::to_owned))
         .unwrap_or_else(|| environment.name.clone())
 }
@@ -1037,7 +1040,7 @@ impl AppState {
         state.evaluator = Some(fixture.evaluator);
         state.connection = ConnectionStatus::starting(fixture::ENDPOINT, Some("icygui".into()));
         state.connection.on_state(ConnectionState::Connected {
-            endpoint: fixture::ENDPOINT.to_owned(),
+            node: connection::full_node(fixture::ENDPOINT),
             version: "r2.15.6-1".to_owned(),
             since: now,
         });

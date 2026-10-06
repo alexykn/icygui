@@ -50,9 +50,10 @@ All of this lives in one `Theme` struct (`ic-ui-kit`). A light theme is a second
 Everything below is backed by the Icinga 2 REST API (`https://<endpoint>:5665/v1/…`) unless marked **client-side**.
 
 ### 2.1 Environments
-- An **environment** = one Icinga 2 API endpoint: URL, TLS (system roots, custom CA, or pinned certificate), auth by API user + password **or** client certificate. Secrets live in the OS keychain (macOS Keychain, Secret Service on Linux), never in config files.
+- An **environment** = one Icinga cluster: its API URLs in order of preference (one for a single master or a load balancer; one per node for an HA pair or a master with satellites; ENV-12), TLS (system roots or Icinga's CA for every URL; a pinned certificate per URL), auth by API user + password **or** client certificate. Secrets live in the OS keychain (macOS Keychain, Secret Service on Linux), never in config files.
+- **Topology (ENV-12):** every connect finds the node behind the URL (`node_name` → endpoint → zone). A node of the top-level zone sees the whole cluster; one in a child zone only its zone (a *partial view*, used only while no master answers, always labelled); without permission to read the zones the view is *not verified*. The engine keeps trying the preferred URLs gently and switches back.
 - **One active environment at a time** (D2). Switching tears down the old connection runtime and starts the new one. Dashboards, groups and notification rules are stored per environment.
-- On connect: auth check `GET /v1`, version and app state from `GET /v1/status`, permission probe (§5).
+- On connect: auth check `GET /v1`, the node and its zone (`/v1/status/IcingaApplication`, `/v1/objects/zones`), version and app state from `GET /v1/status`, permission probe (§5).
 - Footer status `master-01 · 2s` = endpoint + age of the last event-stream message. Yellow when stale (> 30s), red when disconnected (with retry countdown).
 
 ### 2.2 Object browsing (Icinga Web parity)

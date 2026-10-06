@@ -18,7 +18,7 @@ use crate::support::{
 };
 use ic_api::Detail;
 use ic_config::AuthConfig;
-use ic_core::{Command, ConnectionState, CoreEvent, LoadPhase, Tuning};
+use ic_core::{ClusterView, Command, ConnectedNode, ConnectionState, CoreEvent, LoadPhase, Tuning};
 use ic_mock::{MockConfig, MockTls, MockUser, scenarios};
 use ic_model::ServiceState;
 
@@ -34,7 +34,14 @@ async fn the_initial_load_fills_in_tier_by_tier() {
     assert_eq!(
         connected,
         ConnectionState::Connected {
-            endpoint: truth.node_name.clone(),
+            node: ConnectedNode {
+                url: server.url(),
+                url_index: 0,
+                name: truth.node_name.clone(),
+                zone: Some("master".to_owned()),
+                view: ClusterView::Full,
+                passed_over: Vec::new(),
+            },
             version: engine_version(&engine),
             since: ic_model::Timestamp::from_unix_seconds(NOW),
         }
@@ -237,18 +244,20 @@ async fn a_pin_mismatch_shows_both_fingerprints_and_the_certificate() {
     let server = mock(MockConfig::default()).await;
     let mut environment = environment(&server);
     let pinned = ic_config::format_fingerprint(&[0xAB; 32]);
-    environment.tls.pinned_sha256 = Some(pinned.clone());
+    environment.urls[0].pinned_sha256 = Some(pinned.clone());
     let mut engine = start(environment, FakeSecrets::with(ENV_ID, PASSWORD), tuning());
     let state = engine
         .wait_state(|state| matches!(state, ConnectionState::TlsFailed { .. }))
         .await;
     let ConnectionState::TlsFailed {
+        url,
         message,
         certificate,
     } = state
     else {
         unreachable!()
     };
+    assert_eq!(url, server.url(), "the URL whose pin to set");
     assert!(message.contains(&pinned), "{message}");
     assert!(message.contains(&server.cert_fingerprint()), "{message}");
     let certificate = certificate.expect("the presented certificate");
@@ -257,7 +266,7 @@ async fn a_pin_mismatch_shows_both_fingerprints_and_the_certificate() {
 
     // Trust on first use: pin the presented certificate.
     let mut trusted = crate::support::environment(&server);
-    trusted.tls.pinned_sha256 = Some(certificate.fingerprint());
+    trusted.urls[0].pinned_sha256 = Some(certificate.fingerprint());
     engine.send(Command::UpdateEnvironment(trusted));
     engine.connected().await;
     engine.shutdown();
@@ -267,7 +276,7 @@ async fn a_pin_mismatch_shows_both_fingerprints_and_the_certificate() {
 async fn an_untrusted_certificate_is_offered_for_trust() {
     let server = mock(MockConfig::default()).await;
     let mut environment = environment(&server);
-    environment.tls.pinned_sha256 = None;
+    environment.urls[0].pinned_sha256 = None;
     let mut engine = start(environment, FakeSecrets::with(ENV_ID, PASSWORD), tuning());
     let state = engine
         .wait_state(|state| matches!(state, ConnectionState::TlsFailed { .. }))
@@ -294,7 +303,7 @@ async fn unusable_settings_are_misconfigured() {
     assert!(message.contains("/nonexistent/icinga-ca.crt"), "{message}");
 
     let mut environment = crate::support::environment(&server);
-    environment.url = "http://plain.example".to_owned();
+    environment.urls[0].url = "http://plain.example".to_owned();
     engine.send(Command::UpdateEnvironment(environment));
     engine
         .wait_state(|state| matches!(state, ConnectionState::Misconfigured { message } if message.contains("https")))
@@ -325,7 +334,7 @@ async fn client_certificates_and_the_ca_file_are_read() {
         cert_path,
         key_path,
     };
-    environment.tls.pinned_sha256 = None;
+    environment.urls[0].pinned_sha256 = None;
     environment.tls.ca_file = Some(ca_path);
     // No secret needed for a client certificate.
     let secrets = Arc::new(FakeSecrets::default());

@@ -45,22 +45,25 @@ impl Config {
     ///
     /// The new ids are derived from the entries' content (UUID v5), not
     /// random, so the same file always gets the same ids, even when it
-    /// can't be saved: an environment's from its name and URL, a group's
-    /// from its environment's id and its name, a dashboard's from its
-    /// environment's and group's ids and its name. Entries that are the
-    /// same in all of these get different ids in file order. A derived id
-    /// changes only when its entry's name or URL does, or an identical
-    /// entry before it comes or goes; and a password stored under a derived
-    /// environment id is never offered to a server at another URL.
+    /// can't be saved: an environment's from its name and first URL (what
+    /// format version 1 called its `url`), a group's from its
+    /// environment's id and its name, a dashboard's from its environment's
+    /// and group's ids and its name. Entries that are the same in all of
+    /// these get different ids in file order. A derived id changes only
+    /// when its entry's name or first URL does, or an identical entry
+    /// before it comes or goes; so a password stored under a derived
+    /// environment id is never offered to another cluster.
     pub fn repair_ids(&mut self) -> usize {
         let mut changed = 0;
         let mut environment_ids = Scope::new(self.environments.iter().map(|e| e.id.as_str()));
         for (index, environment) in self.environments.iter_mut().enumerate() {
             if !environment_ids.keeps(index) {
+                // The first URL is what version 1 called `url`: the
+                // derivation stays the same across the upgrade.
                 environment.id = environment_ids.derive(&[
                     "environment",
                     environment.name.trim(),
-                    environment.url.trim(),
+                    environment.primary_url(),
                 ]);
                 changed += 1;
             }
@@ -339,7 +342,7 @@ mod tests {
         assert_ne!(reordered.environments[0].id, original.environments[1].id);
         // Another URL never gets the id, and so the password, of this one.
         let mut moved = without_ids();
-        moved.environments[0].url = "https://elsewhere:5665".to_owned();
+        moved.environments[0].urls[0].url = "https://elsewhere:5665".to_owned();
         moved.repair_ids();
         let before = [&original.environments[0].id, &original.environments[1].id];
         assert!(!before.contains(&&moved.environments[0].id));

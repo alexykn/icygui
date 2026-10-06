@@ -11,7 +11,7 @@ use crate::ports::{Clock, Notifier, SecretStore};
 /// The environment to run and the settings around it.
 #[derive(Clone, Debug)]
 pub struct EnvironmentSpec {
-    /// The environment (URL, authentication, TLS, dashboards, rules).
+    /// The environment (URLs, authentication, TLS, dashboards, rules).
     pub environment: ic_config::Environment,
     /// App-wide settings (reconcile interval, log retention).
     pub general: ic_config::General,
@@ -119,6 +119,15 @@ pub struct Tuning {
     /// action on those objects is held back for a while (see
     /// [`crate::ActionOutcome`]).
     pub action_timeout: Duration,
+    /// While connected to a node that doesn't see the whole cluster (a
+    /// partial view, or one that couldn't be verified at a URL after the
+    /// first), the engine asks the URLs it prefers whether one of them
+    /// answers with a fuller view (ENV-12): first after this (30 s),
+    /// doubling up to `probe_max`, half of each wait jitter. A probe costs
+    /// each node that answers three small requests.
+    pub probe_initial: Duration,
+    /// The longest wait between such probes (10 minutes).
+    pub probe_max: Duration,
 }
 
 impl Default for Tuning {
@@ -143,6 +152,8 @@ impl Default for Tuning {
             rule_tick: Duration::from_secs(1),
             prune_interval: Duration::from_hours(1),
             action_timeout: ic_api::DEFAULT_ACTION_TIMEOUT,
+            probe_initial: Duration::from_secs(30),
+            probe_max: Duration::from_mins(10),
         }
     }
 }

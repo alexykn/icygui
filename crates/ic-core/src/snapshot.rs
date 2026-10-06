@@ -14,6 +14,8 @@ use ic_model::{
 };
 use ic_rules::DashboardRef;
 
+use crate::topology::ConnectedNode;
+
 /// Everything known about the active environment at one point in time.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -61,6 +63,15 @@ pub struct Snapshot {
     /// Icinga's clock). The UI marks them ("late 12m"). An object leaves
     /// the map as soon as a check result moves its deadline.
     pub late: Arc<BTreeMap<ObjectKey, Timestamp>>,
+    /// The node the objects come from (ENV-12): the connected node from
+    /// the start of the first load into an empty store, once the engine
+    /// went live on objects loaded from a node with the same view (the
+    /// other master of an HA zone), or once a load from it completed.
+    /// After a switch to a node with another view (a satellite while the
+    /// masters are down, or back) it stays the old node until the reload
+    /// from the new one is complete, so a partial view never looks
+    /// complete. `None` before the first connect.
+    pub node: Option<Arc<ConnectedNode>>,
 }
 
 impl Snapshot {

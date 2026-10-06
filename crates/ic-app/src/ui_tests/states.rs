@@ -48,6 +48,7 @@ fn states(now: Timestamp) -> Vec<ConnectionState> {
             message: "401 Unauthorized".to_owned(),
         },
         ConnectionState::TlsFailed {
+            url: "https://master-01.example.com:5665".to_owned(),
             message: "invalid peer certificate: UnknownIssuer".to_owned(),
             certificate: Some(CertificateInfo {
                 sha256: [0x5a; 32],
@@ -63,7 +64,7 @@ fn states(now: Timestamp) -> Vec<ConnectionState> {
             message: "the CA file /etc/icinga2/ca.crt can't be read".to_owned(),
         },
         ConnectionState::Connected {
-            endpoint: "master-01".to_owned(),
+            node: crate::app_state::connection::full_node("master-01"),
             version: "r2.15.6-1".to_owned(),
             since: now,
         },

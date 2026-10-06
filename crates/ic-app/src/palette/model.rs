@@ -16,6 +16,7 @@ use ic_rules::DashboardRef;
 use super::fuzzy::{Match, Query};
 use crate::actions::ObjectAction;
 use crate::app_state::AppState;
+use crate::app_state::environments::url_summary;
 use crate::notifications::{MuteChoice, OverrideChange, PauseChoice};
 use crate::settings::SettingsTab;
 use crate::sidebar::Dot;
@@ -623,7 +624,7 @@ fn environment_candidates(state: &AppState) -> Vec<Candidate> {
                 PaletteItem {
                     section: Section::Environments,
                     label: format!("Switch to {}", environment.name),
-                    detail: environment.url.clone(),
+                    detail: url_summary(environment),
                     dot: None,
                     key_hint: None,
                     command: PaletteCommand::SwitchEnvironment(environment.id.clone()),

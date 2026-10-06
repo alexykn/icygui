@@ -34,8 +34,8 @@ pub use error::ConfigError;
 pub use fingerprint::{format_fingerprint, parse_fingerprint};
 pub use migrate::migrate;
 pub use model::{
-    AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup, Environment, General, GroupBy,
-    ObjectKind, Sort, SortKey, ThemeChoice, TlsConfig, View,
+    ApiUrl, AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup, Environment, General,
+    GroupBy, MAX_API_URLS, ObjectKind, Sort, SortKey, ThemeChoice, TlsConfig, View,
 };
 pub use paths::Paths;
 pub use share::{export_groups, import_groups};

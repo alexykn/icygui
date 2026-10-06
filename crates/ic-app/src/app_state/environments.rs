@@ -92,7 +92,7 @@ impl AppState {
         let reconnect = connection_differs(current, &edited) || password_changed;
         let mut updated = current.clone();
         updated.name = edited.name;
-        updated.url = edited.url;
+        updated.urls = edited.urls;
         updated.auth = edited.auth;
         updated.tls = edited.tls;
         updated.author = edited.author;
@@ -176,17 +176,27 @@ impl AppState {
     }
 
     /// Pins `fingerprint` as the only certificate environment `id`
-    /// trusts (trust on first use). Returns whether that changed; the
-    /// caller restarts the engine if it's the active environment.
-    pub(crate) fn pin_certificate(&mut self, id: &str, fingerprint: &str) -> bool {
+    /// trusts at its URL `url` (trust on first use; pins are per URL,
+    /// ENV-12). Returns whether that changed (an unknown environment or
+    /// URL changes nothing); the caller restarts the engine if it's the
+    /// active environment.
+    pub(crate) fn pin_certificate(&mut self, id: &str, url: &str, fingerprint: &str) -> bool {
         let Some(environment) = self.config.environment_mut(id) else {
             return false;
         };
-        if environment.tls.pinned_sha256.as_deref() == Some(fingerprint) {
+        let name = environment.name.clone();
+        let Some(entry) = environment
+            .urls
+            .iter_mut()
+            .find(|entry| entry.url.trim() == url.trim())
+        else {
+            return false;
+        };
+        if entry.pinned_sha256.as_deref() == Some(fingerprint) {
             return false;
         }
-        tracing::info!(environment = %environment.name, %fingerprint, "certificate pinned");
-        environment.tls.pinned_sha256 = Some(fingerprint.to_owned());
+        tracing::info!(environment = %name, url = %entry.label(), %fingerprint, "certificate pinned");
+        entry.pinned_sha256 = Some(fingerprint.to_owned());
         self.save_config();
         true
     }
@@ -219,10 +229,21 @@ impl AppState {
     }
 }
 
+/// An environment's URLs in a line: the first as written, and how many
+/// more follow (`https://master-01:5665 + 2 more`).
+pub(crate) fn url_summary(environment: &Environment) -> String {
+    let first = environment.primary_url().to_owned();
+    match environment.urls.len() {
+        0 | 1 => first,
+        count => format!("{first} + {} more", count - 1),
+    }
+}
+
 /// Whether two versions of an environment connect differently: another
-/// id, URL, authentication or TLS setting.
+/// id, URLs (their order, pins and server names), authentication or TLS
+/// setting.
 pub(crate) fn connection_differs(old: &Environment, new: &Environment) -> bool {
-    old.id != new.id || old.url != new.url || old.auth != new.auth || old.tls != new.tls
+    old.id != new.id || old.connection_differs(new)
 }
 
 #[cfg(test)]
@@ -325,7 +346,7 @@ mod tests {
         );
 
         let moved = Environment {
-            url: "https://master-02:5665".to_owned(),
+            urls: vec![ic_config::ApiUrl::new("https://master-02:5665")],
             ..renamed.clone()
         };
         assert_eq!(
@@ -333,7 +354,7 @@ mod tests {
             EnvironmentSaved::Reconnect
         );
         let mut pinned = state.environment().unwrap().clone();
-        pinned.tls.pinned_sha256 = Some("AB".repeat(32));
+        pinned.urls[0].pinned_sha256 = Some("AB".repeat(32));
         assert_eq!(
             state.save_environment(pinned, false),
             EnvironmentSaved::Reconnect
@@ -452,13 +473,31 @@ mod tests {
         let id = prod.id.clone();
         state.save_environment(prod, false);
         let fingerprint = ic_config::format_fingerprint(&[0xab; 32]);
-        assert!(state.pin_certificate(&id, &fingerprint));
-        assert!(!state.pin_certificate(&id, &fingerprint));
-        assert!(!state.pin_certificate("missing", &fingerprint));
+        let url = "https://master-01:5665";
+        assert!(state.pin_certificate(&id, url, &fingerprint));
+        assert!(!state.pin_certificate(&id, url, &fingerprint));
+        assert!(!state.pin_certificate("missing", url, &fingerprint));
+        assert!(
+            !state.pin_certificate(&id, "https://master-02:5665", &fingerprint),
+            "a URL the environment doesn't list"
+        );
         assert_eq!(
-            state.environment().unwrap().tls.pinned_sha256.as_deref(),
+            state.environment().unwrap().urls[0]
+                .pinned_sha256
+                .as_deref(),
             Some(fingerprint.as_str())
         );
+    }
+
+    #[test]
+    fn url_summaries_name_the_first_and_count_the_rest() {
+        let mut prod = basic("prod", "https://master-01:5665");
+        assert_eq!(url_summary(&prod), "https://master-01:5665");
+        prod.urls
+            .push(ic_config::ApiUrl::new("https://master-02:5665"));
+        prod.urls
+            .push(ic_config::ApiUrl::new("https://sat-ams-01:5665"));
+        assert_eq!(url_summary(&prod), "https://master-01:5665 + 2 more");
     }
 
     #[test]

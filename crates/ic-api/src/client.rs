@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use ic_model::{
     Action, ActionTarget, Comment, Dependency, Downtime, Endpoint, EventKind, Host, HostGroup,
-    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, Timestamp,
+    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, Timestamp, Zone,
 };
 use reqwest::header::{ACCEPT, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
@@ -263,6 +263,35 @@ impl Client {
             .find(|entry| entry.name.0.is_empty() || entry.name.0 == name)
             .ok_or_else(|| ApiError::Decode(format!("/v1/status/{name} returned no entry")))?;
         Ok(entry.status.0.unwrap_or(Value::Null))
+    }
+
+    /// The name of the node that answers (`app.node_name` of
+    /// `/v1/status/IcingaApplication`): the `Endpoint` it is in the
+    /// cluster. One small request; `None` when Icinga reports none.
+    ///
+    /// # Errors
+    ///
+    /// Transport, TLS and HTTP errors as [`ApiError`] (`Forbidden` without
+    /// `status/query`); [`ApiError::Decode`] for unexpected JSON.
+    pub async fn node_name(&self) -> Result<Option<String>, ApiError> {
+        let application = self.status_entry("IcingaApplication").await?;
+        Ok(wire::node_name(&application))
+    }
+
+    /// Every zone with its member endpoints, its parent and whether it is
+    /// global: the cluster's zone tree (attributes `endpoints`, `global`
+    /// and `parent` only).
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::hosts`] (`Forbidden` without `objects/query/Zone`).
+    pub async fn zones(&self) -> Result<Vec<Zone>, ApiError> {
+        let results = self
+            .query::<ZoneAttrs>("zones", None, wire::ZONE_TREE_ATTRS)
+            .await?;
+        Ok(map_results(results, "zone", |attrs, name| {
+            attrs.into_model(name)
+        }))
     }
 
     /// All hosts, with every attribute the client shows ([`Detail::Full`]):

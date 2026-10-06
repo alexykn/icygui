@@ -18,7 +18,8 @@ use crate::environment::{CREDENTIALS_REASON, has_credentials, parse_api_url};
 use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::fingerprint::parse_fingerprint;
 use crate::model::{
-    AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind, TlsConfig,
+    ApiUrl, AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, MAX_API_URLS,
+    ObjectKind, TlsConfig,
 };
 
 /// The shortest allowed event log retention, in hours.
@@ -102,14 +103,16 @@ impl Config {
 
 impl Environment {
     /// Checks one environment, as the environment editor needs before
-    /// saving it. Paths are relative to the environment (`url`,
+    /// saving it. Paths are relative to the environment (`urls[0].url`,
     /// `auth.username`, `groups[0].name`).
     ///
-    /// Checks that the id and name are set; the URL (see
-    /// [`Environment::api_url`]); the username or certificate paths; that
-    /// client-certificate authentication has an author; the CA file, pinned
-    /// fingerprint and server name; group and dashboard ids (unique within
-    /// the environment) and names; views; and the notification settings.
+    /// Checks that the id and name are set; that there are one to
+    /// [`MAX_API_URLS`] URLs, each valid (see [`ApiUrl::api_url`]) and
+    /// listed once, with a valid pinned fingerprint and server name if
+    /// set; the username or certificate paths; that client-certificate
+    /// authentication has an author; the CA file; group and dashboard ids
+    /// (unique within the environment) and names; views; and the
+    /// notification settings.
     pub fn validate(&self) -> Vec<ValidationIssue> {
         let mut issues = Issues::default();
         UniqueIds::default().check(&mut issues, "", &self.id);
@@ -136,8 +139,13 @@ pub(crate) fn secret_issues(config: &Config) -> Vec<ValidationIssue> {
     let mut issues = Issues::default();
     for (index, environment) in config.environments.iter().enumerate() {
         let path = format!("environments[{index}]");
-        if has_credentials(&environment.url) {
-            issues.push(join(&path, "url"), CREDENTIALS_REASON);
+        for (url_index, url) in environment.urls.iter().enumerate() {
+            if has_credentials(&url.url) {
+                issues.push(
+                    join(&path, &format!("urls[{url_index}].url")),
+                    CREDENTIALS_REASON,
+                );
+            }
         }
         if let AuthConfig::Basic { username } = &environment.auth
             && username.contains(':')
@@ -197,9 +205,7 @@ fn join(prefix: &str, field: &str) -> String {
 
 fn check_environment(environment: &Environment, path: &str, issues: &mut Issues) {
     check_name(&environment.name, &join(path, "name"), issues);
-    if let Err(reason) = parse_api_url(&environment.url) {
-        issues.push(join(path, "url"), reason);
-    }
+    check_urls(&environment.urls, path, issues);
     check_auth(environment, path, issues);
     check_tls(&environment.tls, &join(path, "tls"), issues);
     check_groups(&environment.groups, path, issues);
@@ -269,11 +275,47 @@ fn check_file(file: &Path, path: &str, issues: &mut Issues) {
     }
 }
 
+/// The URLs: at least one, at most [`MAX_API_URLS`], each usable and
+/// listed once (the same URL twice would only be tried twice), with its
+/// pin and server name.
+fn check_urls(urls: &[ApiUrl], path: &str, issues: &mut Issues) {
+    if urls.is_empty() {
+        issues.push(join(path, "urls"), "must list at least one URL");
+    } else if urls.len() > MAX_API_URLS {
+        issues.push(
+            join(path, "urls"),
+            format!("must list at most {MAX_API_URLS} URLs"),
+        );
+    }
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (index, url) in urls.iter().enumerate() {
+        let url_path = join(path, &format!("urls[{index}]"));
+        match parse_api_url(&url.url) {
+            Ok(parsed) => {
+                if let Some(first) = seen.get(parsed.as_str()) {
+                    issues.push(
+                        join(&url_path, "url"),
+                        format!("is already listed as URL {}", first + 1),
+                    );
+                } else {
+                    seen.insert(parsed.to_string(), index);
+                }
+            }
+            Err(reason) => issues.push(join(&url_path, "url"), reason),
+        }
+        check_pin(url, &url_path, issues);
+    }
+}
+
 fn check_tls(tls: &TlsConfig, path: &str, issues: &mut Issues) {
     if let Some(ca_file) = &tls.ca_file {
         check_file(ca_file, &join(path, "ca_file"), issues);
     }
-    if let Some(fingerprint) = &tls.pinned_sha256
+}
+
+/// A URL's pinned fingerprint and server name.
+fn check_pin(url: &ApiUrl, path: &str, issues: &mut Issues) {
+    if let Some(fingerprint) = &url.pinned_sha256
         && let Err(error) = parse_fingerprint(fingerprint)
     {
         let reason = match error {
@@ -285,7 +327,7 @@ fn check_tls(tls: &TlsConfig, path: &str, issues: &mut Issues) {
             format!("is not a SHA-256 fingerprint: {reason}"),
         );
     }
-    if let Some(server_name) = &tls.server_name
+    if let Some(server_name) = &url.server_name
         && let Some(reason) = server_name_problem(server_name)
     {
         issues.push(join(path, "server_name"), reason);

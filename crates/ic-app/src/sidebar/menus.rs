@@ -13,6 +13,8 @@ use ic_rules::{DashboardRef, ScopeSetting};
 use ic_ui_kit::{ActiveTheme as _, Dismissal, Menu, MenuItem};
 
 use super::{RenameTarget, Sidebar, SidebarEvent};
+use crate::app_state::connection::ViewMarker;
+use crate::app_state::environments::url_summary;
 use crate::app_state::{AppState, permissions};
 use crate::settings::ScopeKey;
 
@@ -365,7 +367,10 @@ impl Sidebar {
                                 .truncate()
                                 .text_size(theme.text.small)
                                 .text_color(colors.text_muted)
-                                .child(environment.url.clone()),
+                                .child(connection.node.as_ref().map_or_else(
+                                    || url_summary(environment),
+                                    |node| node.url.clone(),
+                                )),
                         ),
                 );
                 let lines = detail_lines(state, now)
@@ -459,7 +464,27 @@ impl Sidebar {
 pub(super) fn detail_lines(state: &AppState, now: Timestamp) -> Vec<(&'static str, String)> {
     let connection = state.connection();
     let mut lines = vec![("status", connection.describe(now))];
-    if !connection.endpoint.is_empty() {
+    if let Some(node) = &connection.node {
+        // The node, its zone and how much of the cluster it sees (ENV-12),
+        // and the URLs it was preferred to.
+        lines.push((
+            "node",
+            match &node.zone {
+                Some(zone) => format!("{} · zone {zone}", node.name),
+                None => node.name.clone(),
+            },
+        ));
+        lines.push((
+            "view",
+            ViewMarker::of(&node.view).map_or_else(
+                || "full view: the whole cluster".to_owned(),
+                |marker| marker.short,
+            ),
+        ));
+        for (url, reason) in &node.passed_over {
+            lines.push(("passed over", format!("{url} · {reason}")));
+        }
+    } else if !connection.endpoint.is_empty() {
         lines.push(("endpoint", connection.endpoint.clone()));
     }
     if let Some(version) = connection.version() {
@@ -538,10 +563,11 @@ mod tests {
         let mut state = AppState::fixture(at(0.));
         let lines = detail_lines(&state, at(65.));
         let keys: Vec<_> = lines.iter().map(|(key, _)| *key).collect();
-        assert_eq!(keys, ["status", "endpoint", "version", "last event"]);
+        assert_eq!(keys, ["status", "node", "view", "version", "last event"]);
         assert_eq!(lines[0].1, "connected for 1m");
-        assert_eq!(lines[1].1, "master-01");
-        assert_eq!(lines[3].1, "1m ago");
+        assert_eq!(lines[1].1, "master-01 · zone master");
+        assert_eq!(lines[2].1, "full view: the whole cluster");
+        assert_eq!(lines[4].1, "1m ago");
         state.set_permissions(Some(ApiInfo {
             user: "viewer".to_owned(),
             permissions: vec!["objects/query/*".to_owned()],
@@ -569,6 +595,68 @@ mod tests {
             "icygui",
             "nothing needed is missing"
         );
+    }
+
+    #[test]
+    fn the_details_name_a_partial_view_and_the_urls_passed_over() {
+        let mut state = AppState::fixture(at(0.));
+        state.apply(ic_core::CoreEvent::Connection(
+            ic_core::ConnectionState::Connected {
+                node: ic_core::ConnectedNode {
+                    url: "https://sat-ams-01:5665".to_owned(),
+                    url_index: 1,
+                    name: "sat-ams-01".to_owned(),
+                    zone: Some("ams".to_owned()),
+                    view: ic_core::ClusterView::Partial {
+                        zone: "ams".to_owned(),
+                    },
+                    passed_over: vec![(
+                        "master-01:5665".to_owned(),
+                        "connection refused".to_owned(),
+                    )],
+                },
+                version: "r2.15.6-1".to_owned(),
+                since: at(0.),
+            },
+        ));
+        let lines = detail_lines(&state, at(5.));
+        assert_eq!(lines[1], ("node", "sat-ams-01 · zone ams".to_owned()));
+        assert_eq!(lines[2].0, "view");
+        assert_eq!(
+            lines[2].1,
+            "partial view: zone ams · only that zone and below"
+        );
+        assert_eq!(
+            lines[3],
+            (
+                "passed over",
+                "master-01:5665 · connection refused".to_owned()
+            )
+        );
+        let marker = state.connection().view_marker().unwrap();
+        assert!(marker.partial);
+
+        // Not verified: said so, without a warning colour.
+        state.apply(ic_core::CoreEvent::Connection(
+            ic_core::ConnectionState::Connected {
+                node: ic_core::ConnectedNode {
+                    view: ic_core::ClusterView::Unverified {
+                        reason: "the API user may not read the zones".to_owned(),
+                    },
+                    zone: None,
+                    passed_over: Vec::new(),
+                    ..state.connection().node.clone().unwrap()
+                },
+                version: "r2.15.6-1".to_owned(),
+                since: at(0.),
+            },
+        ));
+        let marker = state.connection().view_marker().unwrap();
+        assert_eq!(marker.label, "view not verified");
+        assert!(!marker.partial);
+        assert!(marker.detail.contains("may not read the zones"));
+        let lines = detail_lines(&state, at(5.));
+        assert_eq!(lines[1], ("node", "sat-ams-01".to_owned()));
     }
 
     #[test]

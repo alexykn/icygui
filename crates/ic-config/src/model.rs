@@ -5,13 +5,22 @@
 //! Secrets (passwords) are never stored here: they live in the OS keychain
 //! under the environment's id.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use ic_rules::{NotificationSettings, ScopeSetting};
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor, value::MapAccessDeserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// Current config file format version.
-pub const CONFIG_VERSION: u32 = 1;
+/// Current config file format version. Version 2 replaced an environment's
+/// single `url` (with the pin and server name in `tls`) by its list of
+/// `urls`, each with its own pin and server name (ENV-12).
+pub const CONFIG_VERSION: u32 = 2;
+
+/// The most URLs an environment may list ([`Environment::urls`]). The
+/// engine tries them in order on every connect, so a long list would only
+/// slow a failover down.
+pub const MAX_API_URLS: usize = 16;
 
 /// The whole configuration file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -82,7 +91,9 @@ pub enum ThemeChoice {
     System,
 }
 
-/// One Icinga 2 API endpoint and everything configured for it.
+/// One Icinga cluster (a single master, an HA pair, a master with
+/// satellites, or nodes behind a load balancer) and everything configured
+/// for it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Environment {
@@ -90,8 +101,14 @@ pub struct Environment {
     pub id: String,
     /// Display name (`prod-cluster`).
     pub name: String,
-    /// API base URL, `https://master-01.example.com:5665`.
-    pub url: String,
+    /// The cluster's API URLs, in order of preference (ENV-12): one for a
+    /// single master or a load balancer, one per node for an HA pair or a
+    /// master with satellites. The engine prefers a node that sees the
+    /// whole cluster (in the top-level zone) and takes one in a child zone
+    /// only while none of those answers. All of them share the login, the
+    /// CA and the system roots; each has its own pin and server name.
+    /// At most [`MAX_API_URLS`].
+    pub urls: Vec<ApiUrl>,
     /// How to authenticate.
     pub auth: AuthConfig,
     /// How to trust the server certificate.
@@ -131,21 +148,78 @@ impl Default for AuthConfig {
     }
 }
 
-/// How to trust the server certificate. Icinga signs its API certificate
-/// with its own CA, so one of `ca_file` or `pinned_sha256` is usually set.
+/// How to trust the servers' certificates, for every URL of the
+/// environment. Icinga signs its API certificates with its own CA, which
+/// covers every node of the cluster, so `ca_file` is the recommended
+/// setting; a pinned certificate names one node's certificate and is set
+/// per URL ([`ApiUrl::pinned_sha256`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TlsConfig {
     /// PEM CA bundle (Icinga's `/var/lib/icinga2/certs/ca.crt`).
     pub ca_file: Option<PathBuf>,
-    /// Accept exactly the server certificate with this SHA-256 fingerprint
-    /// (hex, colons optional), skipping CA and name checks.
-    pub pinned_sha256: Option<String>,
-    /// Verify the certificate against this name instead of the URL's host
-    /// (when connecting by IP or an alias).
-    pub server_name: Option<String>,
     /// Also trust the operating system's root certificates.
     pub use_system_roots: bool,
+}
+
+/// One API URL of an environment, with what is particular to the server
+/// behind it.
+///
+/// In the settings file each entry is a table (`url`, and optionally
+/// `pinned_sha256` and `server_name`); a hand-written file may also give a
+/// plain string (`urls = ["https://master-01:5665", "https://master-02:5665"]`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ApiUrl {
+    /// The API base URL, `https://master-01.example.com:5665`.
+    pub url: String,
+    /// Accept exactly the server certificate with this SHA-256 fingerprint
+    /// (hex, colons optional) at this URL, skipping CA and name checks.
+    pub pinned_sha256: Option<String>,
+    /// Verify the certificate at this URL against this name instead of
+    /// the URL's host (when connecting by IP, a tunnel or an alias).
+    pub server_name: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ApiUrl {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The table form, read field by field so unknown keys are found
+        /// (and logged) like everywhere else in the file.
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Table {
+            url: String,
+            pinned_sha256: Option<String>,
+            server_name: Option<String>,
+        }
+
+        struct UrlVisitor;
+
+        impl<'de> Visitor<'de> for UrlVisitor {
+            type Value = ApiUrl;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a URL, or a table with `url`")
+            }
+
+            fn visit_str<E: de::Error>(self, url: &str) -> Result<ApiUrl, E> {
+                Ok(ApiUrl {
+                    url: url.to_owned(),
+                    ..ApiUrl::default()
+                })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<ApiUrl, A::Error> {
+                let table = Table::deserialize(MapAccessDeserializer::new(map))?;
+                Ok(ApiUrl {
+                    url: table.url,
+                    pinned_sha256: table.pinned_sha256,
+                    server_name: table.server_name,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(UrlVisitor)
+    }
 }
 
 /// A sidebar group: a named folder of dashboards.

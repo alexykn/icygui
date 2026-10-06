@@ -144,7 +144,7 @@ The whole app runs against a simulated Icinga in the same process: a 150-host pr
 ## Quick start
 
 1. **Create an API user.** Paste the ready-made, least-privilege `ApiUser` from the [user guide](docs/user-guide.md#the-api-user) into your Icinga config (or your Ansible role) and reload Icinga.
-2. **Start icygui.** The first window asks for a name, the API URL (`https://<master>:5665`), the API user and its password.
+2. **Start icygui.** The first window asks for a name, the API URL (`https://<master>:5665`; an HA pair or a cluster with satellites gets one URL per node, see [clusters](docs/user-guide.md#clusters-which-urls-to-list)), the API user and its password.
 3. **Trust the certificate.** Point it at Icinga's CA (`/var/lib/icinga2/certs/ca.crt`), or press *test connection*, compare the fingerprint it shows with the master's, and *trust this certificate*. See [TLS](docs/user-guide.md#tls).
 4. **Connect.** You start with an *overview* group: problems, host problems, all services. Press <kbd>⌘K</kbd> / <kbd>Ctrl K</kbd> and start typing.
 

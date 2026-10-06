@@ -10,25 +10,25 @@ use crate::config::new_id;
 use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::fingerprint::parse_fingerprint;
 use crate::model::{
-    AuthConfig, Dashboard, DashboardGroup, Environment, ObjectKind, TlsConfig, View,
+    ApiUrl, AuthConfig, Dashboard, DashboardGroup, Environment, ObjectKind, TlsConfig, View,
 };
 
 impl Environment {
-    /// A new environment with a fresh id, the [default dashboards]
-    /// and default notification settings. `name` and `url` are stored
-    /// trimmed.
+    /// A new environment with a fresh id, one URL, the [default
+    /// dashboards] and default notification settings. `name` and `url` are
+    /// stored trimmed; more URLs go into [`Environment::urls`].
     ///
     /// It trusts the operating system's root certificates, so a server
     /// with a publicly trusted certificate works right away. For Icinga's
     /// own CA, set [`TlsConfig::ca_file`] or pin the certificate
-    /// ([`TlsConfig::pinned_sha256`]).
+    /// ([`ApiUrl::pinned_sha256`]).
     ///
     /// [default dashboards]: default_groups
     pub fn new(name: &str, url: &str, auth: AuthConfig) -> Self {
         Self {
             id: new_id(),
             name: name.trim().to_owned(),
-            url: url.trim().to_owned(),
+            urls: vec![ApiUrl::new(url)],
             auth,
             tls: TlsConfig {
                 use_system_roots: true,
@@ -77,6 +77,30 @@ impl Environment {
         self.group_mut(group_id)?.dashboard_mut(dashboard_id)
     }
 
+    /// The first URL as written (trimmed), for labels; empty without
+    /// URLs.
+    pub fn primary_url(&self) -> &str {
+        self.urls.first().map_or("", |url| url.url.trim())
+    }
+
+    /// Whether the connection settings differ from `other`'s: the URLs
+    /// (with their pins and server names), the login or the TLS settings.
+    /// Names, authors, dashboards and rules don't count.
+    pub fn connection_differs(&self, other: &Self) -> bool {
+        self.urls != other.urls || self.auth != other.auth || self.tls != other.tls
+    }
+}
+
+impl ApiUrl {
+    /// A URL without a pin or server name, stored trimmed.
+    pub fn new(url: &str) -> Self {
+        Self {
+            url: url.trim().to_owned(),
+            pinned_sha256: None,
+            server_name: None,
+        }
+    }
+
     /// The API base URL, checked the way [`Config::validate`] checks it and
     /// with a path that ends in `/`, so `url.join("v1/status")` keeps any
     /// path prefix (a reverse proxy's `/icinga/`).
@@ -96,21 +120,46 @@ impl Environment {
             reason,
         })
     }
-}
 
-impl TlsConfig {
     /// The pinned certificate fingerprint as bytes, if one is set.
     ///
     /// # Errors
     ///
-    /// [`ConfigError::InvalidFingerprint`] when
-    /// [`TlsConfig::pinned_sha256`] is set but not a valid fingerprint (see
-    /// [`parse_fingerprint`]).
+    /// [`ConfigError::InvalidFingerprint`] when [`ApiUrl::pinned_sha256`]
+    /// is set but not a valid fingerprint (see [`parse_fingerprint`]).
     pub fn pinned_fingerprint(&self) -> Result<Option<[u8; 32]>, ConfigError> {
         self.pinned_sha256
             .as_deref()
             .map(parse_fingerprint)
             .transpose()
+    }
+
+    /// The server name override, trimmed, unless blank.
+    pub fn server_name(&self) -> Option<&str> {
+        self.server_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
+
+    /// A short label for messages and lists: the host and port of a valid
+    /// URL (`master-01.example.com:5665`, with a reverse proxy's path:
+    /// `proxy.example.com/icinga`), otherwise the text with any
+    /// credentials, query and fragment masked.
+    pub fn label(&self) -> String {
+        match parse_api_url(&self.url) {
+            Ok(url) => {
+                let host = url.host_str().unwrap_or_default();
+                let mut label = match url.port() {
+                    Some(port) => format!("{host}:{port}"),
+                    None => host.to_owned(),
+                };
+                let path = url.path().trim_end_matches('/');
+                label.push_str(path);
+                label
+            }
+            Err(_) => redact_url(&self.url),
+        }
     }
 }
 
@@ -394,7 +443,8 @@ mod tests {
         let second = Environment::new("prod", "https://master-01:5665", basic("icygui"));
         assert_ne!(first.id, second.id);
         assert_eq!(first.name, "prod");
-        assert_eq!(first.url, "https://master-01:5665");
+        assert_eq!(first.urls, [ApiUrl::new("https://master-01:5665")]);
+        assert_eq!(first.primary_url(), "https://master-01:5665");
         assert!(first.tls.use_system_roots);
         assert_eq!(first.author, None);
         assert_eq!(first.notifications, NotificationSettings::default());
@@ -671,7 +721,7 @@ mod tests {
             "https://master-01:5665/#hunter2",
         ] {
             let environment = Environment::new("prod", url, basic("icygui"));
-            let error = environment.api_url().unwrap_err();
+            let error = environment.urls[0].api_url().unwrap_err();
             for text in [error.to_string(), format!("{error:?}")] {
                 assert!(!text.contains("hunter2"), "{text}");
                 assert!(text.contains("master-01"), "{text}");
@@ -682,26 +732,84 @@ mod tests {
     #[test]
     fn api_url_reports_the_configured_url() {
         let mut environment = Environment::new("prod", "http://m:5665", basic("u"));
-        match environment.api_url() {
+        match environment.urls[0].api_url() {
             Err(ConfigError::InvalidUrl { url, reason }) => {
                 assert_eq!(url, "http://m:5665");
                 assert!(reason.starts_with("must use https"));
             }
             other => panic!("expected an invalid URL, got {other:?}"),
         }
-        environment.url = "https://m:5665".to_owned();
-        assert_eq!(environment.api_url().unwrap().as_str(), "https://m:5665/");
+        environment.urls[0].url = "https://m:5665".to_owned();
+        assert_eq!(
+            environment.urls[0].api_url().unwrap().as_str(),
+            "https://m:5665/"
+        );
+    }
+
+    #[test]
+    fn url_labels_are_short_and_never_show_credentials() {
+        for (text, label) in [
+            (
+                "https://master-01.example.com:5665",
+                "master-01.example.com:5665",
+            ),
+            ("https://master-01.example.com", "master-01.example.com"),
+            (
+                "https://proxy.example.com/icinga/",
+                "proxy.example.com/icinga",
+            ),
+            ("https://[::1]:5665", "[::1]:5665"),
+            (
+                "https://root:pw@master-01:5665",
+                "https://***@master-01:5665",
+            ),
+            ("not a url", "not a url"),
+        ] {
+            assert_eq!(ApiUrl::new(text).label(), label, "{text}");
+        }
+    }
+
+    #[test]
+    fn server_names_are_trimmed_and_blank_ones_unset() {
+        let mut url = ApiUrl::new("https://10.0.0.5:5665");
+        assert_eq!(url.server_name(), None);
+        url.server_name = Some("  ".to_owned());
+        assert_eq!(url.server_name(), None);
+        url.server_name = Some(" master-01 ".to_owned());
+        assert_eq!(url.server_name(), Some("master-01"));
+    }
+
+    #[test]
+    fn connection_changes_are_told_from_other_changes() {
+        let original = Environment::new("prod", "https://master-01:5665", basic("u"));
+        let mut renamed = original.clone();
+        renamed.name = "production".to_owned();
+        renamed.author = Some("m.keller".to_owned());
+        renamed.groups.clear();
+        assert!(!original.connection_differs(&renamed));
+        let mut second = original.clone();
+        second.urls.push(ApiUrl::new("https://master-02:5665"));
+        assert!(original.connection_differs(&second));
+        let mut pinned = original.clone();
+        pinned.urls[0].pinned_sha256 = Some("AB".repeat(32));
+        assert!(original.connection_differs(&pinned));
+        let mut tls = original.clone();
+        tls.tls.use_system_roots = false;
+        assert!(original.connection_differs(&tls));
+        let mut login = original.clone();
+        login.auth = basic("other");
+        assert!(original.connection_differs(&login));
     }
 
     #[test]
     fn pinned_fingerprints_parse() {
-        let mut tls = TlsConfig::default();
-        assert_eq!(tls.pinned_fingerprint().unwrap(), None);
-        tls.pinned_sha256 = Some(["0A"; 32].join(":"));
-        assert_eq!(tls.pinned_fingerprint().unwrap(), Some([0x0a; 32]));
-        tls.pinned_sha256 = Some("0A:0B".to_owned());
+        let mut url = ApiUrl::new("https://m:5665");
+        assert_eq!(url.pinned_fingerprint().unwrap(), None);
+        url.pinned_sha256 = Some(["0A"; 32].join(":"));
+        assert_eq!(url.pinned_fingerprint().unwrap(), Some([0x0a; 32]));
+        url.pinned_sha256 = Some("0A:0B".to_owned());
         assert!(matches!(
-            tls.pinned_fingerprint(),
+            url.pinned_fingerprint(),
             Err(ConfigError::InvalidFingerprint(_))
         ));
     }

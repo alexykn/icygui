@@ -165,6 +165,55 @@ async fn trusting_the_mock_ca() {
     client_as(&server, ROOT, named).info().await.unwrap();
 }
 
+// --- Topology (ENV-12) -----------------------------------------------------
+
+#[tokio::test]
+async fn nodes_report_their_name_and_the_zone_tree() {
+    let cluster = scenarios::prod_cluster();
+    let master = start(MockConfig::with_scenario(cluster.for_node("master-01"))).await;
+    let satellite = start(MockConfig::with_scenario(cluster.for_node("sat-ams-01"))).await;
+
+    let client = root(&master);
+    assert_eq!(
+        client.node_name().await.unwrap().as_deref(),
+        Some("master-01")
+    );
+    let zones = client.zones().await.unwrap();
+    let zone = |name: &str| zones.iter().find(|zone| zone.name == name).unwrap();
+    assert_eq!(zone("master").parent, None);
+    assert_eq!(zone("master").endpoints, ["master-01"]);
+    assert!(!zone("master").global);
+    assert_eq!(zone("ams").parent.as_deref(), Some("master"));
+    assert_eq!(zone("ams").endpoints, ["sat-ams-01"]);
+    assert!(zone("global-templates").global);
+    assert!(zone("global-templates").endpoints.is_empty());
+
+    let client = root(&satellite);
+    assert_eq!(
+        client.node_name().await.unwrap().as_deref(),
+        Some("sat-ams-01")
+    );
+    assert_eq!(client.zones().await.unwrap(), zones);
+    // The satellite has only its zone's hosts.
+    let hosts = client.hosts().await.unwrap();
+    assert!(!hosts.is_empty());
+    assert!(hosts.len() < root(&master).hosts().await.unwrap().len());
+
+    // Without the permissions, Icinga refuses.
+    let viewer = MockUser::new("viewer", "secret", &["objects/query/Host"]);
+    let locked = start(MockConfig {
+        users: vec![viewer],
+        ..MockConfig::with_scenario(cluster.for_node("master-01"))
+    })
+    .await;
+    let client = client_as(&locked, ("viewer", "secret"), pinned(&locked));
+    assert!(matches!(
+        client.node_name().await,
+        Err(ApiError::Forbidden(_))
+    ));
+    assert!(matches!(client.zones().await, Err(ApiError::Forbidden(_))));
+}
+
 // --- Tiered loading ----------------------------------------------------------
 
 #[tokio::test]

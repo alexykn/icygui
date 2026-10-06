@@ -658,10 +658,10 @@ fn a_real_icinga_loads_read_only() {
         );
         environment.tls.use_system_roots = false;
         environment.tls.ca_file = Some(var("ICYGUI_CONTRACT_CA_FILE").into());
-        environment.tls.server_name = Some(var("ICYGUI_CONTRACT_SERVER_NAME"));
+        environment.urls[0].server_name = Some(var("ICYGUI_CONTRACT_SERVER_NAME"));
         environment
     };
-    let api_url = environment("viewer").api_url().unwrap();
+    let api_url = environment("viewer").urls[0].api_url().unwrap();
     let host = api_url.host_str().unwrap_or_default();
     assert!(
         host == "localhost" || host == "127.0.0.1" || host == "[::1]",
@@ -669,6 +669,7 @@ fn a_real_icinga_loads_read_only() {
     );
     let viewer = futures::executor::block_on(ic_core::test_connection(
         environment("viewer"),
+        0,
         Some(SecretString::from("viewer-test")),
     ));
     assert!(
@@ -700,6 +701,10 @@ fn a_real_icinga_loads_read_only() {
                     let state = app.state.read(cx);
                     assert!(state.permissions().is_some());
                     assert_eq!(state.connection_notice(Timestamp::now()), None);
+                    // A single master in the top-level zone (ENV-12).
+                    let node = state.connection().node.clone().unwrap();
+                    assert_eq!(node.view, ic_core::ClusterView::Full, "{node:?}");
+                    assert!(state.connection().view_marker().is_none());
                     assert!(
                         state
                             .selected()

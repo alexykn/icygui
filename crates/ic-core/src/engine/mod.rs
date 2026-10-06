@@ -58,6 +58,7 @@ use crate::event_log::{EventLog, event_log_path};
 use crate::snapshot::{DashboardResult, Snapshot};
 use crate::spec::{EnvironmentSpec, Ports, Tuning};
 use crate::store::{Applied, Discovered, ObjectView, Overview, Store, notification_object};
+use crate::topology::{self, ConnectedNode};
 
 use fetch::{Answers, FetchQueue, FetchTask, Lists};
 use load::LoadTask;
@@ -77,6 +78,9 @@ pub(crate) enum Internal {
     },
     /// The connect task failed.
     ConnectFailed { session: u64, failure: Failure },
+    /// A probe of the URLs preferred over the connected one is back:
+    /// `better` is one whose node sees more of the cluster (ENV-12).
+    Probed { session: u64, better: Option<usize> },
     /// A step of a load.
     Load {
         session: u64,
@@ -157,7 +161,8 @@ impl std::fmt::Debug for Connected {
             .field("client", &self.client)
             .field("user", &self.info.user)
             .field("stream", &self.lines.is_some())
-            .finish()
+            .field("node", &self.node)
+            .finish_non_exhaustive()
     }
 }
 
@@ -222,6 +227,10 @@ enum LoadKind {
 struct Conn {
     client: Client,
     info: ApiInfo,
+    /// The node it reached, and how much of the cluster that node sees.
+    node: Arc<ConnectedNode>,
+    /// The login, for probes of the URLs preferred over this one.
+    login: connect::Login,
     /// When the session connected (its stream opened).
     since: Instant,
     /// When it went live (for the backoff reset and `Connected.since`).
@@ -353,6 +362,16 @@ pub(crate) struct Engine {
     /// Objects whose last action got no answer: the same action on them
     /// is held back for a while, so a retry can't duplicate it.
     doubts: actions::Doubts,
+    /// The URL the next connect tries first (a probe found its node sees
+    /// more of the cluster); the others follow in order of preference.
+    walk_first: Option<usize>,
+    /// The next probe of the URLs preferred over the connected one, while
+    /// its node doesn't see the whole cluster (ENV-12).
+    probe_at: Option<Instant>,
+    /// Spaces the probes: `Tuning::probe_initial`, doubling up to
+    /// `Tuning::probe_max`, with jitter.
+    probe_backoff: Backoff,
+    probe_in_flight: bool,
 }
 
 /// Why the select loop woke up.
@@ -377,6 +396,7 @@ impl Engine {
         let event_log = EventLog::open(event_log_path(&spec.data_dir, &spec.environment.id));
         let notify = Notify::new(&spec.environment);
         let now = Instant::now();
+        let tuning_probe = (tuning.probe_initial, tuning.probe_max);
         Self {
             notify,
             tick_at: now + tuning.rule_tick,
@@ -430,6 +450,10 @@ impl Engine {
             restarts: Restarts::default(),
             state: None,
             doubts: actions::Doubts::default(),
+            walk_first: None,
+            probe_at: None,
+            probe_backoff: Backoff::new(tuning_probe.0, tuning_probe.1),
+            probe_in_flight: false,
         }
     }
 
@@ -558,6 +582,7 @@ impl Engine {
             self.fetch_at(),
             self.reload_due(),
             self.sweep_at(now),
+            self.probe_due(),
             Some(self.tick_at),
             Some(self.prune_at),
         ]
@@ -585,6 +610,9 @@ impl Engine {
         if self.fetch_at().is_some_and(|at| at <= now) {
             self.start_fetch(now);
         }
+        if self.probe_due().is_some_and(|at| at <= now) {
+            self.start_probe();
+        }
         if self.tick_at <= now {
             self.tick(now);
         }
@@ -611,8 +639,10 @@ impl Engine {
         let secrets = Arc::clone(&self.ports.secrets);
         let tx = self.internal_tx.clone();
         let action_timeout = self.tuning.action_timeout;
+        let first = self.walk_first.take();
         self.tasks.spawn(async move {
-            let message = match connect::connect(&environment, secrets, action_timeout).await {
+            let connected = connect::connect(&environment, secrets, action_timeout, first).await;
+            let message = match connected {
                 Ok(connected) => Internal::Connected {
                     session,
                     connected: Box::new(connected),
@@ -638,6 +668,9 @@ impl Engine {
         self.store.end_annotation_query();
         // The stream gap may have missed `Notification` events.
         self.notifications_current = false;
+        // Probes belong to the session.
+        self.probe_at = None;
+        self.probe_in_flight = false;
         // What an aborted load found is real all the same.
         self.finish_discovered();
     }
@@ -688,15 +721,17 @@ impl Engine {
                 ConnectionState::AuthFailed { message }
             }
             Failure::Tls {
+                url,
                 message,
                 certificate,
                 ..
             } => {
-                tracing::warn!(%message, "the server certificate isn't trusted");
+                tracing::warn!(%message, %url, "the server certificate isn't trusted");
                 self.phase = Phase::Idle { retry_at: None };
                 ConnectionState::TlsFailed {
+                    url,
                     message,
-                    certificate,
+                    certificate: certificate.map(|certificate| *certificate),
                 }
             }
         };
@@ -708,8 +743,25 @@ impl Engine {
             client,
             info,
             lines,
+            node,
+            login,
         } = connected;
-        tracing::info!(user = %info.user, version = %info.version, "connected to Icinga");
+        tracing::info!(
+            user = %info.user,
+            version = %info.version,
+            node = %node.name,
+            view = %node.view.label(),
+            "connected to Icinga"
+        );
+        let node = Arc::new(node);
+        // Objects loaded from a node with another view (a satellite's
+        // part, or the whole cluster before a failover to a satellite)
+        // aren't this node's: reloaded at once (jittered).
+        let other_view = self.loaded
+            && self
+                .store
+                .node()
+                .is_some_and(|loaded| !loaded.view.same_data(&node.view));
         self.emit(CoreEvent::Permissions(info.clone()));
         if let Some(stream) = lines {
             let (tx, rx) = mpsc::unbounded_channel();
@@ -735,6 +787,8 @@ impl Engine {
         self.conn = Some(Conn {
             client,
             info,
+            node,
+            login,
             since: Instant::now(),
             live_since: None,
             next_status,
@@ -751,8 +805,19 @@ impl Engine {
             // keeps them current).
             let gap = self.stream_gap();
             self.go_live();
-            self.after_reconnect(gap, can_poll_status);
+            if other_view {
+                tracing::info!("the node sees another part of the cluster; reloading");
+                self.reload_now = false;
+                self.request_reload(sync::ReloadCause::Reconnect);
+            } else {
+                self.adopt_node(true);
+                self.after_reconnect(gap, can_poll_status);
+            }
         } else {
+            // The first load's objects are this node's from the start, so
+            // a partial view is labelled while it fills in (with its first
+            // tier's snapshot).
+            self.adopt_node(false);
             self.reload_now = false;
             self.phase = Phase::Loading;
             self.start_load(LoadKind::First);
@@ -851,6 +916,8 @@ impl Engine {
                 let now = Instant::now();
                 self.load = None;
                 self.loaded = true;
+                // The objects are this node's now.
+                self.adopt_node(true);
                 self.last_load_end = Some(now);
                 self.fetch
                     .release_deferred(now, |key| self.store.contains(key));
@@ -910,10 +977,10 @@ impl Engine {
     /// The first load is in: connected and live.
     fn go_live(&mut self) {
         let now = self.ports.clock.now();
-        let endpoint = self.endpoint_name();
         let Some(conn) = &mut self.conn else {
             return;
         };
+        let node = ConnectedNode::clone(&conn.node);
         conn.live_since = Some((Instant::now(), now));
         // Lines waited during the first load: the stall watch starts now.
         conn.last_line = Instant::now();
@@ -921,24 +988,119 @@ impl Engine {
         let version = conn.info.version.clone();
         self.phase = Phase::Live;
         self.set_state(ConnectionState::Connected {
-            endpoint,
+            node,
             version,
             since: now,
         });
+        self.schedule_probe();
     }
 
-    /// The endpoint's node name, or the URL's host.
-    fn endpoint_name(&self) -> String {
-        self.store
-            .status()
-            .map(|status| status.node_name.clone())
-            .filter(|name| !name.is_empty())
-            .or_else(|| {
-                self.conn
-                    .as_ref()
-                    .and_then(|conn| conn.client.base_url().host_str().map(str::to_owned))
-            })
-            .unwrap_or_default()
+    /// The store's objects come from the connected node (`Snapshot::node`).
+    /// `announce`: a snapshot goes out for it alone.
+    fn adopt_node(&mut self, announce: bool) {
+        if let Some(conn) = &self.conn {
+            self.store.set_node(Arc::clone(&conn.node), announce);
+        }
+    }
+
+    // --- probes of preferred URLs (ENV-12) ------------------------------------------
+
+    /// The URLs worth probing while connected: none while the node sees
+    /// the whole cluster.
+    fn probe_candidates(&self) -> Vec<usize> {
+        let Some(conn) = &self.conn else {
+            return Vec::new();
+        };
+        topology::candidates(
+            &conn.node.view,
+            conn.node.url_index,
+            self.spec.environment.urls.len(),
+        )
+    }
+
+    /// Schedules the next probe, if the connected node's view is short of
+    /// full; a full view starts the probes' spacing over.
+    fn schedule_probe(&mut self) {
+        if self.probe_candidates().is_empty() {
+            self.probe_backoff.reset();
+            self.probe_at = None;
+        } else {
+            self.probe_at = Some(Instant::now() + self.probe_backoff.fail());
+        }
+    }
+
+    /// When the next probe is due: only while live and none runs.
+    fn probe_due(&self) -> Option<Instant> {
+        if self.phase != Phase::Live || self.probe_in_flight {
+            return None;
+        }
+        self.probe_at
+    }
+
+    /// Asks the preferred URLs (`Tuning::probe_initial` after going live,
+    /// then less and less often) whether one answers with a fuller view:
+    /// one URL after the other, a login, the node's name and the zones
+    /// each (the event stream stays where it is until one does).
+    fn start_probe(&mut self) {
+        let candidates = self.probe_candidates();
+        let Some(conn) = &self.conn else {
+            return;
+        };
+        if candidates.is_empty() {
+            self.probe_at = None;
+            return;
+        }
+        self.probe_at = None;
+        self.probe_in_flight = true;
+        let login = conn.login.clone();
+        let urls = self.spec.environment.urls.clone();
+        let current = conn.node.view.clone();
+        let current_index = conn.node.url_index;
+        let action_timeout = self.tuning.action_timeout;
+        let tx = self.internal_tx.clone();
+        let session = self.session;
+        self.tasks.spawn(async move {
+            let mut better = None;
+            for index in candidates {
+                match connect::reach(&login, &urls, index, action_timeout).await {
+                    Ok(reached)
+                        if topology::better(&reached.node.view, index, &current, current_index) =>
+                    {
+                        tracing::info!(
+                            node = %reached.node.name,
+                            view = %reached.node.view.label(),
+                            "a preferred URL answers with a fuller view; switching"
+                        );
+                        better = Some(index);
+                        break;
+                    }
+                    Ok(reached) => tracing::debug!(
+                        node = %reached.node.name,
+                        view = %reached.node.view.label(),
+                        "probe: no fuller view"
+                    ),
+                    Err(failure) => {
+                        tracing::debug!(reason = %failure.reason(), "probe: URL not usable");
+                    }
+                }
+            }
+            let _ = tx.send(Internal::Probed { session, better });
+        });
+    }
+
+    /// A probe is back: switch to the better node, or probe again later.
+    fn on_probed(&mut self, better: Option<usize>) {
+        self.probe_in_flight = false;
+        match better {
+            Some(index) if self.phase == Phase::Live => {
+                // Not a failure: a fresh start on the better node (the
+                // walk continues with the others if it fails meanwhile).
+                self.walk_first = Some(index);
+                self.backoff.reset();
+                self.connect();
+            }
+            _ => self.schedule_probe(),
+        }
     }
 
     // --- status poll ------------------------------------------------------------------
@@ -1419,17 +1581,23 @@ impl Engine {
             Phase::Connecting | Phase::Loading => {
                 tracing::debug!("refresh: a connection attempt or load is already running");
             }
-            Phase::Live => self.request_reload(sync::ReloadCause::User),
+            Phase::Live => {
+                // Connected to a node short of the full view: the preferred
+                // URLs are asked at once too (ENV-12).
+                if !self.probe_in_flight && !self.probe_candidates().is_empty() {
+                    self.probe_at = Some(Instant::now());
+                }
+                self.request_reload(sync::ReloadCause::User);
+            }
         }
     }
 
     fn update_environment(&mut self, environment: ic_config::Environment) {
         let old = &self.spec.environment;
-        let reconnect = old.id != environment.id
-            || old.url != environment.url
-            || old.auth != environment.auth
-            || old.tls != environment.tls;
-        let other_server = old.id != environment.id || old.url != environment.url;
+        let reconnect = old.id != environment.id || old.connection_differs(&environment);
+        // Another cluster: no URL in common (adding the other master of an
+        // HA zone, reordering or fixing a pin keeps the objects).
+        let other_server = old.id != environment.id || !shares_url(old, &environment);
         let other_log = old.id != environment.id;
         let dashboards_changed = old.groups != environment.groups;
         self.spec.environment = environment;
@@ -1480,6 +1648,9 @@ impl Engine {
             Internal::ConnectFailed { session, failure } if session == self.session => {
                 self.fail(failure);
             }
+            Internal::Probed { session, better } if session == self.session => {
+                self.on_probed(better);
+            }
             Internal::Load {
                 session,
                 load,
@@ -1508,6 +1679,7 @@ impl Engine {
             // An older session's late answer.
             Internal::Connected { .. }
             | Internal::ConnectFailed { .. }
+            | Internal::Probed { .. }
             | Internal::Load { .. }
             | Internal::Status { .. }
             | Internal::Fetched { .. }
@@ -1532,6 +1704,23 @@ impl Engine {
 /// How long stopping waits at most for the event log to write what it was
 /// given.
 const LOG_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether two versions of an environment list a URL in common (compared
+/// as parsed, so `https://Master-01:5665/` is `https://master-01:5665`).
+fn shares_url(old: &ic_config::Environment, new: &ic_config::Environment) -> bool {
+    let parsed = |environment: &ic_config::Environment| -> Vec<String> {
+        environment
+            .urls
+            .iter()
+            .map(|url| {
+                url.api_url()
+                    .map_or_else(|_| url.url.trim().to_owned(), |parsed| parsed.to_string())
+            })
+            .collect()
+    };
+    let old = parsed(old);
+    parsed(new).iter().any(|url| old.contains(url))
+}
 
 /// Applies a reloaded small list, if it was reloaded and allowed.
 fn apply_list<T>(answer: Option<Result<Vec<T>, ApiError>>, what: &str, apply: impl FnOnce(Vec<T>)) {

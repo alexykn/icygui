@@ -9,6 +9,7 @@ use ic_model::{Action, ActionTarget, CheckableState, ObjectKey, StateType, Times
 use ic_rules::NotificationIntent;
 
 use crate::snapshot::{DashboardResult, Snapshot};
+use crate::topology::ConnectedNode;
 
 /// What the UI asks the engine to do. Sent with
 /// [`CoreHandle::send`](crate::CoreHandle::send), which never blocks.
@@ -30,8 +31,9 @@ pub enum Command {
     /// themselves).
     Refresh,
     /// The environment's settings changed. Changed connection settings
-    /// (URL, authentication, TLS) reconnect; anything else (dashboards,
-    /// rules, author) applies in place.
+    /// (URLs, their order, pins and server names, authentication, TLS)
+    /// reconnect; anything else (dashboards, rules, author) applies in
+    /// place.
     UpdateEnvironment(ic_config::Environment),
     /// The app-wide settings changed (reconcile interval, log retention).
     UpdateGeneral(ic_config::General),
@@ -124,16 +126,19 @@ pub enum ConnectionState {
     /// Connected and live: the event stream is open (if the API user may
     /// read events) and the initial load is complete.
     Connected {
-        /// The endpoint's node name (`master-01`), or the URL's host.
-        endpoint: String,
+        /// The node the engine is connected to: its name (`master-01`, or
+        /// the URL's host when the API user may not read the status), the
+        /// URL it was reached through, its zone and how much of the
+        /// cluster it sees (ENV-12), and the URLs passed over on the way.
+        node: ConnectedNode,
         /// Icinga's version.
         version: String,
         /// Since when.
         since: Timestamp,
     },
     /// The connection failed or broke; the engine retries at `retry_at`
-    /// with exponential backoff and jitter (1 s → 60 s). `Refresh` retries
-    /// now.
+    /// with exponential backoff and jitter (1 s → 60 s), trying every URL
+    /// again. `Refresh` retries now.
     Reconnecting {
         /// Why.
         error: String,
@@ -150,8 +155,13 @@ pub enum ConnectionState {
     },
     /// The server's certificate isn't trusted or doesn't match the pin. No
     /// automatic retry; the UI offers trust on first use with
-    /// `certificate`.
+    /// `certificate`. With several URLs, only when none of them may come
+    /// back by itself (otherwise `Reconnecting` names each URL's problem).
     TlsFailed {
+        /// The configured URL (as written in the environment's `urls`)
+        /// whose server presented the certificate: its pin is the one to
+        /// set.
+        url: String,
         /// What went wrong (with both fingerprints for a pin mismatch).
         message: String,
         /// The certificate the server presented, when it could be read.

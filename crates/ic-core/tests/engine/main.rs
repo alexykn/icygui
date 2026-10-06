@@ -13,7 +13,9 @@
 //! - `event_log`: the local `SQLite` event log;
 //! - `notified`: who Icinga notified, and when (its `Notification` objects);
 //! - `probe`: `test_connection` and `fetch_certificate`;
-//! - `scale`: production-size loads and bursts (ignored by default).
+//! - `scale`: production-size loads and bursts (ignored by default);
+//! - `topology`: several API URLs per environment, against several mocks
+//!   forming one cluster (ENV-12).
 
 #[path = "../support/mod.rs"]
 mod support;
@@ -29,3 +31,4 @@ mod notifications;
 mod notified;
 mod probe;
 mod scale;
+mod topology;

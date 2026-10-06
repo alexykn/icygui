@@ -206,7 +206,7 @@ pub(crate) fn build_with(now: Timestamp, options: FixtureOptions) -> Fixture {
     let environment = Environment {
         id: ENVIRONMENT_ID.to_owned(),
         name: "prod-cluster".to_owned(),
-        url: "https://master-01.example.com:5665".to_owned(),
+        urls: vec![ic_config::ApiUrl::new("https://master-01.example.com:5665")],
         auth: AuthConfig::Basic {
             username: "icygui".to_owned(),
         },

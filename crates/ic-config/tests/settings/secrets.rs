@@ -2,7 +2,9 @@
 
 use std::fs;
 
-use ic_config::{AuthConfig, Config, ConfigError, ConfigStore, Environment, ValidationIssue};
+use ic_config::{
+    ApiUrl, AuthConfig, Config, ConfigError, ConfigStore, Environment, ValidationIssue,
+};
 
 use crate::fixtures::{full_config, store_with};
 use crate::logs::{capture, warnings};
@@ -35,13 +37,13 @@ fn urls_with_credentials_are_never_saved() {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(dir.path().join("config.toml"));
         let mut config = full_config();
-        config.environments[1].url.clone_from(&url);
+        config.environments[1].urls[0].url.clone_from(&url);
 
         let error = store.save(&config).unwrap_err();
         let message = error.to_string();
         assert_eq!(
             message,
-            "invalid content: environments[1].url: must not contain a user name or password; \
+            "invalid content: environments[1].urls[0].url: must not contain a user name or password; \
              set them in the authentication settings",
             "{url}"
         );
@@ -111,8 +113,8 @@ auth = {{ kind = "basic", username = "root" }}
     }
     assert_eq!(
         first.validate()[0].to_string(),
-        "environments[0].url: must not contain a user name or password; set them in the \
-         authentication settings"
+        "environments[0].urls[0].url: must not contain a user name or password; set them in \
+         the authentication settings"
     );
     // The ids are derived from the content, so they are the same next time.
     assert_eq!(store.load().unwrap(), first);
@@ -176,7 +178,7 @@ fn errors_never_show_the_password() {
         &format!("https://icygui:{PASSWORD}@master-01:5665/?token={PASSWORD}#{PASSWORD}"),
         basic("icygui"),
     );
-    let error = environment.api_url().unwrap_err();
+    let error = environment.urls[0].api_url().unwrap_err();
     assert_eq!(
         error.to_string(),
         "invalid API URL `https://***@master-01:5665/?…`: must not contain a user name or \
@@ -184,13 +186,16 @@ fn errors_never_show_the_password() {
     );
     assert!(!format!("{error:?}").contains(PASSWORD));
 
-    environment.url = format!("https://master-01:5665/v1?password={PASSWORD}");
-    let error = environment.api_url().unwrap_err();
+    environment.urls[0].url = format!("https://master-01:5665/v1?password={PASSWORD}");
+    let error = environment.urls[0].api_url().unwrap_err();
     assert!(!error.to_string().contains(PASSWORD), "{error}");
     assert!(!format!("{error:?}").contains(PASSWORD), "{error:?}");
 
     let mut config = Config::default();
-    environment.url = format!("https://root:{PASSWORD}@master-01:5665");
+    environment.urls[0].url = format!("https://root:{PASSWORD}@master-01:5665");
+    environment
+        .urls
+        .push(ApiUrl::new(&format!("https://{PASSWORD}@master-02:5665")));
     config.environments.push(environment);
     for issue in config.validate() {
         assert!(!issue.to_string().contains(PASSWORD), "{issue}");

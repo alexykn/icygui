@@ -14,6 +14,11 @@
 //!   [`event_log_path`]) keeps state changes, acknowledgements, comments,
 //!   downtimes, flapping and notifications for the retention period;
 //!   [`delete_event_log`] removes it with its environment.
+//! - An environment lists its cluster's API URLs in order of preference;
+//!   every connect finds out which node answers and how much of the
+//!   cluster it sees ([`ClusterView`]), prefers nodes that see all of it
+//!   and keeps trying them gently while connected to one that doesn't
+//!   (ENV-12).
 //! - [`test_connection`] and [`fetch_certificate`] serve the settings
 //!   dialog without a running engine.
 //!
@@ -39,6 +44,7 @@ pub mod snapshot;
 mod spec;
 mod store;
 mod summary;
+mod topology;
 
 pub use command::{
     ActionOutcome, Command, ConnectionState, CoreEvent, LoadPhase, LogEntry, LogKind,
@@ -57,3 +63,4 @@ pub use probe::{
     missing_permissions, test_connection,
 };
 pub use spec::{EnvironmentSpec, Ports, Tuning};
+pub use topology::{ClusterView, ConnectedNode};

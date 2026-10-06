@@ -1663,10 +1663,11 @@ impl Workspace {
                 CertificateEvent::Close => this.close_modal(window, cx),
                 CertificateEvent::Trust {
                     environment_id,
+                    url,
                     fingerprint,
                 } => {
                     this.close_modal(window, cx);
-                    this.trust_certificate(environment_id, fingerprint, cx);
+                    this.trust_certificate(environment_id, url, fingerprint, cx);
                 }
                 CertificateEvent::Edit(id) => {
                     let id = id.clone();
@@ -1684,15 +1685,16 @@ impl Workspace {
     fn trust_certificate(
         &mut self,
         environment_id: &str,
+        url: &str,
         fingerprint: &str,
         cx: &mut Context<Self>,
     ) {
         match live::session(cx) {
             Some(session) => session.update(cx, |session, cx| {
-                session.trust_certificate(environment_id, fingerprint, cx);
+                session.trust_certificate(environment_id, url, fingerprint, cx);
             }),
             None => self.state.update(cx, |state, cx| {
-                state.pin_certificate(environment_id, fingerprint);
+                state.pin_certificate(environment_id, url, fingerprint);
                 cx.notify();
             }),
         }

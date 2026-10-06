@@ -28,7 +28,7 @@ A short checklist for the first time icygui connects to the real Icinga at work.
 
 ## 3. Connect
 
-- [ ] Start icygui. In the onboarding form: name (`prod`), URL `https://<master>:5665`, the API user and password, your own name as *author*.
+- [ ] Start icygui. In the onboarding form: name (`prod`), URL `https://<master>:5665` (an HA zone: *+ add URL* for the second master; satellites, if you want a fallback, after the masters: see [clusters](user-guide.md#clusters-which-urls-to-list)), the API user and password, your own name as *author*. *test all URLs* should show `full view` for every master.
 - [ ] TLS: set the CA file, **or** press *test connection*, compare the SHA-256 it shows with the one from step 2, character by character, and only then *trust this certificate*.
 - [ ] *test connection* shows the API user, Icinga's version and the permissions. Under *client* it lists what the user lacks: `actions/execute-command` (opt-in, left out on purpose) and, with the read-only user, exactly the `actions/*` permissions you left out, nothing else.
 - [ ] *connect*.

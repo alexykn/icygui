@@ -356,6 +356,41 @@ async fn objects_by_name_report_deleted_names_as_missing() {
     }
 }
 
+/// Looking up names without isolating the unknown ones: one request per
+/// batch, and a batch with an unknown name comes back missing as a whole.
+#[tokio::test]
+async fn objects_unsplit_cost_one_request_per_batch() {
+    let server = start(MockConfig::with_scenario(scenarios::prod_cluster())).await;
+    let control = server.control();
+    let client = root(&server);
+    let services = control.services();
+    let known: Vec<ObjectKey> = services.iter().take(250).map(Service::object_key).collect();
+    // The second batch (names 200–249) has an unknown name; the first
+    // doesn't.
+    let mut keys = known.clone();
+    keys.push(ObjectKey::service("hidden-host", "disk"));
+    control.clear_requests();
+    let fetched = client.objects_unsplit(&keys, Detail::Lean).await.unwrap();
+    assert_eq!(control.requests().len(), 2, "one request per batch");
+    assert_eq!(fetched.services.len(), 200);
+    assert_eq!(fetched.missing, keys[200..].to_vec());
+
+    // All unknown: still one request per batch.
+    let hidden: Vec<ObjectKey> = (0..450)
+        .map(|index| ObjectKey::service("hidden-host", &format!("s{index}")))
+        .collect();
+    control.clear_requests();
+    let fetched = client.objects_unsplit(&hidden, Detail::Lean).await.unwrap();
+    assert_eq!(control.requests().len(), 3);
+    assert_eq!(fetched.missing, hidden);
+    assert!(fetched.services.is_empty());
+
+    // Without unknown names it is `objects`.
+    let fetched = client.objects_unsplit(&known, Detail::Full).await.unwrap();
+    assert_eq!(fetched.services.len(), 250);
+    assert!(fetched.missing.is_empty());
+}
+
 /// Icinga's own `Notification` objects: the whole list matches the mock's,
 /// by name in batches with unknown names isolated, and a missing
 /// permission is `Forbidden`.

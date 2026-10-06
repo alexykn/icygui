@@ -63,6 +63,7 @@ use load::LoadTask;
 use notify::Notify;
 use publish::Previews;
 use stream::ReaderMsg;
+use sync::Restarts;
 use watchdog::Watchdog;
 
 /// Messages from the engine's background tasks.
@@ -131,10 +132,12 @@ pub(crate) enum LoadStep {
         overview: Box<Overview>,
         hosts: Vec<Host>,
     },
-    /// Tier 2.
+    /// Tier 2. The engine answers with the problems whose details tier 3
+    /// fetches.
     Services {
         started: u64,
         services: Vec<Service>,
+        details: oneshot::Sender<Vec<ObjectKey>>,
     },
     /// A batch of tier 3.
     Details {
@@ -188,6 +191,22 @@ enum Phase {
     Live,
 }
 
+/// Why a load runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadKind {
+    /// The session's first load into an empty store: no rule inputs, and
+    /// `Connected` once it is in.
+    First,
+    /// A reload after a reconnect, an Icinga restart or `Refresh`: every
+    /// problem's details again (the gap may hide config changes).
+    Reload,
+    /// The periodic reconcile: tier 3 fetches only the problems the store
+    /// doesn't hold in full or whose result is older than their last check
+    /// (events keep the others current), so an outage with thousands of
+    /// problems doesn't reload all their details every interval.
+    Reconcile,
+}
+
 /// The established connection of the current session.
 #[expect(
     clippy::struct_excessive_bools,
@@ -212,6 +231,13 @@ struct Conn {
     /// `Notification` events read while it runs: the objects whose
     /// notifications to re-read if the list turns out older.
     notification_events_waiting: Vec<(u64, ObjectKey)>,
+    /// The stream carries `CheckResult` events: a status poll reporting
+    /// checks while no line arrived for `Tuning::stall_after` means it
+    /// stalled.
+    check_events: bool,
+    /// When the engine last received stream lines (or the stream opened,
+    /// or the session went live).
+    last_line: Instant,
 }
 
 /// The engine.
@@ -238,8 +264,8 @@ pub(crate) struct Engine {
     /// Lines read so far, over every session (see the store's ordering
     /// notes).
     seq: Arc<AtomicU64>,
-    /// The load in flight: its id, and whether it is the session's first.
-    load: Option<(u64, bool)>,
+    /// The load in flight: its id and kind.
+    load: Option<(u64, LoadKind)>,
     loads: u64,
     fetch: FetchQueue,
     revision: u64,
@@ -269,12 +295,19 @@ pub(crate) struct Engine {
     loaded: bool,
     /// The next connect was asked for by the user: reload without jitter.
     reload_now: bool,
-    /// The reload after a reconnect, jittered.
+    /// The next reload ([`LoadKind::Reload`]): after a reconnect
+    /// (jittered), a restart or `Refresh` (spaced, see
+    /// [`Engine::request_reload`]).
     reload_at: Option<Instant>,
+    /// When the last reload started.
+    last_reload: Option<Instant>,
     /// The next periodic reconcile.
     reconcile_at: Option<Instant>,
-    /// When the last load completed.
-    last_load_done: Option<Instant>,
+    /// When the last load ended, complete or failed: the next reconcile
+    /// counts from it.
+    last_load_end: Option<Instant>,
+    /// The `program_start` each Icinga node reported (restart detection).
+    restarts: Restarts,
     /// The connection state last emitted.
     state: Option<ConnectionState>,
     /// Notifications: the rule engine and its inputs.
@@ -354,8 +387,10 @@ impl Engine {
             loaded: false,
             reload_now: false,
             reload_at: None,
+            last_reload: None,
             reconcile_at: None,
-            last_load_done: None,
+            last_load_end: None,
+            restarts: Restarts::default(),
             state: None,
         }
     }
@@ -372,7 +407,7 @@ impl Engine {
         self.prune(Instant::now());
         let mut lines = Vec::new();
         loop {
-            while self.tasks.try_join_next().is_some() {}
+            self.reap_tasks();
             let deadline = self.next_deadline(Instant::now());
             let live = self.phase == Phase::Live;
             let max_batch = self.tuning.max_batch.max(1);
@@ -389,15 +424,42 @@ impl Engine {
                 Wake::Command(command) => self.on_command(command),
                 Wake::Internal(message) => self.on_internal(message),
                 Wake::Lines(0) => {
-                    // The reader is gone without saying why (aborted).
-                    self.lines = None;
+                    // The reader is gone without saying why (it panicked:
+                    // a teardown, which aborts it, also drops the
+                    // receiver). Without a stream nothing stays current.
+                    tracing::error!("the event stream reader ended unexpectedly");
+                    self.fail(Failure::Transient(
+                        "the event stream ended unexpectedly".to_owned(),
+                    ));
                 }
-                Wake::Lines(_) => self.on_lines(std::mem::take(&mut lines)),
+                Wake::Lines(_) => {
+                    if let Some(conn) = &mut self.conn {
+                        conn.last_line = Instant::now();
+                    }
+                    self.on_lines(std::mem::take(&mut lines));
+                }
                 Wake::Timer => {}
             }
             self.run_due();
         }
         self.stop();
+    }
+
+    /// Collects the session's finished tasks. A task that panicked (a bug)
+    /// leaves its part of the session stuck (a load, the re-query queue,
+    /// the status poll), so the session starts over: logged, then a
+    /// reconnect with backoff and a reload.
+    fn reap_tasks(&mut self) {
+        while let Some(result) = self.tasks.try_join_next() {
+            if let Err(error) = result
+                && error.is_panic()
+            {
+                tracing::error!(%error, "a background task panicked; reconnecting");
+                self.fail(Failure::Transient(
+                    "an internal task failed; reconnecting".to_owned(),
+                ));
+            }
+        }
     }
 
     // --- events out ---------------------------------------------------------------
@@ -476,8 +538,8 @@ impl Engine {
         if self.status_at().is_some_and(|at| at <= now) {
             self.poll_status();
         }
-        if self.reload_due().is_some_and(|at| at <= now) {
-            self.start_load(false);
+        if let Some(kind) = self.due_load(now) {
+            self.start_load(kind);
         }
         if self.sweep_at(now).is_some_and(|at| at <= now) {
             self.sweep(now);
@@ -616,6 +678,14 @@ impl Engine {
         let notifications_allowed = info.allows("objects/query/Notification");
         let notification_events = self.lines.is_some()
             && info.allows(&format!("events/{}", EventKind::Notification.api_name()));
+        let check_events = self.lines.is_some()
+            && info.allows(&format!("events/{}", EventKind::CheckResult.api_name()));
+        // Without `objects/query/<type>` a kind isn't asked for by name at
+        // all (events about its objects can't be looked up).
+        self.fetch.refuse(
+            !info.allows("objects/query/Host"),
+            !info.allows("objects/query/Service"),
+        );
         self.conn = Some(Conn {
             client,
             info,
@@ -626,6 +696,8 @@ impl Engine {
             notification_events,
             notifications_in_flight: false,
             notification_events_waiting: Vec::new(),
+            check_events,
+            last_line: Instant::now(),
         });
         if self.loaded {
             // A reconnect: live at once on the objects we have (the stream
@@ -641,17 +713,16 @@ impl Engine {
         } else {
             self.reload_now = false;
             self.phase = Phase::Loading;
-            self.start_load(true);
+            self.start_load(LoadKind::First);
         }
     }
 
-    /// Starts a load (tiers 1–3) unless one runs. `first`: the session's
-    /// first load into an empty store, which ends in `Connected`; other
-    /// loads (reconcile, `Refresh`, a restart, a reconnect) leave the
-    /// connection state alone, and query answers that differ from the
-    /// store without an event explaining it are recorded
-    /// ([`Engine::record_discovered`]).
-    fn start_load(&mut self, first: bool) {
+    /// Starts a load (tiers 1–3) unless one runs. The session's first
+    /// load into an empty store ends in `Connected`; other loads (reconcile,
+    /// `Refresh`, a restart, a reconnect) leave the connection state alone,
+    /// and query answers that differ from the store without an event
+    /// explaining it are recorded ([`Engine::record_discovered`]).
+    fn start_load(&mut self, kind: LoadKind) {
         if self.load.is_some() {
             return;
         }
@@ -660,8 +731,11 @@ impl Engine {
         };
         self.reload_at = None;
         self.reconcile_at = None;
+        if kind == LoadKind::Reload {
+            self.last_reload = Some(Instant::now());
+        }
         self.loads += 1;
-        self.load = Some((self.loads, first));
+        self.load = Some((self.loads, kind));
         self.store.begin_annotation_query();
         let task = LoadTask {
             client: conn.client.clone(),
@@ -674,12 +748,13 @@ impl Engine {
     }
 
     fn on_load(&mut self, load: u64, step: LoadStep) {
-        let Some((current, first)) = self.load else {
+        let Some((current, kind)) = self.load else {
             return;
         };
         if current != load {
             return;
         }
+        let first = kind == LoadKind::First;
         match step {
             LoadStep::Progress { phase, done, total } => {
                 if first {
@@ -691,14 +766,24 @@ impl Engine {
                 overview,
                 hosts,
             } => {
+                if let Some(status) = &overview.status {
+                    // The load reloads anyway.
+                    self.restarts.observe(status);
+                }
                 self.store.apply_overview(*overview, started);
                 self.store.replace_hosts(hosts, started);
                 self.record_discovered(true);
                 self.publish();
             }
-            LoadStep::Services { started, services } => {
+            LoadStep::Services {
+                started,
+                services,
+                details,
+            } => {
                 self.store.replace_services(services, Detail::Lean, started);
                 self.record_discovered(true);
+                // The load task is gone if the session ended meanwhile.
+                let _ = details.send(self.problem_details(kind));
                 self.publish();
             }
             LoadStep::Details { started, fetched } => {
@@ -716,8 +801,9 @@ impl Engine {
                 let now = Instant::now();
                 self.load = None;
                 self.loaded = true;
-                self.last_load_done = Some(now);
-                self.fetch.release_deferred(now);
+                self.last_load_end = Some(now);
+                self.fetch
+                    .release_deferred(now, |key| self.store.contains(key));
                 self.watchdog.loaded(&self.store);
                 self.schedule_reconcile();
                 self.finish_discovered();
@@ -731,14 +817,17 @@ impl Engine {
             }
             LoadStep::Failed(failure) => {
                 self.load = None;
+                self.last_load_end = Some(Instant::now());
                 self.store.end_annotation_query();
                 self.finish_discovered();
                 if first || matches!(failure, Failure::Auth(_)) {
                     self.fail(failure);
                 } else if let Failure::Transient(error) = failure {
-                    // The stream decides whether the connection is gone;
-                    // the next reconcile comes at the usual interval.
-                    tracing::warn!(%error, "reload failed");
+                    // The stream decides whether the connection is gone; a
+                    // failed reload waits a whole interval from now, so a
+                    // struggling master (or a proxy answering 502) isn't
+                    // asked again right away.
+                    tracing::warn!(%error, "reload failed; the next one follows at the usual interval");
                     self.schedule_reconcile();
                 }
             }
@@ -753,6 +842,8 @@ impl Engine {
             return;
         };
         conn.live_since = Some((Instant::now(), now));
+        // Lines waited during the first load: the stall watch starts now.
+        conn.last_line = Instant::now();
         let version = conn.info.version.clone();
         self.phase = Phase::Live;
         self.set_state(ConnectionState::Connected {
@@ -801,12 +892,19 @@ impl Engine {
         conn.next_status = Some(Instant::now() + interval);
         match result {
             Ok(status) => {
-                let program_start = status.program_start;
-                let previous = self.store.set_status(status);
-                if previous.is_some_and(|previous| previous.program_start != program_start) {
+                if let Some(error) = self.stalled(&status) {
+                    tracing::warn!(%error, "reconnecting");
+                    self.fail(Failure::Transient(error));
+                    return;
+                }
+                // Only the same node with another start time restarted: the
+                // masters of an HA zone behind a load balancer each have
+                // their own.
+                let restarted = self.restarts.observe(&status);
+                self.store.set_status(status);
+                if restarted {
                     tracing::info!("Icinga restarted; reloading");
-                    self.notifications_current = false;
-                    self.start_load(false);
+                    self.request_reload();
                 }
             }
             Err(ApiError::Unauthorized) => {
@@ -818,6 +916,29 @@ impl Engine {
             }
             Err(error) => tracing::debug!(%error, "status poll failed"),
         }
+    }
+
+    /// Whether the event stream stalled without closing (a proxy or a
+    /// stuck queue; Icinga sends nothing on an idle stream, and TCP
+    /// keepalives may be answered by a middlebox): Icinga reports active
+    /// checks in the last minute, which each send a `CheckResult` event, yet
+    /// no line arrived for `Tuning::stall_after` (2 minutes, so the checks
+    /// counted happened well after the last line). Returns why.
+    fn stalled(&self, status: &InstanceStatus) -> Option<String> {
+        let conn = self.conn.as_ref()?;
+        let silent = conn.last_line.elapsed();
+        let idle = self.lines.as_ref().is_some_and(UnboundedReceiver::is_empty);
+        (conn.check_events
+            && idle
+            && status.checks_per_minute >= 1.0
+            && silent >= self.tuning.stall_after)
+            .then(|| {
+                format!(
+                    "the event stream stalled: Icinga ran {:.0} checks in the last minute, but no event arrived for {} s",
+                    status.checks_per_minute,
+                    silent.as_secs()
+                )
+            })
     }
 
     // --- re-queries -------------------------------------------------------------------
@@ -840,6 +961,7 @@ impl Engine {
             session: self.session,
             full,
             lean,
+            unknown: round.unknown,
             lists: round.lists,
             urgent: round.urgent,
             notifications: round.notifications,
@@ -852,19 +974,43 @@ impl Engine {
         for answer in answers.objects {
             match answer.result {
                 Ok(fetched) => {
+                    // A whole-batch lookup's missing names weren't found,
+                    // which doesn't make them gone (one name of the batch
+                    // was unknown): they wait like missing ones, but leave
+                    // the store alone.
+                    let gone: &[ObjectKey] = if answer.whole { &[] } else { &fetched.missing };
                     self.store.apply_fetched(
                         fetched.hosts,
                         fetched.services,
                         answer.detail,
-                        &fetched.missing,
+                        gone,
                         answer.started,
                     );
                     self.watchdog.answered(&self.store, &answer.keys);
-                    missing.extend(fetched.missing);
+                    let store = &self.store;
+                    missing.extend(
+                        fetched
+                            .missing
+                            .into_iter()
+                            .filter(|key| !answer.whole || !store.contains(key)),
+                    );
                 }
                 Err(ApiError::Unauthorized) => {
                     self.fail(Failure::Auth(ApiError::Unauthorized.to_string()));
                     return;
+                }
+                Err(ApiError::Forbidden(message)) => {
+                    // The user may not query this kind after all: not asked
+                    // for again this session (events about such objects
+                    // can't be looked up).
+                    let hosts = answer
+                        .keys
+                        .iter()
+                        .any(|key| matches!(key, ObjectKey::Host { .. }));
+                    let kind = if hosts { "hosts" } else { "services" };
+                    tracing::warn!(%message, "the API user may not query {kind} by name; not asking again");
+                    self.fetch.refuse(hosts, !hosts);
+                    self.watchdog.failed(&answer.keys);
                 }
                 Err(error) => {
                     tracing::warn!(%error, "re-query failed");
@@ -952,7 +1098,7 @@ impl Engine {
                     name,
                     ..
                 } => {
-                    self.on_lifecycle(*change, object_type, name, now);
+                    self.on_lifecycle(seq, *change, object_type, name, now);
                     continue;
                 }
                 Event::Notification { object, .. } => {
@@ -991,7 +1137,7 @@ impl Engine {
                     if self.load.is_some() {
                         self.fetch.defer(key);
                     } else {
-                        self.fetch.mark(key, now);
+                        self.fetch.mark_unknown(key, now);
                     }
                 }
             }
@@ -999,20 +1145,40 @@ impl Engine {
         self.event_log.record(log);
     }
 
-    /// A config object was created, modified or deleted: re-query hosts and
-    /// services by name, reload the small lists. Comments and downtimes
-    /// have events of their own.
-    fn on_lifecycle(&mut self, change: ObjectChange, object_type: &str, name: &str, now: Instant) {
+    /// A config object was created, modified or deleted (event `seq`):
+    /// re-query hosts and services by name, reload the small lists.
+    /// Comments and downtimes have events of their own.
+    fn on_lifecycle(
+        &mut self,
+        seq: u64,
+        change: ObjectChange,
+        object_type: &str,
+        name: &str,
+        now: Instant,
+    ) {
         let key = match object_type {
             "Host" => Some(ObjectKey::host(name)),
             "Service" => ServiceKey::parse(name).map(ObjectKey::from),
             _ => None,
         };
         if let Some(key) = key {
-            if change == ObjectChange::Created {
-                self.fetch.mark_created(key, now);
-            } else {
-                self.fetch.mark(key, now);
+            if change == ObjectChange::Deleted {
+                // Answers sent before can't bring it (back) into the store.
+                self.store.note_deleted(key.clone(), seq);
+            }
+            match change {
+                ObjectChange::Created => self.fetch.mark_created(key, now),
+                _ if self.store.contains(&key) => {
+                    self.fetch.mark(key, now);
+                }
+                // Deleted, and not in the store (its tombstone keeps it
+                // out).
+                ObjectChange::Deleted => {}
+                // Changed, but unknown (hidden from this user, or left out
+                // by a load): looked up like other unknown objects.
+                ObjectChange::Modified => {
+                    self.fetch.mark_unknown(key, now);
+                }
             }
             return;
         }
@@ -1071,7 +1237,7 @@ impl Engine {
     /// removals end what the rule engine remembers) and log entries; a
     /// load's wait until it is over, when its last tier brought the
     /// problems' output. Not during the session's first load
-    /// (`self.load` is `Some((_, true))`), which may follow a partial one:
+    /// (`self.load` is `Some((_, LoadKind::First))`), which may follow a partial one:
     /// the initial load produces no rule inputs.
     fn record_discovered(&mut self, load: bool) {
         let found = self.store.take_discovered();
@@ -1107,7 +1273,7 @@ impl Engine {
         if !stale.is_empty() {
             self.fetch.mark_full(stale, Instant::now());
         }
-        if matches!(self.load, Some((_, true))) {
+        if matches!(self.load, Some((_, LoadKind::First))) {
             return;
         }
         let mut log = Vec::new();
@@ -1120,8 +1286,7 @@ impl Engine {
     /// A load is over (or cut off): what it found is judged now.
     fn finish_discovered(&mut self) {
         let mut log = Vec::new();
-        let at = self.evaluation_time();
-        self.notify.load_finished(&self.store, at, &mut log);
+        self.notify.load_finished(&self.store, &mut log);
         self.event_log.record(log);
     }
 
@@ -1165,10 +1330,7 @@ impl Engine {
             Phase::Connecting | Phase::Loading => {
                 tracing::debug!("refresh: a connection attempt or load is already running");
             }
-            Phase::Live => {
-                self.notifications_current = false;
-                self.start_load(false);
-            }
+            Phase::Live => self.request_reload(),
         }
     }
 
@@ -1200,6 +1362,7 @@ impl Engine {
             self.notifications_current = false;
             self.store.clear();
             self.watchdog.clear();
+            self.restarts = Restarts::default();
             self.loaded = false;
             self.publish();
         } else {

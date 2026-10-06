@@ -48,9 +48,16 @@ pub struct Tuning {
     /// A connection that stayed up this long (5 minutes) resets the
     /// backoff, so its next failure retries after `backoff_initial`.
     pub healthy_after: Duration,
-    /// How often `/v1/status` is polled while connected (30 s); a changed
-    /// `program_start` means Icinga restarted and triggers a reload.
+    /// How often `/v1/status` is polled while connected (30 s); a node
+    /// reporting another `program_start` than before restarted, which
+    /// triggers a reload.
     pub status_interval: Duration,
+    /// The event stream counts as stalled (and the engine reconnects) when
+    /// a status poll reports active checks in the last minute but no line
+    /// arrived for this long (2 minutes): every check sends a
+    /// `CheckResult` event, and a stream behind a proxy can stop without
+    /// closing.
+    pub stall_after: Duration,
     /// Snapshots go out at most this often while things change (250 ms).
     pub publish_interval: Duration,
     /// Objects marked for re-query are collected this long before the
@@ -59,7 +66,8 @@ pub struct Tuning {
     pub requery_delay: Duration,
     /// An object Icinga reported as unknown (deleted, or hidden by a
     /// filtered permission) isn't re-queried again for events about it
-    /// within this time (10 minutes), unless it is created again.
+    /// within this time (10 minutes), unless it is created again; each
+    /// time it comes back unknown the wait doubles (up to 4 hours).
     pub missing_ttl: Duration,
     /// The applier takes at most this many event lines per batch (5 000).
     pub max_batch: usize,
@@ -96,6 +104,7 @@ impl Default for Tuning {
             backoff_max: Duration::from_mins(1),
             healthy_after: Duration::from_mins(5),
             status_interval: Duration::from_secs(30),
+            stall_after: Duration::from_mins(2),
             publish_interval: Duration::from_millis(250),
             requery_delay: Duration::from_millis(200),
             missing_ttl: Duration::from_mins(10),

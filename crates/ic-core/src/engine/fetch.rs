@@ -7,6 +7,20 @@
 //! collected for a moment, one round at a time, at most [`MAX_ROUND`]
 //! names per round (and as many notification names) in batches of
 //! [`ic_api::NAMES_PER_REQUEST`].
+//!
+//! **Unknown objects** (events about objects the store doesn't know) are
+//! looked up separately, at most [`MAX_UNKNOWN_ROUND`] per round and
+//! without isolating unknown names ([`Client::objects_unsplit`]): an API
+//! user with filtered `objects/query/*` permissions receives the events of
+//! every object (`events/*` can't be filtered) but may query only some, and
+//! isolating each hidden name would cost about two requests per name. A
+//! batch Icinga can't answer as a whole counts as missing.
+//!
+//! **Missing names** (deleted, hidden, or in such a batch) aren't asked for
+//! again for events about them within `missing_ttl` (10 minutes), unless
+//! `ObjectCreated` names them; each time they come back missing the wait
+//! doubles, up to [`MAX_MISSING_TTL`]. Kinds the API user may not query at
+//! all (no `objects/query/Host` or `Service`) are never asked for.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -22,6 +36,14 @@ use super::Internal;
 
 /// Names per round; the rest waits for the next round.
 pub(super) const MAX_ROUND: usize = 1_000;
+
+/// Unknown objects looked up per round (one request): action targets,
+/// config changes and hydration never wait behind many of them.
+pub(super) const MAX_UNKNOWN_ROUND: usize = ic_api::NAMES_PER_REQUEST;
+
+/// The longest wait before a name that keeps coming back missing is asked
+/// for again.
+pub(super) const MAX_MISSING_TTL: Duration = Duration::from_hours(4);
 
 /// At most this many objects wait for a full fetch (hydration); more are
 /// dropped with a warning (the UI asks again for what it still shows).
@@ -63,6 +85,9 @@ pub(super) struct FetchQueue {
     pending: BTreeSet<ObjectKey>,
     /// Fetched in full whatever the store has (hydration).
     full: BTreeSet<ObjectKey>,
+    /// Objects the store doesn't know, looked up without isolating unknown
+    /// names (see the module notes).
+    unknown: BTreeSet<ObjectKey>,
     /// The names of the round in flight.
     flying: HashSet<ObjectKey>,
     lists: Lists,
@@ -72,14 +97,41 @@ pub(super) struct FetchQueue {
     urgent: bool,
     in_flight: bool,
     /// Objects Icinga answered as unknown (deleted, or hidden by a
-    /// filtered permission), and when: events about them don't cause
-    /// re-queries until `missing_ttl` passed or they are created again.
-    missing: HashMap<ObjectKey, Instant>,
+    /// filtered permission): events about them don't cause re-queries
+    /// until their wait passed or they are created again.
+    missing: HashMap<ObjectKey, Missing>,
     missing_ttl: Duration,
     /// Unknown objects seen while a load ran: re-queried after it.
     deferred: BTreeSet<ObjectKey>,
     /// `Notification` objects to re-read, by full name.
     notifications: BTreeSet<String>,
+    /// Kinds the API user may not query: never asked for.
+    refused: Refused,
+}
+
+/// A name Icinga answered as unknown.
+#[derive(Clone, Copy, Debug)]
+struct Missing {
+    /// Not asked for again (for events) before this.
+    until: Instant,
+    /// The current wait; it doubles each time the name comes back missing.
+    ttl: Duration,
+}
+
+/// The kinds the API user may not query by name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Refused {
+    hosts: bool,
+    services: bool,
+}
+
+impl Refused {
+    fn covers(self, key: &ObjectKey) -> bool {
+        match key {
+            ObjectKey::Host { .. } => self.hosts,
+            ObjectKey::Service { .. } => self.services,
+        }
+    }
 }
 
 /// One round of re-queries.
@@ -89,19 +141,24 @@ pub(super) struct Round {
     pub(super) keys: Vec<ObjectKey>,
     /// Fetched in full.
     pub(super) full: Vec<ObjectKey>,
+    /// Unknown to the store: looked up in whole batches.
+    pub(super) unknown: Vec<ObjectKey>,
     pub(super) lists: Lists,
     pub(super) urgent: bool,
     /// `Notification` objects to re-read.
     pub(super) notifications: Vec<String>,
 }
 
-/// One query of a round: the detail, the names, the reader's line count
-/// when it was sent, and the answer.
+/// One query of a round (one kind, hosts or services): the detail, the
+/// names, the reader's line count when it was sent, and the answer.
+/// `whole`: a lookup of unknown objects without isolating unknown names, so
+/// `missing` only says they weren't found (see the module notes).
 #[derive(Debug)]
 pub(crate) struct Answer {
     pub(super) detail: Detail,
     pub(super) keys: Vec<ObjectKey>,
     pub(super) started: u64,
+    pub(super) whole: bool,
     pub(super) result: Result<Fetched, ApiError>,
 }
 
@@ -125,6 +182,7 @@ impl FetchQueue {
         Self {
             pending: BTreeSet::new(),
             full: BTreeSet::new(),
+            unknown: BTreeSet::new(),
             flying: HashSet::new(),
             lists: Lists::default(),
             since: None,
@@ -134,6 +192,7 @@ impl FetchQueue {
             missing_ttl,
             deferred: BTreeSet::new(),
             notifications: BTreeSet::new(),
+            refused: Refused::default(),
         }
     }
 
@@ -145,18 +204,50 @@ impl FetchQueue {
     fn recently_missing(&self, key: &ObjectKey, now: Instant) -> bool {
         self.missing
             .get(key)
-            .is_some_and(|at| now.duration_since(*at) < self.missing_ttl)
+            .is_some_and(|missing| now < missing.until)
     }
 
-    /// Re-queries `key` (an unknown object, a modified or deleted one, an
-    /// overdue one), unless Icinga said recently that it doesn't exist.
-    /// Returns whether it will be re-queried (a key already queued counts).
+    /// The API user may not query hosts (or services) by name: they are
+    /// never asked for, and those queued are dropped.
+    pub(super) fn refuse(&mut self, hosts: bool, services: bool) {
+        self.refused.hosts |= hosts;
+        self.refused.services |= services;
+        let refused = self.refused;
+        for set in [
+            &mut self.pending,
+            &mut self.full,
+            &mut self.unknown,
+            &mut self.deferred,
+        ] {
+            set.retain(|key| !refused.covers(key));
+        }
+    }
+
+    /// Re-queries `key` (a modified or deleted object, an overdue one, an
+    /// object a load may have left behind), unless Icinga said recently
+    /// that it doesn't exist or the user may not query its kind. Returns
+    /// whether it will be re-queried (a key already queued counts).
     pub(super) fn mark(&mut self, key: ObjectKey, now: Instant) -> bool {
-        if self.recently_missing(&key, now) {
+        if self.refused.covers(&key) || self.recently_missing(&key, now) {
             return false;
         }
         if !self.full.contains(&key) {
+            self.unknown.remove(&key);
             self.pending.insert(key);
+        }
+        self.touch(now);
+        true
+    }
+
+    /// Looks up `key`, which an event mentions but the store doesn't know
+    /// (in a whole batch, see the module notes), unless Icinga said
+    /// recently that it doesn't exist or the user may not query its kind.
+    pub(super) fn mark_unknown(&mut self, key: ObjectKey, now: Instant) -> bool {
+        if self.refused.covers(&key) || self.recently_missing(&key, now) {
+            return false;
+        }
+        if !self.full.contains(&key) && !self.pending.contains(&key) {
+            self.unknown.insert(key);
         }
         self.touch(now);
         true
@@ -172,7 +263,7 @@ impl FetchQueue {
     ) -> usize {
         let mut added = 0;
         for key in keys {
-            if self.full.contains(&key) || self.flying.contains(&key) {
+            if self.full.contains(&key) || self.flying.contains(&key) || self.refused.covers(&key) {
                 continue;
             }
             if self.full.len() >= MAX_PENDING_FULL {
@@ -183,6 +274,7 @@ impl FetchQueue {
                 break;
             }
             self.pending.remove(&key);
+            self.unknown.remove(&key);
             self.missing.remove(&key);
             self.full.insert(key);
             added += 1;
@@ -196,16 +288,25 @@ impl FetchQueue {
 
     /// Re-queries a created object, even if it was missing before.
     pub(super) fn mark_created(&mut self, key: ObjectKey, now: Instant) {
+        if self.refused.covers(&key) {
+            return;
+        }
         self.missing.remove(&key);
-        self.pending.insert(key);
+        self.unknown.remove(&key);
+        if !self.full.contains(&key) {
+            self.pending.insert(key);
+        }
         self.touch(now);
     }
 
     /// Re-queries action targets and publishes right after.
     pub(super) fn mark_urgent(&mut self, keys: impl IntoIterator<Item = ObjectKey>, now: Instant) {
         let before = self.pending.len();
-        self.pending
-            .extend(keys.into_iter().filter(|key| !self.full.contains(key)));
+        let refused = self.refused;
+        self.pending.extend(
+            keys.into_iter()
+                .filter(|key| !self.full.contains(key) && !refused.covers(key)),
+        );
         if self.pending.len() > before {
             self.urgent = true;
             self.touch(now);
@@ -238,15 +339,22 @@ impl FetchQueue {
 
     /// An unknown object while a load runs: decided after the load.
     pub(super) fn defer(&mut self, key: ObjectKey) {
-        self.deferred.insert(key);
+        if !self.refused.covers(&key) {
+            self.deferred.insert(key);
+        }
     }
 
     /// After a load: re-queries the objects deferred during it (events
     /// about them were dropped, so even those the load brought may be
-    /// behind).
-    pub(super) fn release_deferred(&mut self, now: Instant) {
+    /// behind); those the store still doesn't know (`known` says) are
+    /// looked up like other unknown objects.
+    pub(super) fn release_deferred(&mut self, now: Instant, known: impl Fn(&ObjectKey) -> bool) {
         for key in std::mem::take(&mut self.deferred) {
-            self.mark(key, now);
+            if known(&key) {
+                self.mark(key, now);
+            } else {
+                self.mark_unknown(key, now);
+            }
         }
     }
 
@@ -256,6 +364,7 @@ impl FetchQueue {
         if self.in_flight
             || (self.pending.is_empty()
                 && self.full.is_empty()
+                && self.unknown.is_empty()
                 && self.notifications.is_empty()
                 && !self.lists.any())
         {
@@ -265,7 +374,7 @@ impl FetchQueue {
     }
 
     /// Takes the next round (at most [`MAX_ROUND`] names, full fetches
-    /// first).
+    /// first, plus at most [`MAX_UNKNOWN_ROUND`] unknown objects).
     pub(super) fn take(&mut self, now: Instant) -> Round {
         let mut full = Vec::new();
         while full.len() < MAX_ROUND {
@@ -281,6 +390,13 @@ impl FetchQueue {
                 None => break,
             }
         }
+        let mut unknown = Vec::new();
+        while unknown.len() < MAX_UNKNOWN_ROUND {
+            match self.unknown.pop_first() {
+                Some(key) => unknown.push(key),
+                None => break,
+            }
+        }
         let mut notifications = Vec::new();
         while notifications.len() < MAX_ROUND {
             match self.notifications.pop_first() {
@@ -288,29 +404,44 @@ impl FetchQueue {
                 None => break,
             }
         }
-        self.flying = keys.iter().chain(&full).cloned().collect();
+        self.flying = keys.iter().chain(&full).chain(&unknown).cloned().collect();
         let round = Round {
             keys,
             full,
+            unknown,
             lists: std::mem::take(&mut self.lists),
             urgent: std::mem::take(&mut self.urgent),
             notifications,
         };
         self.in_flight = true;
-        self.since =
-            (!self.pending.is_empty() || !self.full.is_empty() || !self.notifications.is_empty())
-                .then_some(now);
+        self.since = (!self.pending.is_empty()
+            || !self.full.is_empty()
+            || !self.unknown.is_empty()
+            || !self.notifications.is_empty())
+        .then_some(now);
         round
     }
 
-    /// A round finished; `missing` didn't exist.
+    /// A round finished; `missing` weren't found. Each waits before it is
+    /// asked for again for events: `missing_ttl` the first time, twice as
+    /// long each time it comes back missing (up to [`MAX_MISSING_TTL`]).
+    /// A name not asked for during a whole further wait starts over.
     pub(super) fn finished(&mut self, missing: &[ObjectKey], now: Instant) {
         self.in_flight = false;
         self.flying.clear();
         self.missing
-            .retain(|_, at| now.duration_since(*at) < self.missing_ttl);
+            .retain(|_, missing| now < missing.until + missing.ttl);
         for key in missing {
-            self.missing.insert(key.clone(), now);
+            let ttl = self.missing.get(key).map_or(self.missing_ttl, |previous| {
+                (previous.ttl * 2).min(MAX_MISSING_TTL.max(self.missing_ttl))
+            });
+            self.missing.insert(
+                key.clone(),
+                Missing {
+                    until: now + ttl,
+                    ttl,
+                },
+            );
         }
     }
 
@@ -319,7 +450,10 @@ impl FetchQueue {
     pub(super) fn reset(&mut self) {
         self.pending.clear();
         self.full.clear();
+        self.unknown.clear();
         self.flying.clear();
+        // Set again from the next session's permissions.
+        self.refused = Refused::default();
         self.lists = Lists::default();
         self.since = None;
         self.urgent = false;
@@ -337,8 +471,11 @@ pub(super) struct FetchTask {
     pub(super) session: u64,
     /// Hosts, services loaded in full before, and hydration.
     pub(super) full: Vec<ObjectKey>,
-    /// Services known only lean (or not at all).
+    /// Services known only lean.
     pub(super) lean: Vec<ObjectKey>,
+    /// Objects the store doesn't know (hosts in full, services lean),
+    /// looked up in whole batches.
+    pub(super) unknown: Vec<ObjectKey>,
     pub(super) lists: Lists,
     pub(super) urgent: bool,
     /// `Notification` objects to re-read.
@@ -349,18 +486,39 @@ impl FetchTask {
     /// Runs the round and reports its answers.
     pub(super) async fn run(self) {
         let mut objects = Vec::new();
-        for (detail, keys) in [(Detail::Full, self.full), (Detail::Lean, self.lean)] {
-            if keys.is_empty() {
-                continue;
+        let (unknown_hosts, unknown_services): (Vec<ObjectKey>, Vec<ObjectKey>) = self
+            .unknown
+            .into_iter()
+            .partition(|key| matches!(key, ObjectKey::Host { .. }));
+        let queries = [
+            (Detail::Full, self.full, false),
+            (Detail::Lean, self.lean, false),
+            (Detail::Full, unknown_hosts, true),
+            (Detail::Lean, unknown_services, true),
+        ];
+        for (detail, keys, whole) in queries {
+            // One query per kind: a refusal (403) then says which kind.
+            let (hosts, services): (Vec<ObjectKey>, Vec<ObjectKey>) = keys
+                .into_iter()
+                .partition(|key| matches!(key, ObjectKey::Host { .. }));
+            for keys in [hosts, services] {
+                if keys.is_empty() {
+                    continue;
+                }
+                let started = self.seq.load(Ordering::SeqCst);
+                let result = if whole {
+                    self.client.objects_unsplit(&keys, detail).await
+                } else {
+                    self.client.objects(&keys, detail).await
+                };
+                objects.push(Answer {
+                    detail,
+                    keys,
+                    started,
+                    whole,
+                    result,
+                });
             }
-            let started = self.seq.load(Ordering::SeqCst);
-            let result = self.client.objects(&keys, detail).await;
-            objects.push(Answer {
-                detail,
-                keys,
-                started,
-                result,
-            });
         }
         let lists = self.lists;
         let answers = Answers {
@@ -464,7 +622,7 @@ mod tests {
         queue.defer(ObjectKey::host("new"));
         assert!(queue.full.is_empty());
         assert_eq!(queue.due(Duration::ZERO), None);
-        queue.release_deferred(now);
+        queue.release_deferred(now, |_| true);
         assert_eq!(queue.take(now).keys, [ObjectKey::host("new")]);
         queue.mark_lists(
             Lists {

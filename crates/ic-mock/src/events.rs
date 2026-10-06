@@ -89,6 +89,8 @@ struct Subscriber {
     filter: Option<ApiFilter>,
     user: String,
     queue: mpsc::Sender<StreamItem>,
+    /// Receives nothing more but stays open (a stalled proxy or queue).
+    stalled: bool,
 }
 
 impl Subscriber {
@@ -194,6 +196,7 @@ impl EventBus {
             filter,
             user: user.to_owned(),
             queue,
+            stalled: false,
         });
         (id, rx)
     }
@@ -252,6 +255,16 @@ impl EventBus {
             .retain(|subscriber| deliver(subscriber, line.clone()));
     }
 
+    /// Stalls every connected stream: it stays open but receives nothing
+    /// more. Streams opened later aren't stalled. Returns how many.
+    pub(crate) fn stall_all(&mut self) -> usize {
+        self.subscribers.retain(|s| !s.queue.is_closed());
+        for subscriber in &mut self.subscribers {
+            subscriber.stalled = true;
+        }
+        self.subscribers.len()
+    }
+
     /// Disconnects every stream (the connections are aborted).
     pub(crate) fn drop_all(&mut self) -> usize {
         let count = self.subscribers.len();
@@ -278,8 +291,12 @@ impl EventBus {
     }
 }
 
-/// Queues a line; `false` drops the subscriber (gone, or too slow).
+/// Queues a line; `false` drops the subscriber (gone, or too slow). A
+/// stalled subscriber gets nothing and stays while its connection does.
 fn deliver(subscriber: &Subscriber, line: Bytes) -> bool {
+    if subscriber.stalled {
+        return !subscriber.queue.is_closed();
+    }
     match subscriber.queue.try_send(line) {
         Ok(()) => true,
         Err(mpsc::error::TrySendError::Full(_)) => {
@@ -384,6 +401,36 @@ mod tests {
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn stalled_streams_stay_open_but_receive_nothing() {
+        let mut bus = EventBus::new(NumberFormat::Float, 4);
+        let (_, mut stalled) = bus.subscribe(types(&[EventType::CheckResult]), None, "root");
+        assert_eq!(bus.stall_all(), 1);
+        let (_, mut fresh) = bus.subscribe(types(&[EventType::CheckResult]), None, "root");
+        // More than the buffer holds: a stalled stream isn't "too slow".
+        for _ in 0..10 {
+            bus.publish(
+                EventType::CheckResult,
+                json!({ "type": "CheckResult" }),
+                0.0,
+            );
+            assert!(fresh.try_recv().is_ok(), "streams opened later work");
+        }
+        bus.publish_line_bytes(&Bytes::from_static(b"raw\n"));
+        assert!(matches!(
+            stalled.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(bus.streams().len(), 2, "both stay connected");
+        drop(stalled);
+        bus.publish(
+            EventType::CheckResult,
+            json!({ "type": "CheckResult" }),
+            0.0,
+        );
+        assert_eq!(bus.streams().len(), 1, "a closed stalled stream is pruned");
     }
 
     #[test]

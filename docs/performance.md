@@ -65,7 +65,7 @@ The lean list the client loads (`ic_api::Detail::Lean`) keeps the check configur
   - `CheckResult` updates the object completely from `vars_after`, `downtime_depth` and `acknowledgement`. `next_check` is estimated from `execution_end` plus the check or retry interval.
   - Several `CheckResult`s for one object within a batch collapse to the last one.
   - `StateChange` and the other event types are never collapsed (rules and the event log need every transition).
-- Re-queries happen only for `ObjectCreated`/`ObjectModified`/`ObjectDeleted` and for unknown objects.
+- Re-queries happen only for `ObjectCreated`/`ObjectModified`/`ObjectDeleted` and for unknown objects. Unknown objects are looked up in whole batches (one request per 200 names, no bisecting) and names that come back missing wait longer each time (10 minutes, doubling up to 4 hours): an API user with filtered permissions receives every object's events but may query only some, and bisecting each hidden name would cost two requests per name (about 54 000 requests every 10 minutes for a user who sees a tenth of 30 000 objects).
 - Snapshots go out at most 4 times per second. Dashboards are re-evaluated only for touched objects and re-sorted only when their rows or sort keys changed.
 
 **Freshness watchdog** (instead of refreshing by schedule):
@@ -75,12 +75,13 @@ The lean list the client loads (`ic_api::Detail::Lean`) keeps the check configur
   - It isn't loaded (`next_update` exists only from Icinga 2.12, and the model has no field for it): it's computed locally with Icinga's formula (`Checkable::GetNextUpdate`) from the lean attributes, and recomputed from every `CheckResult` event.
 - Each event, whether a scheduled check, a manual "check now" by anyone, or a passive result, resets that object's deadline. Manual runs by colleagues therefore never desynchronise anything.
 - An object with no result past its deadline is re-queried by name (batches ≤ 200, at most once per interval per object). That cheaply catches missed events, and it corrects deadlines after someone reschedules a check without an event.
+- A stream that stalls without closing (a proxy that stops relaying; Icinga sends nothing on an idle stream) is noticed by the status poll: active checks in the last minute but no line for 2 minutes reconnects.
 - If Icinga still reports the object overdue after the re-query, the check is genuinely **late**. The UI marks it ("late 12m"), as Icinga DB Web does. A satellite or agent has usually stopped checking.
 
 **Reconciling (keeping the client and Icinga in sync):**
 - A lean reload (tiers 1–3) on connect and reconnect, with jitter so ten clients reconnecting after an Icinga restart don't hit the master at the same instant.
-- A periodic lean reconcile, **adaptive**: every 5 minutes below 5 000 objects, every 15 minutes above. It's configurable.
-- An Icinga restart (`program_start` changes in `/v1/status`, polled every 30 s) triggers a reload.
+- A periodic lean reconcile, **adaptive**: every 5 minutes below 5 000 objects, every 15 minutes above. It's configurable. Its tier 3 fetches only the problems the client doesn't hold in full with a current result, so an outage with 28 000 problems doesn't cost 140 full-detail requests every interval. A failed reload waits a whole interval from the failure.
+- An Icinga restart (a node's `program_start` changes in `/v1/status`, polled every 30 s) triggers a reload; another node of an HA zone answering behind a load balancer doesn't. `Refresh` and restart reloads start at most every 30 s; more requests coalesce.
 - Never periodic full-attribute reloads.
 
 **Budgets** (2 000 hosts / 30 000 services, release build):
@@ -114,6 +115,7 @@ These budgets are tested: `ic-mock` has a `large` scenario of the same size with
 | 6 400 recorded events on 3 000 services (in the normal test suite) | ~0.28 s, ten dashboards updated per batch ~0.10 s |
 | 2 000 services × 10 dashboards (in the normal test suite) | full 40 ms, 100 changed services 4 ms |
 | Icinga's `Notification` objects (one per host and service: 32 000), loaded in the background after the problem lists | 7.1 MB on the wire (222 bytes each, four attributes), complete 0.76 s after `Connected` (3.98 s after the start); 2.0 MB in the store, 1.5 MB copied on write when one changes while the UI holds a snapshot. Not reloaded by periodic reconciles while the stream carries `Notification` events; `cargo test -p ic-api --test mock large -- --include-ignored --nocapture`, `cargo test -p ic-core --test engine scale -- --ignored --nocapture` |
+| Steady state: the simulator checks every object at its interval (96 checks/s measured), production timing, the three default dashboards, a snapshot held like the UI holds one; CPU time of the engine's threads over 40 s | 2.08 s CPU = 5.2 % of one core in the dev profile (79 snapshots); the release budget is < 5 %, and release builds of the workspace crates are several times faster. `cargo test -p ic-core --test engine scale::steady -- --ignored --nocapture` (Linux: reads `/proc/self/task`) |
 | A notification storm: every OK service of the `large` scenario failing at once (28 500 hard state changes) | rule inputs and log entries 0.21 s, judged by the rule engine with ten dashboards' memberships 0.64 s (28 100 intents, nearly all silenced by storm control), written to the SQLite log 0.23 s; `cargo test -p ic-core --lib perf_tests::notifications_in -- --ignored --nocapture` |
 
 The dev-profile numbers above already meet the release budgets (50 000 events in under 3 s; a full evaluation of 20 000 × 10 well under a second; memory far below 400 MB), so release builds have a wide margin.

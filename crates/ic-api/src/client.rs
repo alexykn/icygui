@@ -424,14 +424,53 @@ impl Client {
     ///
     /// As [`Client::hosts`].
     pub async fn objects(&self, keys: &[ObjectKey], detail: Detail) -> Result<Fetched, ApiError> {
+        self.objects_by_name(keys, detail, Split::Isolate).await
+    }
+
+    /// [`Client::objects`] without isolating unknown names: a batch Icinga
+    /// answers with `404 No objects found.` costs one request, and all its
+    /// names come back in [`Fetched::missing`], although only one of them
+    /// needs to be unknown (deleted, or hidden by a filtered permission)
+    /// and the others may exist.
+    ///
+    /// For looking up names events mention that the caller doesn't know:
+    /// an API user whose `objects/query/*` permissions are filtered still
+    /// receives every object's events (`events/*` can't be filtered), and
+    /// isolating each hidden name would cost about two requests per name.
+    /// Treat `missing` as "not found", never as "deleted".
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::hosts`].
+    pub async fn objects_unsplit(
+        &self,
+        keys: &[ObjectKey],
+        detail: Detail,
+    ) -> Result<Fetched, ApiError> {
+        self.objects_by_name(keys, detail, Split::Never).await
+    }
+
+    async fn objects_by_name(
+        &self,
+        keys: &[ObjectKey],
+        detail: Detail,
+        split: Split,
+    ) -> Result<Fetched, ApiError> {
         let (host_names, service_names) = actions::names_by_kind(keys);
         let (hosts, services) = futures::try_join!(
-            self.query_names::<CheckableAttrs>("hosts", "hosts", host_names, detail.host_attrs()),
+            self.query_names::<CheckableAttrs>(
+                "hosts",
+                "hosts",
+                host_names,
+                detail.host_attrs(),
+                split
+            ),
             self.query_names::<CheckableAttrs>(
                 "services",
                 "services",
                 service_names,
-                detail.service_attrs()
+                detail.service_attrs(),
+                split
             ),
         )?;
         let missing = missing_keys(keys, &hosts.missing, &services.missing);
@@ -492,6 +531,7 @@ impl Client {
                 "notifications",
                 names,
                 wire::NOTIFICATION_ATTRS,
+                Split::Isolate,
             )
             .await?;
         Ok(FetchedNotifications {
@@ -893,16 +933,18 @@ impl Client {
     }
 
     /// A targeted query in batches. A 404 ("No objects found.") means a
-    /// name in the batch is unknown: the batch is split until the unknown
-    /// names are isolated, and those come back as missing (deleted
-    /// objects), in request order. An empty name list sends nothing
-    /// (Icinga would return every object).
+    /// name in the batch is unknown: with [`Split::Isolate`] the batch is
+    /// split until the unknown names are isolated, and those come back as
+    /// missing (deleted objects), in request order; with [`Split::Never`]
+    /// the whole batch comes back as missing. An empty name list sends
+    /// nothing (Icinga would return every object).
     async fn query_names<A: DeserializeOwned>(
         &self,
         plural: &'static str,
         key: &str,
         names: Vec<String>,
         attrs: &[&'static str],
+        split: Split,
     ) -> Result<Named<A>, ApiError> {
         let mut answer = Named {
             found: Vec::new(),
@@ -923,6 +965,13 @@ impl Client {
                     if let [name] = batch.as_slice() {
                         tracing::debug!(%name, plural, "object no longer exists");
                         answer.missing.extend(batch);
+                    } else if split == Split::Never {
+                        tracing::debug!(
+                            count = batch.len(),
+                            plural,
+                            "a name of the batch is unknown; not isolating it"
+                        );
+                        answer.missing.extend(batch);
                     } else {
                         let (first, second) = batch.split_at(batch.len() / 2);
                         pending.push(second.to_vec());
@@ -934,6 +983,16 @@ impl Client {
         }
         Ok(answer)
     }
+}
+
+/// What a name query does with a batch Icinga answers with "No objects
+/// found." (one of its names is unknown).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Split {
+    /// Halve it until the unknown names are isolated.
+    Isolate,
+    /// Report all its names as missing (one request per batch).
+    Never,
 }
 
 /// What [`Client::query_names`] found, and the names Icinga doesn't know.

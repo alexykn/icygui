@@ -24,13 +24,18 @@
 //!   from the program start; IDO's `next_update` leaves them out too).
 //! - *Globally disabled checks* (`/v1/status`: host or service checks off)
 //!   take the deadline from active objects of that type: Icinga won't
-//!   check them, and re-querying can't change that.
+//!   check them, and re-querying can't change that. A status that turns
+//!   them off or on recomputes every deadline at once.
 //!
 //! **Clock.** Deadlines are on Icinga's clock, not the laptop's, which may
 //! be off by minutes. [`IcingaClock`] follows Icinga's clock from the
 //! timestamps it sends (every event carries one; a load brings the latest
 //! `last_check`) plus the monotonic time since. It only lags behind Icinga
 //! (events arrive after they happen), which errs towards fewer re-queries.
+//! When Icinga's clock is set back (or a reconnect reaches a node whose
+//! clock is behind), an event more than [`RESYNC`] behind the estimate
+//! resets it, and so does a run of [`DRIFT_WINDOW`] in which every event
+//! was more than [`DRIFT`] behind (a smaller step back).
 //!
 //! **Load on Icinga.** Overdue objects are re-queried by name through the
 //! fetch queue, at most [`ic_api::NAMES_PER_REQUEST`] per sweep and one
@@ -61,25 +66,81 @@ const MAX_SPACING: f64 = 3_600.0;
 /// starts over from the event.
 const RESYNC: f64 = 300.0;
 
+/// Events lag the estimate by the time they take to arrive (well under a
+/// second, a few seconds while the applier is busy). When every event of a
+/// [`DRIFT_WINDOW`] (at least [`DRIFT_EVENTS`] of them) lags by more than
+/// this (in seconds), Icinga's clock was set back by less than [`RESYNC`]:
+/// the clock starts over from the freshest of them.
+const DRIFT: f64 = 30.0;
+const DRIFT_WINDOW: Duration = Duration::from_mins(1);
+const DRIFT_EVENTS: u32 = 3;
+
 /// Icinga's clock as seen through the timestamps it sends.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct IcingaClock {
     /// An Icinga time (Unix seconds) and the instant it was seen.
     reference: Option<(f64, Instant)>,
+    /// The events behind the estimate since the window began.
+    behind: Option<Behind>,
+}
+
+/// Events behind the estimate within a window: how many, and the freshest
+/// (smallest lag, its time and when it arrived).
+#[derive(Clone, Copy, Debug)]
+struct Behind {
+    since: Instant,
+    count: u32,
+    lag: f64,
+    freshest: (f64, Instant),
 }
 
 impl IcingaClock {
-    /// An event sent at `at` arrived at `now`. Moves the clock forward,
-    /// or back if `at` is much older than the estimate.
+    /// An event sent at `at` arrived at `now`. Moves the clock forward, or
+    /// back if `at` is much older than the estimate or a window's events
+    /// all were somewhat older.
     pub(super) fn observe(&mut self, at: Timestamp, now: Instant) {
         let seconds = at.as_unix_seconds();
         if seconds <= 0.0 {
             return;
         }
-        match self.now(now) {
-            Some(estimate) if seconds <= estimate && estimate - seconds < RESYNC => {}
-            _ => self.reference = Some((seconds, now)),
+        let Some(mut estimate) = self.now(now) else {
+            self.reset_to(seconds, now);
+            return;
+        };
+        if let Some(window) = self.behind
+            && now.saturating_duration_since(window.since) >= DRIFT_WINDOW
+        {
+            self.behind = None;
+            if window.count >= DRIFT_EVENTS && window.lag > DRIFT {
+                // Every event of a whole window lagged far: Icinga's clock
+                // was set back. Start over from the freshest of them.
+                tracing::debug!(lag = window.lag, "Icinga's clock went back; following it");
+                self.reference = Some(window.freshest);
+                estimate = self.now(now).unwrap_or(seconds);
+            }
         }
+        let lag = estimate - seconds;
+        if !(0.0..RESYNC).contains(&lag) {
+            self.reset_to(seconds, now);
+            return;
+        }
+        let window = self.behind.get_or_insert(Behind {
+            since: now,
+            count: 0,
+            lag: f64::INFINITY,
+            freshest: (seconds, now),
+        });
+        window.count += 1;
+        if lag < window.lag {
+            window.lag = lag;
+            window.freshest = (seconds, now);
+        }
+    }
+
+    /// Starts over from Icinga's time `seconds`, seen at `now`.
+    fn reset_to(&mut self, seconds: f64, now: Instant) {
+        self.reference = Some((seconds, now));
+        self.behind = None;
     }
 
     /// Icinga's clock was at least at `at` by `now` (a load's latest
@@ -87,7 +148,7 @@ impl IcingaClock {
     pub(super) fn advance(&mut self, at: Timestamp, now: Instant) {
         let seconds = at.as_unix_seconds();
         if seconds > 0.0 && self.now(now).is_none_or(|estimate| seconds > estimate) {
-            self.reference = Some((seconds, now));
+            self.reset_to(seconds, now);
         }
     }
 
@@ -216,6 +277,8 @@ pub(super) struct Watchdog {
     late: Arc<BTreeMap<ObjectKey, Timestamp>>,
     /// The late flags changed since the last [`Watchdog::take_changed`].
     changed: bool,
+    /// The global check switches the deadlines were computed with.
+    globals: Globals,
 }
 
 /// Unix seconds with a total order, for the queue.
@@ -263,7 +326,7 @@ impl Watchdog {
     }
 
     /// Recomputes the deadlines of `objects` from the store (all of them
-    /// with `all`).
+    /// with `all`, or when Icinga's global check switches changed).
     pub(super) fn update<'a>(
         &mut self,
         store: &Store,
@@ -271,6 +334,8 @@ impl Watchdog {
         all: bool,
     ) {
         let globals = Globals::of(store.status());
+        let all = all || globals != self.globals;
+        self.globals = globals;
         if all {
             let gone: Vec<ObjectKey> = self
                 .watched
@@ -611,6 +676,68 @@ mod tests {
             Some(later + Duration::from_secs(50))
         );
         assert_eq!(clock.instant_of(500.0, later), Some(later));
+    }
+
+    #[test]
+    fn the_clock_follows_icinga_back_by_less_than_the_resync() {
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let mut clock = IcingaClock::default();
+        clock.observe(t(10_000.0), start);
+        // Icinga's clock steps back by two minutes; events keep coming every
+        // ten seconds, all 120 s behind the estimate.
+        for second in (10_u32..=60).step_by(10) {
+            clock.observe(
+                t(10_000.0 + f64::from(second) - 120.0),
+                at(u64::from(second)),
+            );
+        }
+        assert_eq!(clock.now(at(60)), Some(10_060.0), "a minute isn't over yet");
+        clock.observe(t(10_070.0 - 120.0), at(70));
+        let now = clock.now(at(70)).unwrap();
+        assert!(
+            (now - (10_070.0 - 120.0)).abs() < 11.0,
+            "re-anchored to the freshest event: {now}"
+        );
+        // From then on events are current again.
+        clock.observe(t(10_080.0 - 120.0), at(80));
+        assert_eq!(clock.now(at(80)), Some(10_080.0 - 120.0));
+
+        // Events a few seconds late (a busy applier) never move it back.
+        let mut clock = IcingaClock::default();
+        clock.observe(t(20_000.0), start);
+        for second in 1_u32..=200 {
+            clock.observe(t(20_000.0 + f64::from(second) - 5.0), at(u64::from(second)));
+        }
+        assert_eq!(clock.now(at(200)), Some(20_200.0));
+    }
+
+    #[test]
+    fn checks_turned_off_globally_drop_the_deadlines_at_once() {
+        let mut store = store_with(2_000.0, vec![svc("a", 500.0, 300.0)]);
+        let status = |service_checks: bool| InstanceStatus {
+            node_name: "master".to_owned(),
+            host_checks_enabled: true,
+            service_checks_enabled: service_checks,
+            ..InstanceStatus::default()
+        };
+        store.set_status(status(true));
+        let mut watchdog = Watchdog::default();
+        watchdog.update(&store, [], true);
+        let a = ObjectKey::service("h", "a");
+        assert!(watchdog.watched.contains_key(&a));
+        // A status poll turns service checks off: nothing changed about the
+        // objects, yet every service's deadline goes.
+        store.set_status(status(false));
+        watchdog.update(&store, [], false);
+        assert!(!watchdog.watched.contains_key(&a));
+        assert!(watchdog.watched.contains_key(&ObjectKey::host("h")));
+        watchdog.clock().observe(t(1_000.0), Instant::now());
+        assert!(watchdog.sweep(10).is_empty(), "nothing is re-queried");
+        // And back on.
+        store.set_status(status(true));
+        watchdog.update(&store, [], false);
+        assert!(watchdog.watched.contains_key(&a));
     }
 
     fn store_with(host_next_check: f64, services: Vec<Service>) -> Store {

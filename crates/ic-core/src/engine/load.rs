@@ -2,15 +2,17 @@
 //! and on reloads. It never asks for more than the lean lists plus the
 //! problems' details, and keeps few requests in flight: the hosts next to
 //! one small query at a time, then the services, then the problems'
-//! details one batch of names at a time.
+//! details one batch of names at a time. Which problems' details the engine
+//! decides once it applied the services (a periodic reconcile skips those
+//! it holds current).
 
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use ic_api::{ApiError, Client, Detail, NAMES_PER_REQUEST};
-use ic_model::{ObjectKey, Service};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 
 use super::{Internal, LoadStep};
 use crate::command::LoadPhase;
@@ -85,14 +87,19 @@ impl LoadTask {
         let started = self.started();
         self.progress(LoadPhase::Services, 0, None);
         let services = permitted("services", self.client.services(Detail::Lean)).await?;
-        let problems: Vec<ObjectKey> = services
-            .iter()
-            .filter(|service| service.is_problem())
-            .map(Service::object_key)
-            .collect();
-        if !self.send(LoadStep::Services { started, services }) {
+        let (details, problems) = oneshot::channel();
+        if !self.send(LoadStep::Services {
+            started,
+            services,
+            details,
+        }) {
             return Ok(());
         }
+        // The engine applied them and names the problems to detail (none
+        // if the load was cut off meanwhile).
+        let Ok(problems) = problems.await else {
+            return Ok(());
+        };
 
         // Tier 3: the problems' check results and links, by name.
         let total = problems.len();

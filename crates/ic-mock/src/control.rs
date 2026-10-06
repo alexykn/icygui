@@ -360,6 +360,14 @@ impl MockControl {
         self.world().bus.drop_all()
     }
 
+    /// Stalls every connected event stream, like a proxy that stops
+    /// relaying without closing the connection: the streams stay open but
+    /// receive nothing more. Streams opened later work. Returns how many
+    /// were stalled.
+    pub fn stall_event_streams(&self) -> usize {
+        self.world().bus.stall_all()
+    }
+
     /// Number of connected event streams.
     pub fn event_streams(&self) -> usize {
         self.world().bus.streams().len()

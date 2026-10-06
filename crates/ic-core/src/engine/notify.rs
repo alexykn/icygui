@@ -23,7 +23,7 @@
 //!   `CoreEvent::Notification`; the audible ones also go to the
 //!   `Notifier`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -67,10 +67,49 @@ pub(super) struct Notify {
     /// Downtimes logged as started.
     started: HashSet<String>,
     /// What the load in flight found that no event announced: judged when
-    /// the load is complete, so the problems' output is loaded by then.
-    discovered: Vec<Discovered>,
+    /// the load is complete, so the problems' output is loaded by then, or
+    /// before the next input about the same object.
+    discovered: Deferred,
     /// The pause last announced (`CoreEvent::NotificationsPaused`).
     announced_pause: Option<Timestamp>,
+}
+
+/// A load's findings waiting to be judged, in order, each with Icinga's
+/// time when it was found. The rule engine needs each object's inputs in
+/// order: an object whose state an event changes while its finding waits
+/// has the finding judged first ([`Deferred::take_object`]).
+#[derive(Debug, Default)]
+struct Deferred {
+    found: Vec<Option<(Discovered, Timestamp)>>,
+    /// Indexes into `found`, per object.
+    by_object: HashMap<ObjectKey, Vec<usize>>,
+}
+
+impl Deferred {
+    fn push(&mut self, change: Discovered, at: Timestamp) {
+        self.by_object
+            .entry(change.object.clone())
+            .or_default()
+            .push(self.found.len());
+        self.found.push(Some((change, at)));
+    }
+
+    /// Takes `object`'s findings, in order.
+    fn take_object(&mut self, object: &ObjectKey) -> Vec<(Discovered, Timestamp)> {
+        let Some(indexes) = self.by_object.remove(object) else {
+            return Vec::new();
+        };
+        indexes
+            .into_iter()
+            .filter_map(|index| self.found.get_mut(index).and_then(Option::take))
+            .collect()
+    }
+
+    /// Takes every finding, in order.
+    fn take_all(&mut self) -> Vec<(Discovered, Timestamp)> {
+        self.by_object.clear();
+        mem::take(&mut self.found).into_iter().flatten().collect()
+    }
 }
 
 impl Notify {
@@ -82,7 +121,7 @@ impl Notify {
             evaluating: Vec::new(),
             confirm: HashSet::new(),
             started: HashSet::new(),
-            discovered: Vec::new(),
+            discovered: Deferred::default(),
             announced_pause: None,
         }
     }
@@ -179,10 +218,12 @@ impl Notify {
     /// queues its rule inputs and appends its log entries to `log`.
     #[expect(clippy::too_many_lines, reason = "one arm per event type")]
     pub(super) fn applied(&mut self, store: &Store, entry: &AppliedEvent, log: &mut Vec<LogEntry>) {
-        let (Some(before), Some(after)) = (entry.before, entry.after) else {
+        let Some(object) = entry.event.object() else {
             return;
         };
-        let Some(object) = entry.event.object() else {
+        // What a load found about the object came before this event.
+        self.flush_deferred(store, object, log);
+        let (Some(before), Some(after)) = (entry.before, entry.after) else {
             return;
         };
         let at = entry.event.at();
@@ -360,14 +401,15 @@ impl Notify {
             self.confirm.remove(object);
         }
         if let ObjectKey::Host { name } = object {
-            self.host_changed(store, name, &before, &after, at);
+            self.host_changed(store, name, &before, &after, at, log);
         }
     }
 
     /// Changes query answers found that no event announced. During a load
     /// (`defer`) they wait until it is complete (its last tier loads the
-    /// problems' output); otherwise they are judged now. `at`: Icinga's
-    /// time as far as it is known.
+    /// problems' output); otherwise they are judged now, after what a load
+    /// found about the same object before. `at`: Icinga's time as far as
+    /// it is known.
     pub(super) fn discovered(
         &mut self,
         store: &Store,
@@ -376,20 +418,30 @@ impl Notify {
         at: Timestamp,
         log: &mut Vec<LogEntry>,
     ) {
-        if defer {
-            self.discovered.extend(found);
-            return;
-        }
         for change in found {
-            self.discovered_one(store, change, at, log);
+            if defer {
+                self.discovered.push(change, at);
+            } else {
+                self.flush_deferred(store, &change.object, log);
+                self.discovered_one(store, change, at, log);
+            }
         }
     }
 
     /// The load is over (complete, failed or cut off): judges what it
     /// found.
-    pub(super) fn load_finished(&mut self, store: &Store, at: Timestamp, log: &mut Vec<LogEntry>) {
-        let found = mem::take(&mut self.discovered);
-        for change in found {
+    pub(super) fn load_finished(&mut self, store: &Store, log: &mut Vec<LogEntry>) {
+        for (change, at) in self.discovered.take_all() {
+            self.discovered_one(store, change, at, log);
+        }
+    }
+
+    /// Judges what the load in flight found about `object` now: an input
+    /// about it is about to follow, and the rule engine needs them in
+    /// order (a finding judged after a newer event would carry a stale
+    /// `handled`, or a state the object already left).
+    fn flush_deferred(&mut self, store: &Store, object: &ObjectKey, log: &mut Vec<LogEntry>) {
+        for (change, at) in self.discovered.take_object(object) {
             self.discovered_one(store, change, at, log);
         }
     }
@@ -436,7 +488,16 @@ impl Notify {
         let mut own_input = false;
         let state_input = state_changed(&before, &after);
         if state_input {
-            let output = store.current_output(&object).unwrap_or_default().to_owned();
+            // The stored output, unless an event moved the object on since
+            // the answer (a finding judged early).
+            let current = store
+                .view_of(&object)
+                .is_some_and(|view| view.state == after.state);
+            let output = if current {
+                store.current_output(&object).unwrap_or_default().to_owned()
+            } else {
+                String::new()
+            };
             self.state_change(store, &object, &before, &after, &output, when, log);
             own_input = true;
         }
@@ -457,7 +518,7 @@ impl Notify {
             self.confirm.remove(&object);
         }
         if let ObjectKey::Host { name } = &object {
-            self.host_changed(store, name, &before, &after, at);
+            self.host_changed(store, name, &before, &after, at, log);
         }
     }
 
@@ -559,7 +620,8 @@ impl Notify {
     }
 
     /// A host went down or came back (or a query found that): its problem
-    /// services' `handled` changed without an event of their own.
+    /// services' `handled` changed without an event of their own (after
+    /// what a load found about them).
     fn host_changed(
         &mut self,
         store: &Store,
@@ -567,6 +629,7 @@ impl Notify {
         before: &ObjectView,
         after: &ObjectView,
         at: Timestamp,
+        log: &mut Vec<LogEntry>,
     ) {
         let was_problem = before.state.is_problem();
         let is_problem = after.state.is_problem();
@@ -574,6 +637,7 @@ impl Notify {
             return;
         }
         for (service, view) in store.problem_services_of(host) {
+            self.flush_deferred(store, &service, log);
             let handled_before = handled(&view, was_problem);
             let handled_after = handled(&view, is_problem);
             self.handling(
@@ -778,8 +842,8 @@ impl Engine {
 
     /// A query for `Notification` objects failed: without permission
     /// (Icinga said so, though `GET /v1` allowed it), the engine stops
-    /// asking for this session; other errors are retried with the next
-    /// load.
+    /// asking for this session; after other errors the store's list may be
+    /// behind, so the next load (a periodic reconcile too) reloads it.
     pub(super) fn notifications_refused(&mut self, error: &ApiError) {
         match error {
             ApiError::Forbidden(message) | ApiError::NotFound(message) => {
@@ -788,7 +852,10 @@ impl Engine {
                     conn.notifications_allowed = false;
                 }
             }
-            error => tracing::warn!(%error, "couldn't load Icinga's notifications"),
+            error => {
+                tracing::warn!(%error, "couldn't load Icinga's notifications; the next reload brings them");
+                self.notifications_current = false;
+            }
         }
     }
 

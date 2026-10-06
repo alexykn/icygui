@@ -740,6 +740,137 @@ fn snapshots_share_and_stay_unchanged() {
 }
 
 #[test]
+fn an_older_answer_applied_after_a_newer_one_changes_nothing() {
+    // A reload's service list is sent at 20 and takes seconds; meanwhile
+    // config changes are re-queried by name (sent at 30) and answered
+    // first.
+    let mut store = loaded();
+
+    // Created: the by-name answer brings `c`; the older list lacks it.
+    let created = service("h", "c", ServiceState::Ok);
+    store.apply_fetched(Vec::new(), vec![created], Detail::Lean, &[], 30);
+    // Modified: the by-name answer brings `a`'s new vars.
+    let mut modified = service("h", "a", ServiceState::Ok);
+    modified.vars.insert("role".to_owned(), json!("new"));
+    store.apply_fetched(Vec::new(), vec![modified], Detail::Lean, &[], 30);
+    // Deleted: the by-name answer finds `b` gone.
+    let removed = store.apply_fetched(Vec::new(), Vec::new(), Detail::Lean, &[key("h", "b")], 30);
+    assert_eq!(removed, [key("h", "b")]);
+    store.take_discovered();
+
+    // The older list: `a` with its old vars, `b` still there, no `c`.
+    let mut old_a = service("h", "a", ServiceState::Ok);
+    old_a.vars.insert("role".to_owned(), json!("old"));
+    old_a.state = ServiceState::Critical;
+    store.replace_services(
+        vec![old_a, service("h", "b", ServiceState::Critical)],
+        Detail::Lean,
+        20,
+    );
+    assert!(store.contains(&key("h", "c")), "created since: stays");
+    assert!(!store.contains(&key("h", "b")), "deleted since: stays gone");
+    let a = stored(&store, "h", "a");
+    assert_eq!(
+        a.vars.get("role"),
+        Some(&json!("new")),
+        "newer config stays"
+    );
+    assert_eq!(a.state, ServiceState::Ok);
+    assert!(
+        store.take_discovered().is_empty(),
+        "an older answer finds nothing"
+    );
+
+    // A newer list wins again, and may bring `b` back (created again).
+    store.replace_services(
+        vec![
+            service("h", "a", ServiceState::Ok),
+            service("h", "b", ServiceState::Warning),
+        ],
+        Detail::Lean,
+        40,
+    );
+    assert!(store.contains(&key("h", "b")));
+    assert!(!store.contains(&key("h", "c")), "gone as of 40");
+    assert_eq!(stored(&store, "h", "a").vars.get("role"), None);
+}
+
+#[test]
+fn a_deletion_event_keeps_older_answers_from_adding_the_object() {
+    let mut store = loaded();
+    // `d` is created and deleted while a list sent at 20 runs; the
+    // deletion event is line 25. The list still has it.
+    store.note_deleted(key("h", "d"), 25);
+    store.apply_fetched(
+        Vec::new(),
+        vec![service("h", "d", ServiceState::Ok)],
+        Detail::Lean,
+        &[],
+        20,
+    );
+    assert!(!store.contains(&key("h", "d")));
+    // A known object announced deleted stays until an answer confirms it,
+    // but older answers don't change it any more.
+    store.note_deleted(key("h", "a"), 25);
+    let mut old = service("h", "a", ServiceState::Critical);
+    old.vars.insert("role".to_owned(), json!("old"));
+    store.apply_fetched(Vec::new(), vec![old], Detail::Lean, &[], 20);
+    assert_eq!(stored(&store, "h", "a").state, ServiceState::Ok);
+    store.apply_fetched(Vec::new(), Vec::new(), Detail::Lean, &[key("h", "a")], 26);
+    assert!(!store.contains(&key("h", "a")));
+    // Created again: a newer answer brings it back.
+    store.apply_fetched(
+        Vec::new(),
+        vec![service("h", "a", ServiceState::Ok)],
+        Detail::Lean,
+        &[],
+        27,
+    );
+    assert!(store.contains(&key("h", "a")));
+}
+
+#[test]
+fn removed_hosts_keep_their_services_out_too() {
+    let mut store = loaded();
+    // The host is found gone by name (sent at 30); an older list (20)
+    // still has it and its services.
+    store.apply_fetched(
+        Vec::new(),
+        Vec::new(),
+        Detail::Full,
+        &[ObjectKey::host("h")],
+        30,
+    );
+    assert!(store.services.is_empty());
+    store.replace_hosts(vec![host("h", HostState::Up)], 20);
+    store.replace_services(
+        vec![
+            service("h", "a", ServiceState::Ok),
+            service("h", "b", ServiceState::Ok),
+        ],
+        Detail::Lean,
+        20,
+    );
+    assert!(store.hosts.is_empty());
+    assert!(store.services.is_empty());
+}
+
+#[test]
+fn tombstones_are_bounded() {
+    let mut store = Store::default();
+    for index in 0..super::MAX_TOMBSTONES as u64 + 10 {
+        store.note_deleted(ObjectKey::host(&format!("h{index}")), index + 1);
+    }
+    assert!(store.removed.len() <= super::MAX_TOMBSTONES);
+    assert!(
+        store
+            .removed
+            .contains_key(&ObjectKey::host(&format!("h{}", super::MAX_TOMBSTONES))),
+        "the newest stay"
+    );
+}
+
+#[test]
 fn query_answers_record_what_no_event_explained() {
     let mut store = loaded();
     assert!(

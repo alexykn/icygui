@@ -596,7 +596,7 @@ fn discovered_changes_wait_for_the_load_and_removals_forget() {
         h.notify.pending.is_empty(),
         "deferred until the load is over"
     );
-    h.notify.load_finished(&h.store, t(160.0), &mut h.log);
+    h.notify.load_finished(&h.store, &mut h.log);
     let inputs = mem::take(&mut h.notify.pending);
     assert_eq!(inputs.len(), 2, "{inputs:#?}");
     let missed = inputs.iter().find(|input| input.object == a).unwrap();
@@ -637,6 +637,97 @@ fn discovered_changes_wait_for_the_load_and_removals_forget() {
         output.is_empty(),
         "the stored result is older than the state: no stale output"
     );
+}
+
+#[test]
+fn a_finding_is_judged_before_newer_events_about_its_object() {
+    let mut h = Harness::new();
+    let a = key("a");
+    // A reload's tier 2 finds h!a critical and acknowledged (missed during
+    // a reconnect gap); it waits for the load to end.
+    let mut acknowledged = Service::new("h", "a");
+    acknowledged.state = ServiceState::Critical;
+    acknowledged.check.state_type = StateType::Hard;
+    acknowledged.check.last_state_change = t(150.0);
+    acknowledged.check.last_check = Some(t(150.0));
+    acknowledged.check.acknowledgement = AckKind::Normal;
+    h.store
+        .apply_fetched(Vec::new(), vec![acknowledged], Detail::Lean, &[], 20);
+    let found = h.store.take_discovered();
+    assert_eq!(found.len(), 1);
+    h.notify
+        .discovered(&h.store, found, true, t(160.0), &mut h.log);
+    assert!(h.notify.pending.is_empty());
+
+    // Before the load is over, a colleague removes the acknowledgement
+    // (read after the answer's query went out).
+    h.seq = 100;
+    let inputs = h.apply(Event::AcknowledgementCleared {
+        object: a.clone(),
+        at: t(170.0),
+    });
+    assert_eq!(inputs.len(), 2, "{inputs:#?}");
+    assert_eq!(
+        state_of(&inputs[0]),
+        (svc(ServiceState::Critical), StateType::Hard, 150.0, true),
+        "the finding first, as the answer saw it"
+    );
+    assert_eq!(inputs[1].change, Change::AcknowledgementCleared);
+    assert!(!inputs[1].handled);
+    assert!(h.notify.confirm.contains(&a), "the next check confirms");
+
+    // The load ends: nothing is judged twice, nothing stale undoes it.
+    h.notify.load_finished(&h.store, &mut h.log);
+    assert!(h.notify.pending.is_empty());
+    assert!(h.notify.confirm.contains(&a));
+
+    // The next check result confirms the unhandled problem.
+    let inputs = h.apply(check(
+        &a,
+        svc(ServiceState::Critical),
+        StateType::Hard,
+        180.0,
+    ));
+    assert_eq!(inputs.len(), 1, "{inputs:#?}");
+    assert_eq!(
+        state_of(&inputs[0]),
+        (svc(ServiceState::Critical), StateType::Hard, 150.0, false)
+    );
+}
+
+#[test]
+fn a_finding_overtaken_by_an_event_keeps_its_place() {
+    let mut h = Harness::new();
+    let a = key("a");
+    // The reload finds h!a critical; before the load ends, a check result
+    // shows it recovered.
+    let mut critical = Service::new("h", "a");
+    critical.state = ServiceState::Critical;
+    critical.check.state_type = StateType::Hard;
+    critical.check.last_state_change = t(150.0);
+    critical.check.last_check = Some(t(150.0));
+    h.store
+        .apply_fetched(Vec::new(), vec![critical], Detail::Lean, &[], 20);
+    let found = h.store.take_discovered();
+    h.notify
+        .discovered(&h.store, found, true, t(160.0), &mut h.log);
+    h.seq = 100;
+    let inputs = h.apply(check(&a, svc(ServiceState::Ok), StateType::Hard, 170.0));
+    let states: Vec<_> = inputs.iter().map(|input| state_of(input).0).collect();
+    assert_eq!(
+        states,
+        [svc(ServiceState::Critical), svc(ServiceState::Ok)],
+        "the problem, then its recovery"
+    );
+    let Change::State { output, .. } = &inputs[0].change else {
+        panic!();
+    };
+    assert!(
+        output.is_empty(),
+        "the stored output belongs to the recovery"
+    );
+    h.notify.load_finished(&h.store, &mut h.log);
+    assert!(h.notify.pending.is_empty(), "judged once");
 }
 
 #[test]

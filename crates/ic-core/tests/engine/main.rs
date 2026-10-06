@@ -7,6 +7,8 @@
 //! - `actions`: every action end to end;
 //! - `dashboards`: dashboard evaluation and previews;
 //! - `freshness`: the freshness watchdog, hydration and reconcile;
+//! - `gentle`: failing reloads, `Refresh` presses, hidden objects, refused
+//!   kinds and stalled streams cost Icinga little;
 //! - `notifications`: rule inputs, the rule engine and the notifier;
 //! - `event_log`: the local `SQLite` event log;
 //! - `notified`: who Icinga notified, and when (its `Notification` objects);
@@ -22,6 +24,7 @@ mod dashboards;
 mod event_log;
 mod events;
 mod freshness;
+mod gentle;
 mod notifications;
 mod notified;
 mod probe;

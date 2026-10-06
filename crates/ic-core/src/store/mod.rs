@@ -20,7 +20,14 @@
 //!   downtime depth, flapping, ...) and takes everything else (config,
 //!   vars, groups, links) from the answer;
 //! - comment and downtime lists keep the changes of events newer than the
-//!   list's query.
+//!   list's query;
+//! - answers race each other too (re-queries run while a reload's tiers
+//!   take seconds): an answer sent before the one that last wrote an object
+//!   (`started` below the object's) changes nothing, and an object a newer
+//!   answer found gone, or an `ObjectDeleted` event newer than the answer
+//!   announced gone, stays gone (a bounded tombstone per removal), so an
+//!   older list neither brings back a deleted object, nor drops one created
+//!   since, nor reverts its config.
 //!
 //! So the store converges to Icinga's state whatever order answers and
 //! events arrive in, without pausing the stream during queries.
@@ -39,6 +46,10 @@ use ic_rules::DashboardRef;
 
 use crate::snapshot::{DashboardResult, Snapshot};
 use crate::summary::Tally;
+
+/// At most this many removals are remembered (deletions are rare; beyond
+/// it the older half is forgotten).
+const MAX_TOMBSTONES: usize = 100_000;
 
 pub(crate) use apply::{Applied, ObjectView};
 
@@ -134,6 +145,10 @@ pub(crate) struct Store {
     /// Services whose links were loaded ([`Detail::Full`]).
     full: HashSet<ServiceKey>,
     seqs: HashMap<ObjectKey, Seqs>,
+    /// Hosts and services found gone by a query answer (its `started`) or
+    /// announced gone by an `ObjectDeleted` event (its `seq`): an answer
+    /// sent before doesn't bring them back.
+    removed: HashMap<ObjectKey, u64>,
     /// `started` of the comment and downtime lists in the store.
     annotations_fetched: u64,
     /// While a comment/downtime list query runs: what events did to each
@@ -740,6 +755,40 @@ impl Store {
             .is_some_and(|seqs| seqs.evented > started)
     }
 
+    /// Whether an answer sent at `started` is older than what the store
+    /// knows of `key`: a newer answer wrote it, or a newer answer (or
+    /// deletion) found it gone. Such an answer changes nothing about it.
+    fn superseded(&self, key: &ObjectKey, started: u64) -> bool {
+        self.seqs
+            .get(key)
+            .is_some_and(|seqs| seqs.fetched > started)
+            || self
+                .removed
+                .get(key)
+                .is_some_and(|removed| *removed > started)
+    }
+
+    /// Remembers that `key` was gone as of `seq`.
+    fn tombstone(&mut self, key: ObjectKey, seq: u64) {
+        if self.removed.len() >= MAX_TOMBSTONES && !self.removed.contains_key(&key) {
+            let mut seqs: Vec<u64> = self.removed.values().copied().collect();
+            let middle = seqs.len() / 2;
+            let (_, cutoff, _) = seqs.select_nth_unstable(middle);
+            let cutoff = *cutoff;
+            self.removed.retain(|_, removed| *removed > cutoff);
+        }
+        let removed = self.removed.entry(key).or_default();
+        *removed = (*removed).max(seq);
+    }
+
+    /// An `ObjectDeleted` event (read as line `seq`) for a host or service:
+    /// answers sent before it can't bring the object (back) into the
+    /// store. Whether it is gone is still asked (it may have been created
+    /// again).
+    pub(crate) fn note_deleted(&mut self, key: ObjectKey, seq: u64) {
+        self.tombstone(key, seq);
+    }
+
     fn mark_fetched(&mut self, key: ObjectKey, started: u64) {
         let seqs = self.seqs.entry(key).or_default();
         seqs.fetched = seqs.fetched.max(started);
@@ -747,6 +796,10 @@ impl Store {
 
     fn put_host(&mut self, mut host: Host, started: u64) {
         let key = host.key();
+        if self.superseded(&key, started) {
+            return;
+        }
+        self.removed.remove(&key);
         if let Some(stored) = self.hosts.get(&host.name) {
             if self.evented_after(&key, started) {
                 keep_event_fields(&mut host.check, &stored.check);
@@ -775,6 +828,13 @@ impl Store {
 
     fn put_service(&mut self, mut service: Service, detail: Detail, started: u64) {
         let key = service.object_key();
+        if self.superseded(&key, started) {
+            // Even a full answer: its result and links are older than the
+            // object in the store (hydration asks again for what the UI
+            // shows; a reconcile fetches problems not held in full).
+            return;
+        }
+        self.removed.remove(&key);
         if let Some(stored) = self.services.get(&service.key) {
             if self.evented_after(&key, started) {
                 keep_event_fields(&mut service.check, &stored.check);
@@ -817,13 +877,18 @@ impl Store {
         self.changes.objects.insert(key);
     }
 
-    /// Removes objects Icinga no longer knows, unless an event newer than
-    /// `started` showed them. A removed host takes its services along.
-    /// Returns what was removed.
+    /// Removes objects Icinga no longer knows, unless an event or answer
+    /// newer than `started` showed them. A removed host takes its services
+    /// along. Returns what was removed.
     fn remove_objects(&mut self, keys: &[ObjectKey], started: u64) -> Vec<ObjectKey> {
         let mut removed = Vec::new();
         for key in keys {
-            if self.evented_after(key, started) || !self.contains(key) {
+            if self.evented_after(key, started) || self.superseded(key, started) {
+                continue;
+            }
+            if !self.contains(key) {
+                // Gone already: an older answer mustn't bring it back.
+                self.tombstone(key.clone(), started);
                 continue;
             }
             match key {
@@ -842,19 +907,20 @@ impl Store {
                         })
                         .collect();
                     for service in services {
-                        self.drop_object(&service);
+                        self.drop_object(&service, started);
                         removed.push(service);
                     }
                 }
                 ObjectKey::Service { .. } => {}
             }
-            self.drop_object(key);
+            self.drop_object(key, started);
             removed.push(key.clone());
         }
         removed
     }
 
-    fn drop_object(&mut self, key: &ObjectKey) {
+    /// Removes an object an answer sent at `started` found gone.
+    fn drop_object(&mut self, key: &ObjectKey, started: u64) {
         if let Some((state, check)) = self.checkable(key) {
             self.discovered.push(Discovered {
                 object: key.clone(),
@@ -885,6 +951,7 @@ impl Store {
             Arc::make_mut(&mut self.icinga_notifications).remove(key);
         }
         self.seqs.remove(key);
+        self.tombstone(key.clone(), started);
         self.changes.any = true;
         self.changes.objects.insert(key.clone());
     }

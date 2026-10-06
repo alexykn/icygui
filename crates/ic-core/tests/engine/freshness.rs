@@ -406,6 +406,16 @@ async fn periodic_reconciles_are_lean_and_keep_the_stream() {
         },
     );
     engine.connected().await;
+    // The first load fetched every problem's details.
+    let problems = engine
+        .latest()
+        .unwrap()
+        .services
+        .values()
+        .filter(|service| service.is_problem())
+        .count();
+    assert!(problems > 0);
+    control.clear_requests();
     assert!(
         wait_until(|| service_loads(&control).len() >= 3).await,
         "reconciled periodically"
@@ -414,15 +424,22 @@ async fn periodic_reconciles_are_lean_and_keep_the_stream() {
         service_loads(&control).iter().all(|full| !full),
         "never a full-attribute reload"
     );
-    assert_eq!(
-        control
+    let details: Vec<NameQuery> = name_queries(&control)
+        .into_iter()
+        .filter(|query| query.full)
+        .collect();
+    assert!(
+        details.is_empty(),
+        "problems held in full with a current result aren't fetched again: {details:?}"
+    );
+    assert!(
+        !control
             .requests()
             .iter()
-            .filter(|request| request.path == "/v1/events")
-            .count(),
-        1,
+            .any(|request| request.path == "/v1/events"),
         "the stream stays"
     );
+    assert_eq!(control.event_streams(), 1);
     let after_connected: Vec<ConnectionState> = engine
         .states()
         .into_iter()

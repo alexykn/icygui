@@ -84,7 +84,7 @@ Every push and pull request (`ci.yml`, on Linux and macOS):
 
 `xtask`'s tests also check that the logo files draw the same mark, that the committed icons, `.icns` and banner are what `cargo xtask icons` renders, the layout and ownership of the `.tar.gz` and `.deb` (built from a stand-in binary), `SHA256SUMS`, and the Homebrew cask and formula. `ic-platform`'s tests check that the tray icon's shapes match the mark SVG.
 
-The contract tests (`contract.yml`) run against Icinga in Docker nightly, on pull requests and pushes to `main` that change `ic-api`, `ic-model`, `contract/` or `Cargo.lock`, and by hand with another image tag. The performance budgets (`perf.yml`, docs/performance.md) run nightly and by hand, in release builds against `ic-mock`'s `large` scenario.
+The contract tests (`contract.yml`) run against Icinga in Docker nightly, on pull requests and pushes to `main` that change `ic-api`, `ic-model`, `contract/` or `Cargo.lock`, and by hand with another image tag. The performance budgets (`perf.yml`, docs/performance.md) run nightly, by hand and on pull requests that change the workflow, in release builds against `ic-mock`'s `large` scenario.
 
 A release (`release.yml`) additionally checks:
 

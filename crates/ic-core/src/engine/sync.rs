@@ -334,12 +334,14 @@ impl Engine {
     /// The problem services whose details (`Full`) tier 3 fetches: every
     /// one for a reload, else (a reconcile, `Refresh`) only those the store
     /// doesn't hold in full with a current result (events keep them
-    /// current). In quiet mode a periodic reconcile fetches only problems
-    /// without any result (outputs may be stale while quiet; waking up
-    /// refreshes them).
+    /// current) and the fetch queue doesn't fetch already (rows on screen,
+    /// the wake-up refresh). In quiet mode, and while the stream switches
+    /// back from it, a periodic reconcile fetches only problems without any
+    /// result (outputs may be stale while quiet; waking up refreshes them
+    /// once the switch is done).
     pub(super) fn problem_details(&self, kind: LoadKind) -> Vec<ObjectKey> {
         let all = matches!(kind, LoadKind::First | LoadKind::Reload);
-        let quiet = kind == LoadKind::Reconcile && self.quiet();
+        let quiet = kind == LoadKind::Reconcile && (self.quiet() || self.stream_quiet());
         self.store
             .services()
             .iter()
@@ -347,6 +349,8 @@ impl Engine {
             .filter(|(key, service)| {
                 if all {
                     true
+                } else if self.fetch.fetches_full(&service.object_key()) {
+                    false
                 } else if quiet {
                     service.check.result.is_none()
                 } else {

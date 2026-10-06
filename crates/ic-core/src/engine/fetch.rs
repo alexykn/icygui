@@ -347,6 +347,11 @@ impl FetchQueue {
             .chain(&self.flying_full)
     }
 
+    /// Whether `key` waits for or is in a full fetch.
+    pub(super) fn fetches_full(&self, key: &ObjectKey) -> bool {
+        self.full.contains(key) || self.background.contains(key) || self.flying_full.contains(key)
+    }
+
     /// Re-queries a created object, even if it was missing before.
     pub(super) fn mark_created(&mut self, key: ObjectKey, now: Instant) {
         if self.refused.covers(&key) {

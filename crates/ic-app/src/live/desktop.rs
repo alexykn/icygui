@@ -37,7 +37,8 @@ pub(crate) enum Urgency {
 }
 
 impl Urgency {
-    /// The XDG `urgency` hint's byte.
+    /// The XDG `urgency` hint's byte (only the Linux D-Bus notifier sends it).
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn level(self) -> u8 {
         match self {
             Self::Low => 0,

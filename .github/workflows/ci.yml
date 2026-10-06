@@ -50,6 +50,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Report compiler messages as annotations
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
       - name: Clippy (pedantic, warnings are errors)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 

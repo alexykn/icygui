@@ -31,6 +31,17 @@
 //!
 //! So the store converges to Icinga's state whatever order answers and
 //! events arrive in, without pausing the stream during queries.
+//!
+//! **Views of the cluster (ENV-12).** While the engine is connected to a
+//! node in a child zone (a partial view), objects its answers leave out
+//! may only be outside its zone: they leave the store, but their last view
+//! is kept ([`Store::set_hiding`]) instead of being reported gone, so the
+//! rule engine doesn't forget them. A later answer that brings one back
+//! (from a master) reports what changed meanwhile as [`Discovered`], and a
+//! complete load from a node that sees everything reports those it didn't
+//! bring as gone ([`Store::release_hidden`]). Objects that come with a
+//! fuller view without having been seen before are listed for the rule
+//! engine to learn ([`Store::track_appeared`]).
 
 mod apply;
 
@@ -160,6 +171,15 @@ pub(crate) struct Store {
     /// Changes found only by query answers, since the last
     /// [`Store::take_discovered`].
     discovered: Vec<Discovered>,
+    /// Hosts and services a node with a partial view left out, with their
+    /// last view (see the module notes).
+    hidden: HashMap<ObjectKey, ObjectView>,
+    /// The connected node has a partial view: objects its answers leave
+    /// out are hidden, not gone.
+    hiding: bool,
+    /// While recording: objects answers brought that the store neither
+    /// held nor hid (see [`Store::track_appeared`]).
+    appeared: Option<Vec<ObjectKey>>,
 }
 
 impl Store {
@@ -421,6 +441,67 @@ impl Store {
     /// The node the objects come from, if any.
     pub(crate) fn node(&self) -> Option<&Arc<crate::topology::ConnectedNode>> {
         self.node.as_ref()
+    }
+
+    /// Whether the connected node has a partial view: objects answers
+    /// leave out are then hidden (their last view kept), not gone.
+    pub(crate) fn set_hiding(&mut self, hiding: bool) {
+        self.hiding = hiding;
+    }
+
+    /// The hosts and services hidden so far.
+    pub(crate) fn hidden_count(&self) -> usize {
+        self.hidden.len()
+    }
+
+    /// A complete load from a node that sees the whole cluster didn't bring
+    /// the hidden objects back: they are gone (reported as [`Discovered`]
+    /// with no `after`, like any removal).
+    pub(crate) fn release_hidden(&mut self) {
+        let hidden = std::mem::take(&mut self.hidden);
+        let mut gone: Vec<(ObjectKey, ObjectView)> = hidden.into_iter().collect();
+        gone.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (object, before) in gone {
+            self.discovered.push(Discovered {
+                object,
+                before,
+                after: None,
+            });
+        }
+    }
+
+    /// Starts (`true`) or stops recording the objects answers bring that
+    /// the store neither held nor hid: what a fuller view adds to a store
+    /// filled from a partial (or unverified) one. Stopping drops what was
+    /// recorded; [`Store::take_appeared`] takes it.
+    pub(crate) fn track_appeared(&mut self, track: bool) {
+        self.appeared = track.then(Vec::new);
+    }
+
+    /// Takes the objects recorded since [`Store::track_appeared`] (still
+    /// recording).
+    pub(crate) fn take_appeared(&mut self) -> Vec<ObjectKey> {
+        self.appeared
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// An object an answer put into the store that it didn't hold: a
+    /// hidden one comes back with what changed meanwhile, another one is
+    /// recorded while that is asked for.
+    fn arrived(&mut self, key: &ObjectKey, after: ObjectView) {
+        if let Some(before) = self.hidden.remove(key) {
+            if before != after {
+                self.discovered.push(Discovered {
+                    object: key.clone(),
+                    before,
+                    after: Some(after),
+                });
+            }
+        } else if let Some(appeared) = &mut self.appeared {
+            appeared.push(key.clone());
+        }
     }
 
     /// Stores a new instance status; returns the previous one.
@@ -847,6 +928,11 @@ impl Store {
                 self.mark_fetched(key, started);
                 return;
             }
+        } else {
+            self.arrived(
+                &key,
+                ObjectView::of(CheckableState::Host(host.state), &host.check),
+            );
         }
         Arc::make_mut(&mut self.hosts).insert(host.name.clone(), Arc::new(host));
         self.mark_fetched(key.clone(), started);
@@ -895,6 +981,11 @@ impl Store {
                 self.mark_fetched(key, started);
                 return;
             }
+        } else {
+            self.arrived(
+                &key,
+                ObjectView::of(CheckableState::Service(service.state), &service.check),
+            );
         }
         if detail == Detail::Full {
             self.full.insert(service.key.clone());
@@ -947,14 +1038,20 @@ impl Store {
         removed
     }
 
-    /// Removes an object an answer sent at `started` found gone.
+    /// Removes an object an answer sent at `started` found gone (or, from
+    /// a node with a partial view, left out: hidden).
     fn drop_object(&mut self, key: &ObjectKey, started: u64) {
         if let Some((state, check)) = self.checkable(key) {
-            self.discovered.push(Discovered {
-                object: key.clone(),
-                before: ObjectView::of(state, check),
-                after: None,
-            });
+            let before = ObjectView::of(state, check);
+            if self.hiding {
+                self.hidden.insert(key.clone(), before);
+            } else {
+                self.discovered.push(Discovered {
+                    object: key.clone(),
+                    before,
+                    after: None,
+                });
+            }
         }
         match key {
             ObjectKey::Host { name } => {

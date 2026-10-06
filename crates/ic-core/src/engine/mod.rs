@@ -376,6 +376,10 @@ pub(crate) struct Engine {
     /// `Tuning::probe_max`, with jitter.
     probe_backoff: Backoff,
     probe_in_flight: bool,
+    /// The pending reload follows a switch to a node with another view of
+    /// the cluster (ENV-12): it brings every object, so events about
+    /// objects the store doesn't hold aren't looked up by name meanwhile.
+    view_reload: bool,
 }
 
 /// Why the select loop woke up.
@@ -459,6 +463,7 @@ impl Engine {
             probe_at: None,
             probe_backoff: Backoff::new(tuning_probe.0, tuning_probe.1),
             probe_in_flight: false,
+            view_reload: false,
         }
     }
 
@@ -643,10 +648,10 @@ impl Engine {
         let environment = self.spec.environment.clone();
         let secrets = Arc::clone(&self.ports.secrets);
         let tx = self.internal_tx.clone();
-        let action_timeout = self.tuning.action_timeout;
-        let first = self.walk_first.take();
+        let timeouts = (self.tuning.action_timeout, self.tuning.identify_timeout);
+        let first = self.walk_start();
         self.tasks.spawn(async move {
-            let connected = connect::connect(&environment, secrets, action_timeout, first).await;
+            let connected = connect::connect(&environment, secrets, timeouts, first).await;
             let message = match connected {
                 Ok(connected) => Internal::Connected {
                     session,
@@ -656,6 +661,26 @@ impl Engine {
             };
             let _ = tx.send(message);
         });
+    }
+
+    /// Where the next walk over the URLs starts: one a probe found better,
+    /// else the URL of the node the objects come from when that node sees
+    /// the whole cluster and isn't the first choice (the master that took
+    /// over after a failover), so a reconnect doesn't wait for a preferred
+    /// master that hangs, nor ask it again and again; the others follow in
+    /// order of preference (ENV-12).
+    fn walk_start(&mut self) -> Option<usize> {
+        self.walk_first.take().or_else(|| {
+            let node = self.store.node()?;
+            let index = node.url_index;
+            let listed = self
+                .spec
+                .environment
+                .urls
+                .get(index)
+                .is_some_and(|url| url.url.trim() == node.url.trim());
+            (index > 0 && listed && node.view.is_full()).then_some(index)
+        })
     }
 
     /// Ends the current session: aborts its tasks (closing the event
@@ -696,20 +721,9 @@ impl Engine {
         self.teardown();
         self.publish_changes();
         let state = match failure {
-            Failure::Transient(error) => {
-                if healthy {
-                    self.backoff.reset();
-                }
-                let delay = self.backoff.fail().max(at_least);
-                tracing::info!(%error, ?delay, "connection lost; retrying");
-                self.phase = Phase::Idle {
-                    retry_at: Some(Instant::now() + delay),
-                };
-                ConnectionState::Reconnecting {
-                    error,
-                    attempt: self.backoff.attempt(),
-                    retry_at: self.ports.clock.now().plus(delay),
-                }
+            Failure::Transient(error) => self.retry_later(error, None, healthy, at_least),
+            Failure::TransientUntrusted { error, untrusted } => {
+                self.retry_later(error, Some(*untrusted), healthy, at_least)
             }
             Failure::MissingSecret => {
                 self.phase = Phase::Idle { retry_at: None };
@@ -743,6 +757,31 @@ impl Engine {
         self.set_state(state);
     }
 
+    /// Backs off (at least `at_least`, after a reset if the session was
+    /// `healthy`) and retries then; the state to report.
+    fn retry_later(
+        &mut self,
+        error: String,
+        untrusted: Option<crate::command::UntrustedUrl>,
+        healthy: bool,
+        at_least: std::time::Duration,
+    ) -> ConnectionState {
+        if healthy {
+            self.backoff.reset();
+        }
+        let delay = self.backoff.fail().max(at_least);
+        tracing::info!(%error, ?delay, "connection lost; retrying");
+        self.phase = Phase::Idle {
+            retry_at: Some(Instant::now() + delay),
+        };
+        ConnectionState::Reconnecting {
+            error,
+            attempt: self.backoff.attempt(),
+            retry_at: self.ports.clock.now().plus(delay),
+            untrusted,
+        }
+    }
+
     fn on_connected(&mut self, connected: Connected) {
         let Connected {
             client,
@@ -767,6 +806,11 @@ impl Engine {
                 .store
                 .node()
                 .is_some_and(|loaded| !loaded.view.same_data(&node.view));
+        // What a satellite's answers leave out may be outside its zone: the
+        // store hides it (keeps its last view) rather than forgetting it.
+        self.store
+            .set_hiding(matches!(node.view, topology::ClusterView::Partial { .. }));
+        self.view_reload = other_view;
         self.emit(CoreEvent::Permissions(info.clone()));
         if let Some(stream) = lines {
             let (tx, rx) = mpsc::unbounded_channel();
@@ -854,6 +898,12 @@ impl Engine {
             self.last_user_reload = Some(now);
         }
         self.reload_full = false;
+        self.view_reload = false;
+        // A fuller view than the one the store was filled from brings
+        // objects never seen: the rule engine learns them when it's over.
+        self.store.track_appeared(
+            kind != LoadKind::First && self.store.node().is_some_and(|node| !node.view.is_full()),
+        );
         self.loads += 1;
         self.load = Some((self.loads, kind));
         self.store.begin_annotation_query();
@@ -917,31 +967,7 @@ impl Engine {
                 self.record_discovered(true);
                 self.publish();
             }
-            LoadStep::Done => {
-                let now = Instant::now();
-                self.load = None;
-                self.loaded = true;
-                // The objects are this node's now.
-                self.adopt_node(true);
-                self.last_load_end = Some(now);
-                self.fetch
-                    .release_deferred(now, |key| self.store.contains(key));
-                self.watchdog.loaded(&self.store);
-                self.schedule_reconcile();
-                self.finish_discovered();
-                if first {
-                    self.load_backoff.reset();
-                    // What is already wrong doesn't notify, but the rule
-                    // engine must know it (before any event about it).
-                    let at = self.evaluation_time();
-                    self.notify.seed(&self.store, at);
-                    self.go_live();
-                }
-                if !self.notifications_current {
-                    self.load_notifications();
-                }
-                self.publish_changes();
-            }
+            LoadStep::Done => self.load_done(first),
             LoadStep::Failed(failure) => {
                 self.load = None;
                 self.last_load_end = Some(Instant::now());
@@ -977,6 +1003,45 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// A load is complete: the objects are the node's, the rule engine
+    /// judges what it found (and, after the first, learns what is wrong).
+    fn load_done(&mut self, first: bool) {
+        let now = Instant::now();
+        self.load = None;
+        self.loaded = true;
+        // The objects are this node's now.
+        self.adopt_node(true);
+        self.last_load_end = Some(now);
+        self.fetch
+            .release_deferred(now, |key| self.store.contains(key));
+        self.watchdog.loaded(&self.store);
+        self.schedule_reconcile();
+        if self.store.hidden_count() > 0
+            && self
+                .conn
+                .as_ref()
+                .is_some_and(|conn| conn.node.view.is_full())
+        {
+            // The whole cluster is in: what it didn't bring back of
+            // what a satellite left out is gone.
+            self.store.release_hidden();
+            self.record_discovered(true);
+        }
+        self.finish_discovered();
+        if first {
+            self.load_backoff.reset();
+            // What is already wrong doesn't notify, but the rule
+            // engine must know it (before any event about it).
+            let at = self.evaluation_time();
+            self.notify.seed(&self.store, at);
+            self.go_live();
+        }
+        if !self.notifications_current {
+            self.load_notifications();
+        }
+        self.publish_changes();
     }
 
     /// The first load is in: connected and live.
@@ -1062,12 +1127,13 @@ impl Engine {
         let current = conn.node.view.clone();
         let current_index = conn.node.url_index;
         let action_timeout = self.tuning.action_timeout;
+        let quick = Some(self.tuning.identify_timeout);
         let tx = self.internal_tx.clone();
         let session = self.session;
         self.tasks.spawn(async move {
             let mut better = None;
             for index in candidates {
-                match connect::reach(&login, &urls, index, action_timeout).await {
+                match connect::reach(&login, &urls, index, action_timeout, quick).await {
                     Ok(reached)
                         if topology::better(&reached.node.view, index, &current, current_index) =>
                     {
@@ -1389,6 +1455,9 @@ impl Engine {
                 Applied::Unknown(key) => {
                     if self.load.is_some() {
                         self.fetch.defer(key);
+                    } else if self.view_reload && self.reload_at.is_some() {
+                        // The pending reload brings it, and answers sent
+                        // after this event.
                     } else {
                         self.fetch.mark_unknown(key, now);
                     }
@@ -1536,11 +1605,22 @@ impl Engine {
         self.event_log.record(log);
     }
 
-    /// A load is over (or cut off): what it found is judged now.
+    /// A load is over (or cut off): what it found is judged now, and the
+    /// rule engine learns the objects a fuller view brought.
     fn finish_discovered(&mut self) {
         let mut log = Vec::new();
         self.notify.load_finished(&self.store, &mut log);
         self.event_log.record(log);
+        let appeared = self.store.take_appeared();
+        self.store.track_appeared(false);
+        if !appeared.is_empty() {
+            tracing::debug!(
+                count = appeared.len(),
+                "a fuller view of the cluster brought objects never seen"
+            );
+            let at = self.evaluation_time();
+            self.notify.seed_objects(&self.store, &appeared, at);
+        }
     }
 
     // --- commands ---------------------------------------------------------------------

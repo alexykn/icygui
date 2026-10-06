@@ -410,6 +410,7 @@ fn hydration_asks_once_and_only_while_connected() {
         error: "gone".to_owned(),
         attempt: 1,
         retry_at: now(),
+        untrusted: None,
     }));
     assert_eq!(
         state.hydrate(vec![ObjectKey::service("h", "new")], start),
@@ -569,6 +570,7 @@ fn view_changes_wait_while_the_engine_waits_to_reconnect() {
         error: "refused".to_owned(),
         attempt: 3,
         retry_at: now(),
+        untrusted: None,
     }));
     assert!(state.update_view(&production, |view| view.hide_handled = true));
     assert!(state.update_view(&production, |view| view.group_by = GroupBy::Host));

@@ -1062,6 +1062,7 @@ impl AppState {
                 error: "connect: connection refused".to_owned(),
                 attempt: 1,
                 retry_at: Timestamp::now(),
+                untrusted: None,
             });
     }
 }

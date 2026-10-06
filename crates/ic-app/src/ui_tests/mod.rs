@@ -95,6 +95,21 @@ impl Harness {
         self.draw(cx);
     }
 
+    /// Moves the pointer to `position` (hover), then draws.
+    fn hover(&self, cx: &mut App, position: Point<Pixels>) {
+        self.in_window(cx, |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers: Modifiers::default(),
+                }),
+                cx,
+            );
+        });
+        self.draw(cx);
+    }
+
     /// Presses the left button at `position`.
     fn press(&self, cx: &mut App, position: Point<Pixels>, modifiers: Modifiers) {
         self.in_window(cx, |window, cx| {

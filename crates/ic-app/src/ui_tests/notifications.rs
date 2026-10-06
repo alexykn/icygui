@@ -70,7 +70,7 @@ fn type_into(app: &Harness, cx: &mut App, id: &FieldId, text: &str) {
 fn the_notification_centre_lists_opens_and_marks_read() {
     run(FixtureOptions::default(), |app, cx| {
         // Newest first: a storm summary (silent, no object), then the
-        // design's problem (it shows last, right above the footer).
+        // design's problem (the second entry).
         app.state.update(cx, |state, cx| {
             state.apply(CoreEvent::Notification(record(
                 "replication",
@@ -98,9 +98,15 @@ fn the_notification_centre_lists_opens_and_marks_read() {
         let sidebar = app.workspace.read(cx).sidebar().clone();
         assert!(sidebar.read(cx).notifications_open());
 
-        // The last entry (the problem) sits right above the centre's
-        // footer: a click opens its object and marks it read.
-        app.click(cx, point(px(200.), px(780.)), Modifiers::default());
+        // The second entry (the problem), under the section's title and
+        // the first entry at the list's top: a click opens its object and
+        // marks it read.
+        let list = sidebar.read(cx).centre_list_bounds();
+        app.click(
+            cx,
+            point(px(200.), list.origin.y + px(115.)),
+            Modifiers::default(),
+        );
         assert_eq!(app.pane_object(cx), Some(replication()));
         assert!(!sidebar.read(cx).notifications_open(), "closed");
         let state = app.state.read(cx);

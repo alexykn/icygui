@@ -127,6 +127,13 @@ pub(crate) struct Sidebar {
     drag: WindowDrag,
     menus: OpenMenu<SidebarMenu>,
     centre: centre::CentreState,
+    /// The environment the switcher's mute row is about: one whose bell
+    /// was clicked in the switcher (`None`: the one on screen).
+    mute_target: Option<String>,
+    /// The window's height at the last render: the footer's popovers fit
+    /// into it (a short window shows less of their lists, never less of
+    /// their controls).
+    viewport: Pixels,
     rename: Option<Rename>,
     _subscriptions: Vec<Subscription>,
 }
@@ -162,6 +169,8 @@ impl Sidebar {
             drag: WindowDrag::default(),
             menus: OpenMenu::default(),
             centre: centre::CentreState::default(),
+            mute_target: None,
+            viewport: crate::WINDOW_SIZE.height,
             rename: None,
             _subscriptions: subscriptions,
         }
@@ -937,9 +946,11 @@ impl Sidebar {
             .active(|style| style.bg(colors.element_active))
             .child(StateDot::with_color(health_color(health, theme)).size(metrics.status_dot))
             .when_some(name, |status, name| {
+                // The name gives way to the node (at most
+                // `STATUS_NODE_MAX`): both stay readable (ENV-06, ENV-12).
                 status.child(
                     div()
-                        .flex_none()
+                        .min_w_0()
                         .ml(px(5.))
                         .max_w(px(STATUS_NAME_MAX))
                         .truncate()
@@ -965,6 +976,10 @@ impl Sidebar {
             )
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                if !this.menus.is_open(&SidebarMenu::Status) {
+                    // The mute row starts with the environment on screen.
+                    this.mute_target = None;
+                }
                 this.menus.toggle(SidebarMenu::Status, down_position(event));
                 cx.notify();
             }));
@@ -975,10 +990,12 @@ impl Sidebar {
         }
     }
 
-    /// The footer switcher's middle: connected, the node, cut short when
-    /// long (an FQDN; the details have it in full), then at the right the
-    /// age of the last event in a slot of its own (it never shortens the
-    /// node as it ticks, ENV-06). A node that sees only part of the cluster
+    /// The footer switcher's middle: connected, the node (its first DNS
+    /// label: `icinga-master-02` of `icinga-master-02.example.com`; the
+    /// tooltip and the details have it in full), cut short beyond
+    /// [`STATUS_NODE_MAX`] (the name gives way first), then at the right the age of the
+    /// last event in a slot of its own (it never shortens the node as it
+    /// ticks, ENV-06). A node that sees only part of the cluster
     /// (a satellite) is coloured, nothing more (ENV-12): the tooltip, the
     /// details and the summary bar say what it means. Otherwise what the
     /// connection does (`retry in 12s`).
@@ -994,11 +1011,12 @@ impl Sidebar {
             (true, Some(age)) => status
                 .child(
                     div()
-                        .min_w_0()
+                        .flex_none()
+                        .max_w(px(STATUS_NODE_MAX))
                         .ml(px(5.))
                         .truncate()
                         .when(partial, |node| node.text_color(theme.states.warning))
-                        .child(endpoint),
+                        .child(short_node(&endpoint).to_owned()),
                 )
                 .child(div().flex_1())
                 .child(
@@ -1166,8 +1184,25 @@ impl Sidebar {
 /// Space left and right of the footer switcher's text (its hover
 /// background reaches that far, as around an icon button's icon).
 const STATUS_PADDING: f32 = 3.;
-/// The widest the footer switcher shows an environment's name.
-const STATUS_NAME_MAX: f32 = 110.;
+/// The widest the footer switcher shows an environment's name; it gives
+/// way to the node down to about nine characters.
+const STATUS_NAME_MAX: f32 = 90.;
+/// The widest the footer switcher shows the connected node (about twelve
+/// characters: `sat-ams-01`, `icinga-maste…`); the name gets the rest.
+const STATUS_NODE_MAX: f32 = 80.;
+
+/// A node's name as the footer shows it: its first DNS label
+/// (`icinga-master-02` of `icinga-master-02.example.com`); an IP address
+/// or a single label as it is.
+pub(super) fn short_node(name: &str) -> &str {
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return name;
+    }
+    match name.split_once('.') {
+        Some((first, _)) if !first.is_empty() => first,
+        _ => name,
+    }
+}
 /// The footer age's slot, in characters (`59s`, `23h`).
 const AGE_SLOT_CHARS: f32 = 3.;
 
@@ -1184,6 +1219,7 @@ pub(super) fn health_color(health: Health, theme: &Theme) -> gpui::Hsla {
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.viewport = window.viewport_size().height;
         let theme = cx.theme();
         let width = theme.metrics.sidebar_width;
         let border = theme.colors.border_split;

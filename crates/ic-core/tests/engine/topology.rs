@@ -14,11 +14,13 @@
 
 use std::time::Duration;
 
+use futures::StreamExt as _;
+
 use crate::support::{ENV_ID, Engine, FakeSecrets, Launch, PASSWORD, USER, environment, mock};
 use ic_config::{ApiUrl, AuthConfig, Environment};
 use ic_core::{ClusterView, ConnectedNode, ConnectionState, Tuning, test_connection};
 use ic_mock::{MockConfig, MockServer, MockTls, MockUser, Scenario, scenarios};
-use ic_model::Endpoint;
+use ic_model::{Endpoint, HostState, ServiceState};
 use secrecy::SecretString;
 
 /// The `prod-cluster` scenario with a second master in the top-level zone
@@ -400,4 +402,382 @@ async fn each_url_is_tested_on_its_own() {
             );
         }
     }
+}
+
+// --- notifications across node switches ---------------------------------------------
+
+/// Faster probes and reloads for the switches below (the second reload
+/// otherwise waits `reload_spacing` after the first).
+fn switching() -> Tuning {
+    Tuning {
+        reload_spacing: Duration::from_millis(50),
+        ..tuning()
+    }
+}
+
+fn start_switching(environment: Environment, server: &MockServer) -> Engine {
+    Launch {
+        environment,
+        tuning: switching(),
+        ..Launch::new(server)
+    }
+    .start()
+}
+
+/// An OK service outside the satellite's zone, on a healthy host, with no
+/// downtime or flapping: one the default rule notifies about.
+fn outside_the_zone(master: &MockServer, satellite: &MockServer) -> (String, String, String) {
+    let zone: std::collections::HashSet<String> = satellite
+        .control()
+        .hosts()
+        .iter()
+        .map(|host| host.name.to_string())
+        .collect();
+    let control = master.control();
+    let hosts = control.hosts();
+    let service = control
+        .services()
+        .into_iter()
+        .find(|service| {
+            service.state == ServiceState::Ok
+                && service.check.downtime_depth == 0
+                && !service.check.flapping
+                && !zone.contains(service.key.host.as_str())
+                && hosts.iter().any(|host| {
+                    host.name == service.key.host
+                        && host.state == HostState::Up
+                        && host.check.downtime_depth == 0
+                })
+        })
+        .expect("an OK service outside the zone");
+    let host = hosts
+        .iter()
+        .find(|host| host.name == service.key.host)
+        .unwrap();
+    (
+        service.key.host.to_string(),
+        service.key.name.to_string(),
+        format!("{} on {}", service.display_name, host.display_name),
+    )
+}
+
+fn set_state(server: &MockServer, host: &str, service: &str, state: ServiceState) {
+    server
+        .control()
+        .set_service_state(
+            host,
+            service,
+            state,
+            &format!("{state:?} - {service}"),
+            true,
+        )
+        .unwrap();
+}
+
+/// Waits until the engine emitted `count` notifications, and a moment
+/// longer; then every notification title so far, in order (anything that
+/// shouldn't have notified shows up, also while the test waited for
+/// something else).
+async fn titles(engine: &mut Engine, count: usize) -> Vec<String> {
+    while engine.notifications().len() < count {
+        engine.notification().await;
+    }
+    while tokio::time::timeout(Duration::from_millis(300), engine.events.next())
+        .await
+        .ok()
+        .flatten()
+        .map(|event| engine.seen.push(event))
+        .is_some()
+    {}
+    engine
+        .notifications()
+        .into_iter()
+        .map(|record| record.intent.title)
+        .collect()
+}
+
+/// Waits until the engine shows `node`'s data: connected to it and its
+/// load in (`hosts` objects).
+async fn showing(engine: &mut Engine, node: &str, hosts: usize) {
+    connected_to(engine, |connected| connected.name == node).await;
+    engine
+        .snapshot(|snapshot| {
+            snapshot
+                .node
+                .as_ref()
+                .is_some_and(|shown| shown.name == node)
+                && snapshot.hosts.len() == hosts
+        })
+        .await;
+}
+
+/// The master stops answering and its stream ends: the engine falls back
+/// to the satellite.
+fn master_down(master: &MockServer) {
+    master.control().fail_next(u32::MAX, 503);
+    master.control().drop_event_streams();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn what_happens_outside_the_zone_during_a_fallback_notifies_once_the_master_is_back() {
+    let cluster = cluster();
+    let master = node(&cluster, "master-01").await;
+    let satellite = node(&cluster, "sat-ams-01").await;
+    let all_hosts = master.control().hosts().len();
+    let zone_hosts = satellite.control().hosts().len();
+    let (host, service, title) = outside_the_zone(&master, &satellite);
+    let mut engine = start_switching(environment_of(&[&master, &satellite]), &master);
+    showing(&mut engine, "master-01", all_hosts).await;
+
+    // A problem notified before the fallback recovers during it: the
+    // recovery is notified once the master is back.
+    set_state(&master, &host, &service, ServiceState::Critical);
+    let critical = format!("CRITICAL · {title}");
+    assert_eq!(
+        titles(&mut engine, 1).await,
+        std::slice::from_ref(&critical)
+    );
+    master_down(&master);
+    showing(&mut engine, "sat-ams-01", zone_hosts).await;
+    set_state(&master, &host, &service, ServiceState::Ok);
+    master.control().fail_next(0, 503);
+    showing(&mut engine, "master-01", all_hosts).await;
+    let recovered = format!("RECOVERED · {title}");
+    assert_eq!(
+        titles(&mut engine, 2).await,
+        [critical.clone(), recovered.clone()],
+        "the recovery, and nothing in the zone again"
+    );
+
+    // A problem that starts during a fallback is notified once the master
+    // is back.
+    master_down(&master);
+    showing(&mut engine, "sat-ams-01", zone_hosts).await;
+    set_state(&master, &host, &service, ServiceState::Critical);
+    master.control().fail_next(0, 503);
+    showing(&mut engine, "master-01", all_hosts).await;
+    assert_eq!(
+        titles(&mut engine, 3).await,
+        [critical.clone(), recovered, critical.clone()]
+    );
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switching_nodes_notifies_nothing_again() {
+    let cluster = cluster();
+    let first = node(&cluster, "master-01").await;
+    let second = node(&cluster, "master-02").await;
+    let satellite = node(&cluster, "sat-ams-01").await;
+    let all_hosts = first.control().hosts().len();
+    let zone_hosts = satellite.control().hosts().len();
+    let (host, service, title) = outside_the_zone(&first, &satellite);
+    let mut engine = start_switching(environment_of(&[&first, &second, &satellite]), &first);
+    showing(&mut engine, "master-01", all_hosts).await;
+
+    // An HA failover, then a fallback to the satellite and back: the
+    // problems the cluster had all along don't notify again.
+    first.shutdown().await;
+    showing(&mut engine, "master-02", all_hosts).await;
+    master_down(&second);
+    showing(&mut engine, "sat-ams-01", zone_hosts).await;
+    second.control().fail_next(0, 503);
+    showing(&mut engine, "master-02", all_hosts).await;
+    // A fence: the next notification is this one.
+    set_state(&second, &host, &service, ServiceState::Critical);
+    let critical = format!("CRITICAL · {title}");
+    assert_eq!(
+        titles(&mut engine, 1).await,
+        std::slice::from_ref(&critical)
+    );
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn objects_a_master_adds_to_a_satellites_view_keep_what_was_notified() {
+    let cluster = cluster();
+    let master = node(&cluster, "master-01").await;
+    let satellite = node(&cluster, "sat-ams-01").await;
+    let all_hosts = master.control().hosts().len();
+    let zone_hosts = satellite.control().hosts().len();
+    let (host, service, title) = outside_the_zone(&master, &satellite);
+
+    // An earlier run on the master notified a problem outside the zone.
+    let mut earlier = Launch {
+        environment: environment_of(&[&master]),
+        tuning: switching(),
+        ..Launch::new(&master)
+    }
+    .start();
+    showing(&mut earlier, "master-01", all_hosts).await;
+    set_state(&master, &host, &service, ServiceState::Critical);
+    let critical = format!("CRITICAL · {title}");
+    assert_eq!(titles(&mut earlier, 1).await, [critical]);
+    earlier.shutdown();
+
+    // This run starts on the satellite (the master doesn't answer), then
+    // the master comes back with the problem the satellite never showed.
+    master.control().fail_next(u32::MAX, 503);
+    let mut engine = Launch {
+        environment: environment_of(&[&master, &satellite]),
+        tuning: switching(),
+        data_dir: Some(earlier.data_dir().to_owned()),
+        ..Launch::new(&master)
+    }
+    .start();
+    showing(&mut engine, "sat-ams-01", zone_hosts).await;
+    master.control().fail_next(0, 503);
+    showing(&mut engine, "master-01", all_hosts).await;
+    // The event log says which problems were notified (asynchronously).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Its recovery is notified: the rule engine learned it was.
+    set_state(&master, &host, &service, ServiceState::Ok);
+    let recovered = format!("RECOVERED · {title}");
+    assert_eq!(titles(&mut engine, 1).await, [recovered]);
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coming_back_to_the_master_asks_for_no_object_by_name_before_the_reload() {
+    let cluster = cluster();
+    let master = node(&cluster, "master-01").await;
+    let satellite = node(&cluster, "sat-ams-01").await;
+    let all_hosts = master.control().hosts().len();
+    let zone_hosts = satellite.control().hosts().len();
+    let (host, service, _) = outside_the_zone(&master, &satellite);
+    let mut engine = Launch {
+        environment: environment_of(&[&master, &satellite]),
+        tuning: Tuning {
+            // The reload follows the switch back after a while.
+            reload_spacing: Duration::from_millis(600),
+            ..tuning()
+        },
+        ..Launch::new(&master)
+    }
+    .start();
+    showing(&mut engine, "master-01", all_hosts).await;
+    master_down(&master);
+    showing(&mut engine, "sat-ams-01", zone_hosts).await;
+    master.control().fail_next(0, 503);
+    connected_to(&mut engine, |node| node.name == "master-01").await;
+    master.control().clear_requests();
+    // Events about objects the satellite didn't serve, before the reload.
+    for state in [ServiceState::Critical, ServiceState::Warning] {
+        set_state(&master, &host, &service, state);
+    }
+    engine
+        .snapshot(|snapshot| {
+            snapshot
+                .node
+                .as_ref()
+                .is_some_and(|node| node.name == "master-01")
+        })
+        .await;
+    // The requests before the reload's first list (every host).
+    let by_name = |request: &ic_mock::RecordedRequest| {
+        request
+            .body
+            .as_ref()
+            .is_some_and(|body| body.get("hosts").is_some() || body.get("services").is_some())
+    };
+    let requests = master.control().requests();
+    let before_reload: Vec<_> = requests
+        .iter()
+        .take_while(|request| request.path != "/v1/objects/hosts" || by_name(request))
+        .collect();
+    assert!(before_reload.len() < requests.len(), "the reload ran");
+    let lookups = before_reload
+        .iter()
+        .filter(|request| request.path.starts_with("/v1/objects/") && by_name(request))
+        .count();
+    assert_eq!(lookups, 0, "the reload brings them");
+    // And the reload brought the service's latest state.
+    let snapshot = engine
+        .snapshot(|snapshot| {
+            snapshot.services.values().any(|candidate| {
+                candidate.key.host.as_str() == host
+                    && &*candidate.key.name == service.as_str()
+                    && candidate.state == ServiceState::Warning
+            })
+        })
+        .await;
+    assert_eq!(snapshot.hosts.len(), all_hosts);
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_master_that_hangs_is_passed_over_quickly_and_not_asked_on_every_reconnect() {
+    let cluster = cluster();
+    let first = node(&cluster, "master-01").await;
+    let second = node(&cluster, "master-02").await;
+    // master-01 accepts connections but answers nothing for two minutes.
+    first.control().set_latency(Duration::from_mins(2));
+    let mut engine = Launch {
+        environment: environment_of(&[&first, &second]),
+        tuning: Tuning {
+            identify_timeout: Duration::from_millis(300),
+            ..tuning()
+        },
+        ..Launch::new(&second)
+    }
+    .start();
+    let started = std::time::Instant::now();
+    let node = connected_to(&mut engine, |_| true).await;
+    assert_eq!(node.name, "master-02");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        node.passed_over,
+        [(label(&first), "no answer within 300ms".to_owned())]
+    );
+
+    // master-02's stream ends: the reconnect starts at master-02, which
+    // took over, and doesn't wait for master-01 again.
+    let asked = first.control().requests().len();
+    second.control().drop_event_streams();
+    engine
+        .wait_state(|state| {
+            matches!(
+                state,
+                ConnectionState::Reconnecting { .. } | ConnectionState::Connecting { .. }
+            )
+        })
+        .await;
+    let node = connected_to(&mut engine, |_| true).await;
+    assert_eq!(node.name, "master-02");
+    assert!(node.passed_over.is_empty(), "{:?}", node.passed_over);
+    assert_eq!(first.control().requests().len(), asked);
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_standby_never_trusted_is_offered_for_trust_while_retrying() {
+    let cluster = cluster();
+    let first = node(&cluster, "master-01").await;
+    let second = node(&cluster, "master-02").await;
+    let mut environment = environment_of(&[&first, &second]);
+    // master-02 was never trusted: no pin, no CA, no system roots.
+    environment.urls[1].pinned_sha256 = None;
+    let second_url = environment.urls[1].url.clone();
+    first.shutdown().await;
+    let mut engine = start(environment, &second);
+    let state = engine
+        .wait_state(|state| matches!(state, ConnectionState::Reconnecting { .. }))
+        .await;
+    let ConnectionState::Reconnecting { untrusted, .. } = &state else {
+        unreachable!()
+    };
+    let untrusted = untrusted.as_ref().expect("the standby is offered");
+    assert_eq!(untrusted.url, second_url);
+    assert_eq!(
+        untrusted.certificate.fingerprint(),
+        second.cert_fingerprint()
+    );
+    let (url, _, certificate) = state.untrusted().unwrap();
+    assert_eq!(url, second_url);
+    assert!(certificate.is_some());
+    engine.shutdown();
 }

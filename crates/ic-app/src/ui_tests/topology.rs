@@ -173,3 +173,33 @@ fn a_satellite_is_labelled_as_a_partial_view() {
         })),
     );
 }
+
+/// ENV-12: "+ add URL" selects the new row's `https://`, so a URL typed (or
+/// pasted) replaces it instead of ending up after it.
+#[test]
+fn a_url_typed_into_an_added_row_replaces_its_https() {
+    super::run(crate::fixture::FixtureOptions::default(), |app, cx| {
+        let id = app
+            .state
+            .read(cx)
+            .active_environment_id()
+            .unwrap()
+            .to_owned();
+        let workspace = app.workspace.clone();
+        app.in_window(cx, |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_environment_editor(Some(&id), window, cx);
+            });
+        });
+        app.draw(cx);
+        let editor = app.workspace.read(cx).environment_editor().unwrap().clone();
+        let before = editor.read(cx).form().urls.len();
+        app.in_window(cx, |window, cx| {
+            editor.update(cx, |editor, cx| editor.add_url_row(window, cx));
+        });
+        app.draw(cx);
+        assert_eq!(editor.read(cx).form().urls[before].url, "https://");
+        app.keys(cx, "h t t p s : / / m 2 : 5 6 6 5");
+        assert_eq!(editor.read(cx).form().urls[before].url, "https://m2:5665");
+    });
+}

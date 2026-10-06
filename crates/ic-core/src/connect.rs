@@ -17,6 +17,7 @@ use ic_config::{ApiUrl, AuthConfig, Environment};
 use ic_model::EventKind;
 use secrecy::{ExposeSecret as _, SecretBox, SecretString};
 
+use crate::command::UntrustedUrl;
 use crate::ports::SecretStore;
 use crate::topology::{ClusterView, ConnectedNode, classify, walk_order};
 
@@ -51,6 +52,17 @@ pub(crate) enum Failure {
     },
     /// Anything that may go away by itself: retry with backoff.
     Transient(String),
+    /// Several URLs and none usable now: one may come back by itself
+    /// (retry with backoff, like [`Failure::Transient`], whose message
+    /// `error` is), and another presented a certificate that isn't
+    /// trusted, which the user may trust to use that one meanwhile (a
+    /// standby never trusted on first use).
+    TransientUntrusted {
+        /// Every URL's problem.
+        error: String,
+        /// The URL whose certificate isn't trusted, and the certificate.
+        untrusted: Box<UntrustedUrl>,
+    },
 }
 
 impl Failure {
@@ -94,7 +106,7 @@ impl Failure {
 
     /// Whether it may go away by itself.
     fn is_transient(&self) -> bool {
-        matches!(self, Self::Transient(_))
+        matches!(self, Self::Transient(_) | Self::TransientUntrusted { .. })
     }
 
     /// Why a URL wasn't taken, in a few words: `connection refused`,
@@ -102,7 +114,9 @@ impl Failure {
     pub(crate) fn reason(&self) -> String {
         match self {
             Self::MissingSecret => "no password".to_owned(),
-            Self::Misconfigured(message) | Self::Transient(message) => message.clone(),
+            Self::Misconfigured(message)
+            | Self::Transient(message)
+            | Self::TransientUntrusted { error: message, .. } => message.clone(),
             Self::Auth(_) => "login refused".to_owned(),
             Self::Tls {
                 mismatch: Some(_), ..
@@ -246,12 +260,33 @@ pub(crate) struct Reached {
 }
 
 /// Logs in at `urls[index]` (`GET /v1`) and finds out which node answers
-/// and how much of the cluster it sees ([`identify`]).
+/// and how much of the cluster it sees ([`identify`]). `quick`: how long
+/// these few small requests may take together while other URLs remain to
+/// try (a node that accepts connections but doesn't answer, an Icinga busy
+/// reloading, shouldn't hold up the others for the full request timeout);
+/// `None` waits as long as any query.
 ///
 /// # Errors
 ///
-/// As [`Login::settings`]; API errors classified by [`Failure::from_api`].
+/// As [`Login::settings`]; API errors classified by [`Failure::from_api`];
+/// [`Failure::Transient`] when `quick` ran out.
 pub(crate) async fn reach(
+    login: &Login,
+    urls: &[ApiUrl],
+    index: usize,
+    action_timeout: Duration,
+    quick: Option<Duration>,
+) -> Result<Reached, Failure> {
+    let answer = reach_unbounded(login, urls, index, action_timeout);
+    match quick {
+        None => answer.await,
+        Some(limit) => tokio::time::timeout(limit, answer)
+            .await
+            .unwrap_or_else(|_| Err(Failure::Transient(format!("no answer within {limit:?}")))),
+    }
+}
+
+async fn reach_unbounded(
     login: &Login,
     urls: &[ApiUrl],
     index: usize,
@@ -383,9 +418,10 @@ pub(crate) struct Connected {
 pub(crate) async fn connect(
     environment: &Environment,
     secrets: Arc<dyn SecretStore>,
-    action_timeout: Duration,
+    timeouts: (Duration, Duration),
     first: Option<usize>,
 ) -> Result<Connected, Failure> {
+    let (action_timeout, identify_timeout) = timeouts;
     let login = Login::read(environment, Password::Store(secrets)).await?;
     let urls = &environment.urls;
     if urls.is_empty() {
@@ -396,8 +432,13 @@ pub(crate) async fn connect(
     let mut failures: Vec<(usize, Failure)> = Vec::new();
     let mut passed_over: Vec<(usize, String)> = Vec::new();
     let mut fallback: Option<Reached> = None;
-    for index in walk_order(urls.len(), first) {
-        let reached = match reach(&login, urls, index, action_timeout).await {
+    let order = walk_order(urls.len(), first);
+    let last = order.last().copied();
+    for index in order {
+        // While another URL remains (or a satellite to fall back on), a
+        // node that doesn't answer is passed over after `identify_timeout`.
+        let quick = (Some(index) != last || fallback.is_some()).then_some(identify_timeout);
+        let reached = match reach(&login, urls, index, action_timeout, quick).await {
             Ok(reached) => reached,
             Err(failure) => {
                 tracing::info!(url = %urls[index].label(), reason = %failure.reason(), "API URL not usable");
@@ -516,9 +557,11 @@ async fn open_stream(
 /// What to report when no URL could be used. One URL: its failure, as it
 /// is. Several: retrying (with every URL's reason) as long as one of them
 /// may come back by itself, so a node that is down for a while doesn't
-/// stop the engine because another needs the user; otherwise the failure
-/// of the most preferred URL, which needs the user (a refused login, an
-/// untrusted certificate, settings that can't work).
+/// stop the engine because another needs the user (offering to trust the
+/// certificate of the first URL whose certificate isn't trusted, so a
+/// standby never trusted on first use can take over); otherwise the
+/// failure of the most preferred URL, which needs the user (a refused
+/// login, an untrusted certificate, settings that can't work).
 fn combine(mut failures: Vec<(usize, Failure)>, urls: &[ApiUrl]) -> Failure {
     failures.sort_by_key(|(index, _)| *index);
     if failures.len() <= 1 {
@@ -533,7 +576,27 @@ fn combine(mut failures: Vec<(usize, Failure)>, urls: &[ApiUrl]) -> Failure {
             .iter()
             .map(|(index, failure)| format!("{}: {}", label(*index), failure.reason()))
             .collect();
-        return Failure::Transient(reasons.join("; "));
+        let error = reasons.join("; ");
+        let untrusted = failures.into_iter().find_map(|(_, failure)| match failure {
+            Failure::Tls {
+                url,
+                message,
+                certificate: Some(certificate),
+                ..
+            } => Some(UntrustedUrl {
+                url,
+                message,
+                certificate: *certificate,
+            }),
+            _ => None,
+        });
+        return match untrusted {
+            Some(untrusted) => Failure::TransientUntrusted {
+                error,
+                untrusted: Box::new(untrusted),
+            },
+            None => Failure::Transient(error),
+        };
     }
     let (index, failure) = failures.swap_remove(0);
     match failure {
@@ -595,6 +658,47 @@ mod tests {
                     .to_owned()
             )
         );
+    }
+
+    #[test]
+    fn a_standby_with_a_certificate_not_trusted_is_offered_while_retrying() {
+        let certificate = CertificateInfo {
+            sha256: [0xab; 32],
+            subject: "CN=master-02".to_owned(),
+            issuer: "CN=Icinga CA".to_owned(),
+            names: vec!["master-02".to_owned()],
+            not_before: ic_model::Timestamp::from_unix_seconds(0.),
+            not_after: ic_model::Timestamp::from_unix_seconds(1.),
+        };
+        let failure = combine(
+            vec![
+                (0, Failure::Transient("connection refused".to_owned())),
+                (
+                    1,
+                    Failure::Tls {
+                        url: "https://master-02:5665".to_owned(),
+                        message: "unknown issuer".to_owned(),
+                        mismatch: None,
+                        certificate: Some(Box::new(certificate.clone())),
+                    },
+                ),
+            ],
+            &urls(2),
+        );
+        assert_eq!(
+            failure,
+            Failure::TransientUntrusted {
+                error:
+                    "master-01:5665: connection refused; master-02:5665: certificate not trusted"
+                        .to_owned(),
+                untrusted: Box::new(UntrustedUrl {
+                    url: "https://master-02:5665".to_owned(),
+                    message: "unknown issuer".to_owned(),
+                    certificate,
+                }),
+            }
+        );
+        assert!(failure.is_transient());
     }
 
     #[test]

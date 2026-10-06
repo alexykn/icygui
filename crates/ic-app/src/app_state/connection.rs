@@ -134,7 +134,9 @@ impl ViewMarker {
                 label: view.label(),
                 short: format!("{} · only that zone and below", view.label()),
                 detail: format!(
-                    "The node is in the child zone {zone}: only the objects of {zone} and the                      zones below it are shown. icygui switches to a node of the top-level zone                      as soon as one answers."
+                    "The node is in the child zone {zone}: only the objects of {zone} and the \
+                     zones below it are shown. icygui switches to a node of the top-level zone \
+                     as soon as one answers."
                 ),
                 partial: true,
             }),
@@ -426,6 +428,7 @@ impl ConnectionStatus {
                 error,
                 attempt,
                 retry_at,
+                ..
             } => format!(
                 "retrying in {} (attempt {attempt}): {error}",
                 format_compact(retry_at.remaining_from(now))
@@ -475,6 +478,44 @@ impl ConnectionStatus {
         Some(Progress { fraction, text })
     }
 
+    /// The notice while reconnecting: when, why, *Retry now*, and
+    /// *Review certificate…* while another URL's certificate isn't trusted
+    /// (`untrusted`).
+    fn reconnecting_notice(
+        &self,
+        error: &str,
+        attempt: u32,
+        retry_at: Timestamp,
+        untrusted: bool,
+        now: Timestamp,
+    ) -> ConnectionNotice {
+        let endpoint = &self.endpoint;
+        let wait = retry_at.remaining_from(now);
+        let when = if wait.as_secs() == 0 {
+            "Retrying now…".to_owned()
+        } else {
+            format!("Retrying in {}.", format_compact(wait))
+        };
+        let what = if self.ever_connected {
+            format!("Connection to {endpoint} lost.")
+        } else {
+            format!("Can't connect to {endpoint}.")
+        };
+        // Another URL's certificate isn't trusted (a standby never
+        // trusted on first use): trusting it lets that one take over.
+        let mut actions = vec![NoticeAction::RetryNow];
+        if untrusted {
+            actions.push(NoticeAction::ReviewCertificate);
+        }
+        ConnectionNotice {
+            kind: NoticeKind::Reconnecting,
+            tone: Tone::Critical,
+            title: format!("{what} {when}"),
+            detail: Some(format!("attempt {attempt} · {error}")),
+            actions,
+        }
+    }
+
     /// The problem to show over the list at `now`, if any.
     pub(crate) fn notice(&self, environment: &str, now: Timestamp) -> Option<ConnectionNotice> {
         if let Some(error) = &self.engine_error {
@@ -491,32 +532,13 @@ impl ConnectionStatus {
                 actions: vec![NoticeAction::RestartEngine],
             });
         }
-        let endpoint = &self.endpoint;
         let notice = match self.state.as_ref()? {
             ConnectionState::Reconnecting {
                 error,
                 attempt,
                 retry_at,
-            } => {
-                let wait = retry_at.remaining_from(now);
-                let when = if wait.as_secs() == 0 {
-                    "Retrying now…".to_owned()
-                } else {
-                    format!("Retrying in {}.", format_compact(wait))
-                };
-                let what = if self.ever_connected {
-                    format!("Connection to {endpoint} lost.")
-                } else {
-                    format!("Can't connect to {endpoint}.")
-                };
-                ConnectionNotice {
-                    kind: NoticeKind::Reconnecting,
-                    tone: Tone::Critical,
-                    title: format!("{what} {when}"),
-                    detail: Some(format!("attempt {attempt} · {error}")),
-                    actions: vec![NoticeAction::RetryNow],
-                }
-            }
+                untrusted,
+            } => self.reconnecting_notice(error, *attempt, *retry_at, untrusted.is_some(), now),
             ConnectionState::AuthFailed { message } => ConnectionNotice {
                 kind: NoticeKind::AuthFailed,
                 tone: Tone::Critical,
@@ -693,6 +715,7 @@ mod tests {
             error: "connection refused".to_owned(),
             attempt: 4,
             retry_at: at(12.),
+            untrusted: None,
         });
         assert_eq!(status.health(at(0.)), Health::Reconnecting);
         assert_eq!(status.label(at(0.)), "master-01 · retry in 12s");
@@ -720,6 +743,7 @@ mod tests {
             error: "connection refused".to_owned(),
             attempt: 4,
             retry_at: at(12.),
+            untrusted: None,
         });
         assert_eq!(
             status.label_parts(at(0.)),
@@ -741,6 +765,7 @@ mod tests {
             error: "stream ended".to_owned(),
             attempt: 2,
             retry_at: at(30.),
+            untrusted: None,
         });
         let notice = status.notice("prod-cluster", at(18.)).unwrap();
         assert_eq!(notice.kind, NoticeKind::Reconnecting);
@@ -760,6 +785,7 @@ mod tests {
             error: "refused".to_owned(),
             attempt: 1,
             retry_at: at(1.),
+            untrusted: None,
         });
         assert!(
             never
@@ -767,6 +793,64 @@ mod tests {
                 .unwrap()
                 .title
                 .starts_with("Can't connect to master-01.")
+        );
+    }
+
+    #[test]
+    fn view_markers_read_as_sentences() {
+        let partial = ViewMarker::of(&ClusterView::Partial {
+            zone: "ams".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(partial.label, "partial view: zone ams");
+        assert_eq!(
+            partial.detail,
+            "The node is in the child zone ams: only the objects of ams and the zones below \
+             it are shown. icygui switches to a node of the top-level zone as soon as one answers."
+        );
+        let unverified = ViewMarker::of(&ClusterView::Unverified {
+            reason: "no zones".to_owned(),
+        })
+        .unwrap();
+        for marker in [partial, unverified] {
+            for text in [&marker.label, &marker.short, &marker.detail] {
+                assert!(!text.contains("  "), "{text:?}");
+            }
+        }
+        assert_eq!(ViewMarker::of(&ClusterView::Full), None);
+    }
+
+    #[test]
+    fn a_standby_not_trusted_can_be_reviewed_while_retrying() {
+        let mut status = connected();
+        status.on_state(ConnectionState::Reconnecting {
+            error: "master-01:5665: connection refused; master-02:5665: certificate not trusted"
+                .to_owned(),
+            attempt: 3,
+            retry_at: at(10.),
+            untrusted: Some(ic_core::UntrustedUrl {
+                url: "https://master-02:5665".to_owned(),
+                message: "unknown issuer".to_owned(),
+                certificate: CertificateInfo {
+                    sha256: [0xab; 32],
+                    subject: "CN=master-02".to_owned(),
+                    issuer: "CN=Icinga CA".to_owned(),
+                    names: vec!["master-02".to_owned()],
+                    not_before: at(0.),
+                    not_after: at(1.),
+                },
+            }),
+        });
+        let notice = status.notice("prod-cluster", at(0.)).unwrap();
+        assert_eq!(notice.kind, NoticeKind::Reconnecting);
+        assert_eq!(
+            notice.actions,
+            [NoticeAction::RetryNow, NoticeAction::ReviewCertificate]
+        );
+        assert_eq!(
+            status.health(at(0.)),
+            Health::Reconnecting,
+            "still retrying"
         );
     }
 
@@ -833,6 +917,7 @@ mod tests {
             error: "refused".to_owned(),
             attempt: 4,
             retry_at: at(12.),
+            untrusted: None,
         });
         assert_eq!(
             status.describe(at(0.)),

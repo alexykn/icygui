@@ -8,8 +8,9 @@
 //!   opens) or *all*. A scope with unread notifications shows its name in
 //!   the accent colour (colour only: nothing moves); tabs that don't fit
 //!   go into a `···` menu, so the row never wraps.
-//! - The pause row pauses every environment, or shows that the one on
-//!   screen is muted.
+//! - The pause row pauses every environment (A5: the pause is global), or
+//!   shows that the environment of the scope is muted on its own, with
+//!   *unmute* (every environment can be muted from the switcher).
 //! - The list, newest first, under `now`, `last hour`, `earlier today`,
 //!   `yesterday`, `older`: unread entries have a bright title; silent ones
 //!   a hollow dot, a dimmer title and why (`silent · storm`). A storm's
@@ -19,6 +20,12 @@
 //!   place's, again shows everything.
 //! - The footer says the history stays on this computer and for how long,
 //!   and opens the notification settings.
+//!
+//! The card keeps its size and place while it is open: the list has a
+//! fixed height (440 px, less in a short window, so the card always fits
+//! above the footer), whatever the scope, the filter, the storms
+//! expanded or the notifications arriving, so the tabs and chips never
+//! move under the pointer.
 
 use std::collections::HashSet;
 
@@ -47,8 +54,27 @@ use crate::settings::SettingsTab;
 const CENTRE_WIDTH: f32 = 420.;
 /// The centre's inner padding, left and right.
 const CENTRE_PADDING: f32 = 14.;
-/// The list's height before it scrolls.
+/// The list's height (it scrolls beyond), in a window tall enough.
 const LIST_MAX_HEIGHT: f32 = 440.;
+/// The least the list gets in a short window.
+const LIST_MIN_HEIGHT: f32 = 120.;
+/// Under the window's height: the footer, the gap above it and the margin
+/// the card keeps from the window's top.
+const OUTSIDE: f32 = 50.;
+/// The card's parts around the list: the heading, the pause row, the
+/// footer and the border.
+const CHROME: f32 = 40. + 39. + 36. + 2.;
+/// The scope tabs' row, with several environments.
+const TABS_HEIGHT: f32 = 38.;
+
+/// The list's height in a window `viewport` high (`tabs`: the scope tabs
+/// show): fixed while the centre is open, so nothing in the card moves
+/// with what the list shows; less in a short window, so the card fits
+/// above the footer.
+pub(super) fn list_height(viewport: f32, tabs: bool) -> f32 {
+    let chrome = CHROME + if tabs { TABS_HEIGHT } else { 0. };
+    (viewport - OUTSIDE - chrome).clamp(LIST_MIN_HEIGHT, LIST_MAX_HEIGHT)
+}
 /// The longest environment name a scope tab shows in full.
 const TAB_NAME_CHARS: usize = 20;
 /// The scope overflow's trigger.
@@ -67,6 +93,8 @@ pub(super) struct CentreState {
     expanded: HashSet<String>,
     /// Whether the scope tabs' `···` menu is open.
     overflow_open: bool,
+    /// The list's scrolling (and where it is drawn).
+    list: gpui::ScrollHandle,
 }
 
 /// The colour of a notification's tone.
@@ -78,6 +106,48 @@ pub(crate) fn tone_color(tone: Tone, theme: &Theme) -> gpui::Hsla {
         Tone::Recovery => theme.states.ok,
         Tone::Info => theme.colors.accent,
     }
+}
+
+/// What the centre's pause row shows.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum PauseLine {
+    /// Every environment is paused until then: *resume*.
+    Paused(Timestamp),
+    /// The scope's environment is muted on its own until then: *unmute*.
+    Muted {
+        /// The environment's id.
+        id: String,
+        /// Its name.
+        name: String,
+        /// Until when.
+        until: Timestamp,
+    },
+    /// The pause of every environment (A5: global by default).
+    Offer,
+}
+
+/// The pause row for `scope` at `now`: the pause of every environment
+/// first; else the scope's environment's own mute (`all` and the other
+/// environments offer the pause of every environment).
+pub(super) fn pause_line(state: &AppState, scope: Option<&Scope>, now: Timestamp) -> PauseLine {
+    if let Some(until) = state.paused_until().filter(|until| *until > now) {
+        return PauseLine::Paused(until);
+    }
+    let Some(Scope::Environment(id)) = scope else {
+        return PauseLine::Offer;
+    };
+    state
+        .environment_by_id(id)
+        .and_then(|environment| {
+            state
+                .environment_paused_until(id, now)
+                .map(|until| PauseLine::Muted {
+                    id: id.clone(),
+                    name: environment.name.clone(),
+                    until,
+                })
+        })
+        .unwrap_or(PauseLine::Offer)
 }
 
 /// A scope tab: what it selects and its label.
@@ -178,6 +248,13 @@ impl Sidebar {
         self.view(self.state.read(cx), Timestamp::now())
     }
 
+    /// Where the centre's list is drawn: it stays put while the centre is
+    /// open, whatever it shows.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn centre_list_bounds(&self) -> gpui::Bounds<gpui::Pixels> {
+        self.centre.list.bounds()
+    }
+
     /// The storms shown expanded.
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn centre_expanded(&self) -> Vec<String> {
@@ -234,9 +311,11 @@ impl Sidebar {
         let view = self.view(state, now);
         let has_environment = state.environment().is_some();
         let header = Self::centre_header(&view, theme, cx);
-        let scopes = (state.environments().len() > 1).then(|| self.centre_scopes(state, theme, cx));
+        let several = state.environments().len() > 1;
+        let scopes = several.then(|| self.centre_scopes(state, theme, cx));
         let pause_row = has_environment.then(|| self.centre_pause(now, theme, cx));
-        let list = self.centre_list(&view, theme, cx);
+        let height = list_height(f32::from(self.viewport), several);
+        let list = self.centre_list(&view, height, theme, cx);
         let footer = Self::centre_footer(state, has_environment, theme, cx);
         let card = div()
             .id("notification-centre")
@@ -522,19 +601,19 @@ impl Sidebar {
 
     /// Pausing every environment (30 minutes, an hour, until 08:00), or
     /// resuming (A5: the pause is global by default); while the
-    /// environment on screen is muted on its own, until when, and
-    /// *unmute*. One line of a chip's height in every case, so the centre
-    /// (anchored above the footer) never moves when it changes.
+    /// environment of the scope is muted on its own, until when, and
+    /// *unmute* (*all* and the other environments' scopes still offer the
+    /// pause of every environment). One line of a chip's height in every
+    /// case, so nothing moves when it changes.
     fn centre_pause(&self, now: Timestamp, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let colors = theme.colors;
         let state = self.state.read(cx);
         let environments = state.environments().len();
-        let paused = state.paused_until().filter(|until| *until > now);
-        let muted = state.environment().and_then(|environment| {
-            state
-                .environment_paused_until(&environment.id, now)
-                .map(|until| (environment.id.clone(), environment.name.clone(), until))
-        });
+        let (paused, muted) = match pause_line(state, self.scope(state).as_ref(), now) {
+            PauseLine::Paused(until) => (Some(until), None),
+            PauseLine::Muted { id, name, until } => (None, Some((id, name, until))),
+            PauseLine::Offer => (None, None),
+        };
         let row = div()
             .flex()
             .flex_none()
@@ -570,18 +649,18 @@ impl Sidebar {
                 .into_any_element();
         }
         if let Some((id, name, until)) = muted {
+            let text = format!("{name} muted until {}: shown silently", when(until, now));
             return row
                 .child(
                     div()
+                        .id("centre-muted")
                         .flex_1()
                         .line_height(px(CHIP_HEIGHT))
                         .min_w_0()
                         .truncate()
                         .text_color(theme.states.warning)
-                        .child(format!(
-                            "{name} muted until {}: shown silently",
-                            when(until, now)
-                        )),
+                        .tooltip(Tooltip::text(text.clone()))
+                        .child(text),
                 )
                 .child(
                     Link::new("centre-unmute", "unmute")
@@ -619,13 +698,23 @@ impl Sidebar {
     }
 
     /// The sections and their entries, newest first, or why there are
-    /// none.
-    fn centre_list(&self, view: &CentreView, theme: &Theme, cx: &Context<Self>) -> AnyElement {
+    /// none, `height` high (it scrolls beyond).
+    fn centre_list(
+        &self,
+        view: &CentreView,
+        height: f32,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let colors = theme.colors;
         if view.sections.is_empty() {
             return div()
+                .id("centre-list")
+                .track_scroll(&self.centre.list)
                 .flex()
+                .flex_none()
                 .flex_col()
+                .h(px(height))
                 .gap(px(6.))
                 .px(px(CENTRE_PADDING))
                 .py(px(18.))
@@ -684,9 +773,11 @@ impl Sidebar {
         }
         div()
             .id("centre-list")
+            .track_scroll(&self.centre.list)
             .flex()
+            .flex_none()
             .flex_col()
-            .max_h(px(LIST_MAX_HEIGHT))
+            .h(px(height))
             .overflow_y_scroll()
             .pb(px(4.))
             .children(rows)
@@ -865,7 +956,9 @@ impl Sidebar {
         if let Some(silence) = &entry.silence {
             extra.push(silence.clone());
         }
-        if let Some(group) = storm {
+        // A summary says how many it held back; a storm still going on
+        // says so in its title already.
+        if let Some(group) = storm.filter(|group| !group.ongoing) {
             extra.push(format!("{} held back", group.members.len()));
         }
         if entry.label.is_none() && extra.is_empty() {
@@ -971,6 +1064,55 @@ mod tests {
             fit_tabs(&[20., 400.], 0, 100., 22., 22.),
             (vec![0], vec![1])
         );
+    }
+
+    #[test]
+    fn the_pause_row_is_the_scopes() {
+        use crate::live::demo;
+        let now = Timestamp::now();
+        let later = Timestamp::from_unix_seconds(now.as_unix_seconds() + 3600.);
+        let mut state = AppState::demo(demo::config(), now);
+        let prod = Scope::Environment(demo::ENVIRONMENT_ID.to_owned());
+        let lab = Scope::Environment(demo::LAB_ID.to_owned());
+        assert_eq!(pause_line(&state, Some(&prod), now), PauseLine::Offer);
+        // prod-cluster muted: its own scope says so; lab's and `all` still
+        // offer to pause every environment.
+        assert!(state.pause_environment(demo::ENVIRONMENT_ID, Some(later)));
+        assert_eq!(
+            pause_line(&state, Some(&prod), now),
+            PauseLine::Muted {
+                id: demo::ENVIRONMENT_ID.to_owned(),
+                name: "prod-cluster".to_owned(),
+                until: later,
+            }
+        );
+        assert_eq!(pause_line(&state, Some(&lab), now), PauseLine::Offer);
+        assert_eq!(pause_line(&state, Some(&Scope::All), now), PauseLine::Offer);
+        // Every environment paused: said in every scope.
+        state.pause_notifications(Some(later));
+        for scope in [&prod, &lab, &Scope::All] {
+            assert_eq!(
+                pause_line(&state, Some(scope), now),
+                PauseLine::Paused(later)
+            );
+        }
+    }
+
+    #[test]
+    fn the_list_keeps_its_height_and_fits_short_windows() {
+        // The default window: the full list, with or without tabs.
+        assert!((list_height(900., true) - LIST_MAX_HEIGHT).abs() < f32::EPSILON);
+        assert!((list_height(900., false) - LIST_MAX_HEIGHT).abs() < f32::EPSILON);
+        // The smallest window (560 px): the whole card stays above the
+        // footer, the list gets what is left.
+        let short = list_height(560., true);
+        assert!(
+            (LIST_MIN_HEIGHT..LIST_MAX_HEIGHT).contains(&short),
+            "{short}"
+        );
+        assert!(short + CHROME + TABS_HEIGHT + OUTSIDE <= 560.);
+        // Never less than a few entries.
+        assert!((list_height(200., true) - LIST_MIN_HEIGHT).abs() < f32::EPSILON);
     }
 
     #[test]

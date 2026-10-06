@@ -80,6 +80,13 @@ pub struct Scenario {
     pub notifications: Vec<Notification>,
     /// The reference time of every timestamp in this scenario.
     pub time_base: Timestamp,
+    /// The time a server moves `time_base` to when it loads the scenario:
+    /// `None` (the default) for the server's start, so "critical for 14
+    /// minutes" holds whenever it starts. [`Scenario::for_node`] sets it,
+    /// so that the servers of one cluster agree on every timestamp (Icinga
+    /// replicates `last_state_change` and the check results across the
+    /// cluster).
+    pub anchor: Option<Timestamp>,
     /// Objects the simulator never changes, so a demo keeps showing them.
     pub pinned: Vec<ObjectKey>,
 }
@@ -214,6 +221,7 @@ impl Scenario {
             users: Vec::new(),
             notifications: Vec::new(),
             time_base: Timestamp::now(),
+            anchor: None,
             pinned: Vec::new(),
         }
     }
@@ -331,10 +339,14 @@ impl Scenario {
     /// endpoints serves everything.
     ///
     /// Each server runs its own copy: changes made through one aren't seen
-    /// by the others (Icinga's cluster would replicate them).
+    /// by the others (Icinga's cluster would replicate them). The copies
+    /// share one [`Scenario::anchor`] (the scenario's own, else its
+    /// `time_base`), so every node reports the same timestamps however far
+    /// apart the servers start.
     #[must_use]
     pub fn for_node(&self, node_name: &str) -> Self {
         let mut scenario = self.clone();
+        scenario.anchor = Some(self.anchor.unwrap_or(self.time_base));
         node_name.clone_into(&mut scenario.status.node_name);
         let Some(zone) = self
             .endpoints
@@ -582,6 +594,8 @@ mod tests {
             assert_eq!(served.services.len(), cluster.services.len(), "{node}");
             assert_eq!(served.zones, cluster.zones);
             assert_eq!(served.endpoints, cluster.endpoints);
+            // Every node's server reports the same timestamps.
+            assert_eq!(served.anchor, Some(cluster.time_base), "{node}");
         }
 
         // The satellite serves the hosts in `ams` and nothing else.

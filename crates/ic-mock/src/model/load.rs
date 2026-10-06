@@ -79,7 +79,10 @@ impl World {
     )]
     pub(crate) fn load(scenario: &Scenario, options: &LoadOptions) -> Result<Self, MockError> {
         let now = options.now;
-        let shift = Shift(now - scenario.time_base.as_unix_seconds());
+        let anchor = scenario
+            .anchor
+            .map_or(now, ic_model::Timestamp::as_unix_seconds);
+        let shift = Shift(anchor - scenario.time_base.as_unix_seconds());
         let status = &scenario.status;
         let program_start = if status.program_start.as_unix_seconds() > 0.0 {
             shift.at(status.program_start)

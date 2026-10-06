@@ -446,6 +446,38 @@ fn deleting_an_environment_stops_its_engine_and_deletes_its_log() {
     );
 }
 
+/// ENV-03: quitting right after deleting an environment still removes its
+/// password (and its event log) once its engine stopped.
+#[test]
+fn quitting_right_after_deleting_an_environment_still_cleans_up() {
+    run_app(
+        crate::WINDOW_SIZE,
+        demo_app(None),
+        Body::Async(Box::new(|app, cx| {
+            async move {
+                let session = cx.update(|cx| live::session(cx).unwrap());
+                every_environment_connected(&app, &cx).await;
+                let log = cx.update(|cx| {
+                    let session = session.read(cx);
+                    assert!(session.has_password(demo::STAGING_ID));
+                    session.event_log_of(demo::STAGING_ID).unwrap()
+                });
+                assert!(log.exists());
+                cx.update(|cx| {
+                    session.update(cx, |session, cx| {
+                        assert!(session.delete_environment(demo::STAGING_ID, cx));
+                        // Quit before the engine had a chance to stop.
+                        session.quit_now(cx);
+                        assert!(!session.has_password(demo::STAGING_ID), "removed");
+                    });
+                });
+                assert!(!log.exists());
+            }
+            .boxed_local()
+        })),
+    );
+}
+
 /// NOTE-08: changing the connection settings of an environment off screen
 /// restarts its engine alone (a new stream to its Icinga, connected again
 /// in the background); the environment on screen keeps its stream.

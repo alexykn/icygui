@@ -75,13 +75,16 @@ pub(crate) struct Response {
     pub(crate) action: Option<String>,
 }
 
-/// What `intent` looks like on screen. `acknowledge` offers the
-/// *Acknowledge* button (a problem the API user may acknowledge).
-pub(crate) fn posted(intent: &NotificationIntent, acknowledge: bool) -> Posted {
-    let body = match (intent.body.trim(), intent.subtitle.trim()) {
-        ("", subtitle) => subtitle.to_owned(),
+/// What `intent` of environment `environment` looks like on screen: the
+/// first line, then where it matched without repeating anything (like the
+/// notification centre's labels). `acknowledge` offers the *Acknowledge*
+/// button (a problem the API user may acknowledge).
+pub(crate) fn posted(intent: &NotificationIntent, environment: &str, acknowledge: bool) -> Posted {
+    let place = crate::notifications::entry::place_of(&intent.subtitle, environment);
+    let body = match (intent.body.trim(), place.as_str()) {
+        ("", place) => place.to_owned(),
         (body, "") => body.to_owned(),
-        (body, subtitle) => format!("{body}\n{subtitle}"),
+        (body, place) => format!("{body}\n{place}"),
     };
     let problem = matches!(intent.tone, Tone::Critical | Tone::Warning | Tone::Unknown);
     let mut actions = Vec::new();
@@ -198,7 +201,11 @@ mod tests {
 
     #[test]
     fn problems_offer_acknowledge_and_open_with_urgency_and_sound() {
-        let posted = posted(&intent(Tone::Critical, Some(replication()), true), true);
+        let posted = posted(
+            &intent(Tone::Critical, Some(replication()), true),
+            "prod-cluster",
+            true,
+        );
         assert_eq!(
             posted.title,
             "CRITICAL · postgres-replication on db-prod-03"
@@ -238,7 +245,11 @@ mod tests {
 
     #[test]
     fn recoveries_and_summaries_are_quieter() {
-        let recovery = posted(&intent(Tone::Recovery, Some(replication()), false), true);
+        let recovery = posted(
+            &intent(Tone::Recovery, Some(replication()), false),
+            "prod-cluster",
+            true,
+        );
         assert_eq!(recovery.urgency, Urgency::Low);
         assert_eq!(recovery.sound, None, "the rule turned the sound off");
         assert_eq!(
@@ -246,7 +257,11 @@ mod tests {
             [(OPEN_ACTION, "Open")],
             "nothing to acknowledge"
         );
-        let warning = posted(&intent(Tone::Warning, Some(replication()), true), false);
+        let warning = posted(
+            &intent(Tone::Warning, Some(replication()), true),
+            "prod-cluster",
+            false,
+        );
         assert_eq!(warning.urgency, Urgency::Normal);
         assert_eq!(
             warning.actions,
@@ -255,9 +270,25 @@ mod tests {
         );
         let mut summary = intent(Tone::Info, None, true);
         summary.body = String::new();
-        let summary = posted(&summary, true);
+        let summary = posted(&summary, "prod-cluster", true);
         assert!(summary.actions.is_empty(), "no object to open");
         assert_eq!(summary.body, "overview / databases");
         assert_eq!(summary.urgency.level(), 0);
+    }
+
+    #[test]
+    fn the_place_is_said_once() {
+        let mut repeated = intent(Tone::Critical, Some(replication()), true);
+        repeated.subtitle = "overview / overview".to_owned();
+        assert_eq!(
+            posted(&repeated, "prod-cluster", true).body,
+            "CRITICAL - standby lag 412s (> 300s)\noverview"
+        );
+        // A storm's summary names its environment in the title already.
+        let mut summary = intent(Tone::Info, None, true);
+        summary.title = "14 new problems in staging".to_owned();
+        summary.subtitle = "staging".to_owned();
+        summary.body = "14 critical".to_owned();
+        assert_eq!(posted(&summary, "staging", true).body, "14 critical");
     }
 }

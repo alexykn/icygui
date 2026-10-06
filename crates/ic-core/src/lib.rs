@@ -51,7 +51,7 @@ mod topology;
 
 pub use command::{
     ActionOutcome, Command, ConnectionState, CoreEvent, LoadPhase, LogEntry, LogKind,
-    NotificationRecord,
+    NotificationRecord, UntrustedUrl,
 };
 pub use error::CoreError;
 pub use event_log::{delete_event_log, event_log_path};

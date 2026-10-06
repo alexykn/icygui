@@ -154,6 +154,10 @@ pub enum ConnectionState {
         attempt: u32,
         /// When.
         retry_at: Timestamp,
+        /// With several URLs: one whose server presented a certificate
+        /// that isn't trusted (a standby never trusted on first use),
+        /// which the UI offers to trust while the engine keeps retrying.
+        untrusted: Option<UntrustedUrl>,
     },
     /// Icinga refused the credentials (401). No automatic retry: `Refresh`
     /// or `UpdateEnvironment` retries.
@@ -187,6 +191,45 @@ pub enum ConnectionState {
         /// What is wrong, for the environment editor.
         message: String,
     },
+}
+
+impl ConnectionState {
+    /// The URL whose certificate isn't trusted, what went wrong and the
+    /// certificate (when it could be read): a [`ConnectionState::TlsFailed`],
+    /// or the untrusted URL of a [`ConnectionState::Reconnecting`].
+    #[must_use]
+    pub fn untrusted(&self) -> Option<(&str, &str, Option<&CertificateInfo>)> {
+        match self {
+            Self::TlsFailed {
+                url,
+                message,
+                certificate,
+            } => Some((url, message, certificate.as_ref())),
+            Self::Reconnecting {
+                untrusted: Some(untrusted),
+                ..
+            } => Some((
+                &untrusted.url,
+                &untrusted.message,
+                Some(&untrusted.certificate),
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// A URL of the environment whose server presented a certificate that
+/// isn't trusted, while the engine keeps retrying because another URL may
+/// come back ([`ConnectionState::Reconnecting`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UntrustedUrl {
+    /// The configured URL (as written in the environment's `urls`): its
+    /// pin is the one to set.
+    pub url: String,
+    /// What went wrong (with both fingerprints for a pin mismatch).
+    pub message: String,
+    /// The certificate the server presented.
+    pub certificate: CertificateInfo,
 }
 
 /// The tiers of the initial load (docs/performance.md).

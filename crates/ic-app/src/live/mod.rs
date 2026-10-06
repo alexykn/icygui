@@ -41,8 +41,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt as _;
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::channel::oneshot;
+use futures::future::Shared;
 use gpui::{App, AppContext as _, Context, Entity, Global, Subscription, Task};
 use ic_config::{AuthConfig, Config, ConfigError, ConfigStore, Environment, Paths};
 use ic_core::ports::SecretStore;
@@ -160,6 +163,9 @@ struct EngineRun {
     generation: u64,
     /// The engine stopping now; the next one starts when it has.
     stopping: Option<Task<()>>,
+    /// Completes when the engine stopping now has stopped, also for the
+    /// quit, which waits for it.
+    stopped: Option<Shared<oneshot::Receiver<()>>>,
     /// Run once the engine stopping now has stopped (a deleted
     /// environment's password and event log).
     cleanups: Vec<Cleanup>,
@@ -327,7 +333,7 @@ impl Session {
     /// it goes to that environment's engine, whichever is active by then.
     fn post(&mut self, raised: &Raised, cx: &mut Context<Self>) {
         let intent = &raised.intent;
-        let (acknowledge, prefix) = {
+        let (acknowledge, name, prefix) = {
             let state = self.state.read(cx);
             let Some(environment) = state.environment_by_id(&raised.environment) else {
                 tracing::debug!(id = %intent.id, "a notification of a removed environment was dropped");
@@ -337,7 +343,7 @@ impl Session {
                 .action_denial_in(&raised.environment, &ObjectAction::Acknowledge)
                 .is_none();
             let prefix = (state.environments().len() > 1).then(|| environment.name.clone());
-            (acknowledge, prefix)
+            (acknowledge, environment.name.clone(), prefix)
         };
         if let Some(object) = &intent.object {
             self.targets.push_front(Target {
@@ -347,7 +353,7 @@ impl Session {
             });
             self.targets.truncate(MAX_TARGETS);
         }
-        let mut posted = desktop::posted(intent, acknowledge);
+        let mut posted = desktop::posted(intent, &name, acknowledge);
         if let Some(name) = prefix {
             posted.title = desktop::prefixed_title(&posted.title, &name);
         }
@@ -802,7 +808,8 @@ impl Session {
         run.cleanups.extend(cleanup);
         match core {
             Some(core) => {
-                let stopped = core.shutdown_in_background();
+                let stopped = core.shutdown_in_background().shared();
+                run.stopped = Some(stopped.clone());
                 let id = id.to_owned();
                 run.stopping = Some(cx.spawn(async move |this, cx| {
                     // Cancelled means it stopped without saying so.
@@ -822,6 +829,7 @@ impl Session {
         let cleanups = match self.engines.get_mut(id) {
             Some(run) => {
                 run.stopping = None;
+                run.stopped = None;
                 std::mem::take(&mut run.cleanups)
             }
             None => Vec::new(),
@@ -1193,19 +1201,28 @@ impl Session {
         .detach();
     }
 
-    /// Stops every engine (side by side, each with its bounded wait) and
-    /// writes what is queued. Runs when the app quits.
+    /// Stops every engine (side by side, each with its bounded wait),
+    /// finishes what waits for engines already stopping (a deleted
+    /// environment's password and event log, ENV-03) and writes what is
+    /// queued. Runs when the app quits.
     fn stop(&mut self, cx: &mut Context<Self>) {
+        let mut stopping = Vec::new();
+        let mut cleanups = Vec::new();
         for run in self.engines.values_mut() {
             run.pump = None;
+            run.stopping = None;
+            stopping.extend(run.stopped.take().map(Stopping::Earlier));
+            cleanups.append(&mut run.cleanups);
         }
         let cores = self.state.update(cx, |state, _| state.take_all_cores());
         let count = cores.len();
-        let stopping: Vec<_> = cores
-            .into_iter()
-            .map(crate::app_state::CoreLink::shutdown_in_background)
-            .collect();
+        stopping.extend(
+            cores
+                .into_iter()
+                .map(|core| Stopping::Now(core.shutdown_in_background())),
+        );
         wait_for_all(stopping, ENGINES_STOP_TIMEOUT);
+        run_cleanups_before_quitting(cleanups, CLEANUP_TIMEOUT);
         if !self.state.read(cx).flush_persistence(FLUSH_TIMEOUT) {
             tracing::warn!("some settings may not have been saved before quitting");
         }
@@ -1216,12 +1233,63 @@ impl Session {
     }
 }
 
-/// Waits until every receiver completed or was cancelled, at most
+/// An engine stopping when the app quits: told to now, or earlier (a
+/// deleted environment's, or one being replaced).
+enum Stopping {
+    Now(oneshot::Receiver<()>),
+    Earlier(Shared<oneshot::Receiver<()>>),
+}
+
+impl Stopping {
+    /// Whether it stopped (or will never say).
+    fn done(&mut self) -> bool {
+        match self {
+            Self::Now(receiver) => !matches!(receiver.try_recv(), Ok(None)),
+            Self::Earlier(stopped) => stopped.clone().now_or_never().is_some(),
+        }
+    }
+}
+
+/// How long quitting waits for the cleanups of deleted environments (the
+/// keychain, the event log) after their engines stopped.
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Runs the cleanups still waiting when the app quits, on another thread,
+/// waiting at most `timeout`; what they couldn't remove is logged (the
+/// window is gone).
+fn run_cleanups_before_quitting(cleanups: Vec<Cleanup>, timeout: Duration) {
+    if cleanups.is_empty() {
+        return;
+    }
+    let (done, finished) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("icygui-cleanup".to_owned())
+        .spawn(move || {
+            let problems: Vec<String> =
+                cleanups.into_iter().flat_map(|cleanup| cleanup()).collect();
+            let _ = done.send(problems);
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "a deleted environment's password and event log couldn't be removed");
+        return;
+    }
+    if let Ok(problems) = finished.recv_timeout(timeout) {
+        for problem in problems {
+            tracing::warn!(%problem, "a deleted environment left something behind");
+        }
+    } else {
+        tracing::warn!(
+            "removing a deleted environment's password and event log didn't finish before quitting"
+        );
+    }
+}
+
+/// Waits until every engine stopped (or never will say), at most
 /// `timeout` in all (the engines stop on their own threads meanwhile).
-fn wait_for_all(mut stopping: Vec<futures::channel::oneshot::Receiver<()>>, timeout: Duration) {
+fn wait_for_all(mut stopping: Vec<Stopping>, timeout: Duration) {
     let deadline = std::time::Instant::now() + timeout;
     while !stopping.is_empty() {
-        stopping.retain_mut(|receiver| matches!(receiver.try_recv(), Ok(None)));
+        stopping.retain_mut(|stopping| !stopping.done());
         if stopping.is_empty() {
             break;
         }
@@ -1267,6 +1335,16 @@ impl Session {
     pub(crate) fn event_log_of(&self, id: &str) -> Option<PathBuf> {
         self.event_log_dir()
             .map(|dir| ic_core::event_log_path(&dir, id))
+    }
+
+    /// Whether environment `id` has a password in the (demo) keychain.
+    pub(crate) fn has_password(&self, id: &str) -> bool {
+        self.secrets.get(id).ok().flatten().is_some()
+    }
+
+    /// What quitting does: stops every engine and finishes what waits.
+    pub(crate) fn quit_now(&mut self, cx: &mut Context<Self>) {
+        self.stop(cx);
     }
 }
 

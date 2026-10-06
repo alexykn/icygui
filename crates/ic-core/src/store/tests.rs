@@ -1063,3 +1063,58 @@ fn notification_lists_and_by_name_answers_converge() {
     store.replace_services(vec![service("h", "a", ServiceState::Ok)], Detail::Lean, 50);
     assert!(store.icinga_notifications().is_empty());
 }
+
+#[test]
+fn a_partial_view_hides_what_it_leaves_out_until_a_full_one_brings_it_back() {
+    let mut store = loaded();
+    store.take_discovered();
+    // A satellite's answers leave `h!b` out: hidden, not gone.
+    store.set_hiding(true);
+    store.replace_services(vec![service("h", "a", ServiceState::Ok)], Detail::Lean, 20);
+    assert!(!store.contains(&key("h", "b")));
+    assert!(store.take_discovered().is_empty(), "not reported gone");
+    assert_eq!(store.hidden_count(), 1);
+
+    // A master brings it back, recovered meanwhile: that is reported.
+    store.set_hiding(false);
+    store.track_appeared(true);
+    store.replace_services(
+        vec![
+            service("h", "a", ServiceState::Ok),
+            service("h", "b", ServiceState::Ok),
+            service("h", "c", ServiceState::Critical),
+        ],
+        Detail::Lean,
+        30,
+    );
+    let found = store.take_discovered();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].object, key("h", "b"));
+    assert_eq!(
+        found[0].before.state,
+        CheckableState::Service(ServiceState::Critical)
+    );
+    assert_eq!(
+        found[0].after.map(|after| after.state),
+        Some(CheckableState::Service(ServiceState::Ok))
+    );
+    assert_eq!(store.hidden_count(), 0);
+    // `h!c` was never seen: listed for the rule engine to learn.
+    assert_eq!(store.take_appeared(), [key("h", "c")]);
+    store.track_appeared(false);
+
+    // Hidden again, and a complete load from a master doesn't bring it:
+    // gone.
+    store.set_hiding(true);
+    store.replace_services(vec![service("h", "a", ServiceState::Ok)], Detail::Lean, 40);
+    assert_eq!(store.hidden_count(), 2);
+    store.set_hiding(false);
+    store.release_hidden();
+    let gone: Vec<(ObjectKey, bool)> = store
+        .take_discovered()
+        .into_iter()
+        .map(|found| (found.object, found.after.is_none()))
+        .collect();
+    assert_eq!(gone, [(key("h", "b"), true), (key("h", "c"), true)]);
+    assert_eq!(store.hidden_count(), 0);
+}

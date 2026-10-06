@@ -27,7 +27,7 @@ pub use form::{CHIP_HEIGHT, Chip, Field, FieldTone, Segmented, Switch, TextArea}
 pub use header::{PaneHeader, SUB_TAB_GAP, SubTabs, sub_tab_width};
 pub use link::{Link, LinkStyle};
 pub use list::{CompactRow, ListRow, RowEmphasis};
-pub use menu::{Dismissable, Dismissal, Menu, MenuItem, Popover};
+pub use menu::{Dismissable, Dismissal, ItemAction, Menu, MenuItem, Popover};
 pub use modal::{DialogBody, Modal, ModalPlacement};
 pub use notice::{EmptyState, NoteEntry, TreeLine, TreeTable};
 pub use state::{CircleSize, Paint, StateCircle, StateDot};

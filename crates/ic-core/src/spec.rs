@@ -135,6 +135,13 @@ pub struct Tuning {
     pub probe_initial: Duration,
     /// The longest wait between such probes (10 minutes).
     pub probe_max: Duration,
+    /// With several URLs, how long logging in at one and finding out its
+    /// node (`GET /v1`, the node's name, the zones) may take while other
+    /// URLs remain to try, and in a probe (8 s): a node that accepts
+    /// connections but doesn't answer (an Icinga busy reloading) is passed
+    /// over after this instead of the full request timeout. The last URL
+    /// of a walk waits as long as any query.
+    pub identify_timeout: Duration,
 }
 
 impl Default for Tuning {
@@ -162,6 +169,7 @@ impl Default for Tuning {
             action_timeout: ic_api::DEFAULT_ACTION_TIMEOUT,
             probe_initial: Duration::from_secs(30),
             probe_max: Duration::from_mins(10),
+            identify_timeout: Duration::from_secs(8),
         }
     }
 }

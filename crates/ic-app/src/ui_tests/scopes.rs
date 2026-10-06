@@ -382,3 +382,175 @@ fn the_switcher_lists_every_environment_with_unread_and_mute() {
         })),
     );
 }
+
+/// A2 and the design rule: the centre keeps its size and place while it is
+/// open, whatever it shows: another scope, a label filter, a storm
+/// expanded, notifications arriving. Nothing moves under the pointer.
+#[test]
+fn the_centre_keeps_its_place_whatever_it_shows() {
+    run_app(
+        crate::WINDOW_SIZE,
+        demo_state,
+        Body::Sync(Box::new(|app, cx| {
+            // A single notification: the list is far from full.
+            app.state.update(cx, |state, cx| {
+                state.apply_from(
+                    demo::ENVIRONMENT_ID,
+                    CoreEvent::Notification(record(
+                        "first",
+                        Some(ObjectKey::service("db-prod-03", "first")),
+                        "overview / overview",
+                        None,
+                        60.,
+                    )),
+                );
+                cx.notify();
+            });
+            app.draw(cx);
+            app.click(cx, CLOCK, Modifiers::default());
+            let sidebar = sidebar(app, cx);
+            let bounds = sidebar.read(cx).centre_list_bounds();
+            assert!(f32::from(bounds.size.height) > 400., "{bounds:?}");
+            let unchanged = |app: &Harness, cx: &mut App, what: &str| {
+                app.draw(cx);
+                assert_eq!(
+                    sidebar.read(cx).centre_list_bounds(),
+                    bounds,
+                    "{what} moved the centre"
+                );
+            };
+            // `all` (the tab is where it was), then back.
+            app.click(cx, ALL_TAB, Modifiers::default());
+            assert_eq!(sidebar.read(cx).centre_scope(cx), Some(Scope::All));
+            unchanged(app, cx, "a scope");
+            // Everything arrives at once: the list fills, the card stays.
+            notify_everywhere(app, cx);
+            unchanged(app, cx, "notifications arriving");
+            app.click(cx, FIRST_LABEL, Modifiers::default());
+            assert_eq!(sidebar.read(cx).centre_view(cx).entries().count(), 8);
+            unchanged(app, cx, "a label filter");
+            app.click(cx, FIRST_LABEL, Modifiers::default());
+            unchanged(app, cx, "clearing the filter");
+        })),
+    );
+}
+
+/// A5: any environment is muted from the switcher, the one on screen
+/// stays as it is: a row's bell (on hover, in its count's place) points the
+/// mute row at that environment; the row's click still switches.
+#[test]
+fn any_environment_is_muted_from_the_switcher() {
+    /// staging's row and its bell.
+    const STAGING_BELL: gpui::Point<gpui::Pixels> = gpui::Point {
+        x: px(405.),
+        y: px(720.),
+    };
+    /// The mute row's `1h`.
+    const ONE_HOUR: gpui::Point<gpui::Pixels> = gpui::Point {
+        x: px(300.),
+        y: px(776.),
+    };
+    run_app(
+        crate::WINDOW_SIZE,
+        demo_state,
+        Body::Sync(Box::new(|app, cx| {
+            app.click(cx, SWITCHER, Modifiers::default());
+            let sidebar = sidebar(app, cx);
+            assert!(sidebar.read(cx).details_open());
+            app.hover(cx, STAGING_BELL);
+            app.click(cx, STAGING_BELL, Modifiers::default());
+            assert!(sidebar.read(cx).details_open(), "still open");
+            let now = Timestamp::now();
+            let state = app.state.read(cx);
+            assert_eq!(
+                state.active_environment_id(),
+                Some(demo::ENVIRONMENT_ID),
+                "the bell doesn't switch"
+            );
+            app.click(cx, ONE_HOUR, Modifiers::default());
+            let state = app.state.read(cx);
+            let until = state
+                .environment_paused_until(demo::STAGING_ID, now)
+                .expect("staging muted");
+            assert!(until.as_unix_seconds() - now.as_unix_seconds() > 3500.);
+            assert_eq!(
+                state.environment_paused_until(demo::ENVIRONMENT_ID, now),
+                None,
+                "the one on screen isn't"
+            );
+            assert_eq!(state.active_environment_id(), Some(demo::ENVIRONMENT_ID));
+            let rows = switcher_rows(state, now);
+            assert!(rows[1].muted && !rows[0].muted);
+        })),
+    );
+}
+
+/// The design rule: the switcher keeps its width whatever the connection
+/// says (a long error, URLs passed over): the mute row's chips stay under
+/// the pointer.
+#[test]
+fn the_switcher_keeps_its_width_while_reconnecting() {
+    /// The mute row's `1h`, as while connected.
+    const ONE_HOUR: gpui::Point<gpui::Pixels> = gpui::Point {
+        x: px(300.),
+        y: px(776.),
+    };
+    run_app(
+        crate::WINDOW_SIZE,
+        demo_state,
+        Body::Sync(Box::new(|app, cx| {
+            app.state.update(cx, |state, cx| {
+                state.apply(CoreEvent::Connection(
+                    ic_core::ConnectionState::Reconnecting {
+                        error: "master-01.example.com:5665: error trying to connect: tcp connect \
+                            error: Connection refused (os error 111); sat-ams-01.example.com:5665: \
+                            HTTP 503: Service Unavailable"
+                            .to_owned(),
+                        attempt: 17,
+                        retry_at: Timestamp::from_unix_seconds(
+                            Timestamp::now().as_unix_seconds() + 42.,
+                        ),
+                        untrusted: None,
+                    },
+                ));
+                cx.notify();
+            });
+            app.draw(cx);
+            app.click(cx, SWITCHER, Modifiers::default());
+            assert!(sidebar(app, cx).read(cx).details_open());
+            app.click(cx, ONE_HOUR, Modifiers::default());
+            let state = app.state.read(cx);
+            assert!(
+                state
+                    .environment_paused_until(demo::ENVIRONMENT_ID, Timestamp::now())
+                    .is_some(),
+                "the chip was where it always is"
+            );
+        })),
+    );
+}
+
+/// The smallest window (900 × 560) with 11 environments: the switcher fits
+/// above the footer (its list scrolls), so *add environment…* is there to
+/// click.
+#[test]
+fn the_switcher_fits_the_smallest_window_with_many_environments() {
+    run_app(
+        gpui::size(px(900.), px(560.)),
+        |cx: &mut App| {
+            let mut config = demo::config();
+            demo::set_count(&mut config, 11);
+            cx.new(|_| AppState::demo(config, Timestamp::now()))
+        },
+        Body::Sync(Box::new(|app, cx| {
+            assert_eq!(app.state.read(cx).environments().len(), 11);
+            app.click(cx, point(px(150.), px(540.)), Modifiers::default());
+            assert!(sidebar(app, cx).read(cx).details_open());
+            app.click(cx, point(px(150.), px(475.)), Modifiers::default());
+            assert!(
+                app.workspace.read(cx).environment_editor().is_some(),
+                "add environment… was in the window"
+            );
+        })),
+    );
+}

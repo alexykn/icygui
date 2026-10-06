@@ -416,22 +416,30 @@ where
     }
 }
 
-/// Where a notification of `source` matched, from its subtitle (`overview
-/// / overview` reads `overview`; the environment's own name is the
-/// environment itself): `None` when the scope already says it all.
-fn label_of(source: &Source<'_>, subtitle: &str, all: bool) -> Option<Label> {
+/// Where a notification of environment `environment` matched, from its
+/// subtitle, without repeating anything: equal parts in a row once
+/// (`overview / overview` reads `overview`), and nothing when it names
+/// only the environment (a storm's summary). The centre's labels and the
+/// desktop notifications both read it.
+pub(crate) fn place_of(subtitle: &str, environment: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for part in subtitle.split(" / ").map(str::trim) {
         if !part.is_empty() && parts.last() != Some(&part) {
             parts.push(part);
         }
     }
-    let label = parts.join(" / ");
-    let label = if label == source.name {
+    let place = parts.join(" / ");
+    if place == environment.trim() {
         String::new()
     } else {
-        label
-    };
+        place
+    }
+}
+
+/// Where a notification of `source` matched ([`place_of`]): `None` when
+/// the scope already says it all.
+fn label_of(source: &Source<'_>, subtitle: &str, all: bool) -> Option<Label> {
+    let label = place_of(subtitle, source.name);
     let text = match (all, label.is_empty()) {
         (true, true) => source.name.to_owned(),
         (true, false) => format!("{} · {label}", source.name),

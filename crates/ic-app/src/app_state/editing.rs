@@ -652,6 +652,7 @@ mod tests {
                 error: "refused".to_owned(),
                 attempt: 2,
                 retry_at: now(),
+                untrusted: None,
             },
         ));
         assert!(state.create_group("x", None).is_some());

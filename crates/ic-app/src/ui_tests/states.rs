@@ -43,6 +43,7 @@ fn states(now: Timestamp) -> Vec<ConnectionState> {
             error: "connect: connection refused (127.0.0.1:5665)".to_owned(),
             attempt: 4,
             retry_at: now.plus(std::time::Duration::from_secs(12)),
+            untrusted: None,
         },
         ConnectionState::AuthFailed {
             message: "401 Unauthorized".to_owned(),

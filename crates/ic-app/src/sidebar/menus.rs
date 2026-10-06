@@ -8,12 +8,15 @@ use std::time::Instant;
 
 use gpui::{
     ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, Styled as _, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use ic_config::DashboardGroup;
 use ic_model::{Timestamp, format_compact};
 use ic_rules::{DashboardRef, ScopeSetting};
-use ic_ui_kit::{ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissal, IconName, Link, Menu, MenuItem};
+use ic_ui_kit::{
+    ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissal, IconName, ItemAction, Link, Menu, MenuItem,
+    Tooltip,
+};
 
 use super::{RenameTarget, Sidebar, SidebarEvent};
 use crate::app_state::connection::ViewMarker;
@@ -22,10 +25,81 @@ use crate::app_state::{AppState, Health, permissions};
 use crate::notifications::{PauseChoice, when};
 use crate::settings::ScopeKey;
 
-/// The connection details' least width.
+/// The connection details' width (fixed: a long error or another
+/// environment's state never widens it, so nothing in it moves sideways).
 const DETAILS_WIDTH: f32 = 320.;
 /// The same with several environments (the switcher's mute row).
 const DETAILS_WIDTH_SEVERAL: f32 = 360.;
+
+/// The heights the switcher's budget counts with (the theme's: a menu
+/// item, a detail line and the gap between lines, the parts around the
+/// lists), so the popover fits above the footer in any window.
+mod budget {
+    /// A menu item (an environment row, *Reload*, *add*, *edit*).
+    pub(super) const ROW: f32 = 28.;
+    /// A detail line (12 px text) and the gap after it.
+    pub(super) const LINE: f32 = 20.;
+    /// The detail lines the budget keeps room for before the environment
+    /// list gets less (status, node, view, two URLs passed over, version,
+    /// last event, API user and one more).
+    pub(super) const LINES: f32 = 9.;
+    /// Under the window's height: the footer, the gap above it and the
+    /// margin the popover keeps from the window's top.
+    pub(super) const OUTSIDE: f32 = 50.;
+    /// The title, its separator, *Reload* and its separator.
+    pub(super) const TOP: f32 = 42. + 9. + ROW + 9.;
+    /// Around the environment list: its separator and label, the mute row
+    /// (several environments), a separator, *add* and *edit*, the card's
+    /// padding and border.
+    pub(super) const BOTTOM: f32 = 9. + 23. + 30. + 9. + 2. * ROW + 10.;
+    /// The fewest environment rows shown before the list scrolls.
+    pub(super) const MIN_ROWS: usize = 3;
+    /// The least height the detail lines get.
+    pub(super) const MIN_LINES: f32 = 60.;
+}
+
+/// How the switcher's lists fit a window (see [`switcher_budget`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct SwitcherBudget {
+    /// The environment rows shown at once (the list scrolls beyond).
+    pub(super) rows: usize,
+    /// The environment list's height.
+    pub(super) list: f32,
+    /// The most the detail lines take (they scroll beyond).
+    pub(super) lines: f32,
+}
+
+/// The switcher's environment list and detail lines in a window `viewport`
+/// high, for `environments` environments: how many rows the list shows
+/// (whole rows; it scrolls beyond) and how tall the detail lines may be
+/// (they scroll beyond). Neither depends on the connection's state, so
+/// nothing in the popover moves when that changes; a short window shows
+/// fewer rows and lines, never fewer controls.
+pub(super) fn switcher_budget(viewport: f32, environments: usize) -> SwitcherBudget {
+    use budget::{BOTTOM, LINE, LINES, MIN_LINES, MIN_ROWS, OUTSIDE, ROW, TOP};
+    let available = viewport - OUTSIDE;
+    let room = available - TOP - BOTTOM - LINES * LINE;
+    let count = environments.max(1);
+    let mut rows = count;
+    while rows > MIN_ROWS.min(count) && height_of(rows, ROW) > room {
+        rows -= 1;
+    }
+    let list = height_of(rows, ROW);
+    SwitcherBudget {
+        rows,
+        list,
+        lines: (available - TOP - BOTTOM - list - 8.).max(MIN_LINES),
+    }
+}
+
+/// `count` rows of `height`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a count of environments, far below 2^23"
+)]
+fn height_of(count: usize, height: f32) -> f32 {
+    count as f32 * height
+}
 
 /// How far the switcher's mute row is indented inside a menu element, so
 /// its text starts where the items' labels do (the menu's check column
@@ -337,26 +411,6 @@ impl Sidebar {
         let colors = theme.colors;
         let state = self.state.read(cx);
         let connection = state.connection();
-        let line = |key: &'static str, value: String| {
-            div()
-                .flex()
-                .gap(px(10.))
-                .text_size(theme.text.small)
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(84.))
-                        .text_color(colors.text_faint)
-                        .child(key),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(colors.text)
-                        .child(value),
-                )
-        };
         // With several environments, room for the mute row's name next to
         // its pause chips.
         let width = if state.environments().len() > 1 {
@@ -364,7 +418,8 @@ impl Sidebar {
         } else {
             DETAILS_WIDTH
         };
-        let mut menu = Menu::new("connection-details").min_width(px(width));
+        let budget = switcher_budget(f32::from(self.viewport), state.environments().len());
+        let mut menu = Menu::new("connection-details").width(px(width));
         match state.environment() {
             Some(environment) => {
                 let title = if state.is_demo_environment() {
@@ -396,10 +451,18 @@ impl Sidebar {
                 );
                 let lines = detail_lines(state, now)
                     .into_iter()
-                    .map(|(key, value)| line(key, value));
-                menu = menu
-                    .separator()
-                    .element(div().flex().flex_col().gap(px(4.)).children(lines));
+                    .enumerate()
+                    .map(|(index, (key, value))| detail_line(index, key, value, theme));
+                menu = menu.separator().element(
+                    div()
+                        .id("connection-detail-lines")
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .max_h(px(budget.lines))
+                        .overflow_y_scroll()
+                        .children(lines),
+                );
                 let can_reload = !connection.is_starting();
                 menu = menu.separator().item(
                     MenuItem::new("reload", "Reload from Icinga")
@@ -423,22 +486,47 @@ impl Sidebar {
                 );
             }
         }
-        Self::with_switcher(menu, state, now, cx).on_dismiss(Self::dismiss_listener(cx))
+        self.with_switcher(menu, state, now, budget, cx)
+            .on_dismiss(Self::dismiss_listener(cx))
     }
 
     /// The environment switcher (ENV-01, B) under the details: every
     /// environment with its health (the footer's dot), its node and the
     /// age of its last event, its unread notifications (A3) and a bell-off
-    /// when muted on its own (A5); the one on screen checked. With several,
-    /// the row that mutes the one on screen; then "add environment…" and
-    /// "edit …".
-    fn with_switcher(mut menu: Menu, state: &AppState, now: Timestamp, cx: &Context<Self>) -> Menu {
+    /// when muted on its own (A5); the one on screen checked. The list is
+    /// `list_height` at most and scrolls beyond. With several, a row's
+    /// bell (on hover, in its count's place) points the mute row under
+    /// the list at that environment (the one on screen until then); then
+    /// "add environment…" and "edit …".
+    fn with_switcher(
+        &self,
+        mut menu: Menu,
+        state: &AppState,
+        now: Timestamp,
+        budget: SwitcherBudget,
+        cx: &Context<Self>,
+    ) -> Menu {
         let theme = cx.theme();
         let environments = state.environments();
         if !environments.is_empty() {
-            menu = menu.separator().label("environments");
+            // A list cut short by a short window says that it scrolls.
+            menu = menu.separator().label(if budget.rows < environments.len() {
+                format!("{} environments · scroll for more", environments.len())
+            } else {
+                "environments".to_owned()
+            });
         }
         let several = environments.len() > 1;
+        let target = self
+            .mute_target
+            .as_deref()
+            .and_then(|id| state.environment_by_id(id))
+            .or_else(|| state.environment());
+        let picked = self
+            .mute_target
+            .as_deref()
+            .filter(|id| state.environment_by_id(id).is_some());
+        let mut items = Vec::new();
         for row in switcher_rows(state, now) {
             let SwitcherRow {
                 id,
@@ -452,7 +540,7 @@ impl Sidebar {
             } = row;
             let item = MenuItem::new(
                 gpui::ElementId::Name(format!("environment-{id}").into()),
-                name,
+                name.clone(),
             )
             .checked(is_active)
             .dot(super::health_color(health, theme));
@@ -461,7 +549,30 @@ impl Sidebar {
             } else {
                 item.detail(detail)
             };
-            menu = menu.item(
+            let item = if several {
+                let target = id.clone();
+                item.action(
+                    ItemAction::new(
+                        gpui::ElementId::Name(format!("environment-bell-{id}").into()),
+                        // The row's bell-off says it is muted; the button
+                        // is the notifications' bell either way.
+                        IconName::Bell,
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.mute_target = Some(target.clone());
+                            cx.notify();
+                        }),
+                    )
+                    .shown(picked == Some(id.as_str()))
+                    .tooltip(Tooltip::new(if muted {
+                        format!("{name} is muted: unmute…")
+                    } else {
+                        format!("Mute {name}…")
+                    })),
+                )
+            } else {
+                item
+            };
+            items.push(
                 item.trailing_icon((several && muted).then_some(IconName::BellOff))
                     .count(unread)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -473,7 +584,8 @@ impl Sidebar {
                     })),
             );
         }
-        if several && let Some(environment) = state.environment() {
+        menu = menu.scrolled("environment-list", items, px(budget.list));
+        if several && let Some(environment) = target {
             menu = menu.element(Self::mute_row(environment, state, now, cx));
         }
         menu = menu.separator().item(Self::emit_item(
@@ -497,11 +609,12 @@ impl Sidebar {
         menu
     }
 
-    /// Mutes the environment on screen (A5; every environment's pause is
-    /// in the notification centre, the palette and the tray): `mute
-    /// staging` with the pause chips, or `staging muted until 18:30` with
-    /// *unmute*. One line of a chip's height either way, like the
-    /// notification centre's pause row, so nothing moves when it changes.
+    /// Mutes one environment (A5; the one on screen, or the one whose bell
+    /// was clicked; every environment's pause is in the notification
+    /// centre, the palette and the tray): `mute staging` with the pause
+    /// chips, or `staging muted until 18:30` with *unmute*. One line of a
+    /// chip's height either way, like the notification centre's pause row,
+    /// so nothing moves when it changes.
     fn mute_row(
         environment: &ic_config::Environment,
         state: &AppState,
@@ -585,6 +698,39 @@ impl Sidebar {
                 .into_any_element(),
         }
     }
+}
+
+/// A line of the connection details: its key, and its value cut short when
+/// too long for the width (an error, a URL passed over), the full text in
+/// its tooltip.
+fn detail_line(
+    index: usize,
+    key: &'static str,
+    value: String,
+    theme: &ic_ui_kit::Theme,
+) -> gpui::Div {
+    let colors = theme.colors;
+    div()
+        .flex()
+        .gap(px(10.))
+        .text_size(theme.text.small)
+        .child(
+            div()
+                .flex_none()
+                .w(px(84.))
+                .text_color(colors.text_faint)
+                .child(key),
+        )
+        .child(
+            div()
+                .id(("connection-detail", index))
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(colors.text)
+                .tooltip(Tooltip::text(value.clone()))
+                .child(value),
+        )
 }
 
 /// One environment in the switcher.
@@ -875,6 +1021,40 @@ mod tests {
         assert!(marker.detail.contains("may not read the zones"));
         let lines = detail_lines(&state, at(5.));
         assert_eq!(lines[1], ("node", "sat-ams-01".to_owned()));
+    }
+
+    #[test]
+    fn the_switcher_fits_any_window_whatever_the_state() {
+        // The default window shows every environment of a big list.
+        let big = switcher_budget(900., 11);
+        assert_eq!(big.rows, 11);
+        assert!((big.list - 11. * budget::ROW).abs() < f32::EPSILON);
+        assert!(big.lines >= 9. * budget::LINE - 4., "{big:?}");
+        // The smallest window (560 px) with 11 environments: three rows
+        // and the lines scroll, the controls stay; the whole popover fits
+        // above the footer.
+        let small = switcher_budget(560., 11);
+        assert_eq!(small.rows, 3);
+        assert!(
+            budget::TOP + small.lines + 8. + small.list + budget::BOTTOM + budget::OUTSIDE
+                <= 560. + 0.5,
+            "{small:?}"
+        );
+        // A few environments show all of them.
+        assert_eq!(switcher_budget(560., 2).rows, 2);
+        assert_eq!(switcher_budget(900., 1).rows, 1);
+    }
+
+    #[test]
+    fn the_footer_shows_a_nodes_first_label() {
+        assert_eq!(
+            super::super::short_node("icinga-master-02.example.com"),
+            "icinga-master-02"
+        );
+        assert_eq!(super::super::short_node("master-01"), "master-01");
+        assert_eq!(super::super::short_node("10.0.4.24"), "10.0.4.24");
+        assert_eq!(super::super::short_node("::1"), "::1");
+        assert_eq!(super::super::short_node(".odd"), ".odd");
     }
 
     #[test]

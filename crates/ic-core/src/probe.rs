@@ -116,7 +116,9 @@ impl From<Failure> for ConnectionFailure {
             Failure::MissingSecret => {
                 Self::Other("no password: enter the API user's password".to_owned())
             }
-            Failure::Misconfigured(message) | Failure::Transient(message) => Self::Other(message),
+            Failure::Misconfigured(message)
+            | Failure::Transient(message)
+            | Failure::TransientUntrusted { error: message, .. } => Self::Other(message),
             Failure::Auth(_) => Self::Unauthorized,
             Failure::Tls {
                 mismatch: Some((expected, actual)),
@@ -207,6 +209,7 @@ async fn probe(
         &environment.urls,
         url,
         ic_api::DEFAULT_ACTION_TIMEOUT,
+        None,
     )
     .await
     {

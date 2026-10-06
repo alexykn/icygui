@@ -52,7 +52,7 @@ fn rank(tone: TrayTone) -> u8 {
 /// What the tray shows for `state` at `now` (BG-02, A4): every
 /// environment runs, so the tint is the worst unhandled state among all
 /// of them, and the tooltip has a line (two when connected) per
-/// environment.
+/// environment, which says when its node sees only part of the cluster.
 pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
     let environments = state.environments();
     let mut tone: Option<TrayTone> = None;
@@ -86,8 +86,14 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
         } else {
             ""
         };
+        // A node that doesn't see the whole cluster: its counts are only
+        // its zone's, and the line says so (ENV-12).
+        let view = connection
+            .view_marker()
+            .map(|marker| format!(" · {}", marker.label))
+            .unwrap_or_default();
         lines.push(format!(
-            "{}{demo} · {}{muted}",
+            "{}{demo} · {}{view}{muted}",
             environment.name,
             connection.short_state()
         ));
@@ -425,6 +431,39 @@ mod tests {
             view.tooltip.contains("staging (demo) · connected · muted"),
             "{}",
             view.tooltip
+        );
+    }
+
+    #[test]
+    fn a_partial_view_is_labelled() {
+        let mut state = AppState::fixture(now());
+        let mut node = crate::app_state::connection::full_node("sat-ams-01");
+        node.zone = Some("ams".to_owned());
+        node.view = ic_core::ClusterView::Partial {
+            zone: "ams".to_owned(),
+        };
+        state.apply(ic_core::CoreEvent::Connection(ConnectionState::Connected {
+            node,
+            version: "r2.15.6-1".to_owned(),
+            since: now(),
+        }));
+        let view = tray_view(&state, now());
+        assert_eq!(
+            view.tooltip.lines().next(),
+            Some("prod-cluster (demo) · connected · partial view: zone ams")
+        );
+        let mut node = crate::app_state::connection::full_node("master-01");
+        node.view = ic_core::ClusterView::Unverified {
+            reason: "the API user may not read the zones".to_owned(),
+        };
+        state.apply(ic_core::CoreEvent::Connection(ConnectionState::Connected {
+            node,
+            version: "r2.15.6-1".to_owned(),
+            since: now(),
+        }));
+        assert_eq!(
+            tray_view(&state, now()).tooltip.lines().next(),
+            Some("prod-cluster (demo) · connected · view not verified")
         );
     }
 

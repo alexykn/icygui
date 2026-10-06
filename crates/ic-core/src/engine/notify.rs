@@ -282,8 +282,28 @@ impl Notify {
                 ObjectView::of(CheckableState::Service(service.state), &service.check),
             )
         });
-        let found: Vec<(ObjectKey, ObjectView)> = hosts
-            .chain(services)
+        self.seed_views(store, hosts.chain(services), at);
+    }
+
+    /// Objects a fuller view brought that the store had never held (a
+    /// master's load after a satellite's, ENV-12): the rule engine learns
+    /// them like the first load's, and those an earlier run notified count
+    /// as notified ([`Notify::restore`]), so their recoveries follow.
+    pub(super) fn seed_objects(&mut self, store: &Store, objects: &[ObjectKey], at: Timestamp) {
+        let views = objects
+            .iter()
+            .filter_map(|object| Some((object.clone(), store.view_of(object)?)));
+        self.seed_views(store, views, at);
+    }
+
+    /// Seeds the problems and flapping objects among `views`.
+    fn seed_views(
+        &mut self,
+        store: &Store,
+        views: impl Iterator<Item = (ObjectKey, ObjectView)>,
+        at: Timestamp,
+    ) {
+        let found: Vec<(ObjectKey, ObjectView)> = views
             .filter(|(_, view)| view.state.is_problem() || view.flapping)
             .collect();
         tracing::debug!(count = found.len(), "seeding the rule engine");

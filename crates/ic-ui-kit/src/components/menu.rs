@@ -12,7 +12,7 @@ use gpui::{
     Window, anchored, deferred, div, point, prelude::FluentBuilder as _, px, relative,
 };
 
-use crate::components::{KeyHint, Tooltip};
+use crate::components::{IconButton, KeyHint, Tooltip};
 use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 
@@ -36,6 +36,64 @@ const CHECK_SLOT: f32 = 14.;
 /// Space between the check mark column and the label.
 const ITEM_GAP: f32 = 8.;
 
+/// The group a menu item's hover reveals its [`ItemAction`] in.
+const ITEM_GROUP: &str = "menu-item";
+
+/// A small icon button of a [`MenuItem`] for a second command on the same
+/// row (mute this environment, where clicking the row switches to it). It
+/// sits in the item's count slot and shows while the pointer is on the row
+/// (the count hides meanwhile), or always while [`ItemAction::shown`],
+/// like the sidebar rows' `···`: nothing moves either way.
+#[must_use = "an item action does nothing unless given to a menu item"]
+pub struct ItemAction {
+    id: ElementId,
+    icon: IconName,
+    tooltip: Option<Tooltip>,
+    shown: bool,
+    on_click: ClickHandler,
+}
+
+impl ItemAction {
+    /// An action showing `icon`, running `handler` when clicked (the item's
+    /// own click doesn't run then).
+    pub fn new(
+        id: impl Into<ElementId>,
+        icon: IconName,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            icon,
+            tooltip: None,
+            shown: false,
+            on_click: Box::new(handler),
+        }
+    }
+
+    /// Shows a tooltip on hover.
+    pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
+        self.tooltip = Some(tooltip);
+        self
+    }
+
+    /// Shows the button (selected) without hovering the row: what it opened
+    /// is showing.
+    pub fn shown(mut self, shown: bool) -> Self {
+        self.shown = shown;
+        self
+    }
+}
+
+impl fmt::Debug for ItemAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ItemAction")
+            .field("id", &self.id)
+            .field("icon", &self.icon)
+            .field("shown", &self.shown)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One entry of a [`Menu`].
 #[derive(IntoElement)]
 #[must_use = "a menu item does nothing unless rendered"]
@@ -48,6 +106,7 @@ pub struct MenuItem {
     dot: Option<Hsla>,
     detail: Option<(SharedString, Option<Hsla>)>,
     count: Option<usize>,
+    action: Option<ItemAction>,
     highlighted: bool,
     disabled: bool,
     tooltip: Option<Tooltip>,
@@ -69,6 +128,7 @@ impl MenuItem {
             dot: None,
             detail: None,
             count: None,
+            action: None,
             highlighted: false,
             disabled: false,
             tooltip: None,
@@ -101,6 +161,13 @@ impl MenuItem {
     /// there for every count, so the label and detail never move.
     pub fn count(mut self, count: usize) -> Self {
         self.count = Some(count);
+        self
+    }
+
+    /// Adds a second command in the count slot, shown on hover (see
+    /// [`ItemAction`]); the slot is kept even without a count.
+    pub fn action(mut self, action: ItemAction) -> Self {
+        self.action = Some(action);
         self
     }
 
@@ -246,21 +313,12 @@ impl RenderOnce for MenuItem {
             .when_some(self.trailing_icon, |item, icon| {
                 item.child(Icon::new(icon).size(px(11.)).color(colors.text_faint))
             })
-            .when_some(self.count, |item, count| {
-                item.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .justify_end()
-                        .w(px(COUNT_SLOT))
-                        .text_size(theme.text.label)
-                        .text_color(colors.accent)
-                        .children(match count {
-                            0 => None,
-                            1..=99 => Some(count.to_string()),
-                            _ => Some("99+".to_owned()),
-                        }),
-                )
+            .when(self.count.is_some() || self.action.is_some(), |item| {
+                item.group(ITEM_GROUP).child(count_slot(
+                    self.count.unwrap_or_default(),
+                    self.action,
+                    cx,
+                ))
             })
             .when_some(self.key, |item, key| item.child(KeyHint::new(key)))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
@@ -285,11 +343,77 @@ impl RenderOnce for MenuItem {
     }
 }
 
+/// A [`MenuItem`]'s count slot: the count (nothing for 0), and the item's
+/// action over it, shown on hover or while [`ItemAction::shown`] (the
+/// count hides meanwhile).
+fn count_slot(count: usize, action: Option<ItemAction>, cx: &App) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors;
+    let shown = action.as_ref().is_some_and(|action| action.shown);
+    let slot = div()
+        .relative()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_end()
+        .w(px(COUNT_SLOT))
+        .h_full()
+        .text_size(theme.text.label)
+        .text_color(colors.accent)
+        .child(
+            div()
+                .when(shown, gpui::Styled::invisible)
+                .when(action.is_some(), |count| {
+                    count.group_hover(ITEM_GROUP, gpui::Styled::invisible)
+                })
+                .children(match count {
+                    0 => None,
+                    1..=99 => Some(count.to_string()),
+                    _ => Some("99+".to_owned()),
+                }),
+        );
+    let Some(action) = action else {
+        return slot;
+    };
+    let handler = action.on_click;
+    let button = IconButton::new(action.id, action.icon)
+        .size(px(COUNT_SLOT - 2.))
+        .icon_size(px(12.))
+        .color(colors.text_muted)
+        .selected(action.shown)
+        .on_click(move |event, window, cx| handler(event, window, cx));
+    let button = match action.tooltip {
+        Some(tooltip) => button.tooltip(tooltip),
+        None => button,
+    };
+    slot.child(
+        div()
+            .absolute()
+            .right_0()
+            .top_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .when(!action.shown, |reveal| {
+                reveal
+                    .invisible()
+                    .group_hover(ITEM_GROUP, gpui::Styled::visible)
+            })
+            .child(button),
+    )
+}
+
 enum Entry {
     Item(Box<MenuItem>),
     Label(SharedString),
     Separator,
     Element(AnyElement),
+    /// Items that scroll within `max_height`.
+    Scrolled {
+        id: ElementId,
+        items: Vec<MenuItem>,
+        max_height: Pixels,
+    },
 }
 
 /// A popup menu's card: items with check marks and key hints, section
@@ -300,6 +424,7 @@ pub struct Menu {
     id: ElementId,
     entries: Vec<Entry>,
     min_width: Pixels,
+    width: Option<Pixels>,
     on_dismiss: Option<DismissHandler>,
 }
 
@@ -310,6 +435,7 @@ impl Menu {
             id: id.into(),
             entries: Vec::new(),
             min_width: px(200.),
+            width: None,
             on_dismiss: None,
         }
     }
@@ -317,6 +443,22 @@ impl Menu {
     /// Adds an item.
     pub fn item(mut self, item: MenuItem) -> Self {
         self.entries.push(Entry::Item(Box::new(item)));
+        self
+    }
+
+    /// Adds items that scroll when they are taller than `max_height` (a
+    /// long list in a short window), lined up with the others.
+    pub fn scrolled(
+        mut self,
+        id: impl Into<ElementId>,
+        items: Vec<MenuItem>,
+        max_height: Pixels,
+    ) -> Self {
+        self.entries.push(Entry::Scrolled {
+            id: id.into(),
+            items,
+            max_height,
+        });
         self
     }
 
@@ -346,6 +488,15 @@ impl Menu {
         self
     }
 
+    /// Fixes the width: the menu never grows with what it shows (items and
+    /// elements cut their text short instead), so nothing in it moves
+    /// sideways when that changes.
+    pub fn width(mut self, width: Pixels) -> Self {
+        self.width = Some(width);
+        self.min_width = width;
+        self
+    }
+
     /// Runs `handler` on Escape or a press outside the menu (close it
     /// there; see [`Dismissable`]).
     pub fn on_dismiss(
@@ -360,9 +511,11 @@ impl Menu {
     /// slot. Labels and the other items are then indented past it.
     #[must_use]
     pub fn has_check_column(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|entry| matches!(entry, Entry::Item(item) if item.checked.is_some()))
+        self.entries.iter().any(|entry| match entry {
+            Entry::Item(item) => item.checked.is_some(),
+            Entry::Scrolled { items, .. } => items.iter().any(|item| item.checked.is_some()),
+            Entry::Label(_) | Entry::Separator | Entry::Element(_) => false,
+        })
     }
 
     /// The labels of the menu's items, in order.
@@ -370,9 +523,12 @@ impl Menu {
     pub fn item_labels(&self) -> Vec<SharedString> {
         self.entries
             .iter()
-            .filter_map(|entry| match entry {
-                Entry::Item(item) => Some(item.label.clone()),
-                Entry::Label(_) | Entry::Separator | Entry::Element(_) => None,
+            .flat_map(|entry| match entry {
+                Entry::Item(item) => vec![item.label.clone()],
+                Entry::Scrolled { items, .. } => {
+                    items.iter().map(|item| item.label.clone()).collect()
+                }
+                Entry::Label(_) | Entry::Separator | Entry::Element(_) => Vec::new(),
             })
             .collect()
     }
@@ -407,6 +563,24 @@ impl RenderOnce for Menu {
                     }
                     (*item).into_any_element()
                 }
+                Entry::Scrolled {
+                    id,
+                    items,
+                    max_height,
+                } => div()
+                    .id(id)
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .max_h(max_height)
+                    .overflow_y_scroll()
+                    .children(items.into_iter().map(|mut item| {
+                        if check_column && item.checked.is_none() {
+                            item.checked = Some(false);
+                        }
+                        item
+                    }))
+                    .into_any_element(),
                 Entry::Label(label) => div()
                     .pl(px(label_indent))
                     .pr(px(ITEM_PADDING))
@@ -438,6 +612,7 @@ impl RenderOnce for Menu {
             .flex()
             .flex_col()
             .min_w(self.min_width)
+            .when_some(self.width, gpui::Styled::w)
             .p(px(4.))
             .rounded(theme.metrics.code_radius)
             .border_1()
@@ -700,6 +875,25 @@ mod tests {
         assert!(!item.is_checked());
         assert_eq!(item.label(), "edit dashboard…");
         assert!(MenuItem::new("on", "on").checked(true).is_checked());
+    }
+
+    #[test]
+    fn scrolled_items_count_as_items() {
+        let menu = Menu::new("environments")
+            .item(MenuItem::new("first", "first"))
+            .scrolled(
+                "list",
+                vec![
+                    MenuItem::new("a", "a").checked(true),
+                    MenuItem::new("b", "b"),
+                ],
+                px(56.),
+            )
+            .width(px(320.));
+        assert_eq!(menu.item_labels(), ["first", "a", "b"]);
+        assert!(menu.has_check_column());
+        assert_eq!(menu.width, Some(px(320.)));
+        assert_eq!(menu.min_width, px(320.));
     }
 
     #[test]

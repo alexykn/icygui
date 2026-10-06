@@ -307,13 +307,17 @@ impl EnvironmentEditor {
         self.urls.iter().position(|row| row.key == key)
     }
 
-    /// "+ add URL": a new row at the end, focused.
+    /// "+ add URL": a new row at the end, focused, its `https://`
+    /// selected, so a URL typed or pasted replaces it.
     fn add_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.form.add_url() else {
             return;
         };
         let row = self.new_row(&self.form.urls[index].clone(), window, cx);
-        row.url.update(cx, |input, cx| input.focus(window, cx));
+        row.url.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
         self.urls.push(row);
         self.error = None;
         cx.notify();

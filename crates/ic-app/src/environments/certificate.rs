@@ -211,12 +211,9 @@ impl CertificateReview {
     pub(crate) fn offer(&self, cx: &App) -> Option<(String, String, TrustOffer)> {
         let state = self.state.read(cx);
         let environment = state.environment()?;
-        let Some(ConnectionState::TlsFailed {
-            url,
-            certificate: Some(certificate),
-            ..
-        }) = &state.connection().state
-        else {
+        // The URL that failed on its certificate, or a standby whose
+        // certificate isn't trusted while another URL is retried.
+        let (url, _, Some(certificate)) = state.connection().state.as_ref()?.untrusted()? else {
             return None;
         };
         let pinned = environment
@@ -227,7 +224,7 @@ impl CertificateReview {
             .as_deref();
         Some((
             environment.id.clone(),
-            url.clone(),
+            url.to_owned(),
             trust_offer(pinned, certificate),
         ))
     }
@@ -302,16 +299,17 @@ impl Render for CertificateReview {
             .map(|environment| environment.id.clone());
         let offer = self.offer(cx).map(|(_, _, offer)| offer);
         let mut endpoint = state.connection().endpoint.clone();
-        let failure = match &state.connection().state {
-            Some(ConnectionState::TlsFailed {
-                url,
-                message,
-                certificate,
-            }) => {
+        let failure = match state
+            .connection()
+            .state
+            .as_ref()
+            .and_then(ConnectionState::untrusted)
+        {
+            Some((url, message, certificate)) => {
                 endpoint = ic_config::ApiUrl::new(url).label();
-                Some((message.clone(), certificate.clone()))
+                Some((message.to_owned(), certificate.cloned()))
             }
-            _ => None,
+            None => None,
         };
         let title = format!("Certificate of {endpoint}");
         let mut dialog = DialogBody::new(title);

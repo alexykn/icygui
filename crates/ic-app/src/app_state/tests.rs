@@ -208,6 +208,7 @@ fn core_events_update_the_state() {
         tone: IntentTone::Info,
         sound: false,
         silent: true,
+        silenced: Some(ic_rules::Silence::Paused),
         at: now(),
     };
     state.apply(CoreEvent::Notification(NotificationRecord {
@@ -424,6 +425,7 @@ fn actions_the_user_may_not_run_are_refused() {
     let request = |action| ActionRequest {
         action,
         targets: vec![target.clone()],
+        review: false,
     };
     assert!(
         state.request(request(ObjectAction::Acknowledge)).is_ok(),

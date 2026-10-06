@@ -175,6 +175,7 @@ type SelectHandler = Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>;
 struct Tab {
     label: SharedString,
     count: Option<usize>,
+    marked: bool,
 }
 
 /// Text tabs with an accent underline under the selected one: the host
@@ -186,6 +187,7 @@ pub struct SubTabs {
     tabs: Vec<Tab>,
     selected: usize,
     on_select: Option<SelectHandler>,
+    trailing: Option<AnyElement>,
 }
 
 impl SubTabs {
@@ -196,6 +198,7 @@ impl SubTabs {
             tabs: Vec::new(),
             selected: 0,
             on_select: None,
+            trailing: None,
         }
     }
 
@@ -204,6 +207,7 @@ impl SubTabs {
         self.tabs.push(Tab {
             label: label.into(),
             count: None,
+            marked: false,
         });
         self
     }
@@ -213,8 +217,35 @@ impl SubTabs {
         self.tabs.push(Tab {
             label: label.into(),
             count: Some(count),
+            marked: false,
         });
         self
+    }
+
+    /// Adds a tab whose label, while `marked` and not selected, shows in
+    /// the accent colour (something new behind it, such as unread
+    /// notifications). Colour only: no dot or count, so nothing moves when
+    /// the mark comes or goes.
+    pub fn marked_tab(mut self, label: impl Into<SharedString>, marked: bool) -> Self {
+        self.tabs.push(Tab {
+            label: label.into(),
+            count: None,
+            marked,
+        });
+        self
+    }
+
+    /// Puts `element` after the last tab, on the tabs' baseline (an
+    /// overflow `···` for tabs that don't fit: the row never wraps).
+    pub fn trailing(mut self, element: impl IntoElement) -> Self {
+        self.trailing = Some(element.into_any_element());
+        self
+    }
+
+    /// The tab labels, in order (counts included).
+    #[must_use]
+    pub fn labels(&self) -> Vec<SharedString> {
+        self.tabs.iter().map(Self::label).collect()
     }
 
     /// Selects the tab at `index` (out-of-range indices select nothing).
@@ -255,35 +286,46 @@ impl RenderOnce for SubTabs {
         div()
             .flex()
             .flex_none()
-            .gap(px(22.))
+            .gap(px(TAB_GAP))
             .text_size(theme.text.body)
+            .whitespace_nowrap()
+            .overflow_hidden()
             .border_b_1()
             .border_color(colors.border_header)
             .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                 let selected = index == self.selected;
+                let marked = tab.marked && !selected;
                 let on_select = self.on_select.clone();
                 div()
                     .id(ElementId::NamedChild(
                         parent_id.clone(),
                         SharedString::from(format!("tab-{index}")),
                     ))
-                    .pb(px(9.))
+                    .pb(px(TAB_PADDING))
                     .border_b(px(2.))
                     .border_color(if selected {
                         colors.accent
                     } else {
                         gpui::transparent_black()
                     })
+                    .flex_none()
                     .text_color(if selected {
                         colors.text_strong
+                    } else if marked {
+                        colors.accent
                     } else {
                         colors.text_muted
                     })
                     .whitespace_nowrap()
                     .child(Self::label(tab))
                     .when(!selected, |tab| {
-                        tab.cursor_pointer()
-                            .hover(|style| style.text_color(colors.text))
+                        tab.cursor_pointer().hover(|style| {
+                            style.text_color(if marked {
+                                colors.accent_hover
+                            } else {
+                                colors.text
+                            })
+                        })
                     })
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .when_some(on_select, |tab, on_select| {
@@ -293,8 +335,34 @@ impl RenderOnce for SubTabs {
                         })
                     })
             }))
+            .when_some(self.trailing, |tabs, trailing| {
+                // On the labels' line: the same space under it as a tab.
+                tabs.child(div().flex_none().pb(px(TAB_PADDING + 2.)).child(trailing))
+            })
     }
 }
+
+/// Space between two tabs.
+const TAB_GAP: f32 = 22.;
+/// Space between a tab's label and its underline.
+const TAB_PADDING: f32 = 9.;
+
+/// How wide [`SubTabs`] draws a tab labelled `label` (with its count) at
+/// `text_size`, gap excluded: the bundled font is monospaced, so callers
+/// can tell which tabs fit before drawing them (an overflow menu for the
+/// rest, so the row never wraps).
+#[must_use]
+pub fn sub_tab_width(label: &str, text_size: Pixels) -> Pixels {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "labels are far shorter than 2^23 characters"
+    )]
+    let chars = label.chars().count() as f32;
+    text_size * (chars * crate::theme::CHAR_WIDTH)
+}
+
+/// The space [`SubTabs`] puts between two tabs.
+pub const SUB_TAB_GAP: Pixels = px(TAB_GAP);
 
 #[cfg(test)]
 mod tests {

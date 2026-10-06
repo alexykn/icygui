@@ -18,7 +18,7 @@ use ic_ui_kit::{ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissal, IconName, Link, 
 use super::{RenameTarget, Sidebar, SidebarEvent};
 use crate::app_state::connection::ViewMarker;
 use crate::app_state::environments::url_summary;
-use crate::app_state::{AppState, permissions};
+use crate::app_state::{AppState, Health, permissions};
 use crate::notifications::{PauseChoice, when};
 use crate::settings::ScopeKey;
 
@@ -426,35 +426,51 @@ impl Sidebar {
         Self::with_switcher(menu, state, now, cx).on_dismiss(Self::dismiss_listener(cx))
     }
 
-    /// The environment switcher (ENV-01) under the details: every
-    /// environment, the active one checked and a muted one with a bell-off
-    /// (A5); with several, the row that mutes the one on screen; then
-    /// "add environment…" and "edit …".
+    /// The environment switcher (ENV-01, B) under the details: every
+    /// environment with its health (the footer's dot), its node and the
+    /// age of its last event, its unread notifications (A3) and a bell-off
+    /// when muted on its own (A5); the one on screen checked. With several,
+    /// the row that mutes the one on screen; then "add environment…" and
+    /// "edit …".
     fn with_switcher(mut menu: Menu, state: &AppState, now: Timestamp, cx: &Context<Self>) -> Menu {
-        let active = state.active_environment_id().map(str::to_owned);
+        let theme = cx.theme();
         let environments = state.environments();
         if !environments.is_empty() {
             menu = menu.separator().label("environments");
         }
         let several = environments.len() > 1;
-        for environment in environments {
-            let id = environment.id.clone();
-            let is_active = active.as_deref() == Some(id.as_str());
-            let muted = several && state.environment_paused_until(&id, now).is_some();
+        for row in switcher_rows(state, now) {
+            let SwitcherRow {
+                id,
+                name,
+                active: is_active,
+                health,
+                detail,
+                partial,
+                muted,
+                unread,
+            } = row;
+            let item = MenuItem::new(
+                gpui::ElementId::Name(format!("environment-{id}").into()),
+                name,
+            )
+            .checked(is_active)
+            .dot(super::health_color(health, theme));
+            let item = if partial {
+                item.detail_colored(detail, theme.states.warning)
+            } else {
+                item.detail(detail)
+            };
             menu = menu.item(
-                MenuItem::new(
-                    gpui::ElementId::Name(format!("environment-{id}").into()),
-                    environment.name.clone(),
-                )
-                .checked(is_active)
-                .trailing_icon(muted.then_some(IconName::BellOff))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.menus.close();
-                    if !is_active {
-                        cx.emit(SidebarEvent::SwitchEnvironment(id.clone()));
-                    }
-                    cx.notify();
-                })),
+                item.trailing_icon((several && muted).then_some(IconName::BellOff))
+                    .count(unread)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.menus.close();
+                        if !is_active {
+                            cx.emit(SidebarEvent::SwitchEnvironment(id.clone()));
+                        }
+                        cx.notify();
+                    })),
             );
         }
         if several && let Some(environment) = state.environment() {
@@ -571,6 +587,66 @@ impl Sidebar {
     }
 }
 
+/// One environment in the switcher.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SwitcherRow {
+    /// Its id.
+    pub(crate) id: String,
+    /// Its name.
+    pub(crate) name: String,
+    /// It is the one on screen.
+    pub(crate) active: bool,
+    /// Its connection's health (the dot).
+    pub(crate) health: Health,
+    /// Its node and the age of its last event (`master-01 · 2s`), what
+    /// the connection does, and a view short of the whole cluster.
+    pub(crate) detail: String,
+    /// Its node sees only part of the cluster (the detail in the warning
+    /// colour).
+    pub(crate) partial: bool,
+    /// Muted on its own (a bell-off).
+    pub(crate) muted: bool,
+    /// Its unread notifications.
+    pub(crate) unread: usize,
+}
+
+/// The switcher's rows (ENV-01, B): every environment, in order.
+pub(crate) fn switcher_rows(state: &AppState, now: Timestamp) -> Vec<SwitcherRow> {
+    state
+        .environments()
+        .iter()
+        .map(|environment| {
+            let id = environment.id.clone();
+            let (health, detail, partial) = match state.slot(&id) {
+                Some(slot) => {
+                    let connection = slot.connection();
+                    let marker = connection.view_marker();
+                    let mut detail = connection.label(now);
+                    if let Some(marker) = &marker {
+                        detail = format!("{detail} · {}", marker.label);
+                    }
+                    (
+                        connection.health(now),
+                        detail,
+                        marker.is_some_and(|marker| marker.partial),
+                    )
+                }
+                None => (Health::Connecting, "starting".to_owned(), false),
+            };
+            SwitcherRow {
+                active: state.is_active(&id),
+                muted: state.environment_paused_until(&id, now).is_some(),
+                unread: state.unread_in(&id),
+                name: environment.name.clone(),
+                id,
+                health,
+                detail,
+                partial,
+            }
+        })
+        .collect()
+}
+
 /// The connection details' lines: the state, the endpoint and its
 /// version, the last event and the API user (with how many of the
 /// permissions the client asks for it lacks).
@@ -623,6 +699,35 @@ pub(super) fn detail_lines(state: &AppState, now: Timestamp) -> Vec<(&'static st
         ));
     }
     lines
+}
+
+/// The footer switcher's tooltip: the environment (and whether it is the
+/// demo's), its connection and view, and which other environments have
+/// unread notifications.
+pub(super) fn status_tooltip(
+    name: Option<&str>,
+    demo: bool,
+    connection: &str,
+    view: Option<&str>,
+    elsewhere: &[(&str, usize)],
+) -> String {
+    let mut text = match name {
+        Some(name) if demo => format!("{name} (demo) · {connection}"),
+        Some(name) => format!("{name} · {connection}"),
+        None => connection.to_owned(),
+    };
+    if let Some(view) = view {
+        let _ = write!(text, " · {view}");
+    }
+    text.push_str(": environments and connection details");
+    if !elsewhere.is_empty() {
+        let unread: Vec<String> = elsewhere
+            .iter()
+            .map(|(name, unread)| format!("{name} {unread} unread"))
+            .collect();
+        let _ = write!(text, " · {}", unread.join(", "));
+    }
+    text
 }
 
 /// The notification centre button's tooltip: unread notifications and a
@@ -770,6 +875,29 @@ mod tests {
         assert!(marker.detail.contains("may not read the zones"));
         let lines = detail_lines(&state, at(5.));
         assert_eq!(lines[1], ("node", "sat-ams-01".to_owned()));
+    }
+
+    #[test]
+    fn the_switcher_tooltip_names_the_environment_and_unread_elsewhere() {
+        assert_eq!(
+            status_tooltip(Some("prod"), false, "master-01 · 2s", None, &[]),
+            "prod · master-01 · 2s: environments and connection details"
+        );
+        assert_eq!(
+            status_tooltip(
+                Some("prod-cluster"),
+                true,
+                "sat-ams-01 · 2s",
+                Some("partial view: zone ams"),
+                &[("staging", 3), ("lab", 1)]
+            ),
+            "prod-cluster (demo) · sat-ams-01 · 2s · partial view: zone ams: environments \
+             and connection details · staging 3 unread, lab 1 unread"
+        );
+        assert_eq!(
+            status_tooltip(None, false, "no environment", None, &[]),
+            "no environment: environments and connection details"
+        );
     }
 
     #[test]

@@ -112,6 +112,7 @@ fn closing_the_window_asks_before_unsaved_work_is_lost() {
             let _ = state.request(ActionRequest {
                 action: ObjectAction::Acknowledge,
                 targets: vec![replication()],
+                review: false,
             });
             cx.notify();
         });
@@ -342,6 +343,7 @@ fn a_notification_keeps_its_environment_after_a_switch() {
                                 tone: Tone::Critical,
                                 sound: true,
                                 silent: false,
+                                silenced: None,
                                 at: Timestamp::now(),
                             });
                         assert!(session.switch_environment(demo::STAGING_ID, cx));

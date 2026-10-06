@@ -45,6 +45,8 @@ pub enum IconName {
     Info,
     /// `key-round`: a login Icinga refused, a password that is missing.
     KeyRound,
+    /// `layers`: several objects at once (the palette's *all N matches*).
+    Layers,
     /// `loader-circle`: loading.
     Loader,
     /// `lock`: a server certificate that isn't trusted.
@@ -69,7 +71,7 @@ pub enum IconName {
 
 impl IconName {
     /// Every icon, for tests and asset listings.
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::ArrowDown,
         Self::ArrowLeft,
         Self::ArrowUp,
@@ -87,6 +89,7 @@ impl IconName {
         Self::Folder,
         Self::Info,
         Self::KeyRound,
+        Self::Layers,
         Self::Loader,
         Self::Lock,
         Self::Maximize,
@@ -126,6 +129,7 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::Folder => Self::Folder,
             IconName::Info => Self::Info,
             IconName::KeyRound => Self::KeyRound,
+            IconName::Layers => Self::Layers,
             IconName::Loader => Self::LoaderCircle,
             IconName::Lock => Self::Lock,
             IconName::Maximize => Self::Maximize2,

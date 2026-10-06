@@ -21,7 +21,7 @@ use gpui::{
 };
 use ic_model::Timestamp;
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
-use ic_ui_kit::{ActiveTheme as _, KeyHint, StateDot, TextField, Theme};
+use ic_ui_kit::{ActiveTheme as _, Icon, IconName, KeyHint, StateDot, TextField, Theme};
 
 pub(crate) use self::model::{Focus, PaletteCommand, PaletteItem};
 use self::model::{PaletteIndex, Section};
@@ -265,7 +265,19 @@ impl CommandPalette {
                     .flex_none()
                     .w(px(8.))
                     .justify_center()
-                    .when_some(item.dot, |slot, dot| slot.child(dot_of(dot, theme))),
+                    .when_some(item.dot.filter(|_| !item.several), |slot, dot| {
+                        slot.child(dot_of(dot, theme))
+                    })
+                    // Several objects (a verb's *all N matches*): a stack
+                    // in the dot's place, tinted with the worst state.
+                    .when(item.several, |slot| {
+                        slot.child(
+                            Icon::new(IconName::Layers).size(px(SEVERAL_MARK)).color(
+                                item.dot
+                                    .map_or(colors.text_muted, |dot| dot_color(dot, theme)),
+                            ),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -450,10 +462,18 @@ fn highlighted(label: &str, matched: &[usize], theme: &Theme) -> StyledText {
 }
 
 fn dot_of(dot: Dot, theme: &Theme) -> StateDot {
-    match dot {
-        Dot::State(state) => StateDot::new(state),
-        Dot::Ok => StateDot::with_color(theme.states.ok),
-        Dot::Empty => StateDot::with_color(theme.states.pending),
-    }
-    .size(px(7.))
+    StateDot::with_color(dot_color(dot, theme)).size(px(7.))
 }
+
+/// The colour of a row's dot.
+fn dot_color(dot: Dot, theme: &Theme) -> gpui::Hsla {
+    match dot {
+        Dot::State(state) => theme.states.checkable(state),
+        Dot::Ok => theme.states.ok,
+        Dot::Empty => theme.states.pending,
+    }
+}
+
+/// The several-objects mark's size: a stroked icon as heavy as the 7 px
+/// filled dots beside it, centred in their slot.
+const SEVERAL_MARK: f32 = 10.;

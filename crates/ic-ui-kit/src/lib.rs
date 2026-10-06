@@ -21,9 +21,9 @@ pub use components::{
     CodeBlock, CompactRow, DialogBody, Dismissable, Dismissal, Divider, DividerColor, EmptyState,
     Field, FieldTone, GlyphButton, IconButton, KeyHint, KvTable, Link, LinkStyle, ListRow, Menu,
     MenuItem, Modal, ModalPlacement, NoteEntry, Paint, PaneHeader, PerfdataRow, PerfdataTable,
-    Popover, ProgressBar, RowEmphasis, SectionLabel, Segmented, StateCircle, StateDot, SubTabs,
-    SummaryBar, SummaryItem, Switch, TOAST_WIDTH, TextArea, TextField, Toast, ToastTone, Tooltip,
-    TreeLine, TreeTable,
+    Popover, ProgressBar, RowEmphasis, SUB_TAB_GAP, SectionLabel, Segmented, StateCircle, StateDot,
+    SubTabs, SummaryBar, SummaryItem, Switch, TOAST_WIDTH, TextArea, TextField, Toast, ToastTone,
+    Tooltip, TreeLine, TreeTable, sub_tab_width,
 };
 pub use fonts::FontError;
 pub use icon::{Icon, IconName};

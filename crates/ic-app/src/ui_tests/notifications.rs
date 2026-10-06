@@ -46,6 +46,7 @@ fn record(
             tone,
             sound: true,
             silent,
+            silenced: silent.then_some(ic_rules::Silence::QuietHours),
             at: Timestamp::from_unix_seconds(Timestamp::now().as_unix_seconds() - ago),
         },
         read: false,

@@ -450,7 +450,11 @@ impl DashboardView {
         }
         self.state.update(cx, |state, cx| {
             // The workspace opens the dialog; a refusal shows as a toast.
-            let _ = state.request(ActionRequest { action, targets });
+            let _ = state.request(ActionRequest {
+                action,
+                targets,
+                review: false,
+            });
             cx.notify();
         });
     }

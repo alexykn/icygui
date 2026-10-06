@@ -310,6 +310,7 @@ mod tests {
         let request = ActionRequest {
             action: ObjectAction::Acknowledge,
             targets: vec![replication()],
+            review: false,
         };
         assert!(state.request(request.clone()).is_ok());
         assert!(state.has_request());
@@ -322,6 +323,7 @@ mod tests {
                 .request(ActionRequest {
                     action: ObjectAction::CheckNow,
                     targets: Vec::new(),
+                    review: false,
                 })
                 .is_ok()
         );
@@ -340,6 +342,7 @@ mod tests {
             .request(ActionRequest {
                 action: ObjectAction::RunCommand,
                 targets: vec![replication()],
+                review: false,
             })
             .unwrap_err();
         assert!(error.contains("actions/execute-command"), "{error}");

@@ -118,8 +118,42 @@ pub struct NotificationIntent {
     /// Record it in the notification centre but don't show an OS
     /// notification (quiet hours, paused, or absorbed by a storm summary).
     pub silent: bool,
+    /// Why it is silent: set by the engine exactly when `silent` is. A
+    /// record logged before the reason was kept has `silent` without one
+    /// (`None`: the reason is unknown).
+    #[serde(default)]
+    pub silenced: Option<Silence>,
     /// When the change happened.
     pub at: Timestamp,
+}
+
+/// Why a notification was recorded without an OS notification.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Silence {
+    /// Notifications were paused (every environment, or this one).
+    Paused,
+    /// Quiet hours.
+    QuietHours,
+    /// One of many in a storm: the storm summary with this id covers it
+    /// (the summary comes when the storm calms down, or once a minute
+    /// while it lasts).
+    Storm {
+        /// The [`NotificationIntent::id`] of the storm summary that covers
+        /// it (`storm:<when the stretch began>`).
+        summary: String,
+    },
+}
+
+impl Silence {
+    /// The reason in a word or two: `paused`, `quiet hours`, `storm`.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Paused => "paused",
+            Self::QuietHours => "quiet hours",
+            Self::Storm { .. } => "storm",
+        }
+    }
 }
 
 /// The id of the notification of `object` entering the problem or

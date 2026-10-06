@@ -413,6 +413,30 @@ impl Workspace {
         }
     }
 
+    /// Shows `object` of environment `environment`: at once if it is on
+    /// screen, else after switching to it (the window follows the switch
+    /// first; a notification centre entry of another environment).
+    pub(crate) fn reveal_in(
+        &mut self,
+        environment: &str,
+        object: &ObjectKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.read(cx).is_active(environment) {
+            self.reveal(object, window, cx);
+            return;
+        }
+        if self.state.read(cx).environment_by_id(environment).is_none() {
+            return;
+        }
+        self.switch_environment(environment, cx);
+        let object = object.clone();
+        cx.defer_in(window, move |this, window, cx| {
+            this.reveal(&object, window, cx);
+        });
+    }
+
     /// Puts the cursor on `cursor` and shows `pane` in its pane, as after
     /// following a link (screen 2c at start).
     pub(crate) fn reveal_linked(
@@ -594,6 +618,10 @@ impl Workspace {
             self.keep_changes(&editor, cx);
         }
         if shown != self.shown {
+            // A tab shown: its object counts as seen (A2).
+            if let Shown::Tab(key) = &shown {
+                crate::pane::mark_seen(&self.state, key, cx);
+            }
             self.shown = shown;
             if self.modal.is_none() {
                 self.focus_main(window, cx);
@@ -942,12 +970,7 @@ impl Workspace {
                         .update(cx, |dashboard, cx| dashboard.run_action(action, cx)),
                 }
             }
-            PaletteCommand::Act(action, targets) => {
-                if let [only] = targets.as_slice() {
-                    self.reveal(only, window, cx);
-                }
-                self.request(action, targets, cx);
-            }
+            PaletteCommand::Act(action, targets) => self.act_on_named(action, targets, window, cx),
             PaletteCommand::Copy { what, text } => self.copy(what, text, cx),
             PaletteCommand::Reload => self.state.update(cx, |state, cx| {
                 if state.refresh(Instant::now()) {
@@ -1032,9 +1055,42 @@ impl Workspace {
         targets: Vec<ObjectKey>,
         cx: &mut Context<Self>,
     ) {
+        self.request_reviewed(action, targets, false, cx);
+    }
+
+    /// Acts on objects a palette query named: one is shown first; several
+    /// (a verb's *all N matches*, `secondary-enter`) are listed in the
+    /// action's dialog before anything is sent.
+    fn act_on_named(
+        &mut self,
+        action: actions::ObjectAction,
+        targets: Vec<ObjectKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let [only] = targets.as_slice() {
+            self.reveal(only, window, cx);
+        }
+        let review = targets.len() > 1;
+        self.request_reviewed(action, targets, review, cx);
+    }
+
+    /// [`Workspace::request`]; with `review`, a dialog lists the objects
+    /// before anything is sent (a palette query's *all N matches*).
+    fn request_reviewed(
+        &self,
+        action: actions::ObjectAction,
+        targets: Vec<ObjectKey>,
+        review: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.state.update(cx, |state, cx| {
             // A refusal shows as a toast.
-            let _ = state.request(actions::ActionRequest { action, targets });
+            let _ = state.request(actions::ActionRequest {
+                action,
+                targets,
+                review,
+            });
             cx.notify();
         });
     }
@@ -1055,7 +1111,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let actions::ActionRequest { action, targets } = request;
+        let actions::ActionRequest {
+            action,
+            targets,
+            review,
+        } = request;
         let elsewhere = environment.filter(|id| !self.state.read(cx).is_active(id));
         let snapshot = match &elsewhere {
             Some(id) => match self.state.read(cx).snapshot_of(id) {
@@ -1091,7 +1151,13 @@ impl Workspace {
             });
             return;
         }
-        if let Some(kind) = DialogKind::for_action(&action) {
+        // Objects a palette query named loosely are always listed first.
+        let dialog = if review {
+            DialogKind::for_review(&action)
+        } else {
+            DialogKind::for_action(&action)
+        };
+        if let Some(kind) = dialog {
             let state = self.state.clone();
             let bound = elsewhere.clone();
             let dialog = cx.new(|cx| ActionDialog::new(state, kind, eligible, bound, window, cx));
@@ -1165,7 +1231,10 @@ impl Workspace {
             SidebarEvent::EditEnvironment(id) => {
                 self.open_environment_editor(Some(id), window, cx);
             }
-            SidebarEvent::OpenObject(key) => self.reveal(key, window, cx),
+            SidebarEvent::OpenObjectIn {
+                environment,
+                object,
+            } => self.reveal_in(environment, object, window, cx),
             SidebarEvent::OpenSettings(tab) => self.open_settings(*tab, None, window, cx),
             SidebarEvent::CustomRule(key) => {
                 self.open_settings(SettingsTab::Notifications, Some(key), window, cx);

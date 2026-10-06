@@ -5,7 +5,7 @@ use ic_model::{CheckableState, HostState, ObjectKey, ServiceState, StateType, Ti
 use ic_rules::{
     Change, DashboardRef, DashboardScope, EventFilter, GroupScope, LocalTime, NotificationIntent,
     NotificationSettings, ObjectMode, ObjectOverride, QuietHours, Rule, RuleEngine, RuleInput,
-    RuleSet, ScopeSetting, StateFilter, StormControl, Tone,
+    RuleSet, ScopeSetting, Silence, StateFilter, StormControl, Tone,
 };
 
 // ---------------------------------------------------------------------------
@@ -2360,16 +2360,29 @@ mod storm {
     fn a_storm_is_silenced_after_the_threshold_and_summarized() {
         let mut scenario = Scenario::new(storm_rules(10, 3));
         let mut silent = Vec::new();
+        let mut reasons = Vec::new();
         for index in 0..14 {
             let at = f64::from(index) * 0.5;
             let intent = one(scenario.at(at).input(problem(index, at)));
             silent.push(intent.silent);
+            assert_eq!(intent.silent, intent.silenced.is_some(), "{intent:?}");
+            reasons.extend(intent.silenced);
         }
         assert_eq!(silent.iter().filter(|silent| !**silent).count(), 3);
         assert!(
             silent[..3].iter().all(|silent| !silent),
             "the first three are shown"
         );
+        // Each silenced one names the summary that covers it.
+        assert_eq!(reasons.len(), 11);
+        assert!(
+            reasons.iter().all(|reason| *reason
+                == Silence::Storm {
+                    summary: "storm:1700000000.000".to_owned()
+                }),
+            "{reasons:?}"
+        );
+        assert_eq!(reasons[0].label(), "storm");
 
         // The storm is over once a whole window passes without one.
         none(&scenario.at(16.4).tick());
@@ -2382,6 +2395,7 @@ mod storm {
         assert!(!summary.silent);
         assert!(summary.sound);
         assert_eq!(summary.id, "storm:1700000000.000");
+        assert_eq!(summary.silenced, None);
         assert_eq!(summary.at, ts(16.5));
 
         // Calm again: notifications are shown.
@@ -2495,7 +2509,13 @@ mod storm {
         one(scenario.at(0.0).input(problem(0, 0.0)));
         one(scenario.at(1.0).input(problem(1, 1.0)));
         scenario.engine.pause_until(Some(ts(3_600.0)));
-        assert!(one(scenario.at(11.0).tick()).silent);
+        let summary = one(scenario.at(11.0).tick());
+        assert!(summary.silent);
+        assert_eq!(summary.silenced, Some(Silence::Paused));
+        // Paused notifications aren't counted by storm control: their
+        // reason is the pause.
+        let paused = one(scenario.at(12.0).input(problem(2, 12.0)));
+        assert_eq!(paused.silenced, Some(Silence::Paused));
     }
 
     #[test]
@@ -2514,7 +2534,9 @@ mod storm {
         one(scenario.at(0.0).input(warning(0.0).service("a")));
         one(scenario.at(1.0).input(warning(1.0).service("b")));
         // The storm ends at night: the summary of warnings is silent.
-        assert!(one(scenario.local(local(MONDAY, 22, 0)).at(11.0).tick()).silent);
+        let summary = one(scenario.local(local(MONDAY, 22, 0)).at(11.0).tick());
+        assert!(summary.silent);
+        assert_eq!(summary.silenced, Some(Silence::QuietHours));
     }
 
     /// The leading number of a summary title (`"14 new problems in …"`).
@@ -2618,7 +2640,13 @@ mod quiet_hours {
     }
 
     fn silent_at(scenario: &mut Scenario, time: LocalTime, service: &str) -> bool {
-        one(scenario.local(time).input(warning(0.0).service(service))).silent
+        let intent = one(scenario.local(time).input(warning(0.0).service(service)));
+        assert_eq!(
+            intent.silenced,
+            intent.silent.then_some(Silence::QuietHours),
+            "quiet hours say so"
+        );
+        intent.silent
     }
 
     #[test]

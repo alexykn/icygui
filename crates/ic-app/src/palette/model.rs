@@ -143,6 +143,10 @@ pub(crate) struct PaletteItem {
     pub(crate) detail: String,
     /// A state dot, for objects and dashboards.
     pub(crate) dot: Option<Dot>,
+    /// It acts on several objects (a verb's *all N matches*): the dot's
+    /// slot shows a several-objects mark instead, in `dot`'s colour (the
+    /// worst state among them).
+    pub(crate) several: bool,
     /// The key that does the same, if any.
     pub(crate) key_hint: Option<&'static str>,
     /// What it does.
@@ -332,6 +336,7 @@ impl PaletteIndex {
                     label: format!("{label} · {}", object.label),
                     detail: object.detail,
                     dot: object.dot,
+                    several: false,
                     key_hint: None,
                     command: PaletteCommand::Act(action.clone(), vec![key]),
                     matched: Vec::new(),
@@ -346,6 +351,18 @@ impl PaletteIndex {
         let hosts = all_matches(&self.hosts, rest, rank);
         let count = services.len() + hosts.len();
         if count > 1 {
+            // The mark takes the worst state among them.
+            let worst = services
+                .iter()
+                .chain(&hosts)
+                .max_by_key(|candidate| candidate.severity)
+                .and_then(|candidate| candidate.item.dot);
+            let objects = |candidates: Vec<&Candidate>| -> Vec<ObjectKey> {
+                candidates
+                    .into_iter()
+                    .filter_map(|candidate| candidate.item.command.object().cloned())
+                    .collect()
+            };
             let detail = [(services.len(), "service"), (hosts.len(), "host")]
                 .into_iter()
                 .filter(|(count, _)| *count > 0)
@@ -356,11 +373,15 @@ impl PaletteIndex {
                 section: Section::Commands,
                 label: format!("{label} · all {count} matches"),
                 detail,
-                dot: None,
+                dot: worst,
+                several: true,
                 key_hint: Some(ALL_MATCHES_KEY),
                 command: PaletteCommand::Act(
                     action.clone(),
-                    services.into_iter().chain(hosts).collect(),
+                    objects(services)
+                        .into_iter()
+                        .chain(objects(hosts))
+                        .collect(),
                 ),
                 matched: Vec::new(),
                 denied,
@@ -397,13 +418,13 @@ pub(crate) fn all_matches_item(items: &[PaletteItem]) -> Option<usize> {
 }
 
 /// Every candidate that contains each of `query`'s terms as typed (not a
-/// fuzzy match; problems only for [`Rank::ProblemsOnly`]), as objects.
-fn all_matches(candidates: &[Candidate], query: &Query, rank: Rank) -> Vec<ObjectKey> {
+/// fuzzy match; problems only for [`Rank::ProblemsOnly`]).
+fn all_matches<'a>(candidates: &'a [Candidate], query: &Query, rank: Rank) -> Vec<&'a Candidate> {
     candidates
         .iter()
         .filter(|candidate| rank != Rank::ProblemsOnly || candidate.problem)
         .filter(|candidate| query.contained_in(&candidate.haystack))
-        .filter_map(|candidate| candidate.item.command.object().cloned())
+        .filter(|candidate| candidate.item.command.object().is_some())
         .collect()
 }
 
@@ -507,6 +528,7 @@ fn setting(label: String, detail: &str, command: PaletteCommand) -> PaletteItem 
         label,
         detail: detail.to_owned(),
         dot: None,
+        several: false,
         key_hint: None,
         command,
         matched: Vec::new(),
@@ -563,6 +585,7 @@ fn dashboard_candidates(state: &AppState) -> Vec<Candidate> {
                     label: dashboard.name.clone(),
                     detail,
                     dot: Some(Dot::from_summary(summary)),
+                    several: false,
                     key_hint: None,
                     command: PaletteCommand::ShowDashboard(reference),
                     matched: Vec::new(),
@@ -595,6 +618,7 @@ fn host_candidates(state: &AppState) -> Vec<Candidate> {
                     label: host.display_name.clone(),
                     detail,
                     dot: Some(Dot::for_object(Some(state))),
+                    several: false,
                     key_hint: None,
                     command: PaletteCommand::OpenObject(host.key()),
                     matched: Vec::new(),
@@ -625,6 +649,7 @@ fn service_candidates(state: &AppState) -> Vec<Candidate> {
                     label: service.display_name.clone(),
                     detail: join_detail(&format!("on {host}"), crate::format::state_word(state)),
                     dot: Some(Dot::for_object(Some(state))),
+                    several: false,
                     key_hint: None,
                     command: PaletteCommand::OpenObject(service.object_key()),
                     matched: Vec::new(),
@@ -651,6 +676,7 @@ fn environment_candidates(state: &AppState) -> Vec<Candidate> {
                     label: format!("Switch to {}", environment.name),
                     detail: url_summary(environment),
                     dot: None,
+                    several: false,
                     key_hint: None,
                     command: PaletteCommand::SwitchEnvironment(environment.id.clone()),
                     matched: Vec::new(),
@@ -693,6 +719,7 @@ fn command(
         label: label.to_owned(),
         detail,
         dot: None,
+        several: false,
         key_hint,
         command,
         matched: Vec::new(),

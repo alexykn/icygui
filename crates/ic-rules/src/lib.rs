@@ -65,7 +65,7 @@ mod text;
 
 pub use engine::RuleEngine;
 pub use intent::{
-    Change, DashboardRef, LocalTime, NotificationIntent, RuleInput, Tone, state_intent_id,
+    Change, DashboardRef, LocalTime, NotificationIntent, RuleInput, Silence, Tone, state_intent_id,
 };
 pub use scope::{DashboardScope, EffectiveRule, GroupScope, RuleSet};
 pub use settings::{

@@ -45,6 +45,8 @@ use crate::settings::{ScopeKey, SettingsTab};
 use crate::workspace::ToggleSidebar;
 
 pub(crate) use self::menus::new_key;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use self::menus::switcher_rows;
 pub(crate) use self::model::Dot;
 use self::model::{OpenTab, SidebarGroup, SidebarItem};
 
@@ -71,8 +73,14 @@ pub(crate) enum SidebarEvent {
     AddEnvironment,
     /// Open the editor for this environment.
     EditEnvironment(String),
-    /// Show this object (a notification centre entry).
-    OpenObject(ObjectKey),
+    /// Show this object of this environment (a notification centre
+    /// entry), switching to the environment first if it isn't on screen.
+    OpenObjectIn {
+        /// The environment's id.
+        environment: String,
+        /// The object.
+        object: ObjectKey,
+    },
     /// Open the settings on this tab.
     OpenSettings(SettingsTab),
     /// Give this group or dashboard a custom notification rule, in the
@@ -118,6 +126,7 @@ pub(crate) struct Sidebar {
     query: String,
     drag: WindowDrag,
     menus: OpenMenu<SidebarMenu>,
+    centre: centre::CentreState,
     rename: Option<Rename>,
     _subscriptions: Vec<Subscription>,
 }
@@ -152,6 +161,7 @@ impl Sidebar {
             query: String::new(),
             drag: WindowDrag::default(),
             menus: OpenMenu::default(),
+            centre: centre::CentreState::default(),
             rename: None,
             _subscriptions: subscriptions,
         }
@@ -865,8 +875,18 @@ impl Sidebar {
             })
     }
 
-    /// The footer's connection status (`● master-01 · 2s`, ENV-06): it
-    /// opens the connection details and the environment switcher.
+    /// The footer's environment switcher (ENV-01, ENV-06, B): the health
+    /// dot, the environment's name, the connected node and the age of the
+    /// last event (or what the connection is doing), and a chevron; a
+    /// button's hover and pressed states. It opens the connection details
+    /// with every environment to switch to.
+    ///
+    /// Nothing in it moves with the state: the dot, the name and the
+    /// chevron (pinned at the right) stay put; a long node name is cut
+    /// short (the age after it never, ENV-06); a node that sees only part
+    /// of the cluster turns the warning colour (ENV-12); another
+    /// environment's unread notifications turn the chevron the accent
+    /// colour (A3: the badge counts the one on screen).
     fn render_status(&self, now: Timestamp, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -875,15 +895,27 @@ impl Sidebar {
         let connection = state.connection();
         let health = connection.health(now);
         let (endpoint, suffix) = connection.label_parts(now);
+        let connected = connection.is_connected() && health != Health::Failed;
+        let name = state
+            .environment()
+            .map(|environment| environment.name.clone());
         // A node that doesn't see the whole cluster says so (ENV-12).
         let marker = connection.view_marker();
-        // The whole label, for an endpoint the footer shortens.
-        let full = match &marker {
-            Some(marker) => format!("{} · {}", connection.label(now), marker.label),
-            None => connection.label(now),
-        };
         let partial = marker.as_ref().is_some_and(|marker| marker.partial);
-        let demo = state.is_demo_environment();
+        let elsewhere = state
+            .environments()
+            .iter()
+            .filter(|environment| !state.is_active(&environment.id))
+            .map(|environment| (environment.name.as_str(), state.unread_in(&environment.id)))
+            .filter(|(_, unread)| *unread > 0)
+            .collect::<Vec<_>>();
+        let tooltip = menus::status_tooltip(
+            name.as_deref(),
+            state.is_demo_environment(),
+            &connection.label(now),
+            marker.as_ref().map(|marker| marker.label.as_str()),
+            &elsewhere,
+        );
         let open = self.menus.is_open(&SidebarMenu::Status);
         let status = div()
             .id("environment-status")
@@ -891,46 +923,46 @@ impl Sidebar {
             .flex_1()
             .min_w_0()
             .items_center()
-            .gap(px(6.))
-            .ml(px(2.))
-            .h(px(22.))
+            // The dot sits where the design draws it; the hover background
+            // reaches around the text like an icon button's.
+            .ml(px(-(STATUS_PADDING - 2.)))
+            .px(px(STATUS_PADDING))
+            .h(metrics.icon_button)
+            .rounded(metrics.small_radius)
             .text_size(theme.text.hint)
-            .text_color(if open {
-                colors.text_muted
-            } else {
-                colors.text_faint
-            })
+            .text_color(colors.text_faint)
             .cursor_pointer()
-            .hover(|style| style.text_color(colors.text_muted))
+            .when(open, |status| status.bg(colors.element_hover))
+            .hover(|style| style.bg(colors.element_hover))
+            .active(|style| style.bg(colors.element_active))
             .child(StateDot::with_color(health_color(health, theme)).size(metrics.status_dot))
-            // A long endpoint (an FQDN) is shortened, never the age or
-            // state after it (ENV-06); the details popover has it in full.
-            // A node that sees only part of the cluster (a satellite) is
-            // coloured, nothing more (ENV-12): the tooltip, the details and
-            // the summary bar say what it means.
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .when(partial, |name| name.text_color(theme.states.warning))
-                    .child(endpoint),
-            )
-            .when_some(suffix, |status, suffix| {
-                status.child(div().flex_none().ml(px(-2.)).child(format!("· {suffix}")))
-            })
-            // `--demo` says so wherever the status is (ENV-10).
-            .when(demo, |status| {
+            .when_some(name, |status, name| {
                 status.child(
                     div()
                         .flex_none()
-                        .px(px(5.))
-                        .rounded(metrics.small_radius)
-                        .border_1()
-                        .border_color(colors.accent.opacity(0.5))
-                        .text_color(colors.accent)
-                        .child("demo"),
+                        .ml(px(5.))
+                        .max_w(px(STATUS_NAME_MAX))
+                        .truncate()
+                        .text_color(if open {
+                            colors.text_strong
+                        } else {
+                            colors.text_secondary
+                        })
+                        .child(name),
                 )
             })
+            .map(|status| Self::status_detail(status, connected, endpoint, suffix, partial, theme))
+            .child(
+                div().flex_none().ml(px(2.)).child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(10.))
+                        .color(if elsewhere.is_empty() {
+                            colors.text_muted
+                        } else {
+                            colors.accent
+                        }),
+                ),
+            )
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
                 this.menus.toggle(SidebarMenu::Status, down_position(event));
@@ -939,9 +971,54 @@ impl Sidebar {
         if open {
             status
         } else {
-            status.tooltip(Tooltip::text(format!(
-                "{full}: environments and connection details"
-            )))
+            status.tooltip(Tooltip::text(tooltip))
+        }
+    }
+
+    /// The footer switcher's middle: connected, the node, cut short when
+    /// long (an FQDN; the details have it in full), then at the right the
+    /// age of the last event in a slot of its own (it never shortens the
+    /// node as it ticks, ENV-06). A node that sees only part of the cluster
+    /// (a satellite) is coloured, nothing more (ENV-12): the tooltip, the
+    /// details and the summary bar say what it means. Otherwise what the
+    /// connection does (`retry in 12s`).
+    fn status_detail(
+        status: Stateful<Div>,
+        connected: bool,
+        endpoint: String,
+        suffix: Option<String>,
+        partial: bool,
+        theme: &Theme,
+    ) -> Stateful<Div> {
+        match (connected, suffix) {
+            (true, Some(age)) => status
+                .child(
+                    div()
+                        .min_w_0()
+                        .ml(px(5.))
+                        .truncate()
+                        .when(partial, |node| node.text_color(theme.states.warning))
+                        .child(endpoint),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .ml(px(2.))
+                        .justify_end()
+                        .w(theme.text.hint * (AGE_SLOT_CHARS * ic_ui_kit::CHAR_WIDTH))
+                        .child(age),
+                ),
+            (_, suffix) => status
+                .child(
+                    div()
+                        .min_w_0()
+                        .ml(px(5.))
+                        .truncate()
+                        .child(suffix.unwrap_or(endpoint)),
+                )
+                .child(div().flex_1()),
         }
     }
 
@@ -971,8 +1048,7 @@ impl Sidebar {
                 .icon_size(metrics.icon_large)
                 .selected(centre_open)
                 .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                    this.menus
-                        .toggle(SidebarMenu::Notifications, down_position(event));
+                    this.toggle_notifications(down_position(event));
                     cx.notify();
                 }));
                 if centre_open {
@@ -1087,9 +1163,17 @@ impl Sidebar {
     }
 }
 
+/// Space left and right of the footer switcher's text (its hover
+/// background reaches that far, as around an icon button's icon).
+const STATUS_PADDING: f32 = 3.;
+/// The widest the footer switcher shows an environment's name.
+const STATUS_NAME_MAX: f32 = 110.;
+/// The footer age's slot, in characters (`59s`, `23h`).
+const AGE_SLOT_CHARS: f32 = 3.;
+
 /// The footer dot's colour (ENV-06): green while live, yellow when stale,
 /// red when reconnecting or failed, grey otherwise.
-fn health_color(health: Health, theme: &Theme) -> gpui::Hsla {
+pub(super) fn health_color(health: Health, theme: &Theme) -> gpui::Hsla {
     match health {
         Health::Live => theme.states.ok,
         Health::Stale => theme.states.warning,

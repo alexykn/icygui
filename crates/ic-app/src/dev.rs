@@ -14,6 +14,10 @@
 //! - `ICYGUI_DEMO_STORM=20` starts a problem storm every 20 seconds
 //!   instead of every 5 minutes (24 services fail: a few notifications,
 //!   the rest silent, then a summary), for the notification centre.
+//! - `ICYGUI_DEMO_ENVIRONMENTS=1` runs that many demo environments (1 to
+//!   11; 3 by default): one shows the app as with a single environment,
+//!   more than three add environments serving `lab`, to see the switcher
+//!   and the notification centre's scopes with many.
 //! - `ICYGUI_DEMO_OPEN` opens an object at start: `service` (the design's
 //!   postgres-replication, screen 2b), `host` (its host db-prod-03 beside
 //!   the list, screen 2c), `tab` (postgres-replication as a tab), or an
@@ -36,6 +40,8 @@ pub(crate) const DASHBOARD_ENV: &str = "ICYGUI_DEMO_DASHBOARD";
 pub(crate) const OPEN_ENV: &str = "ICYGUI_DEMO_OPEN";
 /// Seconds between the demo's problem storms.
 pub(crate) const STORM_ENV: &str = "ICYGUI_DEMO_STORM";
+/// How many demo environments.
+pub(crate) const ENVIRONMENTS_ENV: &str = "ICYGUI_DEMO_ENVIRONMENTS";
 
 /// What to open at start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +75,8 @@ pub(crate) struct DevOptions {
     pub(crate) open: Option<OpenAtStart>,
     /// `ICYGUI_DEMO_STORM`.
     pub(crate) storm_every: Option<u64>,
+    /// `ICYGUI_DEMO_ENVIRONMENTS`.
+    pub(crate) environments: Option<usize>,
 }
 
 impl DevOptions {
@@ -112,6 +120,17 @@ impl DevOptions {
             }
             parsed
         });
+        let environments = get(ENVIRONMENTS_ENV).and_then(|value| {
+            let parsed = value
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|count| *count > 0);
+            if parsed.is_none() {
+                tracing::warn!(%value, "{ENVIRONMENTS_ENV} is not a positive number; ignoring it");
+            }
+            parsed
+        });
         Self {
             scenario,
             seed,
@@ -119,6 +138,7 @@ impl DevOptions {
             dashboard,
             open,
             storm_every,
+            environments,
         }
     }
 
@@ -130,6 +150,7 @@ impl DevOptions {
             || self.dashboard.is_some()
             || self.open.is_some()
             || self.storm_every.is_some()
+            || self.environments.is_some()
     }
 }
 
@@ -188,6 +209,10 @@ mod tests {
         assert_eq!(parse(&[(SCENARIO_ENV, "")]).scenario, None);
         assert_eq!(parse(&[(FAULT_ENV, "auth")]).fault, Some(DemoFault::Auth));
         assert_eq!(parse(&[(FAULT_ENV, "everything")]).fault, None);
+        assert_eq!(parse(&[(ENVIRONMENTS_ENV, " 5 ")]).environments, Some(5));
+        assert_eq!(parse(&[(ENVIRONMENTS_ENV, "many")]).environments, None);
+        assert_eq!(parse(&[(ENVIRONMENTS_ENV, "0")]).environments, None);
+        assert!(parse(&[(ENVIRONMENTS_ENV, "1")]).any());
     }
 
     #[test]

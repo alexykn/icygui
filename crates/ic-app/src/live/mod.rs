@@ -417,6 +417,7 @@ impl Session {
         let acknowledge = ActionRequest {
             action: ObjectAction::Acknowledge,
             targets: vec![target.object.clone()],
+            review: false,
         };
         if response.action.as_deref() == Some(ACKNOWLEDGE_ACTION) && !active {
             window::show(cx);

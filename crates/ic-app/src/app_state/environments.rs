@@ -585,6 +585,7 @@ mod tests {
         let request = crate::actions::ActionRequest {
             action: crate::actions::ObjectAction::Acknowledge,
             targets: vec![object.clone()],
+            review: false,
         };
         assert!(state.request_in(&staging_id, request.clone()).is_ok());
         assert_eq!(

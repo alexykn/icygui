@@ -201,7 +201,11 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
                 if dev.any() {
                     tracing::info!(?dev, "development switches are set");
                 }
-                let mut state = AppState::demo(live::demo::config(), now);
+                let mut config = live::demo::config();
+                if let Some(count) = dev.environments {
+                    live::demo::set_count(&mut config, count);
+                }
+                let mut state = AppState::demo(config, now);
                 if let Some(name) = &dev.dashboard {
                     if let Some(reference) = state.dashboard_named(name) {
                         state.select(reference);

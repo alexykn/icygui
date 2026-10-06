@@ -6,7 +6,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, AnyElement, AnyWindowHandle, App, BoxShadow, ClickEvent, ElementId, Global,
+    Anchor, AnyElement, AnyWindowHandle, App, BoxShadow, ClickEvent, ElementId, Global, Hsla,
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Point,
     RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
     Window, anchored, deferred, div, point, prelude::FluentBuilder as _, px, relative,
@@ -45,10 +45,17 @@ pub struct MenuItem {
     checked: Option<bool>,
     key: Option<SharedString>,
     trailing_icon: Option<IconName>,
+    dot: Option<Hsla>,
+    detail: Option<(SharedString, Option<Hsla>)>,
+    count: Option<usize>,
+    highlighted: bool,
     disabled: bool,
     tooltip: Option<Tooltip>,
     on_click: Option<ClickHandler>,
 }
+
+/// The width kept for a [`MenuItem::count`] (`99+` at the label size).
+const COUNT_SLOT: f32 = 22.;
 
 impl MenuItem {
     /// An item labelled `label`.
@@ -59,10 +66,49 @@ impl MenuItem {
             checked: None,
             key: None,
             trailing_icon: None,
+            dot: None,
+            detail: None,
+            count: None,
+            highlighted: false,
             disabled: false,
             tooltip: None,
             on_click: None,
         }
+    }
+
+    /// Shows a small dot in `color` before the label (the footer's status
+    /// dot: a connection's health).
+    pub fn dot(mut self, color: Hsla) -> Self {
+        self.dot = Some(color);
+        self
+    }
+
+    /// Shows faint, smaller text after the label (`master-01 · 2s`). The
+    /// label keeps its width; the detail is cut short first.
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some((detail.into(), None));
+        self
+    }
+
+    /// [`MenuItem::detail`] in `color` (a warning) instead of faint.
+    pub fn detail_colored(mut self, detail: impl Into<SharedString>, color: Hsla) -> Self {
+        self.detail = Some((detail.into(), Some(color)));
+        self
+    }
+
+    /// Shows `count` at the right end in the accent colour (unread
+    /// notifications, like the footer's badge), nothing for 0. The slot is
+    /// there for every count, so the label and detail never move.
+    pub fn count(mut self, count: usize) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Shows the label in the accent colour (something new behind it):
+    /// colour only, like [`SubTabs::marked_tab`](crate::SubTabs::marked_tab).
+    pub fn highlighted(mut self, highlighted: bool) -> Self {
+        self.highlighted = highlighted;
+        self
     }
 
     /// Shows a tooltip on hover (why the item is disabled).
@@ -149,10 +195,12 @@ impl RenderOnce for MenuItem {
             .px(px(ITEM_PADDING))
             .rounded(theme.metrics.small_radius)
             .text_size(theme.text.body)
-            .text_color(if enabled {
-                colors.text
-            } else {
+            .text_color(if !enabled {
                 colors.text_faint
+            } else if self.highlighted {
+                colors.accent
+            } else {
+                colors.text
             })
             .whitespace_nowrap()
             .when_some(self.checked, |item, checked| {
@@ -170,9 +218,49 @@ impl RenderOnce for MenuItem {
                         }),
                 )
             })
-            .child(div().flex_1().child(self.label))
+            .when_some(self.dot, |item, color| {
+                item.child(
+                    div()
+                        .flex_none()
+                        .size(theme.metrics.status_dot)
+                        .rounded_full()
+                        .bg(color),
+                )
+            })
+            .map(|item| match self.detail {
+                // The label keeps its width (cut short only when it alone
+                // is too wide); the detail takes what is left.
+                Some((detail, color)) => item
+                    .child(div().min_w_0().truncate().child(self.label))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.text.small)
+                            .text_color(color.unwrap_or(colors.text_faint))
+                            .child(detail),
+                    ),
+                None => item.child(div().flex_1().child(self.label)),
+            })
             .when_some(self.trailing_icon, |item, icon| {
                 item.child(Icon::new(icon).size(px(11.)).color(colors.text_faint))
+            })
+            .when_some(self.count, |item, count| {
+                item.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .justify_end()
+                        .w(px(COUNT_SLOT))
+                        .text_size(theme.text.label)
+                        .text_color(colors.accent)
+                        .children(match count {
+                            0 => None,
+                            1..=99 => Some(count.to_string()),
+                            _ => Some("99+".to_owned()),
+                        }),
+                )
             })
             .when_some(self.key, |item, key| item.child(KeyHint::new(key)))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
@@ -198,7 +286,7 @@ impl RenderOnce for MenuItem {
 }
 
 enum Entry {
-    Item(MenuItem),
+    Item(Box<MenuItem>),
     Label(SharedString),
     Separator,
     Element(AnyElement),
@@ -228,7 +316,7 @@ impl Menu {
 
     /// Adds an item.
     pub fn item(mut self, item: MenuItem) -> Self {
-        self.entries.push(Entry::Item(item));
+        self.entries.push(Entry::Item(Box::new(item)));
         self
     }
 
@@ -317,7 +405,7 @@ impl RenderOnce for Menu {
                     if check_column && item.checked.is_none() {
                         item.checked = Some(false);
                     }
-                    item.into_any_element()
+                    (*item).into_any_element()
                 }
                 Entry::Label(label) => div()
                     .pl(px(label_indent))

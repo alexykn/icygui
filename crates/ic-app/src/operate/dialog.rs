@@ -41,6 +41,9 @@ use crate::app_state::AppState;
 pub(crate) const DIALOG_CONTEXT: &str = "ActionDialog";
 /// Key context of the run-command confirmation step.
 const CONFIRM_CONTEXT: &str = "ActionConfirm";
+/// Key context of a dialog without text fields (checking objects named
+/// by a palette query): Enter sends it.
+const FIELDLESS_CONTEXT: &str = "ActionFieldless";
 
 /// The most objects a dialog lists by name.
 const LISTED_OBJECTS: usize = 5;
@@ -86,6 +89,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", NextField, dialog),
         KeyBinding::new("shift-tab", PreviousField, dialog),
         KeyBinding::new("secondary-enter", ConfirmCommand, Some(CONFIRM_CONTEXT)),
+        KeyBinding::new("enter", SendDialog, Some(FIELDLESS_CONTEXT)),
+        KeyBinding::new("secondary-enter", SendDialogNow, Some(FIELDLESS_CONTEXT)),
     ]);
 }
 
@@ -102,6 +107,10 @@ pub(crate) enum DialogKind {
     CheckResult,
     /// Run a check or event command (ACT-06).
     Command,
+    /// Check objects now (ACT-01): only for objects a palette query named
+    /// loosely (*all N matches*), which are listed before anything is
+    /// sent; checks of rows and panes go at once.
+    Check,
 }
 
 impl DialogKind {
@@ -117,6 +126,16 @@ impl DialogKind {
         }
     }
 
+    /// The dialog that lists the objects a palette query named loosely
+    /// before acting on them (`secondary-enter` on a verb's *all N
+    /// matches*): the action's own, or for a check the check dialog.
+    pub(crate) fn for_review(action: &ObjectAction) -> Option<Self> {
+        match action {
+            ObjectAction::CheckNow => Some(Self::Check),
+            other => Self::for_action(other),
+        }
+    }
+
     /// The action it sends.
     pub(crate) fn action(self) -> ObjectAction {
         match self {
@@ -125,6 +144,7 @@ impl DialogKind {
             Self::Comment => ObjectAction::AddComment,
             Self::CheckResult => ObjectAction::SubmitCheckResult,
             Self::Command => ObjectAction::RunCommand,
+            Self::Check => ObjectAction::CheckNow,
         }
     }
 
@@ -136,6 +156,7 @@ impl DialogKind {
             Self::Comment => "Add comment",
             Self::CheckResult => "Submit check result",
             Self::Command => "Run command",
+            Self::Check => "Check now",
         }
     }
 
@@ -146,6 +167,7 @@ impl DialogKind {
             Self::Comment => "add comment",
             Self::CheckResult => "submit result",
             Self::Command => "run…",
+            Self::Check => "check now",
         }
     }
 
@@ -178,6 +200,8 @@ pub(crate) enum Form {
     Result(ResultForm),
     /// The run command dialog.
     Command(CommandForm),
+    /// The check dialog: nothing to fill in.
+    Check,
 }
 
 impl Form {
@@ -188,6 +212,7 @@ impl Form {
             DialogKind::Comment => Self::Comment(CommentForm::default()),
             DialogKind::CheckResult => Self::Result(ResultForm::default()),
             DialogKind::Command => Self::Command(CommandForm::default()),
+            DialogKind::Check => Self::Check,
         }
     }
 
@@ -255,6 +280,7 @@ impl Form {
             Self::Comment(form) => form.action(now),
             Self::Result(form) => form.action(),
             Self::Command(form) => form.action(endpoints),
+            Self::Check => Ok(ic_model::Action::CheckNow { force: true }),
         }
     }
 }
@@ -332,6 +358,7 @@ fn text_fields(kind: DialogKind) -> &'static [(FormField, &'static str, bool)] {
             ),
             (FormField::Ttl, "5m", false),
         ],
+        DialogKind::Check => &[],
     }
 }
 
@@ -1446,6 +1473,28 @@ fn object_state(snapshot: &Snapshot, object: &ObjectKey) -> Option<CheckableStat
     }
 }
 
+impl ActionDialog {
+    /// The form's fields (the check dialog has none: what it does).
+    fn form_blocks(&self, issues: &Issues, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
+        match &self.form {
+            Form::Ack(form) => self.render_ack(form, issues, cx),
+            Form::Downtime(form) => self.render_downtime(form, issues, cx),
+            Form::Comment(form) => self.render_comment(form, issues, cx),
+            Form::Result(form) => self.render_result(form, issues, cx),
+            Form::Command(form) => self.render_command(form, issues, cx),
+            Form::Check => vec![
+                div()
+                    .text_size(theme.text.small)
+                    .text_color(theme.colors.text_muted)
+                    .child(
+                        "Icinga runs their checks at once, forced, on the endpoints that run them.",
+                    )
+                    .into_any_element(),
+            ],
+        }
+    }
+}
+
 impl Render for ActionDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -1503,14 +1552,7 @@ impl Render for ActionDialog {
             if let Some(targets) = self.render_targets(&snapshot, &theme) {
                 body = body.child(targets);
             }
-            let blocks = match &self.form {
-                Form::Ack(form) => self.render_ack(form, &issues, cx),
-                Form::Downtime(form) => self.render_downtime(form, &issues, cx),
-                Form::Comment(form) => self.render_comment(form, &issues, cx),
-                Form::Result(form) => self.render_result(form, &issues, cx),
-                Form::Command(form) => self.render_command(form, &issues, cx),
-            };
-            for block in blocks {
+            for block in self.form_blocks(&issues, &theme, cx) {
                 body = body.child(block);
             }
         }
@@ -1527,6 +1569,8 @@ impl Render for ActionDialog {
             .id("action-dialog")
             .key_context(if self.confirming {
                 CONFIRM_CONTEXT
+            } else if self.inputs.is_empty() {
+                FIELDLESS_CONTEXT
             } else {
                 DIALOG_CONTEXT
             })
@@ -1570,6 +1614,19 @@ mod tests {
             }
         }
         assert_eq!(DialogKind::for_action(&ObjectAction::CheckNow), None);
+        // Checks named by a palette query are listed first, in a dialog
+        // without fields that sends a forced check.
+        let check = DialogKind::for_review(&ObjectAction::CheckNow).unwrap();
+        assert_eq!(check.action(), ObjectAction::CheckNow);
+        assert!(text_fields(check).is_empty());
+        assert_eq!(
+            Form::new(check).action(Timestamp::now(), &[]),
+            Ok(ic_model::Action::CheckNow { force: true })
+        );
+        assert_eq!(
+            DialogKind::for_review(&ObjectAction::Acknowledge),
+            Some(DialogKind::Acknowledge)
+        );
     }
 
     #[test]

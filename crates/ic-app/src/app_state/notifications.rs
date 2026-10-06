@@ -42,8 +42,8 @@ pub(crate) struct GroupPlan {
 }
 
 impl AppState {
-    /// The active environment's recent notifications, newest first (the
-    /// notification centre's).
+    /// The active environment's recent notifications, newest first.
+    #[cfg(test)]
     pub(crate) fn notification_records(&self) -> impl Iterator<Item = &NotificationRecord> {
         self.engine.notifications()
     }
@@ -94,8 +94,9 @@ impl AppState {
         merge_notifications(&mut self.engine.notifications, records);
     }
 
-    /// Marks one of the active environment's notifications read (the
-    /// centre's entry the user opened). Returns whether it was unread.
+    /// Marks one of the active environment's notifications read. Returns
+    /// whether it was unread.
+    #[cfg(test)]
     pub(crate) fn mark_notification_read(&mut self, id: &str) -> bool {
         self.engine.mark_read(id)
     }
@@ -105,6 +106,62 @@ impl AppState {
     pub(crate) fn mark_notification_read_in(&mut self, environment: &str, tag: &str) -> bool {
         self.slot_mut(environment)
             .is_some_and(|slot| slot.mark_read(tag))
+    }
+
+    /// Environment `id`'s recent notifications, newest first (none for an
+    /// environment whose engine hasn't reported).
+    pub(crate) fn notification_records_of(&self, id: &str) -> Vec<&NotificationRecord> {
+        self.slot(id)
+            .map(|slot| slot.notifications().collect())
+            .unwrap_or_default()
+    }
+
+    /// Environment `id`'s notifications not seen yet (A3: the switcher and
+    /// the centre's scopes show the other environments').
+    pub(crate) fn unread_in(&self, id: &str) -> usize {
+        self.slot(id).map_or(0, super::engines::EngineSlot::unread)
+    }
+
+    /// Marks notifications of environment `environment` read, as the
+    /// centre's *mark all read* does for what it shows: all of them, also
+    /// in its log (`ids` `None`), or those listed. Returns whether any was
+    /// unread.
+    pub(crate) fn mark_read_in(&mut self, environment: &str, ids: Option<&[String]>) -> bool {
+        let Some(slot) = self.slot_mut(environment) else {
+            return false;
+        };
+        let mut changed = false;
+        if let Some(ids) = ids {
+            for id in ids {
+                changed |= slot.mark_read(id);
+            }
+        } else {
+            for record in &mut slot.notifications {
+                changed |= !record.read;
+                record.read = true;
+            }
+            if changed {
+                slot.send(Command::MarkNotificationsRead);
+            }
+        }
+        changed
+    }
+
+    /// Marks the active environment's notifications about `object` read:
+    /// it was opened, so they have been seen (A2). Returns whether any was
+    /// unread.
+    pub(crate) fn mark_object_read(&mut self, object: &ObjectKey) -> bool {
+        let ids: Vec<String> = self
+            .engine
+            .notifications()
+            .filter(|record| !record.read && record.intent.object.as_ref() == Some(object))
+            .map(|record| record.intent.id.clone())
+            .collect();
+        let mut changed = false;
+        for id in &ids {
+            changed |= self.engine.mark_read(id);
+        }
+        changed
     }
 
     /// Marks every notification of the active environment read. Returns
@@ -494,6 +551,7 @@ mod tests {
                 tone: Tone::Critical,
                 sound: true,
                 silent: false,
+                silenced: None,
                 at: Timestamp::from_unix_seconds(at),
             },
             read,

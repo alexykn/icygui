@@ -198,6 +198,7 @@ impl RenderOnce for StateCircle {
 pub struct StateDot {
     paint: Paint,
     size: Option<Pixels>,
+    hollow: bool,
 }
 
 impl StateDot {
@@ -206,6 +207,7 @@ impl StateDot {
         Self {
             paint: Paint::State(state),
             size: None,
+            hollow: false,
         }
     }
 
@@ -214,6 +216,7 @@ impl StateDot {
         Self {
             paint: Paint::Color(color),
             size: None,
+            hollow: false,
         }
     }
 
@@ -222,16 +225,29 @@ impl StateDot {
         self.size = Some(size);
         self
     }
+
+    /// Draws a ring instead of a filled dot, as [`StateCircle::handled`]
+    /// does for handled problems: something that is there but quieter (a
+    /// notification recorded without a system notification). Same size.
+    pub fn hollow(mut self, hollow: bool) -> Self {
+        self.hollow = hollow;
+        self
+    }
 }
 
 impl RenderOnce for StateDot {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        div()
+        let color = self.paint.resolve(theme);
+        let dot = div()
             .flex_none()
             .size(self.size.unwrap_or(theme.metrics.sidebar_dot))
-            .rounded_full()
-            .bg(self.paint.resolve(theme))
+            .rounded_full();
+        if self.hollow {
+            dot.border(px(1.5)).border_color(color)
+        } else {
+            dot.bg(color)
+        }
     }
 }
 

@@ -56,7 +56,11 @@ fn type_into(app: &Harness, cx: &mut App, field: FormField, text: &str) {
 /// Asks for `action` on `targets`, as a key or a button does.
 fn request(app: &Harness, cx: &mut App, action: ObjectAction, targets: Vec<ObjectKey>) {
     app.state.update(cx, |state, cx| {
-        let _ = state.request(crate::actions::ActionRequest { action, targets });
+        let _ = state.request(crate::actions::ActionRequest {
+            action,
+            targets,
+            review: false,
+        });
         cx.notify();
     });
     app.draw(cx);
@@ -849,5 +853,99 @@ fn a_request_behind_an_open_dialog_waits_for_it() {
             Some(ModalKind::Action(DialogKind::Acknowledge))
         );
         assert_eq!(dialog(app, cx).read(cx).eligible().targets, [replication()]);
+    });
+}
+
+/// `secondary-enter` on any verb of the palette (`ack`, `acknowledge`,
+/// `downtime`, `dt`, `check`, `recheck`, `comment`, `note`) opens the
+/// action's dialog listing every object the query names (*all N
+/// matches*), and sends nothing: a loose query never acts directly, not
+/// even a check, which goes at once from a row or a pane. The row shows a
+/// several-objects mark in the dot's place.
+#[test]
+fn secondary_enter_on_any_verb_lists_every_target_in_a_dialog() {
+    run(FixtureOptions::default(), |app, cx| {
+        let recorder = record(app, cx);
+        let verbs = [
+            ("ack db-prod", DialogKind::Acknowledge),
+            ("acknowledge db-prod", DialogKind::Acknowledge),
+            ("downtime db-prod", DialogKind::Downtime),
+            ("dt db-prod", DialogKind::Downtime),
+            ("check db-prod", DialogKind::Check),
+            ("recheck db-prod", DialogKind::Check),
+            ("comment db-prod", DialogKind::Comment),
+            ("note db-prod", DialogKind::Comment),
+        ];
+        for (query, kind) in verbs {
+            app.keys(cx, "ctrl-k");
+            let palette = app.workspace.read(cx).palette().unwrap().clone();
+            let input = palette.read(cx).input().clone();
+            app.in_window(cx, |window, cx| {
+                input.update(cx, |input, cx| input.replace_all(query, window, cx));
+            });
+            app.draw(cx);
+            let items = palette.read(cx).items().to_vec();
+            let index = crate::palette::model::all_matches_item(&items)
+                .unwrap_or_else(|| panic!("{query}: an all-matches item"));
+            let all = &items[index];
+            assert!(all.several, "{query}: the several-objects mark");
+            assert!(all.dot.is_some(), "{query}: tinted by the worst state");
+            let PaletteCommand::Act(_, targets) = &all.command else {
+                panic!("{query}: {:?}", all.command);
+            };
+            assert!(targets.len() > 1, "{query}");
+
+            app.keys(cx, "ctrl-enter");
+            assert_eq!(
+                modal(app, cx),
+                Some(ModalKind::Action(kind)),
+                "{query}: the dialog, not the action"
+            );
+            let dialog = dialog(app, cx);
+            let eligible = dialog.read(cx).eligible();
+            let mut listed: Vec<ObjectKey> = eligible
+                .targets
+                .iter()
+                .cloned()
+                .chain(
+                    eligible
+                        .skipped
+                        .iter()
+                        .map(|skipped| skipped.object.clone()),
+                )
+                .collect();
+            let mut expected = targets.clone();
+            listed.sort();
+            expected.sort();
+            assert_eq!(listed, expected, "{query}: every target is listed");
+            assert!(recorder.actions().is_empty(), "{query}: nothing was sent");
+            app.keys(cx, "escape");
+            assert_eq!(modal(app, cx), None, "{query}");
+        }
+
+        // The check dialog sends one forced check for all of them once
+        // confirmed (Enter).
+        app.keys(cx, "ctrl-k");
+        let palette = app.workspace.read(cx).palette().unwrap().clone();
+        let input = palette.read(cx).input().clone();
+        app.in_window(cx, |window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_all("check db-prod", window, cx);
+            });
+        });
+        app.draw(cx);
+        let items = palette.read(cx).items().to_vec();
+        let index = crate::palette::model::all_matches_item(&items).unwrap();
+        let PaletteCommand::Act(_, targets) = items[index].command.clone() else {
+            panic!("an action");
+        };
+        app.keys(cx, "ctrl-enter");
+        assert_eq!(modal(app, cx), Some(ModalKind::Action(DialogKind::Check)));
+        app.keys(cx, "enter");
+        assert_eq!(modal(app, cx), None, "sent and closed");
+        let actions = recorder.actions();
+        assert_eq!(actions.len(), 1, "one request for all");
+        assert_eq!(actions[0].1, ActionTarget::Objects(targets));
+        assert_eq!(actions[0].2, Action::CheckNow { force: true });
     });
 }

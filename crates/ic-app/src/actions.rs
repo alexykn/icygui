@@ -318,6 +318,10 @@ pub(crate) struct ActionRequest {
     pub(crate) action: ObjectAction,
     /// The objects, in list order.
     pub(crate) targets: Vec<ObjectKey>,
+    /// The objects were named loosely (a palette query's *all N
+    /// matches*): a dialog lists them before anything is sent, also for
+    /// actions that otherwise go at once (a check).
+    pub(crate) review: bool,
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, Pixels, Point, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use ic_config::{GroupBy, ObjectKind, Sort, SortKey, View};
 use ic_core::snapshot::Summary;
@@ -109,6 +109,11 @@ impl DashboardView {
             header = header.leading(sidebar_reopen(controls, theme));
         }
         let dashboard = reference.and_then(|reference| state.dashboard(reference));
+        // `--demo` says so over every dashboard of its own environments
+        // (ENV-10); the footer's room goes to the environment switcher.
+        if state.is_demo_environment() {
+            header = header.child(demo_chip(theme));
+        }
         let header = match (reference, dashboard) {
             (Some(reference), Some((_, dashboard))) => header
                 .title(dashboard.name.clone())
@@ -224,7 +229,7 @@ impl DashboardView {
         let theme = cx.theme();
         let open = self.menus.open() == Some(HeaderMenu::Options);
         let trigger = GlyphButton::new("dashboard-options", "···")
-            .text_size(gpui::px(13.))
+            .text_size(px(13.))
             .bleed()
             .color(theme.colors.text_muted)
             .selected(open)
@@ -387,7 +392,7 @@ impl DashboardView {
         let end = div()
             .flex()
             .items_center()
-            .gap(gpui::px(14.))
+            .gap(px(14.))
             .children(view_label)
             .child(
                 div()
@@ -523,6 +528,25 @@ pub(crate) fn summary_items(
         items.push((pending, summary.pending, "pending"));
     }
     items
+}
+
+/// The `demo` chip: the environment on screen is one of the demo's own,
+/// simulated (ENV-10).
+fn demo_chip(theme: &ic_ui_kit::Theme) -> AnyElement {
+    div()
+        .id("demo-chip")
+        .flex_none()
+        .px(px(5.))
+        .rounded(theme.metrics.small_radius)
+        .border_1()
+        .border_color(theme.colors.accent.opacity(0.5))
+        .text_size(theme.text.hint)
+        .text_color(theme.colors.accent)
+        .child("demo")
+        .tooltip(Tooltip::text(
+            "A demo environment: simulated by icygui, no real Icinga is involved",
+        ))
+        .into_any_element()
 }
 
 #[cfg(test)]

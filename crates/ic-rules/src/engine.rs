@@ -7,7 +7,9 @@ use ic_model::{CheckableState, HostState, ObjectKey, ServiceState, StateType, Ti
 use tracing::debug;
 
 use crate::dedupe::Dedupe;
-use crate::intent::{Change, DashboardRef, LocalTime, NotificationIntent, RuleInput, Tone};
+use crate::intent::{
+    Change, DashboardRef, LocalTime, NotificationIntent, RuleInput, Silence, Tone,
+};
 use crate::quiet;
 use crate::recent::Recent;
 use crate::scope::{Candidate, RuleSet, Scopes, Source};
@@ -203,11 +205,16 @@ impl Default for Limits {
 ///   once a whole window passes without a silenced notification, and while
 ///   the storm lasts at most once a minute. Notifications that are silent
 ///   anyway (quiet hours, pause) don't count. `window_secs = 0` disables
-///   storm control.
+///   storm control. A notification a storm silenced says which summary
+///   covers it (`silenced = Silence::Storm { summary }`, the id the
+///   summary gets: `storm:<when the stretch began>`).
 /// - Quiet hours (local time; see [`QuietHours`](crate::QuietHours)) make
-///   notifications `silent`; with `allow_critical`, critical and down stay
-///   audible (and so does a storm summary that silenced one of them).
-/// - While paused, every notification is `silent`.
+///   notifications `silent` (`Silence::QuietHours`); with
+///   `allow_critical`, critical and down stay audible (and so does a storm
+///   summary that silenced one of them).
+/// - While paused, every notification is `silent` (`Silence::Paused`).
+/// - `silenced` says why exactly when `silent` is set; a pause comes
+///   before quiet hours, and both before storm control.
 /// - Title `"{LABEL} · {service} on {host}"` or `"{LABEL} · {host}"` with
 ///   display names; body = the first line of the output, or `"{author}:
 ///   {comment}"`; tone by state; sound from the deciding rule; `at` = when
@@ -563,6 +570,7 @@ impl RuleEngine {
             return;
         };
         let environment = self.scopes.environment_name();
+        let silenced = self.silence(moment, summary.critical);
         // A storm starting again at the same instant (the clock went back)
         // must not reuse an id.
         let base = text::storm_id(summary.started);
@@ -580,7 +588,8 @@ impl RuleEngine {
             body: summary.body(),
             tone: Tone::Info,
             sound: summary.sound,
-            silent: self.is_silenced(moment, summary.critical),
+            silent: silenced.is_some(),
+            silenced,
             at: moment.now,
         };
         debug!(id = %intent.id, title = %intent.title, "storm summary");
@@ -996,12 +1005,17 @@ impl RuleEngine {
             return false;
         }
         let storm = self.scopes.rules().settings.storm;
-        let silent = self.is_silenced(moment, draft.label.is_critical())
-            || self
+        // A pause or quiet hours silence it before storm control counts it.
+        let silenced = self.silence(moment, draft.label.is_critical()).or_else(|| {
+            (self
                 .storm
                 .admit(moment.now, storm, draft.label, draft.sound)
-                == Admission::Absorbed;
-        debug!(id = %draft.id, silent, "notification");
+                == Admission::Absorbed)
+                .then(|| Silence::Storm {
+                    summary: self.storm.started().map(text::storm_id).unwrap_or_default(),
+                })
+        });
+        debug!(id = %draft.id, ?silenced, "notification");
         self.dedupe.insert(&draft.id);
         out.push(NotificationIntent {
             id: draft.id,
@@ -1011,21 +1025,23 @@ impl RuleEngine {
             body: draft.body,
             tone: draft.label.tone(),
             sound: draft.sound,
-            silent,
+            silent: silenced.is_some(),
+            silenced,
             at: draft.at,
         });
         true
     }
 
-    /// Whether notifications are silent at `moment` because of a pause or
-    /// quiet hours. `critical`: critical or down, which quiet hours with
-    /// `allow_critical` keep audible.
-    fn is_silenced(&self, moment: Moment, critical: bool) -> bool {
-        let paused = self.paused_until.is_some_and(|until| moment.now < until);
+    /// Why notifications are silent at `moment`, if a pause or quiet hours
+    /// silence them (`None`: they aren't). `critical`: critical or down,
+    /// which quiet hours with `allow_critical` keep audible.
+    fn silence(&self, moment: Moment, critical: bool) -> Option<Silence> {
+        if self.paused_until.is_some_and(|until| moment.now < until) {
+            return Some(Silence::Paused);
+        }
         let quiet_hours = &self.scopes.rules().settings.quiet_hours;
-        paused
-            || (quiet::is_quiet(quiet_hours, moment.local)
-                && !(quiet_hours.allow_critical && critical))
+        (quiet::is_quiet(quiet_hours, moment.local) && !(quiet_hours.allow_critical && critical))
+            .then_some(Silence::QuietHours)
     }
 
     /// Whether `object` is flapping at `now`.

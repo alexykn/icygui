@@ -75,7 +75,11 @@ fn type_into(app: &Harness, cx: &mut App, field: FormField, text: &str) {
 
 fn request(app: &Harness, cx: &mut App, action: ObjectAction, targets: Vec<ObjectKey>) {
     app.state.update(cx, |state, cx| {
-        let _ = state.request(ActionRequest { action, targets });
+        let _ = state.request(ActionRequest {
+            action,
+            targets,
+            review: false,
+        });
         cx.notify();
     });
     app.draw(cx);

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures::executor::block_on;
 use ic_model::{CheckableState, HostState, ServiceState, StateType};
-use ic_rules::Tone;
+use ic_rules::{Silence, Tone};
 
 use super::db::{Database, DbError, SCHEMA_VERSION};
 use super::*;
@@ -31,6 +31,7 @@ fn intent(id: &str, at: f64, object: Option<ObjectKey>, silent: bool) -> Notific
         tone: Tone::Critical,
         sound: true,
         silent,
+        silenced: silent.then_some(Silence::QuietHours),
         at: Timestamp::from_unix_seconds(at),
     }
 }
@@ -118,13 +119,20 @@ fn notifications_round_trip_dedupe_and_read_flags() {
     let summary = NotificationIntent {
         tone: Tone::Info,
         sound: false,
+        silenced: Some(Silence::Paused),
         ..intent("storm:1", 20.0, None, true)
+    };
+    let absorbed = NotificationIntent {
+        silenced: Some(Silence::Storm {
+            summary: "storm:1".to_owned(),
+        }),
+        ..intent("c", 15.0, Some(service.clone()), true)
     };
     assert_eq!(
         database
-            .log_notifications(&[first.clone(), summary.clone()])
+            .log_notifications(&[first.clone(), summary.clone(), absorbed.clone()])
             .unwrap(),
-        [true, true]
+        [true, true, true]
     );
     // The same id again (an earlier run's) isn't new.
     assert_eq!(
@@ -136,9 +144,10 @@ fn notifications_round_trip_dedupe_and_read_flags() {
 
     let records = database.notifications(10).unwrap();
     let ids: Vec<&str> = records.iter().map(|r| r.intent.id.as_str()).collect();
-    assert_eq!(ids, ["b", "storm:1", "a"], "newest first");
+    assert_eq!(ids, ["b", "storm:1", "c", "a"], "newest first");
     assert_eq!(records[1].intent, summary, "round trip, without object");
-    assert_eq!(records[2].intent, first, "round trip, with object");
+    assert_eq!(records[2].intent, absorbed, "round trip, with the storm");
+    assert_eq!(records[3].intent, first, "round trip, with object");
     assert!(records.iter().all(|record| !record.read));
     assert_eq!(database.notifications(1).unwrap().len(), 1);
 
@@ -152,9 +161,9 @@ fn notifications_round_trip_dedupe_and_read_flags() {
         .iter()
         .map(|record| record.read)
         .collect();
-    assert_eq!(read, [false, true, false]);
+    assert_eq!(read, [false, true, false, false]);
 
-    assert_eq!(database.mark_read().unwrap(), 2);
+    assert_eq!(database.mark_read().unwrap(), 3);
     assert!(database.notifications(10).unwrap().iter().all(|r| r.read));
     assert_eq!(database.mark_read().unwrap(), 0);
 
@@ -221,6 +230,49 @@ fn pruning_drops_what_is_older_than_the_cutoff() {
         database.prune(Timestamp::from_unix_seconds(200.0)).unwrap(),
         0
     );
+}
+
+#[test]
+fn a_log_from_before_the_silence_reasons_gains_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("log.sqlite3");
+    {
+        // Version 1 as the first release wrote it, with a silent row.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version (version) VALUES (1);
+             CREATE TABLE events (id INTEGER PRIMARY KEY, at REAL NOT NULL,
+                 object TEXT NOT NULL, kind TEXT NOT NULL, state TEXT,
+                 state_type TEXT, text TEXT NOT NULL, author TEXT);
+             CREATE TABLE notifications (id TEXT PRIMARY KEY, at REAL NOT NULL,
+                 object TEXT, title TEXT NOT NULL, subtitle TEXT NOT NULL,
+                 body TEXT NOT NULL, tone TEXT NOT NULL, sound INTEGER NOT NULL,
+                 silent INTEGER NOT NULL, read INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO notifications
+                 (id, at, object, title, subtitle, body, tone, sound, silent)
+                 VALUES ('old', 5.0, 'h', 'DOWN · h', 'prod-cluster', '', 'critical', 1, 1);",
+        )
+        .unwrap();
+    }
+    let mut database = Database::open(&path).unwrap();
+    assert_eq!(
+        database.version().unwrap(),
+        Some(SCHEMA_VERSION),
+        "same version"
+    );
+    let old = &database.notifications(10).unwrap()[0];
+    assert!(old.intent.silent);
+    assert_eq!(old.intent.silenced, None, "the reason wasn't recorded");
+    let new = intent("new", 6.0, None, true);
+    database
+        .log_notifications(std::slice::from_ref(&new))
+        .unwrap();
+    assert_eq!(database.notifications(1).unwrap()[0].intent, new);
+    drop(database);
+    // Opening it again finds the column there.
+    let database = Database::open(&path).unwrap();
+    assert_eq!(database.notifications(10).unwrap().len(), 2);
 }
 
 #[test]

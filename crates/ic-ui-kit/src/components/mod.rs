@@ -24,7 +24,7 @@ pub use banner::{Banner, BannerTone, ProgressBar};
 pub use button::{Button, ButtonColors, ButtonVariant, GlyphButton, IconButton, KeyHint};
 pub use divider::{Divider, DividerColor};
 pub use form::{CHIP_HEIGHT, Chip, Field, FieldTone, Segmented, Switch, TextArea};
-pub use header::{PaneHeader, SubTabs};
+pub use header::{PaneHeader, SUB_TAB_GAP, SubTabs, sub_tab_width};
 pub use link::{Link, LinkStyle};
 pub use list::{CompactRow, ListRow, RowEmphasis};
 pub use menu::{Dismissable, Dismissal, Menu, MenuItem, Popover};

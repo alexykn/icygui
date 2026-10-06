@@ -9,7 +9,8 @@
 //! in a temporary directory.
 //!
 //! Development switches (`ICYGUI_DEMO_SCENARIO`, `ICYGUI_DEMO_SEED`,
-//! `ICYGUI_DEMO_DASHBOARD`, `ICYGUI_DEMO_OPEN`, `ICYGUI_DEMO_FAULT`) are
+//! `ICYGUI_DEMO_DASHBOARD`, `ICYGUI_DEMO_OPEN`, `ICYGUI_DEMO_FAULT`,
+//! `ICYGUI_DEMO_ENVIRONMENTS`) are
 //! read by `crate::dev`; [`DemoFault`] makes the demo show the
 //! connection's failure states, for screenshots and tests.
 
@@ -462,9 +463,41 @@ impl SecretStore for DemoSecrets {
 }
 
 /// Whether `environment_id` is one of the demo's own environments (the
-/// simulated `prod-cluster`, `staging` and `lab`).
+/// simulated `prod-cluster`, `staging` and `lab`, and those
+/// `ICYGUI_DEMO_ENVIRONMENTS` adds).
 pub(crate) fn is_built_in(environment_id: &str) -> bool {
     [ENVIRONMENT_ID, STAGING_ID, LAB_ID].contains(&environment_id)
+        || environment_id.starts_with(MORE_PREFIX)
+}
+
+/// The ids of the environments `ICYGUI_DEMO_ENVIRONMENTS` adds start so.
+const MORE_PREFIX: &str = "icygui-demo-more-";
+
+/// The names of the environments `ICYGUI_DEMO_ENVIRONMENTS` adds, in
+/// order.
+const MORE_NAMES: [&str; 8] = [
+    "dev-cluster",
+    "qa",
+    "edge-ams",
+    "edge-fra",
+    "backup",
+    "office",
+    "monitoring-eu",
+    "monitoring-us",
+];
+
+/// Keeps the first `count` demo environments of `config` (1 to 11;
+/// development: one environment, or many in the switcher and the
+/// notification centre's scopes). Those past the third serve `lab` and
+/// storm every 30 minutes.
+pub(crate) fn set_count(config: &mut Config, count: usize) {
+    let count = count.clamp(1, 3 + MORE_NAMES.len());
+    config.environments.truncate(count);
+    for (index, name) in MORE_NAMES.iter().take(count.saturating_sub(3)).enumerate() {
+        let id = format!("{MORE_PREFIX}{index}");
+        let groups = stable_ids(&id, ic_config::default_groups());
+        config.environments.push(environment(&id, name, groups));
+    }
 }
 
 /// The demo server to run for the environment `environment_id`, if it is
@@ -474,14 +507,17 @@ pub(crate) fn is_built_in(environment_id: &str) -> bool {
 /// real ones (`None`).
 ///
 /// Every demo environment runs from the start and notifies in the
-/// background (PLAN.md D2); `staging` and `lab` storm less often than
-/// `prod-cluster` (every 15 and 30 minutes), so their storms don't come
+/// background (PLAN.md D2); `staging` and `lab` storm three and six times
+/// less often than `prod-cluster` (every 15 and 30 minutes by default;
+/// `ICYGUI_DEMO_STORM` sets `prod-cluster`'s), so their storms don't come
 /// all at once.
 pub(crate) fn options_for(environment_id: &str, prod_cluster: &DemoOptions) -> Option<DemoOptions> {
+    let every = prod_cluster.storm_every.unwrap_or(STORM_EVERY);
     let (scenario, storm_every) = match environment_id {
         ENVIRONMENT_ID => return Some(prod_cluster.clone()),
-        STAGING_ID => ("staging", 3 * STORM_EVERY),
-        LAB_ID => ("lab", 6 * STORM_EVERY),
+        STAGING_ID => ("staging", 3 * every),
+        LAB_ID => ("lab", 6 * every),
+        more if more.starts_with(MORE_PREFIX) => ("lab", 6 * every),
         _ => return None,
     };
     Some(DemoOptions {
@@ -499,19 +535,6 @@ pub(crate) fn options_for(environment_id: &str, prod_cluster: &DemoOptions) -> O
 /// servers are up (`AppState::set_demo_servers`): `prod-cluster` lists its
 /// master and its satellite (ENV-12).
 pub(crate) fn config() -> Config {
-    let environment = |id: &str, name: &str, groups: Vec<DashboardGroup>| Environment {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        // Replaced once the demo server listens.
-        urls: vec![ic_config::ApiUrl::new("https://127.0.0.1:5665")],
-        auth: AuthConfig::Basic {
-            username: USER.to_owned(),
-        },
-        tls: TlsConfig::default(),
-        author: Some("demo".to_owned()),
-        groups,
-        notifications: NotificationSettings::default(),
-    };
     Config {
         version: CONFIG_VERSION,
         general: General::default(),
@@ -529,6 +552,22 @@ pub(crate) fn config() -> Config {
                 stable_ids(LAB_ID, ic_config::default_groups()),
             ),
         ],
+    }
+}
+
+/// A demo environment (its URL is replaced once its server listens).
+fn environment(id: &str, name: &str, groups: Vec<DashboardGroup>) -> Environment {
+    Environment {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        urls: vec![ic_config::ApiUrl::new("https://127.0.0.1:5665")],
+        auth: AuthConfig::Basic {
+            username: USER.to_owned(),
+        },
+        tls: TlsConfig::default(),
+        author: Some("demo".to_owned()),
+        groups,
+        notifications: NotificationSettings::default(),
     }
 }
 
@@ -717,6 +756,28 @@ mod tests {
     }
 
     #[test]
+    fn the_demo_runs_one_to_eleven_environments() {
+        let mut one = config();
+        set_count(&mut one, 1);
+        assert_eq!(one.environments.len(), 1);
+        assert_eq!(one.active_environment.as_deref(), Some(ENVIRONMENT_ID));
+        assert!(one.validate().is_empty());
+        let mut config = config();
+        set_count(&mut config, 20);
+        assert_eq!(
+            config.environments.len(),
+            3 + MORE_NAMES.len(),
+            "at most eleven"
+        );
+        let extra = &config.environments[3];
+        assert_eq!(extra.name, "dev-cluster");
+        assert!(is_built_in(&extra.id));
+        let options = options_for(&extra.id, &DemoOptions::default()).unwrap();
+        assert_eq!(options.scenario, "lab");
+        assert!(config.validate().is_empty(), "{:?}", config.validate());
+    }
+
+    #[test]
     fn each_demo_environment_has_its_scenario() {
         let prod = DemoOptions {
             scenario: "large".to_owned(),
@@ -733,12 +794,19 @@ mod tests {
                 staging.fault,
                 staging.storm_every
             ),
-            ("staging", 9, None, Some(900))
+            ("staging", 9, None, Some(60))
         );
         let lab = options_for(LAB_ID, &prod).unwrap();
+        assert_eq!((lab.scenario.as_str(), lab.storm_every), ("lab", Some(120)));
+        // Without `ICYGUI_DEMO_STORM`: every 15 and 30 minutes.
+        let default = DemoOptions::default();
         assert_eq!(
-            (lab.scenario.as_str(), lab.storm_every),
-            ("lab", Some(1800))
+            options_for(STAGING_ID, &default).unwrap().storm_every,
+            Some(900)
+        );
+        assert_eq!(
+            options_for(LAB_ID, &default).unwrap().storm_every,
+            Some(1800)
         );
         assert_eq!(options_for("added-in-the-editor", &prod), None);
     }

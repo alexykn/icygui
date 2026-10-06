@@ -113,7 +113,7 @@ Icinga Web is great for history, reporting and the big picture. icygui is for th
 | **Gentle on the master** | One lean load when it connects (about 35 MB at 30 000 services), then the event stream (about 75 KB/s). A lean reconcile every 5 or 15 minutes catches anything missed. No polling, no periodic full reloads, no re-query per event. |
 | **Least privilege** | Works with an API user without `filter-expression`. It only uses runtime operations under `/v1/actions`; it never changes Icinga's configuration or object attributes. Running commands on agents (`execute-command`) is opt-in and left out of the ready-made API user. Buttons for actions your user may not run are disabled and say why. |
 | **Shareable dashboards** | Dashboards live in groups in the sidebar, per environment. Export a group to a file and a colleague imports it. |
-| **Several Icinga environments** | Production, staging, lab: all of them stay connected and notify (the title says which one), and switching between them from the footer or the palette is instant. Pause them all, or mute one. Each costs its Icinga one event stream, whichever is on screen. Passwords stay in the system keychain. |
+| **Several Icinga environments** | Production, staging, lab: all of them stay connected and notify (the title says which one), and switching between them from the footer or the palette is instant. The switcher and the notification centre show which ones have unread notifications; the centre lists one environment or all of them. Pause them all, or mute one. Each costs its Icinga one event stream, whichever is on screen. Passwords stay in the system keychain. |
 
 ## Install
 

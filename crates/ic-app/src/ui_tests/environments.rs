@@ -377,6 +377,7 @@ fn dialogs_for_one_environment_close_when_another_becomes_active() {
                         let _ = state.request(crate::actions::ActionRequest {
                             action: crate::actions::ObjectAction::AddComment,
                             targets: vec![object.clone()],
+                            review: false,
                         });
                         cx.notify();
                     });

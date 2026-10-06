@@ -8,13 +8,18 @@ use std::time::Duration;
 use ic_model::{
     CheckableState, HostState, ObjectKey, ServiceKey, ServiceState, StateType, Timestamp,
 };
-use ic_rules::{NotificationIntent, Tone};
+use ic_rules::{NotificationIntent, Silence, Tone};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params};
 
 use crate::command::{LogEntry, LogKind, NotificationRecord};
 
 /// The schema this version writes. A database with a newer version (from
 /// a newer icygui) is left alone.
+///
+/// Version 1 gained the nullable column `notifications.silenced` (why a
+/// notification was silent) without a new version: it is added to files
+/// that lack it, and versions that don't know it never name it, so they
+/// keep reading and writing the file.
 pub(super) const SCHEMA_VERSION: i64 = 1;
 
 /// Queries return at most this many rows, whatever the caller asks for.
@@ -47,7 +52,8 @@ CREATE TABLE notifications (
     tone TEXT NOT NULL,
     sound INTEGER NOT NULL,
     silent INTEGER NOT NULL,
-    read INTEGER NOT NULL DEFAULT 0
+    read INTEGER NOT NULL DEFAULT 0,
+    silenced TEXT
 );
 CREATE INDEX notifications_at ON notifications (at);
 ";
@@ -157,8 +163,8 @@ impl Database {
         {
             let mut insert = tx.prepare_cached(
                 "INSERT OR IGNORE INTO notifications
-                 (id, at, object, title, subtitle, body, tone, sound, silent, read)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
+                 (id, at, object, title, subtitle, body, tone, sound, silent, read, silenced)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
             )?;
             for intent in intents {
                 let inserted = insert.execute(params![
@@ -171,6 +177,7 @@ impl Database {
                     tone_name(intent.tone),
                     intent.sound,
                     intent.silent,
+                    intent.silenced.as_ref().map(silence_name),
                 ])?;
                 new.push(inserted > 0);
             }
@@ -241,7 +248,7 @@ impl Database {
     /// The newest notifications first, at most `limit`.
     pub(super) fn notifications(&self, limit: usize) -> Result<Vec<NotificationRecord>, DbError> {
         let mut query = self.conn.prepare_cached(
-            "SELECT id, at, object, title, subtitle, body, tone, sound, silent, read
+            "SELECT id, at, object, title, subtitle, body, tone, sound, silent, read, silenced
              FROM notifications ORDER BY at DESC, rowid DESC LIMIT ?1",
         )?;
         let rows = query
@@ -336,8 +343,21 @@ fn migrate(conn: &Connection) -> Result<(), DbError> {
         }
         Some(found) if found > SCHEMA_VERSION => Err(DbError::Newer { found }),
         // Version 1 is the first; later versions migrate here.
-        Some(_) => Ok(()),
+        Some(_) => add_silenced_column(conn),
     }
+}
+
+/// Adds `notifications.silenced` to a file written before it existed
+/// (see [`SCHEMA_VERSION`]).
+fn add_silenced_column(conn: &Connection) -> Result<(), DbError> {
+    let mut columns = conn.prepare("SELECT name FROM pragma_table_info('notifications')")?;
+    let names = columns
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !names.iter().any(|name| name == "silenced") {
+        conn.execute_batch("ALTER TABLE notifications ADD COLUMN silenced TEXT")?;
+    }
+    Ok(())
 }
 
 fn row_limit(limit: usize) -> i64 {
@@ -400,6 +420,8 @@ fn read_notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Notific
     let Some(tone) = parse_tone(&tone) else {
         return Ok(None);
     };
+    let silent: bool = row.get(8)?;
+    let silenced: Option<String> = row.get(10)?;
     Ok(Some(NotificationRecord {
         intent: NotificationIntent {
             id: row.get(0)?,
@@ -409,7 +431,12 @@ fn read_notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Notific
             body: row.get(5)?,
             tone,
             sound: row.get(7)?,
-            silent: row.get(8)?,
+            silent,
+            // An unknown reason (a newer version's) is no reason.
+            silenced: silenced
+                .as_deref()
+                .and_then(parse_silence)
+                .filter(|_| silent),
             at: Timestamp::from_unix_seconds(row.get(1)?),
         },
         read: row.get(9)?,
@@ -498,6 +525,26 @@ fn tone_name(tone: Tone) -> &'static str {
         Tone::Unknown => "unknown",
         Tone::Recovery => "recovery",
         Tone::Info => "info",
+    }
+}
+
+/// How a [`Silence`] is stored: `paused`, `quiet hours`, or `storm ` and
+/// the summary's id.
+fn silence_name(silence: &Silence) -> String {
+    match silence {
+        Silence::Paused => "paused".to_owned(),
+        Silence::QuietHours => "quiet hours".to_owned(),
+        Silence::Storm { summary } => format!("storm {summary}"),
+    }
+}
+
+fn parse_silence(name: &str) -> Option<Silence> {
+    match name {
+        "paused" => Some(Silence::Paused),
+        "quiet hours" => Some(Silence::QuietHours),
+        _ => name.strip_prefix("storm ").map(|summary| Silence::Storm {
+            summary: summary.to_owned(),
+        }),
     }
 }
 

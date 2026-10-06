@@ -170,6 +170,12 @@ impl ObjectPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![cx.observe(&state, |_, _, cx| cx.notify())];
+        // A pane beside the list shows at once; a tab's pane is made for
+        // every open tab, and its object counts as seen when the tab shows
+        // (the workspace).
+        if mode == PaneMode::Split {
+            mark_seen(&state, &object, cx);
+        }
         Self {
             state,
             mode,
@@ -271,7 +277,7 @@ impl ObjectPane {
             return;
         }
         self.history.clear();
-        self.switch_to(object);
+        self.switch_to(object, cx);
         cx.notify();
     }
 
@@ -281,14 +287,14 @@ impl ObjectPane {
             return;
         }
         self.history.push(self.object.clone());
-        self.switch_to(object);
+        self.switch_to(object, cx);
         cx.notify();
     }
 
     /// Goes back to the previous object.
     pub(crate) fn back(&mut self, cx: &mut Context<Self>) {
         if let Some(previous) = self.history.pop() {
-            self.switch_to(previous);
+            self.switch_to(previous, cx);
             cx.notify();
         }
     }
@@ -310,7 +316,8 @@ impl ObjectPane {
         }
     }
 
-    fn switch_to(&mut self, object: ObjectKey) {
+    fn switch_to(&mut self, object: ObjectKey, cx: &mut App) {
+        mark_seen(&self.state, &object, cx);
         let kind_changed = matches!(self.object, ObjectKey::Host { .. })
             != matches!(object, ObjectKey::Host { .. });
         let host_changed = self.object.host_name() != object.host_name();
@@ -352,6 +359,7 @@ impl ObjectPane {
         let request = ActionRequest {
             action,
             targets: vec![self.object.clone()],
+            review: false,
         };
         self.state.update(cx, |state, cx| {
             let _ = state.request(request);
@@ -1052,6 +1060,20 @@ fn web_link(id: SharedString, url: &str) -> impl IntoElement {
         .truncate()
         .tooltip(Tooltip::new(format!("Open {url} in the browser")))
         .on_click(move |_, _, cx| cx.open_url(&target))
+}
+
+/// `object` shows in a pane: the active environment's notifications about
+/// it count as seen (A2), right after this update.
+pub(crate) fn mark_seen(state: &Entity<AppState>, object: &ObjectKey, cx: &mut App) {
+    let state = state.clone();
+    let object = object.clone();
+    cx.defer(move |cx| {
+        state.update(cx, |state, cx| {
+            if state.mark_object_read(&object) {
+                cx.notify();
+            }
+        });
+    });
 }
 
 #[cfg(test)]

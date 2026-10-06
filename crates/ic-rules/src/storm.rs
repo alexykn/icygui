@@ -247,6 +247,13 @@ impl Storm {
         }
     }
 
+    /// When the storm's current stretch began (`None`: no storm is on).
+    /// The summary that covers what it silences now carries this time in
+    /// its id.
+    pub(crate) fn started(&self) -> Option<Timestamp> {
+        self.period.as_ref().map(|period| period.started)
+    }
+
     /// Whether a storm is on.
     #[cfg(test)]
     pub(crate) fn is_on(&self) -> bool {

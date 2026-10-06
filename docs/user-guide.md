@@ -26,7 +26,7 @@ Other ways:
 
 **Linux desktop requirements.** A Vulkan driver (every desktop Mesa or NVIDIA install has one). For the tray icon, a StatusNotifierItem host: KDE, most other desktops, and GNOME with the *AppIndicator* extension. For desktop notifications, a notification server (every desktop has one). For saved passwords, a Secret Service keyring (GNOME Keyring, KWallet, KeePassXC).
 
-**Try it without an Icinga:** `icygui --demo` runs the whole app against a simulated Icinga in the same process (a 150-host estate with live changes, problem storms and notifications). Actions work against it; nothing is saved and the keychain isn't touched. The footer shows a *demo* badge.
+**Try it without an Icinga:** `icygui --demo` runs the whole app against a simulated Icinga in the same process (a 150-host estate with live changes, problem storms and notifications). Actions work against it; nothing is saved and the keychain isn't touched. A *demo* badge sits in every dashboard's header.
 
 Command line: `icygui [--demo] [--background]`, `icygui --version`, `icygui --help`. `--background` starts in the tray without a window (what launch at login runs); the window opens if no tray shows the icon within 20 seconds.
 
@@ -110,7 +110,7 @@ Start icygui. Without an environment, the window shows the onboarding form:
 
 *test connection* logs in and reads what the user may do: it shows the node that answered (`master-01 · zone master · full view`), the API user, Icinga's version, the permissions, and which of icygui's permissions are missing. With several URLs it tests each in turn (*test all URLs*), and each URL's *test* tests that one: the answer shows under the URL. It changes nothing. *connect* saves the environment (the password goes to the system keychain, never into the settings file) and connects.
 
-What happens on connect: icygui loads hosts in full, services with lean attributes, and problems in detail by name (the problem lists are complete within a few seconds even at 30 000 services; a thin progress bar shows under the header meanwhile), then follows Icinga's event stream. The footer shows `● <node> · <age of the last event>`: the node icygui is connected to.
+What happens on connect: icygui loads hosts in full, services with lean attributes, and problems in detail by name (the problem lists are complete within a few seconds even at 30 000 services; a thin progress bar shows under the header meanwhile), then follows Icinga's event stream. The footer shows `● <environment> <node> <age of the last event> ⌄`: the environment on screen, the node icygui is connected to and how long ago Icinga last sent something.
 
 A new environment starts with one group, *overview*: **problems** (unhandled service problems, worst first), **host problems** and **all services**.
 
@@ -141,7 +141,7 @@ An environment is one Icinga cluster (one or more API URLs, see below) with its 
 
 **Every environment stays connected and notifies**, whichever one is on screen, also while the window is closed: each keeps its own event stream, rules, event log and notifications from the moment icygui starts. Switching only changes what the window shows, so it is instant: the other environment's dashboards are current already. Each Icinga sees the same load as when it was the only environment (one event stream, one lean load on connect and the periodic reconcile), whether it is on screen or not.
 
-- **Switch** from the footer: click `● master-01 · 2s` to open the connection details (environment, URL, state, the node and how much of the cluster it sees, the URLs it passed over and why, version, last event, API user, missing permissions, *Reload from Icinga*) with the switcher under them. The palette has *Switch to <name>*, the tray its environments menu. The sidebar always belongs to the active environment.
+- **Switch** from the footer: click `● prod master-01 2s ⌄` to open the connection details (environment, URL, state, the node and how much of the cluster it sees, the URLs it passed over and why, version, last event, API user, missing permissions, *Reload from Icinga*) with the switcher under them: every environment with its connection's dot, its node and the age of its last event, its unread notifications (the count at the right) and a bell-off when muted; the one on screen is checked. Click one to switch. The footer's chevron turns blue while another environment has unread notifications. The palette has *Switch to <name>*, the tray its environments menu. The sidebar always belongs to the active environment.
 - **Mute** one environment for 30 minutes, an hour or until 08:00 from the switcher (*mute <name>*, for the one on screen) or the palette (*Mute <name> …*, for any); a muted environment has a bell-off in the switcher, and *unmute* ends it. Its notifications are still recorded in the notification centre, marked silent. To silence all of them, pause notifications (see [Notifications](#notifications)).
 - **Add** from the switcher (*add environment…*) or the palette (*Add environment…*).
 - **Edit** from the switcher (*edit <name>…*) or the palette. Changing the URLs (or their order), the login or TLS reconnects. The stored password stays unless you type a new one.
@@ -255,7 +255,7 @@ Click a row (or press <kbd>Enter</kbd>) for the **pane** at the right:
 
 The action keys act on the marked rows if there are any, else on the pane's object, else on the row under the cursor.
 
-**The command palette** (<kbd>⌘K</kbd>) searches hosts, services, dashboards and commands: switching environments, new dashboard and group, import and export, reload from Icinga, pause and resume notifications, the notification centre and settings, and the actions on the current object. Start a query with a verb to act on what it finds: `ack db-prod-03`, `dt web`, `check mq-prod`, `comment …` (also `acknowledge`, `downtime`, `recheck`, `note`). Problems come first; <kbd>⌘Enter</kbd> runs the verb on all matches.
+**The command palette** (<kbd>⌘K</kbd>) searches hosts, services, dashboards and commands: switching environments, new dashboard and group, import and export, reload from Icinga, pause and resume notifications, the notification centre and settings, and the actions on the current object. Start a query with a verb to act on what it finds: `ack db-prod-03`, `dt web`, `check mq-prod`, `comment …` (also `acknowledge`, `downtime`, `recheck`, `note`). Problems come first; <kbd>⌘Enter</kbd> (the *all N matches* row, marked with a stack in the worst state's colour) opens the action's dialog listing every match, a check too: nothing is sent before you confirm.
 
 ## Actions
 
@@ -308,7 +308,15 @@ Recoveries only notify for problems that notified.
 
 **Pause:** 30 minutes, 1 hour, or until 08:00, from the notification centre, the palette, the settings or the tray; *resume* ends it. A pause holds for every environment (with several, the chips say *pause all*). One environment can be muted on its own instead (see [Environments](#environments)). While the environment on screen is paused or muted, the footer's clock turns into a bell-off.
 
-**The notification centre** (the clock icon in the footer) lists the recent notifications of the environment on screen, silent ones included, with an unread badge; *mark all read*; click one to open its object. Each environment keeps its own list: switch to see another's.
+**The notification centre** (the clock icon in the footer; its badge counts the unread notifications of the environment on screen) lists the recent notifications, newest first, under *now*, *last hour*, *earlier today*, *yesterday* and *older*:
+
+- **Scope:** with several environments, tabs under the heading pick whose: the environment on screen (where it opens), another one, or *all*. A tab turns blue while its environment has unread notifications (*all*: another environment has); the heading counts the unread ones of the tab chosen. Environments that don't fit go behind `···`.
+- **Entries:** time, title, the output's first line and where it matched (`overview`, `databases / production`; in *all* with the environment in front: `staging · overview`). Unread ones have a bright title. Click one to open its object (switching to its environment first) and mark it read; opening an object anywhere marks its notifications read too. Click a label to show only that place's notifications, again to show all.
+- **Silent entries** (no desktop notification) have a hollow dot, a dimmer title and the reason: `silent · paused`, `silent · quiet hours`, `silent · storm`.
+- **Storms:** what a storm held back collapses into its summary (`24 new problems in prod-cluster · 19 held back`); click it to list them, again to fold them.
+- *mark all read* marks what the list shows: the tab's environments, or only what a label left.
+
+The history stays on this computer (the footer says for how long: Settings → general → *keep events for*).
 
 No notifications are sent for what's already wrong when icygui connects, but icygui keeps track of it: a service still critical from before its host went down waits for a fresh check (or five minutes) once the host is back, and an object that is flapping stays quiet until it stops. A problem that notified before icygui restarted (or before the environment's connection settings changed) still notifies its recovery, as long as the event log keeps it. Problems that a reconcile finds after a reconnect do notify, also one that recovered and failed again while your laptop slept.
 

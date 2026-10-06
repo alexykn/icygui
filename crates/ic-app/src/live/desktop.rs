@@ -187,6 +187,7 @@ mod tests {
             tone,
             sound,
             silent: false,
+            silenced: None,
             at: Timestamp::from_unix_seconds(1_790_000_000.),
         }
     }

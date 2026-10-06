@@ -28,6 +28,7 @@ gpui_kit_assets::icon_assets!(
         Folder,
         Info,
         KeyRound,
+        Layers,
         LoaderCircle,
         Lock,
         Maximize2,

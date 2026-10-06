@@ -61,6 +61,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
+        env:
+          CARGO_TERM_COLOR: never   # plain lines, so the problem matcher can read failures
         run: cargo test --workspace --locked
 
       - name: Bundle the app (ad-hoc signed on macOS)

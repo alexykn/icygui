@@ -26,6 +26,32 @@
           "message": 3
         }
       ]
+    },
+    {
+      "owner": "rust-test-panic",
+      "pattern": [
+        {
+          "regexp": "^thread '([^']+)' panicked at (.+?):(\\d+):(\\d+):$",
+          "message": 1,
+          "file": 2,
+          "line": 3,
+          "column": 4
+        },
+        {
+          "regexp": "^(.*)$",
+          "message": 1
+        }
+      ]
+    },
+    {
+      "owner": "rust-test-failed",
+      "pattern": [
+        {
+          "regexp": "^test (\\S+) \\.\\.\\. (FAILED)$",
+          "message": 1,
+          "code": 2
+        }
+      ]
     }
   ]
 }

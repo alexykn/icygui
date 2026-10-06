@@ -1,34 +1,53 @@
 //! The root view: the sidebar and the main area, which shows the selected
-//! dashboard (list and detail pane, screens 2a–2c) or an object opened as a
-//! tab, full width.
+//! dashboard (list and detail pane, screens 2a–2c), an object opened as a
+//! tab, the dashboard editor (DASH-04), or on the first run without
+//! environments the onboarding form (ENV-08). Over everything, at most
+//! one modal: the command palette (UI-03), the environment editor, the
+//! certificate review (ENV-05), a confirmation, or a file path.
+//!
+//! The sidebar, the dashboard header, the editors and the palette say
+//! what they want through events; the workspace opens the dialogs and
+//! carries out what was chosen (with `crate::live::Session` for anything
+//! that touches engines, the keychain or files).
 //!
 //! The keyboard belongs to the main area: a click on a spot that takes no
 //! focus of its own (the sidebar, its footer, a header) hands the focus to
 //! the list or the tab shown, and so does losing the focus, so the
-//! shortcuts keep working.
+//! shortcuts keep working. While a modal is open, it has the keyboard.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-    Action, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
-    IntoElement, KeyBinding, MouseDownEvent, ParentElement as _, Render, Styled as _, Subscription,
-    Task, Window, div, prelude::FluentBuilder as _, px,
+    Action, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle,
+    Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, MouseDownEvent,
+    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task,
+    Window, div, prelude::FluentBuilder as _, px,
 };
-use ic_model::ObjectKey;
+use ic_model::{ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
-use ic_ui_kit::{ActiveTheme as _, Divider, DividerColor, IconButton, IconName, Theme, Tooltip};
+use ic_ui_kit::input::{Escape, InputEvent, InputState};
+use ic_ui_kit::{
+    ActiveTheme as _, Button, ButtonVariant, DialogBody, Divider, DividerColor, Field, IconButton,
+    IconName, Modal, ModalPlacement, TextField, Theme, Tooltip,
+};
 
 use crate::actions::{
     self, ActivateNextTab, ActivatePreviousTab, CloseTab, EditEnvironment, FocusMain,
     ReviewCertificate, SelectDashboard, WORKSPACE_CONTEXT,
 };
-use crate::app_state::AppState;
-use crate::chrome::{Controls, WindowControls, WindowDrag};
-use crate::dashboard::DashboardView;
+use crate::app_state::{AppState, UserNotice};
+use crate::chrome::{self, Controls, WindowControls, WindowDrag};
+use crate::dashboard::{DashboardEvent, DashboardView};
+use crate::editor::{DashboardEditor, EditorEvent, EditorTarget};
+use crate::environments::{
+    CertificateEvent, CertificateReview, EditorMode, EnvironmentEditor, EnvironmentEditorEvent,
+};
+use crate::palette::{CommandPalette, Focus, PaletteCommand, PaletteEvent, Pause};
 use crate::pane::{ObjectPane, PaneMode};
-use crate::sidebar::Sidebar;
-use crate::{recovery, window_state};
+use crate::sidebar::{Sidebar, SidebarEvent};
+use crate::{live, recovery, window_state};
 
 /// How often relative times (time in state, the footer's last event, the
 /// reconnect countdown) refresh (UI-04). Only the rows on screen are
@@ -39,16 +58,53 @@ const CLOCK_TICK: Duration = Duration::from_secs(1);
 /// moved or changed size (BG-06).
 const WINDOW_SAVE_DELAY: Duration = Duration::from_millis(750);
 
+/// Key context of the modal layer.
+pub(crate) const MODAL_CONTEXT: &str = "Modal";
+/// Key context of a confirmation dialog.
+const CONFIRM_CONTEXT: &str = "ConfirmDialog";
+
+/// The name of a group created for a first dashboard.
+const FIRST_GROUP_NAME: &str = "dashboards";
+
 /// Shows or hides the sidebar.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct ToggleSidebar;
 
+/// Opens (or closes) the command palette.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct ToggleCommandPalette;
+
+/// Creates a dashboard in the selected dashboard's group (the editor
+/// opens).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct NewDashboard;
+
+/// Closes the open modal.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct CloseModal;
+
+/// Confirms the open confirmation dialog.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct ConfirmModal;
+
 /// Registers the workspace's key bindings (`secondary` is cmd on macOS and
 /// ctrl elsewhere).
 pub(crate) fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("secondary-b", ToggleSidebar, None)]);
+    cx.bind_keys([
+        KeyBinding::new("secondary-b", ToggleSidebar, None),
+        KeyBinding::new("secondary-k", ToggleCommandPalette, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("secondary-n", NewDashboard, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("escape", CloseModal, Some(MODAL_CONTEXT)),
+        KeyBinding::new("enter", ConfirmModal, Some(CONFIRM_CONTEXT)),
+    ]);
     actions::bind_keys(cx);
+    crate::editor::bind_keys(cx);
+    crate::palette::bind_keys(cx);
 }
 
 /// What the main area shows.
@@ -63,14 +119,108 @@ struct TabPane {
     view: Entity<ObjectPane>,
 }
 
+/// The dashboard editor in the main area, and what was shown when it
+/// opened (showing something else closes it).
+struct OpenEditor {
+    view: Entity<DashboardEditor>,
+    opened_over: Shown,
+    _events: Subscription,
+}
+
+/// What a confirmation deletes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Deletion {
+    /// A group and its dashboards.
+    Group(String),
+    /// A dashboard.
+    Dashboard(DashboardRef),
+    /// An environment, its password and its event log.
+    Environment(String),
+}
+
+/// A question before something that can't be undone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Confirmation {
+    /// The question.
+    pub(crate) title: String,
+    /// What it means.
+    pub(crate) detail: String,
+    /// The confirming button's label.
+    pub(crate) confirm: &'static str,
+    /// What happens on confirming.
+    pub(crate) action: Deletion,
+}
+
+/// Which file a path dialog is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PathPurpose {
+    /// Write this export there.
+    Export(String),
+    /// Import groups from there.
+    Import,
+}
+
+/// A path typed by hand where no file chooser is available.
+struct PathPrompt {
+    purpose: PathPurpose,
+    input: Entity<InputState>,
+    error: Option<String>,
+    _events: Subscription,
+}
+
+/// A modal's view and the subscription to its events.
+struct Held<T> {
+    view: Entity<T>,
+    _events: Subscription,
+}
+
+impl<T> Held<T> {
+    fn new(view: Entity<T>, events: Subscription) -> Self {
+        Self {
+            view,
+            _events: events,
+        }
+    }
+}
+
+/// The open modal.
+enum OpenModal {
+    Palette(Held<CommandPalette>),
+    Environment(Held<EnvironmentEditor>),
+    Certificate(Held<CertificateReview>),
+    Confirm(Confirmation),
+    Path(PathPrompt),
+}
+
+/// Which modal is open, for tests.
+#[cfg(all(test, target_os = "linux"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ModalKind {
+    /// The command palette.
+    Palette,
+    /// The environment editor.
+    Environment,
+    /// The certificate review.
+    Certificate,
+    /// A confirmation.
+    Confirm(Confirmation),
+    /// A file path.
+    Path,
+}
+
 /// The window's content.
 pub(crate) struct Workspace {
     state: Entity<AppState>,
     sidebar: Entity<Sidebar>,
     dashboard: Entity<DashboardView>,
     tabs: HashMap<ObjectKey, TabPane>,
+    editor: Option<OpenEditor>,
+    onboarding: Option<(Entity<EnvironmentEditor>, Subscription)>,
+    modal: Option<OpenModal>,
+    modal_focus: FocusHandle,
     sidebar_open: bool,
     shown: Shown,
+    title: SharedString,
     /// The recovery screen's header moves the window.
     drag: WindowDrag,
     /// Saves the window's bounds once it stops moving.
@@ -94,13 +244,29 @@ impl Workspace {
                 this.sync(window, cx);
             }),
             // The focused element went away (a closed pane): the keys go
-            // back to the main area.
+            // back to the main area, or the open modal.
             cx.on_focus_lost(window, |this, window, cx| {
                 this.focus_main(window, cx);
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
                 this.window_moved(window, cx);
             }),
+            cx.subscribe_in(
+                &sidebar,
+                window,
+                |this, _, event: &SidebarEvent, window, cx| {
+                    this.on_sidebar(event, window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &dashboard,
+                window,
+                |this, _, event: &DashboardEvent, window, cx| match event {
+                    DashboardEvent::Edit(reference) => {
+                        this.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
+                    }
+                },
+            ),
         ];
         let clock = cx.spawn(async move |this, cx| {
             loop {
@@ -111,19 +277,29 @@ impl Workspace {
                 }
             }
         });
-        let shown = Shown::Dashboard(state.read(cx).selected().cloned());
-        Self {
+        let (shown, title) = {
+            let state = state.read(cx);
+            (Shown::Dashboard(state.selected().cloned()), title_of(state))
+        };
+        let mut workspace = Self {
             state,
             sidebar,
             dashboard,
             tabs: HashMap::new(),
+            editor: None,
+            onboarding: None,
+            modal: None,
+            modal_focus: cx.focus_handle(),
             sidebar_open: true,
             shown,
+            title,
             drag: WindowDrag::default(),
             save_window: None,
             _subscriptions: subscriptions,
             _clock: clock,
-        }
+        };
+        workspace.sync_onboarding(window, cx);
+        workspace
     }
 
     /// The window moved or changed size: remember where, and save it once
@@ -153,7 +329,7 @@ impl Workspace {
 
     /// Shows `key`: in the first dashboard that lists it (the selected one
     /// first), with its pane open, or else as a tab (a notification's
-    /// click, the startup switches).
+    /// click, the startup switches, the palette).
     pub(crate) fn reveal(&mut self, key: &ObjectKey, window: &mut Window, cx: &mut Context<Self>) {
         let target = self.state.read(cx).dashboard_showing(key);
         match target {
@@ -213,6 +389,54 @@ impl Workspace {
         self.tabs.get(key).map(|tab| &tab.view)
     }
 
+    /// The window title last set.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The dashboard editor, while open.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn editor(&self) -> Option<&Entity<DashboardEditor>> {
+        self.editor.as_ref().map(|editor| &editor.view)
+    }
+
+    /// The onboarding form, while shown.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn onboarding(&self) -> Option<&Entity<EnvironmentEditor>> {
+        self.onboarding.as_ref().map(|(editor, _)| editor)
+    }
+
+    /// Which modal is open.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn modal(&self) -> Option<ModalKind> {
+        self.modal.as_ref().map(|modal| match modal {
+            OpenModal::Palette(_) => ModalKind::Palette,
+            OpenModal::Environment(_) => ModalKind::Environment,
+            OpenModal::Certificate(_) => ModalKind::Certificate,
+            OpenModal::Confirm(confirmation) => ModalKind::Confirm(confirmation.clone()),
+            OpenModal::Path(_) => ModalKind::Path,
+        })
+    }
+
+    /// The open palette.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn palette(&self) -> Option<&Entity<CommandPalette>> {
+        match &self.modal {
+            Some(OpenModal::Palette(palette)) => Some(&palette.view),
+            _ => None,
+        }
+    }
+
+    /// The open environment editor dialog.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn environment_editor(&self) -> Option<&Entity<EnvironmentEditor>> {
+        match &self.modal {
+            Some(OpenModal::Environment(editor)) => Some(&editor.view),
+            _ => None,
+        }
+    }
+
     /// Redraws everything that shows relative times.
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.sidebar.update(cx, |_, cx| cx.notify());
@@ -225,8 +449,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Follows the state: creates and drops tab panes, and moves the focus
-    /// when the main area switches between the dashboard and a tab.
+    /// Follows the state: creates and drops tab panes, closes the editor
+    /// when something else is shown, keeps the window title and the
+    /// onboarding form current, and moves the focus when the main area
+    /// switches between the dashboard and a tab.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let open: Vec<ObjectKey> = state.tabs().to_vec();
@@ -234,6 +460,11 @@ impl Workspace {
             Some(key) => Shown::Tab(key.clone()),
             None => Shown::Dashboard(state.selected().cloned()),
         };
+        let title = title_of(state);
+        if title != self.title {
+            window.set_window_title(&title);
+            self.title = title;
+        }
         self.tabs.retain(|key, _| open.contains(key));
         for key in open {
             if !self.tabs.contains_key(&key) {
@@ -247,32 +478,102 @@ impl Workspace {
                 self.tabs.insert(key, TabPane { view });
             }
         }
-        if shown != self.shown {
-            match &shown {
-                Shown::Tab(key) => {
-                    if let Some(tab) = self.tabs.get(key) {
-                        window.focus(&tab.view.focus_handle(cx), cx);
-                    }
-                }
-                Shown::Dashboard(_) => window.focus(&self.dashboard.focus_handle(cx), cx),
-            }
-            self.shown = shown;
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.opened_over != shown)
+        {
+            self.editor = None;
         }
+        if shown != self.shown {
+            self.shown = shown;
+            if self.modal.is_none() {
+                self.focus_main(window, cx);
+            }
+        }
+        self.sync_onboarding(window, cx);
         cx.notify();
     }
 
-    /// Gives the keyboard focus to the main area: the tab shown, else the
-    /// dashboard list.
+    /// Shows the onboarding form while there is no environment (not in the
+    /// demo, not while the settings can't be read).
+    fn sync_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = {
+            let state = self.state.read(cx);
+            state.environments().is_empty() && !state.is_demo() && state.config_problem().is_none()
+        };
+        match (wanted, self.onboarding.is_some()) {
+            (true, false) => {
+                let editor =
+                    cx.new(|cx| EnvironmentEditor::new(None, EditorMode::Onboarding, window, cx));
+                let events = cx.subscribe_in(
+                    &editor,
+                    window,
+                    |this, _, event: &EnvironmentEditorEvent, window, cx| {
+                        if matches!(event, EnvironmentEditorEvent::Close) {
+                            this.onboarding = None;
+                            this.focus_main(window, cx);
+                            cx.notify();
+                        }
+                    },
+                );
+                self.onboarding = Some((editor, events));
+            }
+            (false, true) => self.onboarding = None,
+            _ => {}
+        }
+    }
+
+    /// Gives the keyboard focus to the open modal, else the main area:
+    /// the editor, the tab shown, or the dashboard list.
     fn focus_main(&self, window: &mut Window, cx: &mut App) {
-        let tab = match &self.shown {
-            Shown::Tab(key) => self.tabs.get(key),
-            Shown::Dashboard(_) => None,
+        // The view that should have the keyboard, and where in it the
+        // keyboard goes when it has none yet (a just-opened view isn't
+        // drawn yet, so its fields can't be found inside it).
+        let (container, default) = if let Some(modal) = &self.modal {
+            match modal {
+                OpenModal::Palette(palette) => (
+                    palette.view.focus_handle(cx),
+                    palette.view.read(cx).default_focus(cx),
+                ),
+                OpenModal::Environment(editor) => (
+                    editor.view.focus_handle(cx),
+                    editor.view.read(cx).default_focus(cx),
+                ),
+                OpenModal::Certificate(review) => {
+                    let handle = review.view.focus_handle(cx);
+                    (handle.clone(), handle)
+                }
+                OpenModal::Path(prompt) => {
+                    let handle = prompt.input.focus_handle(cx);
+                    (handle.clone(), handle)
+                }
+                OpenModal::Confirm(_) => (self.modal_focus.clone(), self.modal_focus.clone()),
+            }
+        } else if let Some(editor) = &self.editor {
+            (
+                editor.view.focus_handle(cx),
+                editor.view.read(cx).default_focus(cx),
+            )
+        } else if let Some((onboarding, _)) = &self.onboarding {
+            (
+                onboarding.focus_handle(cx),
+                onboarding.read(cx).default_focus(cx),
+            )
+        } else {
+            let handle = match &self.shown {
+                Shown::Tab(key) => self.tabs.get(key).map_or_else(
+                    || self.dashboard.focus_handle(cx),
+                    |tab| tab.view.focus_handle(cx),
+                ),
+                Shown::Dashboard(_) => self.dashboard.focus_handle(cx),
+            };
+            (handle.clone(), handle)
         };
-        let handle = match tab {
-            Some(tab) => tab.view.focus_handle(cx),
-            None => self.dashboard.focus_handle(cx),
-        };
-        window.focus(&handle, cx);
+        // A text field inside keeps the focus it has.
+        if !container.contains_focused(window, cx) && !default.is_focused(window) {
+            window.focus(&default, cx);
+        }
     }
 
     fn on_focus_main(&mut self, _: &FocusMain, window: &mut Window, cx: &mut Context<Self>) {
@@ -287,9 +588,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.modal.is_some() {
+            return;
+        }
         let Some(reference) = self.state.read(cx).dashboard_at(action.0) else {
             return;
         };
+        self.show_dashboard(reference, window, cx);
+    }
+
+    /// Shows `reference` and focuses its list.
+    fn show_dashboard(
+        &mut self,
+        reference: DashboardRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.state.update(cx, |state, cx| {
             if state.select(reference) {
                 cx.notify();
@@ -336,7 +650,861 @@ impl Workspace {
             tab.view
                 .update(cx, |pane, cx| pane.set_sidebar_open(open, cx));
         }
+        if let Some(editor) = &self.editor {
+            editor
+                .view
+                .update(cx, |editor, cx| editor.set_sidebar_open(open, cx));
+        }
         cx.notify();
+    }
+
+    // --- Modals -------------------------------------------------------
+
+    /// Opens `modal` (replacing an open one) and gives it the keyboard.
+    fn open_modal(&mut self, modal: OpenModal, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.close_menu(cx);
+        });
+        self.modal = Some(modal);
+        self.focus_main(window, cx);
+        cx.notify();
+    }
+
+    /// Closes the open modal; the keyboard goes back to the main area.
+    pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal.take().is_some() {
+            self.focus_main(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn on_close_modal(&mut self, _: &CloseModal, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_modal(window, cx);
+    }
+
+    fn on_modal_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_modal(window, cx);
+    }
+
+    /// `secondary-k`: opens the command palette, or closes it.
+    fn toggle_palette(
+        &mut self,
+        _: &ToggleCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &self.modal {
+            Some(OpenModal::Palette(_)) => self.close_modal(window, cx),
+            Some(_) => {}
+            None => self.open_palette(window, cx),
+        }
+    }
+
+    /// Opens the command palette over what the main area shows.
+    pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = match &self.shown {
+            Shown::Tab(key) => vec![key.clone()],
+            Shown::Dashboard(_) if self.editor.is_none() => {
+                self.dashboard.update(cx, DashboardView::action_targets)
+            }
+            Shown::Dashboard(_) => Vec::new(),
+        };
+        let focus = Focus { targets };
+        let state = self.state.clone();
+        let palette = cx.new(|cx| CommandPalette::new(&state, &focus, window, cx));
+        let events = cx.subscribe_in(
+            &palette,
+            window,
+            |this, _, event: &PaletteEvent, window, cx| match event {
+                PaletteEvent::Close => this.close_modal(window, cx),
+                PaletteEvent::Run(command) => {
+                    this.close_modal(window, cx);
+                    this.run_command(command.clone(), window, cx);
+                }
+            },
+        );
+        self.open_modal(OpenModal::Palette(Held::new(palette, events)), window, cx);
+    }
+
+    /// Carries out what was chosen in the palette.
+    fn run_command(
+        &mut self,
+        command: PaletteCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            PaletteCommand::ShowDashboard(reference) => self.show_dashboard(reference, window, cx),
+            PaletteCommand::OpenObject(key) => self.reveal(&key, window, cx),
+            PaletteCommand::OpenTab(key) => self.state.update(cx, |state, cx| {
+                if state.open_tab(key) {
+                    cx.notify();
+                }
+            }),
+            PaletteCommand::Act(action, targets) if targets.is_empty() => {
+                let tab = match &self.shown {
+                    Shown::Tab(key) => Some(key.clone()),
+                    Shown::Dashboard(_) => None,
+                };
+                match tab {
+                    Some(key) => self.request(action, vec![key], cx),
+                    None => self
+                        .dashboard
+                        .update(cx, |dashboard, cx| dashboard.run_action(action, cx)),
+                }
+            }
+            PaletteCommand::Act(action, targets) => {
+                if let [only] = targets.as_slice() {
+                    self.reveal(only, window, cx);
+                }
+                self.request(action, targets, cx);
+            }
+            PaletteCommand::Reload => self.state.update(cx, |state, cx| {
+                if state.refresh(std::time::Instant::now()) {
+                    cx.notify();
+                }
+            }),
+            PaletteCommand::ToggleSidebar => self.toggle_sidebar(&ToggleSidebar, window, cx),
+            PaletteCommand::NewDashboard => self.new_dashboard(None, window, cx),
+            PaletteCommand::NewGroup => {
+                let created = self
+                    .state
+                    .update(cx, |state, _| state.create_group("", None));
+                if let Some(id) = created {
+                    self.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.start_rename(crate::sidebar::RenameTarget::Group(id), window, cx);
+                    });
+                }
+            }
+            PaletteCommand::EditDashboard(reference) => {
+                self.open_editor(EditorTarget::Existing(reference), "", window, cx);
+            }
+            PaletteCommand::ImportDashboards => self.import_groups(window, cx),
+            PaletteCommand::ExportDashboards => self.export_groups(&[], window, cx),
+            PaletteCommand::Pause(pause) => {
+                let until = pause_until(pause, Timestamp::now());
+                self.state
+                    .update(cx, |state, _| state.pause_notifications(Some(until)));
+            }
+            PaletteCommand::Resume => {
+                self.state
+                    .update(cx, |state, _| state.pause_notifications(None));
+            }
+            PaletteCommand::SwitchEnvironment(id) => self.switch_environment(&id, cx),
+            PaletteCommand::AddEnvironment => self.open_environment_editor(None, window, cx),
+            PaletteCommand::EditEnvironment(id) => {
+                self.open_environment_editor(Some(&id), window, cx);
+            }
+        }
+    }
+
+    /// Records an action request (the action dialogs pick it up).
+    fn request(
+        &self,
+        action: actions::ObjectAction,
+        targets: Vec<ObjectKey>,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            if state
+                .request(actions::ActionRequest { action, targets })
+                .is_err()
+            {
+                cx.notify();
+            }
+        });
+    }
+
+    fn on_sidebar(&mut self, event: &SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            SidebarEvent::NewDashboard(group) => self.new_dashboard(group.clone(), window, cx),
+            SidebarEvent::EditDashboard(reference) => {
+                self.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
+            }
+            SidebarEvent::DeleteGroup(id) => self.confirm_delete_group(id, window, cx),
+            SidebarEvent::DeleteDashboard(reference) => {
+                self.confirm_delete_dashboard(reference, window, cx);
+            }
+            SidebarEvent::ExportGroups(ids) => self.export_groups(ids, window, cx),
+            SidebarEvent::ImportGroups => self.import_groups(window, cx),
+            SidebarEvent::SwitchEnvironment(id) => self.switch_environment(id, cx),
+            SidebarEvent::AddEnvironment => self.open_environment_editor(None, window, cx),
+            SidebarEvent::EditEnvironment(id) => {
+                self.open_environment_editor(Some(id), window, cx);
+            }
+        }
+    }
+
+    // --- Dashboards ---------------------------------------------------
+
+    /// `secondary-n` (and the `+` buttons): a new dashboard in `group`, or
+    /// the selected dashboard's group, or the first; a group is created
+    /// when there is none.
+    fn new_dashboard(
+        &mut self,
+        group: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let group = self.state.update(cx, |state, _| {
+            state.environment()?;
+            group
+                .or_else(|| state.selected().map(|reference| reference.group_id.clone()))
+                .or_else(|| state.groups().first().map(|group| group.id.clone()))
+                .or_else(|| state.create_group(FIRST_GROUP_NAME, None))
+        });
+        if let Some(group) = group {
+            self.open_editor(EditorTarget::New, &group, window, cx);
+        }
+    }
+
+    fn on_new_dashboard(&mut self, _: &NewDashboard, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal.is_none() {
+            self.new_dashboard(None, window, cx);
+        }
+    }
+
+    /// Opens the dashboard editor in the main area.
+    fn open_editor(
+        &mut self,
+        target: EditorTarget,
+        group_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_modal(window, cx);
+        // Editing shows the dashboard's place: its own list, not a tab.
+        if let EditorTarget::Existing(reference) = &target {
+            self.state.update(cx, |state, cx| {
+                if state.select(reference.clone()) {
+                    cx.notify();
+                }
+            });
+            self.sync(window, cx);
+        } else if self.state.read(cx).active_tab().is_some() {
+            self.state.update(cx, |state, cx| {
+                if state.show_dashboard() {
+                    cx.notify();
+                }
+            });
+            self.sync(window, cx);
+        }
+        let Some(draft) =
+            crate::editor::model::initial_draft(self.state.read(cx), &target, group_id)
+        else {
+            return;
+        };
+        let state = self.state.clone();
+        let sidebar_open = self.sidebar_open;
+        let view = cx.new(|cx| {
+            let mut editor = DashboardEditor::new(state, target, draft, window, cx);
+            editor.set_sidebar_open(sidebar_open, cx);
+            editor
+        });
+        let events =
+            cx.subscribe_in(
+                &view,
+                window,
+                |this, _, event: &EditorEvent, window, cx| match event {
+                    EditorEvent::Closed => {
+                        this.editor = None;
+                        this.focus_main(window, cx);
+                        cx.notify();
+                    }
+                    EditorEvent::Delete(reference) => {
+                        this.confirm_delete_dashboard(reference, window, cx);
+                    }
+                },
+            );
+        self.editor = Some(OpenEditor {
+            view,
+            opened_over: self.shown.clone(),
+            _events: events,
+        });
+        self.focus_main(window, cx);
+        cx.notify();
+    }
+
+    fn confirm_delete_group(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(group) = self
+            .state
+            .read(cx)
+            .groups()
+            .iter()
+            .find(|group| group.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let count = group.dashboards.len();
+        let detail = match count {
+            0 => "It has no dashboards.".to_owned(),
+            1 => "Its dashboard is deleted with it. This can't be undone.".to_owned(),
+            _ => format!("Its {count} dashboards are deleted with it. This can't be undone."),
+        };
+        let confirmation = Confirmation {
+            title: format!("Delete the group {}?", group.name),
+            detail,
+            confirm: "delete group",
+            action: Deletion::Group(id.to_owned()),
+        };
+        self.open_modal(OpenModal::Confirm(confirmation), window, cx);
+    }
+
+    fn confirm_delete_dashboard(
+        &mut self,
+        reference: &DashboardRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self
+            .state
+            .read(cx)
+            .dashboard(reference)
+            .map(|(_, dashboard)| dashboard.name.clone())
+        else {
+            return;
+        };
+        let confirmation = Confirmation {
+            title: format!("Delete the dashboard {name}?"),
+            detail: "Its view and notification setting are deleted. This can't be undone."
+                .to_owned(),
+            confirm: "delete dashboard",
+            action: Deletion::Dashboard(reference.clone()),
+        };
+        self.open_modal(OpenModal::Confirm(confirmation), window, cx);
+    }
+
+    fn confirm_delete_environment(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self
+            .state
+            .read(cx)
+            .environment_by_id(id)
+            .map(|environment| environment.name.clone())
+        else {
+            return;
+        };
+        let confirmation = Confirmation {
+            title: format!("Delete the environment {name}?"),
+            detail: "Its dashboards, its password in the keychain and its local event log are \
+                     deleted. Icinga itself isn't touched. This can't be undone."
+                .to_owned(),
+            confirm: "delete environment",
+            action: Deletion::Environment(id.to_owned()),
+        };
+        self.open_modal(OpenModal::Confirm(confirmation), window, cx);
+    }
+
+    /// Carries out the open confirmation.
+    pub(crate) fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(OpenModal::Confirm(confirmation)) = self.modal.take() else {
+            return;
+        };
+        match confirmation.action {
+            Deletion::Group(id) => {
+                self.state.update(cx, |state, cx| {
+                    if state.delete_group(&id) {
+                        cx.notify();
+                    }
+                });
+            }
+            Deletion::Dashboard(reference) => {
+                if self.editor.as_ref().is_some_and(|editor| {
+                    *editor.view.read(cx).target() == EditorTarget::Existing(reference.clone())
+                }) {
+                    self.editor = None;
+                }
+                self.state.update(cx, |state, cx| {
+                    if state.delete_dashboard(&reference) {
+                        cx.notify();
+                    }
+                });
+            }
+            Deletion::Environment(id) => {
+                let deleted = match live::session(cx) {
+                    Some(session) => {
+                        session.update(cx, |session, cx| session.delete_environment(&id, cx))
+                    }
+                    None => self
+                        .state
+                        .update(cx, |state, _| state.remove_environment(&id).is_some()),
+                };
+                if deleted {
+                    self.editor = None;
+                }
+            }
+        }
+        self.focus_main(window, cx);
+        cx.notify();
+    }
+
+    fn on_confirm(&mut self, _: &ConfirmModal, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm(window, cx);
+    }
+
+    // --- Environments ---------------------------------------------------
+
+    /// Makes `id` the active environment (ENV-01).
+    fn switch_environment(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.editor = None;
+        match live::session(cx) {
+            Some(session) => {
+                session.update(cx, |session, cx| session.switch_environment(id, cx));
+            }
+            None => self.state.update(cx, |state, cx| {
+                if state.switch_environment(id) {
+                    cx.notify();
+                }
+            }),
+        }
+    }
+
+    /// Opens the environment editor for `id` (`None`: a new one).
+    pub(crate) fn open_environment_editor(
+        &mut self,
+        id: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let environment = id.and_then(|id| self.state.read(cx).environment_by_id(id).cloned());
+        if id.is_some() && environment.is_none() {
+            return;
+        }
+        let editor = cx
+            .new(|cx| EnvironmentEditor::new(environment.as_ref(), EditorMode::Dialog, window, cx));
+        let events = cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &EnvironmentEditorEvent, window, cx| match event {
+                EnvironmentEditorEvent::Close => this.close_modal(window, cx),
+                EnvironmentEditorEvent::Delete(id) => {
+                    this.confirm_delete_environment(id, window, cx);
+                }
+            },
+        );
+        self.open_modal(
+            OpenModal::Environment(Held::new(editor, events)),
+            window,
+            cx,
+        );
+    }
+
+    fn on_edit_environment(
+        &mut self,
+        _: &EditEnvironment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self
+            .state
+            .read(cx)
+            .active_environment_id()
+            .map(str::to_owned);
+        match id {
+            Some(id) => self.open_environment_editor(Some(&id), window, cx),
+            None => self.open_environment_editor(None, window, cx),
+        }
+    }
+
+    /// The banner's "Review certificate…" (ENV-05).
+    fn on_review_certificate(
+        &mut self,
+        _: &ReviewCertificate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.state.clone();
+        let review = cx.new(|cx| CertificateReview::new(state, cx));
+        let events = cx.subscribe_in(
+            &review,
+            window,
+            |this, _, event: &CertificateEvent, window, cx| match event {
+                CertificateEvent::Close => this.close_modal(window, cx),
+                CertificateEvent::Trust {
+                    environment_id,
+                    fingerprint,
+                } => {
+                    this.close_modal(window, cx);
+                    this.trust_certificate(environment_id, fingerprint, cx);
+                }
+                CertificateEvent::Edit(id) => {
+                    let id = id.clone();
+                    this.open_environment_editor(Some(&id), window, cx);
+                }
+            },
+        );
+        self.open_modal(
+            OpenModal::Certificate(Held::new(review, events)),
+            window,
+            cx,
+        );
+    }
+
+    fn trust_certificate(
+        &mut self,
+        environment_id: &str,
+        fingerprint: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match live::session(cx) {
+            Some(session) => session.update(cx, |session, cx| {
+                session.trust_certificate(environment_id, fingerprint, cx);
+            }),
+            None => self.state.update(cx, |state, cx| {
+                state.pin_certificate(environment_id, fingerprint);
+                cx.notify();
+            }),
+        }
+    }
+
+    // --- Export and import (DASH-06) -------------------------------------
+
+    /// Writes groups `ids` (all when empty) to a file the user chooses.
+    pub(crate) fn export_groups(
+        &mut self,
+        ids: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, name) = {
+            let state = self.state.read(cx);
+            let text = state.export_groups(ids);
+            let name = match ids {
+                [one] => state
+                    .groups()
+                    .iter()
+                    .find(|group| &group.id == one)
+                    .map_or_else(|| "dashboards".to_owned(), |group| group.name.clone()),
+                _ => state.environment().map_or_else(
+                    || "dashboards".to_owned(),
+                    |environment| environment.name.clone(),
+                ),
+            };
+            (text, format!("{}.icygui-dashboards.toml", file_stem(&name)))
+        };
+        let text = match text {
+            Ok(text) => text,
+            Err(error) => {
+                self.notify_user(UserNotice::problem("Nothing was exported.", error), cx);
+                return;
+            }
+        };
+        let directory = default_directory();
+        let prompt = cx.prompt_for_new_path(&directory, Some(&name));
+        let fallback = directory.join(&name);
+        let window_handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let chosen = prompt.await;
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| match chosen {
+                    Ok(Ok(Some(path))) => Self::write_export(path, text, cx),
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        tracing::info!(%error, "no file chooser; asking for a path");
+                        this.open_path_prompt(PathPurpose::Export(text), &fallback, window, cx);
+                    }
+                    Err(_) => {
+                        this.open_path_prompt(PathPurpose::Export(text), &fallback, window, cx);
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Reads groups from a file the user chooses and adds them.
+    pub(crate) fn import_groups(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).environment().is_none() {
+            return;
+        }
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import".into()),
+        });
+        let fallback = default_directory();
+        let window_handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let chosen = prompt.await;
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| match chosen {
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(path) = paths.into_iter().next() {
+                            Self::read_import(path, cx);
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        tracing::info!(%error, "no file chooser; asking for a path");
+                        this.open_path_prompt(PathPurpose::Import, &fallback, window, cx);
+                    }
+                    Err(_) => this.open_path_prompt(PathPurpose::Import, &fallback, window, cx),
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Opens the path dialog as if no file chooser were available: to
+    /// export `export` (when given), else to import.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn ask_for_path(
+        &mut self,
+        export: Option<String>,
+        suggested: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let purpose = export.map_or(PathPurpose::Import, PathPurpose::Export);
+        self.open_path_prompt(purpose, suggested, window, cx);
+    }
+
+    /// Asks for a path by hand (no file chooser on this desktop).
+    fn open_path_prompt(
+        &mut self,
+        purpose: PathPurpose,
+        suggested: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = suggested.display().to_string();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+        let events = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.finish_path_prompt(cx);
+            }
+        });
+        self.open_modal(
+            OpenModal::Path(PathPrompt {
+                purpose,
+                input,
+                error: None,
+                _events: events,
+            }),
+            window,
+            cx,
+        );
+    }
+
+    /// Carries out the path dialog.
+    fn finish_path_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some(OpenModal::Path(prompt)) = &mut self.modal else {
+            return;
+        };
+        let typed = prompt.input.read(cx).value().trim().to_owned();
+        if typed.is_empty() {
+            prompt.error = Some("Enter a file's path.".to_owned());
+            cx.notify();
+            return;
+        }
+        let path = expand_home(&typed);
+        let purpose = prompt.purpose.clone();
+        self.modal = None;
+        match purpose {
+            PathPurpose::Export(text) => Self::write_export(path, text, cx),
+            PathPurpose::Import => Self::read_import(path, cx),
+        }
+        cx.notify();
+    }
+
+    /// Writes an export off the UI thread and says how it went.
+    fn write_export(path: PathBuf, text: String, cx: &mut Context<Self>) {
+        let target = path.clone();
+        let write = cx
+            .background_executor()
+            .spawn(async move { std::fs::write(&target, text) });
+        cx.spawn(async move |this, cx| {
+            let written = write.await;
+            let _ = this.update(cx, |this, cx| {
+                let notice = match written {
+                    Ok(()) => {
+                        UserNotice::info("Dashboards exported.", Some(path.display().to_string()))
+                    }
+                    Err(error) => UserNotice::problem(
+                        "The dashboards couldn't be exported.",
+                        format!("{}: {error}", path.display()),
+                    ),
+                };
+                this.notify_user(notice, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Reads an export off the UI thread, then adds its groups.
+    fn read_import(path: PathBuf, cx: &mut Context<Self>) {
+        let source = path.clone();
+        let read = cx.background_executor().spawn(async move {
+            let text = std::fs::read_to_string(&source).map_err(|error| error.to_string())?;
+            ic_config::import_groups(&text).map_err(|error| error.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let imported = read.await;
+            let _ = this.update(cx, |this, cx| {
+                let notice = match imported {
+                    Ok(groups) => {
+                        let count = this
+                            .state
+                            .update(cx, |state, _| state.import_groups(groups));
+                        UserNotice::info(
+                            match count {
+                                1 => "1 group of dashboards imported.".to_owned(),
+                                count => format!("{count} groups of dashboards imported."),
+                            },
+                            Some(path.display().to_string()),
+                        )
+                    }
+                    Err(error) => UserNotice::problem(
+                        "Nothing was imported.",
+                        format!("{}: {error}", path.display()),
+                    ),
+                };
+                this.notify_user(notice, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Shows a message in the banner area.
+    fn notify_user(&self, notice: UserNotice, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            state.report(notice);
+            cx.notify();
+        });
+    }
+
+    // --- Rendering ------------------------------------------------------
+
+    fn render_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let modal = self.modal.as_ref()?;
+        let theme = cx.theme().clone();
+        let (width, placement, content): (f32, ModalPlacement, AnyElement) = match modal {
+            OpenModal::Palette(palette) => (
+                640.,
+                ModalPlacement::Top(px(70.)),
+                palette.view.clone().into_any_element(),
+            ),
+            OpenModal::Environment(editor) => (
+                620.,
+                ModalPlacement::Center,
+                editor.view.clone().into_any_element(),
+            ),
+            OpenModal::Certificate(review) => (
+                560.,
+                ModalPlacement::Center,
+                review.view.clone().into_any_element(),
+            ),
+            OpenModal::Confirm(confirmation) => (
+                460.,
+                ModalPlacement::Center,
+                self.render_confirmation(confirmation, &theme, cx),
+            ),
+            OpenModal::Path(prompt) => (
+                520.,
+                ModalPlacement::Center,
+                Self::render_path_prompt(prompt, cx),
+            ),
+        };
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .key_context(MODAL_CONTEXT)
+                .on_action(cx.listener(Self::on_close_modal))
+                .on_action(cx.listener(Self::on_modal_escape))
+                .child(
+                    Modal::new("modal", px(width), content)
+                        .placement(placement)
+                        .on_dismiss(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            this.close_modal(window, cx);
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_confirmation(
+        &self,
+        confirmation: &Confirmation,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id("confirmation")
+            .key_context(CONFIRM_CONTEXT)
+            .track_focus(&self.modal_focus)
+            .on_action(cx.listener(Self::on_confirm))
+            .child(
+                DialogBody::new(confirmation.title.clone())
+                    .child(
+                        div()
+                            .text_color(theme.colors.text_muted)
+                            .child(confirmation.detail.clone()),
+                    )
+                    .action(
+                        Button::new("confirm-cancel", "cancel")
+                            .key_hint("esc")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.close_modal(window, cx);
+                            })),
+                    )
+                    .action(
+                        Button::new("confirm-ok", confirmation.confirm)
+                            .variant(ButtonVariant::Danger)
+                            .key_hint("↵")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.confirm(window, cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_path_prompt(prompt: &PathPrompt, cx: &Context<Self>) -> AnyElement {
+        let (title, action, hint) = match prompt.purpose {
+            PathPurpose::Export(_) => (
+                "Export dashboards",
+                "export",
+                "No file chooser is available here: type where to write the file.",
+            ),
+            PathPurpose::Import => (
+                "Import dashboards",
+                "import",
+                "No file chooser is available here: type the export file's path.",
+            ),
+        };
+        DialogBody::new(title)
+            .child(
+                Field::new("file")
+                    .control(
+                        TextField::new(&prompt.input)
+                            .bordered(true)
+                            .invalid(prompt.error.is_some()),
+                    )
+                    .error(prompt.error.clone())
+                    .hint(hint),
+            )
+            .action(
+                Button::new("path-cancel", "cancel")
+                    .key_hint("esc")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.close_modal(window, cx);
+                    })),
+            )
+            .action(
+                Button::new("path-ok", action).primary().on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.finish_path_prompt(cx)),
+                ),
+            )
+            .into_any_element()
     }
 }
 
@@ -352,23 +1520,32 @@ impl Render for Workspace {
                 .child(recovery::render(&problem, &self.drag, window, cx))
                 .into_any_element();
         }
+        let main = if let Some((onboarding, _)) = &self.onboarding {
+            onboarding.clone().into_any_element()
+        } else if let Some(editor) = &self.editor {
+            editor.view.clone().into_any_element()
+        } else {
+            match &self.shown {
+                Shown::Tab(key) => self
+                    .tabs
+                    .get(key)
+                    .map(|tab| tab.view.clone().into_any_element()),
+                Shown::Dashboard(_) => None,
+            }
+            .unwrap_or_else(|| self.dashboard.clone().into_any_element())
+        };
+        let modal = self.render_modal(cx);
+        let modal_open = self.modal.is_some();
         let theme = cx.theme();
-        let main = match &self.shown {
-            Shown::Tab(key) => self
-                .tabs
-                .get(key)
-                .map(|tab| tab.view.clone().into_any_element()),
-            Shown::Dashboard(_) => None,
-        }
-        .unwrap_or_else(|| self.dashboard.clone().into_any_element());
         div()
             .id("workspace")
             .key_context(WORKSPACE_CONTEXT)
+            .relative()
             // Runs after the element under the mouse had its say: one that
             // takes the focus (the list, a tab, the search field), or keeps
             // it where it is (a menu trigger), prevents the default.
-            .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                if !window.default_prevented() {
+            .on_any_mouse_down(cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                if !modal_open && !window.default_prevented() {
                     this.focus_main(window, cx);
                 }
             }))
@@ -378,13 +1555,10 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::close_tab))
-            // The environment settings handle these (the banner's links).
-            .on_action(|_: &ReviewCertificate, _, _| {
-                tracing::info!("reviewing the certificate is part of the environment settings");
-            })
-            .on_action(|_: &EditEnvironment, _, _| {
-                tracing::info!("the environment settings open here");
-            })
+            .on_action(cx.listener(Self::toggle_palette))
+            .on_action(cx.listener(Self::on_new_dashboard))
+            .on_action(cx.listener(Self::on_review_certificate))
+            .on_action(cx.listener(Self::on_edit_environment))
             .flex()
             .size_full()
             .bg(theme.colors.window_background)
@@ -395,7 +1569,97 @@ impl Render for Workspace {
                 workspace.child(self.sidebar.clone())
             })
             .child(div().flex().flex_1().min_w_0().h_full().child(main))
+            .children(modal)
             .into_any_element()
+    }
+}
+
+/// The window title for the active environment.
+fn title_of(state: &AppState) -> SharedString {
+    chrome::window_title(
+        state
+            .environment()
+            .map(|environment| environment.name.as_str()),
+        state.is_demo(),
+    )
+}
+
+/// When a pause ends: after its duration, or at 08:00 tomorrow (local).
+fn pause_until(pause: Pause, now: Timestamp) -> Timestamp {
+    match pause {
+        Pause::For(duration) => {
+            Timestamp::from_unix_seconds(now.as_unix_seconds() + duration.as_secs_f64())
+        }
+        Pause::UntilTomorrow => tomorrow_morning(now),
+    }
+}
+
+/// 08:00 tomorrow in the local time zone (a day from now if that can't be
+/// worked out).
+fn tomorrow_morning(now: Timestamp) -> Timestamp {
+    use chrono::{Days, Local, NaiveTime, TimeZone as _};
+    let fallback = Timestamp::from_unix_seconds(now.as_unix_seconds() + 86_400.);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "current Unix seconds are far inside i64's range"
+    )]
+    let seconds = now.as_unix_seconds().floor() as i64;
+    let Some(local) = Local.timestamp_opt(seconds, 0).single() else {
+        return fallback;
+    };
+    let Some(morning) = NaiveTime::from_hms_opt(8, 0, 0) else {
+        return fallback;
+    };
+    local
+        .date_naive()
+        .checked_add_days(Days::new(1))
+        .and_then(|day| Local.from_local_datetime(&day.and_time(morning)).earliest())
+        .map_or(fallback, |at| {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "Unix seconds fit an f64 exactly"
+            )]
+            let seconds = at.timestamp() as f64;
+            Timestamp::from_unix_seconds(seconds)
+        })
+}
+
+/// Where file prompts start: `~/Downloads` if it exists, else home, else
+/// the current directory.
+fn default_directory() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home {
+        Some(home) if home.join("Downloads").is_dir() => home.join("Downloads"),
+        Some(home) => home,
+        None => PathBuf::from("."),
+    }
+}
+
+/// `name` as a file name: letters, digits, `-`, `_` and `.`, the rest `-`.
+fn file_stem(name: &str) -> String {
+    let stem: String = name
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if stem.is_empty() {
+        "dashboards".to_owned()
+    } else {
+        stem
+    }
+}
+
+/// A typed path with `~/` meaning the home directory.
+fn expand_home(text: &str) -> PathBuf {
+    match (text.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(text),
     }
 }
 
@@ -424,4 +1688,36 @@ pub(crate) fn sidebar_reopen(controls: Controls, theme: &Theme) -> impl IntoElem
                 .tooltip(Tooltip::new("Show sidebar"))
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleSidebar), cx)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pauses_end_after_their_duration_or_tomorrow_morning() {
+        let now = Timestamp::from_unix_seconds(1_790_000_000.);
+        assert_eq!(
+            pause_until(Pause::For(Duration::from_mins(30)), now),
+            Timestamp::from_unix_seconds(1_790_001_800.)
+        );
+        let tomorrow = pause_until(Pause::UntilTomorrow, now);
+        let ahead = tomorrow.as_unix_seconds() - now.as_unix_seconds();
+        assert!(ahead > 0. && ahead <= 2. * 86_400., "{ahead}");
+    }
+
+    #[test]
+    fn export_names_are_safe_file_names() {
+        assert_eq!(file_stem("prod cluster/db"), "prod-cluster-db");
+        assert_eq!(file_stem("  "), "dashboards");
+        assert_eq!(file_stem("ops_2.0"), "ops_2.0");
+    }
+
+    #[test]
+    fn typed_paths_expand_the_home_directory() {
+        if let Some(home) = std::env::var_os("HOME") {
+            assert_eq!(expand_home("~/x.toml"), PathBuf::from(home).join("x.toml"));
+        }
+        assert_eq!(expand_home("/tmp/x"), PathBuf::from("/tmp/x"));
+    }
 }

@@ -65,6 +65,8 @@ pub(crate) struct SidebarItem<'a> {
     pub(crate) dot: Dot,
     /// Unhandled problems, if any.
     pub(crate) count: Option<u32>,
+    /// Its notifications are off (a bell-off glyph).
+    pub(crate) muted: bool,
 }
 
 /// One group row and the dashboard rows shown under it.
@@ -173,6 +175,7 @@ pub(crate) fn groups<'a>(
                         count: summary
                             .map(|summary| summary.unhandled)
                             .filter(|unhandled| *unhandled > 0),
+                        muted: dashboard.notifications == ic_rules::ScopeSetting::Off,
                     }
                 })
                 .collect();

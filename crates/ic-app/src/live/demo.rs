@@ -13,7 +13,8 @@
 //! read by `crate::dev`; [`DemoFault`] makes the demo show the
 //! connection's failure states, for screenshots and tests.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -32,6 +33,11 @@ use secrecy::SecretString;
 /// The demo environment's id (stable, so tests and screenshots can refer
 /// to it).
 pub(crate) const ENVIRONMENT_ID: &str = "icygui-demo";
+/// The demo's second environment: `ic_mock`'s small `staging` scenario,
+/// to switch to (ENV-01).
+pub(crate) const STAGING_ID: &str = "icygui-demo-staging";
+/// The demo's third environment: `ic_mock`'s nearly empty `lab` scenario.
+pub(crate) const LAB_ID: &str = "icygui-demo-lab";
 /// The node name the demo's Icinga reports (the design's).
 pub(crate) const ENDPOINT: &str = "master-01";
 /// The demo server's API user.
@@ -130,18 +136,29 @@ pub(crate) struct DemoServer {
     thread: Option<JoinHandle<()>>,
     password: SecretString,
     fault: Option<DemoFault>,
+    /// Where it listens, once it does.
+    endpoint: Option<DemoEndpoint>,
 }
 
 impl DemoServer {
-    /// The secret store the core reads the demo user's password from (a
-    /// wrong one, or none, for the faults that need it).
-    pub(crate) fn secrets(&self) -> Arc<dyn SecretStore> {
-        let password = match self.fault {
+    /// Whether it listens.
+    pub(crate) fn is_up(&self) -> bool {
+        self.endpoint.is_some()
+    }
+
+    /// Records where it listens.
+    pub(crate) fn set_endpoint(&mut self, endpoint: DemoEndpoint) {
+        self.endpoint = Some(endpoint);
+    }
+
+    /// The password the core gets for this server (a wrong one, or none,
+    /// for the faults that need it).
+    pub(crate) fn core_password(&self) -> Option<SecretString> {
+        match self.fault {
             Some(DemoFault::Auth) => Some(SecretString::from("not-the-password")),
             Some(DemoFault::MissingSecret) => None,
             _ => Some(self.password.clone()),
-        };
-        Arc::new(DemoSecrets { password })
+        }
     }
 
     /// Where the environment should point, and the pin it should have,
@@ -215,6 +232,7 @@ pub(crate) fn start(
             thread: Some(thread),
             password: SecretString::from(password),
             fault,
+            endpoint: None,
         },
         endpoint,
     ))
@@ -282,34 +300,81 @@ fn demo_password() -> String {
     format!("demo-{nanos:x}-{:x}", std::process::id())
 }
 
-/// The demo user's password, for the core (the user's keychain is never
-/// touched).
-#[derive(Debug)]
-struct DemoSecrets {
-    password: Option<SecretString>,
+/// Passwords for the demo's environments, in memory only: the demo
+/// servers' (new every run), and any the environment editor stores while
+/// the demo runs. The user's keychain is never touched.
+#[derive(Debug, Default)]
+pub(crate) struct DemoSecrets {
+    passwords: Mutex<HashMap<String, SecretString>>,
+}
+
+impl DemoSecrets {
+    /// Sets (or, with `None`, removes) `account`'s password.
+    pub(crate) fn put(&self, account: &str, password: Option<SecretString>) {
+        let mut passwords = self
+            .passwords
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match password {
+            Some(password) => {
+                passwords.insert(account.to_owned(), password);
+            }
+            None => {
+                passwords.remove(account);
+            }
+        }
+    }
 }
 
 impl SecretStore for DemoSecrets {
     fn get(&self, account: &str) -> Result<Option<SecretString>, SecretError> {
-        Ok(self.password.clone().filter(|_| account == ENVIRONMENT_ID))
+        Ok(self
+            .passwords
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(account)
+            .cloned())
     }
 
-    fn set(&self, _account: &str, _secret: &SecretString) -> Result<(), SecretError> {
-        Err(SecretError::new("the demo stores no passwords"))
+    fn set(&self, account: &str, secret: &SecretString) -> Result<(), SecretError> {
+        self.put(account, Some(secret.clone()));
+        Ok(())
     }
 
-    fn delete(&self, _account: &str) -> Result<(), SecretError> {
+    fn delete(&self, account: &str) -> Result<(), SecretError> {
+        self.put(account, None);
         Ok(())
     }
 }
 
-/// The demo's settings: one environment, `prod-cluster`, with the
-/// design's folders of dashboards. Its URL and pin are filled in when the
-/// server is up (`AppState::set_demo_server`).
+/// The demo server to run for the environment `environment_id`, if it is
+/// one of the demo's: `prod-cluster` serves `prod_cluster` (the scenario,
+/// seed and fault chosen at start); `staging` and `lab` serve those
+/// scenarios without faults. Environments added while the demo runs are
+/// real ones (`None`).
+pub(crate) fn options_for(environment_id: &str, prod_cluster: &DemoOptions) -> Option<DemoOptions> {
+    let scenario = match environment_id {
+        ENVIRONMENT_ID => return Some(prod_cluster.clone()),
+        STAGING_ID => "staging",
+        LAB_ID => "lab",
+        _ => return None,
+    };
+    Some(DemoOptions {
+        scenario: scenario.to_owned(),
+        seed: prod_cluster.seed,
+        fault: None,
+    })
+}
+
+/// The demo's settings: three environments to switch between (ENV-01).
+/// `prod-cluster` (active) has the design's folders of dashboards;
+/// `staging` and `lab` start with the default dashboards of a new
+/// environment (DASH-05). Their URLs and pins are filled in when their
+/// servers are up (`AppState::set_demo_server`).
 pub(crate) fn config() -> Config {
-    let environment = Environment {
-        id: ENVIRONMENT_ID.to_owned(),
-        name: "prod-cluster".to_owned(),
+    let environment = |id: &str, name: &str, groups: Vec<DashboardGroup>| Environment {
+        id: id.to_owned(),
+        name: name.to_owned(),
         // Replaced once the demo server listens.
         url: "https://127.0.0.1:5665".to_owned(),
         auth: AuthConfig::Basic {
@@ -317,15 +382,39 @@ pub(crate) fn config() -> Config {
         },
         tls: TlsConfig::default(),
         author: Some("demo".to_owned()),
-        groups: groups(),
+        groups,
         notifications: NotificationSettings::default(),
     };
     Config {
         version: CONFIG_VERSION,
         general: General::default(),
         active_environment: Some(ENVIRONMENT_ID.to_owned()),
-        environments: vec![environment],
+        environments: vec![
+            environment(ENVIRONMENT_ID, "prod-cluster", groups()),
+            environment(
+                STAGING_ID,
+                "staging",
+                stable_ids(STAGING_ID, ic_config::default_groups()),
+            ),
+            environment(
+                LAB_ID,
+                "lab",
+                stable_ids(LAB_ID, ic_config::default_groups()),
+            ),
+        ],
     }
+}
+
+/// `groups` with ids derived from their names, so the demo's dashboards
+/// keep their ids from run to run.
+fn stable_ids(environment_id: &str, mut groups: Vec<DashboardGroup>) -> Vec<DashboardGroup> {
+    for group in &mut groups {
+        group.id = format!("{environment_id}-{}", slug(&group.name));
+        for dashboard in &mut group.dashboards {
+            dashboard.id = format!("{}-{}", group.id, slug(&dashboard.name));
+        }
+    }
+    groups
 }
 
 /// One dashboard of the demo.
@@ -464,9 +553,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_demo_has_one_valid_environment_with_the_designs_folders() {
+    fn the_demo_has_three_valid_environments() {
         let config = config();
-        assert_eq!(config.environments.len(), 1);
+        let names: Vec<_> = config
+            .environments
+            .iter()
+            .map(|environment| environment.name.as_str())
+            .collect();
+        assert_eq!(names, ["prod-cluster", "staging", "lab"]);
         assert_eq!(config.active_environment.as_deref(), Some(ENVIRONMENT_ID));
         let environment = &config.environments[0];
         let names: Vec<_> = environment
@@ -476,29 +570,54 @@ mod tests {
             .collect();
         assert_eq!(names, ["overview", "platform", "lab"]);
         let mut ids = HashSet::new();
-        for group in &environment.groups {
-            assert!(ids.insert(group.id.clone()));
-            for dashboard in &group.dashboards {
-                assert!(ids.insert(dashboard.id.clone()), "{}", dashboard.id);
-                ic_filter::Filter::parse(&dashboard.view.filter)
-                    .unwrap_or_else(|error| panic!("{}: {error:?}", dashboard.name));
+        for environment in &config.environments {
+            for group in &environment.groups {
+                assert!(ids.insert(group.id.clone()));
+                for dashboard in &group.dashboards {
+                    assert!(ids.insert(dashboard.id.clone()), "{}", dashboard.id);
+                    ic_filter::Filter::parse(&dashboard.view.filter)
+                        .unwrap_or_else(|error| panic!("{}: {error:?}", dashboard.name));
+                }
             }
         }
+        assert_eq!(
+            config.environments[1].groups[0].dashboards.len(),
+            3,
+            "the defaults"
+        );
+        assert_eq!(config, super::config(), "the same ids every run");
         assert!(config.validate().is_empty(), "{:?}", config.validate());
     }
 
     #[test]
-    fn the_secret_store_knows_only_the_demo_user() {
-        let secrets = DemoSecrets {
-            password: Some(SecretString::from("p")),
+    fn each_demo_environment_has_its_scenario() {
+        let prod = DemoOptions {
+            scenario: "large".to_owned(),
+            seed: 9,
+            fault: Some(DemoFault::Slow),
         };
+        assert_eq!(options_for(ENVIRONMENT_ID, &prod), Some(prod.clone()));
+        let staging = options_for(STAGING_ID, &prod).unwrap();
+        assert_eq!(
+            (staging.scenario.as_str(), staging.seed, staging.fault),
+            ("staging", 9, None)
+        );
+        assert_eq!(options_for(LAB_ID, &prod).unwrap().scenario, "lab");
+        assert_eq!(options_for("added-in-the-editor", &prod), None);
+    }
+
+    #[test]
+    fn the_secret_store_keeps_passwords_in_memory() {
+        let secrets = DemoSecrets::default();
+        secrets.put(ENVIRONMENT_ID, Some(SecretString::from("p")));
         assert!(secrets.get(ENVIRONMENT_ID).unwrap().is_some());
         assert!(secrets.get("someone-else").unwrap().is_none());
-        assert!(
-            secrets
-                .set(ENVIRONMENT_ID, &SecretString::from("x"))
-                .is_err()
-        );
+        secrets
+            .set("someone-else", &SecretString::from("x"))
+            .unwrap();
+        assert!(secrets.get("someone-else").unwrap().is_some());
+        secrets.delete("someone-else").unwrap();
+        assert!(secrets.get("someone-else").unwrap().is_none());
     }
 
     #[test]
@@ -508,6 +627,7 @@ mod tests {
             thread: None,
             password: SecretString::from("right"),
             fault,
+            endpoint: None,
         };
         let endpoint = DemoEndpoint {
             url: "https://127.0.0.1:4000".to_owned(),
@@ -515,9 +635,7 @@ mod tests {
         };
         let password = |fault| {
             server(fault)
-                .secrets()
-                .get(ENVIRONMENT_ID)
-                .unwrap()
+                .core_password()
                 .map(|secret| secrecy::ExposeSecret::expose_secret(&secret).to_owned())
         };
         assert_eq!(password(None).as_deref(), Some("right"));
@@ -556,10 +674,10 @@ mod tests {
             thread: None,
             password: SecretString::from("hunter2-secret"),
             fault: None,
+            endpoint: None,
         };
-        let secrets = DemoSecrets {
-            password: Some(SecretString::from("hunter2-secret")),
-        };
+        let secrets = DemoSecrets::default();
+        secrets.put(ENVIRONMENT_ID, Some(SecretString::from("hunter2-secret")));
         let text = format!("{server:?} {secrets:?}");
         assert!(!text.contains("hunter2"), "{text}");
     }

@@ -1,38 +1,103 @@
-//! The sidebar: window controls and dashboard search in the header, groups
-//! (folders) of dashboards, the objects open as tabs, and the footer with
-//! the sidebar toggle, the notification centre, the connection status and
-//! `+`.
+//! The sidebar (DASH-01): window controls and dashboard search in the
+//! header, groups (folders) of dashboards, the objects open as tabs, and
+//! the footer with the sidebar toggle, the notification centre, the
+//! connection status and `+`.
+//!
+//! - Groups and dashboards are managed from their `···` menus (also a
+//!   right click on a dashboard): new dashboard (also the group's `+`),
+//!   rename (in place), duplicate, move, reorder, notification setting,
+//!   export, delete (DASH-02, DASH-03). Deleting asks first, and so do the
+//!   editors: the sidebar only says what was asked for ([`SidebarEvent`]),
+//!   the workspace opens the dialogs.
+//! - The footer's connection status opens the connection details with the
+//!   environment switcher (ENV-01, ENV-06); its `+` creates dashboards and
+//!   groups and imports or exports them (DASH-06).
 //!
 //! The footer's "last event" age refreshes with the workspace's clock
-//! (UI-04).
-//!
-//! In the search field, Enter shows the first matching dashboard and Escape
-//! clears the search; both hand the keyboard back to the main area.
+//! (UI-04). In the search field, Enter shows the first matching dashboard
+//! and Escape clears the search; both hand the keyboard back to the main
+//! area.
 
+mod menus;
 mod model;
 
-use std::fmt::Write as _;
-use std::time::Instant;
-
 use gpui::{
-    AnyElement, AppContext as _, ClickEvent, Context, Div, Entity, FontWeight,
+    AnyElement, AppContext as _, ClickEvent, Context, Div, Entity, EventEmitter, FontWeight,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Point, Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div, prelude::FluentBuilder as _, px,
 };
-use ic_model::{Timestamp, format_compact};
+use ic_model::Timestamp;
+use ic_rules::{DashboardRef, ScopeSetting};
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{
-    ActiveTheme as _, Divider, DividerColor, GlyphButton, Icon, IconButton, IconName, Menu,
-    MenuItem, Metrics, Popover, StateDot, TextField, Theme, Tooltip,
+    ActiveTheme as _, Divider, DividerColor, GlyphButton, Icon, IconButton, IconName, Link,
+    Metrics, Popover, StateDot, TextField, Theme, Tooltip,
 };
 
 use crate::actions::FocusMain;
 use crate::app_state::{AppState, Health};
 use crate::chrome::{Controls, WindowControls, WindowDrag};
+use crate::menu_state::{OpenMenu, down_position};
 use crate::workspace::ToggleSidebar;
 
-use self::model::{Dot, OpenTab, SidebarGroup, SidebarItem};
+pub(crate) use self::menus::new_key;
+pub(crate) use self::model::Dot;
+use self::model::{OpenTab, SidebarGroup, SidebarItem};
+
+/// What the sidebar asks the workspace to do: open an editor, a dialog
+/// or a file prompt, or switch environments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarEvent {
+    /// Create a dashboard in this group (`None`: the selected dashboard's
+    /// group, else the first; a group is created if there is none).
+    NewDashboard(Option<String>),
+    /// Edit this dashboard.
+    EditDashboard(DashboardRef),
+    /// Delete this group (after asking).
+    DeleteGroup(String),
+    /// Delete this dashboard (after asking).
+    DeleteDashboard(DashboardRef),
+    /// Export these groups (empty: all of them) to a file.
+    ExportGroups(Vec<String>),
+    /// Import groups from a file.
+    ImportGroups,
+    /// Make this environment the active one.
+    SwitchEnvironment(String),
+    /// Open the editor for a new environment.
+    AddEnvironment,
+    /// Open the editor for this environment.
+    EditEnvironment(String),
+}
+
+/// The sidebar's popup menus.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarMenu {
+    /// The connection details and environment switcher (footer status).
+    Status,
+    /// The footer's `+`.
+    Footer,
+    /// A group's `···`.
+    Group(String),
+    /// A dashboard's `···` (or right click).
+    Dashboard(DashboardRef),
+}
+
+/// What is being renamed in place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RenameTarget {
+    /// A group, by id.
+    Group(String),
+    /// A dashboard.
+    Dashboard(DashboardRef),
+}
+
+/// A rename in progress: a text field in place of the name.
+struct Rename {
+    target: RenameTarget,
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
 
 /// The sidebar view.
 pub(crate) struct Sidebar {
@@ -40,50 +105,12 @@ pub(crate) struct Sidebar {
     search: Entity<InputState>,
     query: String,
     drag: WindowDrag,
-    details: Toggle,
+    menus: OpenMenu<SidebarMenu>,
+    rename: Option<Rename>,
     _subscriptions: Vec<Subscription>,
 }
 
-/// Whether the connection details are open (ENV-06).
-///
-/// A press outside closes them; when that press is on the footer status
-/// itself, its click must not open them again, so the press that closed
-/// them is remembered.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct Toggle {
-    open: bool,
-    dismissed_at: Option<Point<Pixels>>,
-}
-
-impl Toggle {
-    /// Whether it's open.
-    pub(crate) fn is_open(self) -> bool {
-        self.open
-    }
-
-    /// A click on the trigger that went down at `down`.
-    pub(crate) fn toggle(&mut self, down: Option<Point<Pixels>>) {
-        let dismissed = self.dismissed_at.take();
-        if down.is_some() && dismissed == down {
-            return;
-        }
-        self.open = !self.open;
-    }
-
-    /// A press at `at` outside the popover.
-    pub(crate) fn dismiss(&mut self, at: Point<Pixels>) {
-        if self.open {
-            self.open = false;
-            self.dismissed_at = Some(at);
-        }
-    }
-
-    /// Closes it.
-    pub(crate) fn close(&mut self) {
-        self.open = false;
-        self.dismissed_at = None;
-    }
-}
+impl EventEmitter<SidebarEvent> for Sidebar {}
 
 impl Sidebar {
     pub(crate) fn new(
@@ -112,7 +139,8 @@ impl Sidebar {
             search,
             query: String::new(),
             drag: WindowDrag::default(),
-            details: Toggle::default(),
+            menus: OpenMenu::default(),
+            rename: None,
             _subscriptions: subscriptions,
         }
     }
@@ -120,7 +148,30 @@ impl Sidebar {
     /// Whether the connection details are open.
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn details_open(&self) -> bool {
-        self.details.is_open()
+        self.menus.is_open(&SidebarMenu::Status)
+    }
+
+    /// The open menu.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn open_menu(&self) -> Option<&SidebarMenu> {
+        self.menus.current()
+    }
+
+    /// What is being renamed, and its field.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn renaming(&self) -> Option<(&RenameTarget, &Entity<InputState>)> {
+        self.rename
+            .as_ref()
+            .map(|rename| (&rename.target, &rename.input))
+    }
+
+    /// Closes the open menu. Returns whether one was open.
+    pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let closed = self.menus.close();
+        if closed {
+            cx.notify();
+        }
+        closed
     }
 
     /// Enter in the search field: shows the first dashboard the search
@@ -176,6 +227,80 @@ impl Sidebar {
         &self.query
     }
 
+    /// Starts renaming `target` in place: a field with its name, selected.
+    pub(crate) fn start_rename(
+        &mut self,
+        target: RenameTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.menus.close();
+        let name = {
+            let state = self.state.read(cx);
+            match &target {
+                RenameTarget::Group(id) => state
+                    .groups()
+                    .iter()
+                    .find(|group| &group.id == id)
+                    .map(|group| group.name.clone()),
+                RenameTarget::Dashboard(reference) => state
+                    .dashboard(reference)
+                    .map(|(_, dashboard)| dashboard.name.clone()),
+            }
+        };
+        let Some(name) = name else {
+            return;
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    this.finish_rename(true, window, cx);
+                }
+                InputEvent::Change | InputEvent::Focus => {}
+            },
+        );
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        self.rename = Some(Rename {
+            target,
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    /// Ends the rename: saves the new name (`commit`), or keeps the old
+    /// one; the keyboard goes back to the main area.
+    fn finish_rename(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.rename.take() else {
+            return;
+        };
+        if commit {
+            let name = rename.input.read(cx).value().to_string();
+            self.state.update(cx, |state, cx| {
+                let renamed = match &rename.target {
+                    RenameTarget::Group(id) => state.rename_group(id, &name),
+                    RenameTarget::Dashboard(reference) => state.rename_dashboard(reference, &name),
+                };
+                if renamed {
+                    cx.notify();
+                }
+            });
+        }
+        cx.notify();
+        window.dispatch_action(Box::new(FocusMain), cx);
+    }
+
+    /// Escape in the rename field: keeps the old name.
+    fn cancel_rename(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_rename(false, window, cx);
+    }
+
     fn render_header(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let metrics = theme.metrics;
@@ -217,7 +342,7 @@ impl Sidebar {
         let state = self.state.read(cx);
         let theme = cx.theme().clone();
         let Some(environment) = state.environment() else {
-            return empty_note("No dashboards yet", &theme);
+            return empty_note("No dashboards yet", None, &theme, cx);
         };
         // While a tab is shown, no dashboard is highlighted.
         let selected = state.selected().filter(|_| state.active_tab().is_none());
@@ -229,16 +354,16 @@ impl Sidebar {
         );
         let tabs = model::open_tabs(state.tabs(), state.active_tab(), state.snapshot());
         if groups.is_empty() && tabs.is_empty() {
-            let note = if self.query.trim().is_empty() {
-                "No dashboards yet"
+            return if self.query.trim().is_empty() {
+                empty_note("No dashboards yet", Some("new dashboard"), &theme, cx)
             } else {
-                "No matching dashboards"
+                empty_note("No matching dashboards", None, &theme, cx)
             };
-            return empty_note(note, &theme);
         }
+        let count = environment.groups.len();
         let mut rows: Vec<AnyElement> = groups
             .iter()
-            .map(|group| Self::render_group(group, &theme, cx))
+            .map(|group| self.render_group(group, count, &theme, cx))
             .collect();
         if !tabs.is_empty() {
             rows.push(Self::render_open_tabs(&tabs, &theme, cx));
@@ -402,30 +527,43 @@ impl Sidebar {
             .into_any_element()
     }
 
-    fn render_group(group: &SidebarGroup<'_>, theme: &Theme, cx: &Context<Self>) -> AnyElement {
+    fn render_group(
+        &self,
+        group: &SidebarGroup<'_>,
+        group_count: usize,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         div()
             .flex()
             .flex_col()
             .flex_none()
             .pb(px(6.))
-            .child(Self::render_group_header(group, theme, cx))
+            .child(self.render_group_header(group, group_count, theme, cx))
             .children(
                 group
                     .items
                     .iter()
-                    .map(|item| Self::render_item(item, theme, cx)),
+                    .map(|item| self.render_item(item, theme, cx)),
             )
             .into_any_element()
     }
 
     fn render_group_header(
+        &self,
         group: &SidebarGroup<'_>,
+        group_count: usize,
         theme: &Theme,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let colors = theme.colors;
         let group_id = group.group.id.clone();
         let hover_group = SharedString::from(format!("sidebar-group-{group_id}"));
+        let menu_open = self.menus.is_open(&SidebarMenu::Group(group_id.clone()));
+        let renaming = self
+            .rename
+            .as_ref()
+            .filter(|rename| rename.target == RenameTarget::Group(group_id.clone()));
         let chevron = if group.expanded {
             IconName::ChevronDown
         } else {
@@ -443,6 +581,30 @@ impl Sidebar {
                     .group_hover(hover_group.clone(), gpui::Styled::visible)
             }
         };
+        let label: AnyElement = match renaming {
+            Some(rename) => Self::rename_field(rename, theme.text.heading, cx),
+            None => div()
+                .min_w_0()
+                .truncate()
+                .text_size(theme.text.heading)
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if group.active {
+                    colors.text_emphasis
+                } else {
+                    colors.text_secondary
+                })
+                .child(group.group.name.clone())
+                .into_any_element(),
+        };
+        let muted = group.group.notifications == ScopeSetting::Off;
+        let index = self
+            .state
+            .read(cx)
+            .groups()
+            .iter()
+            .position(|candidate| candidate.id == group_id)
+            .unwrap_or(0);
+        let toggle_id = group_id.clone();
         div()
             .id(SharedString::from(format!("group-{group_id}")))
             .group(hover_group.clone())
@@ -455,87 +617,166 @@ impl Sidebar {
             // The `···` button's reach makes up the rest of the 12px.
             .pr(theme.metrics.sidebar_padding - GlyphButton::REACH)
             .cursor_pointer()
-            .when(group.active, |row| row.bg(colors.group_active))
-            .when(!group.active, |row| {
+            .when(group.active || menu_open, |row| row.bg(colors.group_active))
+            .when(!group.active && !menu_open, |row| {
                 row.hover(|style| style.bg(colors.group_hover))
             })
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(theme.text.heading)
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if group.active {
-                        colors.text_emphasis
-                    } else {
-                        colors.text_secondary
-                    })
-                    .child(group.group.name.clone()),
-            )
-            .child(reveal(
-                div()
-                    .flex_none()
-                    .child(Icon::new(chevron).size(px(12.)).color(colors.text_muted)),
-                group.active || !group.expanded,
-            ))
-            .child(div().flex_1())
-            .child(reveal(group_actions(&group_id, theme), group.active))
+            .child(label)
+            .when(muted && renaming.is_none(), |row| {
+                row.child(
+                    Icon::new(IconName::BellOff)
+                        .size(px(11.))
+                        .color(colors.text_faint),
+                )
+            })
+            .when(renaming.is_none(), |row| {
+                row.child(reveal(
+                    div()
+                        .flex_none()
+                        .child(Icon::new(chevron).size(px(12.)).color(colors.text_muted)),
+                    group.active || !group.expanded,
+                ))
+                .child(div().flex_1())
+                .child(reveal(
+                    self.group_actions(group.group, index, group_count, theme, cx),
+                    group.active || menu_open,
+                ))
+            })
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if this.rename.is_some() {
+                    return;
+                }
                 this.state.update(cx, |state, cx| {
-                    if state.toggle_group(&group_id) {
+                    if state.toggle_group(&toggle_id) {
                         cx.notify();
                     }
                 });
             }))
     }
 
-    fn render_item(item: &SidebarItem<'_>, theme: &Theme, cx: &Context<Self>) -> AnyElement {
+    /// The group row's `+` (new dashboard) and `···` (group menu) buttons,
+    /// sized and spaced like the design's glyphs.
+    fn group_actions(
+        &self,
+        group: &ic_config::DashboardGroup,
+        index: usize,
+        group_count: usize,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let group_id = group.id.clone();
+        let menu = SidebarMenu::Group(group_id.clone());
+        let open = self.menus.is_open(&menu);
+        let button = |id: String, glyph: &'static str, size: f32| {
+            GlyphButton::new(SharedString::from(id), glyph)
+                .text_size(px(size))
+                .color(theme.colors.text)
+        };
+        let add_group = group_id.clone();
+        let add = button(format!("group-add-{group_id}"), "+", 15.)
+            .tooltip(Tooltip::new("New dashboard"))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.menus.close();
+                cx.emit(SidebarEvent::NewDashboard(Some(add_group.clone())));
+                cx.notify();
+            }));
+        let more = button(format!("group-menu-{group_id}"), "···", 13.)
+            .selected(open)
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                this.menus.toggle(menu.clone(), down_position(event));
+                cx.notify();
+            }));
+        // The buttons' reach (4px on each side) makes the design's 8px between
+        // the glyphs.
+        div().flex().flex_none().items_center().child(add).child(
+            div()
+                .relative()
+                .flex_none()
+                .child(if open {
+                    more
+                } else {
+                    more.tooltip(Tooltip::new("Group options"))
+                })
+                .when(open, |slot| {
+                    slot.child(
+                        Popover::new(Self::group_menu(group, index, group_count, cx)).align_right(),
+                    )
+                }),
+        )
+    }
+
+    fn render_item(&self, item: &SidebarItem<'_>, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let colors = theme.colors;
         let metrics = theme.metrics;
         let dot = dot(item.dot, theme);
         let reference = item.reference.clone();
-        let id = SharedString::from(format!(
+        let menu = SidebarMenu::Dashboard(item.reference.clone());
+        let menu_open = self.menus.is_open(&menu);
+        let renaming = self
+            .rename
+            .as_ref()
+            .filter(|rename| rename.target == RenameTarget::Dashboard(item.reference.clone()));
+        let id = format!(
             "dashboard-{}-{}",
             item.reference.group_id, item.reference.dashboard_id
-        ));
+        );
+        let hover = SharedString::from(format!("item-{id}"));
+        let label: AnyElement = match renaming {
+            Some(rename) => Self::rename_field(rename, theme.text.row, cx),
+            None => div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(theme.text.row)
+                .text_color(if item.selected {
+                    colors.text_emphasis
+                } else {
+                    colors.text_secondary
+                })
+                .child(SharedString::from(item.name.to_owned()))
+                .into_any_element(),
+        };
+        let right_click_menu = menu.clone();
         div()
-            .id(id)
+            .id(SharedString::from(id.clone()))
+            .group(hover.clone())
+            .relative()
             .flex()
             .flex_none()
             .items_center()
             .gap(px(12.))
             .h(metrics.item_row_height)
             .pl(px(14.))
-            .pr(metrics.sidebar_padding)
+            .pr(metrics.sidebar_padding - GlyphButton::REACH)
             .cursor_pointer()
-            .when(item.selected, |row| row.bg(colors.item_active))
-            .when(!item.selected, |row| {
+            .when(item.selected || menu_open, |row| row.bg(colors.item_active))
+            .when(!item.selected && !menu_open, |row| {
                 row.hover(|style| style.bg(colors.item_hover))
             })
             .child(dot.size(metrics.sidebar_dot))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(theme.text.row)
-                    .text_color(if item.selected {
-                        colors.text_emphasis
-                    } else {
-                        colors.text_secondary
-                    })
-                    .child(SharedString::from(item.name.to_owned())),
-            )
-            .when_some(item.count, |row, count| {
+            .child(label)
+            .when(item.muted && renaming.is_none(), |row| {
                 row.child(
-                    div()
-                        .flex_none()
-                        .text_size(theme.text.label)
-                        .text_color(colors.text_muted)
-                        .child(count.to_string()),
+                    Icon::new(IconName::BellOff)
+                        .size(px(11.))
+                        .color(colors.text_faint),
                 )
             })
+            .when(renaming.is_none(), |row| {
+                row.child(self.item_trailer(item, &id, &hover, theme, cx))
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    this.menus.open(right_click_menu.clone());
+                    cx.notify();
+                }),
+            )
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if this.rename.is_some() {
+                    return;
+                }
                 let reference = reference.clone();
                 this.state.update(cx, |state, cx| {
                     if state.select(reference) {
@@ -546,8 +787,74 @@ impl Sidebar {
             .into_any_element()
     }
 
+    /// The field a group or dashboard is renamed in, in place of its name.
+    fn rename_field(rename: &Rename, text_size: Pixels, cx: &Context<Self>) -> AnyElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .on_action(cx.listener(Self::cancel_rename))
+            .child(
+                TextField::new(&rename.input)
+                    .bordered(true)
+                    .text_size(text_size),
+            )
+            .into_any_element()
+    }
+
+    /// A dashboard row's right end: its count, or the `···` button on
+    /// hover and while its menu is open.
+    fn item_trailer(
+        &self,
+        item: &SidebarItem<'_>,
+        id: &str,
+        hover: &SharedString,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let colors = theme.colors;
+        let menu = SidebarMenu::Dashboard(item.reference.clone());
+        let menu_open = self.menus.is_open(&menu);
+        let more = GlyphButton::new(SharedString::from(format!("{id}-menu")), "···")
+            .text_size(px(13.))
+            .color(colors.text_muted)
+            .selected(menu_open)
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                this.menus.toggle(menu.clone(), down_position(event));
+                cx.notify();
+            }));
+        div()
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_end()
+            .min_w(px(22.))
+            .child(
+                div()
+                    .when(menu_open, gpui::Styled::invisible)
+                    .group_hover(hover.clone(), gpui::Styled::invisible)
+                    .pr(GlyphButton::REACH)
+                    .text_size(theme.text.label)
+                    .text_color(colors.text_muted)
+                    .children(item.count.map(|count| count.to_string())),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .when(!menu_open, |slot| {
+                        slot.invisible()
+                            .group_hover(hover.clone(), gpui::Styled::visible)
+                    })
+                    .child(more),
+            )
+            .when(menu_open, |slot| {
+                slot.child(Popover::new(self.dashboard_menu(&item.reference, cx)).align_right())
+            })
+    }
+
     /// The footer's connection status (`● master-01 · 2s`, ENV-06): it
-    /// opens the connection details.
+    /// opens the connection details and the environment switcher.
     fn render_status(&self, now: Timestamp, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -557,7 +864,7 @@ impl Sidebar {
         let health = connection.health(now);
         let label = connection.label(now);
         let demo = state.is_demo();
-        let open = self.details.is_open();
+        let open = self.menus.is_open(&SidebarMenu::Status);
         let status = div()
             .id("environment-status")
             .flex()
@@ -592,17 +899,13 @@ impl Sidebar {
             })
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                let down = match event {
-                    ClickEvent::Mouse(click) => Some(click.down.position),
-                    ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => None,
-                };
-                this.details.toggle(down);
+                this.menus.toggle(SidebarMenu::Status, down_position(event));
                 cx.notify();
             }));
         if open {
             status
         } else {
-            status.tooltip(Tooltip::text("Connection details"))
+            status.tooltip(Tooltip::text("Environments and connection details"))
         }
     }
 
@@ -612,8 +915,16 @@ impl Sidebar {
         let metrics = theme.metrics;
         let state = self.state.read(cx);
         let now = Timestamp::now();
-        let open = self.details.is_open();
+        let details_open = self.menus.is_open(&SidebarMenu::Status);
+        let footer_open = self.menus.is_open(&SidebarMenu::Footer);
         let status = self.render_status(now, cx);
+        let add = IconButton::new("new-dashboard", IconName::Plus)
+            .icon_size(metrics.icon_large)
+            .selected(footer_open)
+            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                this.menus.toggle(SidebarMenu::Footer, down_position(event));
+                cx.notify();
+            }));
         // Icon buttons are wider than their icons: the padding and gap put
         // the icons where the design draws them (12px in, 14px apart).
         div()
@@ -629,7 +940,7 @@ impl Sidebar {
             .child(
                 IconButton::new("toggle-sidebar", IconName::PanelLeft)
                     .icon_size(metrics.icon_large)
-                    .tooltip(Tooltip::new("Hide sidebar").key(toggle_key()))
+                    .tooltip(Tooltip::new("Hide sidebar").key(menus::toggle_key()))
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(ToggleSidebar), cx);
                     }),
@@ -641,7 +952,7 @@ impl Sidebar {
                     .child(
                         IconButton::new("notification-centre", IconName::Clock)
                             .icon_size(metrics.icon_large)
-                            .tooltip(Tooltip::new(notifications_tooltip(
+                            .tooltip(Tooltip::new(menus::notifications_tooltip(
                                 state.unread_notifications(),
                                 state.paused_until(),
                                 now,
@@ -670,156 +981,29 @@ impl Sidebar {
                     .flex_1()
                     .min_w_0()
                     .child(status)
-                    .when(open, |slot| {
+                    .when(details_open, |slot| {
                         slot.child(Popover::new(self.details_menu(now, cx)).above().gap(px(8.)))
                     }),
             )
             .child(
-                IconButton::new("new-dashboard", IconName::Plus)
-                    .icon_size(metrics.icon_large)
-                    .tooltip(Tooltip::new("New dashboard"))
-                    .on_click(|_, _, _| {
-                        tracing::debug!("new dashboard: the dashboard editor opens here");
+                div()
+                    .relative()
+                    .flex_none()
+                    .child(if footer_open {
+                        add
+                    } else {
+                        add.tooltip(Tooltip::new("New dashboard or group").key(new_key()))
+                    })
+                    .when(footer_open, |slot| {
+                        slot.child(
+                            Popover::new(self.footer_menu(cx))
+                                .above()
+                                .align_right()
+                                .gap(px(8.)),
+                        )
                     }),
             )
     }
-
-    /// The connection details above the footer status (ENV-06): the
-    /// environment, the endpoint and its version, the state, the last event,
-    /// the API user, and "Reload from Icinga".
-    fn details_menu(&self, now: Timestamp, cx: &Context<Self>) -> Menu {
-        let theme = cx.theme();
-        let colors = theme.colors;
-        let state = self.state.read(cx);
-        let connection = state.connection();
-        let line = |key: &'static str, value: String| {
-            div()
-                .flex()
-                .gap(px(10.))
-                .text_size(theme.text.small)
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(84.))
-                        .text_color(colors.text_faint)
-                        .child(key),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(colors.text)
-                        .child(value),
-                )
-        };
-        let mut menu = Menu::new("connection-details").min_width(px(300.));
-        match state.environment() {
-            Some(environment) => {
-                let title = if state.is_demo() {
-                    format!("{} (demo)", environment.name)
-                } else {
-                    environment.name.clone()
-                };
-                menu = menu.element(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(colors.text_strong)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(theme.text.small)
-                                .text_color(colors.text_muted)
-                                .child(environment.url.clone()),
-                        ),
-                );
-            }
-            None => {
-                menu = menu.element(
-                    div()
-                        .text_color(colors.text_muted)
-                        .child("No environment configured."),
-                );
-            }
-        }
-        let lines = detail_lines(state, now)
-            .into_iter()
-            .map(|(key, value)| line(key, value));
-        menu = menu
-            .separator()
-            .element(div().flex().flex_col().gap(px(4.)).children(lines));
-        let can_reload = state.environment().is_some() && !connection.is_starting();
-        menu.separator()
-            .item(
-                MenuItem::new("reload", "Reload from Icinga")
-                    .disabled(!can_reload)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.details.close();
-                        this.state.update(cx, |state, cx| {
-                            if state.refresh(Instant::now()) {
-                                cx.notify();
-                            }
-                        });
-                        cx.notify();
-                    })),
-            )
-            .on_dismiss(cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                this.details.dismiss(event.position);
-                cx.notify();
-            }))
-    }
-}
-
-/// The connection details' lines: the state, the endpoint and its
-/// version, the last event and the API user (with how many of the
-/// permissions the client asks for it lacks).
-fn detail_lines(state: &AppState, now: Timestamp) -> Vec<(&'static str, String)> {
-    let connection = state.connection();
-    let mut lines = vec![("status", connection.describe(now))];
-    if !connection.endpoint.is_empty() {
-        lines.push(("endpoint", connection.endpoint.clone()));
-    }
-    if let Some(version) = connection.version() {
-        lines.push(("version", version.to_owned()));
-    }
-    lines.push((
-        "last event",
-        connection.last_event_at.map_or_else(
-            || "none yet".to_owned(),
-            |at| format!("{} ago", format_compact(at.elapsed_until(now))),
-        ),
-    ));
-    if let Some(info) = state.permissions() {
-        let missing = ic_core::missing_permissions(info).len();
-        lines.push((
-            "API user",
-            if missing == 0 {
-                info.user.clone()
-            } else {
-                format!("{} · {missing} permissions missing", info.user)
-            },
-        ));
-    }
-    lines
-}
-
-/// The notification centre button's tooltip: unread notifications and a
-/// pause.
-fn notifications_tooltip(unread: usize, paused_until: Option<Timestamp>, now: Timestamp) -> String {
-    let mut text = "Notifications".to_owned();
-    if unread > 0 {
-        let _ = write!(text, " · {unread} unread");
-    }
-    if let Some(until) = paused_until.filter(|until| *until > now) {
-        let _ = write!(text, " · paused until {}", crate::format::clock(until, now));
-    }
-    text
 }
 
 /// The footer dot's colour (ENV-06): green while live, yellow when stale,
@@ -855,41 +1039,6 @@ impl Render for Sidebar {
     }
 }
 
-/// The group row's `+` (new dashboard) and `···` (group menu) buttons, sized
-/// and spaced like the design's glyphs.
-fn group_actions(group_id: &str, theme: &Theme) -> Div {
-    let button = |id: String, glyph: &'static str, size: f32, tooltip: &'static str| {
-        GlyphButton::new(SharedString::from(id), glyph)
-            .text_size(px(size))
-            .color(theme.colors.text)
-            .tooltip(Tooltip::new(tooltip))
-    };
-    // The buttons' reach (4px on each side) makes the design's 8px between
-    // the glyphs.
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .child(
-            button(format!("group-add-{group_id}"), "+", 15., "New dashboard").on_click(
-                |_, _, _| {
-                    tracing::debug!("new dashboard: the dashboard editor comes with M4");
-                },
-            ),
-        )
-        .child(
-            button(
-                format!("group-menu-{group_id}"),
-                "···",
-                13.,
-                "Group options",
-            )
-            .on_click(|_, _, _| {
-                tracing::debug!("group menu: rename, reorder and delete come with M4");
-            }),
-        )
-}
-
 /// The state dot of a dashboard or an open tab.
 fn dot(dot: Dot, theme: &Theme) -> StateDot {
     match dot {
@@ -899,8 +1048,14 @@ fn dot(dot: Dot, theme: &Theme) -> StateDot {
     }
 }
 
-/// A row like a dashboard's, with a grey dot: "No dashboards yet".
-fn empty_note(text: &'static str, theme: &Theme) -> AnyElement {
+/// A row like a dashboard's, with a grey dot: "No dashboards yet", and a
+/// link to create one.
+fn empty_note(
+    text: &'static str,
+    link: Option<&'static str>,
+    theme: &Theme,
+    cx: &Context<Sidebar>,
+) -> AnyElement {
     let metrics = theme.metrics;
     div()
         .flex_1()
@@ -919,82 +1074,16 @@ fn empty_note(text: &'static str, theme: &Theme) -> AnyElement {
                 .child(StateDot::with_color(theme.states.pending).size(metrics.sidebar_dot))
                 .child(text),
         )
+        .when_some(link, |note, link| {
+            note.child(
+                div().pl(px(34.)).child(
+                    Link::new("sidebar-empty-new", link)
+                        .text_size(theme.text.small)
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                            cx.emit(SidebarEvent::NewDashboard(None));
+                        })),
+                ),
+            )
+        })
         .into_any_element()
-}
-
-/// The shortcut for [`ToggleSidebar`], as the tooltip shows it.
-fn toggle_key() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "⌘B"
-    } else {
-        "ctrl-b"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use ic_core::ApiInfo;
-    use ic_model::Timestamp;
-
-    use super::*;
-
-    fn at(seconds: f64) -> Timestamp {
-        Timestamp::from_unix_seconds(1_790_000_000. + seconds)
-    }
-
-    #[test]
-    fn the_details_list_the_connection() {
-        let mut state = AppState::fixture(at(0.));
-        let lines = detail_lines(&state, at(65.));
-        let keys: Vec<_> = lines.iter().map(|(key, _)| *key).collect();
-        assert_eq!(keys, ["status", "endpoint", "version", "last event"]);
-        assert_eq!(lines[0].1, "connected for 1m");
-        assert_eq!(lines[1].1, "master-01");
-        assert_eq!(lines[3].1, "1m ago");
-        state.set_permissions(Some(ApiInfo {
-            user: "viewer".to_owned(),
-            permissions: vec!["objects/query/*".to_owned()],
-            version: "v2.15.6".to_owned(),
-        }));
-        let lines = detail_lines(&state, at(65.));
-        let (key, user) = lines.last().unwrap();
-        assert_eq!(*key, "API user");
-        assert!(user.starts_with("viewer · "), "{user}");
-        assert!(user.ends_with("permissions missing"), "{user}");
-    }
-
-    #[test]
-    fn the_notification_tooltip_counts_and_says_paused() {
-        assert_eq!(notifications_tooltip(0, None, at(0.)), "Notifications");
-        assert_eq!(
-            notifications_tooltip(3, None, at(0.)),
-            "Notifications · 3 unread"
-        );
-        let paused = notifications_tooltip(0, Some(at(600.)), at(0.));
-        assert!(
-            paused.starts_with("Notifications · paused until "),
-            "{paused}"
-        );
-        assert_eq!(
-            notifications_tooltip(0, Some(at(-1.)), at(0.)),
-            "Notifications",
-            "a pause that ended isn't mentioned"
-        );
-    }
-
-    #[test]
-    fn the_details_toggle_ignores_the_press_that_closed_them() {
-        use gpui::{point, px};
-        let mut toggle = Toggle::default();
-        toggle.toggle(Some(point(px(1.), px(1.))));
-        assert!(toggle.is_open());
-        let press = point(px(150.), px(880.));
-        toggle.dismiss(press);
-        toggle.toggle(Some(press));
-        assert!(!toggle.is_open(), "the press on the trigger closed them");
-        toggle.toggle(Some(point(px(151.), px(880.))));
-        assert!(toggle.is_open());
-        toggle.close();
-        assert!(!toggle.is_open());
-    }
 }

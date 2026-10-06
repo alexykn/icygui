@@ -18,6 +18,8 @@
 //! Methods here never touch GPUI, so they're tested directly.
 
 pub(crate) mod connection;
+pub(crate) mod editing;
+pub(crate) mod environments;
 pub(crate) mod hydration;
 pub(crate) mod permissions;
 
@@ -57,8 +59,12 @@ const MAX_NOTIFICATIONS: usize = 200;
 pub(crate) trait CoreLink: fmt::Debug {
     /// Sends a command; never blocks.
     fn send(&self, command: Command);
-    /// Stops the engine, waiting a bounded time.
+    /// Stops the engine, waiting a bounded time (at quit).
     fn shutdown(self: Box<Self>);
+    /// Stops the engine on another thread, so switching environments
+    /// never freezes the window. The receiver completes (or is cancelled)
+    /// once it has stopped.
+    fn shutdown_in_background(self: Box<Self>) -> futures::channel::oneshot::Receiver<()>;
 }
 
 impl CoreLink for CoreHandle {
@@ -68,6 +74,22 @@ impl CoreLink for CoreHandle {
 
     fn shutdown(self: Box<Self>) {
         (*self).shutdown();
+    }
+
+    fn shutdown_in_background(self: Box<Self>) -> futures::channel::oneshot::Receiver<()> {
+        let (done, stopped) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("icygui-core-stop".to_owned())
+            .spawn(move || {
+                (*self).shutdown();
+                let _ = done.send(());
+            });
+        if let Err(error) = spawned {
+            // The handle went down with the closure, which signals the
+            // engine to stop; the dropped sender cancels the receiver.
+            tracing::error!(%error, "no thread to stop the engine on; it stops by itself");
+        }
+        stopped
     }
 }
 
@@ -100,6 +122,39 @@ pub(crate) struct ConfigProblem {
     pub(crate) busy: bool,
     /// The last choice failed, and why.
     pub(crate) failure: Option<String>,
+}
+
+/// A message about something the user did: an export written, an import
+/// that failed, a password that couldn't be removed. Shown as a banner
+/// until dismissed (or replaced).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UserNotice {
+    /// What happened.
+    pub(crate) title: String,
+    /// More about it.
+    pub(crate) detail: Option<String>,
+    /// Whether it went wrong (a warning, not information).
+    pub(crate) problem: bool,
+}
+
+impl UserNotice {
+    /// Something that worked.
+    pub(crate) fn info(title: impl Into<String>, detail: Option<String>) -> Self {
+        Self {
+            title: title.into(),
+            detail,
+            problem: false,
+        }
+    }
+
+    /// Something that went wrong.
+    pub(crate) fn problem(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            detail: Some(detail.into()),
+            problem: true,
+        }
+    }
 }
 
 /// What [`AppState::hydrate`] did.
@@ -147,6 +202,7 @@ pub(crate) struct AppState {
     config_problem: Option<ConfigProblem>,
     save_error: Option<String>,
     dismissed_save_error: Option<String>,
+    notice: Option<UserNotice>,
     /// The last action the user asked for; the dialogs pick it up.
     last_request: Option<ActionRequest>,
     /// Why the last action asked for was refused.
@@ -181,6 +237,7 @@ impl AppState {
             config_problem: None,
             save_error: None,
             dismissed_save_error: None,
+            notice: None,
             last_request: None,
             last_denial: None,
             #[cfg(test)]
@@ -242,16 +299,7 @@ impl AppState {
         self.ui.retain_environments(|id| known.contains(id));
         self.config = config;
         self.config_problem = None;
-        self.snapshot = Arc::default();
-        self.permissions = None;
-        self.hydration.forget();
-        self.restore_environment_ui();
-        self.connection = match self.environment() {
-            Some(environment) => {
-                ConnectionStatus::starting(&endpoint_of(environment), user_of(environment))
-            }
-            None => ConnectionStatus::idle(),
-        };
+        self.reset_connection();
         if self.config_dirty && self.persistence.is_some() {
             self.config_dirty = false;
             self.save_config();
@@ -367,13 +415,10 @@ impl AppState {
         self.config.environment(active)
     }
 
-    /// Points the demo environment at the demo server once it runs,
+    /// Points the demo environment `id` at its demo server once it runs,
     /// pinned to its certificate.
-    pub(crate) fn set_demo_server(&mut self, url: &str, fingerprint: Option<&str>) {
-        let Some(id) = self.config.active_environment.clone() else {
-            return;
-        };
-        if let Some(environment) = self.config.environment_mut(&id) {
+    pub(crate) fn set_demo_server(&mut self, id: &str, url: &str, fingerprint: Option<&str>) {
+        if let Some(environment) = self.config.environment_mut(id) {
             url.clone_into(&mut environment.url);
             environment.tls.pinned_sha256 = fingerprint.map(str::to_owned);
             environment.tls.use_system_roots = false;
@@ -569,9 +614,8 @@ impl AppState {
         else {
             return;
         };
-        if let Some(evaluator) = &self.evaluator
-            && let Some(result) = evaluator.evaluate(&self.snapshot, reference, &view)
-        {
+        if let Some(evaluator) = &self.evaluator {
+            let result = evaluator.evaluate(&self.snapshot, reference, &view);
             let mut dashboards = (*self.snapshot.dashboards).clone();
             dashboards.insert(reference.clone(), result);
             self.snapshot = Arc::new(Snapshot {
@@ -885,6 +929,23 @@ impl AppState {
         Hydrated::Sent(fresh)
     }
 
+    /// Asks the core to evaluate an unsaved view (the dashboard editor's
+    /// live validation, match count and rows). `None` without a core.
+    pub(crate) fn preview(
+        &self,
+        view: View,
+    ) -> Option<futures::channel::oneshot::Receiver<Result<DashboardResult, String>>> {
+        let (reply, receiver) = futures::channel::oneshot::channel();
+        #[cfg(test)]
+        if self.evaluator.is_some() {
+            let _ = reply.send(fixture::preview(&self.snapshot, &view));
+            return Some(receiver);
+        }
+        let core = self.core.as_ref()?;
+        core.send(Command::PreviewDashboard { view, reply });
+        Some(receiver)
+    }
+
     /// A save finished (from the writer thread).
     pub(crate) fn on_saved(&mut self, report: SaveReport) {
         match report {
@@ -905,6 +966,31 @@ impl AppState {
     /// Hides the save error until a different one comes.
     pub(crate) fn dismiss_save_error(&mut self) {
         self.dismissed_save_error.clone_from(&self.save_error);
+    }
+
+    /// Shows `notice` (replacing an earlier one).
+    pub(crate) fn report(&mut self, notice: UserNotice) {
+        if notice.problem {
+            tracing::warn!(title = %notice.title, detail = ?notice.detail, "told the user");
+        } else {
+            tracing::info!(title = %notice.title, "told the user");
+        }
+        self.notice = Some(notice);
+    }
+
+    /// The message shown, if any.
+    pub(crate) fn notice(&self) -> Option<&UserNotice> {
+        self.notice.as_ref()
+    }
+
+    /// Hides the message.
+    pub(crate) fn dismiss_notice(&mut self) {
+        self.notice = None;
+    }
+
+    /// Pauses notifications until `until`, or resumes them (`None`).
+    pub(crate) fn pause_notifications(&mut self, until: Option<Timestamp>) {
+        self.send(Command::PauseNotifications(until));
     }
 }
 

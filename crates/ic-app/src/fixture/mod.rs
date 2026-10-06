@@ -59,16 +59,25 @@ pub(crate) struct Evaluator {
 }
 
 impl Evaluator {
-    /// Evaluates `reference` with `view` over `snapshot`; `None` for
-    /// dashboards the demo doesn't know.
+    /// Evaluates `reference` with `view` over `snapshot`. The demo's own
+    /// dashboards use their Rust filters; others (created in a test) have
+    /// their expression evaluated by `ic-filter`, an error if it doesn't
+    /// parse.
     pub(crate) fn evaluate(
         &self,
         snapshot: &Snapshot,
         reference: &DashboardRef,
         view: &View,
-    ) -> Option<DashboardResult> {
-        let filter = self.filters.get(reference)?;
-        Some(evaluate::evaluate(snapshot, view, *filter))
+    ) -> DashboardResult {
+        match self.filters.get(reference) {
+            Some(filter) if view.filter == filter.expression() => {
+                evaluate::evaluate(snapshot, view, *filter)
+            }
+            _ => preview(snapshot, view).unwrap_or_else(|error| DashboardResult {
+                error: Some(error),
+                ..DashboardResult::default()
+            }),
+        }
     }
 
     /// Evaluates every dashboard of `config`'s active environment.
@@ -94,12 +103,22 @@ impl Evaluator {
                     )
                 })
             })
-            .filter_map(|(reference, view)| {
-                let result = self.evaluate(snapshot, &reference, view)?;
-                Some((reference, result))
+            .map(|(reference, view)| {
+                let result = self.evaluate(snapshot, &reference, view);
+                (reference, result)
             })
             .collect()
     }
+}
+
+/// Evaluates a view that isn't saved (the dashboard editor's preview), as
+/// the core's `PreviewDashboard` does.
+///
+/// # Errors
+///
+/// The filter doesn't parse (with its line and column).
+pub(crate) fn preview(snapshot: &Snapshot, view: &View) -> Result<DashboardResult, String> {
+    evaluate::evaluate_expression(snapshot, view)
 }
 
 /// Builds the demo as of `now`; times in state are relative to it.
@@ -614,20 +633,34 @@ mod tests {
             descending: false,
         };
         view.hide_handled = true;
-        let result = demo
-            .evaluator
-            .evaluate(&demo.snapshot, &production, &view)
-            .unwrap();
+        let result = demo.evaluator.evaluate(&demo.snapshot, &production, &view);
         let rows = row_names(&result);
         assert_eq!(rows[0], "api-gw-01!http-latency", "hosts in name order");
         assert!(
             !rows.contains(&"web-edge-02!http-tls".to_owned()),
             "handled hidden"
         );
-        assert!(
+        // Other dashboards (created in a test) are evaluated from their
+        // filter expression, like the core does.
+        let other =
             demo.evaluator
-                .evaluate(&demo.snapshot, &reference("nope", "nope"), &View::default())
-                .is_none()
+                .evaluate(&demo.snapshot, &reference("nope", "nope"), &View::default());
+        assert!(other.error.is_none());
+        assert!(!other.rows.is_empty());
+        let broken = demo.evaluator.evaluate(
+            &demo.snapshot,
+            &reference("nope", "nope"),
+            &View {
+                filter: "host.name ==".to_owned(),
+                ..View::default()
+            },
+        );
+        assert!(
+            broken
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("(line 1, column")),
+            "{broken:?}"
         );
     }
 
@@ -638,10 +671,9 @@ mod tests {
             .view
             .clone();
         view.group_by = GroupBy::HostGroup;
-        let result = demo
-            .evaluator
-            .evaluate(&demo.snapshot, &reference("overview", "databases"), &view)
-            .unwrap();
+        let result =
+            demo.evaluator
+                .evaluate(&demo.snapshot, &reference("overview", "databases"), &view);
         let headers: Vec<String> = row_names(&result)
             .into_iter()
             .filter(|row| row.starts_with('['))

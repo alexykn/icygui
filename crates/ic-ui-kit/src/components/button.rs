@@ -58,6 +58,9 @@ pub enum ButtonVariant {
     /// Every other action.
     #[default]
     Secondary,
+    /// A destructive action that can't be undone (delete), confirmed in a
+    /// dialog: the critical colour.
+    Danger,
 }
 
 /// Resolved colours of a button variant.
@@ -94,6 +97,13 @@ impl ButtonVariant {
                 active: colors.element_active,
                 foreground: colors.text,
                 key: colors.text_faint,
+            },
+            Self::Danger => ButtonColors {
+                background: theme.states.critical,
+                hover: theme.states.critical.opacity(0.85),
+                active: theme.states.critical,
+                foreground: colors.on_accent,
+                key: colors.on_accent_muted,
             },
         }
     }

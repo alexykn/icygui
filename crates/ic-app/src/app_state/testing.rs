@@ -49,4 +49,11 @@ impl CoreLink for Recorder {
     fn shutdown(self: Box<Self>) {
         *self.stopped.borrow_mut() = true;
     }
+
+    fn shutdown_in_background(self: Box<Self>) -> futures::channel::oneshot::Receiver<()> {
+        *self.stopped.borrow_mut() = true;
+        let (done, stopped) = futures::channel::oneshot::channel();
+        let _ = done.send(());
+        stopped
+    }
 }

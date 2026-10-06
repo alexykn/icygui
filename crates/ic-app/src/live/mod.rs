@@ -12,11 +12,20 @@
 //! The engine runs on its own thread with its own tokio runtime; its
 //! events arrive on an unbounded channel that a GPUI task drains in
 //! batches (one re-render per batch, however many snapshots queued up).
+//!
+//! One environment is active at a time (PLAN.md D2). Switching to another,
+//! changing the active one's connection, trusting its certificate or
+//! deleting it replaces the engine: the old one stops on another thread
+//! (the window never waits for it), then the new one starts, so there is
+//! never more than one engine (and one event stream to an Icinga). The
+//! environment editor's passwords go to the keychain off the UI thread;
+//! deleting an environment deletes its password and its event log
+//! (ENV-03) once its engine has stopped.
 
 pub(crate) mod demo;
 pub(crate) mod notifier;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,15 +35,19 @@ use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     App, AppContext as _, Context, Entity, Global, Subscription, SystemNotificationResponse, Task,
 };
-use ic_config::{Config, ConfigError, ConfigStore, Paths};
+use ic_config::{AuthConfig, Config, ConfigError, ConfigStore, Environment, Paths};
 use ic_core::ports::SecretStore;
-use ic_core::{CoreEvent, EnvironmentSpec, Ports, SystemClock};
+use ic_core::{
+    ConnectionFailure, ConnectionReport, CoreEvent, EnvironmentSpec, Ports, SystemClock,
+};
 use ic_model::ObjectKey;
 use ic_rules::NotificationIntent;
 use ic_ui_kit::Root;
+use secrecy::SecretString;
 
-use self::demo::{DemoOptions, DemoServer};
+use self::demo::{DemoOptions, DemoSecrets, DemoServer};
 use self::notifier::GpuiNotifier;
+use crate::app_state::environments::EnvironmentSaved;
 use crate::app_state::{AppState, ConfigProblem};
 use crate::dev::OpenAtStart;
 use crate::persist::{Persistence, SaveReport};
@@ -76,22 +89,39 @@ pub(crate) enum RecoveryChoice {
     StartFresh,
 }
 
+/// Work to do on a background thread once the engine has stopped
+/// (deleting a removed environment's password and event log).
+type Cleanup = Box<dyn FnOnce() + Send>;
+
 /// The running session: the engine, its event pump, notifications and
 /// persistence. One per app, reachable through [`session`].
 pub(crate) struct Session {
     state: Entity<AppState>,
     launch: Launch,
     notifier: Arc<GpuiNotifier>,
+    /// Where passwords are: the keychain, or the demo's memory.
+    secrets: Arc<dyn SecretStore>,
     pump: Option<Task<()>>,
-    demo: Option<DemoServer>,
+    /// The demo's servers by environment id, started when first shown.
+    demo: HashMap<String, DemoServer>,
+    /// The demo's passwords (servers' and the editor's), in memory.
+    demo_secrets: Arc<DemoSecrets>,
     demo_dir: Option<tempfile::TempDir>,
     pending_open: Option<OpenAtStart>,
     /// Recent notifications' tags and objects, for their clicks.
     targets: VecDeque<(String, ObjectKey)>,
-    /// The demo server's control, for tests that change the simulated
+    /// An engine is stopping (or a removed environment being cleaned up);
+    /// the next engine starts when this finishes.
+    stopping: Option<Task<()>>,
+    /// Run once the engine stopping now has stopped.
+    cleanups: Vec<Cleanup>,
+    /// Counts engine replacements, so an engine start that was waiting
+    /// (for a demo server) can tell it's no longer wanted.
+    generation: u64,
+    /// The demo servers' controls, for tests that change the simulated
     /// Icinga.
     #[cfg(all(test, target_os = "linux"))]
-    demo_control: Option<ic_mock::MockControl>,
+    demo_controls: HashMap<String, ic_mock::MockControl>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -146,17 +176,27 @@ impl Session {
             session.stop(cx);
             async {}
         });
+        let demo_secrets = Arc::new(DemoSecrets::default());
+        let secrets: Arc<dyn SecretStore> = match &launch {
+            Launch::Live { secrets, .. } => secrets.clone(),
+            Launch::Demo { .. } => demo_secrets.clone(),
+        };
         Self {
             state,
             launch,
             notifier: Arc::new(notifier),
+            secrets,
             pump: None,
-            demo: None,
+            demo: HashMap::new(),
+            demo_secrets,
             demo_dir: None,
             pending_open,
             targets: VecDeque::new(),
+            stopping: None,
+            cleanups: Vec::new(),
+            generation: 0,
             #[cfg(all(test, target_os = "linux"))]
-            demo_control: None,
+            demo_controls: HashMap::new(),
             _tasks: tasks,
             _subscriptions: vec![quit],
         }
@@ -247,69 +287,128 @@ impl Session {
         }
     }
 
-    /// Connects: starts the engine for the active environment, or the demo
-    /// server and then the engine. Without an environment (or while the
-    /// settings can't be read) nothing starts.
+    /// Connects: starts the engine for the active environment (for the
+    /// demo's environments, once their server runs). Without an
+    /// environment (or while the settings can't be read) nothing starts.
     pub(crate) fn start(&mut self, cx: &mut Context<Self>) {
         match self.launch.clone() {
-            Launch::Live { paths, secrets } => self.start_core(paths.data_dir, secrets, cx),
-            Launch::Demo { options } => self.start_demo(&options, cx),
+            Launch::Live { paths, .. } => {
+                let secrets = self.secrets.clone();
+                self.start_core(paths.data_dir, secrets, cx);
+            }
+            Launch::Demo { options } => {
+                let Some(id) = self
+                    .state
+                    .read(cx)
+                    .active_environment_id()
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                match demo::options_for(&id, &options) {
+                    Some(options) => self.start_demo(&id, &options, cx),
+                    // Added in the editor while the demo runs: a real one.
+                    None => match self.demo_data_dir() {
+                        Ok(data_dir) => {
+                            let secrets = self.secrets.clone();
+                            self.start_core(data_dir, secrets, cx);
+                        }
+                        Err(error) => self.engine_failed(error, cx),
+                    },
+                }
+            }
         }
     }
 
-    fn start_demo(&mut self, options: &DemoOptions, cx: &mut Context<Self>) {
+    /// Reports that the engine couldn't start.
+    fn engine_failed(&self, error: String, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            state.engine_failed(error);
+            cx.notify();
+        });
+    }
+
+    /// The demo's temporary directory for event logs, created on first use.
+    fn demo_data_dir(&mut self) -> Result<PathBuf, String> {
+        if let Some(dir) = &self.demo_dir {
+            return Ok(dir.path().to_path_buf());
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("icygui-demo-")
+            .tempdir()
+            .map_err(|error| format!("no directory for the demo's event log: {error}"))?;
+        let path = dir.path().to_path_buf();
+        self.demo_dir = Some(dir);
+        Ok(path)
+    }
+
+    /// Starts the demo environment `id`'s server unless it runs, then its
+    /// engine.
+    fn start_demo(&mut self, id: &str, options: &DemoOptions, cx: &mut Context<Self>) {
+        if self.demo.get(id).is_some_and(DemoServer::is_up) {
+            self.start_demo_core(cx);
+            return;
+        }
         let (server, endpoint) = match demo::start(options) {
             Ok(started) => started,
             Err(error) => {
-                self.state.update(cx, |state, cx| {
-                    state.engine_failed(format!("the demo server couldn't start: {error}"));
-                    cx.notify();
-                });
+                self.engine_failed(format!("the demo server couldn't start: {error}"), cx);
                 return;
             }
         };
-        self.demo = Some(server);
+        self.demo.insert(id.to_owned(), server);
+        let generation = self.generation;
+        let id = id.to_owned();
         cx.spawn(async move |this, cx| {
             let endpoint = endpoint.await;
             let _ = this.update(cx, |session, cx| {
                 let endpoint = match endpoint {
                     Ok(Ok((endpoint, control))) => {
-                        session.keep_demo_control(control);
+                        session.keep_demo_control(&id, control);
                         endpoint
                     }
                     Ok(Err(error)) => {
-                        session.state.update(cx, |state, cx| {
-                            state.engine_failed(format!("the demo server couldn't start: {error}"));
-                            cx.notify();
-                        });
+                        session.demo.remove(&id);
+                        if session.generation == generation {
+                            session.engine_failed(
+                                format!("the demo server couldn't start: {error}"),
+                                cx,
+                            );
+                        }
                         return;
                     }
                     Err(_) => return,
                 };
-                let Some(server) = session.demo.as_ref() else {
+                let Some(server) = session.demo.get_mut(&id) else {
                     return;
                 };
-                let secrets = server.secrets();
+                server.set_endpoint(endpoint.clone());
+                session.demo_secrets.put(&id, server.core_password());
                 let (url, pin) = server.environment_target(&endpoint);
                 session.state.update(cx, |state, _| {
-                    state.set_demo_server(&url, pin.as_deref());
+                    state.set_demo_server(&id, &url, pin.as_deref());
                 });
-                match tempfile::Builder::new().prefix("icygui-demo-").tempdir() {
-                    Ok(dir) => {
-                        let data_dir = dir.path().to_path_buf();
-                        session.demo_dir = Some(dir);
-                        session.start_core(data_dir, secrets, cx);
-                    }
-                    Err(error) => session.state.update(cx, |state, cx| {
-                        state.engine_failed(format!(
-                            "no directory for the demo's event log: {error}"
-                        ));
-                        cx.notify();
-                    }),
+                // Another environment may have been chosen meanwhile.
+                let still_wanted = session.generation == generation
+                    && session.state.read(cx).active_environment_id() == Some(id.as_str());
+                if still_wanted {
+                    session.start_demo_core(cx);
                 }
             });
         })
         .detach();
+    }
+
+    /// Starts the engine for the active demo environment, whose server
+    /// runs.
+    fn start_demo_core(&mut self, cx: &mut Context<Self>) {
+        match self.demo_data_dir() {
+            Ok(data_dir) => {
+                let secrets = self.secrets.clone();
+                self.start_core(data_dir, secrets, cx);
+            }
+            Err(error) => self.engine_failed(error, cx),
+        }
     }
 
     /// Starts the engine for the active environment and the event pump.
@@ -389,6 +488,201 @@ impl Session {
             }
             tracing::debug!("the engine's event stream ended");
         })
+    }
+
+    /// Replaces the engine: the running one stops on another thread, the
+    /// cleanups run, then an engine starts for the (now) active
+    /// environment. Requests while one runs fold into it.
+    fn replace_engine(&mut self, cleanup: Option<Cleanup>, cx: &mut Context<Self>) {
+        self.generation += 1;
+        self.pump = None;
+        self.targets.clear();
+        self.cleanups.extend(cleanup);
+        let core = self.state.update(cx, |state, _| state.take_core());
+        match core {
+            Some(core) => {
+                let stopped = core.shutdown_in_background();
+                self.stopping = Some(cx.spawn(async move |this, cx| {
+                    // Cancelled means it stopped without saying so.
+                    let _ = stopped.await;
+                    let _ = this.update(cx, Self::engine_stopped);
+                }));
+            }
+            // The engine stopping now: the next one starts after it.
+            None if self.stopping.is_some() => {}
+            None => self.engine_stopped(cx),
+        }
+    }
+
+    /// The old engine has stopped: run the cleanups, then start the next
+    /// engine.
+    fn engine_stopped(&mut self, cx: &mut Context<Self>) {
+        self.stopping = None;
+        let cleanups = std::mem::take(&mut self.cleanups);
+        if cleanups.is_empty() {
+            self.start(cx);
+            return;
+        }
+        let work = cx.background_executor().spawn(async move {
+            for cleanup in cleanups {
+                cleanup();
+            }
+        });
+        self.stopping = Some(cx.spawn(async move |this, cx| {
+            work.await;
+            let _ = this.update(cx, Self::engine_stopped);
+        }));
+    }
+
+    /// Makes `id` the active environment and connects to it (ENV-01).
+    /// Returns whether it switched.
+    pub(crate) fn switch_environment(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let switched = self.state.update(cx, |state, cx| {
+            let switched = state.switch_environment(id);
+            cx.notify();
+            switched
+        });
+        if switched {
+            self.replace_engine(None, cx);
+        }
+        switched
+    }
+
+    /// Saves an environment from the editor (ENV-02): its password (if one
+    /// was typed) into the keychain first, off the UI thread, then the
+    /// settings; the engine restarts if the active environment's
+    /// connection changed, or starts for the first environment.
+    pub(crate) fn save_environment(
+        &mut self,
+        environment: Environment,
+        password: Option<SecretString>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<EnvironmentSaved, String>> {
+        let secrets = self.secrets.clone();
+        cx.spawn(async move |this, cx| {
+            let password_changed = password.is_some();
+            if let Some(password) = password {
+                let account = environment.id.clone();
+                let stored = cx
+                    .background_executor()
+                    .spawn(async move { secrets.set(&account, &password) })
+                    .await;
+                if let Err(error) = stored {
+                    tracing::warn!(%error, "the password couldn't be stored");
+                    return Err(format!("The password couldn't be stored: {error}"));
+                }
+            }
+            this.update(cx, |session, cx| {
+                let saved = session.state.update(cx, |state, cx| {
+                    let saved = state.save_environment(environment, password_changed);
+                    if saved == EnvironmentSaved::Reconnect {
+                        state.reset_connection();
+                    }
+                    cx.notify();
+                    saved
+                });
+                if saved.needs_engine() {
+                    session.replace_engine(None, cx);
+                }
+                saved
+            })
+            .map_err(|_| "the window closed".to_owned())
+        })
+    }
+
+    /// Deletes an environment (ENV-03): its settings and dashboards, then
+    /// (once its engine stopped, if it was the active one) its password
+    /// and its event log. The next environment, if any, becomes active.
+    /// Returns whether it existed.
+    pub(crate) fn delete_environment(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(was_active) = self.state.update(cx, |state, cx| {
+            let removed = state.remove_environment(id);
+            cx.notify();
+            removed
+        }) else {
+            return false;
+        };
+        let secrets = self.secrets.clone();
+        let data_dir = self.event_log_dir();
+        let account = id.to_owned();
+        let cleanup: Cleanup = Box::new(move || {
+            if let Err(error) = secrets.delete(&account) {
+                tracing::warn!(%error, "the deleted environment's password couldn't be removed");
+            }
+            if let Some(data_dir) = data_dir
+                && let Err(error) = ic_core::delete_event_log(&data_dir, &account)
+            {
+                tracing::warn!(%error, "the deleted environment's event log couldn't be removed");
+            }
+        });
+        if was_active {
+            self.replace_engine(Some(cleanup), cx);
+        } else {
+            cx.background_executor()
+                .spawn(async move { cleanup() })
+                .detach();
+        }
+        true
+    }
+
+    /// Trusts `fingerprint` for environment `id` (ENV-05, trust on first
+    /// use): pins it and reconnects if it's the active environment.
+    pub(crate) fn trust_certificate(
+        &mut self,
+        id: &str,
+        fingerprint: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let reconnect = self.state.update(cx, |state, cx| {
+            let pinned = state.pin_certificate(id, fingerprint);
+            let active = state.active_environment_id() == Some(id);
+            if pinned && active {
+                state.reset_connection();
+            }
+            cx.notify();
+            pinned && active
+        });
+        if reconnect {
+            self.replace_engine(None, cx);
+        }
+    }
+
+    /// Tests an environment's settings as edited (ENV-04): with the typed
+    /// password, else the one stored for it.
+    pub(crate) fn test_environment(
+        &self,
+        environment: Environment,
+        typed: Option<SecretString>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<ConnectionReport, ConnectionFailure>> {
+        let secrets = self.secrets.clone();
+        cx.spawn(async move |_, cx| {
+            let password = match typed {
+                Some(password) => Some(password),
+                None if matches!(environment.auth, AuthConfig::Basic { .. }) => {
+                    let account = environment.id.clone();
+                    cx.background_executor()
+                        .spawn(async move { secrets.get(&account).ok().flatten() })
+                        .await
+                }
+                None => None,
+            };
+            match ic_core::test_connection(environment, password).await {
+                Ok(outcome) => outcome,
+                Err(_) => Err(ConnectionFailure::Other(
+                    "the test stopped before it finished".to_owned(),
+                )),
+            }
+        })
+    }
+
+    /// Where the event logs are: the data directory, or the demo's
+    /// temporary one.
+    fn event_log_dir(&self) -> Option<PathBuf> {
+        match &self.launch {
+            Launch::Live { paths, .. } => Some(paths.data_dir.clone()),
+            Launch::Demo { .. } => self.demo_dir.as_ref().map(|dir| dir.path().to_path_buf()),
+        }
     }
 
     /// Carries out what the development switches asked to open once the
@@ -520,30 +814,30 @@ impl Session {
         if !self.state.read(cx).flush_persistence(FLUSH_TIMEOUT) {
             tracing::warn!("some settings may not have been saved before quitting");
         }
-        self.demo = None;
+        self.demo.clear();
         self.demo_dir = None;
         tracing::info!("stopped");
     }
 }
 
 impl Session {
-    /// Keeps the demo server's control for tests (nothing else changes the
+    /// Keeps a demo server's control for tests (nothing else changes the
     /// simulated Icinga).
     #[cfg(all(test, target_os = "linux"))]
-    fn keep_demo_control(&mut self, control: ic_mock::MockControl) {
-        self.demo_control = Some(control);
+    fn keep_demo_control(&mut self, id: &str, control: ic_mock::MockControl) {
+        self.demo_controls.insert(id.to_owned(), control);
     }
 
     #[cfg(not(all(test, target_os = "linux")))]
     #[expect(clippy::unused_self, reason = "only the UI tests keep the control")]
-    fn keep_demo_control(&mut self, _control: ic_mock::MockControl) {}
+    fn keep_demo_control(&mut self, _id: &str, _control: ic_mock::MockControl) {}
 }
 
 #[cfg(all(test, target_os = "linux"))]
 impl Session {
-    /// The demo server's control, once it runs.
+    /// The `prod-cluster` demo server's control, once it runs.
     pub(crate) fn demo_control(&self) -> Option<ic_mock::MockControl> {
-        self.demo_control.clone()
+        self.demo_controls.get(demo::ENVIRONMENT_ID).cloned()
     }
 }
 

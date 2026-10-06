@@ -18,10 +18,11 @@ mod theme;
 pub use assets::Assets;
 pub use components::{
     Banner, BannerTone, Button, ButtonColors, ButtonVariant, CircleSize, CodeBlock, CompactRow,
-    Divider, DividerColor, EmptyState, GlyphButton, IconButton, KeyHint, KvTable, Link, LinkStyle,
-    ListRow, Menu, MenuItem, NoteEntry, Paint, PaneHeader, PerfdataRow, PerfdataTable, Popover,
-    ProgressBar, RowEmphasis, SectionLabel, StateCircle, StateDot, SubTabs, SummaryBar,
-    SummaryItem, TextField, Tooltip, TreeLine, TreeTable,
+    DialogBody, Divider, DividerColor, EmptyState, Field, FieldTone, GlyphButton, IconButton,
+    KeyHint, KvTable, Link, LinkStyle, ListRow, Menu, MenuItem, Modal, ModalPlacement, NoteEntry,
+    Paint, PaneHeader, PerfdataRow, PerfdataTable, Popover, ProgressBar, RowEmphasis, SectionLabel,
+    Segmented, StateCircle, StateDot, SubTabs, SummaryBar, SummaryItem, Switch, TextArea,
+    TextField, Tooltip, TreeLine, TreeTable,
 };
 pub use fonts::FontError;
 pub use icon::{Icon, IconName};
@@ -46,7 +47,7 @@ pub mod input {
     /// dismiss (a selection, a completion) lets it bubble up to the field's
     /// parents, which can handle it with `on_action`.
     pub use gpui_component::input::Escape;
-    pub use gpui_component::input::{InputEvent, InputState};
+    pub use gpui_component::input::{InputEvent, InputState, TextareaState};
 }
 
 use gpui::App;

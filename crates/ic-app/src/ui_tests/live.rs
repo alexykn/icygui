@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use futures::FutureExt as _;
 use gpui::{App, AppContext as _, Entity};
-use ic_config::{AuthConfig, Config, Environment, Paths, Sort, SortKey};
+use ic_config::{AuthConfig, Config, Environment, GroupBy, Paths, Sort, SortKey};
 use ic_core::ports::{SecretError, SecretStore};
 use ic_core::snapshot::DashboardRow;
 use ic_model::{ObjectKey, Timestamp};
@@ -187,6 +187,90 @@ fn view_changes_are_evaluated_by_the_core_and_rows_get_their_details() {
                     lean_on_screen(app, cx) == 0
                 })
                 .await;
+            }
+            .boxed_local()
+        })),
+    );
+}
+
+/// Whether `rows` are well-formed group sections: each header first, with
+/// the number of object rows under it. Returns the headers' labels.
+fn group_sections(rows: &[DashboardRow]) -> Option<Vec<String>> {
+    let mut labels = Vec::new();
+    let mut index = 0;
+    while index < rows.len() {
+        let DashboardRow::Group { label, count } = &rows[index] else {
+            return None;
+        };
+        let objects = rows[index + 1..]
+            .iter()
+            .take_while(|row| matches!(row, DashboardRow::Object(_)))
+            .count();
+        if objects != *count || objects == 0 {
+            return None;
+        }
+        labels.push(label.clone());
+        index += 1 + objects;
+    }
+    Some(labels)
+}
+
+#[test]
+fn group_by_shows_the_cores_group_headers() {
+    run_app(
+        crate::WINDOW_SIZE,
+        demo_app("prod-cluster", None),
+        Body::Async(Box::new(|app, cx| {
+            async move {
+                wait_for(&app, &cx, "the first load", LOAD, |app, cx| {
+                    app.state.read(cx).connection().is_connected()
+                })
+                .await;
+                let mut previous: Vec<String> = Vec::new();
+                for group_by in [GroupBy::HostGroup, GroupBy::ServiceGroup, GroupBy::Host] {
+                    cx.update(|cx| {
+                        app.state.update(cx, |state, cx| {
+                            let all = dashboard(state, "all services");
+                            state.select(all.clone());
+                            assert!(state.update_view(&all, |view| view.group_by = group_by));
+                            cx.notify();
+                        });
+                    });
+                    let before = previous.clone();
+                    wait_for(&app, &cx, "new group headers", LOAD, move |app, cx| {
+                        let state = app.state.read(cx);
+                        state
+                            .selected()
+                            .and_then(|reference| state.result(reference))
+                            .and_then(|result| group_sections(&result.rows))
+                            .is_some_and(|labels| labels.len() > 1 && labels != before)
+                    })
+                    .await;
+                    cx.update(|cx| {
+                        app.draw(cx);
+                        let state = app.state.read(cx);
+                        let result = state
+                            .selected()
+                            .and_then(|reference| state.result(reference))
+                            .unwrap();
+                        let labels = group_sections(&result.rows).unwrap();
+                        // A group shows once, under its display name.
+                        let mut unique = labels.clone();
+                        unique.sort();
+                        unique.dedup();
+                        assert_eq!(unique.len(), labels.len(), "{labels:?}");
+                        let expected = match group_by {
+                            GroupBy::HostGroup => "linux-servers",
+                            GroupBy::Host => "db-prod-03",
+                            _ => "",
+                        };
+                        assert!(
+                            expected.is_empty() || labels.iter().any(|label| label == expected),
+                            "{labels:?}"
+                        );
+                        previous = labels;
+                    });
+                }
             }
             .boxed_local()
         })),

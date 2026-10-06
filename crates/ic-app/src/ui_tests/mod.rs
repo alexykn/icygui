@@ -40,6 +40,8 @@ use crate::pane::{HostTab, ObjectPane};
 use crate::window_state::InitialBounds;
 use crate::workspace::{self, ToggleSidebar, Workspace};
 
+mod editing;
+mod environments;
 mod live;
 mod states;
 

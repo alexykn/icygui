@@ -111,6 +111,36 @@ where
     }
 }
 
+/// A local calendar date: `2027-03-14`.
+pub(crate) fn date(at: Timestamp) -> String {
+    date_time(at, &Local).map_or_else(|| "—".to_owned(), |at| at.format("%Y-%m-%d").to_string())
+}
+
+/// When a certificate stops being valid, as the trust dialog shows it:
+/// `2027-03-14 · in 159d`, or `2025-01-02 · expired 3d ago`; and whether
+/// it has expired.
+pub(crate) fn expiry(not_after: Timestamp, now: Timestamp) -> (String, bool) {
+    if not_after > now {
+        (
+            format!(
+                "{} · in {}",
+                date(not_after),
+                format_compact(not_after.remaining_from(now))
+            ),
+            false,
+        )
+    } else {
+        (
+            format!(
+                "{} · expired {} ago",
+                date(not_after),
+                format_compact(not_after.elapsed_until(now))
+            ),
+            true,
+        )
+    }
+}
+
 fn date_time<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<DateTime<Tz>> {
     let seconds = at.as_unix_seconds().floor();
     // Icinga's timestamps are well inside i64's range; anything else is
@@ -124,6 +154,26 @@ fn date_time<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<DateTime<Tz>> {
     )]
     let whole = seconds as i64;
     Some(DateTime::from_timestamp(whole, 0)?.with_timezone(zone))
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+
+    #[test]
+    fn expiry_says_how_long_is_left_or_since_when_it_expired() {
+        let now = Timestamp::from_unix_seconds(1_790_000_000.);
+        let (valid, expired) = expiry(
+            Timestamp::from_unix_seconds(1_790_000_000. + 86_400. * 3.),
+            now,
+        );
+        assert!(valid.ends_with(" · in 3d"), "{valid}");
+        assert!(!expired);
+        let (gone, expired) = expiry(Timestamp::from_unix_seconds(1_790_000_000. - 7_200.), now);
+        assert!(gone.ends_with(" · expired 2h ago"), "{gone}");
+        assert!(expired);
+        assert_eq!(date(now).len(), 10);
+    }
 }
 
 #[cfg(test)]

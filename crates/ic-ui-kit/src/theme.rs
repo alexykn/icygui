@@ -152,6 +152,11 @@ pub struct Colors {
     /// Drop shadow under menus and other popovers, which float higher
     /// (black at 45 %).
     pub shadow_strong: Hsla,
+    /// Drop shadow under modal cards, which float highest (black at 60 %).
+    pub shadow_modal: Hsla,
+    /// The dimmed window behind a modal card (`#08090b` at 55 %, the
+    /// command palette's in the design).
+    pub backdrop: Hsla,
 }
 
 impl Colors {
@@ -200,6 +205,8 @@ impl Colors {
 
             shadow: hsla(0., 0., 0., 0.35),
             shadow_strong: hsla(0., 0., 0., 0.45),
+            shadow_modal: hsla(0., 0., 0., 0.6),
+            backdrop: rgba(0x0809_0b8c).into(),
         }
     }
 }
@@ -351,8 +358,12 @@ pub struct Metrics {
     pub icon_button: Pixels,
     /// Corner radius of icon buttons and tooltips.
     pub small_radius: Pixels,
-    /// Corner radius of code blocks.
+    /// Corner radius of code blocks and text fields.
     pub code_radius: Pixels,
+    /// Corner radius of modal cards (the command palette, dialogs).
+    pub modal_radius: Pixels,
+    /// Text fields and other form controls.
+    pub field_height: Pixels,
     /// Small icons (sidebar header and footer).
     pub icon_small: Pixels,
     /// Default icon size.
@@ -419,6 +430,8 @@ impl Default for Metrics {
             icon_button: px(22.),
             small_radius: px(4.),
             code_radius: px(6.),
+            modal_radius: px(10.),
+            field_height: px(30.),
             icon_small: px(13.),
             icon: px(14.),
             icon_large: px(16.),

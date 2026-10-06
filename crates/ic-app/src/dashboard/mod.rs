@@ -9,7 +9,7 @@
 //! ([`selection::ListSelection`]); every dashboard keeps its own selection,
 //! scroll position and open pane.
 
-mod header;
+pub(crate) mod header;
 pub(crate) mod rows;
 pub(crate) mod selection;
 
@@ -66,6 +66,13 @@ struct OpenPane {
     _events: Subscription,
 }
 
+/// What the dashboard view asks the workspace to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DashboardEvent {
+    /// Open the editor for this dashboard (the header's `···`).
+    Edit(DashboardRef),
+}
+
 /// The dashboard list with its header, summary bar and detail pane.
 pub(crate) struct DashboardView {
     state: Entity<AppState>,
@@ -84,6 +91,8 @@ pub(crate) struct DashboardView {
     hydrate_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
+
+impl gpui::EventEmitter<DashboardEvent> for DashboardView {}
 
 impl Focusable for DashboardView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -381,6 +390,30 @@ impl DashboardView {
                 cx.notify();
             }
         });
+    }
+
+    /// The objects an action from elsewhere (the command palette) applies
+    /// to: the marked rows, else the pane's or the cursor's object.
+    pub(crate) fn action_targets(&mut self, cx: &mut Context<Self>) -> Vec<ObjectKey> {
+        let Some(reference) = self.sync(cx) else {
+            return Vec::new();
+        };
+        let marked = self
+            .lists
+            .get(&reference)
+            .map(|list| list.selection.marked_keys())
+            .unwrap_or_default();
+        if marked.is_empty() {
+            self.focused_object(cx).into_iter().collect()
+        } else {
+            marked
+        }
+    }
+
+    /// Runs `action` as its key would: on the marked rows, else the
+    /// pane's or the cursor's object.
+    pub(crate) fn run_action(&mut self, action: ObjectAction, cx: &mut Context<Self>) {
+        self.request(action, cx);
     }
 
     /// The object the keyboard acts on without marks: the pane's, else the
@@ -847,7 +880,7 @@ impl SplitLayout {
 }
 
 /// The element id of `key`'s row under `group`.
-fn row_id(group: Option<&str>, key: &ObjectKey) -> ElementId {
+pub(crate) fn row_id(group: Option<&str>, key: &ObjectKey) -> ElementId {
     let name = match group {
         // A control character can't occur in Icinga object or group names.
         Some(group) => format!("row:{group}\u{1f}{key}"),
@@ -857,7 +890,7 @@ fn row_id(group: Option<&str>, key: &ObjectKey) -> ElementId {
 }
 
 /// An object row; `show_host` adds `on <host>` after a service's name.
-fn object_row(
+pub(crate) fn object_row(
     snapshot: &ic_core::snapshot::Snapshot,
     id: ElementId,
     key: &ObjectKey,
@@ -899,7 +932,7 @@ fn object_row(
 
 /// A group header row: a darker band with the group's name in semibold;
 /// grouped by host, the host's state as a compact circle and its output.
-fn group_header(
+pub(crate) fn group_header(
     snapshot: &ic_core::snapshot::Snapshot,
     view: &View,
     label: &str,

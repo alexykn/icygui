@@ -47,6 +47,37 @@ pub(crate) fn banners(state: &Entity<AppState>, now: Timestamp, cx: &App) -> Vec
             .into_any_element(),
         );
     }
+    if let Some(notice) = current.notice() {
+        let dismiss = state.clone();
+        let tone = if notice.problem {
+            BannerTone::Warning
+        } else {
+            BannerTone::Info
+        };
+        let mut banner =
+            Banner::new("user-notice", tone, notice.title.clone()).icon(if notice.problem {
+                IconName::TriangleAlert
+            } else {
+                IconName::Info
+            });
+        if let Some(detail) = &notice.detail {
+            banner = banner.detail(detail.clone());
+        }
+        banners.push(
+            banner
+                .child(
+                    Link::new("dismiss-notice", "Dismiss")
+                        .quiet()
+                        .on_click(move |_, _, cx| {
+                            dismiss.update(cx, |state, cx| {
+                                state.dismiss_notice();
+                                cx.notify();
+                            });
+                        }),
+                )
+                .into_any_element(),
+        );
+    }
     banners
 }
 

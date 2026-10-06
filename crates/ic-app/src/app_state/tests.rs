@@ -458,10 +458,22 @@ fn recovery_adopts_the_settings_and_connects() {
 #[test]
 fn the_demo_server_address_goes_into_its_environment() {
     let mut state = AppState::demo(crate::live::demo::config(), now());
-    state.set_demo_server("https://127.0.0.1:41234", Some("AB:CD"));
-    let environment = state.environment().unwrap();
-    assert_eq!(environment.url, "https://127.0.0.1:41234");
-    assert_eq!(environment.tls.pinned_sha256.as_deref(), Some("AB:CD"));
+    state.set_demo_server(
+        crate::live::demo::STAGING_ID,
+        "https://127.0.0.1:41234",
+        Some("AB:CD"),
+    );
+    let staging = state
+        .environment_by_id(crate::live::demo::STAGING_ID)
+        .unwrap();
+    assert_eq!(staging.url, "https://127.0.0.1:41234");
+    assert_eq!(staging.tls.pinned_sha256.as_deref(), Some("AB:CD"));
+    assert!(!staging.tls.use_system_roots);
+    assert_ne!(
+        state.environment().unwrap().url,
+        "https://127.0.0.1:41234",
+        "the other environments keep theirs"
+    );
 }
 
 #[test]

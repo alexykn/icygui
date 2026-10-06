@@ -11,11 +11,15 @@ mod chrome;
 mod cli;
 mod dashboard;
 mod dev;
+mod editor;
+mod environments;
 #[cfg(test)]
 mod fixture;
 mod format;
 mod live;
 mod logging;
+mod menu_state;
+mod palette;
 mod pane;
 mod persist;
 mod recovery;

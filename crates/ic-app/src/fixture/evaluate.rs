@@ -123,11 +123,51 @@ impl Match {
 
 /// Evaluates `view` over `snapshot` with `filter`.
 pub(crate) fn evaluate(snapshot: &Snapshot, view: &View, filter: DemoFilter) -> DashboardResult {
+    evaluate_with(snapshot, view, |host, service| {
+        filter.matches(host, service)
+    })
+}
+
+/// Evaluates `view` over `snapshot` with its filter expression, parsed and
+/// evaluated by `ic-filter` the way the core does: a filter that doesn't
+/// parse is an error naming the line and column, like the core's.
+///
+/// # Errors
+///
+/// The filter doesn't parse.
+pub(crate) fn evaluate_expression(
+    snapshot: &Snapshot,
+    view: &View,
+) -> Result<DashboardResult, String> {
+    let filter = ic_filter::Filter::parse(&view.filter).map_err(|error| {
+        let (line, column) = error.line_column(&view.filter);
+        format!("{} (line {line}, column {column})", error.message)
+    })?;
+    Ok(evaluate_with(
+        snapshot,
+        view,
+        |host, service| match service {
+            Some(service) => filter.matches(&ic_filter::ServiceScope {
+                service,
+                host: Some(host),
+            }),
+            None => filter.matches(&ic_filter::HostScope { host }),
+        },
+    ))
+}
+
+/// Evaluates `view` over `snapshot`, matching with `matches(host, service)`
+/// (`None` for host views).
+fn evaluate_with(
+    snapshot: &Snapshot,
+    view: &View,
+    matches: impl Fn(&Host, Option<&Service>) -> bool,
+) -> DashboardResult {
     let matches: Vec<Match> = match view.object_kind {
         ObjectKind::Hosts => snapshot
             .hosts
             .values()
-            .filter(|host| filter.matches(host, None))
+            .filter(|host| matches(host, None))
             .map(|host| Match::host(host))
             .collect(),
         ObjectKind::Services => snapshot
@@ -135,8 +175,8 @@ pub(crate) fn evaluate(snapshot: &Snapshot, view: &View, filter: DemoFilter) -> 
             .values()
             .filter_map(|service| {
                 let host = snapshot.host_of(&service.key).map(Arc::as_ref);
-                let matched = host.is_some_and(|host| filter.matches(host, Some(service)));
-                matched.then(|| Match::service(service, host))
+                let keep = host.is_some_and(|host| matches(host, Some(service)));
+                keep.then(|| Match::service(service, host))
             })
             .collect(),
     };

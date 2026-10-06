@@ -257,7 +257,19 @@ impl DashboardView {
                 "service group",
             ),
         ];
-        let mut menu = Menu::new("options-menu").label("group by");
+        let edit = reference.clone();
+        let mut menu = Menu::new("options-menu")
+            .item(
+                MenuItem::new("edit-dashboard", "edit dashboard…").on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
+                        this.menus.close();
+                        cx.emit(super::DashboardEvent::Edit(edit.clone()));
+                        cx.notify();
+                    },
+                )),
+            )
+            .separator()
+            .label("group by");
         for (group_by, id, label) in groupings {
             if group_by == GroupBy::ServiceGroup && view.object_kind == ObjectKind::Hosts {
                 continue;
@@ -402,12 +414,12 @@ fn sort_id(key: SortKey) -> &'static str {
 
 /// The direction a key sorts in when chosen: worst and newest first, names
 /// from A.
-fn natural_descending(key: SortKey) -> bool {
+pub(crate) fn natural_descending(key: SortKey) -> bool {
     matches!(key, SortKey::Severity | SortKey::LastStateChange)
 }
 
 /// What a view lists, as the header's subtitle.
-pub(super) fn view_label(view: &View) -> &'static str {
+pub(crate) fn view_label(view: &View) -> &'static str {
     match (view.object_kind, view.problems_only) {
         (ObjectKind::Services, true) => "service problems",
         (ObjectKind::Hosts, true) => "host problems",
@@ -417,7 +429,7 @@ pub(super) fn view_label(view: &View) -> &'static str {
 }
 
 /// The sort trigger's text: `severity ↓`.
-pub(super) fn sort_label(sort: Sort, kind: ObjectKind) -> SharedString {
+pub(crate) fn sort_label(sort: Sort, kind: ObjectKind) -> SharedString {
     let key = match (sort.key, kind) {
         (SortKey::Severity, _) => "severity",
         (SortKey::LastStateChange, _) => "last change",
@@ -432,7 +444,10 @@ pub(super) fn sort_label(sort: Sort, kind: ObjectKind) -> SharedString {
 /// The counts the summary bar shows: problem states with a count, or the OK
 /// count when there are none, then pending objects. Empty when nothing
 /// matches the dashboard's filter.
-fn summary_items(summary: &Summary, kind: ObjectKind) -> Vec<(CheckableState, u32, &'static str)> {
+pub(crate) fn summary_items(
+    summary: &Summary,
+    kind: ObjectKind,
+) -> Vec<(CheckableState, u32, &'static str)> {
     let (problems, ok, pending) = match kind {
         ObjectKind::Services => (
             vec![

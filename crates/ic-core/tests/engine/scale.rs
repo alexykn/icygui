@@ -271,13 +271,16 @@ mod steady {
     }
 
     /// What one window of the engine costs: the stream's lines and bytes,
-    /// requests to the mock (event streams aside), the engine threads' CPU
-    /// time.
+    /// requests to the mock (event streams aside; `periodic` without those
+    /// a notification brings: Icinga's notification objects read again and
+    /// the notified object's prefetch, one or two per notification in
+    /// either mode), the engine threads' CPU time.
     struct Window {
         seconds: f64,
         lines: u64,
         bytes: u64,
         requests: usize,
+        periodic: usize,
         cpu: f64,
     }
 
@@ -288,11 +291,12 @@ mod steady {
         )]
         fn report(&self, what: &str) -> String {
             format!(
-                "{what}: {:.1} events/s, {:.1} KB/s on the stream, {:.1} requests/min, \
-                 engine {:.2} % of one core",
+                "{what}: {:.1} events/s, {:.1} KB/s on the stream, {:.1} requests/min \
+                 ({:.1} periodic), engine {:.2} % of one core",
                 self.lines as f64 / self.seconds,
                 self.bytes as f64 / self.seconds / 1_000.0,
                 self.requests as f64 / self.seconds * 60.0,
+                self.periodic as f64 / self.seconds * 60.0,
                 self.cpu / self.seconds * 100.0,
             )
         }
@@ -317,14 +321,25 @@ mod steady {
         }
         let seconds = started.elapsed().as_secs_f64();
         let (lines_after, bytes_after) = control.events_delivered();
+        let requests: Vec<_> = control
+            .requests()
+            .into_iter()
+            .filter(|request| request.path != "/v1/events")
+            .collect();
+        let by_notification = |request: &ic_mock::RecordedRequest| {
+            request.path == "/v1/objects/notifications"
+                || request.body.as_ref().is_some_and(|body| {
+                    body.get("hosts").is_some() || body.get("services").is_some()
+                })
+        };
         Window {
             seconds,
             lines: lines_after - lines,
             bytes: bytes_after - bytes,
-            requests: control
-                .requests()
+            requests: requests.len(),
+            periodic: requests
                 .iter()
-                .filter(|request| request.path != "/v1/events")
+                .filter(|request| !by_notification(request))
                 .count(),
             cpu: latest
                 .iter()
@@ -483,7 +498,14 @@ mod steady {
             fewer > 90.0,
             "quiet mode drops at least 90 % of the stream: {fewer:.1} %"
         );
-        assert!(quiet.requests <= live.requests);
+        // Periodic requests: a notification brings one or two in either
+        // mode (how many come in a window is chance).
+        assert!(
+            quiet.periodic <= live.periodic,
+            "quiet {} periodic requests, live {}",
+            quiet.periodic,
+            live.periodic
+        );
         if !cfg!(debug_assertions) {
             assert!(quiet.cpu < live.cpu);
         }

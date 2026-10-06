@@ -4,9 +4,11 @@
 //! - `render <svg> <png> <size>`: render one SVG to a square PNG
 //! - `bundle [--release] [--universal] [--sign IDENTITY]`: macOS `.app` or a
 //!   Linux install tree in `target/bundle`
-//! - `package [--universal] [--sign IDENTITY] [--notarize]`: release
-//!   artifacts in `target/dist` (macOS `.zip` + `.dmg`; Linux `.tar.gz` +
-//!   `.deb`) plus `SHA256SUMS`
+//! - `package [--universal] [--sign IDENTITY] [--notarize] [--prebuilt]`:
+//!   release artifacts in `target/dist` (macOS `.zip` + `.dmg`; Linux
+//!   `.tar.gz` + `.deb`) plus `SHA256SUMS`; with `--prebuilt`, from the
+//!   bundle `bundle --release` left, without building (the release
+//!   workflow signs where nothing compiles)
 //! - `notarize <path>`: notarize and staple an `.app` or `.dmg`
 //! - `homebrew --dist DIR --out TAP_DIR [--repo OWNER/NAME] [--notarized]`:
 //!   write the Homebrew cask (macOS) and formula (Linux) for the artifacts
@@ -58,6 +60,8 @@ pub(crate) struct Flags {
     pub(crate) universal: bool,
     pub(crate) sign: Option<String>,
     pub(crate) notarize: bool,
+    /// `package` from the bundle in `target/bundle`, building nothing.
+    pub(crate) prebuilt: bool,
     pub(crate) dist: Option<PathBuf>,
     pub(crate) out: Option<PathBuf>,
     pub(crate) repo: Option<String>,
@@ -81,6 +85,7 @@ fn parse_flags(args: &[String]) -> Result<Flags> {
             "--universal" => flags.universal = true,
             "--notarize" => flags.notarize = true,
             "--notarized" => flags.notarized = true,
+            "--prebuilt" => flags.prebuilt = true,
             "--sign" => flags.sign = Some(value("--sign")?),
             "--dist" => flags.dist = Some(PathBuf::from(value("--dist")?)),
             "--out" => flags.out = Some(PathBuf::from(value("--out")?)),
@@ -102,7 +107,7 @@ const USAGE: &str = "usage: cargo xtask <command>
   icons                                   render logo, icons, icns, banner
   render <svg> <png> <size>               render one SVG
   bundle [--release] [--universal] [--sign IDENTITY]
-  package [--universal] [--sign IDENTITY] [--notarize]
+  package [--universal] [--sign IDENTITY] [--notarize] [--prebuilt]
   notarize <app-or-dmg>
   homebrew --dist DIR --out TAP_DIR [--repo OWNER/NAME] [--notarized]
   version
@@ -360,6 +365,14 @@ mod tests {
         assert_eq!(flags.positional, ["x"]);
         assert!(parse_flags(&args(&["--nope"])).is_err());
         assert!(parse_flags(&args(&["--sign"])).is_err());
+    }
+
+    #[test]
+    fn prebuilt_is_a_flag() {
+        let flags = parse_flags(&args(&["--prebuilt", "--universal"])).unwrap();
+        assert!(flags.prebuilt);
+        assert!(flags.universal);
+        assert!(!parse_flags(&args(&[])).unwrap().prebuilt);
     }
 
     #[test]

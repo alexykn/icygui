@@ -12,6 +12,7 @@ A short checklist for the first time icygui connects to the real Icinga at work.
 
 - [ ] Add the `ApiUser` from the [user guide](user-guide.md#the-api-user) through your usual config management (the Ansible role), with a long random password from your password manager.
   - For a first look, **leave out the `actions/*` lines**: icygui is then read-only, and its action buttons are disabled with the reason. Add them once you trust it.
+  - `actions/execute-command` isn't in the list, and should stay out unless you need *run command*: together with macros it can run any command on your agents (see [the user guide](user-guide.md#the-api-user)).
   - Don't give it `filter-expression` permissions or any permission beyond the list; icygui needs none.
 - [ ] Deploy and reload Icinga (`icinga2 daemon -C` first, as always).
 
@@ -29,7 +30,7 @@ A short checklist for the first time icygui connects to the real Icinga at work.
 
 - [ ] Start icygui. In the onboarding form: name (`prod`), URL `https://<master>:5665`, the API user and password, your own name as *author*.
 - [ ] TLS: set the CA file, **or** press *test connection*, compare the SHA-256 it shows with the one from step 2, character by character, and only then *trust this certificate*.
-- [ ] *test connection* shows the API user, Icinga's version and the permissions. With the read-only user, *missing* lists exactly the `actions/*` permissions you left out, nothing else.
+- [ ] *test connection* shows the API user, Icinga's version and the permissions. Under *client* it lists what the user lacks: `actions/execute-command` (opt-in, left out on purpose) and, with the read-only user, exactly the `actions/*` permissions you left out, nothing else.
 - [ ] *connect*.
 
 ## 4. What normal looks like
@@ -45,6 +46,7 @@ A short checklist for the first time icygui connects to the real Icinga at work.
 - [ ] Open a host: its services, vars and config tabs, parents and children.
 - [ ] Build a dashboard for your team with a filter you know from Icinga Web or `assign where` (<kbd>⌘N</kbd> / <kbd>Ctrl N</kbd>); compare its count with Icinga Web.
 - [ ] Leave it running for a shift. Close the window: it should keep running in the tray or menu bar and notify.
+- [ ] **On a Mac, look closely:** the menu-bar icon, notifications, launch at login and keychain access have only been tested on Linux so far. Check that the menu-bar icon appears and its menu works after closing the window, that macOS asks to allow notifications and a notification's *Acknowledge* and *Open* buttons work, that launch at login starts icygui in the menu bar, and that the keychain prompt doesn't come back after an update. The full list is in [spikes.md](spikes.md#still-to-run-on-a-mac); report what you find.
 - [ ] Once you've added the `actions/*` permissions: acknowledge one real problem you'd acknowledge anyway, and check it in Icinga Web (author, comment, no notification sent by Icinga for it).
 
 ## 6. What to report, and where

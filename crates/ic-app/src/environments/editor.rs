@@ -32,6 +32,7 @@ use secrecy::SecretString;
 use super::certificate::{certificate_details, mismatch_warning};
 use super::form::{AuthKind, EnvironmentForm, FormField};
 use crate::app_state::environments::EnvironmentSaved;
+use crate::app_state::permissions;
 use crate::live;
 
 /// Where the editor is shown.
@@ -988,6 +989,15 @@ fn report_view(report: &ConnectionReport, theme: &Theme) -> AnyElement {
         (
             FieldTone::Good,
             format!("all {required} permissions the client uses"),
+        )
+    } else if permissions::missing_needed(missing) == 0 {
+        // The user guide's ApiUser: run command is opt-in.
+        (
+            FieldTone::Good,
+            format!(
+                "all {} permissions the client needs; run command's is opt-in",
+                required - missing.len()
+            ),
         )
     } else {
         (

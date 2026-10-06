@@ -47,5 +47,13 @@ NOTE  default quit mode quit after the last window closed
 
 ### Still to run on a Mac
 
-1. `cargo run -p spikes --bin background`: does the menu-bar icon appear, and do Open / Quit work after closing the window?
-2. The same binary inside a dev `.app` bundle (comes with `cargo xtask bundle`): does the permission prompt appear, and do the notification's Acknowledge / Open buttons come back to the app?
+Nothing of the desktop integration has run on macOS yet: CI's macOS job runs clippy, the tests that need no desktop (the UI, tray and notification tests are Linux-only), `cargo xtask bundle` and `--version`. Before relying on icygui on a Mac, check these and record the results here and in PLAN.md §6:
+
+1. The spike: `cargo run -p spikes --bin background`. Does the menu-bar icon appear, and do Open / Quit work after closing the window?
+2. The app, both as a dev bundle (`cargo xtask bundle`, then `open target/bundle/icygui.app`) and as a release installed by `install.sh` (re-signed with the local identity):
+   - [ ] **Menu-bar icon** (BG-02, REL-07): it appears next to GPUI's app, tinted with the worst unhandled state; the tooltip has the counts.
+   - [ ] **Closing the window** (BG-01) keeps icygui in the menu bar, connected; its menu's *Open* brings the window back, *Pause notifications* pauses (the footer shows the bell-off), *Environments* switches, *Quit* quits.
+   - [ ] **Notifications** (NOTE-01): the permission prompt appears for the first one; a notification shows *Acknowledge* and *Open*; *Acknowledge* opens the acknowledge dialog and *Open* the object's pane, also after the window was closed; the rule's sound plays.
+   - [ ] **Launch at login** (BG-03): turning it on writes `~/Library/LaunchAgents/io.github.alexykn.icygui.plist`; after logging out and in, icygui starts in the menu bar without a window; turning it off removes it.
+   - [ ] **Keychain** (ENV-03): saving a password stores it; macOS asks once when icygui reads it, and *Always Allow* sticks. After updating with `install.sh` (same local signing identity) it doesn't ask again.
+   - [ ] **One instance** (BG-04): starting icygui again brings the running one's window forward.

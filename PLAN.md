@@ -64,7 +64,7 @@ Everything below is backed by the Icinga 2 REST API (`https://<endpoint>:5665/v1
 - **Search**: sidebar search filters dashboards. ⌘K searches hosts, services, groups, dashboards and commands.
 
 ### 2.3 Per-object actions (host and service)
-Each action works on one object, a multi-selection, or a whole filter (the API accepts `type` + `filter`, so "acknowledge everything on db-prod-03" is one request).
+Each action works on one object, a multi-selection, or every match of a palette query. Objects are always addressed by name, never by `filter` (which needs the `filter-expression` permission from Icinga 2.17 on): hosts and services go in separate requests of up to 200 names, sent one after another (20 per request for downtimes with `all_services` or child options).
 
 | Action | Endpoint | Options in the dialog |
 |---|---|---|
@@ -118,7 +118,7 @@ Bell controls live in the group and dashboard `···` menus. Muted items show a
 
 **Content**: title `CRITICAL · postgres-replication on db-prod-03`, body = first line of the output, subtitle = group / dashboard. Click → bring the window back (or create it) and open the object pane. **Acknowledge** / **Open** action buttons on both platforms.
 
-**Delivery**: GPUI's built-in `cx.show_system_notification` (XDG notifications via `notify-rust` on Linux, `UNUserNotificationCenter` on macOS, action responses come back on the main thread). It's verified on Linux (`docs/spikes.md`). macOS only delivers from an app bundle, so dev builds on a Mac run from a dev `.app` (`cargo xtask bundle --dev`). The adapter sits behind a `Notifier` port, so a richer Linux backend (urgency, replace) can be swapped in later.
+**Delivery**: GPUI's built-in `cx.show_system_notification` (XDG notifications via `notify-rust` on Linux, `UNUserNotificationCenter` on macOS, action responses come back on the main thread). It's verified on Linux (`docs/spikes.md`). macOS only delivers from an app bundle, so dev builds on a Mac run from a dev `.app` (`cargo xtask bundle`: a debug build unless `--release`). The adapter sits behind a `Notifier` port, so a richer Linux backend (urgency, replace) can be swapped in later.
 
 **Notification centre**: the clock icon in the footer lists recent notifications from the local log, with unread state, "mark all read", and snooze.
 
@@ -256,7 +256,7 @@ must_use_candidate = "allow"
 - Edition 2024, Rust 1.97.0 pinned in `rust-toolchain.toml`.
 - **GPUI source**: `gpui-pre` =0.3.8 from crates.io (a snapshot of zed@279fe07, published by the gpui-component maintainer), renamed to `gpui` in the workspace, plus `gpui-pre-platform` with the `wayland`, `x11` and `font-kit` features. That's the exact GPUI `gpui-component` 0.7.1 is built against, so both share one set of types. crates.io's own `gpui` (0.2.2) is a year old. GPUI is only used in `ic-ui-kit`, `ic-app` and `spikes`, so switching to a Zed git revision later is contained.
 - Logging: `tracing` with a rolling file appender in the log dir. Credentials and auth headers are never logged (a redacting `Debug` impl on secret types).
-- CI matrix: Linux (x86_64) and macOS (arm64): fmt → clippy → test, plus the headless background-mode spike on Linux. A nightly job runs the `ic-api` integration suite against the `icinga/icinga2` Docker image as a contract test for `ic-mock` (§3.6).
+- CI matrix: Linux (x86_64) and macOS (arm64): fmt → clippy → test, plus the headless background-mode spike on Linux. A nightly job runs the `ic-api` integration suite against the `icinga/icinga2` Docker image as a contract test for `ic-mock` (§3.6); another (`perf.yml`, PERF-07) runs the `#[ignore]`d production-scale tests in release builds against `ic-mock`'s `large` scenario, where they fail when a budget of `docs/performance.md` is missed.
 
 ### 3.5 Testing strategy
 | Layer | How |
@@ -306,7 +306,7 @@ There's no real Icinga to develop against, so the project gets its own: a small 
 ## 5. API permissions the client needs
 
 Read: `objects/query/{Host,Service,HostGroup,ServiceGroup,Comment,Downtime,Notification,Dependency,Endpoint,Zone}`, `status/query`, `events/*` for the event types in §2.6. These are exactly the types rc1 queries (who was notified comes from `Notification` objects; check commands are shown by name from the objects). `objects/query/{User,UserGroup,CheckCommand}` join the list only with a feature that reads those objects (users and commands in the Config tab, M7); asking for them earlier would grant read access to contact data and command lines for nothing.
-Operate: `actions/{reschedule-check,acknowledge-problem,remove-acknowledgement,schedule-downtime,remove-downtime,add-comment,remove-comment,process-check-result}`, `actions/execute-command`.
+Operate: `actions/{reschedule-check,acknowledge-problem,remove-acknowledgement,schedule-downtime,remove-downtime,add-comment,remove-comment,process-check-result}`. Opt-in: `actions/execute-command`, which with free-form macros can run any command on the agents; the user guide's `ApiUser` leaves it out and explains how to grant it (a separate `ApiUser`, a permission filter).
 The client probes permissions on connect, greys out what it can't do, and shows why on hover. A ready-to-paste `ApiUser` snippet (for your Ansible role) goes in the README.
 
 ---
@@ -321,6 +321,7 @@ Results of the M0 spikes; details in `docs/spikes.md`.
 | Tray on Linux needs a GTK loop GPUI doesn't run | **Resolved**: `tray-icon` with the `ksni` backend, no GTK. Menu clicks reach GPUI. Verified on Linux. GNOME still needs the AppIndicator extension to *show* it |
 | Native notifications | **Resolved on Linux** with GPUI's built-in API, including action buttons. **macOS open**: bundle-only; needs a run on a Mac |
 | macOS menu-bar icon next to GPUI | **Open**: needs a run on a Mac (`cargo run -p spikes --bin background`) |
+| The rest of the macOS desktop integration: close to the menu bar, the tray menu, launch at login, keychain access after `install.sh` re-signs an update | **Open**: built, but only run on Linux (the UI and tray tests are Linux-only). Checklist in `docs/spikes.md` (*Still to run on a Mac*) |
 | GPUI source is a third-party snapshot (`gpui-pre`) | Accepted for gpui-component compatibility. GPUI is confined to `ic-ui-kit`/`ic-app`; bump `gpui-pre` and `gpui-component` together |
 | macOS builds need the Metal compiler (separate download since Xcode 26) | Documented; CI installs it when missing |
 | The mock drifts from the real API | Nightly contract tests against `icinga/icinga2` in Docker (§3.5) |

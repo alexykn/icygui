@@ -77,18 +77,19 @@ object ApiUser "icygui" {
     "actions/add-comment",
     "actions/remove-comment",
     "actions/process-check-result",
-    "actions/execute-command",
   ]
 }
 ```
 
 Reload Icinga afterwards (`systemctl reload icinga2`).
 
-- This is the complete list icygui checks for: with it, *test connection* reports nothing missing.
+- This is everything icygui uses except `actions/execute-command`, which is left out on purpose (*Run command* below): with this list, *test connection* reports all the permissions icygui needs and lists run command's as the opt-in one it lacks.
 - icygui never sends `filter` expressions in its requests (it addresses hosts and services by name), so it needs no `filter-expression` permission, which Icinga 2.17 requires by default for requests that carry a filter.
 - Permissions restricted with a `filter` in the `ApiUser` work too: icygui then shows and acts on only the objects the user may see.
 - **Read-only:** leave out the `actions/*` lines. Action buttons are then disabled, and hovering one says which permission is missing.
-- **No remote commands:** leave out `actions/execute-command` only; *run command* is then disabled.
+- **Run command is opt-in, and it is remote code execution.** `actions/execute-command` runs a check or event command on an endpoint, and icygui's *run command* sends whatever macros you type. With a command such as the ITL's `by_ssh` (its `by_ssh_command` is free text), or any command with a free-form argument, whoever holds this API user's password can run arbitrary commands as the `icinga` user on every agent and satellite the master reaches, and that password sits in the keychain of every on-call laptop. Without the permission, *run command* is disabled and says which permission is missing. If you do need it:
+  - give it to a **separate `ApiUser`** that only the people who need it have (in icygui, a second environment with the same URL, switched to only to run a command: only the active environment notifies), and/or
+  - **restrict it with a filter** to the objects it may target, for example `{ permission = "actions/execute-command", filter = {{ "lab" in host.groups }} }` (`host` is the host itself or the service's host). A filter limits *which* hosts and services, not *what* runs on them.
 - `objects/query/Notification` and `events/Notification` let the panes show whom Icinga notified about a problem, and when. Without them, that row says it can't tell; everything else works.
 - `status/query` lets icygui notice an Icinga restart and a stalled event stream. Without it, the periodic reconcile still catches up.
 - icygui never needs `objects/modify`, `objects/create`, `objects/delete`, `config/*`, `console` or `actions/restart-process`, and never calls them.
@@ -137,6 +138,8 @@ More settings:
 ## Environments
 
 An environment is one Icinga API endpoint with its own dashboards, groups and notification rules. Several can be configured; one is active.
+
+**Only the active environment is connected and notifies.** Switching closes the connection to the previous one: nothing from it notifies until you switch back, wherever you switched (the footer, the palette or the tray menu). After a switch a notice names the environment that went quiet, and the switcher says it too. On call for production, switch back to it before you close the window.
 
 - **Switch** from the footer: click `● master-01 · 2s` to open the connection details (environment, URL, state, endpoint, version, last event, API user, missing permissions, *Reload from Icinga*) with the switcher under them. The palette has *Switch to <name>*. The sidebar always belongs to the active environment.
 - **Add** from the switcher (*add environment…*) or the palette (*Add environment…*).
@@ -247,7 +250,7 @@ All actions are runtime operations through Icinga's `/v1/actions`. icygui never 
 | **Submit check result** | State, output, performance data (passive results) |
 | **Run command** | Check or event command, endpoint, macros, TTL; after a confirmation that shows what will run (needs Icinga 2.13+) |
 
-- Mark several rows (<kbd>x</kbd>, Shift-click, <kbd>⌘A</kbd>) to act on all of them at once: one request to Icinga. A selection bar under the list shows how many are marked and the actions.
+- Mark several rows (<kbd>x</kbd>, Shift-click, <kbd>⌘A</kbd>) to act on all of them at once: one dialog, one result. icygui sends it in as few requests as it can: hosts and services in separate requests, up to 200 objects each, and 20 hosts per request for a downtime that also covers their services or child hosts (Icinga answers only once it has created every one of those downtimes). The requests go one after another, and after one that went unanswered nothing more is sent (see below). A selection bar under the list shows how many are marked and the actions.
 - Results show as toasts in the bottom-right corner, with per-object failures. The changed rows update within about a second.
 - **When Icinga doesn't answer.** Icinga answers an action only after it has run it for every object, which can take a while on a busy master; icygui waits up to five minutes. Without an answer the toast says *no answer from Icinga: it may have applied this anyway*: look at the object (its pane shows new comments and downtimes as Icinga reports them) before trying again. To keep a retry from adding a second comment or downtime, or running a command twice, icygui holds back the same action on those objects for ten minutes (the toast says why); other actions aren't affected.
 - The author recorded with acknowledgements, downtimes and comments is the environment's *author* (default: the API user).
@@ -256,6 +259,8 @@ All actions are runtime operations through Icinga's `/v1/actions`. icygui never 
 ## Notifications
 
 icygui decides about notifications **on your machine**, from the live event stream, with your rules. It doesn't depend on Icinga's notification users, and nothing you set here changes Icinga.
+
+Notifications come from the **active environment only** (see [Environments](#environments)): while you look at staging, production doesn't notify.
 
 **What a notification looks like:** `CRITICAL · postgres-replication on db-prod-03`, the first line of the output, and the group and dashboard. *Acknowledge* opens the acknowledge dialog; *Open* (or a click) brings the window back (it is recreated if you closed it) with the object's pane.
 
@@ -293,8 +298,8 @@ Clicking a notification from another environment than the active one opens nothi
 
 ## In the background
 
-- **Closing the window** keeps icygui running in the tray (Linux) or the menu bar (macOS), still connected and notifying (Settings → general → *keep running in the tray when the window closes*, on by default). Where no tray icon can be shown (stock GNOME without the AppIndicator extension), closing the window quits, and the settings say so. With unsaved work in the window (dashboard editor changes, text typed in an action dialog) it asks first.
-- **The tray icon** is the logo mark tinted with the worst unhandled state of the active environment; its tooltip has the counts; its menu has *Open*, *Pause notifications*, the environments and *Quit*.
+- **Closing the window** keeps icygui running in the tray (Linux) or the menu bar (macOS), still connected to the active environment and notifying for it (Settings → general → *keep running in the tray when the window closes*, on by default). Where no tray icon can be shown (stock GNOME without the AppIndicator extension), closing the window quits, and the settings say so. With unsaved work in the window (dashboard editor changes, text typed in an action dialog) it asks first.
+- **The tray icon** is the logo mark tinted with the worst unhandled state of the active environment; its tooltip has the counts; its menu has *Open*, *Pause notifications*, the environments and *Quit*. Choosing another environment there switches like the footer does: the previous one stops notifying.
 - **Launch at login** (Settings → general) starts icygui in the background, without a window (a launch agent on macOS, an XDG autostart entry on Linux). If no tray shows its icon within 20 seconds (a panel that starts after icygui gets that long), the window opens instead.
 - **One instance:** starting icygui again brings the running one's window forward.
 - **Quit** from the tray, the app menu or <kbd>⌘Q</kbd>.

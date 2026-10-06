@@ -109,11 +109,11 @@ Icinga Web is great for history, reporting and the big picture. icygui is for th
 | **Native and fast** | Rust and [GPUI](https://www.gpui.rs) (the GPU-rendered UI framework behind the Zed editor), no browser tab. Built and measured for 2 000 hosts and 30 000 services: problem lists are complete within seconds, lists are virtualised, and dashboards update incrementally. |
 | **Live** | One event stream from the Icinga 2 API keeps every list, count and pane current within about a second. Checks that should have reported but didn't are marked *late*. |
 | **Keyboard-first** | <kbd>j</kbd>/<kbd>k</kbd>, <kbd>Enter</kbd>, <kbd>Esc</kbd>, <kbd>x</kbd> to mark rows, <kbd>a</kbd> acknowledge, <kbd>d</kbd> downtime, <kbd>r</kbd> check now, <kbd>c</kbd> comment, <kbd>⌘K</kbd> for everything else. Bulk actions on marked rows, with per-object results. |
-| **Native notifications with sane rules** | Desktop notifications with *Acknowledge* and *Open* buttons, decided on your machine: hard states only, handled problems skipped, recoveries only for problems that notified, one notification per problem however many dashboards show it, storms collapsed into a summary, quiet hours, pause. It keeps watching from the tray or menu bar after you close the window. |
+| **Native notifications with sane rules** | Desktop notifications with *Acknowledge* and *Open* buttons, decided on your machine: hard states only, handled problems skipped, recoveries only for problems that notified, one notification per problem however many dashboards show it, storms collapsed into a summary, quiet hours, pause. It keeps watching the active environment from the tray or menu bar after you close the window. |
 | **Gentle on the master** | One lean load when it connects (about 35 MB at 30 000 services), then the event stream (about 75 KB/s). A lean reconcile every 5 or 15 minutes catches anything missed. No polling, no periodic full reloads, no re-query per event. |
-| **Least privilege** | Works with an API user without `filter-expression`. It only uses runtime operations under `/v1/actions`; it never changes Icinga's configuration or object attributes. Buttons for actions your user may not run are disabled and say why. |
+| **Least privilege** | Works with an API user without `filter-expression`. It only uses runtime operations under `/v1/actions`; it never changes Icinga's configuration or object attributes. Running commands on agents (`execute-command`) is opt-in and left out of the ready-made API user. Buttons for actions your user may not run are disabled and say why. |
 | **Shareable dashboards** | Dashboards live in groups in the sidebar, per environment. Export a group to a file and a colleague imports it. |
-| **Several Icinga environments** | Production, staging, lab: switch from the footer or the palette. Passwords stay in the system keychain. |
+| **Several Icinga environments** | Production, staging, lab: switch from the footer or the palette. Only the active one is connected and notifies. Passwords stay in the system keychain. |
 
 ## Install
 
@@ -163,7 +163,7 @@ Trying it against production for the first time? Read the [first-run checklist](
 
 ## Status
 
-Release candidate: everything planned for the first release is built and tested on Linux and macOS in CI; the first production trial is next. Light theme, multi-view dashboards, a host-group grid and cluster health come after it (see [PLAN.md](PLAN.md)).
+Release candidate: everything planned for the first release is built, and CI builds and tests it on Linux and macOS. The desktop integration has so far only run on Linux, though: on macOS the menu-bar icon, notifications with their *Acknowledge* and *Open* buttons, launch at login and keychain access after an update are still unverified (the [Mac checklist](docs/spikes.md#still-to-run-on-a-mac)). The first production trial is next. Light theme, multi-view dashboards, a host-group grid and cluster health come after it (see [PLAN.md](PLAN.md)).
 
 ## Licence
 

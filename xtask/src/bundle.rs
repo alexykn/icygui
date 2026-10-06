@@ -1,6 +1,8 @@
 //! App bundles: macOS `.app` (universal binary, Developer ID or ad-hoc
 //! signature with the hardened runtime) and the Linux install tree.
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -15,23 +17,93 @@ const LEGAL_FILES: [&str; 2] = ["LICENSE", "THIRD_PARTY_NOTICES.md"];
 
 const MACOS_TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
+/// The file next to the bundle that says how it was built (see [`stamp`]).
+const STAMP: &str = "build-stamp";
+
 /// Builds and bundles the app; returns the `.app` (macOS) or the install
 /// tree root (Linux).
 pub(crate) fn bundle(flags: &Flags) -> Result<PathBuf> {
+    if !cfg!(target_os = "macos") && (flags.universal || flags.sign.is_some()) {
+        return Err("--universal and --sign are macOS-only".to_owned());
+    }
+    let out = target_dir().join("bundle");
+    // A failed build leaves no stamp vouching for an older bundle.
+    let stamp_path = out.join(STAMP);
+    match fs::remove_file(&stamp_path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            return Err(format!("removing {}: {error}", stamp_path.display()));
+        }
+        _ => {}
+    }
     let binary = if flags.universal {
         build_universal()?
     } else {
         build(flags.release, None)?
     };
     check_version(&binary)?;
-    let out = target_dir().join("bundle");
-    if cfg!(target_os = "macos") {
-        bundle_macos(&binary, &out, flags.sign.as_deref())
+    let bundle = if cfg!(target_os = "macos") {
+        bundle_macos(&binary, &out, flags.sign.as_deref())?
     } else {
-        if flags.universal || flags.sign.is_some() {
-            return Err("--universal and --sign are macOS-only".to_owned());
+        bundle_linux(&binary, &out)?
+    };
+    // `--universal` always builds release slices.
+    write(
+        &stamp_path,
+        stamp(flags.release || flags.universal, flags.universal),
+    )?;
+    Ok(bundle)
+}
+
+/// How a bundle was built: `release`, `release universal` or `debug`.
+fn stamp(release: bool, universal: bool) -> String {
+    let profile = if release { "release" } else { "debug" };
+    if universal {
+        format!("{profile} universal\n")
+    } else {
+        format!("{profile}\n")
+    }
+}
+
+/// The release bundle an earlier `bundle --release` left in
+/// `target/bundle` (universal with `--universal`), re-signed with `--sign`'s
+/// identity: `package --prebuilt` packages without building. The release
+/// workflow builds in a step without secrets and signs in one that
+/// compiles nothing, so no build script or proc macro of the dependency
+/// tree runs where the signing identity and the notarization key are.
+pub(crate) fn prebuilt(flags: &Flags) -> Result<PathBuf> {
+    prebuilt_in(&target_dir().join("bundle"), flags)
+}
+
+/// [`prebuilt`] for the bundle directory `out`.
+pub(crate) fn prebuilt_in(out: &Path, flags: &Flags) -> Result<PathBuf> {
+    if !cfg!(target_os = "macos") && (flags.universal || flags.sign.is_some()) {
+        return Err("--universal and --sign are macOS-only".to_owned());
+    }
+    let wanted = stamp(true, flags.universal);
+    let found = fs::read_to_string(out.join(STAMP)).unwrap_or_default();
+    if found != wanted {
+        let found = match found.trim() {
+            "" => "no finished build".to_owned(),
+            other => format!("a {other} build"),
+        };
+        let universal = if flags.universal { " --universal" } else { "" };
+        return Err(format!(
+            "{} holds {found}, not a {}: run `cargo xtask bundle --release{universal}` first",
+            out.display(),
+            wanted.trim()
+        ));
+    }
+    if cfg!(target_os = "macos") {
+        let app = out.join(format!("{APP_NAME}.app"));
+        check_version(&app.join("Contents/MacOS").join(BINARY))?;
+        if let Some(identity) = flags.sign.as_deref() {
+            sign_app(&app, Some(identity))?;
         }
-        bundle_linux(&binary, &out)
+        Ok(app)
+    } else {
+        let tree = out.join(APP_NAME);
+        check_version(&tree.join("bin").join(BINARY))?;
+        Ok(tree)
     }
 }
 
@@ -272,6 +344,54 @@ pub(crate) fn bundle_linux(binary: &Path, out: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `package --prebuilt` takes only a finished release bundle that
+    /// reports the workspace version, and builds nothing.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn prebuilt_takes_only_a_finished_release_bundle() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let scratch = Scratch(
+            std::env::temp_dir().join(format!("icygui-xtask-prebuilt-{}", std::process::id())),
+        );
+        let fake = scratch.0.join("fake-binary");
+        write(&fake, format!("#!/bin/sh\necho '{BINARY} {VERSION}'\n")).unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let out = scratch.0.join("bundle");
+        let tree = bundle_linux(&fake, &out).unwrap();
+        let release = Flags::default();
+
+        let error = prebuilt_in(&out, &release).unwrap_err();
+        assert!(error.contains("no finished build"), "{error}");
+        assert!(error.contains("cargo xtask bundle --release"), "{error}");
+        write(&out.join(STAMP), stamp(false, false)).unwrap();
+        let error = prebuilt_in(&out, &release).unwrap_err();
+        assert!(error.contains("a debug build"), "{error}");
+
+        write(&out.join(STAMP), stamp(true, false)).unwrap();
+        assert_eq!(prebuilt_in(&out, &release).unwrap(), tree);
+        let universal = Flags {
+            universal: true,
+            ..Flags::default()
+        };
+        assert!(prebuilt_in(&out, &universal).is_err(), "macOS-only");
+
+        // A binary that reports another version isn't packaged.
+        write(
+            &tree.join("bin").join(BINARY),
+            "#!/bin/sh\necho 'icygui 0.0.0'\n",
+        )
+        .unwrap();
+        let error = prebuilt_in(&out, &release).unwrap_err();
+        assert!(error.contains("--version printed"), "{error}");
+    }
 
     #[test]
     fn desktop_entry_names_the_app_and_its_icon() {

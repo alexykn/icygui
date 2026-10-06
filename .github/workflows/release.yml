@@ -3,6 +3,13 @@ name: Release
 # Builds, signs, notarizes and publishes a release, then updates the
 # Homebrew tap. Push a tag `vX.Y.Z` matching the workspace version, or run it
 # by hand for an existing tag. Secrets and setup: docs/releasing.md.
+#
+# Secrets are only in reach of steps that compile nothing: everything is
+# built first (build scripts and proc macros of the whole dependency tree
+# run there), then signed. Secrets go into step `env`, never job `env`; the
+# jobs that use them run in the `release` environment, whose protection
+# rules decide who and which refs get them. No build cache: a release is
+# built from scratch, and the actions are pinned to commits.
 
 on:
   push:
@@ -26,9 +33,10 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.TAG }}
+          persist-credentials: false
       - name: Tag must match the workspace version
         id: check
         run: |
@@ -42,19 +50,14 @@ jobs:
   macos:
     needs: version
     runs-on: macos-15
+    environment: release
     outputs:
-      notarized: ${{ steps.package.outputs.notarized }}
-    env:
-      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      notarized: ${{ steps.secrets.outputs.notarize }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.TAG }}
+          persist-credentials: false
 
       - name: Metal toolchain
         run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
@@ -64,74 +67,105 @@ jobs:
           rustup toolchain install
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
+      # Everything that compiles runs here, with no secret in reach.
+      - name: Build and bundle (ad-hoc signed, no secrets)
+        run: |
+          cargo build --locked -p xtask
+          target/debug/xtask bundle --release --universal
+
+      - name: Which signing secrets are set
+        id: secrets
+        env:
+          SIGN: ${{ secrets.MACOS_CERTIFICATE != '' && secrets.MACOS_SIGNING_IDENTITY != '' }}
+          NOTARY_KEY: ${{ secrets.APPLE_API_KEY != '' }}
+        run: |
+          notarize=false
+          if [ "$SIGN" = true ] && [ "$NOTARY_KEY" = true ]; then notarize=true; fi
+          echo "sign=$SIGN" >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
+          if [ "$SIGN" != true ]; then
+            echo "::notice::No Developer ID secrets: the macOS build is ad-hoc signed and not notarized."
+          fi
+
       - name: Import the Developer ID certificate
-        if: env.MACOS_CERTIFICATE != ''
+        if: steps.secrets.outputs.sign == 'true'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
           KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
-          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          (umask 077 && echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12")
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security import "$RUNNER_TEMP/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" \
             -A -t cert -f pkcs12 -k "$KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # shellcheck disable=SC2046 # one argument per keychain already listed
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           rm "$RUNNER_TEMP/certificate.p12"
 
       - name: Notarization key
-        if: env.APPLE_API_KEY != ''
-        run: |
-          echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
-          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+        if: steps.secrets.outputs.notarize == 'true'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: (umask 077 && echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8")
 
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build, sign, notarize and package
-        id: package
+      # Builds nothing: the xtask binary from the build step packages the
+      # bundle it made (`--prebuilt`), re-signed with the Developer ID.
+      - name: Sign, notarize and package
+        env:
+          SIGN: ${{ steps.secrets.outputs.sign }}
+          NOTARIZE: ${{ steps.secrets.outputs.notarize }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
-          # Without a Developer ID the app is ad-hoc signed and not notarized;
-          # install.sh re-signs it with a per-machine identity.
-          args=(package --universal)
-          notarized=false
-          if [ -n "$MACOS_SIGNING_IDENTITY" ] && [ -n "$MACOS_CERTIFICATE" ]; then
+          # Without a Developer ID the app stays ad-hoc signed and isn't
+          # notarized; install.sh re-signs it with a per-machine identity.
+          args=(package --prebuilt --universal)
+          if [ "$SIGN" = true ]; then
             args+=(--sign "$MACOS_SIGNING_IDENTITY")
-            if [ -n "$APPLE_API_KEY" ]; then
+            if [ "$NOTARIZE" = true ]; then
               args+=(--notarize)
-              notarized=true
+              export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
             fi
-          else
-            echo "::notice::No Developer ID secrets: the macOS build is ad-hoc signed and not notarized."
           fi
-          cargo xtask "${args[@]}"
-          echo "notarized=$notarized" >> "$GITHUB_OUTPUT"
+          target/debug/xtask "${args[@]}"
+
+      - name: Remove the signing keychain and the notarization key
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/certificate.p12"
+          if [ -e "$RUNNER_TEMP/signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          fi
 
       - name: Universal binary with the hardened runtime (REL-02)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           app=target/bundle/icygui.app
           lipo "$app/Contents/MacOS/icygui" -verify_arch arm64 x86_64
           codesign --verify --strict --verbose=2 "$app"
           codesign --display --verbose=2 "$app" 2>&1 | tee codesign.txt
           grep -q '^CodeDirectory .*flags=.*runtime' codesign.txt
-          test "$("$app/Contents/MacOS/icygui" --version)" = "icygui ${{ needs.version.outputs.version }}"
+          test "$("$app/Contents/MacOS/icygui" --version)" = "icygui $VERSION"
           rm codesign.txt
 
       - name: Check the signature and Gatekeeper verdict
-        if: env.MACOS_CERTIFICATE != '' && env.APPLE_API_KEY != ''
+        if: steps.secrets.outputs.notarize == 'true'
         run: |
           codesign --verify --deep --strict --verbose=2 target/bundle/icygui.app
           spctl --assess --type execute --verbose=4 target/bundle/icygui.app
           xcrun stapler validate target/dist/*.dmg
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-macos
           path: target/dist/icygui-*
           if-no-files-found: error
-
-      - name: Remove the signing keychain
-        if: always() && env.MACOS_CERTIFICATE != ''
-        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
 
   linux:
     needs: version
@@ -145,9 +179,10 @@ jobs:
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.TAG }}
+          persist-credentials: false
       - name: Build dependencies
         run: |
           sudo apt-get update
@@ -155,13 +190,12 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
             libwayland-dev libfontconfig-dev libfreetype-dev
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
       - run: cargo xtask package
       - name: Show the packages
         run: |
           for deb in target/dist/*.deb; do dpkg-deb --info "$deb"; dpkg-deb --contents "$deb"; done
           tar -tvzf target/dist/icygui-*.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-linux-${{ matrix.arch }}
           path: |
@@ -172,15 +206,13 @@ jobs:
   publish:
     needs: [version, macos, linux]
     runs-on: ubuntu-24.04
+    environment: release
     permissions:
       contents: write
       id-token: write
       attestations: write
-    env:
-      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-      GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: dist-*
           path: dist
@@ -191,15 +223,24 @@ jobs:
         run: sha256sum icygui* | tee SHA256SUMS
 
       - name: Sign the checksums (GPG)
-        if: env.GPG_PRIVATE_KEY != ''
         working-directory: dist
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "No GPG_PRIVATE_KEY: SHA256SUMS is not signed."
+            exit 0
+          fi
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          (umask 077 && mkdir -p "$GNUPGHOME")
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
           gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
             --armor --detach-sign SHA256SUMS
+          rm -rf "$GNUPGHOME"
 
       - name: Build provenance attestations
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: dist/icygui*
 
@@ -224,43 +265,60 @@ jobs:
     # Prereleases (versions like 0.2.0-rc.1) don't update the tap.
     if: ${{ !contains(needs.version.outputs.version, '-') }}
     runs-on: ubuntu-24.04
+    environment: release
     env:
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'alexykn/homebrew-tap' }}
     steps:
-      - name: Skip without a tap token
-        if: env.HOMEBREW_TAP_TOKEN == ''
-        run: echo "::warning::HOMEBREW_TAP_TOKEN is not set; the Homebrew tap was not updated."
+      - name: Is there a tap token
+        id: tap
+        env:
+          HAS_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          echo "enabled=$HAS_TOKEN" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_TOKEN" != true ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; the Homebrew tap was not updated."
+          fi
 
-      - uses: actions/checkout@v4
-        if: env.HOMEBREW_TAP_TOKEN != ''
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: steps.tap.outputs.enabled == 'true'
         with:
           ref: ${{ env.TAG }}
+          persist-credentials: false
 
-      - uses: actions/checkout@v4
-        if: env.HOMEBREW_TAP_TOKEN != ''
+      # Compiled before the tap token is on disk (the tap checkout keeps it
+      # in tap/.git/config for the push).
+      - name: Build xtask
+        if: steps.tap.outputs.enabled == 'true'
+        run: |
+          rustup toolchain install
+          cargo build --locked -p xtask
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: steps.tap.outputs.enabled == 'true'
         with:
           repository: ${{ env.HOMEBREW_TAP_REPO }}
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
-      - uses: actions/download-artifact@v4
-        if: env.HOMEBREW_TAP_TOKEN != ''
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.tap.outputs.enabled == 'true'
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
 
       - name: Update the cask and formula
-        if: env.HOMEBREW_TAP_TOKEN != ''
+        if: steps.tap.outputs.enabled == 'true'
+        env:
+          NOTARIZED: ${{ needs.macos.outputs.notarized }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          rustup toolchain install
-          notarized=()
-          if [ "${{ needs.macos.outputs.notarized }}" = true ]; then notarized=(--notarized); fi
-          cargo xtask homebrew --dist dist --out tap --repo "$GITHUB_REPOSITORY" "${notarized[@]}"
+          flags=()
+          if [ "$NOTARIZED" = true ]; then flags=(--notarized); fi
+          target/debug/xtask homebrew --dist dist --out tap --repo "$GITHUB_REPOSITORY" "${flags[@]}"
           cd tap
           git config user.name "icygui release"
           git config user.email "noreply@github.com"
           git add -A
-          git commit -m "icygui ${{ needs.version.outputs.version }}" || exit 0
+          git commit -m "icygui $VERSION" || exit 0
           git push

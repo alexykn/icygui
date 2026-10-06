@@ -253,6 +253,31 @@ pub fn fetch_certificate(
 mod tests {
     use super::*;
 
+    /// The user guide's ready-made `ApiUser` grants exactly what the client
+    /// uses, except `actions/execute-command`: that one is opt-in, because
+    /// with free-form macros it runs any command on the agents.
+    #[test]
+    fn the_user_guides_api_user_is_the_list_without_execute_command() {
+        let guide = include_str!("../../../docs/user-guide.md");
+        let snippet = guide
+            .split("object ApiUser \"icygui\" {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the user guide has the ApiUser snippet");
+        let mut granted: Vec<&str> = snippet
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
+            .collect();
+        granted.sort_unstable();
+        let mut expected: Vec<&str> = REQUIRED_PERMISSIONS
+            .iter()
+            .copied()
+            .filter(|permission| *permission != "actions/execute-command")
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(granted, expected);
+    }
+
     #[test]
     fn missing_permissions_follow_icinga_wildcards() {
         let all = ApiInfo {

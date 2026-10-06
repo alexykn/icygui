@@ -13,7 +13,7 @@ use ic_rules::{DashboardRef, ScopeSetting};
 use ic_ui_kit::{ActiveTheme as _, Dismissal, Menu, MenuItem};
 
 use super::{RenameTarget, Sidebar, SidebarEvent};
-use crate::app_state::AppState;
+use crate::app_state::{AppState, permissions};
 use crate::settings::ScopeKey;
 
 /// The notification settings a scope can take here (a custom rule is
@@ -409,6 +409,10 @@ impl Sidebar {
         if !environments.is_empty() {
             menu = menu.separator().label("environments");
         }
+        if environments.len() > 1 {
+            // D2: switching stops the other environment's notifications.
+            menu = menu.label("only the active one is connected and notifies");
+        }
         for environment in environments {
             let id = environment.id.clone();
             let is_active = active.as_deref() == Some(id.as_str());
@@ -469,7 +473,8 @@ pub(super) fn detail_lines(state: &AppState, now: Timestamp) -> Vec<(&'static st
         ),
     ));
     if let Some(info) = state.permissions() {
-        let missing = ic_core::missing_permissions(info).len();
+        // Run command's permission is opt-in (the user guide's ApiUser).
+        let missing = permissions::missing_needed(&ic_core::missing_permissions(info));
         lines.push((
             "API user",
             if missing == 0 {
@@ -547,6 +552,23 @@ mod tests {
         assert_eq!(*key, "API user");
         assert!(user.starts_with("viewer · "), "{user}");
         assert!(user.ends_with("permissions missing"), "{user}");
+
+        // The user guide's ApiUser: everything but the opt-in run command.
+        state.set_permissions(Some(ApiInfo {
+            user: "icygui".to_owned(),
+            permissions: ic_core::REQUIRED_PERMISSIONS
+                .iter()
+                .filter(|permission| **permission != "actions/execute-command")
+                .map(|permission| (*permission).to_owned())
+                .collect(),
+            version: "v2.15.6".to_owned(),
+        }));
+        let lines = detail_lines(&state, at(65.));
+        assert_eq!(
+            lines.last().unwrap().1,
+            "icygui",
+            "nothing needed is missing"
+        );
     }
 
     #[test]

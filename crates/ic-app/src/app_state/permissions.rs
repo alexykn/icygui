@@ -75,6 +75,23 @@ pub(crate) fn can_read_notifications(info: Option<&ApiInfo>) -> Option<bool> {
     info.map(|info| info.allows("objects/query/Notification"))
 }
 
+/// Whether `permission` is one the user guide's `ApiUser` leaves out on
+/// purpose: run command's `actions/execute-command`, which with free-form
+/// macros runs any command on the agents. Lacking it isn't a problem to
+/// flag (*run command* still says what it needs).
+pub(crate) fn is_opt_in(permission: &str) -> bool {
+    permission == action_permission(&ObjectAction::RunCommand)
+}
+
+/// How many of the client's permissions (`ic_core::REQUIRED_PERMISSIONS`)
+/// the user lacks, the opt-in ones not counted.
+pub(crate) fn missing_needed(missing: &[String]) -> usize {
+    missing
+        .iter()
+        .filter(|permission| !is_opt_in(permission))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +126,27 @@ mod tests {
                 "{permission} is one the client asks for"
             );
         }
+    }
+
+    /// The user guide's `ApiUser` (everything but run command) lacks
+    /// nothing the client needs.
+    #[test]
+    fn only_run_commands_permission_is_opt_in() {
+        let everything_but_run_command: Vec<&str> = ic_core::REQUIRED_PERMISSIONS
+            .iter()
+            .copied()
+            .filter(|permission| *permission != "actions/execute-command")
+            .collect();
+        let guide = user(&everything_but_run_command);
+        let missing = ic_core::missing_permissions(&guide);
+        assert_eq!(missing, ["actions/execute-command"]);
+        assert_eq!(missing_needed(&missing), 0);
+        assert!(action_denial(Some(&guide), &ObjectAction::RunCommand).is_some());
+
+        let viewer = user(&["objects/query/*", "status/query", "events/*"]);
+        let missing = ic_core::missing_permissions(&viewer);
+        assert_eq!(missing_needed(&missing), missing.len() - 1);
+        assert!(!is_opt_in("actions/acknowledge-problem"));
     }
 
     #[test]

@@ -25,7 +25,7 @@ The pipeline already supports it. Once you have an Apple Developer Program membe
 
 1. **Developer ID certificate.** In Xcode, open Settings → Accounts → Manage Certificates → + → *Developer ID Application*. Export it from Keychain Access as a `.p12` with its private key and a password.
 2. **Notarization key.** In App Store Connect, go to Users and Access → Integrations → App Store Connect API → Team Keys and generate a key with the *Developer* role. Download the `.p8` and note the Key ID and Issuer ID.
-3. **Repository secrets** (Settings → Secrets and variables → Actions):
+3. **Secrets of the `release` environment** (Settings → Environments → `release`; see [Where the secrets live](#where-the-secrets-live)):
 
    | Secret | Value |
    |---|---|
@@ -38,18 +38,30 @@ The pipeline already supports it. Once you have an Apple Developer Program membe
 
 From the next tag on, the app and the `.dmg` are signed with the hardened runtime, notarized and stapled. `install.sh` then keeps Apple's signature instead of re-signing, and browser downloads open without warnings.
 
+The macOS job builds the universal app first, ad-hoc signed, in a step that sees no secret (`cargo xtask bundle --release --universal`): that is where every dependency's build script and proc macro runs. Only then does it import the certificate and write the notarization key, and sign, notarize and package with the xtask binary it already built (`xtask package --prebuilt --universal --sign … --notarize`), which compiles nothing. The keychain and the key file are removed right after.
+
+### Where the secrets live
+
+Put every secret (the Developer ID ones above, `GPG_*`, `HOMEBREW_TAP_TOKEN`) into the **`release` environment**, not into the repository's secrets. The jobs that use them (`macos`, `publish`, `homebrew`) run in that environment; the first release creates it if it doesn't exist. Then protect it (Settings → Environments → `release`):
+
+- **Deployment branches and tags:** *Selected branches and tags*, with the tag pattern `v*` and the branch `main` (a rebuild by hand runs from `main`). A workflow file changed on another branch then can't reach the secrets.
+- A **tag ruleset** (Settings → Rules) that lets only maintainers create `v*` tags.
+- Optionally **required reviewers**: each release then waits until one of them approves it.
+
+Each step gets only the secrets it needs, as step `env`, and no step that compiles sees one. The workflows' actions are pinned to commits; Dependabot (`.github/dependabot.yml`) proposes updates.
+
 ### Optional: Homebrew tap
 
 A personal tap needs no Developer ID either:
 
 1. Create a public repository `alexykn/homebrew-tap`, or any `homebrew-*` name, and set the Actions variable `HOMEBREW_TAP_REPO`.
-2. Add a fine-grained token with *Contents: read and write* on that repository as the secret `HOMEBREW_TAP_TOKEN`.
+2. Add a fine-grained token with *Contents: read and write* on that repository as the secret `HOMEBREW_TAP_TOKEN` of the `release` environment.
 
 The release workflow then writes `Casks/icygui.rb` and `Formula/icygui.rb` (`cargo xtask homebrew`). While builds aren't notarized, the cask clears the quarantine flag after installing and says so in its caveats. Users run `brew install --cask alexykn/tap/icygui`.
 
 ### Optional: GPG-signed checksums
 
-Set `GPG_PRIVATE_KEY` (ASCII-armoured) and `GPG_PASSPHRASE`; the release then includes `SHA256SUMS.asc`.
+Set `GPG_PRIVATE_KEY` (ASCII-armoured) and `GPG_PASSPHRASE` in the `release` environment; the release then includes `SHA256SUMS.asc`.
 
 ## Cutting a release
 
@@ -105,6 +117,7 @@ codesign -dv /Applications/icygui.app 2>&1 | grep Authority   # "icygui local co
 cargo xtask icons                    # after editing assets/logo/*.svg
 cargo xtask bundle --release         # ad-hoc signed target/bundle/icygui.app (notifications need the bundle)
 cargo xtask package                  # Linux: target/dist/*.tar.gz, *.deb, SHA256SUMS
+cargo xtask package --prebuilt       # the same from the bundle `bundle --release` left, building nothing
 ```
 
 Test the installer against local artifacts without publishing:

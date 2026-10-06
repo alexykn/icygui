@@ -119,17 +119,32 @@ impl AppState {
     /// dashboard and tabs come back from the UI state. Returns whether it
     /// changed (an unknown id changes nothing). The caller restarts the
     /// engine.
+    ///
+    /// Only the active environment is connected (PLAN.md D2), so the old
+    /// one stops notifying: a notice says so, naming it.
     pub(crate) fn switch_environment(&mut self, id: &str) -> bool {
         if self.config.environment(id).is_none()
             || self.config.active_environment.as_deref() == Some(id)
         {
             return false;
         }
+        let previous = self
+            .environment()
+            .map(|environment| environment.name.clone());
         self.remember_environment_ui();
         self.config.active_environment = Some(id.to_owned());
         tracing::info!(environment = ?self.environment().map(|e| e.name.clone()), "switching environment");
         self.save_config();
         self.reset_connection();
+        if let Some(previous) = previous {
+            self.report(super::UserNotice::info(
+                format!("{previous} is no longer watched."),
+                Some(format!(
+                    "Only the active environment is connected and notifies: nothing from \
+                     {previous} notifies until you switch back."
+                )),
+            ));
+        }
         true
     }
 
@@ -368,6 +383,40 @@ mod tests {
         assert!(state.switch_environment(&prod_id));
         assert_eq!(state.selected(), Some(&second), "prod's selection is back");
         assert_eq!(state.tabs(), [ic_model::ObjectKey::host("db-prod-03")]);
+    }
+
+    /// Only the active environment notifies (D2): a switch says which
+    /// environment went quiet, every time.
+    #[test]
+    fn switching_says_which_environment_stopped_notifying() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = live(dir.path());
+        let prod = basic("prod", "https://master-01:5665");
+        let staging = basic("staging", "https://staging:5665");
+        let (prod_id, staging_id) = (prod.id.clone(), staging.id.clone());
+        state.save_environment(prod, false);
+        state.save_environment(staging, false);
+        assert!(state.notice().is_none());
+
+        assert!(state.switch_environment(&staging_id));
+        let notice = state.notice().unwrap();
+        assert_eq!(notice.title, "prod is no longer watched.");
+        assert!(!notice.problem);
+        let detail = notice.detail.as_deref().unwrap();
+        assert!(detail.contains("Only the active environment"), "{detail}");
+        assert!(detail.contains("nothing from prod notifies"), "{detail}");
+
+        assert!(!state.switch_environment(&staging_id));
+        assert_eq!(
+            state.notice().unwrap().title,
+            "prod is no longer watched.",
+            "no switch, no new notice"
+        );
+        assert!(state.switch_environment(&prod_id));
+        assert_eq!(
+            state.notice().unwrap().title,
+            "staging is no longer watched."
+        );
     }
 
     #[test]

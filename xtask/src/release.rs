@@ -14,19 +14,24 @@ use crate::{
     remove_dir, run, target_dir, write,
 };
 
-/// Builds release bundles and packages them into `target/dist`.
+/// Builds release bundles (or, with `--prebuilt`, takes the one
+/// `bundle --release` left) and packages them into `target/dist`.
 pub(crate) fn package(flags: &Flags) -> Result<()> {
     if flags.notarize && !flags.sign.as_deref().is_some_and(bundle::is_developer_id) {
         return Err(
             "--notarize needs --sign with a \"Developer ID Application\" identity".to_owned(),
         );
     }
-    let bundle = bundle::bundle(&Flags {
-        release: true,
-        universal: flags.universal,
-        sign: flags.sign.clone(),
-        ..Flags::default()
-    })?;
+    let bundle = if flags.prebuilt {
+        bundle::prebuilt(flags)?
+    } else {
+        bundle::bundle(&Flags {
+            release: true,
+            universal: flags.universal,
+            sign: flags.sign.clone(),
+            ..Flags::default()
+        })?
+    };
     let dist = target_dir().join("dist");
     remove_dir(&dist)?;
     create_dir(&dist)?;

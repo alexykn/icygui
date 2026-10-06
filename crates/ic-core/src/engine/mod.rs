@@ -13,8 +13,9 @@
 //!   evaluates the dashboards for the changes since the last one on a
 //!   blocking thread (`publish.rs`).
 //! - Keeping in sync beyond the stream (`sync.rs`): the freshness watchdog,
-//!   hydration, the periodic reconcile and the jittered reload after a
-//!   reconnect.
+//!   hydration, the periodic reconcile, the jittered reload after a
+//!   reconnect that followed a long gap, restarts and `Refresh`, all
+//!   spaced so a struggling master isn't asked again and again.
 //!
 //! - Notifications and the event log (`notify.rs`, `crate::event_log`):
 //!   every applied change becomes rule inputs and log entries
@@ -112,6 +113,12 @@ pub(crate) enum Internal {
         started: u64,
         result: Result<Vec<Notification>, ApiError>,
     },
+    /// The event log has `known` of the notification ids `asked` (problems
+    /// the rule engine was seeded with): an earlier run notified them.
+    NotifiedBefore {
+        asked: Vec<String>,
+        known: Vec<String>,
+    },
 }
 
 /// A load's progress and answers.
@@ -190,12 +197,16 @@ enum Phase {
 /// Why a load runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LoadKind {
-    /// The session's first load into an empty store: no rule inputs, and
-    /// `Connected` once it is in.
+    /// The session's first load into an empty store: no rule inputs (it
+    /// seeds the rule engine), and `Connected` once it is in.
     First,
-    /// A reload after a reconnect, an Icinga restart or `Refresh`: every
-    /// problem's details again (the gap may hide config changes).
+    /// A reload after a reconnect that followed a long gap, or an Icinga
+    /// restart: every problem's details and Icinga's notifications again
+    /// (the gap may hide config changes).
     Reload,
+    /// `Refresh` by the user while connected: like a reconcile (the events
+    /// keep the rest current), counted in the reload spacing.
+    Refresh,
     /// The periodic reconcile: tier 3 fetches only the problems the store
     /// doesn't hold in full or whose result is older than their last check
     /// (events keep the others current), so an outage with thousands of
@@ -211,6 +222,8 @@ enum LoadKind {
 struct Conn {
     client: Client,
     info: ApiInfo,
+    /// When the session connected (its stream opened).
+    since: Instant,
     /// When it went live (for the backoff reset and `Connected.since`).
     live_since: Option<(Instant, Timestamp)>,
     /// The next status poll; `None` without `status/query` permission.
@@ -250,6 +263,9 @@ pub(crate) struct Engine {
     store: Store,
     phase: Phase,
     backoff: Backoff,
+    /// Spaces the retries of a failing first load (its answers are the
+    /// big ones), independently of the connection's backoff.
+    load_backoff: Backoff,
     /// Counts connection sessions; answers of older ones are dropped.
     session: u64,
     /// The current session's background tasks.
@@ -287,16 +303,31 @@ pub(crate) struct Engine {
     watchdog: Watchdog,
     last_sweep: Option<Instant>,
     /// The store holds a complete load from this environment's server: a
-    /// reconnect goes live on it at once and reconciles shortly after.
+    /// reconnect goes live on it at once (and reloads after a long gap).
     loaded: bool,
     /// The next connect was asked for by the user: reload without jitter.
     reload_now: bool,
-    /// The next reload ([`LoadKind::Reload`]): after a reconnect
+    /// The next reload: after a reconnect that followed a long gap
     /// (jittered), a restart or `Refresh` (spaced, see
     /// [`Engine::request_reload`]).
     reload_at: Option<Instant>,
-    /// When the last reload started.
+    /// The pending reload must bring everything ([`LoadKind::Reload`]),
+    /// not only what isn't current ([`LoadKind::Refresh`]).
+    reload_full: bool,
+    /// The user asked for the pending reload.
+    reload_by_user: bool,
+    /// When the last reload (or `Refresh`) started.
     last_reload: Option<Instant>,
+    /// When the last load of any kind started.
+    last_load_start: Option<Instant>,
+    /// `Refresh` reloads started in a row (each waits longer), and when
+    /// the last one started.
+    user_reloads: u32,
+    last_user_reload: Option<Instant>,
+    /// When the stream last delivered lines (or a session went live), by
+    /// the monotonic and the wall clock: a reconnect after a long gap
+    /// reloads.
+    last_heard: Option<(Instant, Timestamp)>,
     /// The next periodic reconcile.
     reconcile_at: Option<Instant>,
     /// When the last load ended, complete or failed: the next reconcile
@@ -355,6 +386,7 @@ impl Engine {
             prune_at: now,
             notifications_current: false,
             backoff: Backoff::new(tuning.backoff_initial, tuning.backoff_max),
+            load_backoff: Backoff::new(tuning.load_retry_initial, sync::LOAD_RETRY_MAX),
             fetch: FetchQueue::new(tuning.missing_ttl),
             spec,
             ports,
@@ -386,7 +418,13 @@ impl Engine {
             loaded: false,
             reload_now: false,
             reload_at: None,
+            reload_full: false,
+            reload_by_user: false,
             last_reload: None,
+            last_load_start: None,
+            user_reloads: 0,
+            last_user_reload: None,
+            last_heard: None,
             reconcile_at: None,
             last_load_end: None,
             restarts: Restarts::default(),
@@ -595,7 +633,7 @@ impl Engine {
         self.load = None;
         self.fetch.reset();
         self.watchdog.reset_awaiting();
-        self.reload_at = None;
+        // A pending reload stays: the next session serves it.
         self.reconcile_at = None;
         self.store.end_annotation_query();
         // The stream gap may have missed `Notification` events.
@@ -606,6 +644,12 @@ impl Engine {
 
     /// The session failed: back off and retry, or wait for the user.
     fn fail(&mut self, failure: Failure) {
+        self.fail_with(failure, std::time::Duration::ZERO);
+    }
+
+    /// The session failed: back off (at least `at_least`) and retry, or
+    /// wait for the user.
+    fn fail_with(&mut self, failure: Failure, at_least: std::time::Duration) {
         let healthy = self
             .conn
             .as_ref()
@@ -618,7 +662,7 @@ impl Engine {
                 if healthy {
                     self.backoff.reset();
                 }
-                let delay = self.backoff.fail();
+                let delay = self.backoff.fail().max(at_least);
                 tracing::info!(%error, ?delay, "connection lost; retrying");
                 self.phase = Phase::Idle {
                     retry_at: Some(Instant::now() + delay),
@@ -687,9 +731,11 @@ impl Engine {
             !info.allows("objects/query/Host"),
             !info.allows("objects/query/Service"),
         );
+        let can_poll_status = next_status.is_some();
         self.conn = Some(Conn {
             client,
             info,
+            since: Instant::now(),
             live_since: None,
             next_status,
             status_in_flight: false,
@@ -702,15 +748,10 @@ impl Engine {
         });
         if self.loaded {
             // A reconnect: live at once on the objects we have (the stream
-            // keeps them current), and a reconcile shortly after for what
-            // the gap missed, jittered unless the user asked.
+            // keeps them current).
+            let gap = self.stream_gap();
             self.go_live();
-            let delay = if std::mem::take(&mut self.reload_now) {
-                std::time::Duration::ZERO
-            } else {
-                self.tuning.reload_jitter.mul_f64(fastrand::f64())
-            };
-            self.reload_at = Some(Instant::now() + delay);
+            self.after_reconnect(gap, can_poll_status);
         } else {
             self.reload_now = false;
             self.phase = Phase::Loading;
@@ -730,11 +771,19 @@ impl Engine {
         let Some(conn) = &self.conn else {
             return;
         };
-        self.reload_at = None;
+        let now = Instant::now();
+        // The load serves a pending reload, if any.
+        let served = self.reload_at.take().is_some();
         self.reconcile_at = None;
-        if kind == LoadKind::Reload {
-            self.last_reload = Some(Instant::now());
+        self.last_load_start = Some(now);
+        if served || matches!(kind, LoadKind::Reload | LoadKind::Refresh) {
+            self.last_reload = Some(now);
         }
+        if std::mem::take(&mut self.reload_by_user) {
+            self.user_reloads = self.user_reloads.saturating_add(1);
+            self.last_user_reload = Some(now);
+        }
+        self.reload_full = false;
         self.loads += 1;
         self.load = Some((self.loads, kind));
         self.store.begin_annotation_query();
@@ -769,7 +818,7 @@ impl Engine {
             } => {
                 if let Some(status) = &overview.status {
                     // The load reloads anyway.
-                    self.restarts.observe(status);
+                    self.restarts.observe(status, Instant::now());
                 }
                 self.store.apply_overview(*overview, started);
                 self.store.replace_hosts(hosts, started);
@@ -809,6 +858,11 @@ impl Engine {
                 self.schedule_reconcile();
                 self.finish_discovered();
                 if first {
+                    self.load_backoff.reset();
+                    // What is already wrong doesn't notify, but the rule
+                    // engine must know it (before any event about it).
+                    let at = self.evaluation_time();
+                    self.notify.seed(&self.store, at);
                     self.go_live();
                 }
                 if !self.notifications_current {
@@ -821,15 +875,33 @@ impl Engine {
                 self.last_load_end = Some(Instant::now());
                 self.store.end_annotation_query();
                 self.finish_discovered();
-                if first || matches!(failure, Failure::Auth(_)) {
-                    self.fail(failure);
-                } else if let Failure::Transient(error) = failure {
-                    // The stream decides whether the connection is gone; a
-                    // failed reload waits a whole interval from now, so a
-                    // struggling master (or a proxy answering 502) isn't
-                    // asked again right away.
-                    tracing::warn!(%error, "reload failed; the next one follows at the usual interval");
-                    self.schedule_reconcile();
+                match failure {
+                    Failure::Auth(_) => self.fail(failure),
+                    Failure::Transient(_) if first => {
+                        // The first load's answers are the big ones: a
+                        // failing one is retried after a growing wait (up
+                        // to the reconcile interval), not with every quick
+                        // reconnect.
+                        let wait = self.load_backoff.fail_up_to(self.load_retry_cap());
+                        self.fail_with(failure, wait);
+                    }
+                    // An answer that can't be used needs the user.
+                    failure if first => self.fail(failure),
+                    Failure::Transient(error) | Failure::Misconfigured(error) => {
+                        // The stream decides whether the connection is
+                        // gone; a failed reload waits a whole interval from
+                        // now, so a struggling master (or a proxy answering
+                        // 502) isn't asked again right away.
+                        tracing::warn!(%error, "reload failed; the next one follows at the usual interval");
+                        self.schedule_reconcile();
+                    }
+                    other => {
+                        tracing::warn!(
+                            ?other,
+                            "reload failed; the next one follows at the usual interval"
+                        );
+                        self.schedule_reconcile();
+                    }
                 }
             }
         }
@@ -845,6 +917,7 @@ impl Engine {
         conn.live_since = Some((Instant::now(), now));
         // Lines waited during the first load: the stall watch starts now.
         conn.last_line = Instant::now();
+        self.last_heard = Some((Instant::now(), now));
         let version = conn.info.version.clone();
         self.phase = Phase::Live;
         self.set_state(ConnectionState::Connected {
@@ -891,6 +964,7 @@ impl Engine {
         };
         conn.status_in_flight = false;
         conn.next_status = Some(Instant::now() + interval);
+        let connected = conn.since;
         match result {
             Ok(status) => {
                 if let Some(error) = self.stalled(&status) {
@@ -901,11 +975,19 @@ impl Engine {
                 // Only the same node with another start time restarted: the
                 // masters of an HA zone behind a load balancer each have
                 // their own.
-                let restarted = self.restarts.observe(&status);
+                let restarted = self.restarts.observe(&status, Instant::now());
                 self.store.set_status(status);
-                if restarted {
-                    tracing::info!("Icinga restarted; reloading");
-                    self.request_reload();
+                if let Some(seen) = restarted {
+                    if sync::reload_covers_restart(self.last_load_start, connected, seen) {
+                        // A restart of the node behind the stream ended the
+                        // stream, and a load since the reconnect brought
+                        // everything (the other master of an HA zone
+                        // restarted with it during a deploy).
+                        tracing::debug!("a node restarted; a load since brought everything");
+                    } else {
+                        tracing::info!("Icinga restarted; reloading");
+                        self.request_reload(sync::ReloadCause::Restart);
+                    }
                 }
             }
             Err(ApiError::Unauthorized) => {
@@ -1066,6 +1148,9 @@ impl Engine {
             }
         }
         if !lines.is_empty() {
+            // Only lines count: the end of the stream (after a laptop woke
+            // up, say) says nothing about what it missed.
+            self.last_heard = Some((Instant::now(), self.ports.clock.now()));
             self.store.set_last_event_at(self.ports.clock.now());
             let events = stream::prepare(lines);
             if let Some(latest) = events
@@ -1326,6 +1411,7 @@ impl Engine {
                 if retry_at.is_none() {
                     // After a failure that needed the user: a fresh start.
                     self.backoff.reset();
+                    self.load_backoff.reset();
                 }
                 self.reload_now = true;
                 self.connect();
@@ -1333,7 +1419,7 @@ impl Engine {
             Phase::Connecting | Phase::Loading => {
                 tracing::debug!("refresh: a connection attempt or load is already running");
             }
-            Phase::Live => self.request_reload(),
+            Phase::Live => self.request_reload(sync::ReloadCause::User),
         }
     }
 
@@ -1377,6 +1463,7 @@ impl Engine {
         let waiting_for_user = matches!(self.phase, Phase::Idle { .. });
         if reconnect || waiting_for_user {
             self.backoff.reset();
+            self.load_backoff.reset();
             self.reload_now = true;
             self.connect();
         }
@@ -1412,6 +1499,7 @@ impl Engine {
             } => self.on_evaluated(dashboards, *snapshot, quiet, broken),
             Internal::PreviewDone => self.on_preview_done(),
             Internal::Logged(intents) => self.on_logged(intents),
+            Internal::NotifiedBefore { asked, known } => self.on_notified_before(&asked, &known),
             Internal::IcingaNotifications {
                 session,
                 started,

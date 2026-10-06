@@ -621,12 +621,12 @@ async fn refresh_reloads_while_connected() {
             .map(|request| request.path)
             .collect()
     };
-    // A refresh reloads everything a connect loads, Icinga's
-    // notifications included.
+    // A refresh reloads the lists a connect loads; Icinga's notifications
+    // stay, since the stream carries their events.
     assert!(
         wait_until(|| {
             let paths = paths();
-            ["hosts", "services", "notifications"]
+            ["hosts", "services"]
                 .iter()
                 .all(|kind| paths.contains(&format!("/v1/objects/{kind}")))
         })
@@ -634,7 +634,12 @@ async fn refresh_reloads_while_connected() {
         "{:?}",
         paths()
     );
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let paths = paths();
+    assert!(
+        !paths.contains("/v1/objects/notifications"),
+        "kept current by events: {paths:?}"
+    );
     assert!(!paths.contains("/v1/events"), "the stream stays");
     assert_eq!(control.event_streams(), 1);
     let after_connected: Vec<ConnectionState> = engine

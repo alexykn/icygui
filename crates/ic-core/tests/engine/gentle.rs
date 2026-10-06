@@ -111,6 +111,21 @@ async fn a_failing_reload_waits_a_whole_interval() {
     engine.shutdown();
 }
 
+/// Whole service list loads (tier 2) so far.
+fn service_lists(control: &MockControl) -> usize {
+    control
+        .requests()
+        .iter()
+        .filter(|request| {
+            request.path == "/v1/objects/services"
+                && request
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| body.get("services").is_none())
+        })
+        .count()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refresh_presses_coalesce() {
     let server = mock(MockConfig::with_scenario(scenarios::lab())).await;
@@ -121,24 +136,14 @@ async fn refresh_presses_coalesce() {
         .snapshot(|snapshot| !snapshot.icinga_notifications.is_empty())
         .await;
     control.clear_requests();
-    let notification_lists = || {
-        control
-            .requests()
-            .iter()
-            .filter(|request| {
-                request.path == "/v1/objects/notifications"
-                    && request
-                        .body
-                        .as_ref()
-                        .is_none_or(|body| body.get("notifications").is_none())
-            })
-            .count()
-    };
 
     // The first press reloads at once (pressed again while it runs: once).
     engine.send(Command::Refresh);
     engine.send(Command::Refresh);
-    assert!(wait_until(|| notification_lists() == 1).await, "reloaded");
+    assert!(
+        wait_until(|| service_lists(&control) == 1).await,
+        "reloaded"
+    );
     assert_eq!(host_lists(&control).len(), 1);
 
     // More presses right after: one reload, later.
@@ -147,6 +152,71 @@ async fn refresh_presses_coalesce() {
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(host_lists(&control).len(), 1, "coalesced, not repeated");
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refresh_presses_in_a_row_wait_longer_and_longer() {
+    let server = mock(MockConfig::with_scenario(scenarios::lab())).await;
+    let control = server.control();
+    let spacing = Duration::from_millis(150);
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        reload_spacing: spacing,
+        ..launch.tuning
+    };
+    let mut engine = launch.start();
+    engine.connected().await;
+    engine
+        .snapshot(|snapshot| !snapshot.icinga_notifications.is_empty())
+        .await;
+    control.clear_requests();
+
+    // Someone keeps pressing Refresh (the UI lets a press through every
+    // 2 s; here every 20 ms) for 3 s.
+    let pressed = std::time::Instant::now();
+    while pressed.elapsed() < Duration::from_secs(3) {
+        engine.send(Command::Refresh);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let loads = host_lists(&control);
+    let gaps: Vec<f64> = loads.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    // At once, then 1, 4 and 10 spacings after the previous one (at 0,
+    // 0.15, 0.75 and 2.25 s; the next would be at 3.75 s).
+    assert_eq!(loads.len(), 4, "{loads:?}");
+    let expected = [1.0, 4.0, 10.0];
+    for (gap, factor) in gaps.iter().zip(expected) {
+        assert!(
+            *gap >= factor * spacing.as_secs_f64() - 0.02,
+            "{gaps:?} (spacing {spacing:?})"
+        );
+    }
+    // The presses after the last reload coalesced into one more.
+    assert!(wait_until(|| host_lists(&control).len() == 5).await);
+    // Reloads asked for by the user bring what isn't current: Icinga's
+    // notifications (kept current by events) aren't loaded again.
+    assert!(
+        !control
+            .requests()
+            .iter()
+            .any(|request| request.path == "/v1/objects/notifications"),
+        "kept current by events"
+    );
+
+    // After a rest the spacing starts over: two presses in a row reload
+    // one spacing apart, not ten.
+    tokio::time::sleep(spacing * 21).await;
+    control.clear_requests();
+    engine.send(Command::Refresh);
+    assert!(wait_until(|| host_lists(&control).len() == 1).await);
+    engine.send(Command::Refresh);
+    assert!(wait_until(|| host_lists(&control).len() == 2).await);
+    let loads = host_lists(&control);
+    let gap = loads[1] - loads[0];
+    assert!(
+        gap < 4.0 * spacing.as_secs_f64(),
+        "started over: {gap} s (spacing {spacing:?})"
+    );
     engine.shutdown();
 }
 
@@ -335,5 +405,166 @@ async fn a_stream_that_stalls_without_closing_is_reopened() {
                 .is_some_and(|service| service.state == ServiceState::Critical)
         })
         .await;
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failing_first_load_is_retried_less_and_less_often() {
+    // A master too busy to answer the big service list in time, or a
+    // proxy answering 504: the first load fails after its host list.
+    let server = mock(MockConfig::with_scenario(scenarios::lab())).await;
+    let control = server.control();
+    control.fail_path("/v1/objects/services", 1_000_000, 504);
+    let initial = Duration::from_millis(200);
+    let cap = Duration::from_millis(800);
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        load_retry_initial: initial,
+        reconcile_interval: Some(cap),
+        ..launch.tuning
+    };
+    let mut engine = launch.start();
+    assert!(
+        wait_until(|| host_lists(&control).len() >= 5).await,
+        "{:?}",
+        host_lists(&control)
+    );
+    let loads = host_lists(&control);
+    // Each wait is at least half of 200, 400 ms, then the cap of 800 ms.
+    for (index, pair) in loads.windows(2).take(4).enumerate() {
+        let full = (initial * (1 << index)).min(cap);
+        assert!(
+            pair[1] - pair[0] >= full.as_secs_f64() / 2.0 - 0.02,
+            "{loads:?}"
+        );
+    }
+    let state = engine
+        .wait_state(|state| matches!(state, ConnectionState::Reconnecting { .. }))
+        .await;
+    let ConnectionState::Reconnecting { error, .. } = state else {
+        unreachable!();
+    };
+    assert!(error.contains("504"), "{error}");
+    assert!(
+        !engine
+            .states()
+            .iter()
+            .any(|state| matches!(state, ConnectionState::Connected { .. }))
+    );
+
+    // Once it answers, the next attempt connects.
+    control.fail_path("/v1/objects/services", 0, 504);
+    engine.connected().await;
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_answer_that_cannot_be_used_stops_the_first_load() {
+    // Retrying a request Icinga refuses as such (an older Icinga without
+    // an attribute) only costs the master: it needs the user.
+    let server = mock(MockConfig::with_scenario(scenarios::lab())).await;
+    let control = server.control();
+    control.fail_path("/v1/objects/services", 1_000_000, 400);
+    let mut engine = Launch::new(&server).start();
+    let state = engine
+        .wait_state(|state| matches!(state, ConnectionState::Misconfigured { .. }))
+        .await;
+    let ConnectionState::Misconfigured { message } = state else {
+        unreachable!();
+    };
+    assert!(message.contains("400"), "{message}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(host_lists(&control).len(), 1, "not retried");
+    // Retry now.
+    control.fail_path("/v1/objects/services", 0, 400);
+    engine.send(Command::Refresh);
+    engine.connected().await;
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_that_keeps_ending_does_not_reload_each_time() {
+    // A proxy or load balancer ends the stream after a while, again and
+    // again; Icinga is fine.
+    let server = mock(MockConfig::with_scenario(scenarios::lab())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        reload_after_gap: Duration::from_mins(2),
+        status_interval: Duration::from_millis(100),
+        reload_spacing: Duration::from_millis(200),
+        ..launch.tuning
+    };
+    let mut engine = launch.start();
+    engine.connected().await;
+    engine
+        .snapshot(|snapshot| !snapshot.icinga_notifications.is_empty())
+        .await;
+    control.clear_requests();
+    let streams = || {
+        control
+            .requests()
+            .iter()
+            .filter(|request| request.path == "/v1/events")
+            .count()
+    };
+    for round in 1..=8 {
+        assert!(
+            control
+                .wait_for_event_streams(1, Duration::from_secs(5))
+                .await
+        );
+        control.drop_event_streams();
+        assert!(wait_until(|| streams() >= round).await, "reconnected");
+    }
+    assert!(
+        control
+            .wait_for_event_streams(1, Duration::from_secs(5))
+            .await
+    );
+    // Events since bring what changes; the status poll would catch a
+    // restart; nothing was reloaded.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        host_lists(&control).is_empty(),
+        "{:?}",
+        host_lists(&control)
+    );
+    assert!(
+        !control
+            .requests()
+            .iter()
+            .any(|request| request.path == "/v1/objects/notifications")
+    );
+    control
+        .set_service_state("lab-01", "ssh", ServiceState::Critical, "CRITICAL", true)
+        .unwrap();
+    engine
+        .snapshot(|snapshot| {
+            snapshot
+                .services
+                .get(&ServiceKey::new("lab-01", "ssh"))
+                .is_some_and(|service| service.state == ServiceState::Critical)
+        })
+        .await;
+
+    // Icinga restarts: the stream ends, the client is back within a second
+    // and the status poll sees the new start time: one reload.
+    control.set_program_start(control.now());
+    control.drop_event_streams();
+    assert!(wait_until(|| host_lists(&control).len() == 1).await);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(host_lists(&control).len(), 1, "once");
+
+    // The laptop slept for an hour (the wall clock moved, the monotonic one
+    // didn't): the reconnect reloads.
+    assert!(
+        control
+            .wait_for_event_streams(1, Duration::from_secs(5))
+            .await
+    );
+    engine.clock.advance(Duration::from_hours(1));
+    control.drop_event_streams();
+    assert!(wait_until(|| host_lists(&control).len() == 2).await);
     engine.shutdown();
 }

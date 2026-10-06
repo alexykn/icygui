@@ -2781,3 +2781,270 @@ mod load {
         assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Starting: what the first load found
+// ---------------------------------------------------------------------------
+
+mod starting {
+    use super::*;
+
+    use ic_rules::state_intent_id;
+
+    impl Scenario {
+        fn seed(&mut self, input: RuleInput, flapping: bool) {
+            self.engine.seed(input, flapping, ts(self.now));
+        }
+
+        /// The event log has the notification of the service's `state`
+        /// since `since`.
+        fn restore(&mut self, state: ServiceState, since: f64) {
+            self.engine.restore_notified(
+                &the_service(),
+                CheckableState::Service(state),
+                ts(since),
+                ts(self.now),
+            );
+        }
+    }
+
+    #[test]
+    fn what_is_wrong_at_the_start_notifies_neither_itself_nor_its_recovery() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        scenario
+            .at(1_000.0)
+            .seed(critical(0.0).happened(1_000.0), false);
+        none(&scenario.tick());
+        // A check confirming the state is no change.
+        none(&scenario.at(1_060.0).input(critical(0.0).happened(1_060.0)));
+        // Nobody heard of the problem: its end isn't news either.
+        none(&scenario.at(1_200.0).input(ok(1_200.0)));
+        // The next problem is.
+        one(scenario.at(1_300.0).input(critical(1_300.0)));
+    }
+
+    #[test]
+    fn a_new_state_of_a_problem_open_at_the_start_is_judged() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.default_rule.states.warning = true;
+        }));
+        scenario
+            .at(1_000.0)
+            .seed(warning(0.0).happened(1_000.0), false);
+        let intent = one(scenario.at(1_100.0).input(critical(1_100.0)));
+        assert_eq!(
+            intent.title,
+            "CRITICAL · postgres-replication on db-prod-03"
+        );
+        one(scenario.at(1_200.0).input(ok(1_200.0)));
+    }
+
+    #[test]
+    fn a_soft_problem_at_the_start_notifies_when_it_turns_hard() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        scenario
+            .at(10.0)
+            .seed(soft_critical(0.0).happened(10.0), false);
+        let intent = one(scenario.at(30.0).input(critical(0.0).happened(30.0)));
+        assert_eq!(
+            intent.id,
+            "db-prod-03!postgres-replication:critical:1700000000.000"
+        );
+    }
+
+    #[test]
+    fn a_problem_under_a_failed_host_at_the_start_waits_for_a_fresh_check() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        // The host has been down since before the start: the service's
+        // problem is handled.
+        scenario
+            .at(1_000.0)
+            .seed(critical(0.0).handled().happened(1_000.0), false);
+        // The host comes back: the caller repeats the service's state with
+        // `handled` cleared. Its state is left over from the outage.
+        none(&scenario.at(2_000.0).input(critical(0.0).happened(2_000.0)));
+        none(&scenario.at(2_100.0).tick());
+        // Its next check finds it still critical: now it notifies.
+        let intent = one(scenario.at(2_150.0).input(critical(0.0).happened(2_150.0)));
+        assert_eq!(intent.at, ts(2_150.0));
+        // And the recovery of what was told follows.
+        one(scenario.at(2_500.0).input(ok(2_500.0)));
+    }
+
+    #[test]
+    fn a_problem_under_a_failed_host_at_the_start_waits_the_settle_time_without_a_check() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        scenario
+            .at(1_000.0)
+            .seed(critical(0.0).handled().happened(1_000.0), false);
+        none(&scenario.at(2_000.0).input(critical(0.0).happened(2_000.0)));
+        none(&scenario.at(2_299.0).tick());
+        one(scenario.at(2_300.0).tick());
+    }
+
+    #[test]
+    fn a_problem_at_the_start_that_recovers_on_its_first_check_never_notifies() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        scenario
+            .at(1_000.0)
+            .seed(critical(0.0).handled().happened(1_000.0), false);
+        none(&scenario.at(2_000.0).input(critical(0.0).happened(2_000.0)));
+        none(&scenario.at(2_030.0).input(ok(2_030.0)));
+        none(&scenario.at(5_000.0).tick());
+    }
+
+    #[test]
+    fn an_object_flapping_at_the_start_notifies_no_swings() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        scenario.at(1_000.0).seed(ok(0.0).happened(1_000.0), true);
+        for step in 1..=6_u32 {
+            let now = 1_000.0 + f64::from(step) * 60.0;
+            let input = if step % 2 == 1 {
+                critical(now)
+            } else {
+                ok(now)
+            };
+            none(&scenario.at(now).input(input));
+            none(&scenario.at(now + 1.0).tick());
+        }
+        // When it stops, the problem it is in notifies (as in Icinga).
+        none(&scenario.at(1_500.0).input(critical(1_500.0)));
+        let stopped = one(scenario
+            .at(1_600.0)
+            .input(event(Change::FlappingStopped, 1_600.0)));
+        assert_eq!(
+            stopped.id,
+            "db-prod-03!postgres-replication:critical:1700001500.000"
+        );
+    }
+
+    #[test]
+    fn a_flapping_problem_at_the_start_waits_until_flapping_stops() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        scenario
+            .at(1_000.0)
+            .seed(critical(900.0).happened(1_000.0), true);
+        none(&scenario.at(1_060.0).input(ok(1_060.0)));
+        none(&scenario.at(1_120.0).input(critical(1_120.0)));
+        let intent = one(scenario
+            .at(1_200.0)
+            .input(event(Change::FlappingStopped, 1_200.0)));
+        assert_eq!(intent.tone, Tone::Critical);
+    }
+
+    #[test]
+    fn a_problem_an_earlier_run_notified_ends_with_its_recovery() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.default_rule.events = all_events();
+        }));
+        scenario
+            .at(1_000.0)
+            .seed(critical(0.0).happened(1_000.0), false);
+        scenario.restore(ServiceState::Critical, 0.0);
+        // Its state doesn't notify again, even once confirmed.
+        none(&scenario.at(1_060.0).input(critical(0.0).happened(1_060.0)));
+        // An acknowledgement concerns those who were told.
+        assert_eq!(
+            one(scenario.at(1_100.0).input(ack(1_100.0))).title,
+            "ACKNOWLEDGED · postgres-replication on db-prod-03"
+        );
+        let recovery = one(scenario.at(1_200.0).input(ok(1_200.0)));
+        assert_eq!(
+            recovery.title,
+            "RECOVERED · postgres-replication on db-prod-03"
+        );
+        assert_eq!(recovery.subtitle, ENV);
+    }
+
+    #[test]
+    fn an_earlier_notification_is_judged_by_the_dashboards_that_would_notify_now() {
+        let critical_only = dashboard("critical", ScopeSetting::Inherit);
+        let quiet = dashboard("quiet", ScopeSetting::Off);
+        let mut scenario = Scenario::new(rules(vec![group(
+            "databases",
+            ScopeSetting::Inherit,
+            vec![quiet, critical_only],
+        )]));
+        let found = critical(0.0)
+            .on(&[("databases", "quiet"), ("databases", "critical")])
+            .happened(1_000.0);
+        scenario.at(1_000.0).seed(found, false);
+        scenario.restore(ServiceState::Critical, 0.0);
+        let recovery = one(scenario
+            .at(1_200.0)
+            .input(ok(1_200.0).on(&[("databases", "quiet"), ("databases", "critical")])));
+        assert_eq!(recovery.subtitle, "databases / critical");
+    }
+
+    #[test]
+    fn an_earlier_notification_of_another_state_restores_nothing() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        scenario
+            .at(1_000.0)
+            .seed(critical(500.0).happened(1_000.0), false);
+        // The log knows an older problem of the object, not this one.
+        scenario.restore(ServiceState::Critical, 0.0);
+        none(&scenario.at(1_200.0).input(ok(1_200.0)));
+    }
+
+    #[test]
+    fn a_restore_after_the_problem_moved_on_changes_nothing() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.default_rule.states.warning = true;
+        }));
+        scenario
+            .at(1_000.0)
+            .seed(critical(0.0).happened(1_000.0), false);
+        one(scenario.at(1_010.0).input(warning(1_010.0)));
+        scenario.restore(ServiceState::Critical, 0.0);
+        // The warning notified; its recovery follows from that alone.
+        one(scenario.at(1_200.0).input(ok(1_200.0)));
+    }
+
+    #[test]
+    fn a_muted_problem_at_the_start_notifies_when_the_mute_ends() {
+        let mut scenario = Scenario::new(with_settings(rules(Vec::new()), |settings| {
+            settings.objects.push(ObjectOverride {
+                object: the_service(),
+                mode: ObjectMode::Mute,
+                until: Some(ts(2_000.0)),
+            });
+        }));
+        scenario
+            .at(1_000.0)
+            .seed(critical(0.0).happened(1_000.0), false);
+        none(&scenario.at(1_999.0).tick());
+        one(scenario.at(2_000.0).tick());
+    }
+
+    #[test]
+    fn a_seed_never_overrides_what_the_engine_saw() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        one(scenario.at(100.0).input(critical(100.0)));
+        // A stale seed of an older state is ignored: the recovery of the
+        // notified problem still notifies.
+        scenario
+            .at(200.0)
+            .seed(critical(0.0).happened(200.0), false);
+        one(scenario.at(300.0).input(ok(300.0)));
+        // Nor does a seed bring back a problem that ended.
+        scenario
+            .at(400.0)
+            .seed(critical(100.0).happened(400.0), false);
+        none(&scenario.at(500.0).input(ok(300.0).happened(500.0)));
+    }
+
+    #[test]
+    fn state_ids_match_the_intents() {
+        let mut scenario = Scenario::new(rules(Vec::new()));
+        let intent = one(scenario.at(0.0).input(critical(0.25)));
+        assert_eq!(
+            intent.id,
+            state_intent_id(
+                &the_service(),
+                CheckableState::Service(ServiceState::Critical),
+                ts(0.25)
+            )
+        );
+    }
+}

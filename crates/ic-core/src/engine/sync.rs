@@ -3,18 +3,31 @@
 //! - *Reconcile:* a lean reload (tiers 1–3) after every load at an
 //!   adaptive interval (5 minutes below 5 000 objects, 15 above, ±10 %
 //!   jitter so clients drift apart), or `General::reconcile_interval_secs`
-//!   if set, counted from the end of the last load, complete or failed (a
-//!   failed one waits a whole interval). Its tier 3 fetches only the
-//!   problems not held in full or whose result is older than their last
-//!   check. After a reconnect the engine goes live on the objects it has
-//!   and reloads after a random delay below `Tuning::reload_jitter`, so
-//!   clients reconnecting together after an Icinga restart spread out.
-//!   `Refresh` and a restart reload at once, but at most once per
-//!   [`RELOAD_SPACING`]; more of them meanwhile coalesce into one reload
-//!   when it is over. Never a periodic full-attribute reload.
+//!   if set (never below 5 minutes from 5 000 objects on), counted from
+//!   the end of the last load, complete or failed (a failed one waits a
+//!   whole interval). Its tier 3 fetches only the problems not held in
+//!   full or whose result is older than their last check.
+//! - *Reconnects:* the engine goes live on the objects it has. Only after
+//!   a long gap (`Tuning::reload_after_gap` without a line: a laptop that
+//!   slept, an outage, a stall) does it reload, after a random delay below
+//!   `Tuning::reload_jitter`, so clients reconnecting together spread out.
+//!   After a short gap the events since bring every object checked again,
+//!   the status poll catches an Icinga restart, and the next periodic
+//!   reconcile the rest: a stream a proxy ends every few minutes doesn't
+//!   cost a reload each time. Without `status/query` (no restart
+//!   detection) a reconnect reloads, but at most every
+//!   [`SMALL_INTERVAL`].
 //! - *Restarts* ([`Restarts`]): a node reporting another `program_start`
 //!   than before restarted; another node answering (an HA zone behind a
-//!   load balancer) didn't.
+//!   load balancer) didn't. A restart reloads at most every
+//!   `Tuning::reload_spacing`, and not at all if a load started since the
+//!   stream (re)connected and since the node was last seen: a deploy
+//!   restarts both masters of an HA zone, and one reload brings it.
+//! - *`Refresh`* reloads what isn't current (like a reconcile) at once,
+//!   then spaced: `reload_spacing` after the previous reload, 4× that after
+//!   the second, 10× after the third and later, until the user rests
+//!   for 20×. Presses meanwhile coalesce. Never a periodic full-attribute
+//!   reload.
 //! - *Freshness watchdog* (`watchdog.rs`): overdue objects are re-queried
 //!   by name.
 //! - *Hydration:* `Command::Hydrate` fetches lean services in full, by name,
@@ -32,16 +45,49 @@ use tokio::time::Instant;
 use super::{Engine, LoadKind, Phase};
 
 /// Below this many hosts and services the adaptive reconcile runs every
-/// [`SMALL_INTERVAL`], above it every [`LARGE_INTERVAL`].
+/// [`SMALL_INTERVAL`], above it every [`LARGE_INTERVAL`]; a fixed interval
+/// is never shorter than [`SMALL_INTERVAL`] above it.
 const ADAPTIVE_THRESHOLD: usize = 5_000;
 const SMALL_INTERVAL: Duration = Duration::from_mins(5);
 const LARGE_INTERVAL: Duration = Duration::from_mins(15);
 
-/// Reloads asked for by `Refresh` or a restart start at most this often:
-/// several on-call engineers pressing Refresh during an incident cost the
-/// master one lean reload per client every half minute, not one every few
-/// seconds.
-pub(super) const RELOAD_SPACING: Duration = Duration::from_secs(30);
+/// The longest wait between attempts of a failing first load.
+pub(super) const LOAD_RETRY_MAX: Duration = LARGE_INTERVAL;
+
+/// `Refresh` presses in a row wait this many `Tuning::reload_spacing`
+/// after the previous reload: several on-call engineers pressing Refresh
+/// during an incident cost the master a few lean reloads, not two a
+/// minute each.
+const USER_SPACING: [u32; 4] = [1, 1, 4, 10];
+/// A `Refresh` this many `reload_spacing` after the last one starts the
+/// spacing over.
+const USER_RESET: u32 = 20;
+
+/// Why a reload is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReloadCause {
+    /// `Refresh` while connected: what isn't current, spaced more and
+    /// more.
+    User,
+    /// An Icinga restart: everything (its config may have changed).
+    Restart,
+    /// A reconnect after a long gap: everything.
+    Reconnect,
+}
+
+/// Whether a load covers a restart Icinga reported for a node last seen
+/// (with its old start time) at `seen`: it started after the stream
+/// (re)connected at `connected` and after `seen`. The restart of the node
+/// behind the stream ended the stream; the restart of another node (the
+/// other master of an HA zone, restarted with it by a deploy) changed
+/// nothing the stream's node doesn't serve.
+pub(super) fn reload_covers_restart(
+    last_load_start: Option<Instant>,
+    connected: Instant,
+    seen: Instant,
+) -> bool {
+    last_load_start.is_some_and(|start| start > connected && start > seen)
+}
 
 /// The nodes [`Restarts`] remembers (an HA zone has two masters; more
 /// distinct node names start over).
@@ -53,19 +99,22 @@ const MAX_NODES: usize = 16;
 /// zone, and each has its own start time.
 #[derive(Debug, Default)]
 pub(super) struct Restarts {
-    starts: HashMap<String, Timestamp>,
+    /// Per node: its start time, and when it was last seen with it.
+    starts: HashMap<String, (Timestamp, Instant)>,
 }
 
 impl Restarts {
-    /// Notes `status`; whether it shows a node seen before with another
-    /// start time (it restarted).
-    pub(super) fn observe(&mut self, status: &InstanceStatus) -> bool {
+    /// Notes `status`, seen at `now`. If it shows a node seen before with
+    /// another start time (it restarted): when it was last seen with the
+    /// old one.
+    pub(super) fn observe(&mut self, status: &InstanceStatus, now: Instant) -> Option<Instant> {
         if self.starts.len() >= MAX_NODES && !self.starts.contains_key(&status.node_name) {
             self.starts.clear();
         }
         self.starts
-            .insert(status.node_name.clone(), status.program_start)
-            .is_some_and(|previous| previous != status.program_start)
+            .insert(status.node_name.clone(), (status.program_start, now))
+            .filter(|(previous, _)| *previous != status.program_start)
+            .map(|(_, seen)| seen)
     }
 }
 
@@ -78,6 +127,62 @@ impl Engine {
                 self.store.object_count(),
             )
         })
+    }
+
+    /// How long a failing first load waits at most between attempts: the
+    /// reconcile interval as for a large Icinga (its size isn't known yet).
+    pub(super) fn load_retry_cap(&self) -> Duration {
+        self.tuning.reconcile_interval.unwrap_or_else(|| {
+            reconcile_interval(self.spec.general.reconcile_interval_secs, usize::MAX)
+        })
+    }
+
+    /// How long the stream was silent: since it last delivered lines (or
+    /// the session went live), by the monotonic or the wall clock,
+    /// whichever says longer (the monotonic clock may stand still while
+    /// the computer sleeps).
+    pub(super) fn stream_gap(&self) -> Duration {
+        let Some((instant, wall)) = self.last_heard else {
+            return Duration::MAX;
+        };
+        let wall = Duration::try_from_secs_f64(
+            self.ports.clock.now().as_unix_seconds() - wall.as_unix_seconds(),
+        )
+        .unwrap_or_default();
+        instant.elapsed().max(wall)
+    }
+
+    /// The session reconnected (live on the objects it has) after the
+    /// stream was silent for `gap`: reload if it may have missed more than
+    /// the events since bring (see the module notes).
+    pub(super) fn after_reconnect(&mut self, gap: Duration, can_poll_status: bool) {
+        let now = Instant::now();
+        if std::mem::take(&mut self.reload_now) {
+            // The user asked for it.
+            self.reload_full = true;
+            self.notifications_current = false;
+            self.reload_at = Some(now);
+        } else if gap >= self.tuning.reload_after_gap {
+            tracing::debug!(?gap, "reconnected after a long gap; reloading");
+            self.request_reload(ReloadCause::Reconnect);
+        } else if can_poll_status {
+            tracing::debug!(
+                ?gap,
+                "reconnected after a short gap; the next reconcile catches up"
+            );
+            self.schedule_reconcile();
+        } else {
+            // A restart can't be told: reload, but not often.
+            let jitter = self.tuning.reload_jitter.mul_f64(fastrand::f64());
+            let at = self
+                .last_load_start
+                .map_or(now, |start| (start + SMALL_INTERVAL).max(now))
+                + jitter;
+            self.reload_full = true;
+            self.notifications_current = false;
+            self.reload_at = Some(self.reload_at.map_or(at, |pending| pending.min(at)));
+            self.schedule_reconcile();
+        }
     }
 
     /// Schedules the next periodic reconcile, an interval (±10 %) after
@@ -99,51 +204,77 @@ impl Engine {
         self.reload_at.into_iter().chain(self.reconcile_at).min()
     }
 
-    /// The load due at `now`, if any: a reload before a reconcile.
+    /// The load due at `now`, if any: a pending reload (or `Refresh`)
+    /// runs before a reconcile, and a reconcile due first serves it.
     pub(super) fn due_load(&self, now: Instant) -> Option<LoadKind> {
         if self.reload_due().is_none_or(|at| at > now) {
             return None;
         }
-        Some(if self.reload_at.is_some_and(|at| at <= now) {
-            LoadKind::Reload
-        } else {
-            LoadKind::Reconcile
+        Some(match self.reload_at {
+            Some(_) if self.reload_full => LoadKind::Reload,
+            Some(_) => LoadKind::Refresh,
+            None => LoadKind::Reconcile,
         })
     }
 
-    /// A reload (`Refresh`, a restart): now, or once [`RELOAD_SPACING`]
-    /// passed since the last one started; more requests meanwhile coalesce.
-    /// A load in flight brings everything anyway (and Icinga's
-    /// notifications after it).
-    pub(super) fn request_reload(&mut self) {
-        self.notifications_current = false;
+    /// A reload: after a restart or a reconnect everything (Icinga's
+    /// notifications too) at most every `Tuning::reload_spacing`; for
+    /// `Refresh` what isn't current, spaced more the more often it is
+    /// pressed (see the module notes). More requests meanwhile coalesce;
+    /// a load in flight serves them (it brings Icinga's notifications
+    /// after it if they may be stale).
+    pub(super) fn request_reload(&mut self, cause: ReloadCause) {
+        if cause != ReloadCause::User {
+            self.notifications_current = false;
+        }
         if self.load.is_some() {
-            tracing::debug!("reload: a load is already running");
+            tracing::debug!(?cause, "reload: a load is already running");
             return;
         }
         let now = Instant::now();
-        let at = self
+        let base = self.tuning.reload_spacing;
+        let spacing = match cause {
+            ReloadCause::User => {
+                if self
+                    .last_user_reload
+                    .is_some_and(|last| now.duration_since(last) >= base * USER_RESET)
+                {
+                    self.user_reloads = 0;
+                }
+                let step = usize::try_from(self.user_reloads)
+                    .unwrap_or(usize::MAX)
+                    .min(USER_SPACING.len() - 1);
+                self.reload_by_user = true;
+                base * USER_SPACING[step]
+            }
+            ReloadCause::Restart | ReloadCause::Reconnect => {
+                self.reload_full = true;
+                base
+            }
+        };
+        let mut at = self
             .last_reload
-            .map_or(now, |last| (last + RELOAD_SPACING).max(now));
-        if at > now {
-            tracing::debug!(?at, "reload: one ran moments ago; the next follows shortly");
+            .map_or(now, |last| (last + spacing).max(now));
+        if cause == ReloadCause::Reconnect {
+            at += self.tuning.reload_jitter.mul_f64(fastrand::f64());
+        }
+        if at > now + self.tuning.reload_jitter {
+            tracing::debug!(?cause, wait = ?(at - now), "reload: one ran moments ago; the next follows later");
         }
         self.reload_at = Some(self.reload_at.map_or(at, |pending| pending.min(at)));
     }
 
     /// The problem services whose details (`Full`) tier 3 fetches: every
-    /// one, except for a reconcile, which skips those the store holds in
-    /// full with a current result (events keep them current).
+    /// one for a reload, else (a reconcile, `Refresh`) only those the store
+    /// doesn't hold in full with a current result (events keep them
+    /// current).
     pub(super) fn problem_details(&self, kind: LoadKind) -> Vec<ObjectKey> {
+        let all = matches!(kind, LoadKind::First | LoadKind::Reload);
         self.store
             .services()
             .iter()
             .filter(|(_, service)| service.is_problem())
-            .filter(|(key, _)| {
-                kind != LoadKind::Reconcile
-                    || !self.store.is_full(key)
-                    || self.store.result_is_stale(key)
-            })
+            .filter(|(key, _)| all || !self.store.is_full(key) || self.store.result_is_stale(key))
             .map(|(_, service)| service.object_key())
             .collect()
     }
@@ -227,12 +358,24 @@ impl Engine {
 }
 
 /// The reconcile interval for the setting `secs` (0: adaptive) with
-/// `objects` hosts and services.
+/// `objects` hosts and services. A fixed interval is at least
+/// `ic_config::MIN_RECONCILE_INTERVAL_SECS`, and at least
+/// [`SMALL_INTERVAL`] from [`ADAPTIVE_THRESHOLD`] objects on: a lean
+/// reload of 30 000 services every minute would cost the master about
+/// 34 MB a minute per client.
 fn reconcile_interval(secs: u32, objects: usize) -> Duration {
     match secs {
         0 if objects < ADAPTIVE_THRESHOLD => SMALL_INTERVAL,
         0 => LARGE_INTERVAL,
-        secs => Duration::from_secs(u64::from(secs.max(ic_config::MIN_RECONCILE_INTERVAL_SECS))),
+        secs => {
+            let fixed =
+                Duration::from_secs(u64::from(secs.max(ic_config::MIN_RECONCILE_INTERVAL_SECS)));
+            if objects < ADAPTIVE_THRESHOLD {
+                fixed
+            } else {
+                fixed.max(SMALL_INTERVAL)
+            }
+        }
     }
 }
 
@@ -251,22 +394,60 @@ mod tests {
     #[test]
     fn restarts_are_told_from_another_node_answering() {
         let mut restarts = Restarts::default();
-        assert!(!restarts.observe(&status("master-1", 100.0)), "first sight");
-        assert!(!restarts.observe(&status("master-1", 100.0)));
+        let now = Instant::now();
+        let observe = |restarts: &mut Restarts, node: &str, start: f64| {
+            restarts.observe(&status(node, start), now)
+        };
+        assert!(
+            observe(&mut restarts, "master-1", 100.0).is_none(),
+            "first sight"
+        );
+        assert!(observe(&mut restarts, "master-1", 100.0).is_none());
         // An HA zone behind a load balancer: the masters alternate.
         for _ in 0..10 {
-            assert!(!restarts.observe(&status("master-2", 200.0)));
-            assert!(!restarts.observe(&status("master-1", 100.0)));
+            assert!(observe(&mut restarts, "master-2", 200.0).is_none());
+            assert!(observe(&mut restarts, "master-1", 100.0).is_none());
         }
         // One of them restarts.
-        assert!(restarts.observe(&status("master-2", 300.0)));
-        assert!(!restarts.observe(&status("master-1", 100.0)));
-        assert!(!restarts.observe(&status("master-2", 300.0)));
+        assert!(observe(&mut restarts, "master-2", 300.0).is_some());
+        assert!(observe(&mut restarts, "master-1", 100.0).is_none());
+        assert!(observe(&mut restarts, "master-2", 300.0).is_none());
         // Bounded: many distinct names start over.
         for index in 0..MAX_NODES * 2 {
-            assert!(!restarts.observe(&status(&format!("node-{index}"), 1.0)));
+            assert!(observe(&mut restarts, &format!("node-{index}"), 1.0).is_none());
         }
         assert!(restarts.starts.len() <= MAX_NODES);
+    }
+
+    #[test]
+    fn a_deploy_restarting_both_masters_reloads_once() {
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let mut restarts = Restarts::default();
+        // Both masters seen before the deploy.
+        restarts.observe(&status("master-1", 100.0), at(0));
+        restarts.observe(&status("master-2", 200.0), at(30));
+        // The deploy restarts both; the stream reconnects at 70 s, the
+        // next poll reaches master-1: no load since the reconnect.
+        let seen = restarts
+            .observe(&status("master-1", 1_000.0), at(90))
+            .unwrap();
+        assert_eq!(seen, at(0));
+        let mut last_load = Some(at(10));
+        assert!(!reload_covers_restart(last_load, at(70), seen));
+        // It reloads at 90 s; the poll after reaches master-2.
+        last_load = Some(at(90));
+        let seen = restarts
+            .observe(&status("master-2", 1_001.0), at(120))
+            .unwrap();
+        assert!(reload_covers_restart(last_load, at(70), seen), "covered");
+        // Later, master-2 alone restarts again (after the last load): the
+        // stream on master-1 lost nothing, but there was no load since it
+        // was last seen, so it reloads (the safe side).
+        let seen = restarts
+            .observe(&status("master-2", 2_000.0), at(600))
+            .unwrap();
+        assert!(!reload_covers_restart(last_load, at(70), seen));
     }
 
     #[test]
@@ -275,8 +456,11 @@ mod tests {
         assert_eq!(reconcile_interval(0, 4_999), Duration::from_mins(5));
         assert_eq!(reconcile_interval(0, 5_000), Duration::from_mins(15));
         assert_eq!(reconcile_interval(0, 32_000), Duration::from_mins(15));
-        // A setting overrides it, but never below the minimum.
-        assert_eq!(reconcile_interval(120, 32_000), Duration::from_mins(2));
+        // A setting overrides it, but never below the minimum, and never
+        // below 5 minutes for a large Icinga.
+        assert_eq!(reconcile_interval(120, 4_999), Duration::from_mins(2));
+        assert_eq!(reconcile_interval(120, 32_000), Duration::from_mins(5));
+        assert_eq!(reconcile_interval(1_800, 32_000), Duration::from_mins(30));
         assert_eq!(reconcile_interval(10, 10), Duration::from_mins(1));
     }
 }

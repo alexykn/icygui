@@ -1,7 +1,7 @@
 //! The HTTPS server: listener, TLS handshakes, connections, background
 //! tasks (simulator and timers).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
@@ -62,6 +62,8 @@ const CHECKER_PERIOD: Duration = Duration::from_millis(10);
 pub(crate) struct Faults {
     pub(crate) fail_next: u32,
     pub(crate) fail_status: u16,
+    /// Requests to these paths that still fail, and with which status.
+    pub(crate) fail_path: HashMap<String, (u32, u16)>,
     pub(crate) latency: Duration,
     /// Added after an action ran, before its answer goes out.
     pub(crate) action_answer_delay: Duration,
@@ -99,13 +101,23 @@ impl Shared {
         *self.tls.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(state);
     }
 
-    /// Latency to add and, if the next request should fail, its status.
-    pub(crate) fn take_faults(&self) -> (Duration, Option<u16>) {
+    /// Latency to add and, if this request to `path` should fail, its
+    /// status.
+    pub(crate) fn take_faults(&self, path: &str) -> (Duration, Option<u16>) {
         let mut faults = lock(&self.faults);
-        let failure = (faults.fail_next > 0).then(|| {
+        let mut failure = (faults.fail_next > 0).then(|| {
             faults.fail_next -= 1;
             faults.fail_status
         });
+        if failure.is_none()
+            && let Some((count, status)) = faults.fail_path.get_mut(path)
+        {
+            *count -= 1;
+            failure = Some(*status);
+            if *count == 0 {
+                faults.fail_path.remove(path);
+            }
+        }
         (faults.latency, failure)
     }
 
@@ -113,6 +125,15 @@ impl Shared {
         let mut faults = lock(&self.faults);
         faults.fail_next = count;
         faults.fail_status = status;
+    }
+
+    pub(crate) fn set_path_failures(&self, path: &str, count: u32, status: u16) {
+        let mut faults = lock(&self.faults);
+        if count == 0 {
+            faults.fail_path.remove(path);
+        } else {
+            faults.fail_path.insert(path.to_owned(), (count, status));
+        }
     }
 
     pub(crate) fn set_latency(&self, latency: Duration) {

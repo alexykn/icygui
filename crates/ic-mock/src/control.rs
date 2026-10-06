@@ -396,6 +396,15 @@ impl MockControl {
         self.shared.set_failures(count, status);
     }
 
+    /// Fails the next `count` requests to `path` (such as
+    /// `/v1/objects/services`, whatever the method or body) with `status`
+    /// and an Icinga-style error body, before authentication; other paths
+    /// answer normally. Codes outside `100..=999` become 500. `count = 0`
+    /// cancels pending failures of `path`.
+    pub fn fail_path(&self, path: &str, count: u32, status: u16) {
+        self.shared.set_path_failures(path, count, status);
+    }
+
     /// Delays every response by `latency` (zero turns it off). The delay
     /// comes before the request is handled: a client that gives up first
     /// changed nothing.

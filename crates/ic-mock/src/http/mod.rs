@@ -160,7 +160,7 @@ async fn pipeline(
     record: &mut RecordedRequest,
 ) -> Response<Body> {
     let format = shared.number_format;
-    let (latency, failure) = shared.take_faults();
+    let (latency, failure) = shared.take_faults(request.uri().path());
     if !latency.is_zero() {
         tokio::time::sleep(latency).await;
     }

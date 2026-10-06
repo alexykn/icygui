@@ -5,7 +5,11 @@
 //!   something no event announced) becomes a [`RuleInput`] and, for the
 //!   kinds the log keeps, a [`LogEntry`] right away, while the store still
 //!   shows the object as the change left it. The initial load produces
-//!   none: it only fills the store.
+//!   none: it fills the store and seeds the rule engine with its problems
+//!   and flapping objects ([`Notify::seed`]), so the rule engine knows
+//!   what was already wrong without notifying it. Problems an earlier run
+//!   notified (their ids are in the event log) count as notified, so their
+//!   recoveries and acknowledgements follow.
 //! - `handled` is computed from the store after the change: a problem
 //!   that is acknowledged, in downtime, unreachable through a dependency,
 //!   or (for services) on a host with a problem; Icinga suppresses its
@@ -35,7 +39,7 @@ use ic_model::{
 };
 use ic_rules::{
     Change, DashboardScope, GroupScope, LocalTime, NotificationIntent, RuleEngine, RuleInput,
-    RuleSet,
+    RuleSet, state_intent_id,
 };
 
 use super::{AppliedEvent, Engine, Internal};
@@ -61,6 +65,17 @@ pub(super) struct Notify {
     pending: Vec<RuleInput>,
     /// Inputs of the snapshot whose dashboards are being evaluated.
     evaluating: Vec<RuleInput>,
+    /// What the session's first load found (problems and flapping
+    /// objects, each with whether it flaps), waiting for memberships like
+    /// inputs; judged before them.
+    seeds: Vec<(RuleInput, bool)>,
+    /// Seeds of the snapshot whose dashboards are being evaluated.
+    seeds_evaluating: Vec<(RuleInput, bool)>,
+    /// Seeded problems by their state's notification id, until the event
+    /// log said which of them an earlier run notified.
+    seeded: HashMap<String, (ObjectKey, CheckableState, Timestamp)>,
+    /// Ids of seeded problems the event log hasn't been asked about yet.
+    lookups: Vec<String>,
     /// Objects whose `handled` turned false: their next check result
     /// repeats their state.
     confirm: HashSet<ObjectKey>,
@@ -119,6 +134,10 @@ impl Notify {
             rules: RuleEngine::new(rule_set(environment)),
             pending: Vec::new(),
             evaluating: Vec::new(),
+            seeds: Vec::new(),
+            seeds_evaluating: Vec::new(),
+            seeded: HashMap::new(),
+            lookups: Vec::new(),
             confirm: HashSet::new(),
             started: HashSet::new(),
             discovered: Deferred::default(),
@@ -154,15 +173,17 @@ impl Notify {
         self.announced_pause
     }
 
-    /// Whether inputs wait for a snapshot.
+    /// Whether inputs (or seeds) wait for a snapshot.
     pub(super) fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+        !self.pending.is_empty() || !self.seeds.is_empty()
     }
 
     /// A snapshot is cut for evaluation: the inputs so far belong to it.
     pub(super) fn begin_evaluation(&mut self) {
         let pending = mem::take(&mut self.pending);
         self.evaluating.extend(pending);
+        let seeds = mem::take(&mut self.seeds);
+        self.seeds_evaluating.extend(seeds);
     }
 
     /// The evaluation failed: its inputs wait for the next one.
@@ -170,11 +191,15 @@ impl Notify {
         let mut inputs = mem::take(&mut self.evaluating);
         inputs.append(&mut self.pending);
         self.pending = inputs;
+        let mut seeds = mem::take(&mut self.seeds_evaluating);
+        seeds.append(&mut self.seeds);
+        self.seeds = seeds;
     }
 
     /// Judges the inputs of the evaluated snapshot (`evaluated`) or, with
     /// no evaluation in between, every pending input, with their
-    /// memberships from `dashboards`. Returns the intents.
+    /// memberships from `dashboards`, after the seeds among them. Returns
+    /// the intents.
     pub(super) fn judge(
         &mut self,
         dashboards: &Dashboards,
@@ -182,19 +207,106 @@ impl Notify {
         now: Timestamp,
         local: LocalTime,
     ) -> Vec<NotificationIntent> {
-        let inputs = if evaluated {
-            mem::take(&mut self.evaluating)
+        let (seeds, inputs) = if evaluated {
+            (
+                mem::take(&mut self.seeds_evaluating),
+                mem::take(&mut self.evaluating),
+            )
         } else {
+            let mut seeds = mem::take(&mut self.seeds_evaluating);
+            seeds.append(&mut self.seeds);
             let mut inputs = mem::take(&mut self.evaluating);
             inputs.append(&mut self.pending);
-            inputs
+            (seeds, inputs)
         };
+        for (mut input, flapping) in seeds {
+            input.memberships = dashboards.memberships(&input.object);
+            if let Change::State { current, since, .. } = &input.change
+                && current.is_problem()
+            {
+                let since = since.non_zero().unwrap_or(input.at);
+                let id = state_intent_id(&input.object, *current, since);
+                self.lookups.push(id.clone());
+                self.seeded
+                    .insert(id, (input.object.clone(), *current, since));
+            }
+            self.rules.seed(input, flapping, now);
+        }
         let mut intents = Vec::new();
         for mut input in inputs {
             input.memberships = dashboards.memberships(&input.object);
             intents.extend(self.rules.on_input(input, now, local));
         }
         intents
+    }
+
+    /// The notification ids of problems seeded since the last call: the
+    /// event log is asked which of them an earlier run notified.
+    pub(super) fn take_lookups(&mut self) -> Vec<String> {
+        mem::take(&mut self.lookups)
+    }
+
+    /// The event log answered about the seeded problems `asked`: it has
+    /// `known`, which an earlier run notified, so their recoveries and
+    /// acknowledgements follow (if the objects are still in those states).
+    pub(super) fn restore(&mut self, asked: &[String], known: &[String], now: Timestamp) {
+        for id in known {
+            if let Some((object, state, since)) = self.seeded.remove(id) {
+                self.rules.restore_notified(&object, state, since, now);
+            }
+        }
+        for id in asked {
+            self.seeded.remove(id);
+        }
+        if self.seeded.is_empty() {
+            self.seeded = HashMap::new();
+        }
+    }
+
+    /// The session's first load is complete: the rule engine learns what
+    /// is wrong (and what flaps) without notifying it, so a problem left
+    /// over from an outage still waits for a fresh check when its host
+    /// comes back, and a flapping object stays quiet until it stops. The
+    /// seeds wait for their memberships like inputs. `at`: Icinga's time
+    /// as far as it is known.
+    pub(super) fn seed(&mut self, store: &Store, at: Timestamp) {
+        let hosts = store.hosts().iter().map(|(name, host)| {
+            (
+                ObjectKey::Host { name: name.clone() },
+                ObjectView::of(CheckableState::Host(host.state), &host.check),
+            )
+        });
+        let services = store.services().iter().map(|(key, service)| {
+            (
+                ObjectKey::Service { key: key.clone() },
+                ObjectView::of(CheckableState::Service(service.state), &service.check),
+            )
+        });
+        let found: Vec<(ObjectKey, ObjectView)> = hosts
+            .chain(services)
+            .filter(|(_, view)| view.state.is_problem() || view.flapping)
+            .collect();
+        tracing::debug!(count = found.len(), "seeding the rule engine");
+        for (object, view) in found {
+            let output = store.current_output(&object).unwrap_or_default().to_owned();
+            let (host_display, service_display) = store.display_names(&object);
+            let input = RuleInput {
+                handled: handled(&view, host_problem_of(store, &object)),
+                object,
+                host_display,
+                service_display,
+                change: Change::State {
+                    previous: None,
+                    current: view.state,
+                    state_type: view.state_type,
+                    since: view.since,
+                    output,
+                },
+                memberships: Vec::new(),
+                at,
+            };
+            self.seeds.push((input, view.flapping));
+        }
     }
 
     /// The one-second tick: due delayed notifications and storm
@@ -239,7 +351,7 @@ impl Notify {
             Event::CheckResult { result, .. } | Event::StateChange { result, .. } => {
                 let check = matches!(entry.event, Event::CheckResult { .. });
                 if state_changed(&before, &after) {
-                    self.state_change(store, object, &before, &after, &result.output, at, log);
+                    self.state_change(store, object, before.state, &after, &result.output, at, log);
                     own_input = true;
                     confirmed = true;
                 } else if check && handled_before && !handled_after {
@@ -486,7 +598,8 @@ impl Notify {
         let handled_after = handled(&after, host_problem);
         let when = after.since.non_zero().unwrap_or(at);
         let mut own_input = false;
-        let state_input = state_changed(&before, &after);
+        let began_again = began_again(&before, &after);
+        let state_input = began_again || state_changed(&before, &after);
         if state_input {
             // The stored output, unless an event moved the object on since
             // the answer (a finding judged early).
@@ -498,7 +611,15 @@ impl Notify {
             } else {
                 String::new()
             };
-            self.state_change(store, &object, &before, &after, &output, when, log);
+            // A problem that began again ended unseen in between: the rule
+            // engine judges a new problem (the missed recovery itself
+            // isn't announced).
+            let previous = if began_again {
+                recovered(after.state)
+            } else {
+                before.state
+            };
+            self.state_change(store, &object, previous, &after, &output, when, log);
             own_input = true;
         }
         if before.flapping != after.flapping {
@@ -522,13 +643,13 @@ impl Notify {
         }
     }
 
-    /// A state change (or a soft state turning hard).
+    /// A state change from `previous` (or a soft state turning hard).
     #[expect(clippy::too_many_arguments, reason = "the parts of one change")]
     fn state_change(
         &mut self,
         store: &Store,
         object: &ObjectKey,
-        before: &ObjectView,
+        previous: CheckableState,
         after: &ObjectView,
         output: &str,
         at: Timestamp,
@@ -540,7 +661,7 @@ impl Notify {
             store,
             object,
             Change::State {
-                previous: Some(before.state),
+                previous: Some(previous),
                 current: after.state,
                 state_type: after.state_type,
                 since: after.since,
@@ -551,7 +672,7 @@ impl Notify {
         );
         // A new state began at `since`; a soft state turning hard did so
         // with this check.
-        let when = if before.state == after.state {
+        let when = if previous == after.state {
             at
         } else {
             after.since.non_zero().unwrap_or(at)
@@ -752,6 +873,28 @@ impl Engine {
             self.ports.clock.local(),
         );
         self.deliver(intents);
+        let asked = self.notify.take_lookups();
+        if !asked.is_empty() {
+            let tx = self.internal_tx.clone();
+            self.event_log.known(
+                asked.clone(),
+                Box::new(move |known| {
+                    let _ = tx.send(Internal::NotifiedBefore { asked, known });
+                }),
+            );
+        }
+    }
+
+    /// The event log answered which seeded problems an earlier run
+    /// notified.
+    pub(super) fn on_notified_before(&mut self, asked: &[String], known: &[String]) {
+        if !known.is_empty() {
+            tracing::debug!(
+                count = known.len(),
+                "problems open at the start were notified before"
+            );
+        }
+        self.notify.restore(asked, known, self.ports.clock.now());
     }
 
     /// Logs intents; they are emitted once logged
@@ -936,6 +1079,26 @@ fn host_problem_of(store: &Store, object: &ObjectKey) -> bool {
 /// Whether the state, or its type, changed.
 fn state_changed(before: &ObjectView, after: &ObjectView) -> bool {
     before.state != after.state || before.state_type != after.state_type
+}
+
+/// Whether a query found an object in the same problem state as before,
+/// but begun later (`last_state_change` moved on by more than a
+/// millisecond): it left the state and came back while no event told,
+/// most likely through a recovery (a laptop asleep overnight while a
+/// paged problem recovered and failed again). It is a new problem.
+fn began_again(before: &ObjectView, after: &ObjectView) -> bool {
+    after.state.is_problem()
+        && before.state == after.state
+        && before.since.non_zero().is_some()
+        && after.since.as_unix_seconds() - before.since.as_unix_seconds() > 0.001
+}
+
+/// The state a problem of `state`'s kind recovers to: OK or UP.
+fn recovered(state: CheckableState) -> CheckableState {
+    match state {
+        CheckableState::Host(_) => CheckableState::Host(HostState::Up),
+        CheckableState::Service(_) => CheckableState::Service(ServiceState::Ok),
+    }
 }
 
 fn first_line(text: &str) -> &str {

@@ -138,7 +138,8 @@ impl Clock for FakeClock {
 /// The fake clock's time.
 pub(crate) const NOW: f64 = 1_800_000_000.0;
 
-/// Fast timing for tests.
+/// Fast timing for tests. Every reconnect reloads (the gap counts as long
+/// from the start); `gentle.rs` tests the production rule.
 pub(crate) fn tuning() -> Tuning {
     Tuning {
         backoff_initial: Duration::from_millis(40),
@@ -147,6 +148,8 @@ pub(crate) fn tuning() -> Tuning {
         requery_delay: Duration::from_millis(20),
         watchdog_interval: Duration::from_millis(20),
         reload_jitter: Duration::from_millis(30),
+        reload_after_gap: Duration::ZERO,
+        load_retry_initial: Duration::from_millis(40),
         rule_tick: Duration::from_millis(20),
         ..Tuning::default()
     }

@@ -121,3 +121,14 @@ pub struct NotificationIntent {
     /// When the change happened.
     pub at: Timestamp,
 }
+
+/// The id of the notification of `object` entering the problem or
+/// recovery `state` at `since` (`last_state_change`):
+/// `"{object}:{state}:{since}"`, with `since` in Unix seconds to the
+/// millisecond. [`NotificationIntent::id`] of every state notification has
+/// this form; an event log of earlier runs can be asked for it (see
+/// [`RuleEngine::restore_notified`](crate::RuleEngine::restore_notified)).
+#[must_use]
+pub fn state_intent_id(object: &ObjectKey, state: CheckableState, since: Timestamp) -> String {
+    crate::text::state_id(object, state, since)
+}

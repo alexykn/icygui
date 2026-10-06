@@ -282,7 +282,7 @@ Recoveries only notify for problems that notified.
 
 **The notification centre** (the clock icon in the footer) lists recent notifications, silent ones included, with an unread badge; *mark all read*; click one to open its object.
 
-No notifications are sent for what's already wrong when icygui connects. Problems that a reconcile finds after a reconnect do notify.
+No notifications are sent for what's already wrong when icygui connects, but icygui keeps track of it: a service still critical from before its host went down waits for a fresh check (or five minutes) once the host is back, and an object that is flapping stays quiet until it stops. A problem that notified before icygui restarted (or before you switched environments and back) still notifies its recovery, as long as the event log keeps it. Problems that a reconcile finds after a reconnect do notify, also one that recovered and failed again while your laptop slept.
 
 Platform notes: on macOS, notifications come from the app bundle (allow them in System Settings → Notifications the first time). On Linux they go to your desktop's notification server.
 
@@ -309,16 +309,18 @@ The Linux paths follow `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME`.
 - The settings file is written atomically, readable only by you (0600), with the previous version kept as `config.toml.bak`. It never contains passwords.
 - The event log keeps state changes, acknowledgements, comments, downtimes, flapping and notifications for 48 hours (Settings → general → *keep events for*). It feeds the notification centre and the history tabs, so history starts when icygui first connected.
 - The log rotates at 10 MiB and keeps four old files. Passwords and authentication headers are never logged. More detail: `RUST_LOG=icygui=debug,ic_core=debug icygui`.
-- *Reconcile with Icinga* (Settings → general): *adaptive* reloads the lean object list every 5 minutes below 5 000 objects and every 15 above; *fixed interval* lets you choose.
+- *Reconcile with Icinga* (Settings → general): *adaptive* reloads the lean object list every 5 minutes below 5 000 objects and every 15 above; *fixed interval* lets you choose (at least a minute, and at least 5 minutes from 5 000 objects on).
 
 ## How icygui talks to Icinga
 
 It's built to be gentle on the master, also when the whole on-call team runs it:
 - **On connect:** one lean load: hosts, services without their check results, comments, downtimes, groups, dependencies and endpoints, then problems in detail by name, and Icinga's `Notification` objects in the background. At 2 000 hosts and 30 000 services that is about 35 MB, comparable to opening a large page in Icinga Web once.
 - **Then one event stream** (`/v1/events`, about 75 KB/s at that size). Changes are applied from the events themselves; nothing is re-queried per event. Objects are queried by name only when the events can't tell (a configuration change, an unknown object, a pane you open, rows that come into view).
-- **Reconcile:** a lean reload every 5 or 15 minutes, after a reconnect (with jitter, so a team doesn't reload at once) and after an Icinga restart. Never a periodic full reload.
+- **Reconcile:** a lean reload every 5 or 15 minutes, after an Icinga restart (once, also when both masters of an HA zone restart), and after a reconnect that followed a gap of two minutes or more (a laptop that slept; with jitter, so a team doesn't reload at once). After a shorter gap the events since catch up: a proxy that ends the stream every few minutes doesn't cause a reload each time. Never a periodic full reload.
+- **Reload from Icinga** (and *Retry now* while connected) reloads at once; pressed again it waits 30 seconds, then 2 minutes, then 5 minutes between reloads, until you leave it for 10 minutes.
+- **Actions** show their effect through Icinga's events (a forced check's result, the acknowledgement, the downtime); the objects aren't queried again.
 - **Status:** `/v1/status` every 30 seconds (restart and stall detection).
-- **Reconnects** back off from 1 second to 60 seconds.
+- **Reconnects** back off from 1 second to 60 seconds. If the first load fails (a busy master, a proxy answering 504), it is retried after 30 seconds, then a minute, two, and so on up to 15 minutes. An answer icygui can't read stops it with *invalid settings* until you press *Retry now*.
 
 Details and measurements: [performance.md](performance.md).
 

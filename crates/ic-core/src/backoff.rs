@@ -34,6 +34,12 @@ impl Backoff {
         jitter(self.delay(), fastrand::f64())
     }
 
+    /// Like [`Backoff::fail`], with the delay before jitter at most `max`.
+    pub(crate) fn fail_up_to(&mut self, max: Duration) -> Duration {
+        self.failures = self.failures.saturating_add(1);
+        jitter(self.delay().min(max), fastrand::f64())
+    }
+
     /// Back to the first delay (after a healthy connection or a user's
     /// retry).
     pub(crate) fn reset(&mut self) {
@@ -89,6 +95,20 @@ mod tests {
             assert!(
                 wait >= backoff.delay() / 2 && wait < backoff.delay().max(Duration::from_nanos(1))
             );
+        }
+    }
+
+    #[test]
+    fn a_lower_cap_applies_per_failure() {
+        let mut backoff = Backoff::new(Duration::from_secs(30), Duration::from_mins(15));
+        let mut waits = Vec::new();
+        for _ in 0..7 {
+            waits.push(backoff.fail_up_to(Duration::from_mins(5)));
+        }
+        let bounds = [30, 60, 120, 240, 300, 300, 300];
+        for (wait, bound) in waits.iter().zip(bounds) {
+            let bound = Duration::from_secs(bound);
+            assert!(*wait >= bound / 2 && *wait < bound, "{waits:?}");
         }
     }
 

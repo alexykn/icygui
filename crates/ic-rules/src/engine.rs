@@ -166,6 +166,17 @@ impl Default for Limits {
 /// while the engine still tracks a problem means it missed the recovery:
 /// a new problem begins.
 ///
+/// # Starting
+///
+/// What is already wrong when the engine starts doesn't notify, but the
+/// engine must know it: [`RuleEngine::seed`] takes in the problems and
+/// flapping objects the first load found. A seeded problem is held back
+/// while its object flaps, notifies after its handling ends only once a
+/// fresh check confirms it (or the settle time passed), and otherwise
+/// counts as told: its state doesn't notify, a new state of it does as
+/// usual. Its recovery and acknowledgement notify only if an earlier run
+/// notified it, which [`RuleEngine::restore_notified`] tells the engine.
+///
 /// # Other events
 ///
 /// Acknowledgements, downtimes and flapping notify when the matching
@@ -285,6 +296,142 @@ impl RuleEngine {
     /// `None` after the next `tick` or `on_input`.
     pub fn paused_until(&self) -> Option<Timestamp> {
         self.paused_until
+    }
+
+    /// Takes in an object's state as the engine finds it when it starts
+    /// (the session's first load), without notifying: notifications are
+    /// about changes, and what is already wrong isn't one. Call it for
+    /// every object in a problem state or flapping, before any
+    /// [`RuleEngine::on_input`] about it. `input` is a state input
+    /// (`Change::State`; `previous` doesn't matter) with `handled` and
+    /// `memberships` as for `on_input` and `at` = when it was found;
+    /// `flapping`: Icinga reports the object as flapping.
+    ///
+    /// The engine then treats the object as if it had seen it all along:
+    ///
+    /// - A flapping object's problems and recoveries don't notify until it
+    ///   stops flapping.
+    /// - A handled problem that a rule would notify unhandled waits for
+    ///   the end of its handling and a fresh check (or the settle time),
+    ///   like any other.
+    /// - An unhandled problem a rule notifies counts as told: it doesn't
+    ///   notify (a muted one does when the mute ends, if the object is
+    ///   still in that state), but a new state of it is judged as usual.
+    /// - Its recovery and acknowledgement notify only if an earlier run
+    ///   notified it ([`RuleEngine::restore_notified`]).
+    ///
+    /// An object the engine already knows (it saw a change of it) keeps
+    /// what the engine knows; only the flapping flag is taken.
+    pub fn seed(&mut self, input: RuleInput, flapping: bool, now: Timestamp) {
+        let RuleInput {
+            object,
+            host_display,
+            service_display,
+            change,
+            handled,
+            memberships,
+            at,
+        } = input;
+        let Change::State {
+            current,
+            state_type,
+            since,
+            output,
+            ..
+        } = change
+        else {
+            return;
+        };
+        if flapping {
+            self.flapping.insert(object.clone(), now);
+        }
+        if !current.is_problem()
+            || self.tracked.contains_key(&object)
+            || self.settled.get(&object).is_some()
+        {
+            return;
+        }
+        let observation = Observation {
+            subject: Subject {
+                object: object.clone(),
+                host_display,
+                service_display,
+            },
+            state: current,
+            state_type,
+            since: since.non_zero().unwrap_or(at),
+            at,
+            body: text::output_body(&output),
+            handled,
+            memberships,
+        };
+        let episode = Episode::new(earliest(observation.since, now));
+        let mut tracked = Tracked::new(observation, episode);
+        let rules = self.scopes.rules();
+        let muted = rules.object_mode(&object, now) == Some(ObjectMode::Mute);
+        let watched = rules.is_watched(&object, now);
+        tracked.status = if self.is_flapping(&object, now) {
+            Status::Flapping
+        } else {
+            match decide(&self.scopes, &tracked, watched, now) {
+                Decision::Notify { .. } | Decision::Wait { .. } if muted => Status::Muted,
+                // Open before the engine started: no change to tell.
+                Decision::Notify { .. } | Decision::Wait { .. } => Status::Notified,
+                Decision::Suppressed => Status::Suppressed,
+                Decision::Idle => Status::Idle,
+            }
+        };
+        debug!(%object, status = ?tracked.status, "seeded");
+        self.track(tracked);
+    }
+
+    /// An earlier run notified `object`'s problem `state` that began at
+    /// `since` (the event log has its id, see
+    /// [`state_intent_id`](crate::state_intent_id)). If the engine holds
+    /// that problem in that state (from [`RuleEngine::seed`]) and nothing
+    /// of it notified yet, it counts as notified: the state doesn't notify
+    /// again, and its recovery and acknowledgement follow, judged by the
+    /// scopes that would notify the state now (or, if none would, every
+    /// scope the object is on) and a watch. Anything else is ignored.
+    pub fn restore_notified(
+        &mut self,
+        object: &ObjectKey,
+        state: CheckableState,
+        since: Timestamp,
+        now: Timestamp,
+    ) {
+        let Some(tracked) = self.tracked.get(object) else {
+            return;
+        };
+        if !tracked.episode.notified_by.is_empty()
+            || tracked.last.state != state
+            || !same_instant(tracked.last.since, since)
+        {
+            return;
+        }
+        let watched = self.scopes.rules().is_watched(object, now);
+        let candidates = self.scopes.candidates(&tracked.last.memberships, watched);
+        let selecting: Vec<Source> = candidates
+            .iter()
+            .filter(|candidate| candidate.enabled && selects(candidate.rule, state))
+            .map(|candidate| candidate.source.to_source())
+            .collect();
+        let sources = if selecting.is_empty() {
+            candidates
+                .iter()
+                .map(|candidate| candidate.source.to_source())
+                .collect()
+        } else {
+            selecting
+        };
+        let Some(tracked) = self.tracked.get_mut(object) else {
+            return;
+        };
+        debug!(%object, "notified by an earlier run");
+        tracked.episode.notified_by = sources;
+        tracked.episode.last_notified = Some(state);
+        tracked.status = Status::Notified;
+        tracked.settle = None;
     }
 
     /// Judges one change. `now` is the current time and `local` the local
@@ -1082,7 +1229,8 @@ enum Status {
         /// The rules generation `due` was computed under.
         generation: u64,
     },
-    /// Notified (or known to be notified already).
+    /// Notified, known to be notified already, or open before the engine
+    /// started (seeded): nothing to notify for this state.
     Notified,
 }
 

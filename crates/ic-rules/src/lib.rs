@@ -64,7 +64,9 @@ mod storm;
 mod text;
 
 pub use engine::RuleEngine;
-pub use intent::{Change, DashboardRef, LocalTime, NotificationIntent, RuleInput, Tone};
+pub use intent::{
+    Change, DashboardRef, LocalTime, NotificationIntent, RuleInput, Tone, state_intent_id,
+};
 pub use scope::{DashboardScope, EffectiveRule, GroupScope, RuleSet};
 pub use settings::{
     EventFilter, NotificationSettings, ObjectMode, ObjectOverride, QuietHours, Rule, ScopeSetting,

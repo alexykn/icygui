@@ -86,10 +86,15 @@ pub fn delete_event_log(data_dir: &Path, environment_id: &str) -> std::io::Resul
 /// already in the log, from an earlier run, is dropped), in order.
 pub(crate) type Logged = Box<dyn FnOnce(Vec<NotificationIntent>) + Send>;
 
+/// Called on the log's thread with the notification ids the log has, of
+/// those asked for (none without a log).
+pub(crate) type Known = Box<dyn FnOnce(Vec<String>) + Send>;
+
 /// Work for the log's thread.
 enum Job {
     Record(Vec<LogEntry>),
     Notifications(Vec<NotificationIntent>, Logged),
+    Known(Vec<String>, Known),
     History {
         object: Option<ObjectKey>,
         limit: usize,
@@ -163,6 +168,15 @@ impl EventLog {
             self.send(Job::Notifications(intents, logged))
         {
             logged(intents);
+        }
+    }
+
+    /// Tells `known` which of the notification `ids` the log has (from
+    /// an earlier run: the rule engine restores what it notified), on the
+    /// log's thread (or right away, without a log).
+    pub(crate) fn known(&self, ids: Vec<String>, known: Known) {
+        if let Err(Job::Known(_, known)) = self.send(Job::Known(ids, known)) {
+            known(Vec::new());
         }
     }
 
@@ -302,6 +316,23 @@ fn set_aside(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Reads `what` from the database: the default (empty) without a log or
+/// when the read fails (logged).
+fn read<T: Default>(
+    database: Option<&mut Database>,
+    what: &str,
+    query: impl FnOnce(&Database) -> Result<T, db::DbError>,
+) -> T {
+    match database.map(|database| query(database)) {
+        Some(Ok(value)) => value,
+        Some(Err(error)) => {
+            tracing::warn!(%error, "couldn't read {what}");
+            T::default()
+        }
+        None => T::default(),
+    }
+}
+
 /// Runs one job against the database (`None`: no log).
 fn handle(database: Option<&mut Database>, job: Job) {
     match job {
@@ -335,30 +366,25 @@ fn handle(database: Option<&mut Database>, job: Job) {
                 .collect();
             logged(fresh);
         }
+        Job::Known(ids, known) => {
+            known(read(database, "the notifications", |database| {
+                database.known(&ids)
+            }));
+        }
         Job::History {
             object,
             limit,
             reply,
         } => {
-            let entries = database
-                .map(|database| database.history(object.as_ref(), limit))
-                .transpose()
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "couldn't read the event log");
-                    None
-                })
-                .unwrap_or_default();
+            let entries = read(database, "the event log", |database| {
+                database.history(object.as_ref(), limit)
+            });
             let _ = reply.send(entries);
         }
         Job::LoadNotifications { limit, reply } => {
-            let records = database
-                .map(|database| database.notifications(limit))
-                .transpose()
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "couldn't read the notifications");
-                    None
-                })
-                .unwrap_or_default();
+            let records = read(database, "the notifications", |database| {
+                database.notifications(limit)
+            });
             let _ = reply.send(records);
         }
         Job::MarkRead => {
@@ -376,15 +402,7 @@ fn handle(database: Option<&mut Database>, job: Job) {
             }
         }
         Job::HistoryStart(reply) => {
-            let start = database
-                .map(|database| database.history_start())
-                .transpose()
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "couldn't read the event log");
-                    None
-                })
-                .flatten();
-            let _ = reply.send(start);
+            let _ = reply.send(read(database, "the event log", Database::history_start));
         }
         Job::Prune(before) => {
             if let Some(database) = database {

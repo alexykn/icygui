@@ -14,9 +14,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::support::{
-    ENV_ID, FakeSecrets, Launch, environment, mock, start, start_for, tuning, wait_until,
+    ENV_ID, FakeSecrets, Launch, PASSWORD, USER, environment, mock, start, start_for, tuning,
+    wait_until,
 };
-use ic_core::{ActionOutcome, Command, ConnectionState, CoreEvent};
+use ic_core::{ActionOutcome, Command, ConnectionState, CoreEvent, Tuning};
 use ic_mock::{MockConfig, MockControl, MockUser, scenarios};
 use ic_model::{
     AckKind, Action, ActionTarget, ChildOptions, CommandType, DowntimeMode, Endpoint, HostState,
@@ -106,8 +107,8 @@ async fn every_action_end_to_end() {
     engine
         .snapshot(|snapshot| snapshot.services[&pg_key].check.acknowledgement == AckKind::Normal)
         .await;
-    // The target is re-queried right after.
-    assert!(wait_until(|| requeried(&control, "stg-db-01!pg-connections")).await);
+    // The `AcknowledgementSet` event shows it (no re-query needed; see
+    // `a_forced_check_is_not_followed_by_a_query_of_its_targets`).
 
     // Remove it.
     let outcome = run(
@@ -586,5 +587,100 @@ async fn a_comment_without_an_answer_holds_back_comments_on_its_object() {
         json!(["stg-db-01"]),
         "not to the held host"
     );
+    engine.shutdown();
+}
+
+/// A forced check of many services: the results come as `CheckResult`
+/// events once Icinga ran the checks; querying the services right after
+/// the action would only bring their state from before, at the moment
+/// Icinga is busy running them. Without the events, the targets are
+/// re-queried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forced_check_is_not_followed_by_a_query_of_its_targets() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    // The freshness watchdog looks once (the simulator is off, so some
+    // objects are overdue), then not again within the test.
+    let quiet_watchdog = || Tuning {
+        watchdog_interval: Duration::from_hours(1),
+        ..tuning()
+    };
+    let mut engine = start(
+        environment(&server),
+        FakeSecrets::with(ENV_ID, PASSWORD),
+        quiet_watchdog(),
+    );
+    engine.connected().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let services: Vec<ObjectKey> = control
+        .services()
+        .iter()
+        .map(|service| ObjectKey::from(service.key.clone()))
+        .collect();
+    assert!(services.len() > 20);
+    let before = control
+        .service("stg-web-01", "http")
+        .and_then(|service| service.check.last_check)
+        .unwrap();
+    control.clear_requests();
+    let outcome = run(
+        &mut engine,
+        1,
+        ActionTarget::Objects(services.clone()),
+        Action::CheckNow { force: true },
+    )
+    .await;
+    ok(&outcome, services.len());
+    // The checks run and their results arrive as events.
+    engine
+        .snapshot(|snapshot| {
+            snapshot
+                .services
+                .get(&ServiceKey::new("stg-web-01", "http"))
+                .and_then(|service| service.check.last_check)
+                .is_some_and(|checked| checked > before)
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let by_name = control
+        .requests()
+        .iter()
+        .filter(|request| request.path == "/v1/objects/services")
+        .count();
+    assert_eq!(by_name, 0, "no re-query");
+    engine.shutdown();
+
+    // A user without `CheckResult` events: the targets are re-queried.
+    let mut config = MockConfig::with_scenario(scenarios::staging());
+    config.users = vec![MockUser::new(
+        USER,
+        PASSWORD,
+        &[
+            "objects/query/*",
+            "status/query",
+            "actions/*",
+            "events/StateChange",
+        ],
+    )];
+    let server = mock(config).await;
+    let control = server.control();
+    let mut engine = start(
+        environment(&server),
+        FakeSecrets::with(ENV_ID, PASSWORD),
+        quiet_watchdog(),
+    );
+    engine.connected().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    control.clear_requests();
+    let http = ObjectKey::service("stg-web-01", "http");
+    let outcome = run(
+        &mut engine,
+        2,
+        ActionTarget::Objects(vec![http]),
+        Action::CheckNow { force: true },
+    )
+    .await;
+    ok(&outcome, 1);
+    assert!(wait_until(|| requeried(&control, "stg-web-01!http")).await);
     engine.shutdown();
 }

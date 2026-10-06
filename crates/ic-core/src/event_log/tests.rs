@@ -157,6 +157,11 @@ fn notifications_round_trip_dedupe_and_read_flags() {
     assert_eq!(database.mark_read().unwrap(), 2);
     assert!(database.notifications(10).unwrap().iter().all(|r| r.read));
     assert_eq!(database.mark_read().unwrap(), 0);
+
+    // Which ids an earlier run notified, in the order asked.
+    let asked = ["b", "x", "a"].map(str::to_owned);
+    assert_eq!(database.known(&asked).unwrap(), ["b", "a"]);
+    assert!(database.known(&[]).unwrap().is_empty());
 }
 
 #[test]
@@ -343,6 +348,12 @@ fn the_thread_answers_in_order_and_flushes_on_close() {
         .map(|record| (record.intent.id, record.read))
         .collect();
     assert_eq!(read, [("b".to_owned(), true), ("a".to_owned(), false)]);
+    let (done, known) = std_mpsc::channel();
+    log.known(
+        vec!["a".to_owned(), "c".to_owned()],
+        Box::new(move |found| done.send(found).unwrap()),
+    );
+    assert_eq!(known.recv_timeout(Duration::from_secs(5)).unwrap(), ["a"]);
     log.mark_read();
     let (tx, rx) = oneshot::channel();
     log.notifications(10, tx);

@@ -515,6 +515,22 @@ async fn injected_failures_and_latency() {
     let (status, _) = get(&client, &server, "/v1/status").await;
     assert_eq!(status, StatusCode::OK);
 
+    // Failures of one path leave the others alone.
+    control.fail_path("/v1/status", 2, 502);
+    let (status, _) = get(&client, &server, "/v1").await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..2 {
+        let (status, body) = get(&client, &server, "/v1/status").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], json!(502));
+    }
+    let (status, _) = get(&client, &server, "/v1/status").await;
+    assert_eq!(status, StatusCode::OK);
+    control.fail_path("/v1/status", 5, 500);
+    control.fail_path("/v1/status", 0, 500);
+    let (status, _) = get(&client, &server, "/v1/status").await;
+    assert_eq!(status, StatusCode::OK, "cancelled");
+
     control.set_latency(std::time::Duration::from_millis(200));
     let started = std::time::Instant::now();
     let (status, _) = get(&client, &server, "/v1").await;

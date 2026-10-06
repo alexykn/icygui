@@ -1,10 +1,11 @@
-//! The tiered load (docs/performance.md): on connect, after every reconnect
-//! and on reloads. It never asks for more than the lean lists plus the
-//! problems' details, and keeps few requests in flight: the hosts next to
-//! one small query at a time, then the services, then the problems'
-//! details one batch of names at a time. Which problems' details the engine
-//! decides once it applied the services (a periodic reconcile skips those
-//! it holds current).
+//! The tiered load (docs/performance.md): on connect, periodically, and on
+//! reloads (a reconnect after a long gap, a restart, `Refresh`). It never
+//! asks for more than the lean lists plus the problems' details, and keeps
+//! few requests in flight: the hosts next to one small query at a time,
+//! then the services, then the problems' details one batch of names at a
+//! time. Which problems' details the engine decides once it applied the
+//! services (a periodic reconcile and `Refresh` skip those it holds
+//! current).
 
 use std::future::Future;
 use std::sync::Arc;
@@ -202,11 +203,63 @@ async fn optional<T>(
 }
 
 /// Classifies an error of an established connection: credentials that
-/// stopped working need the user; everything else reconnects (and a TLS
-/// problem then shows up with the certificate).
+/// stopped working need the user, and so does an answer this client can't
+/// use (unreadable, or a request Icinga refuses as such: 400 and the like),
+/// which no retry changes; a connection problem, a timeout or a server
+/// error (5xx, 408, 429) may go away, and a TLS problem shows up with the
+/// certificate when reconnecting.
 pub(super) fn failure(error: ApiError) -> Failure {
     match error {
         ApiError::Unauthorized => Failure::Auth(error.to_string()),
-        other => Failure::Transient(other.to_string()),
+        ApiError::Tls(_) | ApiError::CertificateMismatch { .. } => {
+            Failure::Transient(error.to_string())
+        }
+        error if error.is_transient() => Failure::Transient(error.to_string()),
+        error => Failure::Misconfigured(format!(
+            "Icinga's answer to a query can't be used ({error}); retrying won't help"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_what_may_go_away_is_retried() {
+        let transient = [
+            ApiError::Connect("reset".to_owned()),
+            ApiError::Timeout,
+            ApiError::Http {
+                status: 502,
+                message: "Bad Gateway".to_owned(),
+            },
+            ApiError::Http {
+                status: 429,
+                message: String::new(),
+            },
+            ApiError::Tls("unknown issuer".to_owned()),
+        ];
+        for error in transient {
+            assert!(
+                matches!(failure(error.clone()), Failure::Transient(_)),
+                "{error}"
+            );
+        }
+        assert!(matches!(failure(ApiError::Unauthorized), Failure::Auth(_)));
+        let permanent = [
+            ApiError::Decode("missing field `name`".to_owned()),
+            ApiError::Http {
+                status: 400,
+                message: "Invalid attribute".to_owned(),
+            },
+            ApiError::InvalidSettings("bad URL".to_owned()),
+        ];
+        for error in permanent {
+            assert!(
+                matches!(failure(error.clone()), Failure::Misconfigured(_)),
+                "{error}"
+            );
+        }
     }
 }

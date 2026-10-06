@@ -77,11 +77,28 @@ pub struct Tuning {
     /// The freshness watchdog looks for overdue objects at most this often
     /// (5 s), re-querying at most 200 of them per look.
     pub watchdog_interval: Duration,
-    /// After a reconnect the client goes live on the objects it has and
-    /// reconciles with a lean reload after a random delay below this
-    /// (10 s), so clients reconnecting together after an Icinga restart
-    /// don't reload at the same instant. A `Refresh` reloads at once.
+    /// After a reconnect the client goes live on the objects it has and,
+    /// if the stream was gone for `reload_after_gap`, reloads after a
+    /// random delay below this (10 s), so clients reconnecting together
+    /// don't reload at the same instant.
     pub reload_jitter: Duration,
+    /// A reconnect reloads only when the stream was silent this long (2
+    /// minutes, wall-clock or monotonic, whichever is longer: a laptop
+    /// that slept, a network outage, a stall). After a shorter gap the
+    /// events since bring every object that is checked again, an Icinga
+    /// restart is caught by the status poll, and the periodic reconcile
+    /// catches up the rest: a stream that keeps ending (a proxy's maximum
+    /// response time) doesn't cost a reload each time.
+    pub reload_after_gap: Duration,
+    /// Reloads asked for by a detected restart start at most this often
+    /// (30 s); `Refresh` by the user waits this long after the previous
+    /// reload, and longer the more often it is pressed (4× after the
+    /// second, 10× after the third, until it rests for 20×).
+    pub reload_spacing: Duration,
+    /// A failed first load (the big lean lists) is retried after this
+    /// (30 s, half of it jitter), doubling with every further failure up
+    /// to the reconcile interval, instead of with each quick reconnect.
+    pub load_retry_initial: Duration,
     /// The periodic reconcile's interval, overriding
     /// `General::reconcile_interval_secs` (tests); `None` (the default)
     /// uses the setting: adaptive for 0 (5 minutes below 5 000 objects,
@@ -119,6 +136,9 @@ impl Default for Tuning {
             shutdown_timeout: Duration::from_secs(5),
             watchdog_interval: Duration::from_secs(5),
             reload_jitter: Duration::from_secs(10),
+            reload_after_gap: Duration::from_mins(2),
+            reload_spacing: Duration::from_secs(30),
+            load_retry_initial: Duration::from_secs(30),
             reconcile_interval: None,
             rule_tick: Duration::from_secs(1),
             prune_interval: Duration::from_hours(1),

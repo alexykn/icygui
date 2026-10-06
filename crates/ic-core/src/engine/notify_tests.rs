@@ -882,3 +882,97 @@ fn a_check_that_shows_the_handling_over_confirms_the_state() {
     assert_eq!(intents.len(), 1, "{intents:#?}");
     assert_eq!(intents[0].title, "CRITICAL · Service b on Host H");
 }
+
+#[test]
+fn a_problem_found_begun_again_is_a_new_problem() {
+    let mut h = Harness::new();
+    let b = key("b");
+    // A reload finds h!b critical as before, but since 150 (it was 50): it
+    // recovered and failed again while no event told.
+    let mut again = Service::new("h", "b");
+    again.display_name = "Service b".to_owned();
+    again.state = ServiceState::Critical;
+    again.check.state_type = StateType::Hard;
+    again.check.last_state_change = t(150.0);
+    again.check.last_check = Some(t(150.0));
+    again.check.result = Some(CheckResult {
+        output: "CRITICAL - again".to_owned(),
+        execution_end: t(150.0),
+        ..CheckResult::default()
+    });
+    h.store
+        .apply_fetched(Vec::new(), vec![again], Detail::Full, &[], 20);
+    let found = h.store.take_discovered();
+    h.notify
+        .discovered(&h.store, found, false, t(160.0), &mut h.log);
+    let inputs = mem::take(&mut h.notify.pending);
+    assert_eq!(inputs.len(), 1, "{inputs:#?}");
+    let Change::State {
+        previous,
+        current,
+        since,
+        ..
+    } = &inputs[0].change
+    else {
+        panic!();
+    };
+    assert_eq!(inputs[0].object, b);
+    assert_eq!(
+        *previous,
+        Some(svc(ServiceState::Ok)),
+        "the missed recovery"
+    );
+    assert_eq!((*current, *since), (svc(ServiceState::Critical), t(150.0)));
+    let log = h.log();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].at, t(150.0), "logged when it began");
+
+    // The same `since` within a millisecond is the same problem.
+    let mut same = Service::new("h", "b");
+    same.state = ServiceState::Critical;
+    same.check.state_type = StateType::Hard;
+    same.check.last_state_change = t(150.000_4);
+    same.check.last_check = Some(t(200.0));
+    h.store
+        .apply_fetched(Vec::new(), vec![same], Detail::Lean, &[], 30);
+    let found = h.store.take_discovered();
+    h.notify
+        .discovered(&h.store, found, false, t(210.0), &mut h.log);
+    assert!(h.notify.pending.is_empty());
+}
+
+#[test]
+fn the_first_load_seeds_problems_and_flapping_objects() {
+    let mut h = Harness::new();
+    // h!a flaps (OK now); h!b is critical.
+    let mut flapping = Service::new("h", "a");
+    flapping.state = ServiceState::Ok;
+    flapping.check.state_type = StateType::Hard;
+    flapping.check.flapping = true;
+    flapping.check.last_state_change = t(90.0);
+    h.store
+        .apply_fetched(Vec::new(), vec![flapping], Detail::Lean, &[], 20);
+    h.store.take_discovered();
+    h.notify.seed(&h.store, t(120.0));
+    assert!(h.notify.has_pending());
+    let seeds = mem::take(&mut h.notify.seeds);
+    let summary: Vec<(ObjectKey, CheckableState, bool, bool)> = seeds
+        .iter()
+        .map(|(input, flapping)| {
+            let (state, _, _, handled) = state_of(input);
+            (input.object.clone(), state, handled, *flapping)
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (key("a"), svc(ServiceState::Ok), false, true),
+            (key("b"), svc(ServiceState::Critical), false, false),
+        ]
+    );
+    assert!(seeds.iter().all(|(input, _)| input.at == t(120.0)));
+    let Change::State { output, .. } = &seeds[1].0.change else {
+        panic!();
+    };
+    assert_eq!(output, "Critical output");
+}

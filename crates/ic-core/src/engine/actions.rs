@@ -1,6 +1,11 @@
 //! `Command::Action`: runs an action with the environment's author and
-//! reports per-object failures; succeeded targets are re-queried so their
-//! new state shows within a second (events usually bring it first).
+//! reports per-object failures. What it did shows through the events
+//! Icinga sends about it (a check result, an acknowledgement, a comment, a
+//! downtime); only when the stream doesn't carry those event types (or for
+//! `execute-command`) are the succeeded targets re-queried, so their new
+//! state shows within a second. A forced check's re-query in particular
+//! would only bring the state from before the check, at the moment Icinga
+//! runs it.
 //!
 //! An action Icinga didn't answer (its outcome is unknown: Icinga may have
 //! applied it, or may still be applying it) is reported as failed with
@@ -16,7 +21,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use ic_api::{ActionResult, ApiError, Client};
-use ic_model::{Action, ActionTarget, ObjectKey, Timestamp};
+use ic_model::{Action, ActionTarget, EventKind, ObjectKey, Timestamp};
 use tokio::time::Instant;
 
 use super::{Engine, Internal};
@@ -207,8 +212,11 @@ fn reason_to_hold(
 #[derive(Debug)]
 pub(crate) struct Finished {
     pub(super) id: u64,
-    /// The hosts and services it changes (re-queried).
+    /// The hosts and services it changes (re-queried unless the stream
+    /// reports what it did).
     pub(super) dirty: Vec<ObjectKey>,
+    /// The event types that report what it did.
+    pub(super) reported_by: &'static [EventKind],
     pub(super) outcome: ActionOutcome,
     /// The objects whose outcome is unknown.
     pub(super) unknown: Vec<ObjectKey>,
@@ -260,6 +268,7 @@ impl Engine {
             return;
         }
         let dirty = self.action_objects(&target);
+        let reported_by = reported_by(&action, &target);
         let runs = self.plan(action, target);
         let tx = self.internal_tx.clone();
         let sent = Timestamp::now();
@@ -271,6 +280,7 @@ impl Engine {
             let finished = Finished {
                 id,
                 dirty,
+                reported_by,
                 outcome,
                 unknown,
                 repeat: repeat.map(|repeat| (repeat, author, sent)),
@@ -283,6 +293,7 @@ impl Engine {
         let Finished {
             id,
             dirty,
+            reported_by,
             outcome,
             unknown,
             repeat,
@@ -302,13 +313,28 @@ impl Engine {
                     .add(object.clone(), repeat.clone(), &author, sent, now);
             }
         }
-        // Show what Icinga did: changed objects, and those it may have
-        // changed.
-        if outcome.ok > 0 || !unknown.is_empty() {
+        // Show what Icinga did: the events about it do, else the changed
+        // objects are re-queried; those it may have changed are.
+        if outcome.ok > 0 && !self.streams(reported_by) {
             self.fetch.mark_urgent(dirty, now);
+        }
+        if !unknown.is_empty() {
+            self.fetch.mark_urgent(unknown, now);
         }
         self.emit(CoreEvent::ActionFinished { id, outcome });
         self.publish_changes();
+    }
+
+    /// Whether the event stream carries every one of `kinds` (none:
+    /// `false`).
+    fn streams(&self, kinds: &[EventKind]) -> bool {
+        let Some(conn) = self.conn.as_ref().filter(|_| self.lines.is_some()) else {
+            return false;
+        };
+        !kinds.is_empty()
+            && kinds
+                .iter()
+                .all(|kind| conn.info.allows(&format!("events/{}", kind.api_name())))
     }
 
     /// The hosts and services an action changes: its objects, or the
@@ -364,6 +390,29 @@ impl Engine {
             runs.push((action, ActionTarget::Objects(local)));
         }
         runs
+    }
+}
+
+/// The event types through which Icinga reports what `action` on `target`
+/// did; with all of them on the stream its targets aren't re-queried.
+/// None for `execute-command`, whose effect depends on the command.
+fn reported_by(action: &Action, target: &ActionTarget) -> &'static [EventKind] {
+    match (action, target) {
+        (_, ActionTarget::Downtime(_)) => &[EventKind::DowntimeRemoved],
+        (_, ActionTarget::Comment(_)) => &[EventKind::CommentRemoved],
+        (Action::CheckNow { .. } | Action::ProcessCheckResult { .. }, _) => {
+            &[EventKind::CheckResult]
+        }
+        (Action::Acknowledge { .. }, _) => &[EventKind::AcknowledgementSet],
+        (Action::RemoveAcknowledgement, _) => &[EventKind::AcknowledgementCleared],
+        (Action::ScheduleDowntime { .. }, _) => &[
+            EventKind::DowntimeAdded,
+            EventKind::DowntimeStarted,
+            EventKind::DowntimeTriggered,
+        ],
+        (Action::RemoveAllDowntimes, _) => &[EventKind::DowntimeRemoved],
+        (Action::AddComment { .. }, _) => &[EventKind::CommentAdded],
+        (Action::ExecuteCommand { .. }, _) => &[],
     }
 }
 

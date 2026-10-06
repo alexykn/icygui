@@ -224,6 +224,20 @@ impl Database {
         Ok(rows.into_iter().flatten().collect())
     }
 
+    /// Which of the notification `ids` the log has, in the order asked.
+    pub(super) fn known(&self, ids: &[String]) -> Result<Vec<String>, DbError> {
+        let mut query = self
+            .conn
+            .prepare_cached("SELECT 1 FROM notifications WHERE id = ?1")?;
+        let mut found = Vec::new();
+        for id in ids {
+            if query.exists(params![id])? {
+                found.push(id.clone());
+            }
+        }
+        Ok(found)
+    }
+
     /// The newest notifications first, at most `limit`.
     pub(super) fn notifications(&self, limit: usize) -> Result<Vec<NotificationRecord>, DbError> {
         let mut query = self.conn.prepare_cached(

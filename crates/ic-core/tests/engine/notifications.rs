@@ -404,3 +404,144 @@ async fn rules_follow_the_environment() {
     assert_eq!(record.intent.subtitle, "overview / all services");
     engine.shutdown();
 }
+
+/// A notification that must come next: anything before it that shouldn't
+/// have notified shows up in the list.
+async fn fence(engine: &mut Engine, control: &MockControl) {
+    critical(control, "stg-web-01", "http");
+    assert_eq!(
+        titles_until(engine, "CRITICAL · http on stg-web-01").await,
+        ["CRITICAL · http on stg-web-01"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn problems_of_a_host_down_at_the_start_wait_for_a_fresh_check() {
+    // The morning case: a host has been down since before icygui started,
+    // with a service critical from before the outage.
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let http = ObjectKey::service("stg-api-01", "http");
+    critical(&control, "stg-api-01", "http");
+    control
+        .set_host_state("stg-api-01", HostState::Down, "CRITICAL - no route", true)
+        .unwrap();
+    let mut engine = Launch::new(&server).start();
+    settled(&mut engine).await;
+
+    // Someone fixes the host. The service's state is left over from before
+    // the outage (no check since): it waits. Nobody heard of the host's
+    // outage from icygui, so its end isn't news either.
+    control
+        .set_host_state("stg-api-01", HostState::Up, "PING OK", true)
+        .unwrap();
+    fence(&mut engine, &control).await;
+
+    // Its next check confirms it: now it notifies.
+    control
+        .process_check_result(&http, 2, "CRITICAL - still broken", &[])
+        .unwrap();
+    let record = engine.notification().await;
+    assert_eq!(record.intent.title, "CRITICAL · http on stg-api-01");
+    assert_eq!(record.intent.body, "CRITICAL - still broken");
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_object_flapping_at_the_start_stays_quiet() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let http = ObjectKey::service("stg-api-01", "http");
+    for index in 0..24 {
+        let exit = if index % 2 == 0 { 2 } else { 0 };
+        control
+            .process_check_result(&http, exit, "swinging", &[])
+            .unwrap();
+    }
+    assert!(
+        control
+            .service("stg-api-01", "http")
+            .unwrap()
+            .check
+            .flapping
+    );
+    let mut engine = Launch::new(&server).start();
+    settled(&mut engine).await;
+
+    // It keeps swinging; Icinga sends nothing for it, and neither do we.
+    for _ in 0..3 {
+        critical(&control, "stg-api-01", "http");
+        ok(&control, "stg-api-01", "http");
+    }
+    assert!(
+        control
+            .service("stg-api-01", "http")
+            .unwrap()
+            .check
+            .flapping
+    );
+    fence(&mut engine, &control).await;
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_problem_notified_before_a_restart_still_notifies_its_recovery() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let dir = tempfile::tempdir().unwrap();
+    let launch = |server: &ic_mock::MockServer| {
+        let mut launch = Launch::new(server);
+        launch.data_dir = Some(dir.path().to_owned());
+        launch.start()
+    };
+
+    let mut engine = launch(&server);
+    settled(&mut engine).await;
+    critical(&control, "stg-api-01", "http");
+    assert_eq!(
+        engine.notification().await.intent.title,
+        "CRITICAL · http on stg-api-01"
+    );
+    engine.shutdown();
+
+    // The laptop restarts (or the user switches environments and back):
+    // a new engine on the same event log.
+    let mut engine = launch(&server);
+    settled(&mut engine).await;
+    // The event log answers right after the rule engine was seeded.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ok(&control, "stg-api-01", "http");
+    assert_eq!(
+        titles_until(&mut engine, "RECOVERED · http on stg-api-01").await,
+        ["RECOVERED · http on stg-api-01"]
+    );
+    // A problem nobody was told about ends quietly.
+    ok(&control, "stg-db-01", "pg-connections");
+    fence(&mut engine, &control).await;
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_problem_that_began_again_during_a_gap_notifies() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut engine = Launch::new(&server).start();
+    settled(&mut engine).await;
+    critical(&control, "stg-api-01", "http");
+    let first = engine.notification().await.intent;
+    assert_eq!(first.title, "CRITICAL · http on stg-api-01");
+
+    // A proxy stops relaying the stream (a laptop asleep overnight): the
+    // service recovers and fails again unseen.
+    assert_eq!(control.stall_event_streams(), 1);
+    ok(&control, "stg-api-01", "http");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    critical(&control, "stg-api-01", "http");
+    // A reload finds the same state, begun later: a new problem.
+    engine.send(Command::Refresh);
+    let again = engine.notification().await.intent;
+    assert_eq!(again.title, "CRITICAL · http on stg-api-01");
+    assert_ne!(again.id, first.id);
+    assert_eq!(again.body, "CRITICAL - http is broken");
+    engine.shutdown();
+}

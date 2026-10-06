@@ -328,6 +328,11 @@ async fn fifty_thousand_events_at_production_scale() {
         "applied {applied} of {count} recorded events (30 000 services) in {took:?} \
          ({per_second:.0} events/s)"
     );
+    // PERF-03: a 50 000-event burst in under 3 s (release builds; the
+    // nightly `perf` workflow runs this with `--release`).
+    if !cfg!(debug_assertions) {
+        assert!(took < Duration::from_secs(3), "PERF-03: {took:?}");
+    }
     let (took, dashboards, _) = apply(&server, lines, 5_000, true);
     eprintln!("again with ten dashboards updated per batch of 5 000: {took:?} + {dashboards:?}");
 }
@@ -425,6 +430,16 @@ fn twenty_thousand_services_times_ten_dashboards() {
     );
     let (_, single) = dashboards_over(1_334, 1);
     eprintln!("incremental (1 changed service) {single:?}");
+    // PERF-06: dashboards evaluate incrementally; a full evaluation of
+    // 20 000 × 10 is well under a second in release builds (the nightly
+    // `perf` workflow).
+    if !cfg!(debug_assertions) {
+        assert!(full < Duration::from_secs(1), "PERF-06: {full:?}");
+        assert!(
+            incremental < Duration::from_millis(100),
+            "PERF-06: {incremental:?}"
+        );
+    }
 }
 
 /// A store as a while after the initial load: every service has its
@@ -641,4 +656,12 @@ fn notifications_in_a_production_storm() {
         "storm of {entries} failing services: inputs {inputs:?}, judged into {intents} \
          notifications in {judging:?}, logged in {logging:?}"
     );
+    assert!(entries > 20_000, "{entries}");
+    // Release builds (the nightly `perf` workflow) take well under a
+    // second for each step; the bounds only catch pathologies.
+    if !cfg!(debug_assertions) {
+        assert!(inputs < Duration::from_secs(2), "{inputs:?}");
+        assert!(judging < Duration::from_secs(5), "{judging:?}");
+        assert!(logging < Duration::from_secs(5), "{logging:?}");
+    }
 }

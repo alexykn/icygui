@@ -38,7 +38,8 @@ pub use error::ApiError;
 pub use events::{EventLines, EventStream, parse_event};
 pub use info::ApiInfo;
 pub use settings::{
-    CONNECT_TIMEOUT, ConnectionSettings, Credentials, DEFAULT_REQUEST_TIMEOUT, TlsSettings,
+    CONNECT_TIMEOUT, ConnectionSettings, Credentials, DEFAULT_ACTION_TIMEOUT,
+    DEFAULT_REQUEST_TIMEOUT, TlsSettings,
 };
 pub use tls::{CertificateInfo, fetch_server_certificate, format_fingerprint};
 pub use url::Url;

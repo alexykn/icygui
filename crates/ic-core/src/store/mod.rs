@@ -323,6 +323,16 @@ impl Store {
             .collect()
     }
 
+    /// An object's comments.
+    pub(crate) fn comments_of(&self, object: &ObjectKey) -> &[Comment] {
+        self.comments.get(object).map_or(&[], Vec::as_slice)
+    }
+
+    /// An object's downtimes.
+    pub(crate) fn downtimes_of(&self, object: &ObjectKey) -> &[Downtime] {
+        self.downtimes.get(object).map_or(&[], Vec::as_slice)
+    }
+
     /// One of an object's downtimes, by full name.
     pub(crate) fn downtime_of(&self, object: &ObjectKey, name: &str) -> Option<&Downtime> {
         self.downtimes

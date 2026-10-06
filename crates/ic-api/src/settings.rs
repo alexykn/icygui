@@ -12,6 +12,9 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long establishing a TCP connection (plus TLS) may take.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The default action timeout (see [`ConnectionSettings::action_timeout`]).
+pub const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_mins(5);
+
 /// Everything needed to talk to one Icinga 2 API endpoint.
 #[derive(Debug)]
 pub struct ConnectionSettings {
@@ -27,12 +30,22 @@ pub struct ConnectionSettings {
     /// body that keeps arriving may take longer in total (a full object
     /// list over a slow VPN), up to 20 times this. The event stream only
     /// uses it for the response to begin; after that it has no read
-    /// timeout.
+    /// timeout. Actions wait [`ConnectionSettings::action_timeout`] instead.
     pub request_timeout: Duration,
+    /// How long an action request may wait for its answer to begin
+    /// (default 5 minutes). Icinga runs the action for every object of the
+    /// request before it answers, and creating downtimes and comments
+    /// writes a configuration object each, so a busy master can take far
+    /// longer than a query. Giving up early doesn't stop Icinga: it would
+    /// only turn an answer into an unknown outcome
+    /// ([`crate::ActionResult::unknown`]). Icinga itself never closes a
+    /// connection while it works on a request, and TCP keepalive notices a
+    /// dead one.
+    pub action_timeout: Duration,
 }
 
 impl ConnectionSettings {
-    /// Settings with the default timeout.
+    /// Settings with the default timeouts.
     #[must_use]
     pub fn new(base_url: Url, credentials: Credentials, tls: TlsSettings) -> Self {
         Self {
@@ -40,6 +53,7 @@ impl ConnectionSettings {
             credentials,
             tls,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            action_timeout: DEFAULT_ACTION_TIMEOUT,
         }
     }
 }

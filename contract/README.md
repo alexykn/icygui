@@ -12,7 +12,12 @@ pins that down:
   v2.15.6): every object type, status, info, action results, error bodies
   and an event stream, plus a lean service query (`services-lean.json`,
   `ic_api::Detail::Lean`'s attributes) and the answer to an unknown
-  attribute (`error-400-invalid-field.json`). Tests use them as fixtures.
+  attribute (`error-400-invalid-field.json`). Tests use them as fixtures,
+  read in place (`ic-mock`'s `tests/fidelity.rs` too; there is no copy to
+  keep in sync). The recorded stream has no `Notification`, `Flapping` or
+  `ObjectModified` event (they need a notification, a flapping object or a
+  configuration change); until a recording adds them, `ic-mock`'s fidelity
+  test checks those against the keys Icinga's `apievents.cpp` writes.
 - `crates/ic-api/tests/contract.rs` checks the client against the running
   instance (read-only):
 

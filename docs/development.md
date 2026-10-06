@@ -32,7 +32,7 @@ The first build compiles GPUI and takes a few minutes. Dependencies are built wi
 ## Tests against Icinga, and load
 
 - **Against a real Icinga:** only the disposable one from `contract/run-icinga.sh`, through `cargo test -p ic-api --test contract` (see `contract/README.md`). The contract tests refuse any other instance before sending a query: the URL must point to this machine and the fixture-only `viewer` user must log in.
-- **Load and scale tests** run only against `ic-mock` (its `large` scenario and `MockControl::burst`) or `contract/scale/benchmark.sh`, which starts its own Icinga in Docker on localhost. Never point a load test at a production Icinga.
+- **Load and scale tests** run only against `ic-mock` (its `large` scenario and `MockControl::burst`) or `contract/scale/benchmark.sh`, which starts its own Icinga in Docker on localhost. Never point a load test at a production Icinga. The production-size tests are `#[ignore]`d; `.github/workflows/perf.yml` runs them nightly with `--release`, where they assert docs/performance.md's budgets (its steps are the commands to run them yourself).
 - **Against a production Icinga,** the only test is normal use of the app: connect and look around, which costs one lean load like an Icinga Web session.
 
 ## Running the app

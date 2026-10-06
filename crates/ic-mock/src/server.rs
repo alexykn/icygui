@@ -63,6 +63,8 @@ pub(crate) struct Faults {
     pub(crate) fail_next: u32,
     pub(crate) fail_status: u16,
     pub(crate) latency: Duration,
+    /// Added after an action ran, before its answer goes out.
+    pub(crate) action_answer_delay: Duration,
 }
 
 /// State shared by connections, background tasks and control handles.
@@ -115,6 +117,14 @@ impl Shared {
 
     pub(crate) fn set_latency(&self, latency: Duration) {
         lock(&self.faults).latency = latency;
+    }
+
+    pub(crate) fn set_action_answer_delay(&self, delay: Duration) {
+        lock(&self.faults).action_answer_delay = delay;
+    }
+
+    pub(crate) fn action_answer_delay(&self) -> Duration {
+        lock(&self.faults).action_answer_delay
     }
 
     pub(crate) fn record(&self, request: RecordedRequest) {

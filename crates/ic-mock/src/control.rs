@@ -396,9 +396,20 @@ impl MockControl {
         self.shared.set_failures(count, status);
     }
 
-    /// Delays every response by `latency` (zero turns it off).
+    /// Delays every response by `latency` (zero turns it off). The delay
+    /// comes before the request is handled: a client that gives up first
+    /// changed nothing.
     pub fn set_latency(&self, latency: Duration) {
         self.shared.set_latency(latency);
+    }
+
+    /// Actions run at once, but their answers go out only after `delay`
+    /// (zero turns it off): a busy Icinga still creating downtimes and
+    /// comments (it answers when every object of the request is done), or
+    /// a proxy holding the answer back. A client that gives up waiting
+    /// can't tell whether the action ran; it did.
+    pub fn delay_action_answers(&self, delay: Duration) {
+        self.shared.set_action_answer_delay(delay);
     }
 
     /// Aborts every open connection, event streams included.

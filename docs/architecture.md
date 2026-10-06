@@ -231,6 +231,7 @@ pub struct ConnectionSettings {
     pub credentials: Credentials,
     pub tls: TlsSettings,
     pub request_timeout: Duration,             // default 30 s: until the response headers, and per pause between body reads (a body may take ≤ 20× in total); connect timeout 10 s
+    pub action_timeout: Duration,              // default 5 min (DEFAULT_ACTION_TIMEOUT): until an action's answer begins (Icinga answers only once every object of the request is done)
 }
 pub enum Credentials {
     Basic { username: String, password: SecretString },
@@ -260,7 +261,7 @@ impl Client {
     pub async fn objects_unsplit(&self, keys: &[ObjectKey], detail: Detail) -> Result<Fetched, ApiError>;   // the same without bisecting: a 404 batch costs one request and all its names come back in `missing` ("not found", not "deleted")
     pub async fn notifications(&self) -> Result<Vec<Notification>, ApiError>;   // every `Notification` object: host_name, service_name, last_notification, notified_problem_users only
     pub async fn notifications_named(&self, names: &[String]) -> Result<FetchedNotifications, ApiError>;   // by full name (`host!service!name`, `host!name`), like `objects`
-    pub async fn run_action(&self, action: &Action, target: &ActionTarget, author: &str) -> Result<Vec<ActionResult>, ApiError>;   // Err only if the first request fails as a whole; later failures become per-target results (code 0 for timeout/connect)
+    pub async fn run_action(&self, action: &Action, target: &ActionTarget, author: &str) -> Result<Vec<ActionResult>, ApiError>;   // Err only when nothing can have been applied (the first request refused as a whole, or never reaching Icinga); no answer → per-target results with `unknown`; later failures become per-target results
     pub async fn events(&self, queue: &str, kinds: &[EventKind]) -> Result<EventStream, ApiError>;
     pub fn unknown_attributes(&self) -> Vec<(&'static str, &'static str)>;   // (type plural, attribute) this Icinga answered "Invalid field specified" for, sorted; empty on a current Icinga
 }
@@ -279,8 +280,8 @@ pub struct Fetched { pub hosts: Vec<Host>, pub services: Vec<Service>, pub missi
 pub struct FetchedNotifications { pub notifications: Vec<Notification>, pub missing: Vec<String> }   // the same for `notifications_named`
 pub struct ApiInfo { pub user: String, pub permissions: Vec<String>, pub version: String }
 impl ApiInfo { pub fn allows(&self, permission: &str) -> bool; }       // Icinga wildcard semantics ("*", "actions/*", "objects/query/*"); "(filtered)" entries count as allowed
-pub struct ActionResult { pub code: u16, pub status: String, pub name: Option<String>, pub target: Option<String> }   // name: created comment/downtime; target: the object/downtime/comment the result is for
-impl ActionResult { pub fn is_success(&self) -> bool; }              // 2xx
+pub struct ActionResult { pub code: u16, pub status: String, pub name: Option<String>, pub target: Option<String>, pub unknown: bool }   // name: created comment/downtime; target: the object/downtime/comment the result is for; unknown: the request went out but got no answer (code 0): Icinga may have applied it
+impl ActionResult { pub fn is_success(&self) -> bool; }              // 2xx (never when unknown)
 pub struct EventStream { … }                                            // impl Stream<Item = Result<Event, ApiError>>; ends on disconnect
 impl EventStream { pub fn into_lines(self) -> EventLines; }             // the same stream as raw lines (trimmed, never empty), for a reader that leaves parsing to another task
 pub struct EventLines { … }                                             // impl Stream<Item = Result<Vec<u8>, ApiError>>; a transport error once, then the end
@@ -327,7 +328,9 @@ impl ApiError { pub fn is_transient(&self) -> bool; }                 // connect
   - Parameter names and rules follow `12-icinga2-api.md`: `reschedule-check` sends `force` and leaves out `next_check`, so Icinga uses its own "now" (no client clock skew); `acknowledge-problem` always sends `notify: false`; `schedule-downtime` sends `fixed`, `duration` (0 for fixed), `all_services`, `child_options`, `trigger_name`; `process-check-result` for hosts sends 0 (UP) for plugin statuses 0–1 and 1 (DOWN) for 2 and above, since the API accepts only 0 and 1 for hosts (a UI offering UP/DOWN passes 0 or 2).
   - A 404 `No objects found.` for an action is handled like for queries (the targets were resolved before anything ran, so retrying is safe); the vanished names get a per-object 404 result. Results are matched to their target names by order.
   - `execute-command` needs an `endpoint` unless the object has `command_endpoint` (otherwise the per-object result is `404 Can't find a valid endpoint`). Pass the endpoint explicitly, defaulting to the object's `command_endpoint` or the instance's node name.
-  - A response with per-object `code >= 400` still returns `Ok`, and the caller inspects the results. Icinga sets the HTTP status from the per-object codes, so any `{"results": [...]}` body is read as results whatever the status; only Icinga's error document (`{error, status}`) or an unreadable body maps to `ApiError`.
+  - A response with per-object `code >= 400` still returns `Ok`, and the caller inspects the results. Icinga sets the HTTP status from the per-object codes, so any `{"results": [...]}` body is read as results whatever the status; Icinga's error document (`{error, status}`) maps to `ApiError`.
+  - *Unknown outcomes* (`actionshandler.cpp`): Icinga resolves every target, then runs the action for each object, and only then writes the status line, so nothing tells the client how far it got until the whole answer arrives; it doesn't stop when the client leaves, and its liveness check never closes a connection while a request is processed (`HttpServerConnection`). So an action waits `action_timeout` (5 min) for its answer, not the query timeout. A request that went out but got no answer (timeout, a connection broken after sending, an unreadable answer, a 5xx page that isn't Icinga's error document, such as a proxy's 504) may have been applied: its targets get `ActionResult { unknown: true, code: 0 }`, never a plain failure and never `Err`. Icinga's error document comes before anything ran, and so do connection and TLS failures (`reqwest`'s `is_connect`), 401/403 and other 4xx pages: those are failures (`Err` for the first request). After a request without an answer or a failed one, the remaining targets get "not sent" failures and nothing more is sent.
+  - `schedule-downtime` with `all_services` or child options goes out 20 names per request: Icinga creates a downtime (a configuration object written to disk) per service and child as well, so 200 hosts per request could take minutes.
 - *Events:* `POST /v1/events` with `{ "queue": queue, "types": [...] }`. The response is newline-delimited JSON over a long-lived HTTP/1.1 response.
   - Parse incrementally (lines can span chunks).
   - Map each type per `icinga2-apievents.cpp`.
@@ -361,9 +364,10 @@ See PLAN.md §3.6. `MockServer::start(MockConfig) -> MockServer` serves HTTPS on
 - Mass re-check bursts are available through `MockControl::burst` (every object, ~5 000 events/s).
 - `MockControl::set_program_start(at)` pretends a restart (a new `program_start` in `/v1/status`) without dropping connections, for clients' restart detection.
 - `MockControl::stall_event_streams()` stalls every open event stream like a proxy that stops relaying without closing the connection: the streams stay open but receive nothing more (streams opened later work), for clients' stall detection.
+- `MockControl::delay_action_answers(d)` runs actions at once but sends their answers only after `d`, like a busy Icinga still creating downtimes (it answers when every object is done): a client that gives up waiting can't tell whether the action ran, and it did. (`set_latency` delays before handling instead.)
 - It honours `Detail`-style `attrs` selection and name lists exactly like Icinga, including the all-or-nothing 404. The binary is `icinga-mock`. It writes its own wire JSON straight from the docs and sources; it never uses `ic-api`'s types.
 - `filter` (queries, actions, status, event streams) is parsed and evaluated by `ic-filter`, with a scope that gives Icinga's frame (the object, its joins, `filter_vars`, globals) and Icinga's errors for undefined variables and unknown attributes. The HTTP behaviour (404 for filters that fail, or don't compile, when evaluated for an object; 403 without `filter-expression`; silent event streams; Icinga's targeted lookup of `host.name == "a" || …` filters in filter order) is Icinga's; the remaining differences, most of them `ic-filter`'s deliberate ones, are listed in `crates/ic-mock/src/filter.rs`.
-- `tests/fidelity.rs` replays exchanges recorded from Icinga 2.15.6 (`contract/record-queries.py`): Lean and Full selections, joins, meta, name lists, unknown attributes, filters.
+- `tests/fidelity.rs` reads `contract/samples` in place (no copy) and replays exchanges recorded from Icinga 2.15.6 (`contract/record-queries.py`): Lean and Full selections, joins, meta, name lists, unknown attributes, filters. Event types the recording lacks (`Notification`, `Flapping`, `ObjectModified`) are checked against the keys `apievents.cpp` writes.
 - *Icinga's own notifications* (wave 3, stage 3): `Scenario::notifications` (`ic_mock::Notification { name, object, command, users, user_groups, last_notification, notified_problem_users }`; `Scenario::apply_notification(name, users)` adds one per host and service like `apply Notification … to Host/Service`, marking hard unhandled problems as already notified). Every built-in scenario has them (`large`: one per host and service, 32 000). `/v1/objects/notifications` serves them with Icinga 2.15.6's attribute set (`contract/samples/notifications.json`; no time periods or commands are modelled, `period` and `command_endpoint` are empty), by name and in `meta=used_by`. `ProcessCheckResult` sends them like Icinga: on a hard state change (not soft OK → hard OK), or every hard result of a volatile object, not while flapping, in downtime, acknowledged or unreachable (dropped, not stashed as suppressed); every notification of the object notifies its users and user-group members, a recovery only the users told about the problem and it clears that list; each emits a `Notification` event. `MockControl::notifications()` returns them as `ic_model::Notification`s. `tests/notifications.rs` covers the attributes, the events and the recovery rule.
 
 ---
@@ -383,7 +387,7 @@ pub fn start_with_tuning(spec: EnvironmentSpec, ports: Ports, tuning: Tuning) ->
 pub struct Tuning { backoff_initial: 1 s, backoff_max: 60 s, healthy_after: 5 min, status_interval: 30 s, stall_after: 2 min, publish_interval: 250 ms,
                     requery_delay: 200 ms, missing_ttl: 10 min, max_batch: 5 000, shutdown_timeout: 5 s,
                     watchdog_interval: 5 s, reload_jitter: 10 s, reconcile_interval: None,
-                    rule_tick: 1 s, prune_interval: 1 h }   // all pub; Default = these
+                    rule_tick: 1 s, prune_interval: 1 h, action_timeout: 5 min }   // all pub; Default = these
                     // reconcile_interval: Some(d) overrides General.reconcile_interval_secs (tests)
 pub enum CoreError { Runtime(io::Error), Thread(io::Error) }
 pub struct CoreHandle { … }
@@ -403,7 +407,7 @@ pub fn delete_event_log(data_dir: &Path, environment_id: &str) -> io::Result<()>
 pub fn test_connection(environment: ic_config::Environment, password: Option<SecretString>) -> oneshot::Receiver<Result<ConnectionReport, ConnectionFailure>>;
 pub fn fetch_certificate(url: String, server_name: Option<String>) -> oneshot::Receiver<Result<CertificateInfo, String>>;
 pub struct ConnectionReport { pub info: ApiInfo, pub status: InstanceStatus, pub missing_permissions: Vec<String> }   // status: defaults without status/query
-pub const REQUIRED_PERMISSIONS: &[&str];                       // PLAN.md §5, in that order
+pub const REQUIRED_PERMISSIONS: &[&str];                       // PLAN.md §5, in that order: exactly what the client uses (the object types it queries, status, its event types, its actions); a test loads as a user with only these and checks every one is used and nothing is refused
 pub fn missing_permissions(info: &ApiInfo) -> Vec<String>;     // REQUIRED_PERMISSIONS the user lacks (ApiInfo::allows)
 pub enum ConnectionFailure { Unauthorized, Tls { message: String, certificate: Option<CertificateInfo> }, CertificateMismatch { expected: String, actual: String }, Unreachable(String), Other(String) }
 
@@ -440,7 +444,7 @@ pub enum ConnectionState {
     Misconfigured { message: String },                         // invalid URL or pin, unreadable/invalid CA, certificate or key file; no automatic retry
 }
 pub enum LoadPhase { Hosts, Services, Details }                // tier 1 (done/total = its 8 queries), tier 2 (one query, total None), tier 3 (done/total = problem services)
-pub struct ActionOutcome { pub ok: usize, pub failed: Vec<(String, String)>, pub error: Option<String> }   // per-object failures, or a request error
+pub struct ActionOutcome { pub ok: usize, pub failed: Vec<(String, String)>, pub error: Option<String> }   // per-object failures (unknown outcomes and held-back repeats included, their reasons say so), or a request error (only when nothing was applied)
 pub struct LogEntry { pub at: Timestamp, pub object: ObjectKey, pub kind: LogKind, pub text: String, pub author: Option<String> }
 pub enum LogKind { State { state: CheckableState, state_type: StateType }, AcknowledgementSet, AcknowledgementCleared, CommentAdded, CommentRemoved, DowntimeStarted, DowntimeEnded, FlappingStarted, FlappingStopped }
 pub struct NotificationRecord { pub intent: NotificationIntent, pub read: bool }
@@ -565,7 +569,10 @@ The `Snapshot` contract type gains four fields; all are allowed additive changes
 - `Command::Action` runs `Client::run_action` with `author` = `Environment::author_name()`.
 - It reports `ActionFinished` with per-object failures. For example, `execute-command`'s "Can't find a valid endpoint": by default pass the object's `command_endpoint`, else the instance's node name. Without an endpoint, targets with a `command_endpoint` go in one request without one (Icinga's `$command_endpoint$`), the others in a second request with the instance's node name.
 - After success it marks the targets dirty, so their new state shows within a second (removing a downtime or comment re-queries its object); the answer is published at once.
+- Targets whose outcome is unknown (`ActionResult::unknown`: Icinga got the request but its answer didn't come within `Tuning::action_timeout`) are reported in `failed` with a reason that says Icinga may have applied it and to look first, and are marked dirty too; the event stream brings whatever Icinga did. Nothing more is sent for that action. Repeating `add-comment`, `schedule-downtime` or `execute-command` would duplicate it, so for 10 minutes the same action by the same author on those objects is held back (a `failed` entry, nothing sent): with the same text once the store shows Icinga applied the earlier one (author and text match, `entry_time` after it was sent, 5 minutes of clock skew allowed), and with any text while nothing shows yet. Other actions are safe to repeat (Icinga refuses a second acknowledgement; removals and checks are idempotent) and aren't held back.
 - Actions run on their own task: one in flight when the connection drops still finishes and reports. Without a connection the answer is immediate (`error: "not connected to Icinga"`).
+
+**Contract changes in the rc1 data-path fixes** (additive; they only break struct literals of the changed types, which only `ic-api` and `ic-core` themselves build): `ic_api::ConnectionSettings.action_timeout` and `DEFAULT_ACTION_TIMEOUT`; `ic_api::ActionResult.unknown`; `ic_core::Tuning.action_timeout`; `ic_mock::MockControl::delay_action_answers`. Behaviour: `run_action` returns `Err` only when nothing can have been applied, reports unanswered requests as unknown outcomes and stops sending; `schedule-downtime` with `all_services` or child options goes out 20 names per request; `ic-core` reports unknown outcomes as such and holds back repeats that would duplicate; `REQUIRED_PERMISSIONS` no longer lists `objects/query/{User,UserGroup,CheckCommand}` (nothing queries them; PLAN.md §5).
 
 **Contract changes in the wave 3 fixes** (additive; recorded with the review fixes): `ic_api::Client::objects_unsplit`; `ic_mock::MockControl::stall_event_streams`; `ic_core::Tuning.stall_after` (2 min; breaks `Tuning` literals without `..Default`). Behaviour: a failed reload waits an interval from the failure; restarts are detected per node; `Refresh` and restart reloads are spaced (30 s) and coalesce; periodic reconciles fetch only the problems' details the store lacks; unknown objects are looked up in whole batches with growing waits; kinds the user may not query are never asked for; older answers never override newer ones (tombstones for removals and `ObjectDeleted`); stalled streams and panicked tasks reconnect; global check switches recompute deadlines; Icinga's clock follows smaller steps back; a load's findings are judged before newer inputs about their object; failed `Notification` re-reads reload the list with the next load. PERF-04 in docs/requirements.md records the `Notification` re-reads.
 

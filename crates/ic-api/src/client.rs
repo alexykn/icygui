@@ -79,9 +79,9 @@ pub struct ActionResult {
     /// Icinga's per-object code: 200 (done), 202 (accepted, for
     /// `execute-command`), 4xx/5xx (failed for this object). For objects
     /// whose request failed as a whole after other requests of the same
-    /// action had been answered (or that weren't sent because of that
-    /// failure): the HTTP status of the failure, or 0 if it had none
-    /// (connection lost, timeout).
+    /// action had been answered (or that weren't sent because of a
+    /// failure): the HTTP status of the failure, or 0 if it had none. 0
+    /// too when the outcome is [`ActionResult::unknown`].
     pub code: u16,
     /// Icinga's message (`Successfully acknowledged problem for object …`).
     pub status: String,
@@ -92,6 +92,15 @@ pub struct ActionResult {
     /// for (`host`, `host!service`, a downtime name), when known. Icinga
     /// answers name lists in request order, which is how it's matched.
     pub target: Option<String>,
+    /// The outcome is unknown: the request went out but no answer came
+    /// back (it timed out, the connection broke, or a proxy gave up on
+    /// Icinga), so Icinga may have applied the action for this target, or
+    /// may still be applying it. Not a success. Never send the same action
+    /// again blindly: a second `schedule-downtime` or `add-comment` adds a
+    /// duplicate; look at the object first. (Targets of requests that
+    /// were never sent, or that Icinga refused as a whole, are plain
+    /// failures.)
+    pub unknown: bool,
 }
 
 impl ActionResult {
@@ -115,6 +124,8 @@ struct Inner {
     base: Url,
     basic: Option<(String, SecretString)>,
     timeout: Duration,
+    /// How long an action's answer may take to begin.
+    action_timeout: Duration,
     /// Attributes this Icinga turned out not to know, by object type
     /// (plural), so later queries leave them out from the start.
     unsupported: Mutex<HashSet<(&'static str, &'static str)>>,
@@ -174,6 +185,7 @@ impl Client {
                 base,
                 basic,
                 timeout: settings.request_timeout,
+                action_timeout: settings.action_timeout,
                 unsupported: Mutex::new(HashSet::new()),
             }),
         })
@@ -543,8 +555,10 @@ impl Client {
     }
 
     /// Runs an action (`POST /v1/actions/<name>`) on its target. Hosts and
-    /// services go in separate requests; names are batched. `author` is
-    /// sent for acknowledgements, downtimes, comments and removals.
+    /// services go in separate requests; names are batched
+    /// ([`NAMES_PER_REQUEST`], 20 for downtimes with `all_services` or
+    /// child options, which Icinga multiplies). `author` is sent for
+    /// acknowledgements, downtimes, comments and removals.
     ///
     /// A [`ActionTarget::Downtime`] removes that downtime and a
     /// [`ActionTarget::Comment`] removes that comment; both only with
@@ -558,27 +572,37 @@ impl Client {
     /// `process-check-result` on hosts maps the plugin exit status to UP
     /// (0–1) or DOWN (2–3), the only values Icinga accepts for hosts.
     ///
-    /// If a request fails as a whole after earlier requests of the action
-    /// were answered (and may have been applied), the action still returns
-    /// `Ok`: that request's objects, and those not sent yet, get failure
-    /// results carrying the error (see [`ActionResult::code`]); nothing
-    /// more is sent.
+    /// Icinga runs the action for every object of a request before it
+    /// answers, so an answer may wait up to
+    /// [`ConnectionSettings::action_timeout`]. When a request went out but
+    /// no answer came back (timeout, broken connection, a proxy's 502/504
+    /// page, an unreadable answer), its objects get results with
+    /// [`ActionResult::unknown`] set: Icinga may have applied the action.
+    /// When a request fails as a whole after earlier requests of the
+    /// action were answered, its objects get failure results carrying the
+    /// error (see [`ActionResult::code`]). Either way the objects not sent
+    /// yet get "not sent" failures and nothing more is sent: a master that
+    /// stopped answering gets no more work.
     ///
     /// # Errors
     ///
-    /// When the first request fails as a whole: transport, TLS and HTTP
-    /// errors as [`ApiError`] (`Forbidden` with Icinga's "Missing
-    /// permission: …"). [`ApiError::InvalidSettings`] for a downtime or
-    /// comment target with another action.
+    /// Only when nothing can have been applied: the first request was
+    /// refused as a whole (Icinga's error document: a missing permission,
+    /// "Shutting down.", …; or any other 4xx) or never reached Icinga
+    /// (connection or TLS failure). Transport, TLS and HTTP errors as
+    /// [`ApiError`] (`Forbidden` with Icinga's "Missing permission: …").
+    /// [`ApiError::InvalidSettings`] for a downtime or comment target with
+    /// another action.
     pub async fn run_action(
         &self,
         action: &Action,
         target: &ActionTarget,
         author: &str,
     ) -> Result<Vec<ActionResult>, ApiError> {
+        let size = actions::names_per_request(action);
         let requests: Vec<Batch> = actions::plan(action, target)?
             .into_iter()
-            .flat_map(|batch| batch.chunks(NAMES_PER_REQUEST))
+            .flat_map(|batch| batch.chunks(size))
             .collect();
         let mut run = ActionRun::default();
         let mut requests = requests.into_iter();
@@ -586,21 +610,40 @@ impl Client {
             let Err(failure) = self.action_batch(action, batch, author, &mut run).await else {
                 continue;
             };
-            if !run.answered {
-                return Err(failure.error);
+            let BatchFailure {
+                error,
+                maybe_applied,
+                sent,
+                unsent,
+            } = failure;
+            if !run.answered && !maybe_applied {
+                return Err(error);
             }
-            let error = failure.error;
-            tracing::warn!(
-                %error,
-                action = action.api_name(),
-                "an action request failed after earlier ones were answered"
-            );
             let code = error.http_status().unwrap_or(0);
-            run.fail(failure.names, code, &format!("request failed: {error}"));
+            let not_sent = if maybe_applied {
+                tracing::warn!(
+                    %error,
+                    action = action.api_name(),
+                    objects = sent.len(),
+                    "an action request got no answer; Icinga may have applied it"
+                );
+                run.unknown(sent, &error);
+                format!("not sent: an earlier request got no answer ({error})")
+            } else {
+                tracing::warn!(
+                    %error,
+                    action = action.api_name(),
+                    "an action request failed after earlier ones were answered"
+                );
+                run.fail(sent, code, &format!("request failed: {error}"));
+                format!("not sent: an earlier request failed: {error}")
+            };
             run.fail(
-                requests.by_ref().flat_map(|batch| batch.names),
+                unsent
+                    .into_iter()
+                    .chain(requests.by_ref().flat_map(|batch| batch.names)),
                 code,
-                &format!("not sent: an earlier request failed: {error}"),
+                &not_sent,
             );
             break;
         }
@@ -623,7 +666,10 @@ impl Client {
             let body = actions::body(action, batch.kind, &names, author);
             match self.send_action(batch.endpoint, &body).await {
                 Ok(results) => run.answer(&names, results),
-                Err(ApiError::NotFound(message)) if is_no_objects(&message) => {
+                Err(SendFailure {
+                    error: ApiError::NotFound(message),
+                    maybe_applied: false,
+                }) if is_no_objects(&message) => {
                     if let [name] = names.as_slice() {
                         tracing::debug!(%name, action = batch.endpoint, "action target no longer exists");
                         run.fail([name.clone()], 404, &message);
@@ -633,13 +679,17 @@ impl Client {
                         pending.push(first.to_vec());
                     }
                 }
-                Err(error) => {
+                Err(SendFailure {
+                    error,
+                    maybe_applied,
+                }) => {
                     // This request's names, then the rest in sending order.
-                    let names = names
-                        .into_iter()
-                        .chain(pending.into_iter().rev().flatten())
-                        .collect();
-                    return Err(BatchFailure { error, names });
+                    return Err(BatchFailure {
+                        error,
+                        maybe_applied,
+                        sent: names,
+                        unsent: pending.into_iter().rev().flatten().collect(),
+                    });
                 }
             }
         }
@@ -652,36 +702,64 @@ impl Client {
     /// (`actionshandler.cpp`): the code itself when all objects share one,
     /// the single failure code when there is one (even next to successes),
     /// 500 for several different failures. So the body decides: per-object
-    /// `results` come back whatever the status, and only Icinga's error
-    /// document (`{"error": …, "status": …}`: unknown action, missing
-    /// permission, "No objects found.", shutting down) or an unreadable
-    /// body is an error.
+    /// `results` come back whatever the status, and anything else is a
+    /// [`SendFailure`].
+    ///
+    /// Icinga sends its error document (`{"error": …, "status": …}`:
+    /// unknown action, missing permission, "No objects found.", shutting
+    /// down) before it runs anything; every other failure after the
+    /// request went out leaves the outcome open
+    /// ([`SendFailure::maybe_applied`]): no answer within the action
+    /// timeout, a broken connection, an answer that can't be read, a
+    /// server error page that isn't Icinga's (a proxy's 502 or 504 while
+    /// Icinga is still working).
     async fn send_action(
         &self,
         endpoint: &str,
         body: &Value,
-    ) -> Result<Vec<ActionResultWire>, ApiError> {
+    ) -> Result<Vec<ActionResultWire>, SendFailure> {
         let request = self
-            .request(reqwest::Method::POST, &format!("v1/actions/{endpoint}"))?
-            .json(body);
-        let response = self.send(request).await?;
+            .action_request(endpoint, body)
+            .map_err(SendFailure::not_sent)?;
+        let response = match tokio::time::timeout(self.inner.action_timeout, request.send()).await {
+            Err(_) => return Err(SendFailure::unknown(ApiError::Timeout)),
+            Ok(Err(error)) => {
+                let mapped = ApiError::from_reqwest(&error);
+                // No connection (refused, DNS, TLS) or no request: nothing
+                // reached Icinga.
+                return Err(if error.is_connect() || error.is_builder() {
+                    SendFailure::not_sent(mapped)
+                } else {
+                    SendFailure::unknown(mapped)
+                });
+            }
+            Ok(Ok(response)) => response,
+        };
         let status = response.status();
         // An action response is bounded by its request (200 names), so it
         // is read whole whatever the status: a failure can carry 200
         // results.
         let body = match read_body(response, self.inner.timeout, usize::MAX).await {
             Ok(body) => body,
-            Err(error) if status.is_success() => return Err(error),
+            // Icinga checks credentials and permissions before it runs
+            // anything.
+            Err(_) if matches!(status.as_u16(), 401 | 403) => {
+                return Err(SendFailure::not_sent(ApiError::from_status(
+                    status.as_u16(),
+                    b"",
+                )));
+            }
             Err(error) => {
-                tracing::debug!(%error, "couldn't read an action's error response");
-                Vec::new()
+                tracing::debug!(%error, status = status.as_u16(), "couldn't read an action's answer");
+                return Err(SendFailure::unknown(error));
             }
         };
         let parsed = serde_json::from_slice::<Results<ActionResultWire>>(&body);
         if status.is_success() {
+            // Icinga ran the action; only its answer is unreadable.
             return parsed
                 .map(|results| results.results)
-                .map_err(|error| ApiError::Decode(error.to_string()));
+                .map_err(|error| SendFailure::unknown(ApiError::Decode(error.to_string())));
         }
         match parsed {
             Ok(Results { results }) if !results.is_empty() => {
@@ -695,9 +773,27 @@ impl Client {
             _ => {
                 let error = ApiError::from_status(status.as_u16(), &body);
                 tracing::debug!(status = status.as_u16(), %error, "action request failed");
-                Err(error)
+                Err(
+                    if is_icinga_error_document(&body) || !status.is_server_error() {
+                        SendFailure::not_sent(error)
+                    } else {
+                        SendFailure::unknown(error)
+                    },
+                )
             }
         }
+    }
+
+    /// The request for `POST /v1/actions/<endpoint>` with `body`.
+    fn action_request(
+        &self,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<reqwest::RequestBuilder, ApiError> {
+        let request = self
+            .request(reqwest::Method::POST, &format!("v1/actions/{endpoint}"))?
+            .json(body);
+        Ok(request)
     }
 
     /// Opens the event stream (`POST /v1/events`) for `kinds`. `queue`
@@ -1042,6 +1138,45 @@ fn log_failed_entries<A>(plural: &str, results: &[QueryResult<A>]) {
     }
 }
 
+/// Why an action request got no per-object results.
+struct SendFailure {
+    error: ApiError,
+    /// Whether Icinga may have run the action anyway: the request went
+    /// out, but no answer that says otherwise came back.
+    maybe_applied: bool,
+}
+
+impl SendFailure {
+    /// Nothing reached Icinga, or Icinga refused the request as a whole
+    /// before running anything.
+    fn not_sent(error: ApiError) -> Self {
+        Self {
+            error,
+            maybe_applied: false,
+        }
+    }
+
+    /// The request went out, but no answer came back.
+    fn unknown(error: ApiError) -> Self {
+        Self {
+            error,
+            maybe_applied: true,
+        }
+    }
+}
+
+/// Icinga's error document (`{"error": 404, "status": "No objects
+/// found."}`), which it sends before it runs anything.
+fn is_icinga_error_document(body: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct ErrorDocument {
+        error: serde_json::Number,
+        status: String,
+    }
+    serde_json::from_slice::<ErrorDocument>(body)
+        .is_ok_and(|document| document.error.as_f64().is_some() && !document.status.is_empty())
+}
+
 /// The results of one [`Client::run_action`] so far.
 #[derive(Default)]
 struct ActionRun {
@@ -1070,6 +1205,7 @@ impl ActionRun {
                     } else {
                         None
                     },
+                    unknown: false,
                 }),
         );
     }
@@ -1082,15 +1218,36 @@ impl ActionRun {
                 status: status.to_owned(),
                 name: None,
                 target: Some(name),
+                unknown: false,
+            }));
+    }
+
+    /// An unknown outcome for each of `names`: their request went out but
+    /// got no answer (`error`).
+    fn unknown(&mut self, names: impl IntoIterator<Item = String>, error: &ApiError) {
+        let status = format!(
+            "no answer from Icinga ({error}): it may have applied this anyway, or may still be \
+             applying it"
+        );
+        self.results
+            .extend(names.into_iter().map(|name| ActionResult {
+                code: 0,
+                status: status.clone(),
+                name: None,
+                target: Some(name),
+                unknown: true,
             }));
     }
 }
 
-/// An action request that failed as a whole, with the names it and the
-/// rest of its batch carried.
+/// An action request that failed as a whole: the names it carried, and
+/// those of its batch not sent yet.
 struct BatchFailure {
     error: ApiError,
-    names: Vec<String>,
+    /// Whether Icinga may have applied the request ([`SendFailure`]).
+    maybe_applied: bool,
+    sent: Vec<String>,
+    unsent: Vec<String>,
 }
 
 /// Fails with the mapped error for a non-success status. Only the start of
@@ -1300,8 +1457,35 @@ mod tests {
         // A count mismatch can't be matched.
         run.answer(&names, vec![wire(200.0)]);
         assert_eq!(run.results[2].target, None);
-        run.fail(["c".to_owned()], 0, "request failed: request timed out");
+        run.fail(["c".to_owned()], 503, "request failed: Shutting down.");
         assert_eq!(run.results[3].target.as_deref(), Some("c"));
         assert!(!run.results[3].is_success());
+        assert!(!run.results[3].unknown);
+        run.unknown(["d".to_owned()], &ApiError::Timeout);
+        let unknown = &run.results[4];
+        assert_eq!(unknown.target.as_deref(), Some("d"));
+        assert!(unknown.unknown && !unknown.is_success());
+        assert_eq!(unknown.code, 0);
+        assert!(
+            unknown.status.contains("request timed out"),
+            "{}",
+            unknown.status
+        );
+    }
+
+    #[test]
+    fn icinga_error_documents_are_recognised() {
+        assert!(is_icinga_error_document(
+            br#"{"error":404,"status":"No objects found."}"#
+        ));
+        // Versions before 2.13 write every number as a float.
+        assert!(is_icinga_error_document(
+            br#"{"error": 503.0, "status": "Shutting down."}"#
+        ));
+        assert!(!is_icinga_error_document(
+            b"<html>504 Gateway Time-out</html>"
+        ));
+        assert!(!is_icinga_error_document(br#"{"results":[]}"#));
+        assert!(!is_icinga_error_document(br#"{"error":500,"status":""}"#));
     }
 }

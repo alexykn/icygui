@@ -11,9 +11,10 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::support::{
-    ENV_ID, FakeSecrets, environment, mock, start, start_for, tuning, wait_until,
+    ENV_ID, FakeSecrets, Launch, environment, mock, start, start_for, tuning, wait_until,
 };
 use ic_core::{ActionOutcome, Command, ConnectionState, CoreEvent};
 use ic_mock::{MockConfig, MockControl, MockUser, scenarios};
@@ -445,5 +446,145 @@ async fn refused_actions_report_why() {
     )
     .await;
     assert_eq!(outcome.error.as_deref(), Some("not connected to Icinga"));
+    engine.shutdown();
+}
+
+fn late_downtime(control: &MockControl, comment: &str) -> Action {
+    let now = control.now().as_unix_seconds();
+    Action::ScheduleDowntime {
+        comment: comment.to_owned(),
+        start: Timestamp::from_unix_seconds(now),
+        end: Timestamp::from_unix_seconds(now + 3_600.0),
+        mode: DowntimeMode::Fixed,
+        all_services: false,
+        child_options: ChildOptions::None,
+        trigger_name: None,
+    }
+}
+
+fn downtimes_with(control: &MockControl, comment: &str) -> usize {
+    control
+        .downtimes()
+        .iter()
+        .filter(|downtime| downtime.comment == comment)
+        .count()
+}
+
+/// Icinga applies a downtime but answers too late: the outcome says it
+/// may have been applied (not a plain failure), the object is re-queried,
+/// and a retry doesn't schedule it twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unanswered_downtime_is_never_scheduled_twice() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning.action_timeout = Duration::from_millis(300);
+    let mut engine = launch.start();
+    engine.connected().await;
+    let api = ObjectKey::host("stg-api-01");
+    let target = || ActionTarget::Objects(vec![api.clone()]);
+
+    control.delay_action_answers(Duration::from_secs(3));
+    let outcome = run(&mut engine, 1, target(), late_downtime(&control, "rack")).await;
+    assert_eq!(outcome.ok, 0);
+    assert_eq!(outcome.error, None, "not a failure as a whole");
+    assert_eq!(outcome.failed.len(), 1);
+    let (name, reason) = &outcome.failed[0];
+    assert_eq!(name, "stg-api-01");
+    assert!(
+        reason.contains("no answer") && reason.contains("may have applied"),
+        "{reason}"
+    );
+    assert_eq!(downtimes_with(&control, "rack"), 1, "Icinga applied it");
+    // The stream brings it, and the host is re-queried.
+    engine
+        .snapshot(|snapshot| {
+            snapshot
+                .downtimes
+                .get(&api)
+                .is_some_and(|list| list.iter().any(|downtime| downtime.comment == "rack"))
+        })
+        .await;
+    assert!(wait_until(|| requeried(&control, "stg-api-01")).await);
+
+    // The same again: not sent, it's there.
+    control.delay_action_answers(Duration::ZERO);
+    let outcome = run(&mut engine, 2, target(), late_downtime(&control, "rack")).await;
+    assert_eq!(outcome.ok, 0);
+    assert_eq!(outcome.failed.len(), 1);
+    assert!(
+        outcome.failed[0].1.contains("not sent again"),
+        "{}",
+        outcome.failed[0].1
+    );
+    assert_eq!(downtimes_with(&control, "rack"), 1);
+    assert_eq!(bodies(&control, "schedule-downtime").len(), 1);
+
+    // Another downtime is a new decision, and actions that are safe to
+    // repeat aren't held back.
+    let outcome = run(&mut engine, 3, target(), late_downtime(&control, "other")).await;
+    ok(&outcome, 1);
+    let outcome = run(&mut engine, 4, target(), Action::CheckNow { force: true }).await;
+    ok(&outcome, 1);
+    engine.shutdown();
+}
+
+/// While nothing shows whether an unanswered comment was applied, adding
+/// a comment to that object is held back; other objects aren't.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_comment_without_an_answer_holds_back_comments_on_its_object() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning.action_timeout = Duration::from_millis(300);
+    let mut engine = launch.start();
+    engine.connected().await;
+    let api = ObjectKey::host("stg-api-01");
+    let db = ObjectKey::host("stg-db-01");
+    let comment = |text: &str| Action::AddComment {
+        text: text.to_owned(),
+        expiry: None,
+    };
+
+    // The answer (and the request's handling) is delayed past the
+    // timeout: the client gave up before anything happened, but it can't
+    // know that.
+    control.set_latency(Duration::from_secs(2));
+    let outcome = run(
+        &mut engine,
+        1,
+        ActionTarget::Objects(vec![api.clone()]),
+        comment("first"),
+    )
+    .await;
+    assert_eq!(outcome.ok, 0);
+    assert!(outcome.failed[0].1.contains("no answer"), "{outcome:?}");
+    control.set_latency(Duration::ZERO);
+
+    let outcome = run(
+        &mut engine,
+        2,
+        ActionTarget::Objects(vec![api.clone(), db.clone()]),
+        comment("second"),
+    )
+    .await;
+    assert_eq!(outcome.ok, 1, "{outcome:?}");
+    assert_eq!(outcome.failed.len(), 1);
+    let (name, reason) = &outcome.failed[0];
+    assert_eq!(name, "stg-api-01");
+    assert!(
+        reason.contains("held back") && reason.contains("min"),
+        "{reason}"
+    );
+    let second: Vec<Value> = bodies(&control, "add-comment")
+        .into_iter()
+        .filter(|body| body["comment"] == "second")
+        .collect();
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        second[0]["hosts"],
+        json!(["stg-db-01"]),
+        "not to the held host"
+    );
     engine.shutdown();
 }

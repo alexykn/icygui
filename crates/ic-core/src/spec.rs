@@ -95,6 +95,13 @@ pub struct Tuning {
     /// `General::event_log_retention_hours` (1 hour); also when the engine
     /// starts.
     pub prune_interval: Duration,
+    /// How long an action request waits for Icinga's answer (5 minutes,
+    /// `ic_api::DEFAULT_ACTION_TIMEOUT`): Icinga answers only once it has
+    /// run the action for every object of the request. Without an answer
+    /// the outcome is unknown (Icinga may have applied it), and the same
+    /// action on those objects is held back for a while (see
+    /// [`crate::ActionOutcome`]).
+    pub action_timeout: Duration,
 }
 
 impl Default for Tuning {
@@ -115,6 +122,7 @@ impl Default for Tuning {
             reconcile_interval: None,
             rule_tick: Duration::from_secs(1),
             prune_interval: Duration::from_hours(1),
+            action_timeout: ic_api::DEFAULT_ACTION_TIMEOUT,
         }
     }
 }

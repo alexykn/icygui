@@ -189,10 +189,14 @@ pub enum LoadPhase {
 pub struct ActionOutcome {
     /// Objects it succeeded for.
     pub ok: usize,
-    /// Objects it failed for: (full name, Icinga's message).
+    /// Objects it failed for: (full name, Icinga's message). Also objects
+    /// whose outcome is unknown (Icinga got the request but didn't answer
+    /// in time, so it may have applied it; the reason says so), objects
+    /// not sent to after that, and repeats held back because an earlier
+    /// request for them got no answer (the reason says why).
     pub failed: Vec<(String, String)>,
     /// Why the request failed as a whole, if it did (then `ok` is 0 and
-    /// `failed` is empty).
+    /// `failed` is empty). Only when nothing can have been applied.
     pub error: Option<String>,
 }
 

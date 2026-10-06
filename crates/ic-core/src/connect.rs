@@ -4,6 +4,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ic_api::{
     ApiError, ApiInfo, CertificateInfo, Client, ConnectionSettings, Credentials, EventLines,
@@ -162,9 +163,9 @@ async fn read_file(what: &str, path: &Path) -> Result<Vec<u8>, Failure> {
         .map_err(|error| Failure::Misconfigured(format!("{what} {}: {error}", path.display())))
 }
 
-/// Connects: builds the client, checks the credentials (`GET /v1`) and
-/// opens the event stream (queue `icygui-<uuid>`) for every event type the
-/// API user may read.
+/// Connects: builds the client (actions wait `action_timeout` for their
+/// answer), checks the credentials (`GET /v1`) and opens the event stream
+/// (queue `icygui-<uuid>`) for every event type the API user may read.
 ///
 /// # Errors
 ///
@@ -172,8 +173,10 @@ async fn read_file(what: &str, path: &Path) -> Result<Vec<u8>, Failure> {
 pub(crate) async fn connect(
     environment: &Environment,
     secrets: Arc<dyn SecretStore>,
+    action_timeout: Duration,
 ) -> Result<Connected, Failure> {
-    let settings = settings(environment, Password::Store(secrets)).await?;
+    let mut settings = settings(environment, Password::Store(secrets)).await?;
+    settings.action_timeout = action_timeout;
     let url = settings.base_url.clone();
     let server_name = settings.tls.server_name.clone();
     let client = Client::new(settings).map_err(|error| match error {

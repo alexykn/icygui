@@ -21,8 +21,8 @@ the mock and compares the answer as `compare` says:
   shape  - the same status and the shape of the results
 
 The object names exist both in the contract fixtures (icinga/) and in
-ic-mock's prod-cluster scenario. Copy the output to
-crates/ic-mock/tests/fixtures/icinga-2.15.6/ when it changes.
+ic-mock's prod-cluster scenario. ic-mock's tests/fidelity.rs reads the
+output from samples/ directly.
 
 Usage: set -a; . <(contract/run-icinga.sh); set +a; contract/record-queries.py
 """

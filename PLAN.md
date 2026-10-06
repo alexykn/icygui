@@ -305,7 +305,7 @@ There's no real Icinga to develop against, so the project gets its own: a small 
 
 ## 5. API permissions the client needs
 
-Read: `objects/query/{Host,Service,HostGroup,ServiceGroup,Comment,Downtime,User,UserGroup,Notification,Dependency,Endpoint,Zone,CheckCommand}`, `status/query`, `events/*` for the event types in §2.6.
+Read: `objects/query/{Host,Service,HostGroup,ServiceGroup,Comment,Downtime,Notification,Dependency,Endpoint,Zone}`, `status/query`, `events/*` for the event types in §2.6. These are exactly the types rc1 queries (who was notified comes from `Notification` objects; check commands are shown by name from the objects). `objects/query/{User,UserGroup,CheckCommand}` join the list only with a feature that reads those objects (users and commands in the Config tab, M7); asking for them earlier would grant read access to contact data and command lines for nothing.
 Operate: `actions/{reschedule-check,acknowledge-problem,remove-acknowledgement,schedule-downtime,remove-downtime,add-comment,remove-comment,process-check-result}`, `actions/execute-command`.
 The client probes permissions on connect, greys out what it can't do, and shows why on hover. A ready-to-paste `ApiUser` snippet (for your Ansible role) goes in the README.
 

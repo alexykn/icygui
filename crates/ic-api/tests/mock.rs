@@ -535,6 +535,55 @@ async fn actions_return_per_object_results() {
 }
 
 #[tokio::test]
+async fn an_action_icinga_answers_too_late_is_an_unknown_outcome_and_applied() {
+    // The mock creates the downtime at once and answers after 5 s; the
+    // client stops waiting after 300 ms. The outcome is unknown, not a
+    // failure: the downtime exists, and a retry would add a second one.
+    let server = start(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    control.delay_action_answers(Duration::from_secs(5));
+    let mut settings = ConnectionSettings::new(
+        url(&server),
+        Credentials::Basic {
+            username: ROOT.0.to_owned(),
+            password: SecretString::from(ROOT.1.to_owned()),
+        },
+        pinned(&server),
+    );
+    settings.action_timeout = Duration::from_millis(300);
+    let client = Client::new(settings).unwrap();
+    let now = control.now().as_unix_seconds();
+    let downtime = Action::ScheduleDowntime {
+        comment: "late answer".to_owned(),
+        start: Timestamp::from_unix_seconds(now),
+        end: Timestamp::from_unix_seconds(now + 3_600.0),
+        mode: DowntimeMode::Fixed,
+        all_services: false,
+        child_options: ic_model::ChildOptions::None,
+        trigger_name: None,
+    };
+    let host = control.hosts()[0].name.clone();
+    let results = client
+        .run_action(
+            &downtime,
+            &ActionTarget::Objects(vec![ObjectKey::host(host.as_str())]),
+            "alice",
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].unknown, "{results:?}");
+    assert!(!results[0].is_success());
+    let scheduled: Vec<_> = control
+        .downtimes()
+        .into_iter()
+        .filter(|downtime| downtime.comment == "late answer")
+        .collect();
+    assert_eq!(scheduled.len(), 1, "Icinga applied it anyway");
+    assert_eq!(scheduled[0].object, ObjectKey::host(host.as_str()));
+}
+
+#[tokio::test]
 async fn comments_and_downtimes_are_removed_by_the_names_actions_return() {
     let server = start(MockConfig::with_scenario(scenarios::prod_cluster())).await;
     let control = server.control();
@@ -876,6 +925,11 @@ async fn the_large_scenario_loads_in_tiers() {
         "tiered load: {hosts} hosts, {services} services, {problems} problems in {elapsed:.2?}"
     );
     assert!(elapsed < Duration::from_mins(5), "{elapsed:?}");
+    // PERF-01: the problem lists are complete within 5 s (release builds;
+    // the nightly `perf` workflow runs this with `--release`).
+    if !cfg!(debug_assertions) {
+        assert!(elapsed < Duration::from_secs(5), "PERF-01: {elapsed:?}");
+    }
 
     let payloads = Payloads::measure(&server).await;
     let Payloads {
@@ -898,6 +952,11 @@ async fn the_large_scenario_loads_in_tiers() {
         per_service(bytes, count),
         started.elapsed()
     );
+    // What a connect costs the master (docs/performance.md, "Load on the
+    // master per client"): about 28 MB of objects and 7 MB of Icinga's
+    // notifications. A list that grows past these is a regression.
+    assert!(lean < 30_000_000, "lean services: {lean} bytes");
+    assert!(bytes < 8_000_000, "notifications: {bytes} bytes");
 }
 
 #[expect(clippy::cast_precision_loss, reason = "a rough average for the report")]

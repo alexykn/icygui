@@ -1,7 +1,0 @@
-HTTP/1.1 401 Unauthorized
-Server: Icinga/v2.15.6
-WWW-Authenticate: Basic realm="Icinga 2"
-Connection: close
-Content-Type: application/json
-Content-Length: 74
-

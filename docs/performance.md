@@ -96,7 +96,7 @@ The lean list the client loads (`ic_api::Detail::Lean`) keeps the check configur
 | Scrolling a 30 000-row dashboard | smooth; nothing per frame scales with the object count |
 | Load on the master per client | one event stream (~75 KB/s), ~35 MB on connect (~28 MB of objects, ~7 MB of Icinga's `Notification` objects at one per host and service), ~28 MB every 15 minutes |
 
-These budgets are tested: `ic-mock` has a `large` scenario of the same size with a burst mode, and release-mode performance tests (nightly CI) replay bursts and time loads and dashboard evaluation.
+These budgets are tested: `ic-mock` has a `large` scenario of the same size with a burst mode, and release-mode performance tests replay bursts and time loads, filters, dashboard evaluation, memory and the steady-state CPU, failing when a budget above is missed. They are `#[ignore]`d in the normal suite (too slow unoptimised) and run with `--release` in the `Performance` workflow (`.github/workflows/perf.yml`: nightly and on demand); its steps are the commands to run them by hand.
 
 **Engine measurements** (`ic-core`, against `ic-mock`'s `large` scenario in the same process; dev profile, so the workspace crates are unoptimised and release builds are several times faster):
 

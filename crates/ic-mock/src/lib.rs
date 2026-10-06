@@ -33,7 +33,7 @@
 //! ```
 //!
 //! The reference is what a real Icinga 2.15.6 answers: responses recorded
-//! from it (the repository's `contract/samples`, vendored as test fixtures)
+//! from it (the repository's `contract/samples`, read by the tests in place)
 //! win over the API documentation, and Icinga's handler sources fill in the
 //! rest. `tests/fidelity.rs` checks that the mock's responses, errors and
 //! events have the recorded keys and JSON types. In particular:

@@ -1,8 +1,9 @@
 //! Wire fidelity against a real Icinga: responses recorded from Icinga
-//! v2.15.6 (`tests/fixtures/icinga-2.15.6`, copied from the repository's
-//! `contract/samples`) must have the same shape as the mock's: the same
-//! keys (an object may lack only keys that some sample object lacks too),
-//! the same JSON kinds per key, and whole numbers written as integers.
+//! v2.15.6 (the repository's `contract/samples`, read in place so they
+//! can't drift from what was recorded) must have the same shape as the
+//! mock's: the same keys (an object may lack only keys that some sample
+//! object lacks too), the same JSON kinds per key, and whole numbers
+//! written as integers.
 //! `queries.json` holds whole exchanges (request, status, answer), which
 //! are replayed against the mock: attribute selection, joins, meta, name
 //! lists, unknown attributes, filters and request flags.
@@ -28,7 +29,7 @@ use reqwest::{Client, Method, StatusCode};
 use serde_json::{Value, json};
 
 fn fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/icinga-2.15.6")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contract/samples")
 }
 
 fn sample(name: &str) -> Value {
@@ -1101,4 +1102,95 @@ async fn unhandled_exceptions_come_from_the_connection() {
         response.headers().get("server").is_some(),
         "a normal answer"
     );
+}
+
+/// The event types the recording has none of (`contract/samples` holds no
+/// `Notification`, `Flapping` or `ObjectModified` event: they need a
+/// notification, a flapping object or a configuration change), checked
+/// against the keys Icinga 2.15 writes for them instead
+/// (`lib/icinga/apievents.cpp`: `NotificationSentToAllUsersHandler`,
+/// `FlappingChangedHandler`, `SendObjectChangeEvent`). Their check results
+/// have the recorded shape.
+#[tokio::test]
+async fn unrecorded_event_types_have_the_keys_icinga_writes() {
+    let mut errors = Vec::new();
+    let mut scenario = ic_mock::scenarios::staging();
+    // `http` notifies `qa-oncall`; flap detection is off by default.
+    let flapper = scenario
+        .services
+        .iter_mut()
+        .find(|service| service.key.full_name() == "stg-api-01!http")
+        .expect("staging has stg-api-01!http");
+    flapper.check.features.flap_detection = true;
+    let (server, client) = start(MockConfig::with_scenario(scenario)).await;
+    let control = server.control();
+    let types = ["Notification", "Flapping", "ObjectModified"];
+    let mut stream = EventStream::open(
+        &client,
+        &server,
+        &json!({"types": types, "queue": "fidelity-sources"}),
+    )
+    .await;
+    // A hard problem notifies; alternating results then flap.
+    control
+        .set_service_state(
+            "stg-api-01",
+            "http",
+            ic_model::ServiceState::Critical,
+            "CRITICAL - 503",
+            true,
+        )
+        .unwrap();
+    for round in 0..12 {
+        let (state, output) = if round % 2 == 0 {
+            (ic_model::ServiceState::Ok, "HTTP OK")
+        } else {
+            (ic_model::ServiceState::Critical, "CRITICAL - 503")
+        };
+        control
+            .set_service_state("stg-api-01", "http", state, output, false)
+            .unwrap();
+    }
+    control.touch_object("Host", "stg-api-01").unwrap();
+
+    let mut received: Vec<Value> = Vec::new();
+    while let Ok(Some(line)) =
+        tokio::time::timeout(std::time::Duration::from_millis(300), stream.next_line()).await
+    {
+        let event: Value = serde_json::from_str(&line).unwrap();
+        check_numbers("event", &event, &mut errors);
+        received.push(event);
+    }
+    // As the handlers write them (a service's events; a host's lack
+    // `service`, and `command` is left out when a notification has none).
+    let written = [
+        json!({
+            "type": "Notification", "timestamp": 1.5, "host": "h", "service": "s",
+            "command": "mail-service-notification", "users": ["u"],
+            "notification_type": "PROBLEM", "author": "", "text": "", "check_result": {}
+        }),
+        json!({
+            "type": "Flapping", "timestamp": 1.5, "host": "h", "service": "s", "state": 2,
+            "state_type": 1, "is_flapping": true, "flapping_current": 42.5,
+            "threshold_low": 25, "threshold_high": 30
+        }),
+        json!({
+            "type": "ObjectModified", "timestamp": 1.5, "object_type": "Host",
+            "object_name": "h"
+        }),
+    ];
+    for expected in &written {
+        let ty = expected["type"].as_str().unwrap();
+        let actual: Vec<&Value> = received.iter().filter(|e| e["type"] == ty).collect();
+        if actual.is_empty() {
+            errors.push(format!("no {ty} event from the mock"));
+            continue;
+        }
+        Shape::learn([expected]).check(&format!("{ty} event"), actual.iter().copied(), &mut errors);
+        let results: Vec<&Value> = non_null(actual.iter().filter_map(|e| e.get("check_result")));
+        if !results.is_empty() {
+            check_check_results(&format!("{ty} check_result"), &results, &mut errors);
+        }
+    }
+    report(&errors);
 }

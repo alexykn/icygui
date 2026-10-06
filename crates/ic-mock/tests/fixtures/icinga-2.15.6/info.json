@@ -1,1 +1,0 @@
-{"results":[{"info":"More information about API requests is available in the documentation at https://icinga.com/docs/icinga2/latest/","permissions":["objects/query/*","status/query","events/*","actions/*"],"user":"icygui","version":"v2.15.6"}]}

@@ -45,13 +45,10 @@ object ApiUser "icygui" {
     "objects/query/ServiceGroup",
     "objects/query/Comment",
     "objects/query/Downtime",
-    "objects/query/User",
-    "objects/query/UserGroup",
     "objects/query/Notification",
     "objects/query/Dependency",
     "objects/query/Endpoint",
     "objects/query/Zone",
-    "objects/query/CheckCommand",
     "status/query",
 
     // the live event stream
@@ -88,7 +85,8 @@ object ApiUser "icygui" {
 Reload Icinga afterwards (`systemctl reload icinga2`).
 
 - This is the complete list icygui checks for: with it, *test connection* reports nothing missing.
-- None of the permissions uses a `filter` (Icinga's `filter-expression`). icygui doesn't need them, so it works with Icinga 2.17's default, where filtered permissions are restricted.
+- icygui never sends `filter` expressions in its requests (it addresses hosts and services by name), so it needs no `filter-expression` permission, which Icinga 2.17 requires by default for requests that carry a filter.
+- Permissions restricted with a `filter` in the `ApiUser` work too: icygui then shows and acts on only the objects the user may see.
 - **Read-only:** leave out the `actions/*` lines. Action buttons are then disabled, and hovering one says which permission is missing.
 - **No remote commands:** leave out `actions/execute-command` only; *run command* is then disabled.
 - `objects/query/Notification` and `events/Notification` let the panes show whom Icinga notified about a problem, and when. Without them, that row says it can't tell; everything else works.
@@ -248,6 +246,7 @@ All actions are runtime operations through Icinga's `/v1/actions`. icygui never 
 
 - Mark several rows (<kbd>x</kbd>, Shift-click, <kbd>⌘A</kbd>) to act on all of them at once: one request to Icinga. A selection bar under the list shows how many are marked and the actions.
 - Results show as toasts in the bottom-right corner, with per-object failures. The changed rows update within about a second.
+- **When Icinga doesn't answer.** Icinga answers an action only after it has run it for every object, which can take a while on a busy master; icygui waits up to five minutes. Without an answer the toast says *no answer from Icinga: it may have applied this anyway*: look at the object (its pane shows new comments and downtimes as Icinga reports them) before trying again. To keep a retry from adding a second comment or downtime, or running a command twice, icygui holds back the same action on those objects for ten minutes (the toast says why); other actions aren't affected.
 - The author recorded with acknowledgements, downtimes and comments is the environment's *author* (default: the API user).
 - Buttons for actions the API user may not run are disabled; hovering says which permission is missing.
 

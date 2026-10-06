@@ -1,0 +1,62 @@
+name: Performance
+
+# PERF-07: the release-mode budgets of docs/performance.md, at production
+# scale (2 000 hosts, 30 000 services) against ic-mock's `large` scenario in
+# the same process: the tiered load (PERF-01), a 50 000-event burst and the
+# steady-state CPU (PERF-03), the client's memory and dashboard evaluation
+# (PERF-06), filter evaluation, and what a connect costs the master. These
+# tests are `#[ignore]`d in the normal suite (too slow unoptimised); here
+# they run with `--release`, where they assert the budgets themselves.
+# Nothing here talks to a real Icinga.
+
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  budgets:
+    name: release-mode budgets at production scale
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: perf-release
+
+      - name: Report compiler messages as annotations
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
+      - name: Build the benchmarks (release)
+        env:
+          CARGO_TERM_COLOR: never   # plain lines, so the problem matcher can read them
+        run: cargo test --release --locked -p ic-filter -p ic-api -p ic-mock -p ic-core --no-run
+
+      # One test at a time: each starts a production-size mock, and the
+      # memory measurement counts every thread's allocations.
+      - name: Filters over 20 000 services (ic-filter)
+        run: cargo test --release --locked -p ic-filter --test performance -- --ignored --nocapture --test-threads 1
+
+      - name: Tiered load and payload sizes (ic-api against ic-mock)
+        run: cargo test --release --locked -p ic-api --test mock -- --ignored --nocapture --test-threads 1
+
+      - name: The large scenario matches the measurements (ic-mock)
+        run: cargo test --release --locked -p ic-mock --test scale -- --ignored --nocapture --test-threads 1
+
+      - name: Bursts, dashboards, memory and notification storms (ic-core)
+        run: cargo test --release --locked -p ic-core --lib perf_tests -- --ignored --nocapture --test-threads 1
+
+      - name: Load, burst and steady-state CPU of the engine (ic-core)
+        run: cargo test --release --locked -p ic-core --test engine scale -- --ignored --nocapture --test-threads 1

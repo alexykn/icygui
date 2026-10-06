@@ -12,8 +12,10 @@ use secrecy::SecretString;
 
 use crate::connect::{self, Failure, Password};
 
-/// Every permission the client uses (PLAN.md §5): object queries, status,
-/// the event types it subscribes to, and the runtime actions.
+/// Every permission the client uses (PLAN.md §5), and nothing more: the
+/// object types it queries, status, the event types it subscribes to, and
+/// the runtime actions. (No `User`, `UserGroup` or `CheckCommand`: nothing
+/// reads those objects, and they hold contact data and command lines.)
 pub const REQUIRED_PERMISSIONS: &[&str] = &[
     "objects/query/Host",
     "objects/query/Service",
@@ -21,13 +23,10 @@ pub const REQUIRED_PERMISSIONS: &[&str] = &[
     "objects/query/ServiceGroup",
     "objects/query/Comment",
     "objects/query/Downtime",
-    "objects/query/User",
-    "objects/query/UserGroup",
     "objects/query/Notification",
     "objects/query/Dependency",
     "objects/query/Endpoint",
     "objects/query/Zone",
-    "objects/query/CheckCommand",
     "status/query",
     "events/CheckResult",
     "events/StateChange",
@@ -289,6 +288,84 @@ mod tests {
             missing_permissions(&ApiInfo::default()).len(),
             REQUIRED_PERMISSIONS.len()
         );
+    }
+
+    /// The event and action permissions are exactly the event types the
+    /// client subscribes to and the actions it can send (the object
+    /// queries are checked against a real load in `tests/engine/probe.rs`).
+    #[test]
+    fn event_and_action_permissions_are_exactly_what_the_client_uses() {
+        use std::collections::BTreeSet;
+
+        use ic_model::{
+            Action, ChildOptions, CommandType, DowntimeMode, EventKind, Timestamp, Vars,
+        };
+
+        let listed = |prefix: &str| -> BTreeSet<String> {
+            REQUIRED_PERMISSIONS
+                .iter()
+                .filter_map(|permission| permission.strip_prefix(prefix))
+                .map(str::to_owned)
+                .collect()
+        };
+        let kinds: BTreeSet<String> = EventKind::ALL
+            .iter()
+            .map(|kind| kind.api_name().to_owned())
+            .collect();
+        assert_eq!(listed("events/"), kinds);
+
+        let every_action = [
+            Action::CheckNow { force: true },
+            Action::Acknowledge {
+                comment: String::new(),
+                sticky: false,
+                persistent: false,
+                expiry: None,
+            },
+            Action::RemoveAcknowledgement,
+            Action::ScheduleDowntime {
+                comment: String::new(),
+                start: Timestamp::EPOCH,
+                end: Timestamp::EPOCH,
+                mode: DowntimeMode::Fixed,
+                all_services: false,
+                child_options: ChildOptions::None,
+                trigger_name: None,
+            },
+            Action::RemoveAllDowntimes,
+            Action::AddComment {
+                text: String::new(),
+                expiry: None,
+            },
+            Action::ProcessCheckResult {
+                exit_status: 0,
+                output: String::new(),
+                perfdata: Vec::new(),
+                ttl: None,
+            },
+            Action::ExecuteCommand {
+                command_type: CommandType::EventCommand,
+                command: None,
+                endpoint: None,
+                macros: Vars::new(),
+                ttl: 60.0,
+            },
+        ];
+        let mut sent: BTreeSet<String> = every_action
+            .iter()
+            .map(|action| action.api_name().to_owned())
+            .collect();
+        // A comment target (`ActionTarget::Comment`) removes the comment.
+        sent.insert("remove-comment".to_owned());
+        assert_eq!(listed("actions/"), sent);
+
+        // Nothing else: object queries, status, events, actions.
+        assert!(REQUIRED_PERMISSIONS.iter().all(|permission| {
+            ["objects/query/", "events/", "actions/"]
+                .iter()
+                .any(|prefix| permission.starts_with(prefix))
+                || *permission == "status/query"
+        }));
     }
 
     #[test]

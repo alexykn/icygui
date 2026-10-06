@@ -50,7 +50,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::backoff::Backoff;
-use crate::command::{ActionOutcome, Command, ConnectionState, CoreEvent, LoadPhase, LogEntry};
+use crate::command::{Command, ConnectionState, CoreEvent, LoadPhase, LogEntry};
 use crate::connect::{self, Connected, Failure};
 use crate::dashboards::Dashboards;
 use crate::event_log::{EventLog, event_log_path};
@@ -90,11 +90,7 @@ pub(crate) enum Internal {
     /// A re-query round's answers.
     Fetched { session: u64, answers: Box<Answers> },
     /// An action finished.
-    ActionDone {
-        id: u64,
-        dirty: Vec<ObjectKey>,
-        outcome: ActionOutcome,
-    },
+    ActionDone(Box<actions::Finished>),
     /// The dashboards were evaluated for `snapshot`, which is ready to go
     /// out. `quiet`: nothing but the dashboards could have changed.
     /// `broken`: the evaluation failed (a bug); `dashboards` start over.
@@ -323,6 +319,9 @@ pub(crate) struct Engine {
     /// reconciles then skip them; a reconnect, a restart or `Refresh`
     /// reloads them.
     notifications_current: bool,
+    /// Objects whose last action got no answer: the same action on them
+    /// is held back for a while, so a retry can't duplicate it.
+    doubts: actions::Doubts,
 }
 
 /// Why the select loop woke up.
@@ -392,6 +391,7 @@ impl Engine {
             last_load_end: None,
             restarts: Restarts::default(),
             state: None,
+            doubts: actions::Doubts::default(),
         }
     }
 
@@ -572,8 +572,9 @@ impl Engine {
         let environment = self.spec.environment.clone();
         let secrets = Arc::clone(&self.ports.secrets);
         let tx = self.internal_tx.clone();
+        let action_timeout = self.tuning.action_timeout;
         self.tasks.spawn(async move {
-            let message = match connect::connect(&environment, secrets).await {
+            let message = match connect::connect(&environment, secrets, action_timeout).await {
                 Ok(connected) => Internal::Connected {
                     session,
                     connected: Box::new(connected),
@@ -1385,7 +1386,7 @@ impl Engine {
 
     fn on_internal(&mut self, message: Internal) {
         match message {
-            Internal::ActionDone { id, dirty, outcome } => self.on_action_done(id, dirty, outcome),
+            Internal::ActionDone(finished) => self.on_action_done(*finished),
             Internal::Connected { session, connected } if session == self.session => {
                 self.on_connected(*connected);
             }

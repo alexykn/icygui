@@ -134,7 +134,13 @@ pub(crate) async fn serve(
         peer = %conn.peer,
         "request"
     );
+    let action = record.path.starts_with("/v1/actions/");
     shared.record(record);
+    let delay = shared.action_answer_delay();
+    if action && !delay.is_zero() {
+        // The action ran; only its answer is late.
+        tokio::time::sleep(delay).await;
+    }
     if response.extensions().get::<response::Bare>().is_none()
         && let Ok(value) = HeaderValue::from_str(&shared.server_header)
     {

@@ -2062,8 +2062,8 @@ async fn a_request_failing_after_others_were_answered_keeps_their_results() {
 
 #[tokio::test]
 async fn a_timeout_after_others_were_answered_keeps_their_results() {
-    // Host request answered, the service request never: code 0, no HTTP
-    // status.
+    // Host request answered, the service request (recorded, so Icinga has
+    // it) not in time: its outcome is unknown, never a plain failure.
     let pki = Pki::new();
     let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), |request| {
         if request.json()["type"] == json!("Service") {
@@ -2073,7 +2073,7 @@ async fn a_timeout_after_others_were_answered_keeps_their_results() {
     })
     .await;
     let mut settings = basic_settings(server.url(), ca_trust(&pki));
-    settings.request_timeout = Duration::from_millis(300);
+    settings.action_timeout = Duration::from_millis(300);
     let results = Client::new(settings)
         .unwrap()
         .run_action(
@@ -2085,13 +2085,217 @@ async fn a_timeout_after_others_were_answered_keeps_their_results() {
         .unwrap();
     assert_eq!(results.len(), 2);
     assert!(results[0].is_success());
+    assert!(!results[0].unknown);
     assert_eq!(results[1].code, 0);
+    assert!(results[1].unknown);
+    assert!(!results[1].is_success());
     assert_eq!(results[1].target.as_deref(), Some("a!s"));
     assert!(
-        results[1].status.contains("timed out"),
+        results[1].status.contains("timed out") && results[1].status.contains("may have applied"),
         "{}",
         results[1].status
     );
+}
+
+/// A downtime per host, answered after `delay` (Icinga creating downtime
+/// objects on a busy master); every request is recorded first, so it
+/// counts as applied.
+fn scheduling_late(delay: Duration) -> impl Fn(&support::Recorded) -> Reply {
+    move |request| {
+        let results = action_names(request)
+            .iter()
+            .map(|name| json!({ "code": 200, "status": format!("Successfully scheduled downtime '{name}!x' for object '{name}'."), "name": format!("{name}!x") }))
+            .collect();
+        Reply::Slow(delay, Box::new(icinga_action_reply(results)))
+    }
+}
+
+fn rack_downtime(all_services: bool) -> Action {
+    Action::ScheduleDowntime {
+        comment: "rack".to_owned(),
+        start: ic_model::Timestamp::from_unix_seconds(1_791_203_174.0),
+        end: ic_model::Timestamp::from_unix_seconds(1_791_210_374.0),
+        mode: ic_model::DowntimeMode::Fixed,
+        all_services,
+        child_options: ic_model::ChildOptions::None,
+        trigger_name: None,
+    }
+}
+
+#[tokio::test]
+async fn a_first_request_without_an_answer_is_an_unknown_outcome_not_an_error() {
+    // Icinga got the first request (and may be creating its downtimes
+    // still) but didn't answer in time: its hosts are unknown, the rest is
+    // not sent, and the master gets nothing more. An error here would
+    // invite a retry that schedules every downtime twice.
+    let pki = Pki::new();
+    let server = server_with(
+        pki.issue(SERVER_NAME, &[SERVER_NAME]),
+        scheduling_late(Duration::from_secs(5)),
+    )
+    .await;
+    let mut settings = basic_settings(server.url(), ca_trust(&pki));
+    settings.action_timeout = Duration::from_millis(300);
+    let keys: Vec<ObjectKey> = (0..450)
+        .map(|i| ObjectKey::host(&format!("h{i}")))
+        .collect();
+    let results = Client::new(settings)
+        .unwrap()
+        .run_action(&rack_downtime(false), &ActionTarget::Objects(keys), "me")
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 450);
+    assert!(results[..200].iter().all(|result| result.unknown));
+    assert_eq!(results[0].target.as_deref(), Some("h0"));
+    assert!(
+        results[200..]
+            .iter()
+            .all(|result| !result.unknown && !result.is_success())
+    );
+    assert!(
+        results[200].status.starts_with("not sent"),
+        "{}",
+        results[200].status
+    );
+    assert_eq!(results[449].target.as_deref(), Some("h449"));
+    assert_eq!(server.requests().len(), 1, "nothing more after no answer");
+}
+
+#[tokio::test]
+async fn actions_wait_for_their_answer_longer_than_queries() {
+    // Slower than the request timeout, well within the action timeout.
+    let pki = Pki::new();
+    let server = server_with(
+        pki.issue(SERVER_NAME, &[SERVER_NAME]),
+        scheduling_late(Duration::from_millis(600)),
+    )
+    .await;
+    let mut settings = basic_settings(server.url(), ca_trust(&pki));
+    settings.request_timeout = Duration::from_millis(200);
+    assert_eq!(settings.action_timeout, ic_api::DEFAULT_ACTION_TIMEOUT);
+    let results = Client::new(settings)
+        .unwrap()
+        .run_action(
+            &rack_downtime(false),
+            &ActionTarget::Objects(vec![ObjectKey::host("a")]),
+            "me",
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_success(), "{:?}", results[0]);
+    assert_eq!(results[0].name.as_deref(), Some("a!x"));
+}
+
+#[tokio::test]
+async fn answers_that_may_hide_an_applied_action_are_unknown_outcomes() {
+    // A proxy giving up on a busy Icinga (504), a broken gateway (502), a
+    // success Icinga sent but nobody can read: Icinga may have run it.
+    for (status, body) in [
+        (
+            504,
+            "<html><body><h1>504 Gateway Time-out</h1></body></html>",
+        ),
+        (502, "<html><body><h1>502 Bad Gateway</h1></body></html>"),
+        (200, "{\"results\": [{\"code\": 200,"),
+    ] {
+        let pki = Pki::new();
+        let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), move |_| {
+            Reply::Json(status, body.to_owned())
+        })
+        .await;
+        let results = client(&server, ca_trust(&pki))
+            .run_action(
+                &acknowledge(),
+                &ActionTarget::Objects(vec![ObjectKey::host("a"), ObjectKey::host("b")]),
+                "me",
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2, "{status}");
+        assert!(
+            results
+                .iter()
+                .all(|result| result.unknown && result.code == 0),
+            "{status}: {results:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn refusals_before_anything_ran_stay_errors() {
+    // Icinga's error documents (even a 5xx one) and a proxy's 4xx page come
+    // before anything ran; so does a connection that can't be made.
+    for (status, body, expected) in [
+        (
+            503,
+            r#"{"error":503,"status":"Shutting down."}"#.to_owned(),
+            ApiError::Http {
+                status: 503,
+                message: "Shutting down.".to_owned(),
+            },
+        ),
+        (
+            413,
+            "<html>Request Entity Too Large</html>".to_owned(),
+            ApiError::Http {
+                status: 413,
+                message: "<html>Request Entity Too Large</html>".to_owned(),
+            },
+        ),
+    ] {
+        let pki = Pki::new();
+        let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), move |_| {
+            Reply::Json(status, body.clone())
+        })
+        .await;
+        let error = client(&server, ca_trust(&pki))
+            .run_action(
+                &acknowledge(),
+                &ActionTarget::Objects(vec![ObjectKey::host("a")]),
+                "me",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, expected);
+    }
+    let url = ic_api::Url::parse(&format!("https://127.0.0.1:{}", closed_port().await)).unwrap();
+    let error = Client::new(basic_settings(url, TlsSettings::default()))
+        .unwrap()
+        .run_action(
+            &acknowledge(),
+            &ActionTarget::Objects(vec![ObjectKey::host("a")]),
+            "me",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ApiError::Connect(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn downtimes_for_whole_hosts_go_out_in_small_requests() {
+    // Icinga creates a downtime per service too, and answers when all
+    // are done: 20 hosts per request keep each answer quick.
+    let pki = Pki::new();
+    let server = server_with(
+        pki.issue(SERVER_NAME, &[SERVER_NAME]),
+        scheduling_late(Duration::ZERO),
+    )
+    .await;
+    let keys: Vec<ObjectKey> = (0..45).map(|i| ObjectKey::host(&format!("h{i}"))).collect();
+    let results = client(&server, ca_trust(&pki))
+        .run_action(&rack_downtime(true), &ActionTarget::Objects(keys), "me")
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 45);
+    assert!(results.iter().all(ic_api::ActionResult::is_success));
+    let sizes: Vec<usize> = server
+        .requests()
+        .iter()
+        .map(|request| action_names(request).len())
+        .collect();
+    assert_eq!(sizes, [20, 20, 5]);
+    assert_eq!(server.requests()[0].json()["all_services"], json!(true));
 }
 
 #[tokio::test]

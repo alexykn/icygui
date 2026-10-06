@@ -8,7 +8,9 @@
     reason = "test helpers fail the test loudly"
 )]
 
-use crate::support::{PASSWORD, environment, mock};
+use std::collections::BTreeSet;
+
+use crate::support::{Launch, PASSWORD, USER, environment, mock};
 use ic_config::AuthConfig;
 use ic_core::{ConnectionFailure, REQUIRED_PERMISSIONS, fetch_certificate, test_connection};
 use ic_mock::{MockConfig, MockUser, scenarios};
@@ -159,4 +161,77 @@ async fn the_certificate_can_be_read_for_trust_on_first_use() {
         .await
         .unwrap();
     assert!(invalid.unwrap_err().contains("invalid URL"));
+}
+
+/// `objects/query/Dependency` → `dependencies`: the URL segment Icinga
+/// serves a type's objects under.
+fn plural(type_name: &str) -> String {
+    let lower = type_name.to_lowercase();
+    match lower.strip_suffix('y') {
+        Some(stem) => format!("{stem}ies"),
+        None => format!("{lower}s"),
+    }
+}
+
+/// An API user with exactly `REQUIRED_PERMISSIONS` connects and loads
+/// everything without a refusal, and each object query permission is used
+/// by a query: the list asks for nothing the client doesn't need (a
+/// production `ApiUser` gets exactly this list).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_required_permissions_are_exactly_what_a_load_uses() {
+    let server = mock(MockConfig {
+        users: vec![MockUser::new(USER, PASSWORD, REQUIRED_PERMISSIONS)],
+        ..MockConfig::with_scenario(scenarios::staging())
+    })
+    .await;
+    let control = server.control();
+    let mut engine = Launch::new(&server).start();
+    engine.connected().await;
+    // Icinga's `Notification` objects come last, in the background.
+    engine
+        .snapshot(|snapshot| !snapshot.icinga_notifications.is_empty())
+        .await;
+    let requests = control.requests();
+    let refused: Vec<String> = requests
+        .iter()
+        .filter(|request| request.status >= 400)
+        .map(|request| format!("{} {}", request.status, request.path))
+        .collect();
+    assert!(refused.is_empty(), "refused: {refused:?}");
+
+    let queried: BTreeSet<String> = requests
+        .iter()
+        .filter_map(|request| request.path.strip_prefix("/v1/objects/"))
+        .map(str::to_owned)
+        .collect();
+    let permitted: BTreeSet<String> = REQUIRED_PERMISSIONS
+        .iter()
+        .filter_map(|permission| permission.strip_prefix("objects/query/"))
+        .map(plural)
+        .collect();
+    assert_eq!(queried, permitted);
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.path.starts_with("/v1/status"))
+    );
+    let subscribed: BTreeSet<String> = requests
+        .iter()
+        .filter(|request| request.path == "/v1/events")
+        .filter_map(|request| request.body.clone())
+        .flat_map(|body| {
+            body["types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|kind| kind.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let events: BTreeSet<String> = REQUIRED_PERMISSIONS
+        .iter()
+        .filter_map(|permission| permission.strip_prefix("events/"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(subscribed, events);
 }

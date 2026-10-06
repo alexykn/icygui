@@ -7,10 +7,30 @@
 
 use std::collections::HashSet;
 
-use ic_model::{Action, ActionTarget, DowntimeMode, ObjectKey};
+use ic_model::{Action, ActionTarget, ChildOptions, DowntimeMode, ObjectKey};
 use serde_json::{Map, Value, json};
 
+use crate::client::NAMES_PER_REQUEST;
 use crate::error::ApiError;
+
+/// Names per `schedule-downtime` request with `all_services` or child
+/// options. Icinga creates a downtime for each of the host's services and
+/// each child too (every one a configuration object written to disk) and
+/// answers only when all are done, so a request of 200 hosts could take
+/// minutes; this many keep each answer quick.
+pub(crate) const DOWNTIME_TREES_PER_REQUEST: usize = 20;
+
+/// How many names one request of `action` carries.
+pub(crate) fn names_per_request(action: &Action) -> usize {
+    match action {
+        Action::ScheduleDowntime {
+            all_services,
+            child_options,
+            ..
+        } if *all_services || *child_options != ChildOptions::None => DOWNTIME_TREES_PER_REQUEST,
+        _ => NAMES_PER_REQUEST,
+    }
+}
 
 /// What one action request targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -677,6 +697,37 @@ mod tests {
         let (hosts, services) = names_by_kind(&many);
         assert_eq!(hosts.len(), 2_000);
         assert_eq!(services.len(), 40_000);
+    }
+
+    #[test]
+    fn downtimes_for_whole_trees_go_out_in_smaller_requests() {
+        let downtime = |all_services, child_options| Action::ScheduleDowntime {
+            comment: "rack".to_owned(),
+            start: Timestamp::from_unix_seconds(100.0),
+            end: Timestamp::from_unix_seconds(200.0),
+            mode: DowntimeMode::Fixed,
+            all_services,
+            child_options,
+            trigger_name: None,
+        };
+        assert_eq!(
+            names_per_request(&downtime(false, ChildOptions::None)),
+            NAMES_PER_REQUEST
+        );
+        for (all_services, child_options) in [
+            (true, ChildOptions::None),
+            (false, ChildOptions::Triggered),
+            (false, ChildOptions::NonTriggered),
+        ] {
+            assert_eq!(
+                names_per_request(&downtime(all_services, child_options)),
+                DOWNTIME_TREES_PER_REQUEST
+            );
+        }
+        assert_eq!(
+            names_per_request(&Action::CheckNow { force: true }),
+            NAMES_PER_REQUEST
+        );
     }
 
     #[test]

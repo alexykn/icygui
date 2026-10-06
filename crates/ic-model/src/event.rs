@@ -165,8 +165,10 @@ pub enum Event {
     StateChange {
         /// The object.
         object: ObjectKey,
-        /// The new state. For hosts, down vs unreachable is only known after
-        /// re-querying `last_reachable`; the event reports down.
+        /// The new state. A down host is unreachable when its check
+        /// result's `vars_after.reachable` is false (no re-query needed);
+        /// without `vars_after` (older Icinga versions) it counts as
+        /// reachable, so the event reports down.
         state: CheckableState,
         /// Soft or hard.
         state_type: StateType,

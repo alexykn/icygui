@@ -63,6 +63,11 @@ async fn production_scale_load_and_burst() {
         eprintln!("{at:>12.3?}  {what}");
     }
     eprintln!("initial load complete (problem details included) after {loaded:?}");
+    // PERF-01: the problem lists are complete within 5 s (release builds;
+    // the nightly `perf` workflow runs this with `--release`).
+    if !cfg!(debug_assertions) {
+        assert!(loaded < Duration::from_secs(5), "PERF-01: {loaded:?}");
+    }
     assert!(engine.states().iter().any(|state| matches!(
         state,
         ConnectionState::Loading {
@@ -241,13 +246,22 @@ mod steady {
         let share = cpu / elapsed * 100.0;
         eprintln!(
             "steady state: {rate:.0} checks/s, {snapshots} snapshots in {elapsed:.1} s, \
-             engine threads {cpu:.2} s CPU = {share:.1} % of one core (dev profile)"
+             engine threads {cpu:.2} s CPU = {share:.1} % of one core ({})",
+            if cfg!(debug_assertions) {
+                "dev profile"
+            } else {
+                "release"
+            }
         );
         assert!(rate > 80.0, "the simulator checks at Icinga's pace: {rate}");
         assert!(held.is_some());
         // Measured 5.2 % with unoptimised workspace crates (dev profile);
-        // the release budget is 5 %.
+        // the release budget (PERF-03) is 5 %, checked by the nightly
+        // `perf` workflow's release build.
         assert!(share < 25.0, "{share:.1} %");
+        if !cfg!(debug_assertions) {
+            assert!(share < 5.0, "PERF-03: {share:.1} % of one core");
+        }
         engine.shutdown();
     }
 }

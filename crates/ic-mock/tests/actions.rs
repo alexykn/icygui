@@ -689,3 +689,42 @@ async fn action_errors() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(results(&body).len(), 4);
 }
+
+#[tokio::test]
+async fn late_answers_come_after_the_action_ran() {
+    // `delay_action_answers`: a busy Icinga still answering. A client that
+    // gives up first has still added the comment.
+    let (server, client) = lab().await;
+    let control = server.control();
+    control.delay_action_answers(Duration::from_secs(5));
+    let body = json!({
+        "type": "Host", "hosts": ["lab-01"], "author": "late", "comment": "answered late"
+    });
+    let gave_up = tokio::time::timeout(
+        Duration::from_millis(300),
+        post(&client, &server, "/v1/actions/add-comment", &body),
+    )
+    .await;
+    assert!(gave_up.is_err(), "the answer is late");
+    assert!(
+        control
+            .comments()
+            .iter()
+            .any(|comment| comment.author == "late" && comment.text == "answered late"),
+        "the comment exists"
+    );
+    assert!(
+        control
+            .requests()
+            .iter()
+            .any(|request| request.path == "/v1/actions/add-comment" && request.status == 200)
+    );
+    // Queries aren't delayed, and turning it off answers actions at once.
+    let started = std::time::Instant::now();
+    let (status, _) = get(&client, &server, "/v1/objects/hosts").await;
+    assert_eq!(status, StatusCode::OK);
+    control.delay_action_answers(Duration::ZERO);
+    let (status, _) = post(&client, &server, "/v1/actions/add-comment", &body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(started.elapsed() < Duration::from_secs(4));
+}

@@ -946,7 +946,8 @@ impl Sidebar {
     }
 
     /// The footer's clock (NOTE-05): opens the notification centre; the
-    /// unread count on it, a bell-off while paused.
+    /// unread count of the environment on screen on it, a bell-off while
+    /// its notifications are paused (all environments', or its own).
     fn render_clock(&self, now: Timestamp, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -954,7 +955,7 @@ impl Sidebar {
         let state = self.state.read(cx);
         let centre_open = self.menus.is_open(&SidebarMenu::Notifications);
         let badge = crate::notifications::entry::badge(state.unread_notifications());
-        let paused = state.is_paused(now);
+        let paused = state.active_pause(now).is_some();
         div()
             .relative()
             .flex_none()
@@ -979,7 +980,7 @@ impl Sidebar {
                 } else {
                     button.tooltip(Tooltip::new(menus::notifications_tooltip(
                         state.unread_notifications(),
-                        state.paused_until(),
+                        state.active_pause(now),
                         now,
                     )))
                 }

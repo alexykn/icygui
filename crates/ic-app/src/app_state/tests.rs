@@ -542,9 +542,13 @@ fn object_names_parse() {
 fn shutting_down_takes_the_core() {
     let (mut state, recorder) = connected_fixture();
     let core = state.take_core().unwrap();
-    core.shutdown();
+    drop(core.shutdown_in_background());
     assert!(*recorder.stopped.borrow());
     assert!(state.take_core().is_none());
+    // At quit every engine's link goes.
+    let (mut state, _) = connected_fixture();
+    assert_eq!(state.take_all_cores().len(), 1);
+    assert!(state.take_all_cores().is_empty());
 }
 
 #[test]

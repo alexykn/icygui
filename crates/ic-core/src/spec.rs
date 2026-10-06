@@ -60,6 +60,13 @@ pub struct Tuning {
     pub stall_after: Duration,
     /// Snapshots go out at most this often while things change (250 ms).
     pub publish_interval: Duration,
+    /// Snapshots of an engine whose environment isn't on screen
+    /// ([`crate::Command::SetActive`]`(false)`) go out at most this often
+    /// (2 s): only the tray and the environment switcher read them. Rule
+    /// inputs waiting for their dashboard memberships still go out after
+    /// `publish_interval`, so its notifications are as prompt as the
+    /// active environment's.
+    pub background_publish_interval: Duration,
     /// Objects marked for re-query are collected this long before the
     /// request goes out (200 ms), so a burst of config changes costs few
     /// requests.
@@ -139,6 +146,7 @@ impl Default for Tuning {
             status_interval: Duration::from_secs(30),
             stall_after: Duration::from_mins(2),
             publish_interval: Duration::from_millis(250),
+            background_publish_interval: Duration::from_secs(2),
             requery_delay: Duration::from_millis(200),
             missing_ttl: Duration::from_mins(10),
             max_batch: 5_000,

@@ -46,13 +46,67 @@ impl AppState {
             "action requested"
         );
         self.last_request = Some(request.clone());
-        self.requested = Some(request);
+        self.requested = Some((request, None));
         Ok(())
     }
 
-    /// The action asked for and not yet picked up.
-    pub(crate) fn take_request(&mut self) -> Option<ActionRequest> {
+    /// Records an action asked for in environment `environment`, which
+    /// need not be the active one: a desktop notification's *Acknowledge*
+    /// goes to its own environment's engine without switching (A1). Its
+    /// API user's permissions decide, as in [`AppState::request`].
+    ///
+    /// # Errors
+    ///
+    /// Why the API user may not run the action, or that the environment is
+    /// gone.
+    pub(crate) fn request_in(
+        &mut self,
+        environment: &str,
+        request: ActionRequest,
+    ) -> Result<(), String> {
+        if self.is_active(environment) {
+            return self.request(request);
+        }
+        let Some(name) = self
+            .config
+            .environment(environment)
+            .map(|found| found.name.clone())
+        else {
+            return Err("That environment was removed.".to_owned());
+        };
+        if let Some(denial) = self.action_denial_in(environment, &request.action) {
+            tracing::info!(action = request.action.label(), %denial, "action refused");
+            self.last_denial = Some(denial.clone());
+            self.tracker.inform(
+                format!("Can't {} in {name}", request.action.label()),
+                Some(denial.clone()),
+                Instant::now(),
+            );
+            return Err(denial);
+        }
+        if request.targets.is_empty() {
+            return Ok(());
+        }
+        tracing::info!(action = request.action.label(), environment = %name, "action requested in another environment");
+        self.last_request = Some(request.clone());
+        self.requested = Some((request, Some(environment.to_owned())));
+        Ok(())
+    }
+
+    /// The action asked for and not yet picked up, with its environment
+    /// (`None`: the active one).
+    pub(crate) fn take_request(&mut self) -> Option<(ActionRequest, Option<String>)> {
         self.requested.take()
+    }
+
+    /// Drops a waiting request meant for the environment on screen (it
+    /// changed: the request was for the previous one); one bound to its
+    /// own environment stays. Returns the dropped one.
+    pub(crate) fn drop_unbound_request(&mut self) -> Option<ActionRequest> {
+        if matches!(self.requested, Some((_, None))) {
+            return self.requested.take().map(|(request, _)| request);
+        }
+        None
     }
 
     /// Whether a request waits to be picked up.
@@ -85,7 +139,7 @@ impl AppState {
         if spec.objects.is_empty() {
             return Err("Nothing to do: none of the objects qualifies.".to_owned());
         }
-        if self.core.is_none() || !self.connection.is_connected() {
+        if self.engine.core.is_none() || !self.engine.connection.is_connected() {
             return Err(NOT_CONNECTED.to_owned());
         }
         self.last_action_id += 1;
@@ -97,12 +151,64 @@ impl AppState {
             "sending action"
         );
         self.tracker
-            .start(id, &spec, &self.snapshot, Instant::now());
+            .start(id, &spec, &self.engine.snapshot, Instant::now());
         self.send(Command::Action {
             id,
             target: spec.target,
             action: spec.action,
         });
+        Ok(id)
+    }
+
+    /// Sends `spec` to environment `environment`'s engine (the active one,
+    /// or another: an acknowledgement from its desktop notification). An
+    /// action in another environment gets a toast, no markers: its rows
+    /// aren't on screen. Returns its id.
+    ///
+    /// # Errors
+    ///
+    /// Why nothing was sent: the environment is gone, the API user may not
+    /// run it, or there is no connection to that Icinga.
+    pub(crate) fn submit_in(&mut self, environment: &str, spec: ActionSpec) -> Result<u64, String> {
+        if self.is_active(environment) {
+            return self.submit(spec);
+        }
+        let Some(name) = self
+            .config
+            .environment(environment)
+            .map(|found| found.name.clone())
+        else {
+            return Err("That environment was removed; nothing was sent.".to_owned());
+        };
+        if let Some(denial) = self.action_denial_in(environment, &spec.kind) {
+            return Err(denial);
+        }
+        if spec.objects.is_empty() {
+            return Err("Nothing to do: none of the objects qualifies.".to_owned());
+        }
+        let connected = self
+            .slot(environment)
+            .is_some_and(|slot| slot.core.is_some() && slot.connection.is_connected());
+        if !connected {
+            return Err(NOT_CONNECTED.to_owned());
+        }
+        self.last_action_id += 1;
+        let id = self.last_action_id;
+        tracing::info!(
+            id,
+            action = spec.action.api_name(),
+            objects = spec.objects.len(),
+            environment = %name,
+            "sending action to another environment"
+        );
+        self.tracker.start_elsewhere(id, &spec, &name);
+        if let Some(slot) = self.slot(environment) {
+            slot.send(Command::Action {
+                id,
+                target: spec.target,
+                action: spec.action,
+            });
+        }
         Ok(id)
     }
 
@@ -116,7 +222,7 @@ impl AppState {
             "action finished"
         );
         self.tracker
-            .finish(id, outcome, &self.snapshot, Instant::now());
+            .finish(id, outcome, &self.engine.snapshot, Instant::now());
     }
 
     /// The marker for `object` while an action on it is in flight or
@@ -163,7 +269,7 @@ impl AppState {
     /// anything changed.
     pub(crate) fn tick_actions(&mut self, now: Instant) -> bool {
         let expired = self.tracker.expire(now);
-        let settled = self.tracker.settle(&self.snapshot, now);
+        let settled = self.tracker.settle(&self.engine.snapshot, now);
         expired || settled
     }
 }
@@ -207,7 +313,7 @@ mod tests {
         };
         assert!(state.request(request.clone()).is_ok());
         assert!(state.has_request());
-        assert_eq!(state.take_request(), Some(request.clone()));
+        assert_eq!(state.take_request(), Some((request.clone(), None)));
         assert_eq!(state.take_request(), None);
         assert_eq!(state.last_request(), Some(&request));
         // Nothing to act on: nothing to pick up.

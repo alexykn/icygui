@@ -134,6 +134,9 @@ struct Running {
     /// that, not the object.
     by_name: bool,
     toast: u64,
+    /// It went to another environment than the one on screen (its name):
+    /// no markers or failures on the rows, the toasts name it.
+    elsewhere: Option<String>,
 }
 
 /// The actions in flight, their markers, failures and toasts.
@@ -359,6 +362,35 @@ impl Tracker {
                 objects: spec.objects.clone(),
                 by_name: !matches!(spec.target, ActionTarget::Objects(_)),
                 toast,
+                elsewhere: None,
+            },
+        );
+    }
+
+    /// Records that action `id` (`spec`) went to the environment
+    /// `environment` (its name), which isn't on screen: a toast that names
+    /// it says it's on its way; no markers (its rows aren't shown).
+    pub(crate) fn start_elsewhere(&mut self, id: u64, spec: &ActionSpec, environment: &str) {
+        let words = verbs(&spec.kind);
+        let toast = self.push(
+            Some(id),
+            ToastTone::Pending,
+            format!(
+                "{} {} in {environment}…",
+                words.progressive,
+                describe_objects(&spec.objects)
+            ),
+            Vec::new(),
+            None,
+        );
+        self.running.insert(
+            id,
+            Running {
+                kind: spec.kind.clone(),
+                objects: spec.objects.clone(),
+                by_name: !matches!(spec.target, ActionTarget::Objects(_)),
+                toast,
+                elsewhere: Some(environment.to_owned()),
             },
         );
     }
@@ -378,7 +410,10 @@ impl Tracker {
             return;
         };
         let words = verbs(&running.kind);
-        let what = describe_objects(&running.objects);
+        let what = match &running.elsewhere {
+            Some(environment) => format!("{} in {environment}", describe_objects(&running.objects)),
+            None => describe_objects(&running.objects),
+        };
         // Which objects failed, and why.
         let mut failed: Vec<(Option<ObjectKey>, String, String)> = Vec::new();
         if let Some(error) = &outcome.error {
@@ -396,6 +431,10 @@ impl Tracker {
             }
         }
         for (object, _, reason) in &failed {
+            if running.elsewhere.is_some() {
+                // Another environment's objects: their rows aren't here.
+                break;
+            }
             if let Some(object) = object {
                 if self.marks.get(object).is_some_and(|mark| mark.action == id) {
                     self.marks.remove(object);

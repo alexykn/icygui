@@ -86,6 +86,7 @@ impl Hydration {
 
     /// Forgets everything (another server, or a reload replaced the
     /// objects).
+    #[cfg(test)]
     pub(crate) fn forget(&mut self) {
         self.requested.clear();
     }

@@ -42,25 +42,25 @@ pub(crate) struct GroupPlan {
 }
 
 impl AppState {
-    /// Recent notifications, newest first (the notification centre's).
+    /// The active environment's recent notifications, newest first (the
+    /// notification centre's).
     pub(crate) fn notification_records(&self) -> impl Iterator<Item = &NotificationRecord> {
-        self.notifications.iter()
+        self.engine.notifications()
     }
 
-    /// Notifications not seen yet, silent ones included.
+    /// The active environment's notifications not seen yet, silent ones
+    /// included.
     pub(crate) fn unread_notifications(&self) -> usize {
-        self.notifications
-            .iter()
-            .filter(|record| !record.read)
-            .count()
+        self.engine.unread()
     }
 
-    /// Asks the core for the log's recent notifications (when it starts).
-    /// `None` without a core.
-    pub(crate) fn request_notifications(
+    /// Asks environment `id`'s engine for its log's recent notifications
+    /// (when it starts). `None` without its engine.
+    pub(crate) fn request_notifications_of(
         &self,
+        id: &str,
     ) -> Option<oneshot::Receiver<Vec<NotificationRecord>>> {
-        let core = self.core.as_ref()?;
+        let core = self.slot(id)?.core.as_ref()?;
         let (reply, receiver) = oneshot::channel();
         core.send(Command::LoadNotifications {
             limit: MAX_NOTIFICATIONS,
@@ -69,47 +69,49 @@ impl AppState {
         Some(receiver)
     }
 
-    /// Takes the log's recent notifications: merged with those that
-    /// arrived meanwhile (by id; read if either says so), newest first.
-    pub(crate) fn load_notifications(&mut self, records: Vec<NotificationRecord>) {
-        for record in records {
-            match self
-                .notifications
-                .iter_mut()
-                .find(|known| known.intent.id == record.intent.id)
-            {
-                Some(known) => known.read |= record.read,
-                None => self.notifications.push_back(record),
-            }
+    /// Asks the active environment's engine for its log's recent
+    /// notifications. `None` without a core.
+    #[cfg(test)]
+    pub(crate) fn request_notifications(
+        &self,
+    ) -> Option<oneshot::Receiver<Vec<NotificationRecord>>> {
+        let id = self.active_environment_id()?.to_owned();
+        self.request_notifications_of(&id)
+    }
+
+    /// Takes environment `id`'s log's recent notifications: merged with
+    /// those that arrived meanwhile (by id; read if either says so),
+    /// newest first.
+    pub(crate) fn load_notifications_of(&mut self, id: &str, records: Vec<NotificationRecord>) {
+        if let Some(slot) = self.slot_mut(id) {
+            merge_notifications(&mut slot.notifications, records);
         }
-        self.notifications.make_contiguous().sort_by(|a, b| {
-            b.intent
-                .at
-                .as_unix_seconds()
-                .total_cmp(&a.intent.at.as_unix_seconds())
-        });
-        self.notifications.truncate(MAX_NOTIFICATIONS);
     }
 
-    /// Marks one notification read (the centre's entry the user opened).
-    /// Returns whether it was unread.
+    /// [`AppState::load_notifications_of`] for the active environment.
+    #[cfg(test)]
+    pub(crate) fn load_notifications(&mut self, records: Vec<NotificationRecord>) {
+        merge_notifications(&mut self.engine.notifications, records);
+    }
+
+    /// Marks one of the active environment's notifications read (the
+    /// centre's entry the user opened). Returns whether it was unread.
     pub(crate) fn mark_notification_read(&mut self, id: &str) -> bool {
-        let Some(record) = self
-            .notifications
-            .iter_mut()
-            .find(|record| record.intent.id == id && !record.read)
-        else {
-            return false;
-        };
-        record.read = true;
-        self.send(Command::MarkNotificationRead(id.to_owned()));
-        true
+        self.engine.mark_read(id)
     }
 
-    /// Marks every notification read. Returns whether any was unread.
+    /// Marks notification `tag` of environment `environment` read (a
+    /// desktop notification clicked). Returns whether it was unread.
+    pub(crate) fn mark_notification_read_in(&mut self, environment: &str, tag: &str) -> bool {
+        self.slot_mut(environment)
+            .is_some_and(|slot| slot.mark_read(tag))
+    }
+
+    /// Marks every notification of the active environment read. Returns
+    /// whether any was unread.
     pub(crate) fn mark_all_notifications_read(&mut self) -> bool {
         let mut changed = false;
-        for record in &mut self.notifications {
+        for record in &mut self.engine.notifications {
             changed |= !record.read;
             record.read = true;
         }
@@ -141,7 +143,7 @@ impl AppState {
             let _ = reply.send(entries);
             return Some(receiver);
         }
-        let core = self.core.as_ref()?;
+        let core = self.engine.core.as_ref()?;
         core.send(Command::LoadHistory {
             object: Some(object),
             limit,
@@ -163,35 +165,124 @@ impl AppState {
             let _ = reply.send(oldest);
             return Some(receiver);
         }
-        let core = self.core.as_ref()?;
+        let core = self.engine.core.as_ref()?;
         core.send(Command::LoadHistoryStart { reply });
         Some(receiver)
     }
 
-    /// Until when notifications are paused (`None`: not paused).
+    /// Until when notifications are paused in every environment (`None`:
+    /// not paused).
     pub(crate) fn paused_until(&self) -> Option<Timestamp> {
         self.paused_until
     }
 
-    /// Whether notifications are paused at `now`.
+    /// Whether notifications are paused in every environment at `now`.
     pub(crate) fn is_paused(&self, now: Timestamp) -> bool {
         self.paused_until.is_some_and(|until| until > now)
     }
 
-    /// Pauses notifications until `until`, or resumes them (`None`). The
-    /// pause shows at once and carries over to the next environment's
-    /// engine.
-    pub(crate) fn pause_notifications(&mut self, until: Option<Timestamp>) {
-        tracing::info!(?until, "notifications paused by the user");
-        self.paused_until = until;
-        self.send(Command::PauseNotifications(until));
+    /// Until when environment `id`'s own pause runs, at `now` (`None`:
+    /// none, or over).
+    pub(crate) fn environment_paused_until(&self, id: &str, now: Timestamp) -> Option<Timestamp> {
+        self.environment_pauses
+            .get(id)
+            .copied()
+            .filter(|until| *until > now)
     }
 
-    /// Gives a new engine the pause that is still running.
+    /// Until when environment `id`'s notifications are paused at `now`:
+    /// the later of the pause of every environment and its own (`None`:
+    /// they notify).
+    pub(crate) fn effective_pause(&self, id: &str, now: Timestamp) -> Option<Timestamp> {
+        let global = self.paused_until.filter(|until| *until > now);
+        let own = self.environment_paused_until(id, now);
+        match (global, own) {
+            (Some(global), Some(own)) => Some(if own.as_unix_seconds() > global.as_unix_seconds() {
+                own
+            } else {
+                global
+            }),
+            (pause, None) | (None, pause) => pause,
+        }
+    }
+
+    /// Until when the active environment's notifications are paused at
+    /// `now` (by the pause of every environment, or its own).
+    pub(crate) fn active_pause(&self, now: Timestamp) -> Option<Timestamp> {
+        self.active_environment_id()
+            .map_or_else(|| self.paused_until.filter(|until| *until > now), |id| {
+                self.effective_pause(id, now)
+            })
+    }
+
+    /// Pauses notifications in every environment until `until`, or
+    /// resumes them (`None`; an environment's own pause still holds). The
+    /// pause shows at once and every engine, also those started later,
+    /// gets it.
+    pub(crate) fn pause_notifications(&mut self, until: Option<Timestamp>) {
+        tracing::info!(?until, "notifications paused by the user (every environment)");
+        self.paused_until = until;
+        self.send_pauses();
+    }
+
+    /// Pauses environment `id`'s notifications until `until`, or resumes
+    /// them (`None`; the pause of every environment still holds). Returns
+    /// whether that changed anything (an unknown environment changes
+    /// nothing).
+    pub(crate) fn pause_environment(&mut self, id: &str, until: Option<Timestamp>) -> bool {
+        if self.config.environment(id).is_none() {
+            return false;
+        }
+        let before = self.environment_pauses.get(id).copied();
+        match until {
+            Some(until) => {
+                self.environment_pauses.insert(id.to_owned(), until);
+            }
+            None => {
+                self.environment_pauses.remove(id);
+            }
+        }
+        if before == until {
+            return false;
+        }
+        tracing::info!(environment = %id, ?until, "an environment's notifications paused by the user");
+        let pause = self.effective_pause(id, Timestamp::now());
+        if let Some(slot) = self.slot(id) {
+            slot.send(Command::PauseNotifications(pause));
+        }
+        true
+    }
+
+    /// Gives every engine the pause in force for its environment.
+    fn send_pauses(&self) {
+        let now = Timestamp::now();
+        for environment in &self.config.environments {
+            if let Some(slot) = self.slot(&environment.id) {
+                slot.send(Command::PauseNotifications(
+                    self.effective_pause(&environment.id, now),
+                ));
+            }
+        }
+    }
+
+    /// Gives a new engine of the active environment the pause still
+    /// running for it.
+    #[cfg(test)]
     pub(super) fn resend_pause(&self) {
-        if let Some(until) = self.paused_until.filter(|until| *until > Timestamp::now()) {
+        let pause = self
+            .active_environment_id()
+            .and_then(|id| self.effective_pause(id, Timestamp::now()));
+        if let Some(until) = pause {
             self.send(Command::PauseNotifications(Some(until)));
         }
+    }
+
+    /// Forgets the pauses that are over at `now`.
+    pub(super) fn expire_pauses(&mut self, now: Timestamp) {
+        if self.paused_until.is_some_and(|until| until <= now) {
+            self.paused_until = None;
+        }
+        self.environment_pauses.retain(|_, until| *until > now);
     }
 
     /// The watch or mute in force on `object` at `now` (an expired mute
@@ -341,6 +432,30 @@ impl AppState {
     pub(crate) fn set_fake_history(&mut self, entries: Vec<LogEntry>) {
         self.fake_history = Some(entries);
     }
+}
+
+/// Merges `records` (a log's recent notifications) into `known`: by id
+/// (read if either says so), newest first, at most `MAX_NOTIFICATIONS`.
+fn merge_notifications(
+    known: &mut std::collections::VecDeque<NotificationRecord>,
+    records: Vec<NotificationRecord>,
+) {
+    for record in records {
+        match known
+            .iter_mut()
+            .find(|existing| existing.intent.id == record.intent.id)
+        {
+            Some(existing) => existing.read |= record.read,
+            None => known.push_back(record),
+        }
+    }
+    known.make_contiguous().sort_by(|a, b| {
+        b.intent
+            .at
+            .as_unix_seconds()
+            .total_cmp(&a.intent.at.as_unix_seconds())
+    });
+    known.truncate(MAX_NOTIFICATIONS);
 }
 
 /// Whether an override is still in force at `now`.

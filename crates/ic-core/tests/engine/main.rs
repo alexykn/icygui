@@ -5,6 +5,8 @@
 //! - `connect`: connecting, the tiered load, reconnects and failures;
 //! - `events`: the live event stream, re-queries and bursts;
 //! - `actions`: every action end to end;
+//! - `background`: engines whose environment isn't on screen, several
+//!   side by side;
 //! - `dashboards`: dashboard evaluation and previews;
 //! - `freshness`: the freshness watchdog, hydration and reconcile;
 //! - `gentle`: failing reloads, `Refresh` presses, hidden objects, refused
@@ -21,6 +23,7 @@
 mod support;
 
 mod actions;
+mod background;
 mod connect;
 mod dashboards;
 mod event_log;

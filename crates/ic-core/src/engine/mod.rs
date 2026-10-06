@@ -291,6 +291,10 @@ pub(crate) struct Engine {
     fetch: FetchQueue,
     revision: u64,
     last_publish: Option<Instant>,
+    /// The environment is on screen (`Command::SetActive`): snapshots go
+    /// out every `publish_interval`, else every
+    /// `background_publish_interval` unless rule inputs wait.
+    active: bool,
     /// The dashboards' state; `None` while an evaluation runs on a
     /// blocking thread.
     dashboards: Option<Box<Dashboards>>,
@@ -424,6 +428,7 @@ impl Engine {
             loads: 0,
             revision: 0,
             last_publish: None,
+            active: true,
             dashboards: Some(Box::new(dashboards)),
             dashboard_results: Arc::default(),
             dashboards_configured: false,
@@ -1564,6 +1569,20 @@ impl Engine {
             Command::MarkNotificationRead(id) => self.event_log.mark_one_read(id),
             Command::LoadHistoryStart { reply } => self.event_log.history_start(reply),
             Command::Hydrate(keys) => self.hydrate(keys),
+            Command::SetActive(active) => self.set_active(active),
+        }
+    }
+
+    /// `Command::SetActive`: an environment on screen gets its snapshots
+    /// at the normal pace, and what changed at once when it comes back.
+    fn set_active(&mut self, active: bool) {
+        if self.active == active {
+            return;
+        }
+        tracing::debug!(environment = %self.spec.environment.name, active, "on screen");
+        self.active = active;
+        if active {
+            self.publish_changes();
         }
     }
 

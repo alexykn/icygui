@@ -6,37 +6,27 @@
 //! connection; starting and stopping engines, the keychain and event logs
 //! are `crate::live::Session`'s, which calls them.
 
-use std::sync::Arc;
-
 use ic_config::Environment;
 
-use super::{AppState, ConnectionStatus, endpoint_of, user_of};
+use super::{AppState, EngineSlot};
 
-/// What saving an edited environment means for the running engine.
+/// What saving an edited environment means for its engine (every
+/// environment runs one).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EnvironmentSaved {
     /// A new environment that became the active one (there was none):
-    /// start an engine for it.
+    /// start its engine.
     AddedActive,
-    /// A new environment; the active one stays.
+    /// A new environment; the active one stays. Start its engine.
     Added,
-    /// The active environment's connection (URL, authentication, TLS or
-    /// password) changed: restart its engine.
+    /// The environment's connection (URL, authentication, TLS or password)
+    /// changed: restart its engine.
     Reconnect,
-    /// The active environment changed in place (name, author): the core
-    /// was told.
+    /// The environment changed in place (name, author): its engine was
+    /// told.
     InPlace,
-    /// An inactive environment changed.
-    Inactive,
     /// Nothing changed.
     Unchanged,
-}
-
-impl EnvironmentSaved {
-    /// Whether an engine has to (re)start for the active environment.
-    pub(crate) fn needs_engine(self) -> bool {
-        matches!(self, Self::AddedActive | Self::Reconnect)
-    }
 }
 
 impl AppState {
@@ -62,13 +52,13 @@ impl AppState {
     /// notification rules. `password_changed` says a new password went to
     /// the keychain (which also needs a reconnect).
     ///
-    /// The first environment becomes the active one.
+    /// The first environment becomes the active one. The caller starts or
+    /// restarts the environment's engine as the answer says.
     pub(crate) fn save_environment(
         &mut self,
         edited: Environment,
         password_changed: bool,
     ) -> EnvironmentSaved {
-        let active = self.config.active_environment.clone();
         let Some(index) = self
             .config
             .environments
@@ -79,7 +69,7 @@ impl AppState {
             tracing::info!(environment = %edited.name, "environment added");
             self.config.environments.push(edited);
             let saved = if self.environment().is_none() {
-                self.config.active_environment = Some(id);
+                self.activate(Some(id));
                 self.reset_connection();
                 EnvironmentSaved::AddedActive
             } else {
@@ -101,74 +91,72 @@ impl AppState {
         }
         tracing::info!(environment = %updated.name, reconnect, "environment changed");
         *current = updated;
-        let is_active = active.as_deref() == Some(edited.id.as_str());
-        if !is_active {
-            self.save_config();
-            EnvironmentSaved::Inactive
-        } else if reconnect {
-            self.save_config();
+        self.save_config();
+        if reconnect {
             EnvironmentSaved::Reconnect
         } else {
-            self.environment_changed();
+            // Its rules carry the name (storm summaries).
+            self.send_environment_to(&edited.id);
             EnvironmentSaved::InPlace
         }
     }
 
-    /// Makes `id` the active environment: the snapshot, permissions and
-    /// notifications of the old one are dropped, and its selected
-    /// dashboard and tabs come back from the UI state. Returns whether it
-    /// changed (an unknown id changes nothing). The caller restarts the
-    /// engine.
-    ///
-    /// Only the active environment is connected (PLAN.md D2), so the old
-    /// one stops notifying: a notice says so, naming it.
+    /// Makes `id` the active environment (ENV-01): its engine has been
+    /// running all along (PLAN.md D2), so its snapshot, connection and
+    /// notifications show at once; the old one's are kept for when it
+    /// comes back, and its engine keeps watching and notifying. The
+    /// selected dashboard and tabs come back from the UI state. Returns
+    /// whether it changed (an unknown id changes nothing).
     pub(crate) fn switch_environment(&mut self, id: &str) -> bool {
         if self.config.environment(id).is_none()
             || self.config.active_environment.as_deref() == Some(id)
         {
             return false;
         }
-        let previous = self
-            .environment()
-            .map(|environment| environment.name.clone());
         self.remember_environment_ui();
-        self.config.active_environment = Some(id.to_owned());
+        self.activate(Some(id.to_owned()));
         tracing::info!(environment = ?self.environment().map(|e| e.name.clone()), "switching environment");
         self.save_config();
-        self.reset_connection();
-        if let Some(previous) = previous {
-            self.report(super::UserNotice::info(
-                format!("{previous} is no longer watched."),
-                Some(format!(
-                    "Only the active environment is connected and notifies: nothing from \
-                     {previous} notifies until you switch back."
-                )),
-            ));
-        }
+        self.forget_window_requests();
+        self.restore_environment_ui();
+        self.announce_active();
+        #[cfg(test)]
+        self.evaluate_fixture_all();
         true
     }
 
-    /// Removes the environment `id` and its UI state. Returns whether it
-    /// was the active one (the first remaining one is active then), or
-    /// `None` for an unknown id. The caller deletes its password and event
-    /// log and, if it was active, restarts the engine.
+    /// Removes the environment `id`, its UI state and its pause. Returns
+    /// whether it was the active one (the first remaining one is active
+    /// then, at once if its engine runs), or `None` for an unknown id. The
+    /// caller stops its engine first ([`AppState::take_core_of`]), then
+    /// deletes its password and event log.
     pub(crate) fn remove_environment(&mut self, id: &str) -> Option<bool> {
         let index = self
             .config
             .environments
             .iter()
             .position(|environment| environment.id == id)?;
+        let was_active = self.config.active_environment.as_deref() == Some(id);
+        if let Some(core) = self.take_core_of(id) {
+            tracing::warn!("the removed environment's engine was still linked; it stops now");
+            drop(core);
+        }
         let removed = self.config.environments.remove(index);
         tracing::info!(environment = %removed.name, "environment removed");
         self.ui.retain_environments(|kept| kept != id);
-        let was_active = self.config.active_environment.as_deref() == Some(id);
+        self.environment_pauses.remove(id);
+        self.parked.remove(id);
         if was_active {
-            self.config.active_environment = self
+            let next = self
                 .config
                 .environments
                 .first()
                 .map(|environment| environment.id.clone());
-            self.reset_connection();
+            self.config.active_environment = None;
+            self.activate(next);
+            self.forget_window_requests();
+            self.restore_environment_ui();
+            self.announce_active();
         }
         self.save_config();
         self.save_ui();
@@ -201,31 +189,33 @@ impl AppState {
         true
     }
 
-    /// Starts over with the active environment's connection (another
-    /// environment, or its engine restarts): no objects, permissions or
-    /// notifications yet, its selected dashboard and tabs from the UI
-    /// state.
+    /// Starts over with the active environment's connection (its engine
+    /// restarts): no objects, permissions or notifications yet, its
+    /// selected dashboard and tabs from the UI state. The link to the
+    /// engine stays (the session replaces it).
     pub(crate) fn reset_connection(&mut self) {
-        self.snapshot = Arc::default();
-        self.permissions = None;
-        self.hydration.forget();
-        self.update_pending = false;
-        self.last_refresh = None;
-        self.notifications.clear();
-        // A pause is app-wide: the next engine gets it (`set_core`).
+        let core = self.engine.core.take();
+        self.engine = match self.environment() {
+            Some(environment) => EngineSlot::starting(environment),
+            None => EngineSlot::idle(),
+        };
+        self.engine.core = core;
+        // The pauses are the app's: the next engine gets them
+        // (`set_core_for`).
+        self.forget_window_requests();
+        self.restore_environment_ui();
+        #[cfg(test)]
+        self.evaluate_fixture_all();
+    }
+
+    /// Forgets what the window asked for in the environment that was on
+    /// screen: a waiting action request and the actions' markers and
+    /// toasts.
+    fn forget_window_requests(&mut self) {
         self.requested = None;
         self.last_request = None;
         self.last_denial = None;
         self.tracker.clear();
-        self.restore_environment_ui();
-        self.connection = match self.environment() {
-            Some(environment) => {
-                ConnectionStatus::starting(&endpoint_of(environment), user_of(environment))
-            }
-            None => ConnectionStatus::idle(),
-        };
-        #[cfg(test)]
-        self.evaluate_fixture_all();
     }
 }
 

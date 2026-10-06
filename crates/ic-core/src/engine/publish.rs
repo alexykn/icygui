@@ -2,7 +2,9 @@
 //! blocking thread, and dashboard previews.
 //!
 //! A snapshot goes out at most every `publish_interval` while things
-//! change, and right away after load tiers and actions. When objects
+//! change (every `background_publish_interval` while the environment
+//! isn't on screen and no rule input waits), and right away after load
+//! tiers and actions. When objects
 //! changed, the dashboards are brought up to date first: the engine cuts
 //! the snapshot (cheap: shared maps), hands it and the dashboards' state to
 //! a blocking thread, and emits it with the results once they are back.
@@ -46,10 +48,16 @@ impl Engine {
     /// publishes).
     pub(super) fn publish_at(&self, now: Instant) -> Option<Instant> {
         self.dashboards.as_ref()?;
-        let changes = self.needs_publish().then(|| {
-            self.last_publish
-                .map_or(now, |last| last + self.tuning.publish_interval)
-        });
+        // Nobody looks at an inactive environment's lists: its snapshots
+        // go out less often, unless notifications wait for them.
+        let interval = if self.active || self.notify.has_pending() {
+            self.tuning.publish_interval
+        } else {
+            self.tuning.background_publish_interval
+        };
+        let changes = self
+            .needs_publish()
+            .then(|| self.last_publish.map_or(now, |last| last + interval));
         let time = self
             .time_dependent
             .then(|| self.time_refreshed + TIME_REFRESH);

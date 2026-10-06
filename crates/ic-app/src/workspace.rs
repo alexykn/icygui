@@ -614,7 +614,7 @@ impl Workspace {
         self.kept_draft = None;
         self.request_waits = false;
         self.state.update(cx, |state, _| {
-            if let Some(request) = state.take_request() {
+            if let Some(request) = state.drop_unbound_request() {
                 tracing::info!(
                     action = request.action.label(),
                     "dropped a request for the previous environment"
@@ -652,8 +652,8 @@ impl Workspace {
         }
         self.request_waits = false;
         let request = self.state.update(cx, |state, _| state.take_request());
-        if let Some(request) = request {
-            self.handle_request(request, window, cx);
+        if let Some((request, environment)) = request {
+            self.handle_request(request, environment, window, cx);
         }
     }
 
@@ -1022,15 +1022,27 @@ impl Workspace {
 
     /// Carries out an action asked for: opens its dialog for the objects
     /// it applies to, asks first (bulk removals, many checks), or sends
-    /// it. When none of the objects qualifies, a toast says why.
+    /// it. When none of the objects qualifies, a toast says why. An action
+    /// for another environment than the one on screen (`environment`; a
+    /// desktop notification's *Acknowledge*, A1) opens its dialog for that
+    /// environment's objects, and the dialog sends it to that
+    /// environment's engine.
     fn handle_request(
         &mut self,
         request: actions::ActionRequest,
+        environment: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let actions::ActionRequest { action, targets } = request;
-        let snapshot = self.state.read(cx).snapshot().clone();
+        let elsewhere = environment.filter(|id| !self.state.read(cx).is_active(id));
+        let snapshot = match &elsewhere {
+            Some(id) => match self.state.read(cx).snapshot_of(id) {
+                Some(snapshot) => snapshot.clone(),
+                None => return,
+            },
+            None => self.state.read(cx).snapshot().clone(),
+        };
         let eligible = match action {
             actions::ObjectAction::Acknowledge
             | actions::ObjectAction::RemoveAcknowledgement
@@ -1060,7 +1072,9 @@ impl Workspace {
         }
         if let Some(kind) = DialogKind::for_action(&action) {
             let state = self.state.clone();
-            let dialog = cx.new(|cx| ActionDialog::new(state, kind, eligible, window, cx));
+            let bound = elsewhere.clone();
+            let dialog =
+                cx.new(|cx| ActionDialog::new(state, kind, eligible, bound, window, cx));
             let events = cx.subscribe_in(
                 &dialog,
                 window,
@@ -1074,6 +1088,18 @@ impl Workspace {
         let Some(spec) = ActionSpec::immediate(&action, eligible.targets.clone()) else {
             return;
         };
+        if let Some(id) = elsewhere {
+            // Only an acknowledgement (a dialog) comes from another
+            // environment; anything else is sent there without asking.
+            let label = spec.kind.label();
+            self.state.update(cx, |state, cx| {
+                if let Err(error) = state.submit_in(&id, spec) {
+                    state.inform(format!("Couldn't {label}"), Some(error));
+                }
+                cx.notify();
+            });
+            return;
+        }
         match confirmation_for(&spec, &snapshot, &eligible) {
             Some(confirmation) => {
                 self.open_modal(OpenModal::Confirm(confirmation), window, cx);

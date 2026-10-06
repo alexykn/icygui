@@ -79,6 +79,14 @@ pub enum Command {
     /// Fetches full details (output, perfdata, links) of lean objects: the
     /// rows on screen and an opened pane. Sent debounced by the UI.
     Hydrate(Vec<ObjectKey>),
+    /// Whether the environment is the one on screen (the app runs an
+    /// engine for every environment; one is active). An engine starts
+    /// active. An inactive one does everything an active one does (the
+    /// event stream, reconciles, rules, the event log, notifications) and
+    /// costs Icinga no more, but publishes snapshots at most every
+    /// `Tuning::background_publish_interval` (2 s) while only check
+    /// results change; becoming active publishes what changed at once.
+    SetActive(bool),
 }
 
 /// What the engine tells the UI. Received from

@@ -19,13 +19,14 @@
 
 pub(crate) mod connection;
 pub(crate) mod editing;
+mod engines;
 pub(crate) mod environments;
 pub(crate) mod hydration;
 mod notifications;
 mod operations;
 pub(crate) mod permissions;
 
-use std::collections::VecDeque;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,7 +44,7 @@ use ic_rules::DashboardRef;
 pub(crate) use self::connection::{
     ConnectionNotice, ConnectionStatus, Health, NoticeAction, NoticeKind, Tone,
 };
-use self::hydration::Hydration;
+pub(crate) use self::engines::EngineSlot;
 #[cfg(test)]
 pub(crate) use self::notifications::GroupPlan;
 pub(crate) use self::notifications::NotificationPlan;
@@ -67,10 +68,9 @@ const MAX_NOTIFICATIONS: usize = 200;
 pub(crate) trait CoreLink: fmt::Debug {
     /// Sends a command; never blocks.
     fn send(&self, command: Command);
-    /// Stops the engine, waiting a bounded time (at quit).
-    fn shutdown(self: Box<Self>);
-    /// Stops the engine on another thread, so switching environments
-    /// never freezes the window. The receiver completes (or is cancelled)
+    /// Stops the engine on another thread (its bounded wait), so replacing
+    /// or deleting an environment never freezes the window and engines
+    /// stop side by side at quit. The receiver completes (or is cancelled)
     /// once it has stopped.
     fn shutdown_in_background(self: Box<Self>) -> futures::channel::oneshot::Receiver<()>;
 }
@@ -78,10 +78,6 @@ pub(crate) trait CoreLink: fmt::Debug {
 impl CoreLink for CoreHandle {
     fn send(&self, command: Command) {
         Self::send(self, command);
-    }
-
-    fn shutdown(self: Box<Self>) {
-        (*self).shutdown();
     }
 
     fn shutdown_in_background(self: Box<Self>) -> futures::channel::oneshot::Receiver<()> {
@@ -181,9 +177,13 @@ pub(crate) enum Hydrated {
 pub(crate) struct AppState {
     config: Config,
     ui: UiState,
-    snapshot: Arc<Snapshot>,
-    connection: ConnectionStatus,
-    permissions: Option<ApiInfo>,
+    /// The active environment's engine: its link, snapshot, connection,
+    /// permissions and notifications (what the window shows).
+    engine: EngineSlot,
+    /// Every other environment's engine (they all run, PLAN.md D2), by
+    /// environment id: swapped with `engine` when the active environment
+    /// changes, so switching is instant.
+    parked: BTreeMap<String, EngineSlot>,
     selected: Option<DashboardRef>,
     /// Objects opened as tabs ("↗ open as tab"), in the order they were
     /// opened.
@@ -194,28 +194,25 @@ pub(crate) struct AppState {
     /// "recorded locally since …").
     started_at: Timestamp,
     mode: Mode,
-    core: Option<Box<dyn CoreLink>>,
     persistence: Option<Persistence>,
     /// The settings changed before persistence was attached (an active
     /// environment picked at start).
     config_dirty: bool,
-    /// The environment changed in place while the engine waited to
-    /// reconnect; the update goes out once it connects.
-    update_pending: bool,
-    hydration: Hydration,
-    last_refresh: Option<Instant>,
-    /// The notification centre's list, newest first: the log's recent
-    /// ones, then every new one.
-    notifications: VecDeque<ic_core::NotificationRecord>,
-    /// Until when notifications are paused, app-wide.
+    /// Until when notifications are paused in every environment (NOTE-04,
+    /// A5: the default pause).
     paused_until: Option<Timestamp>,
+    /// Until when each environment's own notifications are paused (from
+    /// the switcher or the palette), by environment id.
+    environment_pauses: BTreeMap<String, Timestamp>,
     config_problem: Option<ConfigProblem>,
     save_error: Option<String>,
     dismissed_save_error: Option<String>,
     notice: Option<UserNotice>,
     /// An action the user asked for, until the workspace picks it up (and
-    /// opens its dialog, asks, or sends it).
-    requested: Option<ActionRequest>,
+    /// opens its dialog, asks, or sends it), and the environment it is for
+    /// (`None`: the active one; a desktop notification's *Acknowledge*
+    /// goes to its own environment without switching).
+    requested: Option<(ActionRequest, Option<String>)>,
     /// The last action the user asked for (tests read it).
     last_request: Option<ActionRequest>,
     /// Why the last action asked for was refused.
@@ -239,22 +236,17 @@ impl AppState {
         Self {
             config,
             ui,
-            snapshot: Arc::default(),
-            connection: ConnectionStatus::idle(),
-            permissions: None,
+            engine: EngineSlot::idle(),
+            parked: BTreeMap::new(),
             selected: None,
             tabs: Vec::new(),
             active_tab: None,
             started_at: now,
             mode,
-            core: None,
             persistence: None,
             config_dirty: false,
-            update_pending: false,
-            hydration: Hydration::default(),
-            last_refresh: None,
-            notifications: VecDeque::new(),
             paused_until: None,
+            environment_pauses: BTreeMap::new(),
             config_problem: None,
             save_error: None,
             dismissed_save_error: None,
@@ -285,7 +277,7 @@ impl AppState {
     pub(crate) fn demo(config: Config, now: Timestamp) -> Self {
         let mut state = Self::base(config, UiState::default(), Mode::Demo, now);
         state.restore_environment_ui();
-        state.connection = ConnectionStatus::starting(
+        state.engine.connection = ConnectionStatus::starting(
             crate::live::demo::ENDPOINT,
             Some(crate::live::demo::USER.to_owned()),
         );
@@ -323,6 +315,8 @@ impl AppState {
             .map(|environment| environment.id.clone())
             .collect();
         self.ui.retain_environments(|id| known.contains(id));
+        self.environment_pauses.retain(|id, _| known.contains(id));
+        self.parked.clear();
         self.config = config;
         self.config_problem = None;
         self.reset_connection();
@@ -383,33 +377,23 @@ impl AppState {
             .is_none_or(|persistence| persistence.flush(timeout))
     }
 
-    /// Connects the outbound half to a running core.
+    /// Connects the outbound half to the active environment's running
+    /// core (tests; the session uses [`AppState::set_core_for`]).
+    #[cfg(test)]
     pub(crate) fn set_core(&mut self, core: Box<dyn CoreLink>) {
-        self.core = Some(core);
+        self.engine.core = Some(core);
         self.resend_pause();
     }
 
-    /// Disconnects the outbound half (to stop the core).
+    /// Disconnects the outbound half of the active environment (tests).
+    #[cfg(test)]
     pub(crate) fn take_core(&mut self) -> Option<Box<dyn CoreLink>> {
-        self.core.take()
+        self.engine.core.take()
     }
 
-    /// The engine couldn't start.
-    pub(crate) fn engine_failed(&mut self, error: String) {
-        self.connection.on_engine_error(error);
-    }
-
-    /// The engine stopped on its own (its events ended).
-    pub(crate) fn engine_stopped(&mut self, error: String) {
-        self.connection.on_engine_stopped(error);
-    }
-
+    /// Sends `command` to the active environment's engine.
     fn send(&self, command: Command) {
-        if let Some(core) = &self.core {
-            core.send(command);
-        } else {
-            tracing::debug!(?command, "no core running; command dropped");
-        }
+        self.engine.send(command);
     }
 
     /// Whether this is the `--demo` session (or the test fixture): nothing
@@ -424,11 +408,16 @@ impl AppState {
     /// while the demo runs talks to a real Icinga, and its actions are
     /// real, so it isn't.
     pub(crate) fn is_demo_environment(&self) -> bool {
+        self.active_environment_id()
+            .is_some_and(|id| self.is_demo_environment_id(id))
+    }
+
+    /// Whether environment `id` is simulated (see
+    /// [`AppState::is_demo_environment`]).
+    pub(crate) fn is_demo_environment_id(&self, id: &str) -> bool {
         match self.mode {
             Mode::Live => false,
-            Mode::Demo => self
-                .active_environment_id()
-                .is_some_and(crate::live::demo::is_built_in),
+            Mode::Demo => crate::live::demo::is_built_in(id),
             #[cfg(test)]
             Mode::Fixture => true,
         }
@@ -481,18 +470,18 @@ impl AppState {
 
     /// The latest snapshot of the active environment.
     pub(crate) fn snapshot(&self) -> &Arc<Snapshot> {
-        &self.snapshot
+        &self.engine.snapshot
     }
 
     /// Whether no objects have arrived yet (connecting, or the first load
     /// still running).
     pub(crate) fn has_no_objects(&self) -> bool {
-        self.snapshot.hosts.is_empty() && self.snapshot.services.is_empty()
+        self.engine.snapshot.hosts.is_empty() && self.engine.snapshot.services.is_empty()
     }
 
     /// The connection to the active environment.
     pub(crate) fn connection(&self) -> &ConnectionStatus {
-        &self.connection
+        &self.engine.connection
     }
 
     /// The connection problem to show at `now`, if any.
@@ -500,27 +489,27 @@ impl AppState {
         let name = self
             .environment()
             .map_or("the environment", |environment| environment.name.as_str());
-        self.connection.notice(name, now)
+        self.engine.connection.notice(name, now)
     }
 
     /// The API user and its permissions, once connected.
     pub(crate) fn permissions(&self) -> Option<&ApiInfo> {
-        self.permissions.as_ref()
+        self.engine.permissions.as_ref()
     }
 
     /// Why the user may not run `action`, if it may not (ENV-09).
     pub(crate) fn action_denial(&self, action: &ObjectAction) -> Option<String> {
-        permissions::action_denial(self.permissions.as_ref(), action)
+        permissions::action_denial(self.engine.permissions.as_ref(), action)
     }
 
     /// Why the user may not read objects of `kind`, if it may not.
     pub(crate) fn query_denial(&self, kind: ObjectKind) -> Option<String> {
-        permissions::query_denial(self.permissions.as_ref(), kind)
+        permissions::query_denial(self.engine.permissions.as_ref(), kind)
     }
 
     /// Whether the user may read who Icinga notified (`None`: unknown yet).
     pub(crate) fn can_read_notifications(&self) -> Option<bool> {
-        permissions::can_read_notifications(self.permissions.as_ref())
+        permissions::can_read_notifications(self.engine.permissions.as_ref())
     }
 
     /// When this client started recording events.
@@ -590,7 +579,7 @@ impl AppState {
 
     /// A dashboard's evaluated rows and counts.
     pub(crate) fn result(&self, reference: &DashboardRef) -> Option<&DashboardResult> {
-        self.snapshot.dashboards.get(reference)
+        self.engine.snapshot.dashboards.get(reference)
     }
 
     /// The first dashboard (the selected one first) whose rows show `key`.
@@ -669,13 +658,13 @@ impl AppState {
             return;
         };
         if let Some(evaluator) = &self.evaluator {
-            let result = evaluator.evaluate(&self.snapshot, reference, &view);
-            let mut dashboards = (*self.snapshot.dashboards).clone();
+            let result = evaluator.evaluate(&self.engine.snapshot, reference, &view);
+            let mut dashboards = (*self.engine.snapshot.dashboards).clone();
             dashboards.insert(reference.clone(), result);
-            self.snapshot = Arc::new(Snapshot {
-                revision: self.snapshot.revision + 1,
+            self.engine.snapshot = Arc::new(Snapshot {
+                revision: self.engine.snapshot.revision + 1,
                 dashboards: Arc::new(dashboards),
-                ..(*self.snapshot).clone()
+                ..(*self.engine.snapshot).clone()
             });
         }
     }
@@ -687,17 +676,14 @@ impl AppState {
     /// so the update waits until the engine connects by itself.
     fn environment_changed(&mut self) {
         self.save_config();
-        if self.connection.is_waiting() {
-            self.update_pending = true;
-        } else {
-            self.send_environment();
-        }
+        self.send_environment();
     }
 
+    /// Sends the active environment's settings to its engine (or once it
+    /// connects, while it waits to reconnect).
     fn send_environment(&mut self) {
-        self.update_pending = false;
         if let Some(environment) = self.environment().cloned() {
-            self.send(Command::UpdateEnvironment(environment));
+            self.engine.update_environment(&environment);
         }
     }
 
@@ -868,48 +854,43 @@ impl AppState {
                 if let ConnectionState::Connected { node, version, .. } = &state {
                     tracing::info!(node = %node.name, view = %node.view.label(), %version, "connected");
                 }
-                self.connection.on_state(state);
-                if self.update_pending && !self.connection.is_waiting() {
+                self.engine.connection.on_state(state);
+                if self.engine.update_pending && !self.engine.connection.is_waiting() {
                     self.send_environment();
                 }
             }
-            CoreEvent::Permissions(info) => self.permissions = Some(info),
+            CoreEvent::Permissions(info) => self.engine.permissions = Some(info),
             CoreEvent::ActionFinished { id, outcome } => self.action_finished(id, &outcome),
-            CoreEvent::Notification(record) => {
-                if !self
-                    .notifications
-                    .iter()
-                    .any(|known| known.intent.id == record.intent.id)
-                {
-                    self.notifications.push_front(record);
-                    self.notifications.truncate(MAX_NOTIFICATIONS);
-                }
-            }
-            CoreEvent::NotificationsPaused(until) => self.paused_until = until,
+            CoreEvent::Notification(record) => self.engine.push_notification(record),
+            // The pauses are the app's (global and per environment); an
+            // engine saying its pause ended lets the app forget the ones
+            // that are over.
+            CoreEvent::NotificationsPaused(_) => self.expire_pauses(Timestamp::now()),
         }
     }
 
     /// Replaces the snapshot (the core published a new one).
     pub(crate) fn set_snapshot(&mut self, snapshot: Arc<Snapshot>) {
-        self.connection.on_snapshot(&snapshot);
-        self.snapshot = snapshot;
-        self.tracker.settle(&self.snapshot, Instant::now());
+        self.engine.connection.on_snapshot(&snapshot);
+        self.engine.snapshot = snapshot;
+        self.tracker.settle(&self.engine.snapshot, Instant::now());
     }
 
     /// Reloads from Icinga (or connects now after a failure). Ignored while
     /// connecting, and within two seconds of the last one. Returns whether
     /// it was sent.
     pub(crate) fn refresh(&mut self, now: Instant) -> bool {
-        if self.core.is_none() || self.connection.is_starting() {
+        if self.engine.core.is_none() || self.engine.connection.is_starting() {
             return false;
         }
         if self
+            .engine
             .last_refresh
             .is_some_and(|last| now.saturating_duration_since(last) < REFRESH_SPACING)
         {
             return false;
         }
-        self.last_refresh = Some(now);
+        self.engine.last_refresh = Some(now);
         self.send(Command::Refresh);
         true
     }
@@ -918,10 +899,10 @@ impl AppState {
     /// output, an opened pane), skipping those asked for recently. Only
     /// while connected.
     pub(crate) fn hydrate(&mut self, keys: Vec<ObjectKey>, now: Instant) -> Hydrated {
-        if self.core.is_none() || !self.connection.is_connected() {
+        if self.engine.core.is_none() || !self.engine.connection.is_connected() {
             return Hydrated::NotNow;
         }
-        let fresh = self.hydration.take_new(keys, now);
+        let fresh = self.engine.hydration.take_new(keys, now);
         if fresh.is_empty() {
             return Hydrated::Nothing;
         }
@@ -939,10 +920,10 @@ impl AppState {
         let (reply, receiver) = futures::channel::oneshot::channel();
         #[cfg(test)]
         if self.evaluator.is_some() {
-            let _ = reply.send(fixture::preview(&self.snapshot, &view));
+            let _ = reply.send(fixture::preview(&self.engine.snapshot, &view));
             return Some(receiver);
         }
-        let core = self.core.as_ref()?;
+        let core = self.engine.core.as_ref()?;
         core.send(Command::PreviewDashboard { view, reply });
         Some(receiver)
     }
@@ -1035,16 +1016,16 @@ impl AppState {
     pub(crate) fn fixture_with(now: Timestamp, options: FixtureOptions) -> Self {
         let fixture = fixture::build_with(now, options);
         let mut state = Self::base(fixture.config, UiState::default(), Mode::Fixture, now);
-        state.snapshot = Arc::new(fixture.snapshot);
+        state.engine.snapshot = Arc::new(fixture.snapshot);
         state.selected = Some(fixture.selected);
         state.evaluator = Some(fixture.evaluator);
-        state.connection = ConnectionStatus::starting(fixture::ENDPOINT, Some("icygui".into()));
-        state.connection.on_state(ConnectionState::Connected {
+        state.engine.connection = ConnectionStatus::starting(fixture::ENDPOINT, Some("icygui".into()));
+        state.engine.connection.on_state(ConnectionState::Connected {
             node: connection::full_node(fixture::ENDPOINT),
             version: "r2.15.6-1".to_owned(),
             since: now,
         });
-        state.connection.last_event_at = Some(now);
+        state.engine.connection.last_event_at = Some(now);
         state
     }
 
@@ -1061,17 +1042,17 @@ impl AppState {
     /// Replaces the connection status.
     #[cfg(target_os = "linux")]
     pub(crate) fn set_connection(&mut self, connection: ConnectionStatus) {
-        self.connection = connection;
+        self.engine.connection = connection;
     }
 
     /// Replaces the API user's permissions.
     pub(crate) fn set_permissions(&mut self, info: Option<ApiInfo>) {
-        self.permissions = info;
+        self.engine.permissions = info;
     }
 
     /// The connection drops (the engine waits to reconnect).
     pub(crate) fn set_connection_lost(&mut self) {
-        self.connection.on_state(ConnectionState::Reconnecting {
+        self.engine.connection.on_state(ConnectionState::Reconnecting {
             error: "connect: connection refused".to_owned(),
             attempt: 1,
             retry_at: Timestamp::now(),

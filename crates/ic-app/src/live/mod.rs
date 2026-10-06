@@ -1,26 +1,32 @@
-//! The bridge between `ic-core` and the UI: starts the engine for the
-//! active environment, pumps its events into [`AppState`] without blocking
-//! the UI thread, posts its notifications, saves settings and UI state off
-//! the UI thread, and stops everything cleanly when the app quits.
+//! The bridge between `ic-core` and the UI: starts an engine for every
+//! saved environment, pumps their events into [`AppState`] without
+//! blocking the UI thread, posts their notifications, saves settings and
+//! UI state off the UI thread, and stops everything cleanly when the app
+//! quits.
 //!
 //! - Live: the settings file and the UI state from `ic_config::Paths`,
 //!   passwords from the OS keychain (`ic_platform::KeyringSecrets`),
 //!   notifications through GPUI ([`notifier`]), the system clock.
-//! - `--demo` ([`demo`]): the same engine against an in-process
-//!   `ic_mock::MockServer`; nothing is saved.
+//! - `--demo` ([`demo`]): the same engines against in-process
+//!   `ic_mock::MockServer`s; nothing is saved.
 //!
-//! The engine runs on its own thread with its own tokio runtime; its
+//! Every engine runs on its own thread with its own tokio runtime; its
 //! events arrive on an unbounded channel that a GPUI task drains in
-//! batches (one re-render per batch, however many snapshots queued up).
+//! batches (one re-render per batch, however many snapshots queued up),
+//! tagged with the engine's environment.
 //!
-//! One environment is active at a time (PLAN.md D2). Switching to another,
-//! changing the active one's connection, trusting its certificate or
-//! deleting it replaces the engine: the old one stops on another thread
-//! (the window never waits for it), then the new one starts, so there is
-//! never more than one engine (and one event stream to an Icinga). The
-//! environment editor's passwords go to the keychain off the UI thread;
-//! deleting an environment deletes its password and its event log
-//! (ENV-03) once its engine has stopped.
+//! Every saved environment runs its own engine (PLAN.md D2), from the
+//! start (also with `--background`) until it is deleted: event stream,
+//! rules, event log and notifications, whichever environment is on screen.
+//! The active one drives the window; the others are told they aren't on
+//! screen and publish less often, and cost Icinga no more than the active
+//! one (one stream and one lean load per environment). Switching only
+//! swaps what the window shows. Changing an environment's connection or
+//! trusting its certificate replaces its engine: the old one stops on
+//! another thread (the window never waits for it), then the new one
+//! starts. The environment editor's passwords go to the keychain off the
+//! UI thread; deleting an environment stops its engine, then deletes its
+//! password and its event log (ENV-03).
 
 #[cfg(all(target_os = "linux", not(test)))]
 mod dbus;
@@ -62,6 +68,9 @@ const MAX_EVENTS_PER_BATCH: usize = 512;
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How many notifications are remembered for their click.
 const MAX_TARGETS: usize = 256;
+/// How long quitting waits for the engines (each stops within 5 s, side
+/// by side).
+const ENGINES_STOP_TIMEOUT: Duration = Duration::from_secs(7);
 
 /// How the app was started.
 #[derive(Clone)]
@@ -117,8 +126,9 @@ pub(crate) struct Session {
     intents: UnboundedSender<Raised>,
     /// Where passwords are: the keychain, or the demo's memory.
     secrets: Arc<dyn SecretStore>,
-    pump: Option<Task<()>>,
-    /// The demo's servers by environment id, started when first shown.
+    /// Every environment's engine run, by environment id.
+    engines: HashMap<String, EngineRun>,
+    /// The demo's servers by environment id.
     demo: HashMap<String, DemoServer>,
     /// The demo's passwords (servers' and the editor's), in memory.
     demo_secrets: Arc<DemoSecrets>,
@@ -128,14 +138,6 @@ pub(crate) struct Session {
     desktop: Box<dyn Desktop>,
     /// Recent notifications' tags and objects, for their clicks.
     targets: VecDeque<Target>,
-    /// An engine is stopping (or a removed environment being cleaned up);
-    /// the next engine starts when this finishes.
-    stopping: Option<Task<()>>,
-    /// Run once the engine stopping now has stopped.
-    cleanups: Vec<Cleanup>,
-    /// Counts engine replacements, so an engine start that was waiting
-    /// (for a demo server) can tell it's no longer wanted.
-    generation: u64,
     /// The demo servers' controls, for tests that change the simulated
     /// Icinga.
     #[cfg(all(test, target_os = "linux"))]
@@ -145,6 +147,22 @@ pub(crate) struct Session {
     shown: desktop::RecordingDesktop,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// One environment's engine as the session runs it.
+#[derive(Default)]
+struct EngineRun {
+    /// Drains the engine's events into the state.
+    pump: Option<Task<()>>,
+    /// Counts the engine's replacements, so a start that was waiting (for
+    /// a demo server, for the log's notifications) can tell it's no
+    /// longer wanted.
+    generation: u64,
+    /// The engine stopping now; the next one starts when it has.
+    stopping: Option<Task<()>>,
+    /// Run once the engine stopping now has stopped (a deleted
+    /// environment's password and event log).
+    cleanups: Vec<Cleanup>,
 }
 
 /// The global handle on the session.
@@ -230,16 +248,13 @@ impl Session {
             launch,
             intents,
             secrets,
-            pump: None,
+            engines: HashMap::new(),
             demo: HashMap::new(),
             demo_secrets,
             demo_dir: None,
             pending_open,
             desktop,
             targets: VecDeque::new(),
-            stopping: None,
-            cleanups: Vec::new(),
-            generation: 0,
             #[cfg(all(test, target_os = "linux"))]
             demo_controls: HashMap::new(),
             #[cfg(all(test, target_os = "linux"))]
@@ -305,20 +320,24 @@ impl Session {
         })
     }
 
-    /// Shows an engine's intent on the desktop (NOTE-01): with
-    /// *Acknowledge* for a problem the API user may acknowledge, and
-    /// *Open*. It belongs to the environment whose engine raised it, which
-    /// need not be the active one by now (an engine being replaced, or an
-    /// intent still queued when the user switched): its clicks are checked
-    /// against that environment, and it offers *Acknowledge* only while
-    /// that environment is active (the permissions known are the active
-    /// environment's).
+    /// Shows an engine's intent on the desktop (NOTE-01, A1): from every
+    /// environment, whichever is on screen. With more than one environment
+    /// the title starts with the environment's name. *Acknowledge* is
+    /// offered for a problem that environment's API user may acknowledge;
+    /// it goes to that environment's engine, whichever is active by then.
     fn post(&mut self, raised: &Raised, cx: &mut Context<Self>) {
         let intent = &raised.intent;
-        let acknowledge = {
+        let (acknowledge, prefix) = {
             let state = self.state.read(cx);
-            state.active_environment_id() == Some(raised.environment.as_str())
-                && state.action_denial(&ObjectAction::Acknowledge).is_none()
+            let Some(environment) = state.environment_by_id(&raised.environment) else {
+                tracing::debug!(id = %intent.id, "a notification of a removed environment was dropped");
+                return;
+            };
+            let acknowledge = state
+                .action_denial_in(&raised.environment, &ObjectAction::Acknowledge)
+                .is_none();
+            let prefix = (state.environments().len() > 1).then(|| environment.name.clone());
+            (acknowledge, prefix)
         };
         if let Some(object) = &intent.object {
             self.targets.push_front(Target {
@@ -328,7 +347,11 @@ impl Session {
             });
             self.targets.truncate(MAX_TARGETS);
         }
-        self.desktop.show(desktop::posted(intent, acknowledge), cx);
+        let mut posted = desktop::posted(intent, acknowledge);
+        if let Some(name) = prefix {
+            posted.title = desktop::prefixed_title(&posted.title, &name);
+        }
+        self.desktop.show(posted, cx);
     }
 
     /// Carries out clicks on desktop notifications, on the UI thread.
@@ -345,9 +368,12 @@ impl Session {
         })
     }
 
-    /// A desktop notification was clicked (NOTE-01): its object opens (the
-    /// window comes back if it was closed) and the notification counts as
-    /// read; *Acknowledge* also opens the acknowledge dialog for it.
+    /// A desktop notification was clicked (NOTE-01, A1): it counts as read
+    /// and the window comes back (opened again if it was closed). A click
+    /// on it or *Open* switches to its environment and shows the object;
+    /// *Acknowledge* opens the acknowledge dialog for the object in its own
+    /// environment, without switching: the acknowledgement goes to that
+    /// environment's engine, never to the one on screen.
     pub(crate) fn notification_clicked(&mut self, response: &Response, cx: &mut Context<Self>) {
         let Some(target) = self
             .targets
@@ -360,21 +386,55 @@ impl Session {
             return;
         };
         tracing::info!(object = %target.object, action = ?response.action, "notification clicked");
-        let from_active = self.state.update(cx, |state, cx| {
-            let from_active = state.active_environment_id() == Some(target.environment.as_str());
-            if from_active && state.mark_notification_read(&target.tag) {
-                cx.notify();
-            }
-            from_active
-        });
-        if !from_active {
-            // Nothing happens in the active environment: an
-            // acknowledgement for one Icinga must never go to another.
+        let (exists, active) = {
+            let state = self.state.read(cx);
+            (
+                state.environment_by_id(&target.environment).is_some(),
+                state.is_active(&target.environment),
+            )
+        };
+        if !exists {
             window::show(cx);
             self.state.update(cx, |state, cx| {
-                let (title, detail) = other_environment_notice(state, &target);
-                state.inform(title, Some(detail));
+                state.inform(
+                    "That notification is from a removed environment",
+                    Some(format!(
+                        "It was about {}.",
+                        crate::operate::forms::describe_objects(std::slice::from_ref(
+                            &target.object
+                        ))
+                    )),
+                );
                 cx.notify();
+            });
+            return;
+        }
+        self.state.update(cx, |state, cx| {
+            if state.mark_notification_read_in(&target.environment, &target.tag) {
+                cx.notify();
+            }
+        });
+        let acknowledge = ActionRequest {
+            action: ObjectAction::Acknowledge,
+            targets: vec![target.object.clone()],
+        };
+        if response.action.as_deref() == Some(ACKNOWLEDGE_ACTION) && !active {
+            window::show(cx);
+            self.state.update(cx, |state, cx| {
+                // A refusal (no permission) shows as a toast.
+                let _ = state.request_in(&target.environment, acknowledge);
+                cx.notify();
+            });
+            return;
+        }
+        if !active {
+            // The object shows once the window followed the switch.
+            self.switch_environment(&target.environment, cx);
+            let object = target.object.clone();
+            cx.defer(move |cx| {
+                if !open_object(&object, cx) {
+                    tracing::warn!(%object, "no window to show the notification's object in");
+                }
             });
             return;
         }
@@ -385,10 +445,7 @@ impl Session {
         if response.action.as_deref() == Some(ACKNOWLEDGE_ACTION) {
             self.state.update(cx, |state, cx| {
                 // A refusal (no permission) shows as a toast.
-                let _ = state.request(ActionRequest {
-                    action: ObjectAction::Acknowledge,
-                    targets: vec![target.object.clone()],
-                });
+                let _ = state.request(acknowledge);
                 cx.notify();
             });
         }
@@ -400,45 +457,62 @@ impl Session {
         self.shown.shown.borrow().clone()
     }
 
-    /// Connects: starts the engine for the active environment (for the
-    /// demo's environments, once their server runs). Without an
+    /// Starts the engine of every environment that has none yet (at start,
+    /// also with `--background`, and once the settings were recovered).
+    /// The demo's environments start once their server runs. Without an
     /// environment (or while the settings can't be read) nothing starts.
     pub(crate) fn start(&mut self, cx: &mut Context<Self>) {
-        match self.launch.clone() {
-            Launch::Live { paths, .. } => {
-                let secrets = self.secrets.clone();
-                self.start_core(paths.data_dir, secrets, cx);
-            }
-            Launch::Demo { options } => {
-                let Some(id) = self
-                    .state
-                    .read(cx)
-                    .active_environment_id()
-                    .map(str::to_owned)
-                else {
-                    return;
-                };
-                match demo::options_for(&id, &options) {
-                    Some(options) => self.start_demo(&id, &options, cx),
-                    // Added in the editor while the demo runs: a real one.
-                    None => match self.demo_data_dir() {
-                        Ok(data_dir) => {
-                            let secrets = self.secrets.clone();
-                            self.start_core(data_dir, secrets, cx);
-                        }
-                        Err(error) => self.engine_failed(error, cx),
-                    },
-                }
+        let ids: Vec<String> = self
+            .state
+            .read(cx)
+            .environments()
+            .iter()
+            .map(|environment| environment.id.clone())
+            .collect();
+        if ids.is_empty() {
+            tracing::info!("no environment configured; nothing to connect to");
+        }
+        for id in ids {
+            if !self.engines.contains_key(&id) {
+                self.start_environment(&id, cx);
             }
         }
     }
 
-    /// Reports that the engine couldn't start.
-    fn engine_failed(&self, error: String, cx: &mut Context<Self>) {
+    /// Starts environment `id`'s engine (for the demo's environments, once
+    /// their server runs).
+    fn start_environment(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.engines.entry(id.to_owned()).or_default();
+        match self.launch.clone() {
+            Launch::Live { paths, .. } => {
+                let secrets = self.secrets.clone();
+                self.start_core(id, paths.data_dir, secrets, cx);
+            }
+            Launch::Demo { options } => match demo::options_for(id, &options) {
+                Some(options) => self.start_demo(id, &options, cx),
+                // Added in the editor while the demo runs: a real one.
+                None => match self.demo_data_dir() {
+                    Ok(data_dir) => {
+                        let secrets = self.secrets.clone();
+                        self.start_core(id, data_dir, secrets, cx);
+                    }
+                    Err(error) => self.engine_failed(id, error, cx),
+                },
+            },
+        }
+    }
+
+    /// Reports that environment `id`'s engine couldn't start.
+    fn engine_failed(&self, id: &str, error: String, cx: &mut Context<Self>) {
         self.state.update(cx, |state, cx| {
-            state.engine_failed(error);
+            state.engine_failed_for(id, error);
             cx.notify();
         });
+    }
+
+    /// The current generation of environment `id`'s engine.
+    fn generation(&self, id: &str) -> u64 {
+        self.engines.get(id).map_or(0, |run| run.generation)
     }
 
     /// The demo's temporary directory for event logs, created on first use.
@@ -459,22 +533,24 @@ impl Session {
     /// engine.
     fn start_demo(&mut self, id: &str, options: &DemoOptions, cx: &mut Context<Self>) {
         if self.demo.get(id).is_some_and(DemoServer::is_up) {
-            self.start_demo_core(cx);
+            self.start_demo_core(id, cx);
             return;
         }
         let (server, endpoint) = match demo::start(options) {
             Ok(started) => started,
             Err(error) => {
-                self.engine_failed(format!("the demo server couldn't start: {error}"), cx);
+                self.engine_failed(id, format!("the demo server couldn't start: {error}"), cx);
                 return;
             }
         };
         self.demo.insert(id.to_owned(), server);
-        let generation = self.generation;
+        let generation = self.generation(id);
         let id = id.to_owned();
         cx.spawn(async move |this, cx| {
             let endpoint = endpoint.await;
             let _ = this.update(cx, |session, cx| {
+                let still_wanted = session.generation(&id) == generation
+                    && session.state.read(cx).environment_by_id(&id).is_some();
                 let endpoint = match endpoint {
                     Ok(Ok((endpoint, control))) => {
                         session.keep_demo_control(&id, control);
@@ -482,8 +558,9 @@ impl Session {
                     }
                     Ok(Err(error)) => {
                         session.demo.remove(&id);
-                        if session.generation == generation {
+                        if still_wanted {
                             session.engine_failed(
+                                &id,
                                 format!("the demo server couldn't start: {error}"),
                                 cx,
                             );
@@ -501,46 +578,49 @@ impl Session {
                 session.state.update(cx, |state, _| {
                     state.set_demo_servers(&id, &targets);
                 });
-                // Another environment may have been chosen meanwhile.
-                let still_wanted = session.generation == generation
-                    && session.state.read(cx).active_environment_id() == Some(id.as_str());
+                // The environment may have been deleted, or its engine
+                // replaced, meanwhile.
                 if still_wanted {
-                    session.start_demo_core(cx);
+                    session.start_demo_core(&id, cx);
                 }
             });
         })
         .detach();
     }
 
-    /// Starts the engine for the active demo environment, whose server
-    /// runs.
-    fn start_demo_core(&mut self, cx: &mut Context<Self>) {
+    /// Starts the engine for demo environment `id`, whose server runs.
+    fn start_demo_core(&mut self, id: &str, cx: &mut Context<Self>) {
         match self.demo_data_dir() {
             Ok(data_dir) => {
                 let secrets = self.secrets.clone();
-                self.start_core(data_dir, secrets, cx);
+                self.start_core(id, data_dir, secrets, cx);
             }
-            Err(error) => self.engine_failed(error, cx),
+            Err(error) => self.engine_failed(id, error, cx),
         }
     }
 
-    /// Starts the engine for the active environment and the event pump.
+    /// Starts environment `id`'s engine and its event pump.
     fn start_core(
         &mut self,
+        id: &str,
         data_dir: PathBuf,
         secrets: Arc<dyn SecretStore>,
         cx: &mut Context<Self>,
     ) {
         let (environment, general) = {
             let state = self.state.read(cx);
-            (state.environment().cloned(), state.config().general.clone())
+            (
+                state.environment_by_id(id).cloned(),
+                state.config().general.clone(),
+            )
         };
         let Some(environment) = environment else {
-            tracing::info!("no environment configured; nothing to connect to");
+            tracing::debug!(environment = %id, "removed before its engine started");
+            self.engines.remove(id);
             return;
         };
         let name = environment.name.clone();
-        let notifier = self.engine_notifier(&environment.id);
+        let notifier = self.engine_notifier(id);
         let spec = EnvironmentSpec {
             environment,
             general,
@@ -555,26 +635,27 @@ impl Session {
             Ok(mut handle) => {
                 let events = handle.take_events();
                 let recent = self.state.update(cx, |state, cx| {
-                    state.set_core(Box::new(handle));
+                    state.set_core_for(id, Box::new(handle));
                     cx.notify();
-                    state.request_notifications()
+                    state.request_notifications_of(id)
                 });
                 if let Some(recent) = recent {
-                    // The notification centre starts with the log's, unless
-                    // this engine was replaced meanwhile (its notifications
-                    // are another environment's, or already reloaded).
-                    let generation = self.generation;
+                    // The notification centre starts with the log's,
+                    // unless this engine was replaced meanwhile (its
+                    // notifications are reloaded by the next one).
+                    let generation = self.generation(id);
+                    let id = id.to_owned();
                     cx.spawn(async move |this, cx| {
                         if let Ok(records) = recent.await {
                             let _ = this.update(cx, |session, cx| {
-                                if session.generation != generation {
+                                if session.generation(&id) != generation {
                                     tracing::debug!(
                                         "a replaced engine's notifications were dropped"
                                     );
                                     return;
                                 }
                                 session.state.update(cx, |state, cx| {
-                                    state.load_notifications(records);
+                                    state.load_notifications_of(&id, records);
                                     cx.notify();
                                 });
                             });
@@ -583,16 +664,14 @@ impl Session {
                     .detach();
                 }
                 if let Some(events) = events {
-                    self.pump = Some(self.spawn_pump(events, cx));
+                    let pump = self.spawn_pump(id, events, cx);
+                    self.engines.entry(id.to_owned()).or_default().pump = Some(pump);
                 }
                 tracing::info!(environment = %name, "engine started");
             }
             Err(error) => {
-                tracing::error!(%error, "the engine couldn't start");
-                self.state.update(cx, |state, cx| {
-                    state.engine_failed(error.to_string());
-                    cx.notify();
-                });
+                tracing::error!(%error, environment = %name, "the engine couldn't start");
+                self.engine_failed(id, error.to_string(), cx);
             }
         }
     }
@@ -603,13 +682,16 @@ impl Session {
         GpuiNotifier::new(self.intents.clone(), id)
     }
 
-    /// Drains the engine's events into the state, a batch per re-render.
+    /// Drains environment `id`'s engine's events into the state, a batch
+    /// per re-render.
     fn spawn_pump(
         &self,
+        id: &str,
         mut events: UnboundedReceiver<CoreEvent>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         let state = self.state.downgrade();
+        let id = id.to_owned();
         cx.spawn(async move |this, cx| {
             while let Some(first) = events.next().await {
                 let mut batch = vec![first];
@@ -621,30 +703,33 @@ impl Session {
                 }
                 let applied = state.update(cx, |state, cx| {
                     for event in batch {
-                        state.apply(event);
+                        state.apply_from(&id, event);
                     }
                     cx.notify();
                 });
                 if applied.is_err() {
                     return;
                 }
-                let _ = this.update(cx, Self::after_events);
+                let _ = this.update(cx, |session, cx| session.after_events(&id, cx));
             }
             // The session drops the pump before it stops an engine, so the
             // stream only ends here when the engine died (a panic on its
             // thread): say so instead of showing stale data as live.
-            tracing::error!("the engine's event stream ended: the engine stopped on its own");
-            let _ = this.update(cx, Self::engine_stopped_on_its_own);
+            tracing::error!(environment = %id, "the engine's event stream ended: the engine stopped on its own");
+            let _ = this.update(cx, |session, cx| session.engine_stopped_on_its_own(&id, cx));
         })
     }
 
-    /// The engine died: its link goes (commands to it would vanish), the
-    /// footer and a banner say so and offer a restart (ENV-07).
-    fn engine_stopped_on_its_own(&mut self, cx: &mut Context<Self>) {
-        self.pump = None;
+    /// Environment `id`'s engine died: its link goes (commands to it would
+    /// vanish), the footer and a banner say so and offer a restart
+    /// (ENV-07).
+    fn engine_stopped_on_its_own(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(run) = self.engines.get_mut(id) {
+            run.pump = None;
+        }
         self.state.update(cx, |state, cx| {
-            drop(state.take_core());
-            state.engine_stopped(
+            state.engine_stopped_for(
+                id,
                 "Icinga's data is no longer updated. The log file has the details; \
                  Restart starts a new engine."
                     .to_owned(),
@@ -656,52 +741,97 @@ impl Session {
     /// Starts a new engine for the active environment (the banner's
     /// "Restart" after the engine stopped or couldn't start).
     pub(crate) fn restart_engine(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .state
+            .read(cx)
+            .active_environment_id()
+            .map(str::to_owned)
+        else {
+            return;
+        };
         tracing::info!("restarting the engine");
-        self.state.update(cx, |state, cx| {
-            state.reset_connection();
-            cx.notify();
-        });
-        self.replace_engine(None, cx);
+        self.replace_engine(&id, None, cx);
     }
 
-    /// Ends the event stream as an engine that died would (tests).
+    /// Ends the active environment's event stream as an engine that died
+    /// would (tests).
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn end_event_stream(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .state
+            .read(cx)
+            .active_environment_id()
+            .map(str::to_owned)
+        else {
+            return;
+        };
         let (sender, events) = unbounded();
         drop(sender);
-        self.pump = Some(self.spawn_pump(events, cx));
+        let pump = self.spawn_pump(&id, events, cx);
+        self.engines.entry(id).or_default().pump = Some(pump);
     }
 
-    /// Replaces the engine: the running one stops on another thread, the
-    /// cleanups run, then an engine starts for the (now) active
-    /// environment. Requests while one runs fold into it.
-    fn replace_engine(&mut self, cleanup: Option<Cleanup>, cx: &mut Context<Self>) {
-        self.generation += 1;
-        self.pump = None;
-        self.cleanups.extend(cleanup);
-        let core = self.state.update(cx, |state, _| state.take_core());
+    /// Replaces environment `id`'s engine: the running one stops on
+    /// another thread, the cleanups run, then an engine starts for the
+    /// environment (unless it was deleted). Requests while one stops fold
+    /// into it. The environment's slot starts over at once.
+    fn replace_engine(&mut self, id: &str, cleanup: Option<Cleanup>, cx: &mut Context<Self>) {
+        let core = self.state.update(cx, |state, cx| {
+            let core = state.take_core_of(id);
+            state.reset_environment(id);
+            cx.notify();
+            core
+        });
+        self.stop_engine(id, core, cleanup, cx);
+    }
+
+    /// Stops environment `id`'s engine (`core`, taken from the state) on
+    /// another thread; then the cleanups run and, if the environment still
+    /// exists, its next engine starts.
+    fn stop_engine(
+        &mut self,
+        id: &str,
+        core: Option<Box<dyn crate::app_state::CoreLink>>,
+        cleanup: Option<Cleanup>,
+        cx: &mut Context<Self>,
+    ) {
+        let run = self.engines.entry(id.to_owned()).or_default();
+        run.generation += 1;
+        run.pump = None;
+        run.cleanups.extend(cleanup);
         match core {
             Some(core) => {
                 let stopped = core.shutdown_in_background();
-                self.stopping = Some(cx.spawn(async move |this, cx| {
+                let id = id.to_owned();
+                run.stopping = Some(cx.spawn(async move |this, cx| {
                     // Cancelled means it stopped without saying so.
                     let _ = stopped.await;
-                    let _ = this.update(cx, Self::engine_stopped);
+                    let _ = this.update(cx, |session, cx| session.engine_stopped(&id, cx));
                 }));
             }
             // The engine stopping now: the next one starts after it.
-            None if self.stopping.is_some() => {}
-            None => self.engine_stopped(cx),
+            None if run.stopping.is_some() => {}
+            None => self.engine_stopped(id, cx),
         }
     }
 
-    /// The old engine has stopped: run the cleanups, then start the next
-    /// engine.
-    fn engine_stopped(&mut self, cx: &mut Context<Self>) {
-        self.stopping = None;
-        let cleanups = std::mem::take(&mut self.cleanups);
+    /// Environment `id`'s old engine has stopped: run the cleanups, then
+    /// start its next engine (unless the environment was deleted).
+    fn engine_stopped(&mut self, id: &str, cx: &mut Context<Self>) {
+        let cleanups = match self.engines.get_mut(id) {
+            Some(run) => {
+                run.stopping = None;
+                std::mem::take(&mut run.cleanups)
+            }
+            None => Vec::new(),
+        };
         if cleanups.is_empty() {
-            self.start(cx);
+            if self.state.read(cx).environment_by_id(id).is_some() {
+                self.start_environment(id, cx);
+            } else {
+                self.engines.remove(id);
+                self.demo.remove(id);
+            }
             return;
         }
         let work = cx.background_executor().spawn(async move {
@@ -710,13 +840,19 @@ impl Session {
                 .flat_map(|cleanup| cleanup())
                 .collect::<Vec<_>>()
         });
-        self.stopping = Some(cx.spawn(async move |this, cx| {
+        let stopped = id.to_owned();
+        let task = cx.spawn(async move |this, cx| {
             let problems = work.await;
             let _ = this.update(cx, |session, cx| {
                 session.report_leftovers(&problems, cx);
-                session.engine_stopped(cx);
+                session.engine_stopped(&stopped, cx);
             });
-        }));
+        });
+        if let Some(run) = self.engines.get_mut(id) {
+            run.stopping = Some(task);
+        } else {
+            task.detach();
+        }
     }
 
     /// Tells the user what a cleanup couldn't remove (ENV-03: a password
@@ -734,24 +870,25 @@ impl Session {
         });
     }
 
-    /// Makes `id` the active environment and connects to it (ENV-01).
-    /// Returns whether it switched.
+    /// Makes `id` the active environment (ENV-01): at once, since its
+    /// engine runs already (one that never started, starts). Returns
+    /// whether it switched.
     pub(crate) fn switch_environment(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
         let switched = self.state.update(cx, |state, cx| {
             let switched = state.switch_environment(id);
             cx.notify();
             switched
         });
-        if switched {
-            self.replace_engine(None, cx);
+        if switched && !self.engines.contains_key(id) {
+            self.start_environment(id, cx);
         }
         switched
     }
 
     /// Saves an environment from the editor (ENV-02): its password (if one
     /// was typed) into the keychain first, off the UI thread, then the
-    /// settings; the engine restarts if the active environment's
-    /// connection changed, or starts for the first environment.
+    /// settings; a new environment's engine starts, and one whose
+    /// connection changed restarts.
     pub(crate) fn save_environment(
         &mut self,
         environment: Environment,
@@ -779,6 +916,7 @@ impl Session {
             let mut leftovers = Vec::new();
             if !matches!(environment.auth, AuthConfig::Basic { .. }) {
                 let label = account.clone();
+                let account = account.clone();
                 let removed = cx
                     .background_executor()
                     .spawn(async move { secrets.delete(&account) })
@@ -791,14 +929,15 @@ impl Session {
                 session.report_leftovers(&leftovers, cx);
                 let saved = session.state.update(cx, |state, cx| {
                     let saved = state.save_environment(environment, password_changed);
-                    if saved == EnvironmentSaved::Reconnect {
-                        state.reset_connection();
-                    }
                     cx.notify();
                     saved
                 });
-                if saved.needs_engine() {
-                    session.replace_engine(None, cx);
+                match saved {
+                    EnvironmentSaved::AddedActive | EnvironmentSaved::Added => {
+                        session.start_environment(&account, cx);
+                    }
+                    EnvironmentSaved::Reconnect => session.replace_engine(&account, None, cx),
+                    EnvironmentSaved::InPlace | EnvironmentSaved::Unchanged => {}
                 }
                 saved
             })
@@ -807,15 +946,17 @@ impl Session {
     }
 
     /// Deletes an environment (ENV-03): its settings and dashboards, then
-    /// (once its engine stopped, if it was the active one) its password
-    /// and its event log. The next environment, if any, becomes active.
+    /// (once its engine stopped) its password and its event log. The next
+    /// environment, if any, becomes active when it was the active one.
     /// Returns whether it existed.
     pub(crate) fn delete_environment(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
-        let Some(was_active) = self.state.update(cx, |state, cx| {
+        let removed = self.state.update(cx, |state, cx| {
+            let core = state.take_core_of(id);
             let removed = state.remove_environment(id);
             cx.notify();
-            removed
-        }) else {
+            removed.map(|_| core)
+        });
+        let Some(core) = removed else {
             return false;
         };
         let secrets = self.secrets.clone();
@@ -837,22 +978,16 @@ impl Session {
             }
             problems
         });
-        if was_active {
-            self.replace_engine(Some(cleanup), cx);
-        } else {
-            let work = cx.background_executor().spawn(async move { cleanup() });
-            cx.spawn(async move |this, cx| {
-                let problems = work.await;
-                let _ = this.update(cx, |session, cx| session.report_leftovers(&problems, cx));
-            })
-            .detach();
-        }
+        self.stop_engine(id, core, Some(cleanup), cx);
+        // The environment shown now may never have started (its engine
+        // failed): every remaining one runs.
+        self.start(cx);
         true
     }
 
     /// Trusts `fingerprint` for environment `id`'s URL `url` (ENV-05,
-    /// trust on first use; pins are per URL): pins it and reconnects if
-    /// it's the active environment.
+    /// trust on first use; pins are per URL): pins it and restarts that
+    /// environment's engine.
     pub(crate) fn trust_certificate(
         &mut self,
         id: &str,
@@ -860,17 +995,13 @@ impl Session {
         fingerprint: &str,
         cx: &mut Context<Self>,
     ) {
-        let reconnect = self.state.update(cx, |state, cx| {
+        let pinned = self.state.update(cx, |state, cx| {
             let pinned = state.pin_certificate(id, url, fingerprint);
-            let active = state.active_environment_id() == Some(id);
-            if pinned && active {
-                state.reset_connection();
-            }
             cx.notify();
-            pinned && active
+            pinned
         });
-        if reconnect {
-            self.replace_engine(None, cx);
+        if pinned {
+            self.replace_engine(id, None, cx);
         }
     }
 
@@ -943,13 +1074,14 @@ impl Session {
     }
 
     /// Carries out what the development switches asked to open once the
-    /// object shows.
-    fn after_events(&mut self, cx: &mut Context<Self>) {
+    /// object shows (after events of environment `id`; only the active
+    /// one's count).
+    fn after_events(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(open) = self.pending_open.clone() else {
             return;
         };
         let state = self.state.read(cx);
-        if !state.connection().is_connected() {
+        if !state.is_active(id) || !state.connection().is_connected() {
             return;
         }
         let ready = match &open {
@@ -1060,20 +1192,43 @@ impl Session {
         .detach();
     }
 
-    /// Stops the engine (bounded wait) and writes what is queued. Runs when
-    /// the app quits.
+    /// Stops every engine (side by side, each with its bounded wait) and
+    /// writes what is queued. Runs when the app quits.
     fn stop(&mut self, cx: &mut Context<Self>) {
-        self.pump = None;
-        let core = self.state.update(cx, |state, _| state.take_core());
-        if let Some(core) = core {
-            core.shutdown();
+        for run in self.engines.values_mut() {
+            run.pump = None;
         }
+        let cores = self.state.update(cx, |state, _| state.take_all_cores());
+        let count = cores.len();
+        let stopping: Vec<_> = cores
+            .into_iter()
+            .map(|core| core.shutdown_in_background())
+            .collect();
+        wait_for_all(stopping, ENGINES_STOP_TIMEOUT);
         if !self.state.read(cx).flush_persistence(FLUSH_TIMEOUT) {
             tracing::warn!("some settings may not have been saved before quitting");
         }
+        self.engines.clear();
         self.demo.clear();
         self.demo_dir = None;
-        tracing::info!("stopped");
+        tracing::info!(engines = count, "stopped");
+    }
+}
+
+/// Waits until every receiver completed or was cancelled, at most
+/// `timeout` in all (the engines stop on their own threads meanwhile).
+fn wait_for_all(mut stopping: Vec<futures::channel::oneshot::Receiver<()>>, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while !stopping.is_empty() {
+        stopping.retain_mut(|receiver| matches!(receiver.try_recv(), Ok(None)));
+        if stopping.is_empty() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(left = stopping.len(), "some engines didn't stop in time");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -1094,7 +1249,17 @@ impl Session {
 impl Session {
     /// The `prod-cluster` demo server's control, once it runs.
     pub(crate) fn demo_control(&self) -> Option<ic_mock::MockControl> {
-        self.demo_controls.get(demo::ENVIRONMENT_ID).cloned()
+        self.demo_control_of(demo::ENVIRONMENT_ID)
+    }
+
+    /// Demo environment `id`'s server's control, once it runs.
+    pub(crate) fn demo_control_of(&self, id: &str) -> Option<ic_mock::MockControl> {
+        self.demo_controls.get(id).cloned()
+    }
+
+    /// Whether environment `id` has an engine run (started, or stopping).
+    pub(crate) fn has_engine(&self, id: &str) -> bool {
+        self.engines.contains_key(id)
     }
 }
 
@@ -1138,22 +1303,6 @@ fn problem_for(store: &ConfigStore, failure: &str) -> ConfigProblem {
         newer: false,
         busy: false,
         failure: Some(failure.to_owned()),
-    }
-}
-
-/// What a click on a notification of another environment than the active
-/// one says: which environment it came from, and what it is about.
-fn other_environment_notice(state: &AppState, target: &Target) -> (String, String) {
-    let object = crate::operate::forms::describe_objects(std::slice::from_ref(&target.object));
-    match state.environment_by_id(&target.environment) {
-        Some(environment) => (
-            format!("That notification is from {}", environment.name),
-            format!("Switch to {} to see {object}.", environment.name),
-        ),
-        None => (
-            "That notification is from a removed environment".to_owned(),
-            format!("It was about {object}."),
-        ),
     }
 }
 

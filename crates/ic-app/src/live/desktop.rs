@@ -110,6 +110,17 @@ pub(crate) fn posted(intent: &NotificationIntent, acknowledge: bool) -> Posted {
     }
 }
 
+/// `title` with the environment's name in front, for when there is more
+/// than one environment (A1): `staging · CRITICAL · disk on stg-01`. A
+/// storm's summary names its environment already (`14 new problems in
+/// staging`) and stays as it is.
+pub(crate) fn prefixed_title(title: &str, environment: &str) -> String {
+    if environment.trim().is_empty() || title.ends_with(&format!(" in {environment}")) {
+        return title.to_owned();
+    }
+    format!("{environment} · {title}")
+}
+
 /// Shows notifications on the desktop.
 pub(crate) trait Desktop {
     /// Shows `posted`.
@@ -208,6 +219,20 @@ mod tests {
         let gpui = system_notification(&posted);
         assert_eq!(gpui.actions.len(), 2);
         assert_eq!(gpui.actions[1].id, OPEN_ACTION);
+    }
+
+    #[test]
+    fn with_several_environments_the_title_names_its_environment() {
+        assert_eq!(
+            prefixed_title("CRITICAL · disk on stg-01", "staging"),
+            "staging · CRITICAL · disk on stg-01"
+        );
+        // A storm's summary names it already.
+        assert_eq!(
+            prefixed_title("14 new problems in staging", "staging"),
+            "14 new problems in staging"
+        );
+        assert_eq!(prefixed_title("CRITICAL · x", " "), "CRITICAL · x");
     }
 
     #[test]

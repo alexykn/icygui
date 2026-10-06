@@ -1,9 +1,10 @@
-//! The tray / menu-bar icon (BG-01, BG-02, REL-07) through
-//! `ic_platform::tray`: the logo's mark tinted with the active
-//! environment's worst unhandled state (grey while not connected), a
-//! tooltip with the environment, its connection and its counts, and the
-//! menu: open, pause notifications (30 minutes, an hour, until 08:00) or
-//! resume, switch environment, quit.
+//! The tray / menu-bar icon (BG-01, BG-02, REL-07, A4) through
+//! `ic_platform::tray`: the logo's mark tinted with the worst unhandled
+//! state of every environment (they all run; grey while none is
+//! connected), a tooltip with each environment, its connection and its
+//! counts, and the menu: open, pause notifications in every environment
+//! (30 minutes, an hour, until 08:00) or resume, switch environment,
+//! quit.
 //!
 //! It exists while the settings say to keep running in the tray
 //! (`General::close_to_tray`, on by default) and follows the state: every
@@ -24,10 +25,10 @@ use crate::notifications::when;
 /// What the tray shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TrayView {
-    /// The icon's tint: the worst unhandled state while connected, else
-    /// grey (`None`).
+    /// The icon's tint: the worst unhandled state of every connected
+    /// environment, else grey (`None`).
     pub(crate) tone: Option<TrayTone>,
-    /// `prod-cluster · connected`, the counts, and a pause.
+    /// Each environment with its connection and counts, and a pause.
     pub(crate) tooltip: String,
     /// The environments to switch to, `(id, name)`.
     pub(crate) environments: Vec<(String, String)>,
@@ -37,52 +38,91 @@ pub(crate) struct TrayView {
     pub(crate) paused: Option<String>,
 }
 
-/// What the tray shows for `state` at `now`.
+/// How bad a tint is, for the worst across environments: critical and
+/// down, then unknown and unreachable, then warning (Icinga Web's order).
+fn rank(tone: TrayTone) -> u8 {
+    match tone {
+        TrayTone::Critical => 3,
+        TrayTone::Unknown => 2,
+        TrayTone::Warning => 1,
+        TrayTone::Ok => 0,
+    }
+}
+
+/// What the tray shows for `state` at `now` (BG-02, A4): every
+/// environment runs, so the tint is the worst unhandled state among all
+/// of them, and the tooltip has a line (two when connected) per
+/// environment.
 pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
-    let connection = state.connection();
-    let connected = connection.is_connected();
-    let overall = &state.snapshot().overall;
-    let tone = if connected {
-        TrayTone::for_worst_unhandled(overall.worst_unhandled)
-    } else {
-        None
-    };
+    let environments = state.environments();
+    let mut tone: Option<TrayTone> = None;
     let mut lines = Vec::new();
-    match state.environment() {
-        Some(environment) => {
-            let demo = if state.is_demo_environment() {
-                " (demo)"
-            } else {
-                ""
-            };
-            lines.push(format!(
-                "{}{demo} · {}",
-                environment.name,
-                connection.short_state()
-            ));
-            if connected {
-                let counts: Vec<String> = [
-                    (overall.down, "down"),
-                    (overall.unreachable, "unreachable"),
-                    (overall.critical, "critical"),
-                    (overall.warning, "warning"),
-                    (overall.unknown, "unknown"),
-                ]
-                .into_iter()
-                .filter(|(count, _)| *count > 0)
-                .map(|(count, word)| format!("{count} {word}"))
-                .collect();
+    for environment in environments {
+        let demo = if state.is_demo_environment_id(&environment.id) {
+            " (demo)"
+        } else {
+            ""
+        };
+        let Some(slot) = state.slot(&environment.id) else {
+            // Its engine hasn't started yet.
+            lines.push(format!("{}{demo} · connecting", environment.name));
+            continue;
+        };
+        let connection = slot.connection();
+        let connected = connection.is_connected();
+        let overall = &slot.snapshot().overall;
+        if connected
+            && let Some(worst) = TrayTone::for_worst_unhandled(overall.worst_unhandled)
+            && tone.is_none_or(|current| rank(worst) > rank(current))
+        {
+            tone = Some(worst);
+        }
+        let muted = if environments.len() > 1
+            && state
+                .environment_paused_until(&environment.id, now)
+                .is_some()
+        {
+            " · muted"
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "{}{demo} · {}{muted}",
+            environment.name,
+            connection.short_state()
+        ));
+        if connected {
+            let mut counts: Vec<String> = [
+                (overall.down, "down"),
+                (overall.unreachable, "unreachable"),
+                (overall.critical, "critical"),
+                (overall.warning, "warning"),
+                (overall.unknown, "unknown"),
+            ]
+            .into_iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, word)| format!("{count} {word}"))
+            .collect();
+            counts.push(match overall.unhandled {
+                0 => "nothing unhandled".to_owned(),
+                1 => "1 unhandled problem".to_owned(),
+                count => format!("{count} unhandled problems"),
+            });
+            if environments.len() == 1 {
+                // One environment: the counts and the unhandled ones on
+                // lines of their own, as before.
+                let unhandled = counts.pop().unwrap_or_default();
                 if !counts.is_empty() {
                     lines.push(counts.join(" · "));
                 }
-                lines.push(match overall.unhandled {
-                    0 => "nothing unhandled".to_owned(),
-                    1 => "1 unhandled problem".to_owned(),
-                    count => format!("{count} unhandled problems"),
-                });
+                lines.push(unhandled);
+            } else {
+                lines.push(counts.join(" · "));
             }
         }
-        None => lines.push("no environment".to_owned()),
+    }
+    if environments.is_empty() {
+        lines.push("no environment".to_owned());
     }
     let paused = state
         .paused_until()
@@ -94,8 +134,7 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
     TrayView {
         tone,
         tooltip: lines.join("\n"),
-        environments: state
-            .environments()
+        environments: environments
             .iter()
             .map(|environment| (environment.id.clone(), environment.name.clone()))
             .collect(),
@@ -292,8 +331,8 @@ mod tests {
         assert_eq!(view.paused, None);
 
         // Paused: the menu and the tooltip say until when.
-        let until = Timestamp::from_unix_seconds(now().as_unix_seconds() + 1800.);
-        state.apply(ic_core::CoreEvent::NotificationsPaused(Some(until)));
+        let until = Timestamp::from_unix_seconds(Timestamp::now().as_unix_seconds() + 1800.);
+        state.pause_notifications(Some(until));
         let view = tray_view(&state, now());
         assert!(view.paused.is_some());
         assert!(view.tooltip.ends_with(&format!(
@@ -315,6 +354,78 @@ mod tests {
             },
         ));
         assert!(tray_view(&state, now()).tooltip.contains("login refused"));
+    }
+
+    #[test]
+    fn every_environment_counts_and_has_its_lines() {
+        let mut state = AppState::fixture(now());
+        let staging = ic_config::Environment::new(
+            "staging",
+            "https://stg-master:5665",
+            ic_config::AuthConfig::Basic {
+                username: "icygui".to_owned(),
+            },
+        );
+        let staging_id = staging.id.clone();
+        state.save_environment(staging, false);
+        // Production (on screen) is critical; staging hasn't connected.
+        let view = tray_view(&state, now());
+        assert_eq!(view.tone, Some(TrayTone::Critical));
+        let lines: Vec<&str> = view.tooltip.lines().collect();
+        assert_eq!(lines[0], "prod-cluster (demo) · connected");
+        assert!(lines[1].contains("critical") && lines[1].ends_with("unhandled problems"));
+        assert_eq!(lines[2], "staging (demo) · connecting");
+        assert_eq!(view.environments.len(), 2);
+
+        // Staging connects in the background with only a warning; once
+        // production has nothing unhandled, the tray shows staging's.
+        state.apply_from(
+            &staging_id,
+            ic_core::CoreEvent::Connection(ConnectionState::Connected {
+                node: crate::app_state::connection::full_node("stg-master"),
+                version: "r2.15.6-1".to_owned(),
+                since: now(),
+            }),
+        );
+        let mut overall = ic_core::snapshot::Summary {
+            warning: 1,
+            unhandled: 1,
+            worst_unhandled: Some(ic_model::CheckableState::Service(
+                ic_model::ServiceState::Warning,
+            )),
+            ..ic_core::snapshot::Summary::default()
+        };
+        state.apply_from(
+            &staging_id,
+            ic_core::CoreEvent::Snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+                overall: overall.clone(),
+                ..ic_core::snapshot::Snapshot::default()
+            })),
+        );
+        let view = tray_view(&state, now());
+        assert_eq!(view.tone, Some(TrayTone::Critical), "the worst of both");
+        assert_eq!(
+            view.tooltip.lines().nth(3),
+            Some("1 warning · 1 unhandled problem")
+        );
+        overall.warning = 0;
+        overall.unhandled = 0;
+        overall.worst_unhandled = None;
+        state.set_snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+            overall,
+            ..ic_core::snapshot::Snapshot::default()
+        }));
+        assert_eq!(tray_view(&state, now()).tone, Some(TrayTone::Warning));
+
+        // A muted environment says so.
+        let later = Timestamp::from_unix_seconds(Timestamp::now().as_unix_seconds() + 3600.);
+        assert!(state.pause_environment(&staging_id, Some(later)));
+        let view = tray_view(&state, Timestamp::now());
+        assert!(
+            view.tooltip.contains("staging (demo) · connected · muted"),
+            "{}",
+            view.tooltip
+        );
     }
 
     #[test]

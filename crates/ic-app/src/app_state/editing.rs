@@ -381,11 +381,11 @@ impl AppState {
         let Some(evaluator) = &self.evaluator else {
             return;
         };
-        let dashboards = evaluator.evaluate_all(&self.snapshot, &self.config);
-        self.snapshot = Arc::new(ic_core::snapshot::Snapshot {
-            revision: self.snapshot.revision + 1,
+        let dashboards = evaluator.evaluate_all(&self.engine.snapshot, &self.config);
+        self.engine.snapshot = Arc::new(ic_core::snapshot::Snapshot {
+            revision: self.engine.snapshot.revision + 1,
             dashboards: Arc::new(dashboards),
-            ..(*self.snapshot).clone()
+            ..(*self.engine.snapshot).clone()
         });
     }
 }

@@ -376,27 +376,35 @@ pub(crate) const ENVIRONMENT_CHANGED: &str =
     "Another environment is active now; nothing was sent. Ask again there.";
 
 impl ActionDialog {
-    /// A dialog of `kind` for `eligible`'s objects.
+    /// A dialog of `kind` for `eligible`'s objects in `environment` (`None`:
+    /// the active one; another one for a desktop notification's
+    /// *Acknowledge*, A1): it sends to that environment's engine only.
     pub(crate) fn new(
         state: Entity<AppState>,
         kind: DialogKind,
         eligible: Eligible,
+        environment: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let form = Form::new(kind);
-        let environment_id = state.read(cx).active_environment_id().map(str::to_owned);
+        let environment_id =
+            environment.or_else(|| state.read(cx).active_environment_id().map(str::to_owned));
         let (author, endpoints, endpoint_default, triggers) = {
             let current = state.read(cx);
-            let snapshot = current.snapshot();
+            let snapshot = environment_id
+                .as_deref()
+                .and_then(|id| current.snapshot_of(id))
+                .unwrap_or_else(|| current.snapshot());
             let triggers = if kind == DialogKind::Downtime {
                 trigger_choices(snapshot, &eligible.targets, Timestamp::now())
             } else {
                 Vec::new()
             };
             (
-                current
-                    .environment()
+                environment_id
+                    .as_deref()
+                    .and_then(|id| current.environment_by_id(id))
                     .map(|environment| environment.author_name().to_owned())
                     .unwrap_or_default(),
                 snapshot
@@ -717,12 +725,12 @@ impl ActionDialog {
             ActionSpec::for_objects(self.kind.action(), action, self.eligible.targets.clone());
         let environment_id = self.environment_id.clone();
         let sent = self.state.update(cx, |state, cx| {
-            // Another environment became active meanwhile (same host
-            // names, maybe production): send nothing there.
-            if state.active_environment_id() != environment_id.as_deref() {
-                return Err(ENVIRONMENT_CHANGED.to_owned());
-            }
-            let sent = state.submit(spec);
+            // To the engine of the environment the objects are in, never
+            // to another (same host names, maybe production).
+            let sent = match environment_id.as_deref() {
+                Some(id) => state.submit_in(id, spec),
+                None => state.submit(spec),
+            };
             cx.notify();
             sent
         });
@@ -1443,8 +1451,26 @@ impl Render for ActionDialog {
         let theme = cx.theme().clone();
         let colors = theme.colors;
         let issues = self.issues();
-        let snapshot = self.state.read(cx).snapshot().clone();
-        let what = describe_objects(&self.eligible.targets);
+        let (snapshot, elsewhere) = {
+            let state = self.state.read(cx);
+            match self.environment_id.as_deref() {
+                Some(id) if !state.is_active(id) => (
+                    state
+                        .snapshot_of(id)
+                        .cloned()
+                        .unwrap_or_else(|| state.snapshot().clone()),
+                    state
+                        .environment_by_id(id)
+                        .map(|environment| environment.name.clone()),
+                ),
+                _ => (state.snapshot().clone(), None),
+            }
+        };
+        // Another environment's objects: the title names it.
+        let what = match elsewhere {
+            Some(name) => format!("{} in {name}", describe_objects(&self.eligible.targets)),
+            None => describe_objects(&self.eligible.targets),
+        };
         let title = div()
             .flex()
             .items_center()

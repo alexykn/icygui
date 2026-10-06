@@ -632,6 +632,7 @@ impl Session {
             environment,
             general,
             data_dir,
+            start: ic_core::Start::User,
         };
         let ports = Ports {
             secrets,

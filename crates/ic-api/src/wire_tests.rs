@@ -826,6 +826,15 @@ fn recorded_status() {
     );
     assert!((status.avg_latency - 0.418_276_786_804_199_2).abs() < 1e-9);
     assert!(status.avg_execution_time > 0.0);
+    // The CIB's counts: the installation's size before anything loads.
+    let counts = status.counts;
+    assert_eq!(
+        (counts.hosts_up, counts.hosts_down, counts.hosts_unreachable),
+        (3, 1, 1)
+    );
+    assert_eq!((counts.hosts(), counts.services()), (5, 6));
+    assert_eq!(counts.service_states(), [2, 2, 1, 1]);
+    assert_eq!(counts.services_pending, 1);
 }
 
 #[test]
@@ -838,6 +847,14 @@ fn status_tolerates_missing_parts() {
     assert!(status.host_checks_enabled, "missing switches default to on");
     assert_eq!(status.node_name, "");
     assert!(status.checks_per_minute.abs() < f64::EPSILON);
+    assert_eq!(status.counts, ObjectCounts::default());
+    let odd = instance_status(
+        &Value::Null,
+        &json!({ "num_services_ok": -3, "num_services_warning": "7", "num_hosts_up": 1e12 }),
+    );
+    assert_eq!(odd.counts.services_ok, 0, "a negative count reads as 0");
+    assert_eq!(odd.counts.services_warning, 7);
+    assert_eq!(odd.counts.hosts_up, u32::MAX, "clamped");
 }
 
 #[test]

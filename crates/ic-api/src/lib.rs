@@ -19,9 +19,13 @@
 //! - Icinga's own `Notification` objects (who Icinga notified, and when)
 //!   load with [`Client::notifications`] and by name with
 //!   [`Client::notifications_named`].
+//! - [`RequestBudget`] paces by-name requests: a token bucket shared by the
+//!   clones of a client it is attached to ([`Client::with_budget`]), with
+//!   [`Client::priority`] for the object the user is opening.
 //! - Wire JSON is mapped into `ic-model` types; the wire structs are private.
 
 mod actions;
+mod budget;
 mod client;
 mod detail;
 mod error;
@@ -32,6 +36,7 @@ mod settings;
 mod tls;
 mod wire;
 
+pub use budget::RequestBudget;
 pub use client::{ActionResult, Client, NAMES_PER_REQUEST};
 pub use detail::{Cluster, Detail, Fetched, FetchedNotifications};
 pub use error::ApiError;

@@ -7,6 +7,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ic_api::{
@@ -392,14 +393,46 @@ async fn identify(
 }
 
 /// A client, the API user it logged in as, the event stream if the user
-/// may read events, the node it reached, and the login for probes of the
-/// other URLs.
+/// may read events (and what it subscribed to), the node it reached, and
+/// the login for probes of the other URLs.
 pub(crate) struct Connected {
     pub(crate) client: Client,
     pub(crate) info: ApiInfo,
     pub(crate) lines: Option<EventLines>,
+    /// The stream's event types.
+    pub(crate) kinds: Vec<EventKind>,
+    /// It was opened in quiet mode (no check results, PERF-09).
+    pub(crate) quiet: bool,
     pub(crate) node: ConnectedNode,
     pub(crate) login: Login,
+}
+
+/// The event types a stream subscribes to: every type the API user may
+/// read, without `CheckResult` in quiet mode ([`EventKind::QUIET`]).
+pub(crate) fn stream_kinds(info: &ApiInfo, quiet: bool) -> Vec<EventKind> {
+    let kinds: &[EventKind] = if quiet {
+        &EventKind::QUIET
+    } else {
+        &EventKind::ALL
+    };
+    kinds
+        .iter()
+        .copied()
+        .filter(|kind| info.allows(&format!("events/{}", kind.api_name())))
+        .collect()
+}
+
+/// Opens an event stream (a fresh queue `icygui-<uuid>`) for `kinds`.
+///
+/// # Errors
+///
+/// As [`Client::events`].
+pub(crate) async fn open_events(
+    client: &Client,
+    kinds: &[EventKind],
+) -> Result<EventLines, ApiError> {
+    let queue = format!("icygui-{}", uuid::Uuid::new_v4());
+    Ok(client.events(&queue, kinds).await?.into_lines())
 }
 
 /// Connects (ENV-12): reads the login, then walks the environment's URLs
@@ -409,7 +442,8 @@ pub(crate) struct Connected {
 /// there is to go by then). A node in a child zone (a partial view) is
 /// taken only when the walk found nothing better: the first such one.
 /// Then the event stream opens (queue `icygui-<uuid>`) for every event
-/// type the API user may read.
+/// type the API user may read, without check results while `quiet` is set
+/// when it opens (quiet mode, PERF-09).
 ///
 /// # Errors
 ///
@@ -420,6 +454,7 @@ pub(crate) async fn connect(
     secrets: Arc<dyn SecretStore>,
     timeouts: (Duration, Duration),
     first: Option<usize>,
+    quiet: Arc<AtomicBool>,
 ) -> Result<Connected, Failure> {
     let (action_timeout, identify_timeout) = timeouts;
     let login = Login::read(environment, Password::Store(secrets)).await?;
@@ -462,9 +497,9 @@ pub(crate) async fn connect(
             }
             continue;
         }
-        match open_stream(reached).await {
-            Ok((client, info, lines, node)) => {
-                return Ok(finish(client, info, lines, node, login, urls, passed_over));
+        match open_stream(reached, quiet.load(Ordering::SeqCst)).await {
+            Ok(opened) => {
+                return Ok(finish(opened, login, urls, passed_over));
             }
             Err((reached_index, failure)) => {
                 passed_over.push((reached_index, failure.reason()));
@@ -473,9 +508,9 @@ pub(crate) async fn connect(
         }
     }
     if let Some(reached) = fallback {
-        match open_stream(reached).await {
-            Ok((client, info, lines, node)) => {
-                return Ok(finish(client, info, lines, node, login, urls, passed_over));
+        match open_stream(reached, quiet.load(Ordering::SeqCst)).await {
+            Ok(opened) => {
+                return Ok(finish(opened, login, urls, passed_over));
             }
             Err((index, failure)) => failures.push((index, failure)),
         }
@@ -483,17 +518,32 @@ pub(crate) async fn connect(
     Err(combine(failures, urls))
 }
 
-/// The connection with `passed_over` (by URL index, without the one taken)
-/// in order of preference.
-fn finish(
+/// A reached node with its event stream open (if any).
+struct Opened {
     client: Client,
     info: ApiInfo,
     lines: Option<EventLines>,
-    mut node: ConnectedNode,
+    kinds: Vec<EventKind>,
+    quiet: bool,
+    node: ConnectedNode,
+}
+
+/// The connection with `passed_over` (by URL index, without the one taken)
+/// in order of preference.
+fn finish(
+    opened: Opened,
     login: Login,
     urls: &[ApiUrl],
     mut passed_over: Vec<(usize, String)>,
 ) -> Connected {
+    let Opened {
+        client,
+        info,
+        lines,
+        kinds,
+        quiet,
+        mut node,
+    } = opened;
     passed_over.retain(|(index, _)| *index != node.url_index);
     passed_over.sort_by_key(|(index, _)| *index);
     node.passed_over = passed_over
@@ -510,41 +560,52 @@ fn finish(
         client,
         info,
         lines,
+        kinds,
+        quiet,
         node,
         login,
     }
 }
 
 /// Opens the event stream of a reached node for every event type the API
-/// user may read (none: no stream).
-async fn open_stream(
-    reached: Reached,
-) -> Result<(Client, ApiInfo, Option<EventLines>, ConnectedNode), (usize, Failure)> {
+/// user may read, without check results when `quiet` (none: no stream).
+async fn open_stream(reached: Reached, quiet: bool) -> Result<Opened, (usize, Failure)> {
     let Reached { client, info, node } = reached;
-    let kinds: Vec<EventKind> = EventKind::ALL
-        .into_iter()
-        .filter(|kind| info.allows(&format!("events/{}", kind.api_name())))
-        .collect();
+    let kinds = stream_kinds(&info, quiet);
+    let opened = |lines: Option<EventLines>, client: Client, info: ApiInfo, node: ConnectedNode| {
+        let kinds = if lines.is_some() {
+            kinds.clone()
+        } else {
+            Vec::new()
+        };
+        Opened {
+            client,
+            info,
+            lines,
+            kinds,
+            quiet,
+            node,
+        }
+    };
     if kinds.is_empty() {
         tracing::warn!(
             user = %info.user,
             "the API user may not read any event type: no live updates"
         );
-        return Ok((client, info, None, node));
+        return Ok(opened(None, client, info, node));
     }
-    if kinds.len() < EventKind::ALL.len() {
+    if stream_kinds(&info, false).len() < EventKind::ALL.len() {
         tracing::warn!(
             user = %info.user,
             allowed = kinds.len(),
             "the API user may read only some event types"
         );
     }
-    let queue = format!("icygui-{}", uuid::Uuid::new_v4());
-    match client.events(&queue, &kinds).await {
-        Ok(stream) => Ok((client, info, Some(stream.into_lines()), node)),
+    match open_events(&client, &kinds).await {
+        Ok(lines) => Ok(opened(Some(lines), client, info, node)),
         Err(ApiError::Forbidden(message)) => {
             tracing::warn!(%message, "the event stream was refused: no live updates");
-            Ok((client, info, None, node))
+            Ok(opened(None, client, info, node))
         }
         Err(error) => {
             let base = client.base_url().clone();

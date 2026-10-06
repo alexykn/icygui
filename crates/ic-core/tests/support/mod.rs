@@ -22,7 +22,7 @@ use ic_core::ports::{Clock, Notifier, SecretError, SecretStore};
 use ic_core::snapshot::Snapshot;
 use ic_core::{
     Command, ConnectionState, CoreEvent, CoreHandle, EnvironmentSpec, LogEntry, NotificationRecord,
-    Ports, Tuning,
+    Ports, Start, Tuning,
 };
 use ic_mock::{MockConfig, MockServer};
 use ic_model::Timestamp;
@@ -211,6 +211,9 @@ pub(crate) struct Launch {
     pub(crate) now: f64,
     /// Where the event log lives; a fresh temporary directory if `None`.
     pub(crate) data_dir: Option<PathBuf>,
+    /// How the engine starts (a background start waits before its first
+    /// load).
+    pub(crate) start: Start,
 }
 
 impl Launch {
@@ -225,6 +228,7 @@ impl Launch {
             general: General::default(),
             now: Timestamp::now().as_unix_seconds(),
             data_dir: None,
+            start: Start::User,
         }
     }
 
@@ -242,6 +246,7 @@ pub(crate) fn start(environment: Environment, secrets: Arc<FakeSecrets>, tuning:
         general: General::default(),
         now: NOW,
         data_dir: None,
+        start: Start::User,
     })
 }
 
@@ -253,6 +258,7 @@ fn launch(launch: Launch) -> Engine {
         general,
         now,
         data_dir,
+        start,
     } = launch;
     let (dir, data_dir) = if let Some(data_dir) = data_dir {
         (None, data_dir)
@@ -267,6 +273,7 @@ fn launch(launch: Launch) -> Engine {
         environment,
         general,
         data_dir: data_dir.clone(),
+        start,
     };
     let ports = Ports {
         secrets: Arc::clone(&secrets) as Arc<dyn SecretStore>,

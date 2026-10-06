@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::actions::{self, Batch, TargetKind};
+use crate::budget::RequestBudget;
 use crate::detail::{Cluster, Detail, Fetched, FetchedNotifications};
 use crate::error::ApiError;
 use crate::events::EventStream;
@@ -112,10 +113,13 @@ impl ActionResult {
 }
 
 /// A client for one Icinga 2 API endpoint. Cheap to clone; clones share
-/// the connection pool.
+/// the connection pool (and the request budget, if one is attached).
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<Inner>,
+    /// The budget its by-name requests take from, and whether they go
+    /// first ([`Client::priority`]).
+    budget: Option<(Arc<RequestBudget>, bool)>,
 }
 
 struct Inner {
@@ -188,7 +192,47 @@ impl Client {
                 action_timeout: settings.action_timeout,
                 unsupported: Mutex::new(HashSet::new()),
             }),
+            budget: None,
         })
+    }
+
+    /// This client with `budget` for its by-name requests
+    /// ([`Client::objects`], [`Client::objects_unsplit`],
+    /// [`Client::notifications_named`], [`Client::endpoint_states`]): each
+    /// request of at most [`NAMES_PER_REQUEST`] names, including the halves
+    /// of a batch split to find an unknown name, waits for a token. Lists
+    /// (hosts, services, comments …), the status and actions don't count.
+    /// The connection pool is shared with `self`.
+    #[must_use]
+    pub fn with_budget(&self, budget: Arc<RequestBudget>) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            budget: Some((budget, false)),
+        }
+    }
+
+    /// This client with its by-name requests ahead of the budget: they take
+    /// a token without waiting (borrowing one when none is left), for the
+    /// object the user is opening. Without a budget, the same client.
+    #[must_use]
+    pub fn priority(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            budget: self
+                .budget
+                .as_ref()
+                .map(|(budget, _)| (Arc::clone(budget), true)),
+        }
+    }
+
+    /// Takes a token for one by-name request, waiting for it unless this
+    /// is the priority client.
+    async fn spend(&self) {
+        match &self.budget {
+            Some((budget, true)) => budget.take_now(),
+            Some((budget, false)) => budget.acquire().await,
+            None => {}
+        }
     }
 
     /// The API base URL (path ending in `/`).
@@ -1117,6 +1161,7 @@ impl Client {
             if batch.is_empty() {
                 continue;
             }
+            self.spend().await;
             match self.query::<A>(plural, Some((key, &batch)), attrs).await {
                 Ok(found) => answer.found.extend(found),
                 Err(ApiError::NotFound(message)) if is_no_objects(&message) => {

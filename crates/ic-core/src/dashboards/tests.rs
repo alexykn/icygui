@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -599,6 +600,49 @@ fn untouched_dashboards_keep_their_rows() {
     // Nothing changed at all.
     let after = dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
     assert!(Arc::ptr_eq(&before, &after));
+}
+
+#[test]
+fn quiet_mode_keeps_only_the_memberships_notifications_need() {
+    let views = [("p", view("service.state != 0")), ("all", view(""))];
+    let mut data = sample();
+    let mut dashboards = evaluate(&views, &data);
+    let before = Arc::clone(dashboards.results());
+    let only: BTreeSet<DashboardRef> = [reference("p")].into_iter().collect();
+    dashboards.set_scope(Scope::Quiet(Some(only)));
+
+    // ssh on web-1 goes critical.
+    let key = ServiceKey::new("web-1", "ssh");
+    let services = Arc::make_mut(&mut data.services);
+    let mut ssh = (*services[&key]).clone();
+    ssh.state = ServiceState::Critical;
+    services.insert(key.clone(), Arc::new(ssh));
+    let object = ObjectKey::from(key.clone());
+    let after = dashboards.update(
+        &data,
+        &some(std::slice::from_ref(&object)),
+        false,
+        &AtomicBool::new(false),
+    );
+    assert!(Arc::ptr_eq(&before, &after), "rows and summaries wait");
+    assert_eq!(
+        dashboards.memberships(&object),
+        [reference("p"), reference("all")],
+        "the dashboard notifications depend on knows at once"
+    );
+
+    // Awake: everything comes up to date, the one left out in full.
+    dashboards.set_scope(Scope::All);
+    dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
+    assert!(names(result(&dashboards, "p")).contains(&"web-1!ssh".to_owned()));
+    assert_eq!(
+        result(&dashboards, "all").summary.critical,
+        before[&reference("all")].summary.critical + 1
+    );
+    assert_eq!(
+        result(&dashboards, "p").summary.critical,
+        before[&reference("p")].summary.critical + 1
+    );
 }
 
 #[test]

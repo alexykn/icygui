@@ -113,6 +113,29 @@ impl EventKind {
         Self::Notification,
     ];
 
+    /// What a client in quiet mode subscribes to (PERF-09): every kind but
+    /// `CheckResult`, which is about 95–99 % of the stream (one per check)
+    /// and changes nothing a notification depends on: state changes
+    /// (`StateChange`, soft and hard, with the check result that caused
+    /// them), acknowledgements, comments, downtimes, flapping, Icinga's own
+    /// notifications and configuration changes still arrive at once.
+    pub const QUIET: [Self; 14] = [
+        Self::StateChange,
+        Self::AcknowledgementSet,
+        Self::AcknowledgementCleared,
+        Self::CommentAdded,
+        Self::CommentRemoved,
+        Self::DowntimeAdded,
+        Self::DowntimeRemoved,
+        Self::DowntimeStarted,
+        Self::DowntimeTriggered,
+        Self::Flapping,
+        Self::ObjectCreated,
+        Self::ObjectModified,
+        Self::ObjectDeleted,
+        Self::Notification,
+    ];
+
     /// The API's name for the type.
     #[must_use]
     pub fn api_name(self) -> &'static str {

@@ -329,6 +329,32 @@ impl World {
         }
     }
 
+    /// The CIB's host and service counts by state (`num_hosts_*`,
+    /// `num_services_*`), as `cib_status` reports them.
+    pub(crate) fn object_counts(&self) -> ic_model::ObjectCounts {
+        let mut counts = ic_model::ObjectCounts::default();
+        for service in self.all_services() {
+            match service.state_raw {
+                0 => counts.services_ok += 1,
+                1 => counts.services_warning += 1,
+                2 => counts.services_critical += 1,
+                _ => counts.services_unknown += 1,
+            }
+            counts.services_pending += u32::from(!service.has_been_checked());
+        }
+        for host in self.hosts.values() {
+            if !self.is_reachable(&host.full_name(), DepType::State) {
+                counts.hosts_unreachable += 1;
+            } else if host.state() == 0 {
+                counts.hosts_up += 1;
+            } else {
+                counts.hosts_down += 1;
+            }
+            counts.hosts_pending += u32::from(!host.has_been_checked());
+        }
+        counts
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one entry per CIB statistic, as in cib.cpp"

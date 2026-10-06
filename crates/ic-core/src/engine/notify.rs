@@ -27,7 +27,7 @@
 //!   `CoreEvent::Notification`; the audible ones also go to the
 //!   `Notifier`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -38,8 +38,8 @@ use ic_model::{
     StateType, Timestamp,
 };
 use ic_rules::{
-    Change, DashboardScope, GroupScope, LocalTime, NotificationIntent, RuleEngine, RuleInput,
-    RuleSet, state_intent_id,
+    Change, DashboardRef, DashboardScope, GroupScope, LocalTime, NotificationIntent, RuleEngine,
+    RuleInput, RuleSet, state_intent_id,
 };
 
 use super::{AppliedEvent, Engine, Internal};
@@ -128,6 +128,37 @@ impl Deferred {
 }
 
 impl Notify {
+    /// The dashboards whose memberships can change a notification
+    /// decision, for quiet mode (which evaluates only these): every one
+    /// (`None`) while the environment's own rule is on, since an object
+    /// that matches no dashboard notifies by it and one that matches a
+    /// dashboard that is off doesn't; else those whose effective rule is
+    /// on (with the environment off, a dashboard that is off decides
+    /// nothing whether it matches or not).
+    pub(super) fn decisive_dashboards(&self) -> Option<BTreeSet<DashboardRef>> {
+        let rules = self.rules.rules();
+        if rules.settings.enabled {
+            return None;
+        }
+        Some(
+            rules
+                .groups
+                .iter()
+                .flat_map(|group| {
+                    group.dashboards.iter().map(|dashboard| DashboardRef {
+                        group_id: group.id.clone(),
+                        dashboard_id: dashboard.id.clone(),
+                    })
+                })
+                .filter(|reference| {
+                    rules
+                        .dashboard_rule(reference)
+                        .is_some_and(|rule| rule.enabled)
+                })
+                .collect(),
+        )
+    }
+
     /// Notifications for `environment`'s rules, nothing seen yet.
     pub(super) fn new(environment: &ic_config::Environment) -> Self {
         Self {
@@ -939,6 +970,10 @@ impl Engine {
             tracing::debug!(id = %intent.id, title = %intent.title, silent = intent.silent, "notification");
             if !intent.silent {
                 self.ports.notifier.notify(&intent);
+                // Its pane should be complete when it is clicked.
+                if let Some(object) = &intent.object {
+                    self.prefetch(object);
+                }
             }
             self.emit(CoreEvent::Notification(NotificationRecord {
                 intent,

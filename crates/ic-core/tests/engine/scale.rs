@@ -7,6 +7,10 @@
 //! simulator checking every object at its interval (about 110 events/s)
 //! while the engine's threads' CPU time is measured.
 //!
+//! And quiet mode (PERF-09): the same engine live, then quiet, then
+//! awake again, with what its stream carries, the requests it sends and
+//! its CPU, and how fast an opened object fills in.
+//!
 //! Ignored by default (slow in unoptimised builds); prints its timings:
 //! `cargo test -p ic-core --test engine scale -- --ignored --nocapture
 //! --test-threads 1`.
@@ -134,8 +138,9 @@ mod steady {
 
     use futures::StreamExt;
     use ic_core::snapshot::Snapshot;
-    use ic_core::{CoreEvent, Tuning};
+    use ic_core::{Command, CoreEvent, Tuning};
     use ic_mock::{MockConfig, SimulationConfig, scenarios};
+    use ic_model::{ObjectKey, ServiceState};
 
     use crate::support::{ENV_ID, FakeSecrets, PASSWORD, environment, mock, start};
 
@@ -261,6 +266,226 @@ mod steady {
         assert!(share < 25.0, "{share:.1} %");
         if !cfg!(debug_assertions) {
             assert!(share < 5.0, "PERF-03: {share:.1} % of one core");
+        }
+        engine.shutdown();
+    }
+
+    /// What one window of the engine costs: the stream's lines and bytes,
+    /// requests to the mock (event streams aside), the engine threads' CPU
+    /// time.
+    struct Window {
+        seconds: f64,
+        lines: u64,
+        bytes: u64,
+        requests: usize,
+        cpu: f64,
+    }
+
+    impl Window {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "counts of a minute's events, far below 2^52"
+        )]
+        fn report(&self, what: &str) -> String {
+            format!(
+                "{what}: {:.1} events/s, {:.1} KB/s on the stream, {:.1} requests/min, \
+                 engine {:.2} % of one core",
+                self.lines as f64 / self.seconds,
+                self.bytes as f64 / self.seconds / 1_000.0,
+                self.requests as f64 / self.seconds * 60.0,
+                self.cpu / self.seconds * 100.0,
+            )
+        }
+    }
+
+    /// Measures `how_long` of whatever the engine does now.
+    async fn measure(
+        engine: &mut crate::support::Engine,
+        control: &ic_mock::MockControl,
+        how_long: Duration,
+        held: &mut Option<Arc<Snapshot>>,
+    ) -> Window {
+        let (lines, bytes) = control.events_delivered();
+        control.clear_requests();
+        let mut first = HashMap::new();
+        engine_threads_cpu(&mut first);
+        let mut latest = first.clone();
+        let started = Instant::now();
+        while started.elapsed() < how_long {
+            drain(engine, Duration::from_secs(1), held).await;
+            engine_threads_cpu(&mut latest);
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        let (lines_after, bytes_after) = control.events_delivered();
+        Window {
+            seconds,
+            lines: lines_after - lines,
+            bytes: bytes_after - bytes,
+            requests: control
+                .requests()
+                .iter()
+                .filter(|request| request.path != "/v1/events")
+                .count(),
+            cpu: latest
+                .iter()
+                .map(|(tid, seconds)| seconds - first.get(tid).copied().unwrap_or(0.0))
+                .sum(),
+        }
+    }
+
+    /// PERF-09: quiet versus live at production scale. The `large`
+    /// scenario with the simulator checking every object at its interval
+    /// (about 100 check results per second) and two new problems a minute,
+    /// production timing; one engine live for a window, then quiet for a
+    /// window: what its stream carries, the requests it sends, its CPU.
+    /// Then waking up: the time until the full stream is back, and the
+    /// time from opening an object (`Command::Focus`) to its filled pane,
+    /// for an object a notification prefetched and one never loaded in
+    /// full.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "production size, two minutes; run with --ignored --nocapture"]
+    #[expect(clippy::too_many_lines, reason = "one measurement, step by step")]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "byte counts of a minute's stream, far below 2^52"
+    )]
+    async fn quiet_versus_live_at_production_scale() {
+        let server = mock(MockConfig {
+            event_buffer: 100_000,
+            simulation: SimulationConfig {
+                problems_per_hour: 120.0,
+                ..SimulationConfig::running(11)
+            },
+            ..MockConfig::with_scenario(scenarios::large(42))
+        })
+        .await;
+        let control = server.control();
+        let mut engine = start(
+            environment(&server),
+            FakeSecrets::with(ENV_ID, PASSWORD),
+            Tuning::default(),
+        );
+        engine.connected().await;
+        engine
+            .snapshot(|snapshot| !snapshot.icinga_notifications.is_empty())
+            .await;
+        let mut held: Option<Arc<Snapshot>> = engine.latest();
+        drain(&mut engine, Duration::from_secs(10), &mut held).await;
+        let window = Duration::from_secs(40);
+
+        let live = measure(&mut engine, &control, window, &mut held).await;
+        eprintln!("{}", live.report("live "));
+        engine.send(Command::SetQuiet(true));
+        let switched = Instant::now();
+        while !control
+            .event_stream_stats()
+            .iter()
+            .all(|stream| !stream.types.contains(&"CheckResult"))
+            || control.event_streams() != 1
+        {
+            drain(&mut engine, Duration::from_millis(50), &mut held).await;
+        }
+        eprintln!("quiet stream in {:?}", switched.elapsed());
+        drain(&mut engine, Duration::from_secs(5), &mut held).await;
+        let quiet = measure(&mut engine, &control, window, &mut held).await;
+        eprintln!("{}", quiet.report("quiet"));
+        let fewer = 100.0 * (1.0 - quiet.bytes as f64 / live.bytes.max(1) as f64);
+        let cpu = 100.0 * (1.0 - quiet.cpu / live.cpu.max(f64::EPSILON));
+        eprintln!("quiet: {fewer:.1} % fewer stream bytes, {cpu:.0} % less engine CPU");
+
+        // A problem notified while quiet: prefetched, so opening it after
+        // waking up needs no request.
+        let snapshot = held.clone().unwrap();
+        let mut lean = snapshot
+            .services
+            .values()
+            .filter(|service| service.state == ServiceState::Ok && service.check.result.is_none())
+            .map(|service| service.key.clone());
+        let notified = lean.next().unwrap();
+        let opened = lean.next().unwrap();
+        control
+            .set_service_state(
+                &notified.host.to_string(),
+                &notified.name,
+                ServiceState::Critical,
+                "CRITICAL - measured",
+                true,
+            )
+            .unwrap();
+        let mut events = 0;
+        let notified_at = Instant::now();
+        loop {
+            let event = engine.next().await;
+            events += 1;
+            if let CoreEvent::Notification(record) = &event
+                && record.intent.object == Some(ObjectKey::from(notified.clone()))
+            {
+                break;
+            }
+            assert!(events < 1_000_000);
+        }
+        eprintln!(
+            "the notification while quiet came {:?} after the state change",
+            notified_at.elapsed()
+        );
+        // The prefetch.
+        let snapshot = engine
+            .snapshot(|snapshot| {
+                let key = ObjectKey::from(notified.clone());
+                !snapshot.is_updating(&key)
+                    && snapshot.services[&notified]
+                        .check
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.output == "CRITICAL - measured")
+            })
+            .await;
+        held = Some(snapshot);
+
+        // Waking up, and opening the notified object (a click).
+        let woke = Instant::now();
+        engine.send(Command::SetQuiet(false));
+        engine.send(Command::Focus(ObjectKey::from(notified.clone())));
+        let snapshot = engine
+            .snapshot(|snapshot| !snapshot.is_updating(&ObjectKey::from(notified.clone())))
+            .await;
+        eprintln!(
+            "notification click to a filled pane: {:?} (prefetched: {})",
+            woke.elapsed(),
+            snapshot.services[&notified].check.result.is_some()
+        );
+        // An object never loaded in full.
+        let focused = Instant::now();
+        engine.send(Command::Focus(ObjectKey::from(opened.clone())));
+        engine
+            .snapshot(|snapshot| snapshot.services[&opened].check.result.is_some())
+            .await;
+        eprintln!(
+            "opening an object never loaded in full: filled after {:?}",
+            focused.elapsed()
+        );
+        while !control
+            .event_stream_stats()
+            .iter()
+            .all(|stream| stream.types.contains(&"CheckResult"))
+            || control.event_streams() != 1
+        {
+            drain(&mut engine, Duration::from_millis(20), &mut held).await;
+        }
+        eprintln!(
+            "the full stream was back {:?} after waking up",
+            woke.elapsed()
+        );
+        drain(&mut engine, Duration::from_secs(5), &mut held).await;
+        let awake = measure(&mut engine, &control, Duration::from_secs(20), &mut held).await;
+        eprintln!("{}", awake.report("awake"));
+        assert!(
+            fewer > 90.0,
+            "quiet mode drops at least 90 % of the stream: {fewer:.1} %"
+        );
+        assert!(quiet.requests <= live.requests);
+        if !cfg!(debug_assertions) {
+            assert!(quiet.cpu < live.cpu);
         }
         engine.shutdown();
     }

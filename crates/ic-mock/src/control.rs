@@ -17,6 +17,22 @@ use crate::model::{CheckInput, ObjKind, ObjRef, ProcessOutcome, World};
 use crate::server::Shared;
 use crate::tls;
 
+/// A connected event stream, for measurements
+/// ([`MockControl::event_stream_stats`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventStreamStats {
+    /// The stream's id (counts up from 1).
+    pub id: u64,
+    /// The API user that opened it.
+    pub user: String,
+    /// Its event types, sorted.
+    pub types: Vec<&'static str>,
+    /// Lines sent to it so far.
+    pub lines: u64,
+    /// Bytes sent to it so far.
+    pub bytes: u64,
+}
+
 /// A request the server received (recorded before authentication, so
 /// failed logins show up too).
 #[derive(Clone, Debug, PartialEq)]
@@ -371,6 +387,30 @@ impl MockControl {
     /// Number of connected event streams.
     pub fn event_streams(&self) -> usize {
         self.world().bus.streams().len()
+    }
+
+    /// The connected event streams: their event types and what each has
+    /// been sent so far (measurements: a client in quiet mode subscribes
+    /// without `CheckResult`).
+    pub fn event_stream_stats(&self) -> Vec<EventStreamStats> {
+        self.world()
+            .bus
+            .streams()
+            .into_iter()
+            .map(|info| EventStreamStats {
+                id: info.id,
+                user: info.user,
+                types: info.types,
+                lines: info.lines,
+                bytes: info.bytes,
+            })
+            .collect()
+    }
+
+    /// Lines and bytes sent to every event stream ever connected, closed
+    /// ones included.
+    pub fn events_delivered(&self) -> (u64, u64) {
+        self.world().bus.delivered()
     }
 
     /// Waits until at least `count` event streams are connected.

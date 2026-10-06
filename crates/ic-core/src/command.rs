@@ -87,6 +87,40 @@ pub enum Command {
     /// `Tuning::background_publish_interval` (2 s) while only check
     /// results change; becoming active publishes what changed at once.
     SetActive(bool),
+    /// Quiet mode on or off (PERF-09; an engine starts live). The app
+    /// turns it on for every environment that isn't on screen and for the
+    /// one on screen while the window is hidden, when the general setting
+    /// `quiet_when_hidden` is on.
+    ///
+    /// Quiet: the event stream is subscribed again without `CheckResult`
+    /// events (state changes, acknowledgements, comments, downtimes,
+    /// flapping, Icinga's notifications and configuration changes still
+    /// arrive at once, so notifications are never delayed); the status
+    /// poll runs every `Tuning::quiet_status_interval` (5 minutes) and the
+    /// reconcile at least every `Tuning::quiet_reconcile_interval` (30
+    /// minutes); no freshness watchdog, no hydration; only the dashboards
+    /// that take part in notification decisions are evaluated. Stale while
+    /// quiet: check outputs, last-check times and late markers.
+    ///
+    /// Live again (waking up): the full stream reopens without a gap or a
+    /// duplicate (both streams overlap until a line came on both, see
+    /// docs/architecture.md), the dashboards are evaluated again, and the
+    /// problems whose check result may have changed meanwhile are fetched
+    /// in full by name in the background (at most 1 000, most severe
+    /// first), after the object the user opens ([`Command::Focus`]) and
+    /// the rows on screen ([`Command::Hydrate`]).
+    SetQuiet(bool),
+    /// The object the user is opening (a notification clicked, the
+    /// palette, the selection): fetched in full by name at once, ahead of
+    /// every queued request and the request budget, unless the store holds
+    /// it in full with a result no check can have replaced (live since
+    /// before its last check). One request in flight; a newer `Focus`
+    /// while one runs replaces the one waiting. The snapshot goes out as
+    /// soon as the answer is in; meanwhile `Snapshot::updating` lists it.
+    Focus(ObjectKey),
+    /// The user is here (the window was shown): a background start's first
+    /// load that still waits ([`crate::Start::Background`]) starts now.
+    StartNow,
 }
 
 /// What the engine tells the UI. Received from

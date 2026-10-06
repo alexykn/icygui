@@ -91,6 +91,9 @@ struct Subscriber {
     queue: mpsc::Sender<StreamItem>,
     /// Receives nothing more but stays open (a stalled proxy or queue).
     stalled: bool,
+    /// Lines and bytes queued for it so far.
+    lines: u64,
+    bytes: u64,
 }
 
 impl Subscriber {
@@ -125,6 +128,9 @@ pub(crate) struct StreamInfo {
     pub(crate) user: String,
     pub(crate) types: Vec<&'static str>,
     pub(crate) filtered: bool,
+    /// Lines and bytes queued for it so far.
+    pub(crate) lines: u64,
+    pub(crate) bytes: u64,
 }
 
 /// All connected event streams.
@@ -134,6 +140,8 @@ pub(crate) struct EventBus {
     number_format: NumberFormat,
     buffer: usize,
     published: u64,
+    /// Lines and bytes queued for every stream ever connected.
+    delivered: (u64, u64),
 }
 
 impl std::fmt::Debug for EventBus {
@@ -177,6 +185,7 @@ impl EventBus {
             number_format,
             buffer: buffer.max(1),
             published: 0,
+            delivered: (0, 0),
         }
     }
 
@@ -197,6 +206,8 @@ impl EventBus {
             user: user.to_owned(),
             queue,
             stalled: false,
+            lines: 0,
+            bytes: 0,
         });
         (id, rx)
     }
@@ -224,9 +235,10 @@ impl EventBus {
         line.push(b'\n');
         let line = Bytes::from(line);
         let mut wanted = wanted.into_iter();
-        self.subscribers.retain(|subscriber| {
+        let delivered = &mut self.delivered;
+        self.subscribers.retain_mut(|subscriber| {
             if wanted.next().unwrap_or(false) {
-                deliver(subscriber, line.clone())
+                deliver(subscriber, line.clone(), delivered)
             } else {
                 !subscriber.queue.is_closed()
             }
@@ -251,8 +263,14 @@ impl EventBus {
 
     /// Sends raw bytes (e.g. a malformed line) to every stream.
     pub(crate) fn publish_line_bytes(&mut self, line: &Bytes) {
+        let delivered = &mut self.delivered;
         self.subscribers
-            .retain(|subscriber| deliver(subscriber, line.clone()));
+            .retain_mut(|subscriber| deliver(subscriber, line.clone(), delivered));
+    }
+
+    /// Lines and bytes queued for every stream ever connected.
+    pub(crate) fn delivered(&self) -> (u64, u64) {
+        self.delivered
     }
 
     /// Stalls every connected stream: it stays open but receives nothing
@@ -285,20 +303,30 @@ impl EventBus {
                     user: s.user.clone(),
                     types,
                     filtered: s.filter.is_some(),
+                    lines: s.lines,
+                    bytes: s.bytes,
                 }
             })
             .collect()
     }
 }
 
-/// Queues a line; `false` drops the subscriber (gone, or too slow). A
-/// stalled subscriber gets nothing and stays while its connection does.
-fn deliver(subscriber: &Subscriber, line: Bytes) -> bool {
+/// Queues a line, counting it (per stream and in `delivered`); `false`
+/// drops the subscriber (gone, or too slow). A stalled subscriber gets
+/// nothing and stays while its connection does.
+fn deliver(subscriber: &mut Subscriber, line: Bytes, delivered: &mut (u64, u64)) -> bool {
     if subscriber.stalled {
         return !subscriber.queue.is_closed();
     }
+    let bytes = line.len() as u64;
     match subscriber.queue.try_send(line) {
-        Ok(()) => true,
+        Ok(()) => {
+            subscriber.lines += 1;
+            subscriber.bytes += bytes;
+            delivered.0 += 1;
+            delivered.1 += bytes;
+            true
+        }
         Err(mpsc::error::TrySendError::Full(_)) => {
             tracing::warn!(
                 stream = subscriber.id,

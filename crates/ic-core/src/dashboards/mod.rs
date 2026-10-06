@@ -28,6 +28,12 @@
 //! member, before `problems_only` and `hide_handled`; `shown` counts the
 //! rows.
 //!
+//! In quiet mode (PERF-09, [`Scope::Quiet`]) only the dashboards that
+//! take part in notification decisions are evaluated, and only their
+//! memberships (and sort order) are kept current: their rows and
+//! summaries, which nobody sees while quiet, are rebuilt when quiet mode
+//! ends; the dashboards left out are evaluated in full then.
+//!
 //! A filter that doesn't parse, or fails to evaluate for some object (a
 //! type error such as `"a" < 1`, an unknown function), sets
 //! `DashboardResult.error` and leaves the rows and summary empty, like an
@@ -78,11 +84,23 @@ pub(crate) struct Data {
     pub(crate) now: Timestamp,
 }
 
+/// What [`Dashboards::update`] brings up to date.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// Every dashboard, rows and summaries included.
+    #[default]
+    All,
+    /// Quiet mode: only the memberships (and sort order) of these
+    /// dashboards (`None`: of every one); rows and summaries wait.
+    Quiet(Option<BTreeSet<DashboardRef>>),
+}
+
 /// Every dashboard of the environment.
 #[derive(Debug, Default)]
 pub(crate) struct Dashboards {
     boards: Vec<Board>,
     results: Arc<BTreeMap<DashboardRef, DashboardResult>>,
+    scope: Scope,
 }
 
 impl Dashboards {
@@ -126,7 +144,23 @@ impl Dashboards {
 
     /// Whether some dashboard's filter calls `get_time()`.
     pub(crate) fn time_dependent(&self) -> bool {
-        self.boards.iter().any(|board| board.time_dependent)
+        self.boards
+            .iter()
+            .any(|board| board.time_dependent && self.evaluates(&board.reference))
+    }
+
+    /// What the next updates bring up to date (see [`Scope`]). A dashboard
+    /// left out keeps its last result and is evaluated in full when it is
+    /// evaluated again.
+    pub(crate) fn set_scope(&mut self, scope: Scope) {
+        self.scope = scope;
+    }
+
+    fn evaluates(&self, reference: &DashboardRef) -> bool {
+        match &self.scope {
+            Scope::All | Scope::Quiet(None) => true,
+            Scope::Quiet(Some(only)) => only.contains(reference),
+        }
     }
 
     /// The latest results.
@@ -160,9 +194,18 @@ impl Dashboards {
     ) -> Arc<BTreeMap<DashboardRef, DashboardResult>> {
         let mut dirty: Option<Dirty> = None;
         let mut any_changed = false;
+        let (only, members_only) = match &self.scope {
+            Scope::All => (None, false),
+            Scope::Quiet(only) => (only.as_ref(), true),
+        };
         for board in &mut self.boards {
             if cancel.load(Ordering::Relaxed) {
                 return Arc::clone(&self.results);
+            }
+            if only.is_some_and(|only| !only.contains(&board.reference)) {
+                // Stale until evaluated again, then in full.
+                board.needs_full = true;
+                continue;
             }
             if changes.all || board.needs_full || (refresh_time && board.time_dependent) {
                 board.evaluate_all(data, cancel);
@@ -173,7 +216,9 @@ impl Dashboards {
             if changes.groups && board.view.group_by != GroupBy::None {
                 board.rows_dirty = true;
             }
-            any_changed |= board.finish(data);
+            if !members_only {
+                any_changed |= board.finish(data);
+            }
         }
         let stale = self.results.len() != self.boards.len()
             || self

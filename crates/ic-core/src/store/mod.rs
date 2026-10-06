@@ -545,6 +545,9 @@ impl Store {
             overall: self.overall(),
             late,
             node: self.node.clone(),
+            // Set by the engine.
+            quiet: false,
+            updating: Arc::default(),
         }
     }
 
@@ -554,8 +557,18 @@ impl Store {
         for host in self.hosts.values() {
             tally.add_host(host);
         }
+        // Services are sorted by host: each host is looked up once.
+        let mut current: Option<(&HostName, Option<&Host>)> = None;
         for service in self.services.values() {
-            tally.add_service(service, self.hosts.get(&service.key.host).map(Arc::as_ref));
+            let host = match current {
+                Some((name, host)) if *name == service.key.host => host,
+                _ => {
+                    let host = self.hosts.get(&service.key.host).map(Arc::as_ref);
+                    current = Some((&service.key.host, host));
+                    host
+                }
+            };
+            tally.add_service(service, host);
         }
         tally.finish()
     }

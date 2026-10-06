@@ -326,15 +326,13 @@ impl Engine {
     }
 
     /// Whether the event stream carries every one of `kinds` (none:
-    /// `false`).
+    /// `false`): what it subscribed to, so in quiet mode a forced check's
+    /// targets are re-queried (no check results come).
     fn streams(&self, kinds: &[EventKind]) -> bool {
         let Some(conn) = self.conn.as_ref().filter(|_| self.lines.is_some()) else {
             return false;
         };
-        !kinds.is_empty()
-            && kinds
-                .iter()
-                .all(|kind| conn.info.allows(&format!("events/{}", kind.api_name())))
+        !kinds.is_empty() && kinds.iter().all(|kind| conn.kinds.contains(kind))
     }
 
     /// The hosts and services an action changes: its objects, or the

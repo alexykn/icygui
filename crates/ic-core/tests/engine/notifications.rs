@@ -27,6 +27,20 @@ async fn settled(engine: &mut Engine) {
         .await;
 }
 
+/// Whether the mock was asked for `name`'s service in full by name (a
+/// notification's prefetch).
+fn prefetched(control: &MockControl, name: &str) -> bool {
+    control.requests().iter().any(|request| {
+        request.path == "/v1/objects/services"
+            && request
+                .body
+                .as_ref()
+                .and_then(|body| body.get("services"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|names| names.iter().any(|value| value.as_str() == Some(name)))
+    })
+}
+
 fn critical(control: &MockControl, host: &str, service: &str) {
     control
         .set_service_state(
@@ -530,6 +544,22 @@ async fn a_problem_that_began_again_during_a_gap_notifies() {
     critical(&control, "stg-api-01", "http");
     let first = engine.notification().await.intent;
     assert_eq!(first.title, "CRITICAL · http on stg-api-01");
+    // The notification prefetches the object's details; that answer is in
+    // before the stream stalls (it would see the recovery below).
+    let http = ObjectKey::service("stg-api-01", "http");
+    assert!(
+        wait_until(|| prefetched(&control, "stg-api-01!http")).await,
+        "the notified object is prefetched"
+    );
+    engine
+        .snapshot(|snapshot| {
+            !snapshot.is_updating(&http)
+                && snapshot.services[http.as_service().unwrap()]
+                    .check
+                    .result
+                    .is_some()
+        })
+        .await;
 
     // A proxy stops relaying the stream (a laptop asleep overnight): the
     // service recovers and fails again unseen.

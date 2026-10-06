@@ -4,7 +4,7 @@
 //! Collections are `Arc`-shared so publishing a snapshot is cheap and the UI
 //! can hold on to an old one while the runtime builds the next.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use ic_model::{
@@ -76,6 +76,17 @@ pub struct Snapshot {
     /// from the new one is complete, so a partial view never looks
     /// complete. `None` before the first connect.
     pub node: Option<Arc<ConnectedNode>>,
+    /// The event stream carries no check results (quiet mode, PERF-09):
+    /// outputs, last-check times and late markers may be stale, and a
+    /// stream can be silent for many minutes, so the age of the last event
+    /// says nothing about the connection's health.
+    pub quiet: bool,
+    /// Hosts and services whose full details are being fetched: the object
+    /// the user opened ([`crate::Command::Focus`]), rows hydrating, a
+    /// notified object's prefetch, problems refreshed after waking up. A
+    /// pane shows an "updating" hint when its object stays here for a
+    /// moment (about 300 ms).
+    pub updating: Arc<BTreeSet<ObjectKey>>,
 }
 
 impl Snapshot {
@@ -122,6 +133,13 @@ impl Snapshot {
     #[must_use]
     pub fn is_late(&self, object: &ObjectKey) -> bool {
         self.late.contains_key(object)
+    }
+
+    /// Whether a host's or service's full details are being fetched (see
+    /// [`Snapshot::updating`]).
+    #[must_use]
+    pub fn is_updating(&self, object: &ObjectKey) -> bool {
+        self.updating.contains(object)
     }
 }
 

@@ -73,7 +73,7 @@ mod sim;
 mod tls;
 
 pub use config::{MockConfig, MockTls, MockUser, NumberFormat, SimulationConfig, StormConfig};
-pub use control::{MockControl, RecordedRequest};
+pub use control::{EventStreamStats, MockControl, RecordedRequest};
 pub use error::MockError;
 pub use scenario::{Notification, Scenario, Summary, User, Zone, raw_check_result};
 pub use server::MockServer;

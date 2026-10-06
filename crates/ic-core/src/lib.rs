@@ -9,6 +9,13 @@
 //!   An app runs one engine per environment side by side and tells each
 //!   whether its environment is on screen ([`Command::SetActive`]): one off
 //!   screen publishes less often and costs Icinga nothing more.
+//! - Quiet mode ([`Command::SetQuiet`], PERF-09): an engine nobody looks at
+//!   follows Icinga without check results (notifications as prompt as
+//!   ever), polls and reconciles less, and wakes up without losing an
+//!   event; the object the user opens ([`Command::Focus`]) goes ahead of
+//!   every queue and of the request budget all by-name requests share.
+//!   Background starts ([`Start::Background`]) wait a delay proportional
+//!   to the installation's size before their first load.
 //! - Notifications: every change the engine applies is judged by the
 //!   environment's rules (`ic-rules`); every decision is logged and
 //!   emitted as [`CoreEvent::Notification`], the audible ones also shown
@@ -65,5 +72,5 @@ pub use probe::{
     ConnectionFailure, ConnectionReport, REQUIRED_PERMISSIONS, fetch_certificate,
     missing_permissions, test_connection,
 };
-pub use spec::{EnvironmentSpec, Ports, Tuning};
+pub use spec::{EnvironmentSpec, Ports, Start, Tuning};
 pub use topology::{ClusterNode, ClusterView, ConnectedNode, NodeState};

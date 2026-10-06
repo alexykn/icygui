@@ -216,6 +216,7 @@ impl Scenario {
                 checks_per_minute: 0.0,
                 avg_latency: 0.0,
                 avg_execution_time: 0.0,
+                counts: ic_model::ObjectCounts::default(),
             },
             zones: Vec::new(),
             users: Vec::new(),

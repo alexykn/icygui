@@ -21,7 +21,7 @@ use crate::connect::Failure;
 use crate::store::Overview;
 
 /// The tier-1 queries counted in [`LoadPhase::Hosts`] progress.
-const OVERVIEW_QUERIES: usize = 8;
+pub(super) const OVERVIEW_QUERIES: usize = 8;
 
 /// What a load task needs.
 pub(super) struct LoadTask {

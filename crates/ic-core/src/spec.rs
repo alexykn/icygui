@@ -17,6 +17,28 @@ pub struct EnvironmentSpec {
     pub general: ic_config::General,
     /// Where the environment's event log lives.
     pub data_dir: PathBuf,
+    /// Whether the user is waiting for this engine ([`Start::User`]) or
+    /// the app started in the background ([`Start::Background`]: launch at
+    /// login, `--background`), when the first load waits a random delay
+    /// proportional to the installation's size (PERF-09).
+    pub start: Start,
+}
+
+/// How an engine starts (PERF-09).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Start {
+    /// The user is there (the window is shown): the first load starts as
+    /// soon as the engine is connected.
+    #[default]
+    User,
+    /// The app started in the background (launch at login): the first
+    /// load waits a random delay of up to `Tuning::start_delay_per_thousand`
+    /// per 1 000 services (at most `Tuning::start_delay_max`), the size
+    /// read from `/v1/status/CIB` first, so many clients started together
+    /// (a team logging in at nine) spread their big queries out. Small
+    /// installations wait under a second. [`crate::Command::StartNow`]
+    /// (the window was shown) ends the wait.
+    Background,
 }
 
 /// The operating-system services the engine uses.
@@ -61,8 +83,9 @@ pub struct Tuning {
     /// Snapshots go out at most this often while things change (250 ms).
     pub publish_interval: Duration,
     /// Snapshots of an engine whose environment isn't on screen
-    /// ([`crate::Command::SetActive`]`(false)`) go out at most this often
-    /// (2 s): only the tray and the environment switcher read them. Rule
+    /// ([`crate::Command::SetActive`]`(false)`), or that is quiet
+    /// ([`crate::Command::SetQuiet`]), go out at most this often (2 s):
+    /// only the tray and the environment switcher read them. Rule
     /// inputs waiting for their dashboard memberships still go out after
     /// `publish_interval`, so its notifications are as prompt as the
     /// active environment's.
@@ -108,9 +131,12 @@ pub struct Tuning {
     pub load_retry_initial: Duration,
     /// The periodic reconcile's interval, overriding
     /// `General::reconcile_interval_secs` (tests); `None` (the default)
-    /// uses the setting: adaptive for 0 (5 minutes below 5 000 objects,
-    /// 15 minutes above), else the setting but at least
-    /// `ic_config::MIN_RECONCILE_INTERVAL_SECS`.
+    /// uses the setting: adaptive for 0 (28 ms per host and service, 5 to
+    /// 60 minutes, doubled up to twice while the event stream stays
+    /// continuous and reconciles find nothing it missed, at most 60
+    /// minutes), else the setting but at least
+    /// `ic_config::MIN_RECONCILE_INTERVAL_SECS`. Quiet mode makes it at
+    /// least `quiet_reconcile_interval` either way.
     pub reconcile_interval: Option<Duration>,
     /// How often the notification rule engine ticks (1 s): delayed
     /// notifications, storm summaries, pauses and mutes ending.
@@ -135,6 +161,31 @@ pub struct Tuning {
     pub probe_initial: Duration,
     /// The longest wait between such probes (10 minutes).
     pub probe_max: Duration,
+    /// How often `/v1/status` is polled in quiet mode
+    /// ([`crate::Command::SetQuiet`]; 5 minutes instead of
+    /// `status_interval`).
+    pub quiet_status_interval: Duration,
+    /// The shortest reconcile interval in quiet mode (30 minutes): the
+    /// adaptive interval, stretched while the stream is continuous, but at
+    /// least this.
+    pub quiet_reconcile_interval: Duration,
+    /// How long the old and the new event stream may overlap when quiet
+    /// mode switches the subscription (2 s): the old one is closed once a
+    /// line came on both (it has delivered everything sent before the new
+    /// one subscribed), or after this.
+    pub stream_handover: Duration,
+    /// The request budget for by-name queries ([`ic_api::RequestBudget`]):
+    /// one request per `request_interval` (200 ms: 5 per second) after a
+    /// burst of `request_burst` (10). Zero: no limit. The object the user
+    /// is opening ([`crate::Command::Focus`]) never waits.
+    pub request_interval: Duration,
+    /// The budget's burst (10 requests).
+    pub request_burst: u32,
+    /// A background start ([`Start::Background`]) waits a random delay of
+    /// up to this per 1 000 services (3 s) before its first load …
+    pub start_delay_per_thousand: Duration,
+    /// … but at most this (90 s).
+    pub start_delay_max: Duration,
     /// With several URLs, how long logging in at one and finding out its
     /// node (`GET /v1`, the node's name, the zones) may take while other
     /// URLs remain to try, and in a probe (8 s): a node that accepts
@@ -170,6 +221,13 @@ impl Default for Tuning {
             probe_initial: Duration::from_secs(30),
             probe_max: Duration::from_mins(10),
             identify_timeout: Duration::from_secs(8),
+            quiet_status_interval: Duration::from_mins(5),
+            quiet_reconcile_interval: Duration::from_mins(30),
+            stream_handover: Duration::from_secs(2),
+            request_interval: Duration::from_millis(200),
+            request_burst: 10,
+            start_delay_per_thousand: Duration::from_secs(3),
+            start_delay_max: Duration::from_secs(90),
         }
     }
 }

@@ -25,21 +25,28 @@
 //! - Icinga's own `Notification` objects (who Icinga notified, and when)
 //!   load in the background after the problem lists and follow Icinga's
 //!   `Notification` events.
+//! - Quiet mode and the instant wake-up (`quiet.rs`, PERF-09): the stream
+//!   switched to state changes only and back without losing or repeating
+//!   an event, quiet schedules, the object the user opens ahead of every
+//!   queue, prefetches on notification, background starts.
+//! - Every by-name request takes a token from the engine's request budget
+//!   ([`ic_api::RequestBudget`]); the object the user opens goes first.
 
 mod actions;
 mod fetch;
 mod load;
 mod notify;
 mod publish;
+mod quiet;
 mod stream;
 mod sync;
 mod watchdog;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use ic_api::{ApiError, ApiInfo, Client, Detail};
+use ic_api::{ApiError, ApiInfo, Client, Detail, EventLines, RequestBudget};
 use ic_model::{
     Event, EventKind, Host, InstanceStatus, Notification, ObjectChange, ObjectKey, Service,
     ServiceKey, Timestamp,
@@ -47,7 +54,7 @@ use ic_model::{
 use ic_rules::{DashboardRef, NotificationIntent};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinSet};
 use tokio::time::Instant;
 
 use crate::backoff::Backoff;
@@ -56,7 +63,7 @@ use crate::connect::{self, Connected, Failure};
 use crate::dashboards::Dashboards;
 use crate::event_log::{EventLog, event_log_path};
 use crate::snapshot::{DashboardResult, Snapshot};
-use crate::spec::{EnvironmentSpec, Ports, Tuning};
+use crate::spec::{EnvironmentSpec, Ports, Start, Tuning};
 use crate::store::{Applied, Discovered, ObjectView, Overview, Store, notification_object};
 use crate::topology::{self, ConnectedNode};
 
@@ -125,6 +132,24 @@ pub(crate) enum Internal {
         asked: Vec<String>,
         known: Vec<String>,
     },
+    /// The new stream of a switch between quiet and live mode is open (or
+    /// not).
+    StreamOpened {
+        session: u64,
+        switch: u64,
+        result: Result<EventLines, ApiError>,
+    },
+    /// The object the user opened (`Command::Focus`), fetched in full when
+    /// the reader had read `started` lines.
+    Focused {
+        session: u64,
+        key: ObjectKey,
+        started: u64,
+        result: Result<ic_api::Fetched, ApiError>,
+    },
+    /// A background start's size: Icinga's service count, if it could be
+    /// read.
+    StartSize { session: u64, services: Option<u32> },
 }
 
 /// A load's progress and answers.
@@ -163,9 +188,19 @@ impl std::fmt::Debug for Connected {
             .field("client", &self.client)
             .field("user", &self.info.user)
             .field("stream", &self.lines.is_some())
+            .field("quiet", &self.quiet)
             .field("node", &self.node)
             .finish_non_exhaustive()
     }
+}
+
+/// Icinga's service counts by state at a quiet status poll (see
+/// `quiet.rs`): the node that answered, the counts, when.
+#[derive(Debug)]
+pub(crate) struct QuietCounts {
+    node: String,
+    counts: [u32; 4],
+    at: Instant,
 }
 
 /// An event the store applied, with the object's view before and after:
@@ -260,6 +295,10 @@ struct Conn {
     /// checks while no line arrived for `Tuning::stall_after` means it
     /// stalled.
     check_events: bool,
+    /// The stream's event types.
+    kinds: Vec<EventKind>,
+    /// The stream carries no check results (quiet mode).
+    quiet: bool,
     /// When the engine last received stream lines (or the stream opened,
     /// or the session went live).
     last_line: Instant,
@@ -387,6 +426,58 @@ pub(crate) struct Engine {
     /// the cluster (ENV-12): it brings every object, so events about
     /// objects the store doesn't hold aren't looked up by name meanwhile.
     view_reload: bool,
+    /// Quiet mode is wanted (`Command::SetQuiet`); the connect task reads
+    /// it when it opens the stream.
+    quiet_wanted: Arc<AtomicBool>,
+    /// The latest stream carried no check results (kept across sessions:
+    /// a live stream after a quiet one wakes up).
+    stream_quiet: bool,
+    /// The current stream's reader.
+    reader: Option<AbortHandle>,
+    /// A switch of the stream between quiet and live in progress.
+    switch: Option<quiet::Switch>,
+    /// Counts switches (answers of abandoned ones are dropped).
+    switches: u64,
+    /// A failed switch is tried again then.
+    switch_retry_at: Option<Instant>,
+    switch_backoff: Backoff,
+    /// After a switch: the old stream's lines the new one may repeat.
+    dedupe: Option<quiet::Dedupe>,
+    /// When the live stream last came back after quiet mode (Icinga's
+    /// time); `None` while it never was quiet.
+    woke_at: Option<f64>,
+    /// Paces every by-name request (`Tuning::request_interval`,
+    /// `request_burst`).
+    budget: Arc<RequestBudget>,
+    /// A background start (until the first load starts or the user came).
+    start: Start,
+    /// A background start's first load waits until then.
+    start_at: Option<Instant>,
+    /// The object the user opened, being fetched.
+    focus: quiet::Focus,
+    /// When the recent prefetches on notification went out.
+    prefetched: VecDeque<Instant>,
+    /// Periodic reconciles in a row that found nothing the stream missed,
+    /// while the stream was continuous: each doubles the interval (twice
+    /// at most, never above an hour).
+    reconcile_streak: u32,
+    /// The load in flight found something no event announced.
+    load_found: bool,
+    /// Since when the stream has been continuous (the session went live).
+    continuous_since: Option<Instant>,
+    /// The last quiet status poll's counts (kept across sessions).
+    quiet_counts: Option<QuietCounts>,
+    /// A quiet stream suspected of stalling: when to check, and since when
+    /// no line came.
+    stall_suspect: Option<(Instant, Instant)>,
+    /// What `Snapshot::updating` says, and whether it changed since the
+    /// last snapshot.
+    updating: Arc<BTreeSet<ObjectKey>>,
+    updating_changed: bool,
+    /// The stream's mode changed (`Snapshot::quiet`).
+    mode_changed: bool,
+    /// Every dashboard is evaluated again (after quiet mode).
+    dashboards_resume: bool,
 }
 
 /// Why the select loop woke up.
@@ -395,6 +486,8 @@ enum Wake {
     Command(Command),
     Internal(Internal),
     Lines(usize),
+    /// The new stream's lines while two streams overlap (a mode switch).
+    NewLines(usize),
     Timer,
 }
 
@@ -412,6 +505,11 @@ impl Engine {
         let notify = Notify::new(&spec.environment);
         let now = Instant::now();
         let tuning_probe = (tuning.probe_initial, tuning.probe_max);
+        let budget = Arc::new(RequestBudget::new(
+            tuning.request_interval,
+            tuning.request_burst,
+        ));
+        let start = spec.start;
         Self {
             notify,
             tick_at: now + tuning.rule_tick,
@@ -471,6 +569,29 @@ impl Engine {
             probe_backoff: Backoff::new(tuning_probe.0, tuning_probe.1),
             probe_in_flight: false,
             view_reload: false,
+            quiet_wanted: Arc::new(AtomicBool::new(false)),
+            stream_quiet: false,
+            reader: None,
+            switch: None,
+            switches: 0,
+            switch_retry_at: None,
+            switch_backoff: Backoff::new(quiet::SWITCH_RETRY.0, quiet::SWITCH_RETRY.1),
+            dedupe: None,
+            woke_at: None,
+            budget,
+            start,
+            start_at: None,
+            focus: quiet::Focus::default(),
+            prefetched: VecDeque::new(),
+            reconcile_streak: 0,
+            load_found: false,
+            continuous_since: None,
+            quiet_counts: None,
+            stall_suspect: None,
+            updating: Arc::default(),
+            updating_changed: false,
+            mode_changed: false,
+            dashboards_resume: false,
         }
     }
 
@@ -481,23 +602,32 @@ impl Engine {
         mut internal_rx: UnboundedReceiver<Internal>,
         mut shutdown: oneshot::Receiver<()>,
     ) {
+        // Commands sent right after the start (quiet mode, say) apply
+        // before the first connect opens the stream.
+        while let Ok(command) = commands.try_recv() {
+            self.on_command(command);
+        }
         self.connect();
         // Pruned before any query can reach the log.
         self.prune(Instant::now());
         let mut lines = Vec::new();
+        let mut new_lines = Vec::new();
         loop {
             self.reap_tasks();
             let deadline = self.next_deadline(Instant::now());
             let live = self.phase == Phase::Live;
             let max_batch = self.tuning.max_batch.max(1);
+            let mut overlap = self.take_overlap();
             let wake = tokio::select! {
                 biased;
                 _ = &mut shutdown => Wake::Shutdown,
                 command = commands.recv() => command.map_or(Wake::Shutdown, Wake::Command),
                 Some(message) = internal_rx.recv() => Wake::Internal(message),
                 count = receive_lines(self.lines.as_mut().filter(|_| live), &mut lines, max_batch) => Wake::Lines(count),
+                count = receive_lines(overlap.as_mut(), &mut new_lines, max_batch) => Wake::NewLines(count),
                 () = sleep_until(deadline) => Wake::Timer,
             };
+            self.restore_overlap(overlap);
             match wake {
                 Wake::Shutdown => break,
                 Wake::Command(command) => self.on_command(command),
@@ -517,6 +647,8 @@ impl Engine {
                     }
                     self.on_lines(std::mem::take(&mut lines));
                 }
+                Wake::NewLines(0) => self.new_reader_gone(),
+                Wake::NewLines(_) => self.on_new_lines(std::mem::take(&mut new_lines)),
                 Wake::Timer => {}
             }
             self.run_due();
@@ -576,6 +708,20 @@ impl Engine {
         }
     }
 
+    /// When a background start's first load may begin.
+    fn first_load_at(&self) -> Option<Instant> {
+        (self.phase == Phase::Loading && self.load.is_none())
+            .then_some(self.start_at)
+            .flatten()
+    }
+
+    /// When a failed switch of the stream is tried again: only while live.
+    fn switch_retry_due(&self) -> Option<Instant> {
+        (self.phase == Phase::Live)
+            .then_some(self.switch_retry_at)
+            .flatten()
+    }
+
     fn status_at(&self) -> Option<Instant> {
         let conn = self.conn.as_ref()?;
         if self.phase != Phase::Live || conn.status_in_flight {
@@ -600,6 +746,10 @@ impl Engine {
             self.reload_due(),
             self.sweep_at(now),
             self.probe_due(),
+            self.first_load_at(),
+            self.switch_retry_due(),
+            self.handover_at(),
+            self.stall_suspect.map(|(at, _)| at),
             Some(self.tick_at),
             Some(self.prune_at),
         ]
@@ -614,6 +764,21 @@ impl Engine {
         let now = Instant::now();
         if self.retry_at().is_some_and(|at| at <= now) {
             self.connect();
+        }
+        if self.first_load_at().is_some_and(|at| at <= now) {
+            self.start_at = None;
+            self.start = Start::User;
+            self.start_load(LoadKind::First);
+        }
+        if self.handover_at().is_some_and(|at| at <= now) {
+            self.complete_handover();
+        }
+        if self.switch_retry_due().is_some_and(|at| at <= now) {
+            self.switch_retry_at = None;
+            self.want_mode();
+        }
+        if self.stall_suspect.is_some_and(|(at, _)| at <= now) {
+            self.check_stall();
         }
         if self.status_at().is_some_and(|at| at <= now) {
             self.poll_status();
@@ -657,8 +822,9 @@ impl Engine {
         let tx = self.internal_tx.clone();
         let timeouts = (self.tuning.action_timeout, self.tuning.identify_timeout);
         let first = self.walk_start();
+        let quiet = Arc::clone(&self.quiet_wanted);
         self.tasks.spawn(async move {
-            let connected = connect::connect(&environment, secrets, timeouts, first).await;
+            let connected = connect::connect(&environment, secrets, timeouts, first, quiet).await;
             let message = match connected {
                 Ok(connected) => Internal::Connected {
                     session,
@@ -708,6 +874,16 @@ impl Engine {
         // Probes belong to the session.
         self.probe_at = None;
         self.probe_in_flight = false;
+        // So do the stream, its switches and the opened object's request.
+        self.reader = None;
+        self.switch = None;
+        self.switch_retry_at = None;
+        self.dedupe = None;
+        self.focus = quiet::Focus::default();
+        self.start_at = None;
+        self.stall_suspect = None;
+        self.continuous_since = None;
+        self.note_updating();
         // What an aborted load found is real all the same.
         self.finish_discovered();
     }
@@ -794,6 +970,8 @@ impl Engine {
             client,
             info,
             lines,
+            kinds,
+            quiet,
             node,
             login,
         } = connected;
@@ -802,8 +980,11 @@ impl Engine {
             version = %info.version,
             node = %node.name,
             view = %node.view.label(),
+            quiet,
             "connected to Icinga"
         );
+        // Every by-name request of the session takes from the budget.
+        let client = client.with_budget(Arc::clone(&self.budget));
         let node = Arc::new(node);
         // Objects loaded from a node with another view (a satellite's
         // part, or the whole cluster before a failover to a satellite)
@@ -821,8 +1002,10 @@ impl Engine {
         self.emit(CoreEvent::Permissions(info.clone()));
         if let Some(stream) = lines {
             let (tx, rx) = mpsc::unbounded_channel();
-            self.tasks
-                .spawn(stream::read(stream, Arc::clone(&self.seq), tx));
+            self.reader = Some(
+                self.tasks
+                    .spawn(stream::read(stream, Arc::clone(&self.seq), tx)),
+            );
             self.lines = Some(rx);
         }
         let next_status = info
@@ -831,8 +1014,12 @@ impl Engine {
         let notifications_allowed = info.allows("objects/query/Notification");
         let notification_events = self.lines.is_some()
             && info.allows(&format!("events/{}", EventKind::Notification.api_name()));
-        let check_events = self.lines.is_some()
-            && info.allows(&format!("events/{}", EventKind::CheckResult.api_name()));
+        let check_events = kinds.contains(&EventKind::CheckResult);
+        let woke = self.loaded && self.stream_quiet && !quiet;
+        if self.stream_quiet != quiet {
+            self.stream_quiet = quiet;
+            self.mode_changed = true;
+        }
         // Without `objects/query/<type>` a kind isn't asked for by name at
         // all (events about its objects can't be looked up).
         self.fetch.refuse(
@@ -856,8 +1043,12 @@ impl Engine {
             notifications_in_flight: false,
             notification_events_waiting: Vec::new(),
             check_events,
+            kinds,
+            quiet,
             last_line: Instant::now(),
         });
+        // The stream is continuous from here (lines wait during a load).
+        self.continuous_since = Some(Instant::now());
         if self.loaded {
             // A reconnect: live at once on the objects we have (the stream
             // keeps them current).
@@ -871,6 +1062,11 @@ impl Engine {
                 self.adopt_node(true);
                 self.after_reconnect(gap, can_poll_status);
             }
+            if woke {
+                // Live again after quiet mode, through a reconnect (once
+                // it is known whether a full reload follows).
+                self.woke();
+            }
         } else {
             // The first load's objects are this node's from the start, so
             // a partial view is labelled while it fills in (with its first
@@ -878,7 +1074,7 @@ impl Engine {
             self.adopt_node(false);
             self.reload_now = false;
             self.phase = Phase::Loading;
-            self.start_load(LoadKind::First);
+            self.begin_first_load();
         }
     }
 
@@ -906,6 +1102,12 @@ impl Engine {
             self.user_reloads = self.user_reloads.saturating_add(1);
             self.last_user_reload = Some(now);
         }
+        if kind == LoadKind::First {
+            // Whatever the start was, it is served.
+            self.start = Start::User;
+            self.start_at = None;
+        }
+        self.load_found = false;
         self.reload_full = false;
         self.view_reload = false;
         // A fuller view than the one the store was filled from brings
@@ -976,7 +1178,7 @@ impl Engine {
                 self.record_discovered(true);
                 self.publish();
             }
-            LoadStep::Done => self.load_done(first),
+            LoadStep::Done => self.load_done(kind),
             LoadStep::Failed(failure) => {
                 self.load = None;
                 self.last_load_end = Some(Instant::now());
@@ -1016,12 +1218,14 @@ impl Engine {
 
     /// A load is complete: the objects are the node's, the rule engine
     /// judges what it found (and, after the first, learns what is wrong).
-    fn load_done(&mut self, first: bool) {
+    fn load_done(&mut self, kind: LoadKind) {
+        let first = kind == LoadKind::First;
         let now = Instant::now();
         self.load = None;
         self.loaded = true;
         // The objects are this node's now.
         self.adopt_node(true);
+        self.track_continuity(kind);
         self.last_load_end = Some(now);
         self.fetch
             .release_deferred(now, |key| self.store.contains(key));
@@ -1072,6 +1276,8 @@ impl Engine {
             since: now,
         });
         self.schedule_probe();
+        // The stream follows the wanted mode.
+        self.want_mode();
     }
 
     /// The store's objects come from the connected node (`Snapshot::node`).
@@ -1268,7 +1474,11 @@ impl Engine {
     }
 
     fn on_status(&mut self, result: Result<InstanceStatus, ApiError>) {
-        let interval = self.tuning.status_interval;
+        let interval = if self.quiet() {
+            self.tuning.quiet_status_interval
+        } else {
+            self.tuning.status_interval
+        };
         let Some(conn) = &mut self.conn else {
             return;
         };
@@ -1282,6 +1492,7 @@ impl Engine {
                     self.fail(Failure::Transient(error));
                     return;
                 }
+                self.watch_quiet_stream(&status);
                 // Only the same node with another start time restarted: the
                 // masters of an HA zone behind a load balancer each have
                 // their own.
@@ -1441,6 +1652,7 @@ impl Engine {
             }
         }
         self.fetch.finished(&missing, Instant::now());
+        self.note_updating();
         if answers.urgent {
             self.publish_changes();
         }
@@ -1450,6 +1662,8 @@ impl Engine {
 
     /// Applies a batch from the reader: parses, collapses check results,
     /// applies in order; then handles the end of the stream if it came.
+    /// While a mode switch reads two streams, the old stream's lines are
+    /// remembered, and its end hands over to the new one (`quiet.rs`).
     fn on_lines(&mut self, batch: Vec<ReaderMsg>) {
         let mut lines = Vec::with_capacity(batch.len());
         let mut end = None;
@@ -1459,28 +1673,47 @@ impl Engine {
                 ReaderMsg::End(error) => end = Some(error),
             }
         }
-        if !lines.is_empty() {
-            // Only lines count: the end of the stream (after a laptop woke
-            // up, say) says nothing about what it missed.
-            self.last_heard = Some((Instant::now(), self.ports.clock.now()));
-            self.store.set_last_event_at(self.ports.clock.now());
-            let events = stream::prepare(lines);
-            if let Some(latest) = events
-                .iter()
-                .map(|(_, event)| event.at())
-                .max_by(|a, b| a.as_unix_seconds().total_cmp(&b.as_unix_seconds()))
-            {
-                self.watchdog.clock().observe(latest, Instant::now());
-            }
-            self.apply_events(events);
-        }
+        let common = self.note_old_lines(&lines);
+        self.apply_lines(lines);
         if let Some(error) = end {
+            if self.overlapping() {
+                tracing::info!(
+                    ?error,
+                    "the old event stream ended during a switch; the new one takes over"
+                );
+                self.complete_handover();
+                return;
+            }
             let error = error.map_or_else(
                 || "the event stream was closed by Icinga".to_owned(),
                 |error| format!("the event stream broke: {error}"),
             );
             self.fail(Failure::Transient(error));
+        } else if common {
+            self.complete_handover();
         }
+    }
+
+    /// Parses, collapses and applies stream lines (those an earlier stream
+    /// already brought are dropped after a switch).
+    fn apply_lines(&mut self, mut lines: Vec<(u64, Vec<u8>)>) {
+        self.drop_duplicates(&mut lines);
+        if lines.is_empty() {
+            return;
+        }
+        // Only lines count: the end of the stream (after a laptop woke
+        // up, say) says nothing about what it missed.
+        self.last_heard = Some((Instant::now(), self.ports.clock.now()));
+        self.store.set_last_event_at(self.ports.clock.now());
+        let events = stream::prepare(lines);
+        if let Some(latest) = events
+            .iter()
+            .map(|(_, event)| event.at())
+            .max_by(|a, b| a.as_unix_seconds().total_cmp(&b.as_unix_seconds()))
+        {
+            self.watchdog.clock().observe(latest, Instant::now());
+        }
+        self.apply_events(events);
     }
 
     /// Applies events in order; each applied change is recorded at once
@@ -1501,6 +1734,10 @@ impl Engine {
                 }
                 Event::Notification { object, .. } => {
                     self.on_icinga_notification(seq, object, now);
+                    continue;
+                }
+                _ if self.older_check(&event) => {
+                    // From the overlap of a switch: a newer state is in.
                     continue;
                 }
                 _ => {}
@@ -1645,6 +1882,10 @@ impl Engine {
         if found.is_empty() {
             return;
         }
+        if load {
+            // The stream missed something: reconciles stay frequent.
+            self.load_found = true;
+        }
         let mut stale = Vec::new();
         for Discovered {
             object,
@@ -1729,6 +1970,9 @@ impl Engine {
             Command::LoadHistoryStart { reply } => self.event_log.history_start(reply),
             Command::Hydrate(keys) => self.hydrate(keys),
             Command::SetActive(active) => self.set_active(active),
+            Command::SetQuiet(quiet) => self.set_quiet(quiet),
+            Command::Focus(key) => self.focus(key),
+            Command::StartNow => self.start_now(),
         }
     }
 
@@ -1755,6 +1999,10 @@ impl Engine {
                 }
                 self.reload_now = true;
                 self.connect();
+            }
+            Phase::Loading if self.start_at.is_some() => {
+                // A background start waiting: the user wants it now.
+                self.start_now();
             }
             Phase::Connecting | Phase::Loading => {
                 tracing::debug!("refresh: a connection attempt or load is already running");
@@ -1861,6 +2109,20 @@ impl Engine {
                 started,
                 result,
             } if session == self.session => self.on_icinga_notifications(started, result),
+            Internal::StreamOpened {
+                session,
+                switch,
+                result,
+            } if session == self.session => self.on_stream_opened(switch, result),
+            Internal::Focused {
+                session,
+                key,
+                started,
+                result,
+            } if session == self.session => self.on_focused(&key, started, result),
+            Internal::StartSize { session, services } if session == self.session => {
+                self.start_after(services);
+            }
             // An older session's late answer.
             Internal::Connected { .. }
             | Internal::ConnectFailed { .. }
@@ -1868,7 +2130,10 @@ impl Engine {
             | Internal::Load { .. }
             | Internal::Status { .. }
             | Internal::Fetched { .. }
-            | Internal::IcingaNotifications { .. } => {}
+            | Internal::IcingaNotifications { .. }
+            | Internal::StreamOpened { .. }
+            | Internal::Focused { .. }
+            | Internal::StartSize { .. } => {}
         }
     }
 

@@ -275,6 +275,7 @@ impl World {
             checks_per_minute: f64::from(self.stats.checks_last_minute(now)),
             avg_latency: average(latency),
             avg_execution_time: average(execution),
+            counts: self.object_counts(),
         }
     }
 }

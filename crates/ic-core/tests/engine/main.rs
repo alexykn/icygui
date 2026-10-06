@@ -15,7 +15,11 @@
 //! - `event_log`: the local `SQLite` event log;
 //! - `notified`: who Icinga notified, and when (its `Notification` objects);
 //! - `probe`: `test_connection` and `fetch_certificate`;
+//! - `quiet`: quiet mode, waking up, the object the user opens, the
+//!   request budget, prefetches and background starts (PERF-09);
 //! - `scale`: production-size loads and bursts (ignored by default);
+//! - `starts`: many clients starting at once against the local Docker
+//!   Icinga of `contract/scale/starts.sh` (ignored);
 //! - `topology`: several API URLs per environment, against several mocks
 //!   forming one cluster (ENV-12).
 
@@ -33,5 +37,7 @@ mod gentle;
 mod notifications;
 mod notified;
 mod probe;
+mod quiet;
 mod scale;
+mod starts;
 mod topology;

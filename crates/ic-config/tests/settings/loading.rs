@@ -161,6 +161,10 @@ url = "https://master-01.example.com:5665"
     );
     let config = store_with(dir.path(), &text).load().unwrap();
     assert_eq!(config.general, General::default());
+    assert!(
+        config.general.quiet_when_hidden,
+        "quiet mode is on unless turned off (files from before it had no key)"
+    );
     assert_eq!(config.active_environment, None);
     let environment = &config.environments[0];
     assert_eq!(

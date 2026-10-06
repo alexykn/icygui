@@ -490,6 +490,30 @@ impl Watchdog {
         self.awaiting.clear();
     }
 
+    /// Check results came back after quiet mode, which had none: deadlines
+    /// that passed meanwhile say nothing (no result moved them). Every
+    /// object is looked at again one interval from now at the earliest
+    /// (at least a minute), by when its next check result has come if
+    /// Icinga checks it, so waking up costs no re-query storm.
+    pub(super) fn rebase(&mut self) {
+        let Some(now) = self.icinga_now() else {
+            return;
+        };
+        let keys: Vec<ObjectKey> = self.watched.keys().cloned().collect();
+        for key in keys {
+            let Some(watch) = self.watched.get_mut(&key) else {
+                continue;
+            };
+            let old = watch.next_look();
+            watch.not_before = watch.not_before.max(now + watch.interval.max(MIN_SPACING));
+            let new = watch.next_look();
+            if old.total_cmp(&new).is_ne() {
+                self.queue.remove(&(Seconds(old), key.clone()));
+                self.queue.insert((Seconds(new), key));
+            }
+        }
+    }
+
     /// A load just brought Icinga's own view of every object: whatever is
     /// overdue in it is late, without a re-query.
     pub(super) fn loaded(&mut self, store: &Store) {

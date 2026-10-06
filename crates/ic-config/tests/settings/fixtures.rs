@@ -30,6 +30,7 @@ pub(crate) fn full_config() -> Config {
             launch_at_login: true,
             event_log_retention_hours: 72,
             reconcile_interval_secs: 120,
+            quiet_when_hidden: false,
         },
         active_environment: Some(prod.id.clone()),
         environments: vec![prod, staging()],

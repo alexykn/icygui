@@ -3,8 +3,8 @@
 //!
 //! A snapshot goes out at most every `publish_interval` while things
 //! change (every `background_publish_interval` while the environment
-//! isn't on screen and no rule input waits), and right away after load
-//! tiers and actions. When objects
+//! isn't on screen or is quiet, and no rule input waits), and right away
+//! after load tiers, actions and the opened object's answer. When objects
 //! changed, the dashboards are brought up to date first: the engine cuts
 //! the snapshot (cheap: shared maps), hands it and the dashboards' state to
 //! a blocking thread, and emits it with the results once they are back.
@@ -39,8 +39,11 @@ impl Engine {
     fn needs_publish(&self) -> bool {
         self.store.has_changes()
             || self.dashboards_configured
+            || self.dashboards_resume
             || self.watchdog.has_changes()
             || self.notify.has_pending()
+            || self.updating_changed
+            || self.mode_changed
     }
 
     /// When the next throttled snapshot (or the time-dependent dashboards'
@@ -48,9 +51,10 @@ impl Engine {
     /// publishes).
     pub(super) fn publish_at(&self, now: Instant) -> Option<Instant> {
         self.dashboards.as_ref()?;
-        // Nobody looks at an inactive environment's lists: its snapshots
-        // go out less often, unless notifications wait for them.
-        let interval = if self.active || self.notify.has_pending() {
+        // Nobody looks at the lists of an environment that isn't on screen
+        // or is quiet (the window is hidden): its snapshots go out less
+        // often (the tray reads them), unless notifications wait for them.
+        let interval = if (self.active && !self.quiet()) || self.notify.has_pending() {
             self.tuning.publish_interval
         } else {
             self.tuning.background_publish_interval
@@ -87,14 +91,28 @@ impl Engine {
         if reconfigured {
             dashboards.configure(&self.spec.environment);
         }
+        // Quiet mode keeps only the memberships notifications depend on
+        // current; rows, summaries and the other dashboards come back when
+        // it ends.
+        let resumed = std::mem::take(&mut self.dashboards_resume);
+        dashboards.set_scope(if self.quiet() {
+            dashboards::Scope::Quiet(self.notify.decisive_dashboards())
+        } else {
+            dashboards::Scope::All
+        });
+        self.updating_changed = false;
+        self.mode_changed = false;
         let refresh_time = self.time_dependent && self.time_refreshed.elapsed() >= TIME_REFRESH;
-        let snapshot = self.store.snapshot(
+        let mut snapshot = self.store.snapshot(
             0,
             self.ports.clock.now(),
             Arc::clone(&self.dashboard_results),
             self.watchdog.late(),
         );
+        snapshot.quiet = self.stream_quiet();
+        snapshot.updating = Arc::clone(&self.updating);
         let evaluate = reconfigured
+            || resumed
             || refresh_time
             || changes.all
             || changes.groups

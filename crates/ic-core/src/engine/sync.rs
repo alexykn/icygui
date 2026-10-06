@@ -1,22 +1,34 @@
 //! Keeping the store in sync beyond the event stream, gently:
 //!
 //! - *Reconcile:* a lean reload (tiers 1–3) after every load at an
-//!   adaptive interval (5 minutes below 5 000 objects, 15 above, ±10 %
-//!   jitter so clients drift apart), or `General::reconcile_interval_secs`
-//!   if set (never below 5 minutes from 5 000 objects on), counted from
-//!   the end of the last load, complete or failed (a failed one waits a
-//!   whole interval). Its tier 3 fetches only the problems not held in
-//!   full or whose result is older than their last check.
+//!   adaptive interval that follows the installation's size
+//!   ([`reconcile_interval`]: [`PER_OBJECT`] per host and service, at least
+//!   [`MIN_INTERVAL`], at most [`MAX_INTERVAL`]: 5 minutes up to about
+//!   10 700 objects, 15 at 32 000), doubled after each periodic reconcile
+//!   that found nothing the stream missed while the stream was continuous
+//!   (at most [`MAX_STREAK`] times, never above [`MAX_INTERVAL`]; a gap, a
+//!   reconnect or a finding starts over), or
+//!   `General::reconcile_interval_secs` if set (never below 5 minutes from
+//!   5 000 objects on); quiet mode makes it at least
+//!   `Tuning::quiet_reconcile_interval`. Counted from the end of the last
+//!   load, complete or failed (a failed one waits a whole interval), ±10 %
+//!   jitter so clients drift apart. Its tier 3 fetches only the problems
+//!   not held in full or whose result is older than their last check (in
+//!   quiet mode only those without a result: outputs may be stale there).
 //! - *Reconnects:* the engine goes live on the objects it has. Only after
-//!   a long gap (`Tuning::reload_after_gap` without a line: a laptop that
-//!   slept, an outage, a stall) does it reload, after a random delay below
-//!   `Tuning::reload_jitter`, so clients reconnecting together spread out.
+//!   a long gap (`Tuning::reload_after_gap` without a line, plus
+//!   `Tuning::quiet_status_interval` for a quiet stream, which may be
+//!   silent that long and is heard at every quiet status poll: a laptop
+//!   that slept, an outage, a stall) does it reload, after a random delay
+//!   below `Tuning::reload_jitter`, so clients reconnecting together spread
+//!   out. (A quiet reconnect whose next status poll finds Icinga's state
+//!   counts changed reloads too.)
 //!   After a short gap the events since bring every object checked again,
 //!   the status poll catches an Icinga restart, and the next periodic
 //!   reconcile the rest: a stream a proxy ends every few minutes doesn't
 //!   cost a reload each time. Without `status/query` (no restart
 //!   detection) a reconnect reloads, but at most every
-//!   [`SMALL_INTERVAL`].
+//!   [`MIN_INTERVAL`].
 //! - *Restarts* ([`Restarts`]): a node reporting another `program_start`
 //!   than before restarted; another node answering (an HA zone behind a
 //!   load balancer) didn't. A restart reloads at most every
@@ -44,15 +56,23 @@ use tokio::time::Instant;
 
 use super::{Engine, LoadKind, Phase};
 
-/// Below this many hosts and services the adaptive reconcile runs every
-/// [`SMALL_INTERVAL`], above it every [`LARGE_INTERVAL`]; a fixed interval
-/// is never shorter than [`SMALL_INTERVAL`] above it.
+/// From this many hosts and services on, a fixed reconcile interval is
+/// never shorter than [`MIN_INTERVAL`].
 const ADAPTIVE_THRESHOLD: usize = 5_000;
-const SMALL_INTERVAL: Duration = Duration::from_mins(5);
-const LARGE_INTERVAL: Duration = Duration::from_mins(15);
+/// The adaptive reconcile interval per host and service: a lean reload
+/// costs the master about 900 bytes per object, so each client's reconcile
+/// costs it about 2 MB a minute whatever the size (28 MB every 15 minutes
+/// at 32 000 objects).
+pub(super) const PER_OBJECT: Duration = Duration::from_millis(28);
+/// The adaptive interval's floor (small installations: cheap, frequent).
+pub(super) const MIN_INTERVAL: Duration = Duration::from_mins(5);
+/// Its ceiling, also with the stretch for a continuous stream.
+pub(super) const MAX_INTERVAL: Duration = Duration::from_hours(1);
+/// At most this many doublings for a continuous stream.
+pub(super) const MAX_STREAK: u32 = 2;
 
 /// The longest wait between attempts of a failing first load.
-pub(super) const LOAD_RETRY_MAX: Duration = LARGE_INTERVAL;
+pub(super) const LOAD_RETRY_MAX: Duration = Duration::from_mins(15);
 
 /// `Refresh` presses in a row wait this many `Tuning::reload_spacing`
 /// after the previous reload: several on-call engineers pressing Refresh
@@ -121,20 +141,47 @@ impl Restarts {
 impl Engine {
     /// The periodic reconcile's interval (see the module notes).
     pub(super) fn reconcile_interval(&self) -> Duration {
-        self.tuning.reconcile_interval.unwrap_or_else(|| {
+        let interval = self.tuning.reconcile_interval.unwrap_or_else(|| {
             reconcile_interval(
                 self.spec.general.reconcile_interval_secs,
                 self.store.object_count(),
+                self.reconcile_streak,
             )
-        })
+        });
+        if self.quiet() {
+            interval.max(self.tuning.quiet_reconcile_interval)
+        } else {
+            interval
+        }
     }
 
-    /// How long a failing first load waits at most between attempts: the
-    /// reconcile interval as for a large Icinga (its size isn't known yet).
+    /// How long a failing first load waits at most between attempts: as
+    /// for a large Icinga (its size isn't known yet), or the fixed setting.
     pub(super) fn load_retry_cap(&self) -> Duration {
-        self.tuning.reconcile_interval.unwrap_or_else(|| {
-            reconcile_interval(self.spec.general.reconcile_interval_secs, usize::MAX)
-        })
+        self.tuning
+            .reconcile_interval
+            .unwrap_or(match self.spec.general.reconcile_interval_secs {
+                0 => LOAD_RETRY_MAX,
+                secs => reconcile_interval(secs, usize::MAX, 0),
+            })
+    }
+
+    /// A load of `kind` completed: whether the stream has been continuous
+    /// since the previous load ended decides the next interval's stretch.
+    /// A periodic reconcile that found nothing the stream missed doubles
+    /// it (up to [`MAX_STREAK`] times); one that found something, a reload
+    /// (a reconnect after a gap, a restart, the first load) or a stream
+    /// that broke since starts over. `Refresh` leaves it.
+    pub(super) fn track_continuity(&mut self, kind: LoadKind) {
+        let continuous = self
+            .continuous_since
+            .is_some_and(|since| self.last_load_end.is_some_and(|previous| since <= previous));
+        self.reconcile_streak = match kind {
+            _ if self.load_found => 0,
+            LoadKind::Reconcile if continuous => (self.reconcile_streak + 1).min(MAX_STREAK),
+            LoadKind::Refresh if continuous => self.reconcile_streak,
+            _ => 0,
+        };
     }
 
     /// How long the stream was silent: since it last delivered lines (or
@@ -157,12 +204,19 @@ impl Engine {
     /// the events since bring (see the module notes).
     pub(super) fn after_reconnect(&mut self, gap: Duration, can_poll_status: bool) {
         let now = Instant::now();
+        // A quiet stream may be silent for a whole quiet status interval
+        // (each quiet poll that finds nothing missed counts as hearing it).
+        let long_gap = if self.stream_quiet {
+            self.tuning.reload_after_gap + self.tuning.quiet_status_interval
+        } else {
+            self.tuning.reload_after_gap
+        };
         if std::mem::take(&mut self.reload_now) {
             // The user asked for it.
             self.reload_full = true;
             self.notifications_current = false;
             self.reload_at = Some(now);
-        } else if gap >= self.tuning.reload_after_gap {
+        } else if gap >= long_gap {
             tracing::debug!(?gap, "reconnected after a long gap; reloading");
             self.request_reload(ReloadCause::Reconnect);
         } else if can_poll_status {
@@ -176,7 +230,7 @@ impl Engine {
             let jitter = self.tuning.reload_jitter.mul_f64(fastrand::f64());
             let at = self
                 .last_load_start
-                .map_or(now, |start| (start + SMALL_INTERVAL).max(now))
+                .map_or(now, |start| (start + MIN_INTERVAL).max(now))
                 + jitter;
             self.reload_full = true;
             self.notifications_current = false;
@@ -267,14 +321,25 @@ impl Engine {
     /// The problem services whose details (`Full`) tier 3 fetches: every
     /// one for a reload, else (a reconcile, `Refresh`) only those the store
     /// doesn't hold in full with a current result (events keep them
-    /// current).
+    /// current). In quiet mode a periodic reconcile fetches only problems
+    /// without any result (outputs may be stale while quiet; waking up
+    /// refreshes them).
     pub(super) fn problem_details(&self, kind: LoadKind) -> Vec<ObjectKey> {
         let all = matches!(kind, LoadKind::First | LoadKind::Reload);
+        let quiet = kind == LoadKind::Reconcile && self.quiet();
         self.store
             .services()
             .iter()
             .filter(|(_, service)| service.is_problem())
-            .filter(|(key, _)| all || !self.store.is_full(key) || self.store.result_is_stale(key))
+            .filter(|(key, service)| {
+                if all {
+                    true
+                } else if quiet {
+                    service.check.result.is_none()
+                } else {
+                    !self.store.is_full(key) || self.store.result_is_stale(key)
+                }
+            })
             .map(|(_, service)| service.object_key())
             .collect()
     }
@@ -300,9 +365,10 @@ impl Engine {
 
     /// When the watchdog should look for overdue objects: while live and
     /// no load runs (a load brings everything anyway), at most every
-    /// `watchdog_interval`.
+    /// `watchdog_interval`; never in quiet mode (no check results move the
+    /// deadlines).
     pub(super) fn sweep_at(&self, now: Instant) -> Option<Instant> {
-        if self.phase != Phase::Live || self.load.is_some() {
+        if self.phase != Phase::Live || self.load.is_some() || self.quiet() || self.stream_quiet() {
             return None;
         }
         let at = self.watchdog.due(now)?;
@@ -340,6 +406,10 @@ impl Engine {
     /// what is queued or in flight, in rounds of at most 1 000 names and
     /// requests of 200.
     pub(super) fn hydrate(&mut self, keys: Vec<ObjectKey>) {
+        if self.quiet() {
+            tracing::debug!(count = keys.len(), "quiet mode: no hydration");
+            return;
+        }
         let wanted: Vec<ObjectKey> = keys
             .into_iter()
             .filter(|key| match key {
@@ -353,27 +423,39 @@ impl Engine {
             return;
         }
         let added = self.fetch.mark_full(wanted, Instant::now());
+        self.note_updating();
         tracing::debug!(added, "hydrating");
     }
 }
 
 /// The reconcile interval for the setting `secs` (0: adaptive) with
-/// `objects` hosts and services. A fixed interval is at least
+/// `objects` hosts and services, after `streak` periodic reconciles that
+/// found nothing a continuous stream missed.
+///
+/// Adaptive: `objects ×` [`PER_OBJECT`] within [`MIN_INTERVAL`] and
+/// [`MAX_INTERVAL`], doubled per streak (at most [`MAX_STREAK`] times),
+/// never above [`MAX_INTERVAL`]. A fixed interval is at least
 /// `ic_config::MIN_RECONCILE_INTERVAL_SECS`, and at least
-/// [`SMALL_INTERVAL`] from [`ADAPTIVE_THRESHOLD`] objects on: a lean
-/// reload of 30 000 services every minute would cost the master about
-/// 34 MB a minute per client.
-fn reconcile_interval(secs: u32, objects: usize) -> Duration {
+/// [`MIN_INTERVAL`] from [`ADAPTIVE_THRESHOLD`] objects on (a lean reload
+/// of 30 000 services every minute would cost the master about 34 MB a
+/// minute per client); it doesn't stretch (the user chose it).
+pub(super) fn reconcile_interval(secs: u32, objects: usize, streak: u32) -> Duration {
     match secs {
-        0 if objects < ADAPTIVE_THRESHOLD => SMALL_INTERVAL,
-        0 => LARGE_INTERVAL,
+        0 => {
+            let objects = u32::try_from(objects).unwrap_or(u32::MAX);
+            let base = PER_OBJECT
+                .saturating_mul(objects)
+                .clamp(MIN_INTERVAL, MAX_INTERVAL);
+            base.saturating_mul(1 << streak.min(MAX_STREAK))
+                .min(MAX_INTERVAL)
+        }
         secs => {
             let fixed =
                 Duration::from_secs(u64::from(secs.max(ic_config::MIN_RECONCILE_INTERVAL_SECS)));
             if objects < ADAPTIVE_THRESHOLD {
                 fixed
             } else {
-                fixed.max(SMALL_INTERVAL)
+                fixed.max(MIN_INTERVAL)
             }
         }
     }
@@ -451,16 +533,32 @@ mod tests {
     }
 
     #[test]
-    fn the_reconcile_interval_adapts_to_the_size() {
-        assert_eq!(reconcile_interval(0, 0), Duration::from_mins(5));
-        assert_eq!(reconcile_interval(0, 4_999), Duration::from_mins(5));
-        assert_eq!(reconcile_interval(0, 5_000), Duration::from_mins(15));
-        assert_eq!(reconcile_interval(0, 32_000), Duration::from_mins(15));
+    fn the_reconcile_interval_follows_the_size() {
+        let minutes = |objects, streak| reconcile_interval(0, objects, streak).as_secs_f64() / 60.0;
+        // Small installations: cheap, every 5 minutes.
+        assert!((minutes(0, 0) - 5.0).abs() < 1e-9);
+        assert!((minutes(2_000, 0) - 5.0).abs() < 1e-9);
+        assert!((minutes(10_000, 0) - 5.0).abs() < 1e-9);
+        // Then proportional, without steps: about 15 minutes at the
+        // production size (2 000 hosts, 30 000 services).
+        assert!((minutes(16_000, 0) - 7.466).abs() < 0.01);
+        assert!((minutes(32_000, 0) - 14.933).abs() < 0.01);
+        assert!(minutes(32_001, 0) > minutes(32_000, 0));
+        assert!((minutes(500_000, 0) - 60.0).abs() < 1e-9, "at most an hour");
+        // A continuous stream stretches it, up to an hour.
+        assert!((minutes(32_000, 1) - 29.866).abs() < 0.01);
+        assert!((minutes(32_000, 2) - 59.733).abs() < 0.01);
+        assert!((minutes(32_000, 9) - 59.733).abs() < 0.01, "twice at most");
+        assert!((minutes(2_000, 2) - 20.0).abs() < 1e-9);
+        assert!((minutes(64_000, 2) - 60.0).abs() < 1e-9);
         // A setting overrides it, but never below the minimum, and never
-        // below 5 minutes for a large Icinga.
-        assert_eq!(reconcile_interval(120, 4_999), Duration::from_mins(2));
-        assert_eq!(reconcile_interval(120, 32_000), Duration::from_mins(5));
-        assert_eq!(reconcile_interval(1_800, 32_000), Duration::from_mins(30));
-        assert_eq!(reconcile_interval(10, 10), Duration::from_mins(1));
+        // below 5 minutes for a large Icinga; it doesn't stretch.
+        assert_eq!(reconcile_interval(120, 4_999, 0), Duration::from_mins(2));
+        assert_eq!(reconcile_interval(120, 32_000, 2), Duration::from_mins(5));
+        assert_eq!(
+            reconcile_interval(1_800, 32_000, 1),
+            Duration::from_mins(30)
+        );
+        assert_eq!(reconcile_interval(10, 10, 0), Duration::from_mins(1));
     }
 }

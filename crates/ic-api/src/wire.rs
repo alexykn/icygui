@@ -5,8 +5,8 @@
 use ic_model::{
     AckKind, CheckInfo, CheckResult, CheckableState, Comment, CommentKind, Dependency, Downtime,
     Endpoint, Features, Host, HostGroup, HostName, HostState, InstanceStatus, Links, Notification,
-    ObjectKey, Perfdata, Service, ServiceGroup, ServiceKey, ServiceState, StateAfter, StateType,
-    Threshold, Timestamp, Vars, Zone, parse_perfdata, parse_perfdata_entry,
+    ObjectCounts, ObjectKey, Perfdata, Service, ServiceGroup, ServiceKey, ServiceState, StateAfter,
+    StateType, Threshold, Timestamp, Vars, Zone, parse_perfdata, parse_perfdata_entry,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -854,6 +854,39 @@ pub(crate) fn instance_status(application: &Value, cib: &Value) -> InstanceStatu
         checks_per_minute: stat("active_host_checks_1min") + stat("active_service_checks_1min"),
         avg_latency: stat("avg_latency"),
         avg_execution_time: stat("avg_execution_time"),
+        counts: object_counts(cib),
+    }
+}
+
+/// The CIB's object counts by state; a count missing or out of range
+/// reads as 0.
+fn object_counts(cib: &Value) -> ObjectCounts {
+    let count = |key: &str| {
+        cib.get(key)
+            .and_then(number)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map_or(0, |value| {
+                // Whole counts well below 2^32 (the guard keeps the cast
+                // exact for anything Icinga reports).
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a finite, non-negative count clamped to u32"
+                )]
+                let count = value.min(f64::from(u32::MAX)) as u32;
+                count
+            })
+    };
+    ObjectCounts {
+        hosts_up: count("num_hosts_up"),
+        hosts_down: count("num_hosts_down"),
+        hosts_unreachable: count("num_hosts_unreachable"),
+        hosts_pending: count("num_hosts_pending"),
+        services_ok: count("num_services_ok"),
+        services_warning: count("num_services_warning"),
+        services_critical: count("num_services_critical"),
+        services_unknown: count("num_services_unknown"),
+        services_pending: count("num_services_pending"),
     }
 }
 

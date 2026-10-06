@@ -915,5 +915,6 @@ pub(super) fn status(now: Timestamp) -> InstanceStatus {
         checks_per_minute: 1840.,
         avg_latency: 0.004,
         avg_execution_time: 0.31,
+        counts: ic_model::ObjectCounts::default(),
     }
 }

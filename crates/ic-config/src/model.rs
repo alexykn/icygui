@@ -60,10 +60,19 @@ pub struct General {
     /// How long the local event log keeps events, in hours.
     pub event_log_retention_hours: u32,
     /// How often the client reconciles with a lean reload, in seconds. `0`
-    /// (the default) is adaptive: every 5 minutes below 5 000 hosts and
-    /// services, every 15 minutes above. Other values override it; the
-    /// engine never goes below [`crate::MIN_RECONCILE_INTERVAL_SECS`].
+    /// (the default) is adaptive: the interval follows the number of hosts
+    /// and services (5 minutes for small installations, about 15 at 30 000
+    /// services) and stretches while the event stream stays continuous.
+    /// Other values override it; the engine never goes below
+    /// [`crate::MIN_RECONCILE_INTERVAL_SECS`].
     pub reconcile_interval_secs: u32,
+    /// Quiet mode (PERF-09, on by default): environments that aren't on
+    /// screen, and the one on screen while the window is hidden (closed to
+    /// the tray, or minimised where the system reports it), follow Icinga
+    /// with state changes only, no check results, and poll and reconcile
+    /// less often; notifications are never delayed. Off: every environment
+    /// stays fully live.
+    pub quiet_when_hidden: bool,
 }
 
 impl Default for General {
@@ -74,6 +83,7 @@ impl Default for General {
             launch_at_login: false,
             event_log_retention_hours: 48,
             reconcile_interval_secs: 0,
+            quiet_when_hidden: true,
         }
     }
 }

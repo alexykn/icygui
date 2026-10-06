@@ -40,4 +40,4 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 # Integration tests against the mock Icinga (ic-mock never depends on ic-api).
 ic-mock = { path = "../ic-mock" }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "test-util"] }

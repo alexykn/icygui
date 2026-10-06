@@ -16,6 +16,15 @@
 //! isolating each hidden name would cost about two requests per name. A
 //! batch Icinga can't answer as a whole counts as missing.
 //!
+//! **Priorities** (PERF-09): full fetches (hydration of the rows on
+//! screen, a notified object's prefetch) go first in every round, then
+//! re-queries; problems refreshed after quiet mode (the *background*
+//! lane) only fill a round without full fetches, one request's worth at a
+//! time, so rows on screen never wait behind them. The object the user is
+//! opening doesn't queue at all (`Command::Focus`). Every request also
+//! takes a token from the client's request budget
+//! ([`ic_api::RequestBudget`]).
+//!
 //! **Missing names** (deleted, hidden, or in such a batch) aren't asked for
 //! again for events about them within `missing_ttl` (10 minutes), unless
 //! `ObjectCreated` names them; each time they come back missing the wait
@@ -85,11 +94,16 @@ pub(super) struct FetchQueue {
     pending: BTreeSet<ObjectKey>,
     /// Fetched in full whatever the store has (hydration).
     full: BTreeSet<ObjectKey>,
+    /// Fetched in full when nothing else is waiting: problems whose check
+    /// result may have changed while quiet mode left out check results.
+    background: BTreeSet<ObjectKey>,
     /// Objects the store doesn't know, looked up without isolating unknown
     /// names (see the module notes).
     unknown: BTreeSet<ObjectKey>,
     /// The names of the round in flight.
     flying: HashSet<ObjectKey>,
+    /// Those of them fetched in full (hydration, prefetch, background).
+    flying_full: HashSet<ObjectKey>,
     lists: Lists,
     /// When the oldest pending entry was marked.
     since: Option<Instant>,
@@ -182,8 +196,10 @@ impl FetchQueue {
         Self {
             pending: BTreeSet::new(),
             full: BTreeSet::new(),
+            background: BTreeSet::new(),
             unknown: BTreeSet::new(),
             flying: HashSet::new(),
+            flying_full: HashSet::new(),
             lists: Lists::default(),
             since: None,
             urgent: false,
@@ -216,6 +232,7 @@ impl FetchQueue {
         for set in [
             &mut self.pending,
             &mut self.full,
+            &mut self.background,
             &mut self.unknown,
             &mut self.deferred,
         ] {
@@ -231,7 +248,7 @@ impl FetchQueue {
         if self.refused.covers(&key) || self.recently_missing(&key, now) {
             return false;
         }
-        if !self.full.contains(&key) {
+        if !self.full.contains(&key) && !self.background.contains(&key) {
             self.unknown.remove(&key);
             self.pending.insert(key);
         }
@@ -275,6 +292,7 @@ impl FetchQueue {
             }
             self.pending.remove(&key);
             self.unknown.remove(&key);
+            self.background.remove(&key);
             self.missing.remove(&key);
             self.full.insert(key);
             added += 1;
@@ -284,6 +302,49 @@ impl FetchQueue {
             self.touch(now);
         }
         added
+    }
+
+    /// Fetches `keys` in full in the background lane (see the module
+    /// notes), skipping those queued or in flight. Returns how many were
+    /// added.
+    pub(super) fn mark_background(
+        &mut self,
+        keys: impl IntoIterator<Item = ObjectKey>,
+        now: Instant,
+    ) -> usize {
+        let mut added = 0;
+        for key in keys {
+            if self.full.contains(&key)
+                || self.flying.contains(&key)
+                || self.refused.covers(&key)
+                || self.background.len() >= MAX_PENDING_FULL
+            {
+                continue;
+            }
+            if self.background.insert(key) {
+                added += 1;
+            }
+        }
+        if added > 0 {
+            self.touch(now);
+        }
+        added
+    }
+
+    /// Forgets `key` wherever it waits (the object the user opens is
+    /// fetched on its own, at once).
+    pub(super) fn forget(&mut self, key: &ObjectKey) {
+        self.full.remove(key);
+        self.background.remove(key);
+        self.pending.remove(key);
+    }
+
+    /// The objects waiting for or in a full fetch.
+    pub(super) fn updating(&self) -> impl Iterator<Item = &ObjectKey> {
+        self.full
+            .iter()
+            .chain(&self.background)
+            .chain(&self.flying_full)
     }
 
     /// Re-queries a created object, even if it was missing before.
@@ -364,6 +425,7 @@ impl FetchQueue {
         if self.in_flight
             || (self.pending.is_empty()
                 && self.full.is_empty()
+                && self.background.is_empty()
                 && self.unknown.is_empty()
                 && self.notifications.is_empty()
                 && !self.lists.any())
@@ -374,7 +436,8 @@ impl FetchQueue {
     }
 
     /// Takes the next round (at most [`MAX_ROUND`] names, full fetches
-    /// first, plus at most [`MAX_UNKNOWN_ROUND`] unknown objects).
+    /// first, plus at most [`MAX_UNKNOWN_ROUND`] unknown objects; the
+    /// background lane only when no full fetch waits, one request's worth).
     pub(super) fn take(&mut self, now: Instant) -> Round {
         let mut full = Vec::new();
         while full.len() < MAX_ROUND {
@@ -388,6 +451,14 @@ impl FetchQueue {
             match self.pending.pop_first() {
                 Some(key) => keys.push(key),
                 None => break,
+            }
+        }
+        if full.is_empty() {
+            while full.len() < ic_api::NAMES_PER_REQUEST.min(MAX_ROUND - keys.len()) {
+                match self.background.pop_first() {
+                    Some(key) => full.push(key),
+                    None => break,
+                }
             }
         }
         let mut unknown = Vec::new();
@@ -405,6 +476,7 @@ impl FetchQueue {
             }
         }
         self.flying = keys.iter().chain(&full).chain(&unknown).cloned().collect();
+        self.flying_full = full.iter().cloned().collect();
         let round = Round {
             keys,
             full,
@@ -416,6 +488,7 @@ impl FetchQueue {
         self.in_flight = true;
         self.since = (!self.pending.is_empty()
             || !self.full.is_empty()
+            || !self.background.is_empty()
             || !self.unknown.is_empty()
             || !self.notifications.is_empty())
         .then_some(now);
@@ -429,6 +502,7 @@ impl FetchQueue {
     pub(super) fn finished(&mut self, missing: &[ObjectKey], now: Instant) {
         self.in_flight = false;
         self.flying.clear();
+        self.flying_full.clear();
         self.missing
             .retain(|_, missing| now < missing.until + missing.ttl);
         for key in missing {
@@ -450,8 +524,10 @@ impl FetchQueue {
     pub(super) fn reset(&mut self) {
         self.pending.clear();
         self.full.clear();
+        self.background.clear();
         self.unknown.clear();
         self.flying.clear();
+        self.flying_full.clear();
         // Set again from the next session's permissions.
         self.refused = Refused::default();
         self.lists = Lists::default();
@@ -633,6 +709,46 @@ mod tests {
         );
         queue.reset();
         assert_eq!(queue.due(Duration::ZERO), None);
+    }
+
+    #[test]
+    fn the_background_lane_waits_for_full_fetches() {
+        let now = Instant::now();
+        let mut queue = FetchQueue::new(Duration::from_mins(10));
+        let problems: Vec<ObjectKey> = (0..450)
+            .map(|index| ObjectKey::service("h", &format!("p{index:03}")))
+            .collect();
+        assert_eq!(queue.mark_background(problems.clone(), now), 450);
+        let row = ObjectKey::service("h", "row");
+        queue.mark_full([row.clone()], now);
+        assert_eq!(queue.updating().count(), 451);
+        let round = queue.take(now);
+        assert_eq!(round.full, [row], "the row on screen alone");
+        queue.finished(&[], now);
+        let round = queue.take(now);
+        assert_eq!(
+            round.full.len(),
+            ic_api::NAMES_PER_REQUEST,
+            "then one request's worth"
+        );
+        assert!(round.full.iter().all(|key| problems.contains(key)));
+        assert_eq!(queue.updating().count(), 450, "in flight counts");
+        // A row queued meanwhile goes before the rest.
+        queue.mark_full([ObjectKey::service("h", "row2")], now);
+        queue.finished(&[], now);
+        assert_eq!(queue.take(now).full, [ObjectKey::service("h", "row2")]);
+        queue.finished(&[], now);
+        // Focus takes an object out of every lane.
+        let last = problems[449].clone();
+        queue.forget(&last);
+        assert_eq!(queue.take(now).full.len(), 200);
+        queue.finished(&[], now);
+        let round = queue.take(now);
+        assert_eq!(round.full.len(), 49);
+        assert!(!round.full.contains(&last));
+        queue.finished(&[], now);
+        assert_eq!(queue.due(Duration::ZERO), None);
+        assert_eq!(queue.updating().count(), 0);
     }
 
     #[test]

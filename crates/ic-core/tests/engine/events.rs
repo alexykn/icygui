@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use crate::support::{mock, start_for, wait_until};
+use crate::support::{Launch, mock, start_for, wait_until};
 use ic_core::snapshot::Snapshot;
 use ic_core::{ConnectionState, LoadPhase};
 use ic_mock::{MockConfig, MockControl, scenarios};
@@ -52,7 +52,11 @@ fn requeried(control: &MockControl) -> Vec<(String, Vec<String>)> {
 async fn every_event_type_reaches_the_snapshot() {
     let server = mock(MockConfig::with_scenario(scenarios::lab())).await;
     let control = server.control();
-    let mut engine = start_for(&server);
+    // Without notifications: a shown notification prefetches its object
+    // (one by-name request, `quiet.rs`), which isn't what this checks.
+    let mut launch = Launch::new(&server);
+    launch.environment.notifications.enabled = false;
+    let mut engine = launch.start();
     engine.connected().await;
     let ssh = ObjectKey::service("lab-01", "ssh");
     control.clear_requests();

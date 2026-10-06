@@ -11,13 +11,15 @@
 //!   the workspace opens the dialogs.
 //! - The footer's connection status opens the connection details with the
 //!   environment switcher (ENV-01, ENV-06); its `+` creates dashboards and
-//!   groups and imports or exports them (DASH-06).
+//!   groups and imports or exports them (DASH-06); its clock opens the
+//!   notification centre (NOTE-05) and carries the unread count.
 //!
 //! The footer's "last event" age refreshes with the workspace's clock
 //! (UI-04). In the search field, Enter shows the first matching dashboard
 //! and Escape clears the search; both hand the keyboard back to the main
 //! area.
 
+mod centre;
 mod menus;
 mod model;
 
@@ -27,7 +29,7 @@ use gpui::{
     Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription,
     Window, div, prelude::FluentBuilder as _, px,
 };
-use ic_model::Timestamp;
+use ic_model::{ObjectKey, Timestamp};
 use ic_rules::{DashboardRef, ScopeSetting};
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{
@@ -39,6 +41,7 @@ use crate::actions::FocusMain;
 use crate::app_state::{AppState, Health};
 use crate::chrome::{Controls, WindowControls, WindowDrag};
 use crate::menu_state::{OpenMenu, down_position};
+use crate::settings::{ScopeKey, SettingsTab};
 use crate::workspace::ToggleSidebar;
 
 pub(crate) use self::menus::new_key;
@@ -68,6 +71,13 @@ pub(crate) enum SidebarEvent {
     AddEnvironment,
     /// Open the editor for this environment.
     EditEnvironment(String),
+    /// Show this object (a notification centre entry).
+    OpenObject(ObjectKey),
+    /// Open the settings on this tab.
+    OpenSettings(SettingsTab),
+    /// Give this group or dashboard a custom notification rule, in the
+    /// notification settings.
+    CustomRule(ScopeKey),
 }
 
 /// The sidebar's popup menus.
@@ -77,6 +87,8 @@ pub(crate) enum SidebarMenu {
     Status,
     /// The footer's `+`.
     Footer,
+    /// The notification centre (the footer's clock).
+    Notifications,
     /// A group's `···`.
     Group(String),
     /// A dashboard's `···` (or right click).
@@ -909,11 +921,81 @@ impl Sidebar {
         }
     }
 
-    fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+    /// The footer's clock (NOTE-05): opens the notification centre; the
+    /// unread count on it, a bell-off while paused.
+    fn render_clock(&self, now: Timestamp, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let colors = theme.colors;
         let metrics = theme.metrics;
         let state = self.state.read(cx);
+        let centre_open = self.menus.is_open(&SidebarMenu::Notifications);
+        let badge = crate::notifications::entry::badge(state.unread_notifications());
+        let paused = state.is_paused(now);
+        div()
+            .relative()
+            .flex_none()
+            .child({
+                let button = IconButton::new(
+                    "notification-centre",
+                    if paused {
+                        IconName::BellOff
+                    } else {
+                        IconName::Clock
+                    },
+                )
+                .icon_size(metrics.icon_large)
+                .selected(centre_open)
+                .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                    this.menus
+                        .toggle(SidebarMenu::Notifications, down_position(event));
+                    cx.notify();
+                }));
+                if centre_open {
+                    button
+                } else {
+                    button.tooltip(Tooltip::new(menus::notifications_tooltip(
+                        state.unread_notifications(),
+                        state.paused_until(),
+                        now,
+                    )))
+                }
+            })
+            .when_some(badge, |slot, badge| {
+                // The unread count at the icon's top right.
+                slot.child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .left(px(15.))
+                        .h(px(12.))
+                        .min_w(px(12.))
+                        .px(px(3.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(colors.window_background)
+                        .bg(colors.accent)
+                        .text_size(px(8.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_accent)
+                        .child(badge),
+                )
+            })
+            .when(centre_open, |slot| {
+                slot.child(
+                    Popover::new(self.notification_centre(now, cx))
+                        .above()
+                        .gap(px(8.)),
+                )
+            })
+    }
+
+    fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let metrics = theme.metrics;
         let now = Timestamp::now();
         let details_open = self.menus.is_open(&SidebarMenu::Status);
         let footer_open = self.menus.is_open(&SidebarMenu::Footer);
@@ -945,35 +1027,7 @@ impl Sidebar {
                         window.dispatch_action(Box::new(ToggleSidebar), cx);
                     }),
             )
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .child(
-                        IconButton::new("notification-centre", IconName::Clock)
-                            .icon_size(metrics.icon_large)
-                            .tooltip(Tooltip::new(menus::notifications_tooltip(
-                                state.unread_notifications(),
-                                state.paused_until(),
-                                now,
-                            )))
-                            .on_click(|_, _, _| {
-                                tracing::debug!("the notification centre opens here");
-                            }),
-                    )
-                    .when(state.unread_notifications() > 0, |slot| {
-                        // An unread dot at the icon's top right.
-                        slot.child(
-                            div()
-                                .absolute()
-                                .top(px(5.))
-                                .right(px(5.))
-                                .size(px(6.))
-                                .rounded_full()
-                                .bg(colors.accent),
-                        )
-                    }),
-            )
+            .child(self.render_clock(now, cx))
             .child(
                 div()
                     .relative()

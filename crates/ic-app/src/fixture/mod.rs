@@ -80,6 +80,13 @@ impl Evaluator {
         }
     }
 
+    /// Fills in what the core computes: the overall counts and every
+    /// dashboard.
+    fn fill(&self, snapshot: &mut Snapshot, config: &Config) {
+        snapshot.overall = evaluate::overall(snapshot);
+        snapshot.dashboards = Arc::new(self.evaluate_all(snapshot, config));
+    }
+
     /// Evaluates every dashboard of `config`'s active environment.
     pub(crate) fn evaluate_all(
         &self,
@@ -213,7 +220,7 @@ pub(crate) fn build_with(now: Timestamp, options: FixtureOptions) -> Fixture {
         environments: vec![environment],
     };
     let evaluator = Evaluator { filters };
-    snapshot.dashboards = Arc::new(evaluator.evaluate_all(&snapshot, &config));
+    evaluator.fill(&mut snapshot, &config);
     let selected = if options.generated_rows > 0 {
         DashboardRef {
             group_id: "demo-lab".to_owned(),

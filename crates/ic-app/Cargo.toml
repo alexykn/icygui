@@ -44,6 +44,11 @@ tokio = { version = "1.53.2", features = ["rt-multi-thread", "sync"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# Linux: desktop notifications with urgency and sound over the session bus
+# (the zbus ic-platform's tray and keyring use).
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
 [dev-dependencies]
 # Checks that the demo's dashboard filters parse.
 ic-filter.workspace = true

@@ -40,7 +40,8 @@ use ic_ui_kit::{
 
 use crate::actions::{
     self, ActivateNextTab, ActivatePreviousTab, CloseTab, EditEnvironment, FocusMain,
-    ReviewCertificate, SelectDashboard, WORKSPACE_CONTEXT,
+    OpenNotifications, OpenSettings, ReviewCertificate, SelectDashboard, ShowAbout,
+    WORKSPACE_CONTEXT,
 };
 use crate::app_state::{AppState, UserNotice};
 use crate::chrome::{self, Controls, WindowControls, WindowDrag};
@@ -52,8 +53,9 @@ use crate::environments::{
 use crate::operate::dialog::{ActionDialog, DialogEvent, DialogKind};
 use crate::operate::forms::{self, describe_objects};
 use crate::operate::{ActionSpec, CHECK_CONFIRM_ABOVE};
-use crate::palette::{CommandPalette, Focus, PaletteCommand, PaletteEvent, Pause};
+use crate::palette::{CommandPalette, Focus, PaletteCommand, PaletteEvent};
 use crate::pane::{ObjectPane, PaneMode};
+use crate::settings::{ScopeKey, SettingsDialog, SettingsEvent, SettingsTab};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::{live, recovery, window_state};
 
@@ -114,6 +116,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
     crate::editor::bind_keys(cx);
     crate::palette::bind_keys(cx);
     crate::operate::dialog::bind_keys(cx);
+    crate::settings::bind_keys(cx);
 }
 
 /// What the main area shows.
@@ -205,6 +208,8 @@ enum OpenModal {
     Action(Held<ActionDialog>),
     Confirm(Confirmation),
     Path(PathPrompt),
+    Settings(Held<SettingsDialog>),
+    About,
 }
 
 /// Which modal is open, for tests.
@@ -223,6 +228,10 @@ pub(crate) enum ModalKind {
     Confirm(Box<Confirmation>),
     /// A file path.
     Path,
+    /// The settings.
+    Settings,
+    /// The about dialog.
+    About,
 }
 
 /// The window's content.
@@ -434,7 +443,18 @@ impl Workspace {
             OpenModal::Action(dialog) => ModalKind::Action(dialog.view.read(cx).kind()),
             OpenModal::Confirm(confirmation) => ModalKind::Confirm(Box::new(confirmation.clone())),
             OpenModal::Path(_) => ModalKind::Path,
+            OpenModal::Settings(_) => ModalKind::Settings,
+            OpenModal::About => ModalKind::About,
         })
+    }
+
+    /// The open settings dialog.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn settings(&self) -> Option<&Entity<SettingsDialog>> {
+        match &self.modal {
+            Some(OpenModal::Settings(settings)) => Some(&settings.view),
+            _ => None,
+        }
     }
 
     /// The open palette.
@@ -591,7 +611,13 @@ impl Workspace {
                     let handle = prompt.input.focus_handle(cx);
                     (handle.clone(), handle)
                 }
-                OpenModal::Confirm(_) => (self.modal_focus.clone(), self.modal_focus.clone()),
+                OpenModal::Settings(settings) => (
+                    settings.view.focus_handle(cx),
+                    settings.view.read(cx).default_focus(cx),
+                ),
+                OpenModal::Confirm(_) | OpenModal::About => {
+                    (self.modal_focus.clone(), self.modal_focus.clone())
+                }
             }
         } else if let Some(editor) = &self.editor {
             (
@@ -825,15 +851,30 @@ impl Workspace {
             }
             PaletteCommand::ImportDashboards => self.import_groups(window, cx),
             PaletteCommand::ExportDashboards => self.export_groups(&[], window, cx),
-            PaletteCommand::Pause(pause) => {
-                let until = pause_until(pause, Timestamp::now());
-                self.state
-                    .update(cx, |state, _| state.pause_notifications(Some(until)));
-            }
-            PaletteCommand::Resume => {
-                self.state
-                    .update(cx, |state, _| state.pause_notifications(None));
-            }
+            PaletteCommand::Pause(choice) => self.state.update(cx, |state, cx| {
+                let now = Timestamp::now();
+                state.pause_notifications(Some(choice.until(now)));
+                state.inform(
+                    format!("Notifications paused {}", choice.label(now)),
+                    Some("They're recorded in the notification centre meanwhile.".to_owned()),
+                );
+                cx.notify();
+            }),
+            PaletteCommand::Resume => self.state.update(cx, |state, cx| {
+                state.pause_notifications(None);
+                state.inform("Notifications resumed", None);
+                cx.notify();
+            }),
+            PaletteCommand::Override(change, targets) => self.change_override(change, &targets, cx),
+            PaletteCommand::OpenNotifications => self.open_notifications(window, cx),
+            PaletteCommand::MarkNotificationsRead => self.state.update(cx, |state, cx| {
+                if state.mark_all_notifications_read() {
+                    cx.notify();
+                }
+            }),
+            PaletteCommand::Settings(tab) => self.open_settings(tab, None, window, cx),
+            PaletteCommand::About => self.open_about(window, cx),
+            PaletteCommand::Quit => cx.quit(),
             PaletteCommand::SwitchEnvironment(id) => self.switch_environment(&id, cx),
             PaletteCommand::AddEnvironment => self.open_environment_editor(None, window, cx),
             PaletteCommand::EditEnvironment(id) => {
@@ -962,7 +1003,92 @@ impl Workspace {
             SidebarEvent::EditEnvironment(id) => {
                 self.open_environment_editor(Some(id), window, cx);
             }
+            SidebarEvent::OpenObject(key) => self.reveal(key, window, cx),
+            SidebarEvent::OpenSettings(tab) => self.open_settings(*tab, None, window, cx),
+            SidebarEvent::CustomRule(key) => {
+                self.open_settings(SettingsTab::Notifications, Some(key), window, cx);
+            }
         }
+    }
+
+    // --- Notifications and settings (NOTE-02..06, BG-01, BG-03) --------
+
+    /// Watches, mutes or unmutes `targets` and says so.
+    pub(crate) fn change_override(
+        &self,
+        change: crate::notifications::OverrideChange,
+        targets: &[ObjectKey],
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            if let Some(message) = change.apply(state, targets, Timestamp::now()) {
+                state.inform(message, None);
+                cx.notify();
+            }
+        });
+    }
+
+    /// Opens the notification centre above the footer.
+    pub(crate) fn open_notifications(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sidebar_open {
+            self.toggle_sidebar(&ToggleSidebar, window, cx);
+        }
+        self.sidebar.update(cx, Sidebar::open_notifications);
+    }
+
+    /// Opens the settings on `tab`; with `custom`, that group or dashboard
+    /// gets a custom rule to edit.
+    pub(crate) fn open_settings(
+        &mut self,
+        tab: SettingsTab,
+        custom: Option<&ScopeKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(OpenModal::Settings(settings)) = &self.modal
+            && custom.is_none()
+        {
+            settings
+                .view
+                .update(cx, |settings, cx| settings.show_tab(tab, cx));
+            return;
+        }
+        let state = self.state.clone();
+        let dialog = cx.new(|cx| SettingsDialog::new(state, tab, custom, window, cx));
+        let events = cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, event: &SettingsEvent, window, cx| match event {
+                SettingsEvent::Close => this.close_modal(window, cx),
+                SettingsEvent::About => this.open_about(window, cx),
+                SettingsEvent::LaunchAtLogin(enabled) => {
+                    crate::background::autostart::change(*enabled, &this.state, cx);
+                }
+            },
+        );
+        self.open_modal(OpenModal::Settings(Held::new(dialog, events)), window, cx);
+    }
+
+    /// Shows the about dialog.
+    pub(crate) fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_modal(OpenModal::About, window, cx);
+    }
+
+    fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(SettingsTab::General, None, window, cx);
+    }
+
+    fn on_show_about(&mut self, _: &ShowAbout, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_about(window, cx);
+    }
+
+    fn on_open_notifications(
+        &mut self,
+        _: &OpenNotifications,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_notifications(window, cx);
     }
 
     // --- Dashboards ---------------------------------------------------
@@ -1549,6 +1675,12 @@ impl Workspace {
                 ModalPlacement::Center,
                 Self::render_path_prompt(prompt, cx),
             ),
+            OpenModal::Settings(settings) => (
+                700.,
+                ModalPlacement::Top(px(48.)),
+                settings.view.clone().into_any_element(),
+            ),
+            OpenModal::About => (460., ModalPlacement::Center, self.render_about(cx)),
         };
         Some(
             div()
@@ -1616,6 +1748,25 @@ impl Workspace {
                             })),
                     ),
             )
+            .into_any_element()
+    }
+
+    fn render_about(&self, cx: &Context<Self>) -> AnyElement {
+        let facts = live::session(cx)
+            .map(|session| session.read(cx).about_facts())
+            .unwrap_or_default();
+        div()
+            .id("about")
+            .track_focus(&self.modal_focus)
+            .child(crate::settings::about::render(
+                &facts,
+                Button::new("about-close", "close")
+                    .key_hint("esc")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.close_modal(window, cx);
+                    })),
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -1724,6 +1875,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_new_dashboard))
             .on_action(cx.listener(Self::on_review_certificate))
             .on_action(cx.listener(Self::on_edit_environment))
+            .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_show_about))
+            .on_action(cx.listener(Self::on_open_notifications))
             .flex()
             .size_full()
             .bg(theme.colors.window_background)
@@ -1823,46 +1977,6 @@ fn title_of(state: &AppState) -> SharedString {
     )
 }
 
-/// When a pause ends: after its duration, or at 08:00 tomorrow (local).
-fn pause_until(pause: Pause, now: Timestamp) -> Timestamp {
-    match pause {
-        Pause::For(duration) => {
-            Timestamp::from_unix_seconds(now.as_unix_seconds() + duration.as_secs_f64())
-        }
-        Pause::UntilTomorrow => tomorrow_morning(now),
-    }
-}
-
-/// 08:00 tomorrow in the local time zone (a day from now if that can't be
-/// worked out).
-fn tomorrow_morning(now: Timestamp) -> Timestamp {
-    use chrono::{Days, Local, NaiveTime, TimeZone as _};
-    let fallback = Timestamp::from_unix_seconds(now.as_unix_seconds() + 86_400.);
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "current Unix seconds are far inside i64's range"
-    )]
-    let seconds = now.as_unix_seconds().floor() as i64;
-    let Some(local) = Local.timestamp_opt(seconds, 0).single() else {
-        return fallback;
-    };
-    let Some(morning) = NaiveTime::from_hms_opt(8, 0, 0) else {
-        return fallback;
-    };
-    local
-        .date_naive()
-        .checked_add_days(Days::new(1))
-        .and_then(|day| Local.from_local_datetime(&day.and_time(morning)).earliest())
-        .map_or(fallback, |at| {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "Unix seconds fit an f64 exactly"
-            )]
-            let seconds = at.timestamp() as f64;
-            Timestamp::from_unix_seconds(seconds)
-        })
-}
-
 /// Where file prompts start: `~/Downloads` if it exists, else home, else
 /// the current directory.
 fn default_directory() -> PathBuf {
@@ -1932,18 +2046,6 @@ pub(crate) fn sidebar_reopen(controls: Controls, theme: &Theme) -> impl IntoElem
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pauses_end_after_their_duration_or_tomorrow_morning() {
-        let now = Timestamp::from_unix_seconds(1_790_000_000.);
-        assert_eq!(
-            pause_until(Pause::For(Duration::from_mins(30)), now),
-            Timestamp::from_unix_seconds(1_790_001_800.)
-        );
-        let tomorrow = pause_until(Pause::UntilTomorrow, now);
-        let ahead = tomorrow.as_unix_seconds() - now.as_unix_seconds();
-        assert!(ahead > 0. && ahead <= 2. * 86_400., "{ahead}");
-    }
 
     #[test]
     fn export_names_are_safe_file_names() {

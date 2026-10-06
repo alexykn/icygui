@@ -16,9 +16,10 @@ use ic_ui_kit::{ActiveTheme as _, Menu, MenuItem};
 
 use super::{RenameTarget, Sidebar, SidebarEvent};
 use crate::app_state::AppState;
+use crate::settings::ScopeKey;
 
-/// The notification settings a scope can take here (custom rules come with
-/// the notification settings).
+/// The notification settings a scope can take here (a custom rule is
+/// edited in the notification settings).
 const SCOPE_SETTINGS: [(&str, &str, ScopeSetting); 3] = [
     ("inherit", "inherit", ScopeSetting::Inherit),
     ("on", "on", ScopeSetting::On),
@@ -137,13 +138,15 @@ impl Sidebar {
                 .checked(checked),
             );
         }
-        if matches!(group.notifications, ScopeSetting::Custom(_)) {
-            menu = menu.item(
-                MenuItem::new("group-notify-custom", "custom rule")
-                    .checked(true)
-                    .disabled(true),
-            );
-        }
+        menu = menu.item(
+            Self::emit_item(
+                "group-notify-custom",
+                "custom rule…",
+                SidebarEvent::CustomRule(ScopeKey::Group(id.clone())),
+                cx,
+            )
+            .checked(matches!(group.notifications, ScopeSetting::Custom(_))),
+        );
         menu.separator()
             .item(Self::emit_item(
                 "group-export",
@@ -238,13 +241,18 @@ impl Sidebar {
                 .checked(checked),
             );
         }
-        if matches!(dashboard.notifications, ScopeSetting::Custom(_)) {
-            menu = menu.item(
-                MenuItem::new("dashboard-notify-custom", "custom rule")
-                    .checked(true)
-                    .disabled(true),
-            );
-        }
+        menu = menu.item(
+            Self::emit_item(
+                "dashboard-notify-custom",
+                "custom rule…",
+                SidebarEvent::CustomRule(ScopeKey::Dashboard(
+                    reference.group_id.clone(),
+                    reference.dashboard_id.clone(),
+                )),
+                cx,
+            )
+            .checked(matches!(dashboard.notifications, ScopeSetting::Custom(_))),
+        );
         menu.separator()
             .item(Self::emit_item(
                 "dashboard-delete",

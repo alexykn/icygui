@@ -224,6 +224,19 @@ fn evaluate_with(
     }
 }
 
+/// Every host's and service's counts, as the core's `Snapshot::overall`.
+pub(super) fn overall(snapshot: &Snapshot) -> Summary {
+    let matches: Vec<Match> = snapshot
+        .hosts
+        .values()
+        .map(|host| Match::host(host))
+        .chain(snapshot.services.values().map(|service| {
+            Match::service(service, snapshot.host_of(&service.key).map(AsRef::as_ref))
+        }))
+        .collect();
+    summarize(&matches)
+}
+
 pub(super) fn summarize(matches: &[Match]) -> Summary {
     let mut summary = Summary::default();
     let mut worst: Option<&Match> = None;

@@ -25,6 +25,10 @@
 //! | | `secondary-b` | `ToggleSidebar` |
 //! | | — | [`FocusMain`]: hand the keyboard to the list or the tab shown (Enter and Escape in the sidebar search do this) |
 //! | | — | [`ReviewCertificate`], [`EditEnvironment`]: from the connection banner |
+//! | `SettingsDialog` | `secondary-s`, `enter` in a field | save the settings; `tab` / `shift-tab` move between fields |
+//! | (anywhere, also without a window) | `secondary-,` | [`OpenSettings`] |
+//! | | `secondary-q` | [`Quit`]: quit, even when the app keeps running in the tray |
+//! | | — | [`ShowAbout`], [`OpenNotifications`], [`ShowWindow`]: the app menu, the tray |
 //!
 //! `secondary` is cmd on macOS and ctrl elsewhere. Single letters are bound
 //! only in the list and pane contexts, so they never reach text fields.
@@ -179,6 +183,33 @@ pub(crate) struct ReviewCertificate;
 #[action(namespace = icygui)]
 pub(crate) struct EditEnvironment;
 
+/// Opens the settings dialog (`secondary-,`; the macOS app menu's
+/// *Settings…*). Without a window, the window opens first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct OpenSettings;
+
+/// Shows the about dialog (the macOS app menu's *About icygui*).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct ShowAbout;
+
+/// Opens the notification centre.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct OpenNotifications;
+
+/// Shows the main window (creates it when it was closed to the tray).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct ShowWindow;
+
+/// Quits the app (`secondary-q`, the app menu, the tray), even when it
+/// would keep running in the tray.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct Quit;
+
 /// Registers the default key bindings of the workspace, the list and the
 /// panes.
 pub(crate) fn bind_keys(cx: &mut App) {
@@ -193,6 +224,10 @@ pub(crate) fn bind_keys(cx: &mut App) {
         )
     }));
     cx.bind_keys([
+        // Anywhere, so the macOS menu shows them (and they work in every
+        // dialog).
+        KeyBinding::new("secondary-,", OpenSettings, None),
+        KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("ctrl-tab", ActivateNextTab, workspace),
         KeyBinding::new("ctrl-shift-tab", ActivatePreviousTab, workspace),
         KeyBinding::new("secondary-w", CloseTab, workspace),

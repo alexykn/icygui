@@ -100,6 +100,8 @@ enum Job {
         reply: oneshot::Sender<Vec<NotificationRecord>>,
     },
     MarkRead,
+    MarkOneRead(String),
+    HistoryStart(oneshot::Sender<Option<Timestamp>>),
     Prune(Timestamp),
     Stop(mpsc::Sender<()>),
 }
@@ -197,6 +199,19 @@ impl EventLog {
     /// Marks every notification read.
     pub(crate) fn mark_read(&self) {
         let _ = self.send(Job::MarkRead);
+    }
+
+    /// Marks the notification with this intent id read.
+    pub(crate) fn mark_one_read(&self, id: String) {
+        let _ = self.send(Job::MarkOneRead(id));
+    }
+
+    /// Answers `reply` with the time of the oldest entry (`None`: no
+    /// entries, or no log).
+    pub(crate) fn history_start(&self, reply: oneshot::Sender<Option<Timestamp>>) {
+        if let Err(Job::HistoryStart(reply)) = self.send(Job::HistoryStart(reply)) {
+            let _ = reply.send(None);
+        }
     }
 
     /// Deletes what happened before `before`.
@@ -352,6 +367,24 @@ fn handle(database: Option<&mut Database>, job: Job) {
             {
                 tracing::warn!(%error, "couldn't mark the notifications read");
             }
+        }
+        Job::MarkOneRead(id) => {
+            if let Some(database) = database
+                && let Err(error) = database.mark_one_read(&id)
+            {
+                tracing::warn!(%error, "couldn't mark a notification read");
+            }
+        }
+        Job::HistoryStart(reply) => {
+            let start = database
+                .map(|database| database.history_start())
+                .transpose()
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "couldn't read the event log");
+                    None
+                })
+                .flatten();
+            let _ = reply.send(start);
         }
         Job::Prune(before) => {
             if let Some(database) = database {

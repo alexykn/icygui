@@ -84,7 +84,7 @@ pub(super) fn render(
                 .child(services_tab(&services, host.is_problem(), now, cx))
                 .into_any_element()
         }
-        HostTab::History => history_tab(host, pane.state.read(cx).started_at(), now, theme),
+        HostTab::History => super::history::host_tab(pane, &host.display_name, now, cx),
         HostTab::Vars => vars_tab(host, theme),
         HostTab::Config => config_tab(pane, snapshot, host, now, cx),
     };
@@ -225,25 +225,6 @@ fn services_tab(
                     })),
             )
         })
-        .into_any_element()
-}
-
-fn history_tab(host: &Host, since: Timestamp, now: Timestamp, theme: &Theme) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(6.))
-        .px(theme.metrics.pane_inset)
-        .py(px(16.))
-        .text_size(theme.text.small)
-        .child(div().text_color(theme.colors.text_muted).child(format!(
-            "recorded locally since {}",
-            format::clock(since, now)
-        )))
-        .child(div().text_color(theme.colors.text_faint).child(format!(
-            "State changes, acknowledgements and downtimes of {} appear here as they happen.",
-            host.display_name
-        )))
         .into_any_element()
 }
 

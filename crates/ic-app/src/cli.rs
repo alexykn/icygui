@@ -24,6 +24,9 @@ pub(crate) enum Invocation {
 pub(crate) struct Options {
     /// `--demo`: run against the built-in simulated Icinga (ENV-10).
     pub(crate) demo: bool,
+    /// `--background`: start in the tray without the window (launch at
+    /// login, BG-03).
+    pub(crate) background: bool,
 }
 
 /// A command line that can't be understood.
@@ -51,6 +54,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Invocati
             "-h" | "--help" => return Ok(Invocation::Help),
             "-V" | "--version" => return Ok(Invocation::Version),
             "--demo" => options.demo = true,
+            "--background" => options.background = true,
             // macOS passes a process serial number when Finder starts an
             // app bundle on older systems.
             psn if psn.starts_with("-psn_") => {}
@@ -78,6 +82,8 @@ pub(crate) fn help_text() -> String {
          Options:\n\
          \x20     --demo     Run against a built-in simulated Icinga (no server or\n\
          \x20                credentials needed; nothing is saved)\n\
+         \x20     --background\n\
+         \x20                Start in the tray without the window (as at login)\n\
          \x20 -V, --version  Print the version and exit\n\
          \x20 -h, --help     Print this help and exit\n\
          \n\
@@ -106,8 +112,23 @@ mod tests {
     fn demo_runs_the_demo() {
         assert_eq!(
             parse_strs(&["--demo"]),
-            Ok(Invocation::Run(Options { demo: true }))
+            Ok(Invocation::Run(Options {
+                demo: true,
+                background: false
+            }))
         );
+    }
+
+    #[test]
+    fn background_starts_in_the_tray() {
+        assert_eq!(
+            parse_strs(&["--background"]),
+            Ok(Invocation::Run(Options {
+                demo: false,
+                background: true
+            }))
+        );
+        assert!(help_text().contains("--background"));
     }
 
     #[test]

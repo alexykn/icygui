@@ -70,6 +70,7 @@ pub(super) fn render(
         },
     )
     .map(IntoElement::into_any_element);
+    let history = super::history::service_section(pane, now, cx);
 
     let column = sections()
         .px(theme.metrics.pane_inset)
@@ -100,7 +101,8 @@ pub(super) fn render(
             .children(notes)
             .children(vars)
             .child(groups)
-            .children(links),
+            .children(links)
+            .child(history),
         BodyLayout::WideTab => column
             .max_w(px(TAB_CONTENT_WIDTH + TAB_COLUMN_GAP + TAB_SIDE_WIDTH))
             .child(
@@ -114,7 +116,8 @@ pub(super) fn render(
                             .min_w_0()
                             .child(output)
                             .children(perfdata)
-                            .children(notes),
+                            .children(notes)
+                            .child(history),
                     )
                     .child(
                         sections()

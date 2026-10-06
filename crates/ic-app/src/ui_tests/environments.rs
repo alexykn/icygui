@@ -33,6 +33,7 @@ fn mock_icinga() -> (DemoServer, DemoEndpoint, SecretString) {
         scenario: "lab".to_owned(),
         seed: 5,
         fault: None,
+        storm_every: None,
     })
     .unwrap();
     let (endpoint, _control) = futures::executor::block_on(ready).unwrap().unwrap();
@@ -67,6 +68,7 @@ fn demo_app(fault: Option<DemoFault>) -> impl FnOnce(&mut App) -> Entity<AppStat
                     scenario: "prod-cluster".to_owned(),
                     seed: 3,
                     fault,
+                    storm_every: None,
                 },
             },
             None,

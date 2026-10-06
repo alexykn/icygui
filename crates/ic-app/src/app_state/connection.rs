@@ -291,6 +291,25 @@ impl ConnectionStatus {
         format!("{endpoint} · {status}")
     }
 
+    /// The state in a word or two, without times (the tray's tooltip):
+    /// `connected`, `reconnecting`, `login refused`, …
+    pub(crate) fn short_state(&self) -> &'static str {
+        if self.engine_error.is_some() {
+            return "not started";
+        }
+        match &self.state {
+            None => "not connected",
+            Some(ConnectionState::Connected { .. }) => "connected",
+            Some(ConnectionState::Connecting { .. }) => "connecting",
+            Some(ConnectionState::Loading { .. }) => "loading",
+            Some(ConnectionState::Reconnecting { .. }) => "reconnecting",
+            Some(ConnectionState::AuthFailed { .. }) => "login refused",
+            Some(ConnectionState::TlsFailed { .. }) => "certificate not trusted",
+            Some(ConnectionState::MissingSecret) => "no password",
+            Some(ConnectionState::Misconfigured { .. }) => "invalid settings",
+        }
+    }
+
     /// Icinga's version, once known.
     pub(crate) fn version(&self) -> Option<&str> {
         self.version.as_deref()

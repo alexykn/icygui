@@ -2,10 +2,13 @@
 //!
 //! `icygui` connects to the active environment of the settings file;
 //! `icygui --demo` runs the same app against a built-in simulated Icinga.
-//! `--version` and `--help` answer without opening a window.
+//! `--background` starts in the tray without the window (launch at
+//! login). `--version` and `--help` answer without opening a window. A
+//! second launch hands over to the running instance and exits.
 
 mod actions;
 mod app_state;
+mod background;
 mod banner;
 mod chrome;
 mod cli;
@@ -19,11 +22,13 @@ mod format;
 mod live;
 mod logging;
 mod menu_state;
+mod notifications;
 mod operate;
 mod palette;
 mod pane;
 mod persist;
 mod recovery;
+mod settings;
 mod sidebar;
 #[cfg(test)]
 #[cfg(target_os = "linux")]
@@ -35,7 +40,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext as _, Bounds, Entity, Pixels, Size, TitlebarOptions,
+    App, AppContext as _, Bounds, Entity, Pixels, QuitMode, Size, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle, WindowOptions,
     point, px,
 };
@@ -45,6 +50,7 @@ use ic_model::Timestamp;
 use ic_ui_kit::Root;
 
 use crate::app_state::AppState;
+use crate::background::instance::{self, Claim, Instance, Request};
 use crate::chrome::ControlsPreference;
 use crate::cli::Invocation;
 use crate::dev::DevOptions;
@@ -85,10 +91,33 @@ fn main() -> ExitCode {
             .filter(|_| matches!(dirs, Ok(Ok(()))))
             .map(|paths| paths.log_dir.as_path()),
     );
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), log = ?log_file, demo = options.demo, "starting");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), log = ?log_file, demo = options.demo, background = options.background, "starting");
     if let Ok(Err(error)) = &dirs {
         tracing::warn!(%error, "couldn't create icygui's directories");
     }
+    // One instance per user (BG-04); the demo runs beside the real app.
+    let instance = match (&paths, options.demo) {
+        (Ok(paths), false) => {
+            let request = if options.background {
+                Request::Background
+            } else {
+                Request::Show
+            };
+            match instance::claim(&instance::directory(&paths.data_dir), request) {
+                Ok(Claim::Primary(instance)) => Some(instance),
+                Ok(Claim::Forwarded) => {
+                    tracing::info!("icygui is already running; it was asked to show its window");
+                    return ExitCode::SUCCESS;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "another instance doesn't answer");
+                    let _ = print(&mut std::io::stderr(), &format!("{APP_NAME}: {error}\n"));
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        _ => None,
+    };
     let launch = if options.demo {
         let dev = DevOptions::from_env();
         let defaults = DemoOptions::default();
@@ -97,6 +126,7 @@ fn main() -> ExitCode {
                 scenario: dev.scenario.clone().unwrap_or(defaults.scenario),
                 seed: dev.seed.unwrap_or(defaults.seed),
                 fault: dev.fault,
+                storm_every: dev.storm_every,
             },
             dev,
         }
@@ -113,7 +143,7 @@ fn main() -> ExitCode {
             }
         }
     };
-    run(launch);
+    run(launch, options.background, instance);
     ExitCode::SUCCESS
 }
 
@@ -136,62 +166,113 @@ enum Startup {
     },
 }
 
-/// Runs the app until it quits.
-fn run(startup: Startup) {
-    application()
+/// Runs the app until it quits: in the background (`--background`, BG-03)
+/// without the window when a tray shows it. Closing the window keeps it
+/// running in the tray when the settings say so (BG-01).
+fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
+    let app = application()
         .with_assets(ic_ui_kit::Assets)
-        .run(move |cx: &mut App| {
-            cx.set_app_identity(APP_ID, APP_NAME);
-            if let Err(error) = ic_ui_kit::init(cx) {
-                tracing::error!(%error, "cannot start without the bundled fonts");
-                cx.quit();
-                return;
-            }
-            cx.set_global(ControlsPreference::from_env());
-            workspace::bind_keys(cx);
+        // Closing the last window doesn't quit by itself;
+        // `background::window::closed` decides.
+        .with_quit_mode(QuitMode::Explicit);
+    // macOS: the dock icon or a launch from Finder while running.
+    app.on_reopen(|cx| {
+        background::window::show(cx);
+    });
+    app.run(move |cx: &mut App| {
+        cx.set_app_identity(APP_ID, APP_NAME);
+        if let Err(error) = ic_ui_kit::init(cx) {
+            tracing::error!(%error, "cannot start without the bundled fonts");
+            cx.quit();
+            return;
+        }
+        cx.set_global(ControlsPreference::from_env());
+        workspace::bind_keys(cx);
+        background::menus::install(cx);
 
-            let now = Timestamp::now();
-            let (state, launch, pending_open) = match startup {
-                Startup::Live { paths } => {
-                    let state = live_state(&paths, now);
-                    let secrets = Arc::new(ic_platform::KeyringSecrets::new());
-                    (state, Launch::Live { paths, secrets }, None)
-                }
-                Startup::Demo { options, dev } => {
-                    if dev.any() {
-                        tracing::info!(?dev, "development switches are set");
-                    }
-                    let mut state = AppState::demo(live::demo::config(), now);
-                    if let Some(name) = &dev.dashboard {
-                        if let Some(reference) = state.dashboard_named(name) {
-                            state.select(reference);
-                        } else {
-                            tracing::warn!(%name, "{} names no demo dashboard", dev::DASHBOARD_ENV);
-                        }
-                    }
-                    (state, Launch::Demo { options }, dev.open)
-                }
-            };
-            let bounds = window_state::initial_bounds(
-                state.window_state(),
-                &cx.displays()
-                    .iter()
-                    .map(|display| display.bounds())
-                    .collect::<Vec<_>>(),
-                WINDOW_SIZE,
-            );
-            let recovering = state.config_problem().is_some();
-            let state = cx.new(|_| state);
-            let session = Session::install(state.clone(), launch, pending_open, cx);
-            if let Err(error) = open_main_window(state, bounds, cx) {
-                tracing::error!(error = %format!("{error:#}"), "failed to open the main window");
-                cx.quit();
-                return;
+        let now = Timestamp::now();
+        let (state, launch, pending_open) = match startup {
+            Startup::Live { paths } => {
+                let state = live_state(&paths, now);
+                let secrets = Arc::new(ic_platform::KeyringSecrets::new());
+                (state, Launch::Live { paths, secrets }, None)
             }
-            if !recovering {
-                session.update(cx, Session::start);
+            Startup::Demo { options, dev } => {
+                if dev.any() {
+                    tracing::info!(?dev, "development switches are set");
+                }
+                let mut state = AppState::demo(live::demo::config(), now);
+                if let Some(name) = &dev.dashboard {
+                    if let Some(reference) = state.dashboard_named(name) {
+                        state.select(reference);
+                    } else {
+                        tracing::warn!(%name, "{} names no demo dashboard", dev::DASHBOARD_ENV);
+                    }
+                }
+                (state, Launch::Demo { options }, dev.open)
             }
+        };
+        let bounds = window_state::initial_bounds(
+            state.window_state(),
+            &cx.displays()
+                .iter()
+                .map(|display| display.bounds())
+                .collect::<Vec<_>>(),
+            WINDOW_SIZE,
+        );
+        let recovering = state.config_problem().is_some();
+        let (launch_at_login, demo) = (state.config().general.launch_at_login, state.is_demo());
+        let state = cx.new(|_| state);
+        let session = Session::install(state.clone(), launch, pending_open, cx);
+        background::window::install(state.clone(), cx);
+        background::tray::install(&state, cx);
+        cx.on_window_closed(|cx, _| background::window::closed(cx))
+            .detach();
+        if let Some(requests) = instance.as_mut().and_then(Instance::requests) {
+            spawn_instance_requests(requests, cx);
+        }
+        // The instance lives as long as the app.
+        cx.set_global(RunningInstance {
+            _instance: instance.take(),
         });
+        background::autostart::refresh_at_start(launch_at_login, demo, cx);
+        let hidden = !recovering && background::window::start_hidden(background, cx);
+        if !hidden && !background::window::open_at_start(state, bounds, cx) {
+            cx.quit();
+            return;
+        }
+        if !recovering {
+            session.update(cx, Session::start);
+        }
+    });
+}
+
+/// The instance lock and listener, held while the app runs.
+struct RunningInstance {
+    _instance: Option<Instance>,
+}
+
+impl gpui::Global for RunningInstance {}
+
+/// Later launches (BG-04): bring the window forward.
+fn spawn_instance_requests(
+    mut requests: futures::channel::mpsc::UnboundedReceiver<Request>,
+    cx: &mut App,
+) {
+    use futures::StreamExt as _;
+    cx.spawn(async move |cx| {
+        while let Some(request) = requests.next().await {
+            cx.update(|cx| match request {
+                Request::Show => {
+                    background::window::show(cx);
+                }
+                Request::Background => {
+                    tracing::info!("started at login while running: nothing to do");
+                }
+            });
+        }
+    })
+    .detach();
 }
 
 /// The live app's state: the settings (or the problem reading them) and the

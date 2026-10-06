@@ -37,6 +37,7 @@ pub(super) fn demo_app(
                     scenario: scenario.to_owned(),
                     seed: 3,
                     fault,
+                    storm_every: None,
                 },
             },
             None,

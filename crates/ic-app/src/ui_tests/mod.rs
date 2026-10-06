@@ -42,10 +42,12 @@ use crate::window_state::InitialBounds;
 use crate::workspace::{self, ToggleSidebar, Workspace};
 
 mod actions;
+mod background;
 mod editing;
 mod environments;
 mod live;
 mod live_actions;
+mod notifications;
 mod states;
 
 /// One headless app at a time.
@@ -264,6 +266,8 @@ fn run_app(
     let record = failure.clone();
     gpui_platform::headless()
         .with_assets(ic_ui_kit::Assets)
+        // As the app runs: closing the window doesn't quit by itself.
+        .with_quit_mode(gpui::QuitMode::Explicit)
         .run(move |cx: &mut App| {
             ic_ui_kit::init(cx).unwrap();
             // Draw our own window controls even though headless windows have

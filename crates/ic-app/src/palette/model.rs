@@ -9,7 +9,6 @@
 //! the best few per section are kept.
 
 use std::cmp::Reverse;
-use std::time::Duration;
 
 use ic_model::{CheckableState, ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
@@ -17,6 +16,8 @@ use ic_rules::DashboardRef;
 use super::fuzzy::{Match, Query};
 use crate::actions::ObjectAction;
 use crate::app_state::AppState;
+use crate::notifications::{MuteChoice, OverrideChange, PauseChoice};
+use crate::settings::SettingsTab;
 use crate::sidebar::Dot;
 
 /// The palette's sections, in display order.
@@ -57,15 +58,6 @@ impl Section {
     }
 }
 
-/// How long notifications can be paused for from the palette.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Pause {
-    /// For a while.
-    For(Duration),
-    /// Until 08:00 tomorrow, local time.
-    UntilTomorrow,
-}
-
 /// What running a palette item does.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PaletteCommand {
@@ -101,9 +93,21 @@ pub(crate) enum PaletteCommand {
     /// Export every group to a file.
     ExportDashboards,
     /// Pause notifications.
-    Pause(Pause),
+    Pause(PauseChoice),
     /// Resume paused notifications.
     Resume,
+    /// Watch, mute or unmute these objects (NOTE-02).
+    Override(OverrideChange, Vec<ObjectKey>),
+    /// Open the notification centre (NOTE-05).
+    OpenNotifications,
+    /// Mark every notification read.
+    MarkNotificationsRead,
+    /// Open the settings (`secondary-,`), on this tab.
+    Settings(SettingsTab),
+    /// Show what icygui is.
+    About,
+    /// Quit the app, even when it keeps running in the tray.
+    Quit,
     /// Make this environment the active one.
     SwitchEnvironment(String),
     /// Add an environment.
@@ -597,6 +601,7 @@ fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem>
         items.extend(dashboard_commands(state));
     }
     items.extend(more_actions);
+    items.extend(override_commands(state, focus, now));
     items.extend(pause_commands(state, now, has_environment));
     items.push(command(
         "Toggle sidebar",
@@ -747,35 +752,132 @@ fn dashboard_commands(state: &AppState) -> Vec<PaletteItem> {
     items
 }
 
-/// Resuming paused notifications, or pausing them.
+/// Resuming paused notifications, or pausing them; the notification
+/// centre, its read marks and the settings.
 fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Vec<PaletteItem> {
-    match state.paused_until().filter(|until| *until > now) {
+    let mut items = match state.paused_until().filter(|until| *until > now) {
         Some(until) => vec![command(
             "Resume notifications",
-            format!("paused until {}", crate::format::clock(until, now)),
+            format!("paused until {}", crate::notifications::when(until, now)),
             None,
             PaletteCommand::Resume,
         )],
-        None if has_environment => [
-            (
-                "Pause notifications for 30 minutes",
-                Pause::For(Duration::from_mins(30)),
-            ),
-            (
-                "Pause notifications for 1 hour",
-                Pause::For(Duration::from_hours(1)),
-            ),
-            ("Pause notifications until tomorrow", Pause::UntilTomorrow),
-        ]
-        .into_iter()
-        .map(|(label, pause)| command(label, String::new(), None, PaletteCommand::Pause(pause)))
-        .collect(),
+        None if has_environment => PauseChoice::ALL
+            .into_iter()
+            .map(|choice| {
+                command(
+                    &format!("Pause notifications {}", choice.label(now)),
+                    String::new(),
+                    None,
+                    PaletteCommand::Pause(choice),
+                )
+            })
+            .collect(),
         None => Vec::new(),
+    };
+    let unread = state.unread_notifications();
+    items.push(command(
+        "Notifications",
+        if unread > 0 {
+            format!("{unread} unread")
+        } else {
+            String::new()
+        },
+        None,
+        PaletteCommand::OpenNotifications,
+    ));
+    if unread > 0 {
+        items.push(command(
+            "Mark all notifications read",
+            String::new(),
+            None,
+            PaletteCommand::MarkNotificationsRead,
+        ));
     }
+    if has_environment {
+        items.push(command(
+            "Notification settings…",
+            String::new(),
+            None,
+            PaletteCommand::Settings(SettingsTab::Notifications),
+        ));
+    }
+    items.push(command(
+        "Settings…",
+        String::new(),
+        Some(crate::settings::settings_key()),
+        PaletteCommand::Settings(SettingsTab::General),
+    ));
+    items.push(command(
+        "About icygui",
+        String::new(),
+        None,
+        PaletteCommand::About,
+    ));
+    items.push(command(
+        "Quit icygui",
+        String::new(),
+        Some(crate::settings::quit_key()),
+        PaletteCommand::Quit,
+    ));
+    items
+}
+
+/// Watching, muting and unmuting the focused objects (NOTE-02).
+fn override_commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem> {
+    if focus.targets.is_empty() || state.environment().is_none() {
+        return Vec::new();
+    }
+    let what = match focus.targets.as_slice() {
+        [one] => one.to_string(),
+        many => format!("{} objects", many.len()),
+    };
+    let current: Vec<_> = focus
+        .targets
+        .iter()
+        .map(|target| state.object_override(target, now).map(|entry| entry.mode))
+        .collect();
+    let all_watched = current
+        .iter()
+        .all(|mode| *mode == Some(ic_rules::ObjectMode::Watch));
+    let any = current.iter().any(Option::is_some);
+    let targets = focus.targets.clone();
+    let mut items = Vec::new();
+    if !all_watched {
+        items.push(command(
+            "Watch",
+            what.clone(),
+            None,
+            PaletteCommand::Override(OverrideChange::Watch, targets.clone()),
+        ));
+    }
+    for choice in MuteChoice::ALL {
+        items.push(command(
+            &format!("Mute {}", choice.label(now)),
+            what.clone(),
+            None,
+            PaletteCommand::Override(OverrideChange::Mute(choice), targets.clone()),
+        ));
+    }
+    if any {
+        items.push(command(
+            if all_watched {
+                "Stop watching"
+            } else {
+                "Unmute"
+            },
+            what,
+            None,
+            PaletteCommand::Override(OverrideChange::Clear, targets),
+        ));
+    }
+    items
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn now() -> Timestamp {
@@ -942,7 +1044,7 @@ mod tests {
         assert!(
             items
                 .iter()
-                .any(|item| item.command == PaletteCommand::Pause(Pause::UntilTomorrow))
+                .any(|item| item.command == PaletteCommand::Pause(PauseChoice::UntilMorning))
         );
         state.apply(ic_core::CoreEvent::NotificationsPaused(Some(
             Timestamp::from_unix_seconds(1_790_003_600.),

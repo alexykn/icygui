@@ -45,6 +45,9 @@ pub(crate) const USER: &str = "icygui";
 /// The scenario served unless `ICYGUI_DEMO_SCENARIO` names another.
 pub(crate) const DEFAULT_SCENARIO: &str = "prod-cluster";
 
+/// Seconds (simulator ticks) between problem storms.
+const STORM_EVERY: u64 = 300;
+
 /// When the [`DemoFault::Outage`] begins.
 const OUTAGE_AFTER: Duration = Duration::from_secs(20);
 /// The latency of every answer with [`DemoFault::Slow`].
@@ -102,6 +105,8 @@ pub(crate) struct DemoOptions {
     pub(crate) seed: u64,
     /// A failure to show on purpose.
     pub(crate) fault: Option<DemoFault>,
+    /// Seconds between problem storms (default: five minutes).
+    pub(crate) storm_every: Option<u64>,
 }
 
 impl Default for DemoOptions {
@@ -112,6 +117,7 @@ impl Default for DemoOptions {
                 .duration_since(UNIX_EPOCH)
                 .map_or(1, |elapsed| elapsed.as_secs()),
             fault: None,
+            storm_every: None,
         }
     }
 }
@@ -211,7 +217,7 @@ pub(crate) fn start(
             seed: options.seed,
             problems_per_hour: 60.,
             storm: Some(StormConfig {
-                every_ticks: 300,
+                every_ticks: options.storm_every.unwrap_or(STORM_EVERY),
                 size: 24,
                 duration_ticks: 90,
             }),
@@ -363,6 +369,7 @@ pub(crate) fn options_for(environment_id: &str, prod_cluster: &DemoOptions) -> O
         scenario: scenario.to_owned(),
         seed: prod_cluster.seed,
         fault: None,
+        storm_every: None,
     })
 }
 
@@ -595,6 +602,7 @@ mod tests {
             scenario: "large".to_owned(),
             seed: 9,
             fault: Some(DemoFault::Slow),
+            storm_every: Some(20),
         };
         assert_eq!(options_for(ENVIRONMENT_ID, &prod), Some(prod.clone()));
         let staging = options_for(STAGING_ID, &prod).unwrap();
@@ -694,6 +702,7 @@ mod tests {
             scenario: "lab".to_owned(),
             seed: 7,
             fault: None,
+            storm_every: None,
         };
         let (server, endpoint) = start(&options).unwrap();
         let (endpoint, _control) = futures::executor::block_on(endpoint).unwrap().unwrap();

@@ -737,11 +737,21 @@ fn the_panes_menu_offers_the_other_actions_and_copying() {
         let labels = pane.update(cx, |pane, cx| {
             pane.more_menu_labels(Some("CRITICAL".to_owned()), cx)
         });
+        let morning = format!(
+            "mute {}",
+            crate::notifications::MuteChoice::UntilMorning.label(ic_model::Timestamp::now())
+        );
         assert_eq!(
             labels,
             [
                 "submit check result…",
                 "run command…",
+                // Watching and muting (NOTE-02).
+                "watch: always notify",
+                "mute for 1 hour",
+                "mute for 4 hours",
+                morning.as_str(),
+                "mute until unmuted",
                 "copy name",
                 "copy filter expression",
                 "copy output",

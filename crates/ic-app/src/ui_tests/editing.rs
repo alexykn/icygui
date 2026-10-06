@@ -245,7 +245,7 @@ fn groups_are_renamed_reordered_and_deleted_from_their_menu() {
 
         // delete: asks first; Escape keeps it, Enter deletes.
         app.click(cx, OVERVIEW_MENU, Modifiers::default());
-        app.click(cx, group_menu_item(363.), Modifiers::default());
+        app.click(cx, group_menu_item(386.), Modifiers::default());
         let Some(ModalKind::Confirm(confirmation)) = app.workspace.read(cx).modal(cx) else {
             panic!("no confirmation");
         };
@@ -262,7 +262,7 @@ fn groups_are_renamed_reordered_and_deleted_from_their_menu() {
         assert_eq!(app.workspace.read(cx).modal(cx), None);
         assert_eq!(group_names(app.state.read(cx)).len(), 3);
         app.click(cx, OVERVIEW_MENU, Modifiers::default());
-        app.click(cx, group_menu_item(363.), Modifiers::default());
+        app.click(cx, group_menu_item(386.), Modifiers::default());
         app.keys(cx, "enter");
         assert_eq!(app.workspace.read(cx).modal(cx), None);
         assert_eq!(group_names(app.state.read(cx)), ["platform", "lab"]);
@@ -323,7 +323,7 @@ fn dashboards_are_duplicated_moved_muted_and_deleted_from_their_menu() {
             sidebar.read(cx).open_menu(),
             Some(&SidebarMenu::Dashboard(moved.clone()))
         );
-        app.click(cx, dashboard_menu_item(lab_row, 384.), Modifiers::default());
+        app.click(cx, dashboard_menu_item(lab_row, 407.), Modifiers::default());
         assert!(matches!(
             app.workspace.read(cx).modal(cx),
             Some(ModalKind::Confirm(confirmation)) if confirmation.action == Confirmed::Dashboard(moved.clone())

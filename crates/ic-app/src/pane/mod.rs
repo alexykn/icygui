@@ -9,6 +9,7 @@
 //! without a key and copies the name, the output and a filter expression
 //! (PANE-05).
 
+mod history;
 mod host;
 pub(crate) mod model;
 mod service;
@@ -22,6 +23,7 @@ use gpui::{
     Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use ic_model::{ObjectKey, Timestamp};
+use ic_rules::ObjectMode;
 use ic_ui_kit::{
     ActiveTheme as _, Button, EmptyState, GlyphButton, Icon, IconButton, IconName, Link, Menu,
     MenuItem, PaneHeader, Popover, Scrollbar, Theme, Tooltip,
@@ -37,6 +39,7 @@ use crate::banner;
 use crate::chrome::{Controls, WindowDrag};
 use crate::dashboard::{HYDRATE_DEBOUNCE, SplitLayout};
 use crate::menu_state::{OpenMenu, down_position};
+use crate::notifications::{MuteChoice, OverrideChange};
 use crate::operate::expression;
 use crate::workspace::sidebar_reopen;
 
@@ -137,6 +140,10 @@ pub(crate) struct ObjectPane {
     hydrate_task: Option<Task<()>>,
     /// The `···` menu beside the action buttons.
     menu: OpenMenu<PaneMenu>,
+    /// The local event log's entries for the shown object (PANE-04).
+    log: Option<history::PaneHistory>,
+    /// Reads them.
+    log_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -178,6 +185,8 @@ impl ObjectPane {
             hydration_wanted: Vec::new(),
             hydrate_task: None,
             menu: OpenMenu::default(),
+            log: None,
+            log_task: None,
             _subscriptions: subscriptions,
         }
     }
@@ -350,6 +359,17 @@ impl ObjectPane {
         });
     }
 
+    /// Watches, mutes or unmutes the shown object and says so (NOTE-02).
+    fn change_override(&self, change: OverrideChange, cx: &mut App) {
+        let objects = [self.object.clone()];
+        self.state.update(cx, |state, cx| {
+            if let Some(message) = change.apply(state, &objects, Timestamp::now()) {
+                state.inform(message, None);
+            }
+            cx.notify();
+        });
+    }
+
     /// Copies `text` and says what was copied.
     fn copy(&self, what: &str, text: String, cx: &mut App) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -473,6 +493,7 @@ impl ObjectPane {
 impl Render for ObjectPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.want_details(cx);
+        self.want_history(cx);
         let theme = cx.theme().clone();
         let header = self.render_header(window, cx);
         let snapshot = self.state.read(cx).snapshot().clone();
@@ -621,6 +642,7 @@ fn action_buttons(
             }
         };
     let failure = failure_line(pane, cx);
+    let watch = override_line(pane, cx);
     let more = more_trigger(pane, output, cx);
     div()
         .flex()
@@ -672,6 +694,38 @@ fn action_buttons(
                 .child(more),
         )
         .children(failure)
+        .children(watch)
+}
+
+/// The object's watch or mute (NOTE-02), with a way to end it.
+fn override_line(pane: &ObjectPane, cx: &Context<ObjectPane>) -> Option<impl IntoElement> {
+    let theme = cx.theme();
+    let now = Timestamp::now();
+    let entry = pane.state.read(cx).object_override(&pane.object, now)?;
+    let (icon, color, end) = match entry.mode {
+        ObjectMode::Watch => (IconName::Bell, theme.colors.accent, "stop watching"),
+        ObjectMode::Mute => (IconName::BellOff, theme.colors.text_muted, "unmute"),
+    };
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_size(theme.text.small)
+            .child(Icon::new(icon).size(theme.metrics.icon_small).color(color))
+            .child(
+                div()
+                    .text_color(theme.colors.text_muted)
+                    .child(crate::notifications::override_text(entry, now)),
+            )
+            .child(
+                Link::new("pane-override-clear", end)
+                    .quiet()
+                    .on_click(cx.listener(|this: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                        this.change_override(OverrideChange::Clear, cx);
+                    })),
+            ),
+    )
 }
 
 /// The last failed action on the pane's object, with Icinga's reason and
@@ -801,6 +855,7 @@ fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>
             ObjectAction::RemoveDowntimes,
         ));
     }
+    menu = override_items(menu, pane, cx);
     menu = menu
         .separator()
         .item(copy(
@@ -848,6 +903,64 @@ fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>
             cx.notify();
         }),
     )
+}
+
+/// The pane menu's watch and mute items (NOTE-02): local to this computer.
+fn override_items(mut menu: Menu, pane: &ObjectPane, cx: &Context<ObjectPane>) -> Menu {
+    let now = Timestamp::now();
+    let current = pane
+        .state
+        .read(cx)
+        .object_override(&pane.object, now)
+        .map(|entry| entry.mode);
+    let change = |id: &'static str, label: String, change: OverrideChange| {
+        MenuItem::new(id, label).on_click(cx.listener(
+            move |this: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                this.menu.close();
+                this.change_override(change, cx);
+                cx.notify();
+            },
+        ))
+    };
+    menu = menu.separator().label("notifications");
+    if current != Some(ObjectMode::Watch) {
+        menu = menu.item(
+            change(
+                "pane-watch",
+                "watch: always notify".to_owned(),
+                OverrideChange::Watch,
+            )
+            .tooltip(Tooltip::new(
+                "Notify with the environment's rule even when no dashboard does",
+            )),
+        );
+    }
+    for (index, choice) in MuteChoice::ALL.into_iter().enumerate() {
+        menu = menu.item(change(
+            [
+                "pane-mute-1h",
+                "pane-mute-4h",
+                "pane-mute-morning",
+                "pane-mute-forever",
+            ]
+            .get(index)
+            .copied()
+            .unwrap_or("pane-mute"),
+            format!("mute {}", choice.label(now)),
+            OverrideChange::Mute(choice),
+        ));
+    }
+    if let Some(mode) = current {
+        menu = menu.item(change(
+            "pane-override-clear-menu",
+            match mode {
+                ObjectMode::Watch => "stop watching".to_owned(),
+                ObjectMode::Mute => "unmute".to_owned(),
+            },
+            OverrideChange::Clear,
+        ));
+    }
+    menu
 }
 
 /// The object's notes and action URLs that open in a browser, macros

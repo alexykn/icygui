@@ -243,6 +243,22 @@ impl Database {
             .execute("UPDATE notifications SET read = 1 WHERE read = 0", [])?)
     }
 
+    /// Marks the notification `id` read; returns whether it was unread.
+    pub(super) fn mark_one_read(&self, id: &str) -> Result<bool, DbError> {
+        Ok(self.conn.execute(
+            "UPDATE notifications SET read = 1 WHERE id = ?1 AND read = 0",
+            params![id],
+        )? > 0)
+    }
+
+    /// When the oldest entry happened; `None` while there are none.
+    pub(super) fn history_start(&self) -> Result<Option<Timestamp>, DbError> {
+        let oldest: Option<f64> = self
+            .conn
+            .query_row("SELECT min(at) FROM events", [], |row| row.get(0))?;
+        Ok(oldest.map(Timestamp::from_unix_seconds))
+    }
+
     /// Deletes events and notifications from before `before`, and gives
     /// the freed pages back. Returns how many rows went.
     pub(super) fn prune(&self, before: Timestamp) -> Result<usize, DbError> {

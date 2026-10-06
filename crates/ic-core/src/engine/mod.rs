@@ -1313,6 +1313,8 @@ impl Engine {
                 self.emit(CoreEvent::NotificationsPaused(paused));
             }
             Command::MarkNotificationsRead => self.event_log.mark_read(),
+            Command::MarkNotificationRead(id) => self.event_log.mark_one_read(id),
+            Command::LoadHistoryStart { reply } => self.event_log.history_start(reply),
             Command::Hydrate(keys) => self.hydrate(keys),
         }
     }

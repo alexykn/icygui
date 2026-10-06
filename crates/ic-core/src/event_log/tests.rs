@@ -142,9 +142,46 @@ fn notifications_round_trip_dedupe_and_read_flags() {
     assert!(records.iter().all(|record| !record.read));
     assert_eq!(database.notifications(1).unwrap().len(), 1);
 
-    assert_eq!(database.mark_read().unwrap(), 3);
+    // One by one (the entry the user opened), then all of them.
+    assert!(database.mark_one_read("storm:1").unwrap());
+    assert!(!database.mark_one_read("storm:1").unwrap(), "already read");
+    assert!(!database.mark_one_read("no-such-id").unwrap());
+    let read: Vec<bool> = database
+        .notifications(10)
+        .unwrap()
+        .iter()
+        .map(|record| record.read)
+        .collect();
+    assert_eq!(read, [false, true, false]);
+
+    assert_eq!(database.mark_read().unwrap(), 2);
     assert!(database.notifications(10).unwrap().iter().all(|r| r.read));
     assert_eq!(database.mark_read().unwrap(), 0);
+}
+
+#[test]
+fn the_history_starts_with_its_oldest_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = Database::open(&dir.path().join("log.sqlite3")).unwrap();
+    assert_eq!(database.history_start().unwrap(), None, "nothing recorded");
+    let mut database = database;
+    let host = ObjectKey::host("h");
+    database
+        .record(&[
+            state(&host, 30.0, CheckableState::Host(HostState::Down), "down"),
+            state(&host, 20.0, CheckableState::Host(HostState::Up), "up"),
+        ])
+        .unwrap();
+    assert_eq!(
+        database.history_start().unwrap(),
+        Some(Timestamp::from_unix_seconds(20.0))
+    );
+    database.prune(Timestamp::from_unix_seconds(25.0)).unwrap();
+    assert_eq!(
+        database.history_start().unwrap(),
+        Some(Timestamp::from_unix_seconds(30.0)),
+        "pruning moves the start"
+    );
 }
 
 #[test]
@@ -297,12 +334,27 @@ fn the_thread_answers_in_order_and_flushes_on_close() {
         "a known id isn't new"
     );
 
+    log.mark_one_read("b".to_owned());
+    let (tx, rx) = oneshot::channel();
+    log.notifications(10, tx);
+    let read: Vec<(String, bool)> = block_on(rx)
+        .unwrap()
+        .into_iter()
+        .map(|record| (record.intent.id, record.read))
+        .collect();
+    assert_eq!(read, [("b".to_owned(), true), ("a".to_owned(), false)]);
     log.mark_read();
     let (tx, rx) = oneshot::channel();
     log.notifications(10, tx);
     let records = block_on(rx).unwrap();
     assert_eq!(records.len(), 2);
     assert!(records.iter().all(|record| record.read));
+    let (tx, rx) = oneshot::channel();
+    log.history_start(tx);
+    assert_eq!(
+        block_on(rx).unwrap(),
+        Some(Timestamp::from_unix_seconds(0.0))
+    );
 
     // Writes queued right before closing are on disk afterwards.
     log.record(vec![state(

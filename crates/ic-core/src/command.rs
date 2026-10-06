@@ -56,6 +56,16 @@ pub enum Command {
     },
     /// Marks every notification read.
     MarkNotificationsRead,
+    /// Marks one notification read, by its intent id (the notification
+    /// centre's entry the user opened). An unknown id changes nothing.
+    MarkNotificationRead(String),
+    /// When the local event log's oldest entry happened: the history's
+    /// "recorded locally since …". `None` while the log is empty (or there
+    /// is no log).
+    LoadHistoryStart {
+        /// Receives the time.
+        reply: oneshot::Sender<Option<Timestamp>>,
+    },
     /// Evaluates a view that isn't saved yet (the dashboard editor's live
     /// match count and rows).
     PreviewDashboard {

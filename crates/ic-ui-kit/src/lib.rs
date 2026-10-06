@@ -47,6 +47,9 @@ pub mod input {
     /// dismiss (a selection, a completion) lets it bubble up to the field's
     /// parents, which can handle it with `on_action`.
     pub use gpui_component::input::Escape;
+    /// The text fields' editing actions, for an Edit menu (macOS): they act
+    /// on the focused field.
+    pub use gpui_component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
     pub use gpui_component::input::{InputEvent, InputState, TextareaState};
 }
 

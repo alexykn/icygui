@@ -215,7 +215,7 @@ fn core_events_update_the_state() {
         read: false,
     }));
     assert_eq!(state.unread_notifications(), 1);
-    assert_eq!(state.notifications().count(), 1);
+    assert_eq!(state.notification_records().count(), 1);
     state.apply(CoreEvent::NotificationsPaused(Some(now())));
     assert_eq!(state.paused_until(), Some(now()));
 }

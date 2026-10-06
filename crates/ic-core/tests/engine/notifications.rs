@@ -144,9 +144,19 @@ async fn the_initial_load_is_silent_and_live_problems_notify_once() {
     );
     assert_eq!(stored[1].intent, *intent, "logged as emitted");
     assert!(stored.iter().all(|record| !record.read));
+    // The entry the user opened, then all of them.
+    engine.send(Command::MarkNotificationRead(stored[1].intent.id.clone()));
+    let stored = engine.stored_notifications().await;
+    let read: Vec<bool> = stored.iter().map(|record| record.read).collect();
+    assert_eq!(read, [false, true]);
     engine.send(Command::MarkNotificationsRead);
     let stored = engine.stored_notifications().await;
     assert!(stored.iter().all(|record| record.read));
+    // The history starts with the first change logged.
+    let (reply, start) = futures::channel::oneshot::channel();
+    engine.send(Command::LoadHistoryStart { reply });
+    let start = start.await.unwrap().expect("changes were logged");
+    assert!(start <= stored[1].intent.at, "{start:?}");
     engine.shutdown();
 }
 

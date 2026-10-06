@@ -11,6 +11,9 @@
 //!   `auth`, `tls`, `missing-secret`, `misconfigured`, `outage` (lost
 //!   after 20 s), `slow` (every answer takes 0.9 s) or `frozen` (Icinga
 //!   stops checking: checks become late).
+//! - `ICYGUI_DEMO_STORM=20` starts a problem storm every 20 seconds
+//!   instead of every 5 minutes (24 services fail: a few notifications,
+//!   the rest silent, then a summary), for the notification centre.
 //! - `ICYGUI_DEMO_OPEN` opens an object at start: `service` (the design's
 //!   postgres-replication, screen 2b), `host` (its host db-prod-03 beside
 //!   the list, screen 2c), `tab` (postgres-replication as a tab), or an
@@ -31,6 +34,8 @@ pub(crate) const FAULT_ENV: &str = "ICYGUI_DEMO_FAULT";
 pub(crate) const DASHBOARD_ENV: &str = "ICYGUI_DEMO_DASHBOARD";
 /// The object opened at start.
 pub(crate) const OPEN_ENV: &str = "ICYGUI_DEMO_OPEN";
+/// Seconds between the demo's problem storms.
+pub(crate) const STORM_ENV: &str = "ICYGUI_DEMO_STORM";
 
 /// What to open at start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +67,8 @@ pub(crate) struct DevOptions {
     pub(crate) dashboard: Option<String>,
     /// `ICYGUI_DEMO_OPEN`.
     pub(crate) open: Option<OpenAtStart>,
+    /// `ICYGUI_DEMO_STORM`.
+    pub(crate) storm_every: Option<u64>,
 }
 
 impl DevOptions {
@@ -94,12 +101,24 @@ impl DevOptions {
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty());
         let open = get(OPEN_ENV).and_then(|value| parse_open(value.trim()));
+        let storm_every = get(STORM_ENV).and_then(|value| {
+            let parsed = value
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|seconds| *seconds > 0);
+            if parsed.is_none() {
+                tracing::warn!(%value, "{STORM_ENV} is not a number of seconds; ignoring it");
+            }
+            parsed
+        });
         Self {
             scenario,
             seed,
             fault,
             dashboard,
             open,
+            storm_every,
         }
     }
 
@@ -110,6 +129,7 @@ impl DevOptions {
             || self.fault.is_some()
             || self.dashboard.is_some()
             || self.open.is_some()
+            || self.storm_every.is_some()
     }
 }
 

@@ -187,8 +187,7 @@ impl AppState {
         self.update_pending = false;
         self.last_refresh = None;
         self.notifications.clear();
-        self.unread = 0;
-        self.paused_until = None;
+        // A pause is app-wide: the next engine gets it (`set_core`).
         self.requested = None;
         self.last_request = None;
         self.last_denial = None;

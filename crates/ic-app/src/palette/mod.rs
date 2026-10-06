@@ -23,7 +23,7 @@ use ic_model::Timestamp;
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{ActiveTheme as _, KeyHint, StateDot, TextField, Theme};
 
-pub(crate) use self::model::{Focus, PaletteCommand, PaletteItem, Pause};
+pub(crate) use self::model::{Focus, PaletteCommand, PaletteItem};
 use self::model::{PaletteIndex, Section};
 use crate::app_state::AppState;
 use crate::sidebar::Dot;

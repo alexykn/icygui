@@ -22,7 +22,10 @@
 //! deleting an environment deletes its password and its event log
 //! (ENV-03) once its engine has stopped.
 
+#[cfg(all(target_os = "linux", not(test)))]
+mod dbus;
 pub(crate) mod demo;
+pub(crate) mod desktop;
 pub(crate) mod notifier;
 
 use std::collections::{HashMap, VecDeque};
@@ -31,10 +34,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use futures::channel::mpsc::UnboundedReceiver;
-use gpui::{
-    App, AppContext as _, Context, Entity, Global, Subscription, SystemNotificationResponse, Task,
-};
+use futures::channel::mpsc::{UnboundedReceiver, unbounded};
+use gpui::{App, AppContext as _, Context, Entity, Global, Subscription, Task};
 use ic_config::{AuthConfig, Config, ConfigError, ConfigStore, Environment, Paths};
 use ic_core::ports::SecretStore;
 use ic_core::{
@@ -42,16 +43,17 @@ use ic_core::{
 };
 use ic_model::ObjectKey;
 use ic_rules::NotificationIntent;
-use ic_ui_kit::Root;
 use secrecy::SecretString;
 
 use self::demo::{DemoOptions, DemoSecrets, DemoServer};
+use self::desktop::{ACKNOWLEDGE_ACTION, Desktop, Response};
 use self::notifier::GpuiNotifier;
+use crate::actions::{ActionRequest, ObjectAction};
 use crate::app_state::environments::EnvironmentSaved;
 use crate::app_state::{AppState, ConfigProblem};
+use crate::background::window;
 use crate::dev::OpenAtStart;
 use crate::persist::{Persistence, SaveReport};
-use crate::workspace::Workspace;
 
 /// At most this many events are applied per re-render.
 const MAX_EVENTS_PER_BATCH: usize = 512;
@@ -93,6 +95,17 @@ pub(crate) enum RecoveryChoice {
 /// (deleting a removed environment's password and event log).
 type Cleanup = Box<dyn FnOnce() + Send>;
 
+/// A notification shown on the desktop, for its clicks.
+#[derive(Clone, Debug)]
+struct Target {
+    /// The intent's id.
+    tag: String,
+    /// The environment it came from.
+    environment: Option<String>,
+    /// Its object.
+    object: ObjectKey,
+}
+
 /// The running session: the engine, its event pump, notifications and
 /// persistence. One per app, reachable through [`session`].
 pub(crate) struct Session {
@@ -108,8 +121,10 @@ pub(crate) struct Session {
     demo_secrets: Arc<DemoSecrets>,
     demo_dir: Option<tempfile::TempDir>,
     pending_open: Option<OpenAtStart>,
+    /// Shows notifications on the desktop.
+    desktop: Box<dyn Desktop>,
     /// Recent notifications' tags and objects, for their clicks.
-    targets: VecDeque<(String, ObjectKey)>,
+    targets: VecDeque<Target>,
     /// An engine is stopping (or a removed environment being cleaned up);
     /// the next engine starts when this finishes.
     stopping: Option<Task<()>>,
@@ -122,6 +137,9 @@ pub(crate) struct Session {
     /// Icinga.
     #[cfg(all(test, target_os = "linux"))]
     demo_controls: HashMap<String, ic_mock::MockControl>,
+    /// What the desktop was asked to show (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    shown: desktop::RecordingDesktop,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -160,18 +178,37 @@ impl Session {
         cx: &mut Context<Self>,
     ) -> Self {
         let (notifier, intents) = GpuiNotifier::new();
-        let mut tasks = vec![Self::spawn_notifications(intents, cx)];
+        let (responses, clicks) = unbounded::<Response>();
+        let mut tasks = vec![
+            Self::spawn_notifications(intents, cx),
+            Self::spawn_clicks(clicks, cx),
+        ];
         if let Launch::Live { paths, .. } = &launch {
             tasks.push(Self::attach_persistence(&state, paths, cx));
         }
-        let weak = cx.weak_entity();
-        cx.on_system_notification_response(move |response, cx| {
-            if let Some(session) = weak.upgrade() {
-                session.update(cx, |session, cx| {
-                    session.notification_clicked(&response, cx);
-                });
-            }
+        // GPUI's backend (macOS) answers here; the D-Bus one (Linux)
+        // sends to `responses` itself.
+        let gpui_responses = responses.clone();
+        cx.on_system_notification_response(move |response, _| {
+            let _ = gpui_responses.unbounded_send(Response {
+                tag: response.tag.to_string(),
+                action: response.action_id.map(|action| action.to_string()),
+            });
         });
+        #[cfg(all(test, target_os = "linux"))]
+        let shown = desktop::RecordingDesktop::default();
+        #[cfg(all(test, target_os = "linux"))]
+        let desktop: Box<dyn Desktop> = {
+            drop(responses);
+            Box::new(shown.clone())
+        };
+        #[cfg(all(test, not(target_os = "linux")))]
+        let desktop: Box<dyn Desktop> = {
+            drop(responses);
+            Box::new(desktop::RecordingDesktop::default())
+        };
+        #[cfg(not(test))]
+        let desktop = desktop_for(responses);
         let quit = cx.on_app_quit(|session, cx| {
             session.stop(cx);
             async {}
@@ -191,12 +228,15 @@ impl Session {
             demo_secrets,
             demo_dir: None,
             pending_open,
+            desktop,
             targets: VecDeque::new(),
             stopping: None,
             cleanups: Vec::new(),
             generation: 0,
             #[cfg(all(test, target_os = "linux"))]
             demo_controls: HashMap::new(),
+            #[cfg(all(test, target_os = "linux"))]
+            shown,
             _tasks: tasks,
             _subscriptions: vec![quit],
         }
@@ -208,7 +248,7 @@ impl Session {
         paths: &Paths,
         cx: &mut Context<Self>,
     ) -> Task<()> {
-        let (sender, mut reports) = futures::channel::mpsc::unbounded::<SaveReport>();
+        let (sender, mut reports) = unbounded::<SaveReport>();
         let started = Persistence::start(
             paths.config_store(),
             paths.state_store(),
@@ -241,50 +281,110 @@ impl Session {
         })
     }
 
-    /// Posts the core's notifications on the UI thread.
+    /// Shows the core's notifications on the desktop, on the UI thread.
     fn spawn_notifications(
         mut intents: UnboundedReceiver<NotificationIntent>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx| {
             while let Some(intent) = intents.next().await {
-                let shown = this.update(cx, |session, cx| {
-                    if let Some(object) = &intent.object {
-                        session
-                            .targets
-                            .push_front((intent.id.clone(), object.clone()));
-                        session.targets.truncate(MAX_TARGETS);
-                    }
-                    cx.show_system_notification(notifier::system_notification(&intent));
-                });
-                if shown.is_err() {
+                if this
+                    .update(cx, |session, cx| session.post(&intent, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
         })
     }
 
-    /// A notification (or its "Open" button) was clicked: open its object.
-    fn notification_clicked(
-        &mut self,
-        response: &SystemNotificationResponse,
-        cx: &mut Context<Self>,
-    ) {
-        let target = self
-            .targets
-            .iter()
-            .find(|(tag, _)| tag.as_str() == response.tag.as_ref())
-            .map(|(_, object)| object.clone());
-        match target {
-            Some(object) => {
-                if !open_object(&object, cx) {
-                    tracing::info!(%object, "no window to open the notification's object in");
+    /// Shows `intent` on the desktop (NOTE-01): with *Acknowledge* for a
+    /// problem the API user may acknowledge, and *Open*.
+    fn post(&mut self, intent: &NotificationIntent, cx: &mut Context<Self>) {
+        let (environment, acknowledge) = {
+            let state = self.state.read(cx);
+            (
+                state.active_environment_id().map(str::to_owned),
+                state.action_denial(&ObjectAction::Acknowledge).is_none(),
+            )
+        };
+        if let Some(object) = &intent.object {
+            self.targets.push_front(Target {
+                tag: intent.id.clone(),
+                environment,
+                object: object.clone(),
+            });
+            self.targets.truncate(MAX_TARGETS);
+        }
+        self.desktop.show(desktop::posted(intent, acknowledge), cx);
+    }
+
+    /// Carries out clicks on desktop notifications, on the UI thread.
+    fn spawn_clicks(mut clicks: UnboundedReceiver<Response>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            while let Some(response) = clicks.next().await {
+                let clicked = this.update(cx, |session, cx| {
+                    session.notification_clicked(&response, cx);
+                });
+                if clicked.is_err() {
+                    break;
                 }
             }
-            None => {
-                tracing::debug!(tag = %response.tag, "a notification without an object was clicked");
+        })
+    }
+
+    /// A desktop notification was clicked (NOTE-01): its object opens (the
+    /// window comes back if it was closed) and the notification counts as
+    /// read; *Acknowledge* also opens the acknowledge dialog for it.
+    pub(crate) fn notification_clicked(&mut self, response: &Response, cx: &mut Context<Self>) {
+        let Some(target) = self
+            .targets
+            .iter()
+            .find(|target| target.tag == response.tag)
+            .cloned()
+        else {
+            tracing::debug!(tag = %response.tag, "a notification without an object was clicked");
+            window::show(cx);
+            return;
+        };
+        tracing::info!(object = %target.object, action = ?response.action, "notification clicked");
+        let active = self.state.update(cx, |state, cx| {
+            if state.mark_notification_read(&target.tag) {
+                cx.notify();
             }
+            state.active_environment_id().map(str::to_owned)
+        });
+        if target.environment != active {
+            window::show(cx);
+            self.state.update(cx, |state, cx| {
+                state.inform(
+                    "That notification is from another environment",
+                    Some(format!("Switch to it to see {}.", target.object)),
+                );
+                cx.notify();
+            });
+            return;
         }
+        if !open_object(&target.object, cx) {
+            tracing::warn!(object = %target.object, "no window to show the notification's object in");
+            return;
+        }
+        if response.action.as_deref() == Some(ACKNOWLEDGE_ACTION) {
+            self.state.update(cx, |state, cx| {
+                // A refusal (no permission) shows as a toast.
+                let _ = state.request(ActionRequest {
+                    action: ObjectAction::Acknowledge,
+                    targets: vec![target.object.clone()],
+                });
+                cx.notify();
+            });
+        }
+    }
+
+    /// What the desktop was asked to show (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn shown_notifications(&self) -> Vec<desktop::Posted> {
+        self.shown.shown.borrow().clone()
     }
 
     /// Connects: starts the engine for the active environment (for the
@@ -440,10 +540,24 @@ impl Session {
         match ic_core::start(spec, ports) {
             Ok(mut handle) => {
                 let events = handle.take_events();
-                self.state.update(cx, |state, cx| {
+                let recent = self.state.update(cx, |state, cx| {
                     state.set_core(Box::new(handle));
                     cx.notify();
+                    state.request_notifications()
                 });
+                if let Some(recent) = recent {
+                    // The notification centre starts with the log's.
+                    let state = self.state.downgrade();
+                    cx.spawn(async move |_, cx| {
+                        if let Ok(records) = recent.await {
+                            let _ = state.update(cx, |state, cx| {
+                                state.load_notifications(records);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                }
                 if let Some(events) = events {
                     self.pump = Some(self.spawn_pump(events, cx));
                 }
@@ -496,7 +610,6 @@ impl Session {
     fn replace_engine(&mut self, cleanup: Option<Cleanup>, cx: &mut Context<Self>) {
         self.generation += 1;
         self.pump = None;
-        self.targets.clear();
         self.cleanups.extend(cleanup);
         let core = self.state.update(cx, |state, _| state.take_core());
         match core {
@@ -676,6 +789,22 @@ impl Session {
         })
     }
 
+    /// What the about dialog says about where things are.
+    pub(crate) fn about_facts(&self) -> crate::settings::about::AboutFacts {
+        match &self.launch {
+            Launch::Live { paths, .. } => crate::settings::about::AboutFacts {
+                settings: Some(paths.config_file.display().to_string()),
+                logs: Some(paths.log_dir.display().to_string()),
+            },
+            Launch::Demo { .. } => crate::settings::about::AboutFacts {
+                settings: Some("none: the demo saves nothing".to_owned()),
+                logs: Paths::from_system()
+                    .ok()
+                    .map(|paths| paths.log_dir.display().to_string()),
+            },
+        }
+    }
+
     /// Where the event logs are: the data directory, or the demo's
     /// temporary one.
     fn event_log_dir(&self) -> Option<PathBuf> {
@@ -713,7 +842,7 @@ impl Session {
                 open_object(&key, cx);
             }
             OpenAtStart::Linked { cursor, pane } => {
-                with_workspace(cx, |workspace, window, cx| {
+                window::with_workspace(cx, |workspace, window, cx| {
                     workspace.reveal_linked(&cursor, pane.clone(), window, cx);
                 });
             }
@@ -872,34 +1001,30 @@ fn problem_for(store: &ConfigStore, failure: &str) -> ConfigProblem {
     }
 }
 
-/// Runs `f` on the main window's workspace, if the window is open.
-fn with_workspace(
-    cx: &mut App,
-    f: impl FnOnce(&mut Workspace, &mut gpui::Window, &mut Context<Workspace>),
-) -> bool {
-    let Some(window) = cx
-        .windows()
-        .into_iter()
-        .find_map(|window| window.downcast::<Root>())
-    else {
-        return false;
-    };
-    window
-        .update(cx, |root, window, cx| {
-            let Ok(workspace) = root.view().clone().downcast::<Workspace>() else {
-                return false;
-            };
-            workspace.update(cx, |workspace, cx| f(workspace, window, cx));
-            window.activate_window();
-            true
-        })
-        .unwrap_or(false)
-}
-
 /// Shows `object`: in a dashboard that lists it, else as a tab, and
-/// brings the window forward. Returns whether a window was there.
+/// brings the window forward (opening it if it was closed). Returns
+/// whether a window shows it.
 pub(crate) fn open_object(object: &ObjectKey, cx: &mut App) -> bool {
-    with_workspace(cx, |workspace, window, cx| {
+    window::with_workspace(cx, |workspace, window, cx| {
         workspace.reveal(object, window, cx);
     })
+}
+
+/// The desktop notifications of this platform: over D-Bus on Linux, with
+/// clicks to `responses`; GPUI's elsewhere.
+#[cfg(not(test))]
+fn desktop_for(responses: futures::channel::mpsc::UnboundedSender<Response>) -> Box<dyn Desktop> {
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(dbus::DbusDesktop::start(
+            crate::APP_NAME,
+            crate::APP_ID,
+            responses,
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        drop(responses);
+        Box::new(desktop::GpuiDesktop)
+    }
 }

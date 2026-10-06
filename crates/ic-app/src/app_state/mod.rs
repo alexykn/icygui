@@ -21,6 +21,7 @@ pub(crate) mod connection;
 pub(crate) mod editing;
 pub(crate) mod environments;
 pub(crate) mod hydration;
+mod notifications;
 mod operations;
 pub(crate) mod permissions;
 
@@ -43,6 +44,9 @@ pub(crate) use self::connection::{
     ConnectionNotice, ConnectionStatus, Health, NoticeAction, NoticeKind, Tone,
 };
 use self::hydration::Hydration;
+#[cfg(test)]
+pub(crate) use self::notifications::GroupPlan;
+pub(crate) use self::notifications::NotificationPlan;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use self::operations::NOT_CONNECTED;
 use crate::actions::{ActionRequest, ObjectAction};
@@ -200,8 +204,10 @@ pub(crate) struct AppState {
     update_pending: bool,
     hydration: Hydration,
     last_refresh: Option<Instant>,
+    /// The notification centre's list, newest first: the log's recent
+    /// ones, then every new one.
     notifications: VecDeque<ic_core::NotificationRecord>,
-    unread: usize,
+    /// Until when notifications are paused, app-wide.
     paused_until: Option<Timestamp>,
     config_problem: Option<ConfigProblem>,
     save_error: Option<String>,
@@ -222,6 +228,10 @@ pub(crate) struct AppState {
     /// Evaluates dashboards for the fixture; the core does that itself.
     #[cfg(test)]
     evaluator: Option<fixture::Evaluator>,
+    /// The event log's entries for the fixture (newest first); the core
+    /// answers from its log otherwise.
+    #[cfg(test)]
+    fake_history: Option<Vec<ic_core::LogEntry>>,
 }
 
 impl AppState {
@@ -244,7 +254,6 @@ impl AppState {
             hydration: Hydration::default(),
             last_refresh: None,
             notifications: VecDeque::new(),
-            unread: 0,
             paused_until: None,
             config_problem: None,
             save_error: None,
@@ -257,6 +266,8 @@ impl AppState {
             last_action_id: 0,
             #[cfg(test)]
             evaluator: None,
+            #[cfg(test)]
+            fake_history: None,
         }
     }
 
@@ -375,6 +386,7 @@ impl AppState {
     /// Connects the outbound half to a running core.
     pub(crate) fn set_core(&mut self, core: Box<dyn CoreLink>) {
         self.core = Some(core);
+        self.resend_pause();
     }
 
     /// Disconnects the outbound half (to stop the core).
@@ -840,11 +852,14 @@ impl AppState {
             CoreEvent::Permissions(info) => self.permissions = Some(info),
             CoreEvent::ActionFinished { id, outcome } => self.action_finished(id, &outcome),
             CoreEvent::Notification(record) => {
-                if !record.read {
-                    self.unread += 1;
+                if !self
+                    .notifications
+                    .iter()
+                    .any(|known| known.intent.id == record.intent.id)
+                {
+                    self.notifications.push_front(record);
+                    self.notifications.truncate(MAX_NOTIFICATIONS);
                 }
-                self.notifications.push_front(record);
-                self.notifications.truncate(MAX_NOTIFICATIONS);
             }
             CoreEvent::NotificationsPaused(until) => self.paused_until = until,
         }
@@ -855,22 +870,6 @@ impl AppState {
         self.connection.on_snapshot(&snapshot);
         self.snapshot = snapshot;
         self.tracker.settle(&self.snapshot, Instant::now());
-    }
-
-    /// Recent notifications, newest first (the notification centre's).
-    #[cfg(test)]
-    pub(crate) fn notifications(&self) -> impl Iterator<Item = &ic_core::NotificationRecord> {
-        self.notifications.iter()
-    }
-
-    /// Notifications not seen yet.
-    pub(crate) fn unread_notifications(&self) -> usize {
-        self.unread
-    }
-
-    /// Until when notifications are paused.
-    pub(crate) fn paused_until(&self) -> Option<Timestamp> {
-        self.paused_until
     }
 
     /// Reloads from Icinga (or connects now after a failure). Ignored while
@@ -964,11 +963,6 @@ impl AppState {
     /// Hides the message.
     pub(crate) fn dismiss_notice(&mut self) {
         self.notice = None;
-    }
-
-    /// Pauses notifications until `until`, or resumes them (`None`).
-    pub(crate) fn pause_notifications(&mut self, until: Option<Timestamp>) {
-        self.send(Command::PauseNotifications(until));
     }
 }
 

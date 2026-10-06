@@ -43,7 +43,7 @@ impl AppState {
 
     /// Runs `change` on the active environment; when it returns `Some`,
     /// the environment is saved and sent to the core.
-    fn change_environment<R>(
+    pub(super) fn change_environment<R>(
         &mut self,
         change: impl FnOnce(&mut Environment) -> Option<R>,
     ) -> Option<R> {

@@ -3527,6 +3527,7 @@ dependencies = [
  "ic-platform",
  "ic-rules",
  "ic-ui-kit",
+ "image",
  "schemars",
  "secrecy",
  "serde",

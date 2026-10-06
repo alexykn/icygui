@@ -874,8 +874,10 @@ impl Sidebar {
         let state = self.state.read(cx);
         let connection = state.connection();
         let health = connection.health(now);
-        let label = connection.label(now);
-        let demo = state.is_demo();
+        let (endpoint, suffix) = connection.label_parts(now);
+        // The whole label, for an endpoint the footer shortens.
+        let full = connection.label(now);
+        let demo = state.is_demo_environment();
         let open = self.menus.is_open(&SidebarMenu::Status);
         let status = div()
             .id("environment-status")
@@ -895,7 +897,12 @@ impl Sidebar {
             .cursor_pointer()
             .hover(|style| style.text_color(colors.text_muted))
             .child(StateDot::with_color(health_color(health, theme)).size(metrics.status_dot))
-            .child(div().min_w_0().truncate().child(label))
+            // A long endpoint (an FQDN) is shortened, never the age or
+            // state after it (ENV-06); the details popover has it in full.
+            .child(div().min_w_0().truncate().child(endpoint))
+            .when_some(suffix, |status, suffix| {
+                status.child(div().flex_none().ml(px(-2.)).child(format!("· {suffix}")))
+            })
             // `--demo` says so wherever the status is (ENV-10).
             .when(demo, |status| {
                 status.child(
@@ -917,7 +924,9 @@ impl Sidebar {
         if open {
             status
         } else {
-            status.tooltip(Tooltip::text("Environments and connection details"))
+            status.tooltip(Tooltip::text(format!(
+                "{full}: environments and connection details"
+            )))
         }
     }
 
@@ -961,12 +970,14 @@ impl Sidebar {
                 }
             })
             .when_some(badge, |slot, badge| {
-                // The unread count at the icon's top right.
+                // The unread count at the icon's top right. It is anchored
+                // by its right edge and grows over the icon, so `28` or
+                // `99+` never covers the health dot next to it (ENV-06).
                 slot.child(
                     div()
                         .absolute()
                         .top(px(2.))
-                        .left(px(15.))
+                        .right(px(-4.))
                         .h(px(12.))
                         .min_w(px(12.))
                         .px(px(3.))

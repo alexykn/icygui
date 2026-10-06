@@ -4,7 +4,7 @@
 //! characters highlighted and key hints; keyboard only: up/down (or
 //! ctrl-p/ctrl-n) move, Enter runs, Tab opens an object as a tab, Escape
 //! closes. A query starting with a verb acts on the objects it names
-//! (`ack db-prod`).
+//! (`ack db-prod`), one by one or all together (`secondary-enter`).
 //!
 //! The palette only says what was chosen ([`PaletteEvent::Run`]); the
 //! workspace carries it out.
@@ -51,6 +51,11 @@ pub(crate) struct PaletteConfirm;
 #[action(namespace = icygui)]
 pub(crate) struct PaletteOpenTab;
 
+/// Runs a verb query on all the objects it names (`secondary-enter`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct PaletteRunAll;
+
 /// Registers the palette's keys. They are bound over the palette's text
 /// field (`CommandPalette > Input`), registered after gpui-component's
 /// own bindings, so they win over the field's cursor movement.
@@ -63,10 +68,12 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-n", PaletteNext, field),
         KeyBinding::new("ctrl-p", PalettePrevious, field),
         KeyBinding::new("enter", PaletteConfirm, field),
+        KeyBinding::new("secondary-enter", PaletteRunAll, field),
         KeyBinding::new("tab", PaletteOpenTab, field),
         KeyBinding::new("down", PaletteNext, palette),
         KeyBinding::new("up", PalettePrevious, palette),
         KeyBinding::new("enter", PaletteConfirm, palette),
+        KeyBinding::new("secondary-enter", PaletteRunAll, palette),
     ]);
 }
 
@@ -222,6 +229,12 @@ impl CommandPalette {
         self.run(self.selected, true, cx);
     }
 
+    fn on_run_all(&mut self, _: &PaletteRunAll, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = model::all_matches_item(&self.items) {
+            self.run(index, false, cx);
+        }
+    }
+
     fn render_item(&self, index: usize, item: &PaletteItem, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -328,6 +341,7 @@ impl Render for CommandPalette {
             .on_action(cx.listener(Self::on_previous))
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_open_tab))
+            .on_action(cx.listener(Self::on_run_all))
             .on_action(cx.listener(|_, _: &Escape, _, cx| cx.emit(PaletteEvent::Close)))
             .flex()
             .flex_col()
@@ -386,12 +400,16 @@ impl Render for CommandPalette {
                     })
                     .children(rows),
             )
-            .child(footer(theme))
+            .child(footer(
+                model::all_matches_item(&self.items).is_some(),
+                theme,
+            ))
     }
 }
 
-/// The keys the palette takes.
-fn footer(theme: &Theme) -> Div {
+/// The keys the palette takes; `all`: a verb query names several
+/// objects, which `secondary-enter` acts on together.
+fn footer(all: bool, theme: &Theme) -> Div {
     div()
         .flex()
         .flex_none()
@@ -405,7 +423,11 @@ fn footer(theme: &Theme) -> Div {
         .child("↑↓ navigate")
         .child("↵ run")
         .child("⇥ open as tab")
-        .child("ack/dt/check <name> acts")
+        .child(if all {
+            format!("{} run on all matches", model::ALL_MATCHES_KEY)
+        } else {
+            "ack/dt/check <name> acts".to_owned()
+        })
         .child(div().flex_1())
         .child("esc")
 }

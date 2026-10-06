@@ -183,3 +183,34 @@ async fn control_rejects_unknown_objects() {
     );
     assert!(control.remove_downtime("nope").is_err());
 }
+
+/// The first simulated check of an object comes at its `next_check`, as
+/// Icinga's checker would run it: a soft problem retried a minute after
+/// the start is checked then, not minutes later (clients would mark it
+/// late).
+#[tokio::test]
+async fn first_checks_come_when_next_check_says() {
+    let (server, _) = start(config(7)).await;
+    let control = server.control();
+    let kubelet = || control.service("k8s-node-04", "kubelet").unwrap();
+    let before = kubelet();
+    let next_check = before.check.next_check.expect("scheduled");
+    let last_check = before.check.last_check.expect("checked before");
+    let due_in = next_check.as_unix_seconds() - ic_model::Timestamp::now().as_unix_seconds();
+    assert!(
+        (1.0..=120.0).contains(&due_in),
+        "a soft problem's retry: {due_in}s"
+    );
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a positive number of seconds below two minutes"
+    )]
+    let ticks = due_in.ceil() as u64 + 2;
+    control.step_simulation(ticks);
+    let after = kubelet();
+    assert!(
+        after.check.last_check.expect("checked") > last_check,
+        "checked within {ticks} ticks"
+    );
+}

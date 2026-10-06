@@ -329,20 +329,18 @@ impl DashboardView {
         let (_, dashboard) = state.dashboard(reference)?;
         let result = state.result(reference)?;
         let view = &dashboard.view;
-        let items = summary_items(&result.summary, view.object_kind);
+        // The bar counts what the list shows (LIST-02): an on-call
+        // engineer reads it as the list's size.
+        let items = summary_items(&result.shown, view.object_kind);
         if items.is_empty() {
-            // Nothing matches the filter: the empty state says so.
+            // Nothing is listed: the empty state says why.
             return None;
         }
         let toggle_reference = reference.clone();
         let hide = !view.hide_handled;
-        let handled_label = if view.hide_handled {
-            "handled hidden"
-        } else {
-            "handled shown"
-        };
+        let toggle_text = handled_label(view.hide_handled, result.summary.handled);
         // The selection bar under the list counts marked rows.
-        let end_text = handled_label.to_owned();
+        let end_text = toggle_text.clone();
         let texts: Vec<String> = items
             .iter()
             .map(|(state, count, label)| SummaryItem::new(*state, *count, *label).text())
@@ -358,7 +356,7 @@ impl DashboardView {
                 .id("handled-toggle")
                 .cursor_pointer()
                 .hover(|style| style.text_color(colors.text_muted))
-                .child(handled_label)
+                .child(toggle_text)
                 .tooltip(Tooltip::text(if view.hide_handled {
                     "Show acknowledged problems, downtimes and problems on down hosts"
                 } else {
@@ -382,6 +380,16 @@ impl DashboardView {
                 .end(end)
                 .into_any_element(),
         )
+    }
+}
+
+/// The summary bar's handled toggle: `handled shown`, or while hidden how
+/// many handled problems the list leaves out (`4 handled hidden`).
+pub(crate) fn handled_label(hide_handled: bool, handled: u32) -> String {
+    match (hide_handled, handled) {
+        (false, _) => "handled shown".to_owned(),
+        (true, 0) => "handled hidden".to_owned(),
+        (true, handled) => format!("{handled} handled hidden"),
     }
 }
 
@@ -571,6 +579,13 @@ mod tests {
             [(CheckableState::Host(HostState::Pending), 1, "pending")]
         );
         assert!(summary_items(&Summary::default(), ObjectKind::Services).is_empty());
+    }
+
+    #[test]
+    fn the_toggle_says_how_many_handled_problems_are_hidden() {
+        assert_eq!(handled_label(false, 10), "handled shown");
+        assert_eq!(handled_label(true, 0), "handled hidden");
+        assert_eq!(handled_label(true, 10), "10 handled hidden");
     }
 
     #[test]

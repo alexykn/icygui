@@ -6,15 +6,22 @@
 //! Two threads: one posts (`Notify`) and remembers which server id is
 //! which notification; one listens for `ActionInvoked` and
 //! `NotificationClosed` and hands clicks to the UI thread as
-//! [`Response`]s. The connection is opened with the first notification;
-//! when there is no session bus or no notification server, notifications
-//! are only in the notification centre (logged once, tried again a minute
-//! later).
+//! [`Response`]s. The connection, and with it the listening thread, is
+//! opened with the first notification and kept for good: only when the
+//! bus itself goes (the listener ends) is a new one opened. When there is
+//! no session bus or no notification server (`GetCapabilities` fails),
+//! notifications are only in the notification centre: logged once, tried
+//! again a minute later, without new connections or threads.
+//!
+//! Servers that parse markup in the body (`body-markup`) get it escaped:
+//! plugin output often has `&` and `<`, and must never become a link or an
+//! image fetched from the desktop.
 //!
 //! Tested end to end by `tests/background.rs` (a fake notification server
 //! on a private session bus); unit tests show nothing on the desktop.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -33,8 +40,10 @@ const PATH: &str = "/org/freedesktop/Notifications";
 const DEFAULT_ACTION: &str = "default";
 /// How many posted notifications are remembered for their clicks.
 const MAX_REMEMBERED: usize = 512;
-/// How long to wait before trying an unreachable bus again.
+/// How long to wait before trying an unreachable bus or server again.
 const RETRY_AFTER: Duration = Duration::from_mins(1);
+/// The longest body sent (the specification's guidance for servers).
+const MAX_BODY_CHARS: usize = 1000;
 
 /// Server ids of posted notifications and their tags, oldest first.
 #[derive(Debug, Default)]
@@ -96,10 +105,45 @@ impl Desktop for DbusDesktop {
     }
 }
 
-/// A connection to the notification server, and what it posted.
+/// The session bus connection, its listener, and what was posted.
 struct Server {
     proxy: Proxy<'static>,
     posts: Arc<Mutex<Posts>>,
+    /// Cleared by the listener when the connection ends.
+    alive: Arc<AtomicBool>,
+    /// Whether the server parses markup in the body (`None`: not asked
+    /// yet, or asked again after a failure).
+    markup: Option<bool>,
+}
+
+/// When posting stopped working, and whether that was logged.
+#[derive(Debug, Default)]
+struct Backoff {
+    failed_at: Option<Instant>,
+    warned: bool,
+}
+
+impl Backoff {
+    /// Whether to try now.
+    fn ready(&self) -> bool {
+        self.failed_at.is_none_or(|at| at.elapsed() >= RETRY_AFTER)
+    }
+
+    /// Records a failure; logs only the first of a series.
+    fn failed(&mut self, what: &str, error: &zbus::Error) {
+        if !self.warned {
+            tracing::warn!(%error, "{what}; notifications stay in the centre and are tried again every minute");
+            self.warned = true;
+        }
+        self.failed_at = Some(Instant::now());
+    }
+
+    fn succeeded(&mut self) {
+        if self.warned {
+            tracing::info!("desktop notifications work again");
+        }
+        *self = Self::default();
+    }
 }
 
 /// Posts every notification it is given until the app goes.
@@ -110,27 +154,47 @@ fn post_loop(
     responses: &UnboundedSender<Response>,
 ) {
     let mut server: Option<Server> = None;
-    let mut failed_at: Option<Instant> = None;
+    let mut backoff = Backoff::default();
     while let Ok(posted) = jobs.recv() {
-        if server.is_none() && failed_at.is_none_or(|at| at.elapsed() >= RETRY_AFTER) {
+        if !backoff.ready() {
+            continue;
+        }
+        // A connection whose listener ended (the bus went) is replaced;
+        // a live one is kept, so failures never add threads.
+        if server
+            .as_ref()
+            .is_none_or(|server| !server.alive.load(Ordering::Acquire))
+        {
+            server = None;
             match connect(responses.clone()) {
-                Ok(connected) => {
-                    server = Some(connected);
-                    failed_at = None;
-                }
+                Ok(connected) => server = Some(connected),
                 Err(error) => {
-                    if failed_at.is_none() {
-                        tracing::warn!(%error, "no notification server on the session bus; notifications stay in the centre");
-                    }
-                    failed_at = Some(Instant::now());
+                    backoff.failed("no session bus", &error);
+                    continue;
                 }
             }
         }
-        let Some(connected) = &server else {
+        let Some(connected) = server.as_mut() else {
             continue;
         };
-        match notify(&connected.proxy, &posted, app_name, app_id) {
+        // Is a notification server there, and does it parse markup?
+        let markup = match connected.markup {
+            Some(markup) => markup,
+            None => match capabilities(&connected.proxy) {
+                Ok(capabilities) => {
+                    let markup = capabilities.iter().any(|name| name == "body-markup");
+                    connected.markup = Some(markup);
+                    markup
+                }
+                Err(error) => {
+                    backoff.failed("no notification server on the session bus", &error);
+                    continue;
+                }
+            },
+        };
+        match notify(&connected.proxy, &posted, app_name, app_id, markup) {
             Ok(id) => {
+                backoff.succeeded();
                 tracing::debug!(id, tag = %posted.tag, "notification posted");
                 connected
                     .posts
@@ -139,10 +203,10 @@ fn post_loop(
                     .insert(id, posted.tag);
             }
             Err(error) => {
-                tracing::warn!(%error, "the notification server refused a notification");
-                // The server may have gone: connect again next time.
-                server = None;
-                failed_at = None;
+                // The server may have gone or been replaced: ask again
+                // what it can, a minute from now, on the same connection.
+                connected.markup = None;
+                backoff.failed("the notification server refused a notification", &error);
             }
         }
     }
@@ -158,12 +222,28 @@ fn connect(responses: UnboundedSender<Response>) -> zbus::Result<Server> {
         .build();
     let signals = MessageIterator::for_match_rule(rule, &connection, Some(256))?;
     let posts = Arc::new(Mutex::new(Posts::default()));
+    let alive = Arc::new(AtomicBool::new(true));
     let listening = posts.clone();
+    let ended = alive.clone();
     std::thread::Builder::new()
         .name("icygui-notify-clicks".to_owned())
-        .spawn(move || listen(signals, &listening, &responses))
+        .spawn(move || {
+            listen(signals, &listening, &responses);
+            ended.store(false, Ordering::Release);
+        })
         .map_err(|error| zbus::Error::Failure(error.to_string()))?;
-    Ok(Server { proxy, posts })
+    Ok(Server {
+        proxy,
+        posts,
+        alive,
+        markup: None,
+    })
+}
+
+/// The server's capabilities (`GetCapabilities`); fails when no
+/// notification server is on the bus.
+fn capabilities(proxy: &Proxy<'_>) -> zbus::Result<Vec<String>> {
+    proxy.call("GetCapabilities", &())
 }
 
 /// Hands clicks on our notifications to the UI thread; forgets closed
@@ -209,13 +289,54 @@ fn listen(signals: MessageIterator, posts: &Mutex<Posts>, responses: &UnboundedS
     tracing::debug!("the notification server's signals ended");
 }
 
-/// Calls `Notify`; returns the server's id for it.
-fn notify(proxy: &Proxy<'_>, posted: &Posted, app_name: &str, app_id: &str) -> zbus::Result<u32> {
-    let mut actions: Vec<&str> = vec![DEFAULT_ACTION, "Open"];
+/// The body as sent: at most [`MAX_BODY_CHARS`] characters, with `&`, `<`
+/// and `>` escaped for a server that parses markup.
+fn body_text(body: &str, markup: bool) -> String {
+    let mut text: String = body.chars().take(MAX_BODY_CHARS).collect();
+    if text.len() < body.len() {
+        text.push('…');
+    }
+    if !markup {
+        return text;
+    }
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// The actions list: the body's own (`default`), then the buttons. The
+/// body's action has no label of its own when there is an *Open* button,
+/// so servers that show it as a button don't show *Open* twice.
+fn action_list(posted: &Posted) -> Vec<&str> {
+    let has_open = posted
+        .actions
+        .iter()
+        .any(|(id, _)| *id == super::desktop::OPEN_ACTION);
+    let mut actions: Vec<&str> = vec![DEFAULT_ACTION, if has_open { "" } else { "Open" }];
     for (id, label) in &posted.actions {
         actions.push(id);
         actions.push(label);
     }
+    actions
+}
+
+/// Calls `Notify`; returns the server's id for it.
+fn notify(
+    proxy: &Proxy<'_>,
+    posted: &Posted,
+    app_name: &str,
+    app_id: &str,
+    markup: bool,
+) -> zbus::Result<u32> {
+    let actions = action_list(posted);
+    let body = body_text(&posted.body, markup);
     let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
     hints.insert("urgency", Value::U8(posted.urgency.level()));
     hints.insert("desktop-entry", Value::from(app_id));
@@ -234,10 +355,65 @@ fn notify(proxy: &Proxy<'_>, posted: &Posted, app_name: &str, app_id: &str) -> z
             0_u32,
             app_id,
             posted.title.as_str(),
-            posted.body.as_str(),
+            body.as_str(),
             actions,
             hints,
             -1_i32,
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::desktop::{OPEN_ACTION, Urgency};
+    use super::*;
+
+    fn posted(body: &str, actions: Vec<(&'static str, &'static str)>) -> Posted {
+        Posted {
+            tag: "t".to_owned(),
+            title: "CRITICAL · procs".to_owned(),
+            body: body.to_owned(),
+            urgency: Urgency::Critical,
+            sound: None,
+            actions,
+        }
+    }
+
+    #[test]
+    fn bodies_are_escaped_for_servers_that_parse_markup() {
+        let output = "procs & threads < 5 <a href=\"https://evil\">x</a>";
+        assert_eq!(body_text(output, false), output);
+        assert_eq!(
+            body_text(output, true),
+            "procs &amp; threads &lt; 5 &lt;a href=\"https://evil\"&gt;x&lt;/a&gt;"
+        );
+        let long = "x".repeat(5000);
+        assert_eq!(body_text(&long, false).chars().count(), MAX_BODY_CHARS + 1);
+    }
+
+    #[test]
+    fn open_shows_once() {
+        let with_open = posted(
+            "",
+            vec![("acknowledge", "Acknowledge"), (OPEN_ACTION, "Open")],
+        );
+        assert_eq!(
+            action_list(&with_open),
+            ["default", "", "acknowledge", "Acknowledge", "open", "Open"]
+        );
+        let summary = posted("", Vec::new());
+        assert_eq!(action_list(&summary), ["default", "Open"]);
+    }
+
+    #[test]
+    fn failures_back_off_for_a_minute() {
+        let mut backoff = Backoff::default();
+        assert!(backoff.ready());
+        backoff.failed("test", &zbus::Error::Failure("no server".to_owned()));
+        assert!(!backoff.ready(), "no new attempt right away");
+        assert!(backoff.warned);
+        backoff.succeeded();
+        assert!(backoff.ready());
+        assert!(!backoff.warned);
+    }
 }

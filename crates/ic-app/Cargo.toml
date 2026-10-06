@@ -24,12 +24,17 @@ gpui.workspace = true
 gpui_platform.workspace = true
 ic-config.workspace = true
 ic-core.workspace = true
+# The dashboard editor parses a filter before saving it.
+ic-filter.workspace = true
 # `icygui --demo` (ENV-10) serves a simulated Icinga in-process.
 ic-mock = { path = "../ic-mock" }
 ic-model.workspace = true
 ic-platform.workspace = true
 ic-rules.workspace = true
 ic-ui-kit.workspace = true
+# The window icon (`WindowOptions::icon` is GPUI's `image::RgbaImage`):
+# the same version and PNG decoder GPUI already builds.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Actions with data (`SelectDashboard(3)`) are built from keymap JSON: GPUI's
 # `Action` derive needs `Deserialize` and `JsonSchema` for them. Both are
 # already in GPUI's dependency graph with the same features.
@@ -48,7 +53,3 @@ tracing-subscriber.workspace = true
 # (the zbus ic-platform's tray and keyring use).
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
-
-[dev-dependencies]
-# Checks that the demo's dashboard filters parse.
-ic-filter.workspace = true

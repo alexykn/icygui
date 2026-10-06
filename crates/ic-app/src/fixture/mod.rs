@@ -549,6 +549,41 @@ mod tests {
         );
         assert!(overview.summary.handled > 0);
         assert!(!row_names(overview).contains(&"web-edge-02!http-tls".to_owned()));
+        // The summary bar's counts are the rows'.
+        assert_eq!(overview.shown.handled, 0);
+        assert!(overview.shown.critical < overview.summary.critical);
+    }
+
+    #[test]
+    fn the_shown_counts_add_up_to_the_listed_rows() {
+        let demo = demo();
+        for result in demo.snapshot.dashboards.values() {
+            let shown = result.shown;
+            let counted = shown.critical
+                + shown.warning
+                + shown.unknown
+                + shown.down
+                + shown.unreachable
+                + shown.ok
+                + shown.pending;
+            let objects = result
+                .rows
+                .iter()
+                .filter(|row| matches!(row, DashboardRow::Object(_)))
+                .count();
+            // A grouped row may be listed under several groups.
+            assert!(
+                usize::try_from(counted).unwrap() <= objects,
+                "{counted} counted, {objects} listed"
+            );
+            if !result
+                .rows
+                .iter()
+                .any(|row| matches!(row, DashboardRow::Group { .. }))
+            {
+                assert_eq!(usize::try_from(counted).unwrap(), objects);
+            }
+        }
     }
 
     #[test]

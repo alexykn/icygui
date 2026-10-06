@@ -152,6 +152,29 @@ pub(crate) fn same_fingerprint(pinned: &str, fingerprint: &[u8; 32]) -> bool {
     ic_config::parse_fingerprint(pinned).is_ok_and(|pinned| &pinned == fingerprint)
 }
 
+/// What trusting a presented certificate means.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TrustOffer {
+    /// The presented certificate's SHA-256 (colon hex), which trusting
+    /// pins.
+    pub(crate) fingerprint: String,
+    /// The configured pin it would replace: set only when a pin exists and
+    /// names another certificate (renewed, or someone intercepting), so the
+    /// dialog shows both fingerprints and a danger-styled button.
+    pub(crate) replaces: Option<String>,
+}
+
+/// What the review offers for `certificate` when the environment pins
+/// `pinned`.
+pub(crate) fn trust_offer(pinned: Option<&str>, certificate: &CertificateInfo) -> TrustOffer {
+    TrustOffer {
+        fingerprint: certificate.fingerprint(),
+        replaces: pinned
+            .filter(|pinned| !same_fingerprint(pinned, &certificate.sha256))
+            .map(str::to_owned),
+    }
+}
+
 /// The dialog for the running engine's certificate failure.
 pub(crate) struct CertificateReview {
     state: Entity<AppState>,
@@ -173,16 +196,45 @@ impl CertificateReview {
             focus_handle: cx.focus_handle(),
         }
     }
+
+    /// The environment and what trusting its presented certificate means,
+    /// while the connection fails on a certificate that could be read.
+    pub(crate) fn offer(&self, cx: &App) -> Option<(String, TrustOffer)> {
+        let state = self.state.read(cx);
+        let environment = state.environment()?;
+        let Some(ConnectionState::TlsFailed {
+            certificate: Some(certificate),
+            ..
+        }) = &state.connection().state
+        else {
+            return None;
+        };
+        Some((
+            environment.id.clone(),
+            trust_offer(environment.tls.pinned_sha256.as_deref(), certificate),
+        ))
+    }
+
+    /// Trusts the presented certificate ("trust this certificate", or
+    /// "trust the new certificate" after a mismatch).
+    pub(crate) fn trust(&mut self, cx: &mut Context<Self>) {
+        if let Some((environment_id, offer)) = self.offer(cx) {
+            cx.emit(CertificateEvent::Trust {
+                environment_id,
+                fingerprint: offer.fingerprint,
+            });
+        }
+    }
 }
 
 impl CertificateReview {
     /// The dialog's buttons: "edit environment…", cancel, and trusting the
-    /// certificate (`trust`: its fingerprint, and whether it replaces a
-    /// pin).
+    /// certificate (`trust`: whether one can be trusted, and whether that
+    /// replaces a pin).
     fn with_buttons(
         mut dialog: DialogBody,
         environment_id: Option<String>,
-        trust: Option<(String, bool)>,
+        trust: Option<bool>,
         cx: &Context<Self>,
     ) -> DialogBody {
         if let Some(id) = environment_id.clone() {
@@ -199,7 +251,7 @@ impl CertificateReview {
                 .key_hint("esc")
                 .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(CertificateEvent::Close))),
         );
-        if let (Some((fingerprint, mismatch)), Some(id)) = (trust, environment_id) {
+        if let (Some(mismatch), Some(_)) = (trust, environment_id) {
             dialog = dialog.action(
                 Button::new(
                     "certificate-trust",
@@ -214,12 +266,7 @@ impl CertificateReview {
                 } else {
                     ButtonVariant::Primary
                 })
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    cx.emit(CertificateEvent::Trust {
-                        environment_id: id.clone(),
-                        fingerprint: fingerprint.clone(),
-                    });
-                })),
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.trust(cx))),
             );
         }
         dialog
@@ -232,9 +279,10 @@ impl Render for CertificateReview {
         let colors = theme.colors;
         let now = Timestamp::now();
         let state = self.state.read(cx);
-        let environment = state.environment();
-        let environment_id = environment.map(|environment| environment.id.clone());
-        let pinned = environment.and_then(|environment| environment.tls.pinned_sha256.clone());
+        let environment_id = state
+            .environment()
+            .map(|environment| environment.id.clone());
+        let offer = self.offer(cx).map(|(_, offer)| offer);
         let endpoint = state.connection().endpoint.clone();
         let failure = match &state.connection().state {
             Some(ConnectionState::TlsFailed {
@@ -245,7 +293,6 @@ impl Render for CertificateReview {
         };
         let title = format!("Certificate of {endpoint}");
         let mut dialog = DialogBody::new(title);
-        let mut trust: Option<(String, bool)> = None;
         match &failure {
             None => {
                 dialog = dialog.child(
@@ -262,10 +309,8 @@ impl Render for CertificateReview {
                 );
                 match certificate {
                     Some(certificate) => {
-                        let mismatch = pinned
-                            .as_deref()
-                            .filter(|pinned| !same_fingerprint(pinned, &certificate.sha256));
-                        if let Some(pinned) = mismatch {
+                        let replaces = offer.as_ref().and_then(|offer| offer.replaces.as_deref());
+                        if let Some(pinned) = replaces {
                             dialog = dialog.child(mismatch_warning(
                                 pinned,
                                 &certificate.fingerprint(),
@@ -279,7 +324,6 @@ impl Render for CertificateReview {
                             ));
                         }
                         dialog = dialog.child(certificate_details(certificate, now, &theme));
-                        trust = Some((certificate.fingerprint(), mismatch.is_some()));
                     }
                     None => {
                         dialog = dialog.child(div().text_color(colors.text_muted).child(
@@ -290,6 +334,7 @@ impl Render for CertificateReview {
                 }
             }
         }
+        let trust = offer.map(|offer| offer.replaces.is_some());
         let dialog = Self::with_buttons(dialog, environment_id, trust, cx);
         div()
             .id("certificate-review")
@@ -304,6 +349,40 @@ impl Render for CertificateReview {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn certificate(sha256: [u8; 32]) -> CertificateInfo {
+        CertificateInfo {
+            sha256,
+            subject: "CN=icinga-master".to_owned(),
+            issuer: "CN=Icinga CA".to_owned(),
+            names: vec!["icinga-master".to_owned()],
+            not_before: Timestamp::EPOCH,
+            not_after: Timestamp::from_unix_seconds(2_000_000_000.0),
+        }
+    }
+
+    #[test]
+    fn a_pin_mismatch_offers_the_new_certificate_with_both_fingerprints() {
+        let presented = certificate([0xab; 32]);
+        let other = ic_config::format_fingerprint(&[0xcd; 32]);
+        // Nothing pinned yet: plain trust on first use.
+        assert_eq!(
+            trust_offer(None, &presented),
+            TrustOffer {
+                fingerprint: presented.fingerprint(),
+                replaces: None,
+            }
+        );
+        // The pin names this certificate (in another notation): no warning.
+        assert_eq!(
+            trust_offer(Some(&"ab".repeat(32)), &presented).replaces,
+            None
+        );
+        // Another certificate is pinned: both fingerprints.
+        let offer = trust_offer(Some(&other), &presented);
+        assert_eq!(offer.fingerprint, presented.fingerprint());
+        assert_eq!(offer.replaces, Some(other));
+    }
 
     #[test]
     fn fingerprints_compare_in_any_notation() {

@@ -216,6 +216,59 @@ fn filters_select_members_and_display_flags_select_rows() {
         }
     );
     assert_eq!(result(&dashboards, "problems").error, None);
+
+    // `shown` counts the rows: the bar matches the list.
+    assert_eq!(
+        result(&dashboards, "problems").shown,
+        Summary {
+            warning: 1,
+            unhandled: 1,
+            worst_unhandled: Some(CheckableState::Service(ServiceState::Warning)),
+            ..Summary::default()
+        }
+    );
+    assert_eq!(result(&dashboards, "all").shown, summary);
+}
+
+#[test]
+fn shown_counts_follow_the_display_flags() {
+    let data = sample();
+    let all = view("host.vars.role == \"db\"");
+    let mut dashboards = evaluate(&[("d", all.clone())], &data);
+    assert_eq!(result(&dashboards, "d").shown.critical, 2);
+    let mut hidden = all;
+    hidden.hide_handled = true;
+    // Only the display flags changed: the rows are rebuilt, nothing is
+    // evaluated again.
+    dashboards.configure(&environment(&[("d", hidden)]));
+    dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
+    let result = result(&dashboards, "d");
+    assert_eq!(names(result), ["db-1!disk", "db-1!ssh", "db-2!ssh"]);
+    assert_eq!(result.shown.critical, 0, "both critical ones are handled");
+    assert_eq!(result.shown.ok, 2);
+    assert_eq!(result.summary.critical, 2, "the sidebar still counts them");
+}
+
+#[test]
+fn a_zero_last_state_change_sorts_by_the_last_hard_change() {
+    // Icinga 2 reports last_state_change = 0 for objects in their state
+    // since their first check; last_hard_state_change has the time.
+    let mut first_check = service("db-1", "down-since-start", ServiceState::Critical, 0.0);
+    first_check.check.last_hard_state_change = Timestamp::from_unix_seconds(1_000.0);
+    let older = service("db-1", "older", ServiceState::Critical, 500.0);
+    let data = data(
+        vec![host("db-1", HostState::Up, &[], "db")],
+        vec![first_check, older],
+    );
+    let mut v = view("service.state != 0");
+    v.sort = Sort {
+        key: SortKey::LastStateChange,
+        descending: true,
+    };
+    assert_eq!(
+        names(result(&evaluate(&[("d", v)], &data), "d")),
+        ["db-1!down-since-start", "db-1!older"]
+    );
 }
 
 #[test]

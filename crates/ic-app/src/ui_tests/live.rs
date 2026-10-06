@@ -467,6 +467,61 @@ fn settings_with(name: &str) -> Config {
     }
 }
 
+/// ENV-07: an engine that dies (its event stream ends while the session
+/// didn't stop it) shows a banner and the footer's "stopped" instead of
+/// stale data as live; "Restart" brings a new engine.
+#[test]
+fn an_engine_that_dies_says_so_and_restarts() {
+    run_app(
+        crate::WINDOW_SIZE,
+        demo_app("prod-cluster", None),
+        Body::Async(Box::new(|app, cx| {
+            async move {
+                wait_for(&app, &cx, "the first load", LOAD, |app, cx| {
+                    app.state.read(cx).connection().is_connected()
+                })
+                .await;
+                cx.update(|cx| {
+                    let session = live::session(cx).unwrap();
+                    session.update(cx, Session::end_event_stream);
+                });
+                wait_for(&app, &cx, "the stopped engine", LOAD, |app, cx| {
+                    app.state
+                        .read(cx)
+                        .connection_notice(Timestamp::now())
+                        .is_some_and(|notice| {
+                            notice.kind == NoticeKind::EngineFailed
+                                && notice.title.contains("stopped")
+                        })
+                })
+                .await;
+                cx.update(|cx| {
+                    let state = app.state.read(cx);
+                    assert!(
+                        state
+                            .connection()
+                            .label(Timestamp::now())
+                            .ends_with("· stopped"),
+                        "{}",
+                        state.connection().label(Timestamp::now())
+                    );
+                    // The banner's Restart.
+                    app.in_window(cx, |window, cx| {
+                        window.dispatch_action(Box::new(crate::actions::RestartEngine), cx);
+                    });
+                });
+                wait_for(&app, &cx, "the new engine's load", LOAD, |app, cx| {
+                    let state = app.state.read(cx);
+                    state.connection().is_connected()
+                        && state.connection_notice(Timestamp::now()).is_none()
+                })
+                .await;
+            }
+            .boxed_local()
+        })),
+    );
+}
+
 #[test]
 fn an_unreadable_settings_file_can_be_restored_from_the_backup() {
     let dir = tempfile::tempdir().unwrap();
@@ -527,7 +582,10 @@ fn an_unreadable_settings_file_can_be_restored_from_the_backup() {
 fn an_unreadable_settings_file_can_be_started_fresh() {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::in_dir(dir.path());
-    std::fs::create_dir_all(dir.path()).unwrap();
+    let store = paths.config_store();
+    // A good backup, then a file from a newer icygui.
+    store.save(&settings_with("good")).unwrap();
+    store.save(&settings_with("current")).unwrap();
     std::fs::write(paths.config_file.clone(), "version = 99\n").unwrap();
     let check = paths.clone();
     run_app(
@@ -572,6 +630,11 @@ fn an_unreadable_settings_file_can_be_started_fresh() {
         })),
     );
     assert_eq!(check.config_store().load().unwrap(), Config::default());
+    let backup = check.config_store().load_backup().unwrap().unwrap();
+    assert_eq!(
+        backup.environments[0].name, "good",
+        "starting fresh leaves the last good backup to restore later"
+    );
 }
 
 /// The disposable Icinga 2.15.6 from `contract/run-icinga.sh`, read-only:

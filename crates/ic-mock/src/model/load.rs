@@ -107,6 +107,7 @@ impl World {
         };
         let mut world = Self {
             clock_offset: 0.0,
+            loaded_at: now,
             app,
             hosts: BTreeMap::new(),
             services: BTreeMap::new(),

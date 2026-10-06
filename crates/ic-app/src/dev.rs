@@ -8,7 +8,7 @@
 //!   the same story; the default changes every run).
 //! - `ICYGUI_DEMO_DASHBOARD=databases` selects a dashboard by name.
 //! - `ICYGUI_DEMO_FAULT` shows a connection failure on purpose: `offline`,
-//!   `auth`, `tls`, `missing-secret`, `misconfigured`, `outage` (lost
+//!   `auth`, `tls`, `pin-mismatch`, `missing-secret`, `misconfigured`, `outage` (lost
 //!   after 20 s), `slow` (every answer takes 0.9 s) or `frozen` (Icinga
 //!   stops checking: checks become late).
 //! - `ICYGUI_DEMO_STORM=20` starts a problem storm every 20 seconds

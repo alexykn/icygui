@@ -161,6 +161,23 @@ fn the_palette_finds_and_runs_by_keyboard() {
         let request = app.state.read(cx).last_request().unwrap().clone();
         assert_eq!(request.action, ObjectAction::Acknowledge);
         assert_eq!(request.targets, [replication()]);
+
+        // ctrl/cmd-enter acts on all the objects it names, together.
+        app.keys(cx, "escape");
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
+        app.keys(cx, "ctrl-k");
+        type_query(app, cx, "ack db-prod");
+        app.keys(cx, "ctrl-enter");
+        let request = app.state.read(cx).last_request().unwrap().clone();
+        assert_eq!(request.action, ObjectAction::Acknowledge);
+        assert!(request.targets.len() > 1, "{:?}", request.targets);
+        assert!(request.targets.contains(&replication()));
+        assert!(
+            request
+                .targets
+                .iter()
+                .all(|target| target.to_string().contains("db-prod"))
+        );
     });
 }
 
@@ -432,6 +449,73 @@ fn a_new_dashboard_is_made_in_the_editor_with_a_live_preview() {
     );
 }
 
+/// DASH-04: a save right after typing (inside the preview's debounce)
+/// never stores a filter that doesn't parse, and waits for the check of
+/// one that does.
+#[test]
+fn a_save_right_after_typing_checks_the_filter_first() {
+    run_app(
+        crate::WINDOW_SIZE,
+        |cx| cx.new(|_| AppState::fixture(Timestamp::now())),
+        Body::Async(Box::new(|app, cx| {
+            async move {
+                cx.update(|cx| {
+                    let dashboard = app.dashboard(cx);
+                    dashboard.update(cx, |_, cx| cx.emit(DashboardEvent::Edit(production())));
+                });
+                // A broken filter, then ctrl-s before the preview's
+                // debounce is over (no await in between: no timer runs).
+                cx.update(|cx| {
+                    app.draw(cx);
+                    let filter = editor(&app, cx).read(cx).filter_input().clone();
+                    app.in_window(cx, |window, cx| {
+                        filter.update(cx, |input, cx| {
+                            input.replace_all("service.state != ", window, cx);
+                        });
+                    });
+                });
+                cx.update(|cx| app.keys(cx, "ctrl-s"));
+                cx.update(|cx| {
+                    let editor = editor(&app, cx);
+                    let error = editor.read(cx).save_error().unwrap().to_owned();
+                    assert!(error.contains("(line 1, column 18)"), "{error}");
+                    let (_, saved) = app.state.read(cx).selected_dashboard().unwrap();
+                    assert_ne!(saved.view.filter, "service.state != ", "not saved");
+                });
+                // A working one, saved at once: once checked.
+                cx.update(|cx| {
+                    let filter = editor(&app, cx).read(cx).filter_input().clone();
+                    app.in_window(cx, |window, cx| {
+                        filter.update(cx, |input, cx| {
+                            input.replace_all("service.state != 0", window, cx);
+                        });
+                    });
+                });
+                cx.update(|cx| {
+                    app.keys(cx, "ctrl-s");
+                    assert!(
+                        app.workspace.read(cx).editor().is_some(),
+                        "waits for the check"
+                    );
+                });
+                wait_for(
+                    &app,
+                    &cx,
+                    "the checked save",
+                    Duration::from_secs(5),
+                    |app, cx| app.workspace.read(cx).editor().is_none(),
+                )
+                .await;
+                cx.update(|cx| {
+                    let (_, saved) = app.state.read(cx).selected_dashboard().unwrap();
+                    assert_eq!(saved.view.filter, "service.state != 0");
+                });
+            }
+            .boxed_local()
+        })),
+    );
+}
+
 #[test]
 fn the_header_menu_edits_a_dashboard_and_escape_discards() {
     run(FixtureOptions::default(), |app, cx| {
@@ -448,16 +532,57 @@ fn the_header_menu_edits_a_dashboard_and_escape_discards() {
         app.in_window(cx, |window, cx| {
             name.update(cx, |input, cx| input.replace_all("prod", window, cx));
         });
+        // Escape asks before dropping the changes; Escape again keeps
+        // editing, Enter discards.
         app.keys(cx, "escape");
+        assert!(
+            matches!(
+                app.workspace.read(cx).modal(cx),
+                Some(ModalKind::Confirm(confirmation))
+                    if confirmation.action == Confirmed::DiscardEdits
+            ),
+            "asks first"
+        );
+        app.keys(cx, "escape");
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
+        assert_eq!(
+            editor(app, cx).read(cx).draft().name,
+            "prod",
+            "still editing"
+        );
+        app.keys(cx, "escape enter");
         assert!(app.workspace.read(cx).editor().is_none(), "discarded");
         let (_, saved) = app.state.read(cx).selected_dashboard().unwrap();
         assert_eq!(saved.name, "production", "nothing saved");
-        // Selecting another dashboard leaves the editor too.
+        // Without changes, Escape leaves at once.
         dashboard.update(cx, |_, cx| cx.emit(DashboardEvent::Edit(production())));
         app.draw(cx);
-        assert!(app.workspace.read(cx).editor().is_some());
+        app.keys(cx, "escape");
+        assert!(app.workspace.read(cx).editor().is_none());
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
+        // Selecting another dashboard leaves the editor too, keeping its
+        // changes for the next edit of the same dashboard.
+        dashboard.update(cx, |_, cx| cx.emit(DashboardEvent::Edit(production())));
+        app.draw(cx);
+        let name = editor(app, cx).read(cx).name_input().clone();
+        app.in_window(cx, |window, cx| {
+            name.update(cx, |input, cx| input.replace_all("kept", window, cx));
+        });
         app.click(cx, sidebar_item(0), Modifiers::default());
         assert!(app.workspace.read(cx).editor().is_none());
+        dashboard.update(cx, |_, cx| cx.emit(DashboardEvent::Edit(production())));
+        app.draw(cx);
+        assert_eq!(editor(app, cx).read(cx).draft().name, "kept");
+        app.keys(cx, "escape enter");
+        assert!(app.workspace.read(cx).editor().is_none());
+        dashboard.update(cx, |_, cx| cx.emit(DashboardEvent::Edit(production())));
+        app.draw(cx);
+        assert_eq!(
+            editor(app, cx).read(cx).draft().name,
+            "production",
+            "discarded for good"
+        );
+        app.keys(cx, "escape");
         // ctrl-n opens it for a new dashboard in the selected group.
         app.keys(cx, "ctrl-n");
         assert_eq!(*editor(app, cx).read(cx).target(), EditorTarget::New);

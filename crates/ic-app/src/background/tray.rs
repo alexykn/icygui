@@ -50,7 +50,11 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
     let mut lines = Vec::new();
     match state.environment() {
         Some(environment) => {
-            let demo = if state.is_demo() { " (demo)" } else { "" };
+            let demo = if state.is_demo_environment() {
+                " (demo)"
+            } else {
+                ""
+            };
             lines.push(format!(
                 "{}{demo} · {}",
                 environment.name,

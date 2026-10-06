@@ -98,7 +98,7 @@ impl Match {
             problem: host.is_problem(),
             handled: host.is_handled(),
             severity: host.severity(),
-            last_state_change: host.check.last_state_change,
+            last_state_change: ic_core::snapshot::state_since(&host.check),
             host_groups: host.groups.clone(),
             service_groups: Vec::new(),
         }
@@ -114,7 +114,7 @@ impl Match {
             problem: service.is_problem(),
             handled: service.is_handled(host_problem),
             severity: service.severity(),
-            last_state_change: service.check.last_state_change,
+            last_state_change: ic_core::snapshot::state_since(&service.check),
             host_groups: host.map(|host| host.groups.clone()).unwrap_or_default(),
             service_groups: service.groups.clone(),
         }
@@ -186,6 +186,7 @@ fn evaluate_with(
         .filter(|object| !view.problems_only || object.problem)
         .filter(|object| !view.hide_handled || !object.handled)
         .collect();
+    let shown = summarize(&visible);
     visible.sort_by(|a, b| compare(a, b, view.sort));
     let label = |name: &str, groups: &[(String, String)]| {
         groups
@@ -220,6 +221,7 @@ fn evaluate_with(
     DashboardResult {
         rows: Arc::new(rows),
         summary,
+        shown,
         error: None,
     }
 }

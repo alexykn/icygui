@@ -24,7 +24,7 @@
 //! | | `secondary-w` | [`CloseTab`]: close the tab shown |
 //! | | `secondary-b` | `ToggleSidebar` |
 //! | | — | [`FocusMain`]: hand the keyboard to the list or the tab shown (Enter and Escape in the sidebar search do this) |
-//! | | — | [`ReviewCertificate`], [`EditEnvironment`]: from the connection banner |
+//! | | — | [`ReviewCertificate`], [`EditEnvironment`], [`RestartEngine`]: from the connection banner |
 //! | `SettingsDialog` | `secondary-s`, `enter` in a field | save the settings; `tab` / `shift-tab` move between fields |
 //! | (anywhere, also without a window) | `secondary-,` | [`OpenSettings`] |
 //! | | `secondary-q` | [`Quit`]: quit, even when the app keeps running in the tray |
@@ -182,6 +182,12 @@ pub(crate) struct ReviewCertificate;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct EditEnvironment;
+
+/// Starts the connection engine again after it stopped on its own or
+/// couldn't start (the connection banner's "Restart").
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct RestartEngine;
 
 /// Opens the settings dialog (`secondary-,`; the macOS app menu's
 /// *Settings…*). Without a window, the window opens first.

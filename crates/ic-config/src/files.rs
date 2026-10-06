@@ -80,11 +80,13 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<(), ConfigError> {
 ///
 /// 1. write the contents to a temporary file in the target's directory and
 ///    sync it to disk;
-/// 2. if `keep_previous` says the previous contents deserve it, copy them
-///    to a new file next to `backup` that later saves never replace
-///    (`<name>.unreadable-<unix seconds>`);
-/// 3. copy the previous contents to `backup` the same way (temporary file,
-///    sync, rename), keeping exactly one backup;
+/// 2. if `keep_previous` says the previous contents deserve it (this
+///    version can't read them), copy them to a new file next to `backup`
+///    that later saves never replace (`<name>.unreadable-<unix seconds>`)
+///    and leave `backup` alone: it holds the last contents that could be
+///    read, which the user may still want to restore;
+/// 3. otherwise copy the previous contents to `backup` the same way
+///    (temporary file, sync, rename), keeping exactly one backup;
 /// 4. rename the temporary file over the target (atomic on POSIX), then sync
 ///    the directory so the rename itself is durable.
 ///
@@ -133,16 +135,20 @@ pub(crate) fn write_atomic(
     let backup_dir = parent_dir(backup);
     if let Some(previous) = &previous {
         if keep_previous(previous) {
+            // An unreadable file must not replace the backup: "start
+            // fresh" after a bad hand edit would lose the last good
+            // settings the recovery screen had just offered to restore.
             let kept = keep_copy(path, backup_dir, previous)?;
             tracing::warn!(
                 path = %kept.display(),
                 "kept a copy of the replaced settings file, which this version can't read"
             );
+        } else {
+            let backup_temp = write_temp(backup_dir, backup, previous)?;
+            backup_temp
+                .persist(backup)
+                .map_err(|error| ConfigError::io("replacing", backup, error.error))?;
         }
-        let backup_temp = write_temp(backup_dir, backup, previous)?;
-        backup_temp
-            .persist(backup)
-            .map_err(|error| ConfigError::io("replacing", backup, error.error))?;
         if backup_dir != dir {
             sync_dir(backup_dir);
         }
@@ -811,7 +817,23 @@ mod tests {
                 assert_eq!(mode(&dir.path().join(name)), 0o600);
             }
             assert_eq!(read(&path), "two");
-            assert_eq!(read(&backup), "broken again");
+            // Unreadable contents never become the backup.
+            assert!(!backup.exists());
+        }
+
+        #[test]
+        fn an_unreadable_file_leaves_the_last_good_backup_alone() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let backup = dir.path().join("config.toml.bak");
+            fs::write(&path, b"broken").unwrap();
+            fs::write(&backup, b"good").unwrap();
+            write_atomic(&path, &backup, b"fresh", |_: &[u8]| true, no_checkpoint).unwrap();
+            assert_eq!(read(&path), "fresh");
+            assert_eq!(read(&backup), "good");
+            // The next ordinary save backs up the readable file again.
+            write_atomic(&path, &backup, b"edited", keep_nothing, no_checkpoint).unwrap();
+            assert_eq!(read(&backup), "fresh");
         }
     }
 }

@@ -187,7 +187,7 @@ fn services_tab(
         )
         .title(service.display_name.clone())
         .detail(service.check.output().to_owned())
-        .trailing(format::since(service.check.last_state_change, now))
+        .trailing(format::time_in_state(&service.check, now))
         .on_click(
             cx.listener(move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
                 pane.navigate(key.clone(), cx);

@@ -4,7 +4,7 @@
 //! Each dashboard ([`Board`]) keeps its compiled [`Filter`] (recompiled
 //! when the filter or the object kind changes) and its *members*: the
 //! objects the filter matches, with the facts its rows and summary need
-//! (state, severity, handling, `last_state_change`). Membership ignores
+//! (state, severity, handling, when the state began). Membership ignores
 //! `problems_only` and `hide_handled`, so recoveries still match (the rule
 //! engine's memberships come from here). The visible members are kept in
 //! sort order, so a changed object costs a removal and an insertion, and a
@@ -20,11 +20,13 @@
 //! Rows: `problems_only`, then `hide_handled` (Icinga's handled: a problem
 //! that is acknowledged, in downtime, or a service whose host has a
 //! problem), sorted by the view's key with the ties going to severity
-//! (descending), `last_state_change` (newest first), host name and service
+//! (descending), when the state began ([`state_since`]: `last_state_change`,
+//! else `last_hard_state_change`; newest first), host name and service
 //! name. `GroupBy` puts a header before each group's rows; groups are
 //! ordered by their worst severity (descending), then label, and objects
 //! without a group come last under "ungrouped". The summary counts every
-//! member, before `problems_only` and `hide_handled`.
+//! member, before `problems_only` and `hide_handled`; `shown` counts the
+//! rows.
 //!
 //! A filter that doesn't parse, or fails to evaluate for some object (a
 //! type error such as `"a" < 1`, an unknown function), sets
@@ -47,7 +49,7 @@ use ic_model::{
 };
 use ic_rules::DashboardRef;
 
-use crate::snapshot::{DashboardResult, DashboardRow, Summary};
+use crate::snapshot::{DashboardResult, DashboardRow, Summary, state_since};
 use crate::store::Changes;
 use crate::summary::Tally;
 
@@ -288,7 +290,7 @@ impl Ord for OrdF64 {
 struct Facts {
     state: CheckableState,
     severity: u32,
-    /// `last_state_change`, Unix seconds.
+    /// When the state began ([`state_since`]), Unix seconds.
     since: f64,
     problem: bool,
     /// Icinga's handled (a problem acknowledged, in downtime, or a service
@@ -511,7 +513,7 @@ impl Board {
         let facts = Facts {
             state: CheckableState::Host(host.state),
             severity: host.severity(),
-            since: host.check.last_state_change.as_unix_seconds(),
+            since: state_since(&host.check).as_unix_seconds(),
             problem: host.is_problem(),
             handled: host.is_handled(),
             groups: self.groups_hash(Some(host), None),
@@ -535,7 +537,7 @@ impl Board {
         let facts = Facts {
             state: CheckableState::Service(service.state),
             severity: service.severity(),
-            since: service.check.last_state_change.as_unix_seconds(),
+            since: state_since(&service.check).as_unix_seconds(),
             problem: service.is_problem(),
             handled: service.is_handled(host_problem),
             groups: self.groups_hash(host, Some(service)),
@@ -636,6 +638,8 @@ impl Board {
                 .map(|(object, facts)| RowKey::new(sort, object, facts))
                 .collect();
             self.rows_dirty = true;
+            // What is shown changed, so do its counts.
+            self.summary_dirty = true;
         }
         if !self.rows_dirty && !self.summary_dirty {
             return false;
@@ -656,14 +660,15 @@ impl Board {
             } else {
                 Arc::clone(&self.result.rows)
             };
-            let summary = if self.summary_dirty || self.result.error.is_some() {
-                self.summary()
+            let (summary, shown) = if self.summary_dirty || self.result.error.is_some() {
+                self.summaries()
             } else {
-                self.result.summary
+                (self.result.summary, self.result.shown)
             };
             DashboardResult {
                 rows,
                 summary,
+                shown,
                 error: None,
             }
         };
@@ -676,12 +681,17 @@ impl Board {
         true
     }
 
-    fn summary(&self) -> Summary {
-        let mut tally = Tally::default();
+    /// The counts over every member, and over the members the rows show.
+    fn summaries(&self) -> (Summary, Summary) {
+        let mut all = Tally::default();
+        let mut shown = Tally::default();
         for facts in self.members.values() {
-            tally.add(facts.state, facts.handled, facts.severity);
+            all.add(facts.state, facts.handled, facts.severity);
+            if self.visible(facts) {
+                shown.add(facts.state, facts.handled, facts.severity);
+            }
         }
-        tally.finish()
+        (all.finish(), shown.finish())
     }
 
     fn rows(&self, data: &Data) -> Vec<DashboardRow> {

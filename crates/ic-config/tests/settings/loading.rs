@@ -507,6 +507,35 @@ fn files_this_version_cannot_read_survive_starting_fresh() {
 }
 
 #[test]
+fn starting_fresh_keeps_the_backup_the_recovery_screen_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(dir.path().join("config.toml"));
+    let good = full_config();
+    store.save(&good).unwrap();
+    store.save(&Config::default()).unwrap();
+    assert_eq!(store.load_backup().unwrap(), Some(good.clone()));
+    // A bad hand edit: the file no longer parses.
+    fs::write(store.path(), "version = 1\n[general\n").unwrap();
+    assert!(store.load().is_err());
+
+    // "start fresh" saves the defaults over it.
+    store.save(&Config::default()).unwrap();
+    assert_eq!(store.load().unwrap(), Config::default());
+    assert_eq!(
+        store.load_backup().unwrap(),
+        Some(good),
+        "the last good settings are still there to restore"
+    );
+    assert!(
+        entries(dir.path())
+            .iter()
+            .any(|name| name.starts_with("config.toml.unreadable-")),
+        "{:?}",
+        entries(dir.path())
+    );
+}
+
+#[test]
 fn readable_files_are_not_kept_apart() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path(), WITHOUT_IDS);
@@ -621,29 +650,37 @@ fn the_backup_restores_settings_after_corruption() {
     fs::write(store.path(), "version = 1\n[general\n").unwrap();
     assert!(store.load().is_err());
 
-    // Restore: read the backup and save it. The corrupt file becomes the
-    // backup, so nothing is lost.
+    // Restore: read the backup and save it. The corrupt file is kept
+    // apart, so nothing is lost, and the backup stays the good one.
     let restored = store.load_backup().unwrap().unwrap();
     assert_eq!(restored, older);
     store.save(&restored).unwrap();
     assert_eq!(store.load().unwrap(), older);
-    assert_eq!(
-        fs::read_to_string(store.backup_path()).unwrap(),
-        "version = 1\n[general\n"
-    );
+    assert_eq!(store.load_backup().unwrap(), Some(older));
+    assert_eq!(kept_unreadable(dir.path()), ["version = 1\n[general\n"]);
 }
 
 #[test]
-fn starting_fresh_keeps_the_corrupt_file_as_the_backup() {
+fn starting_fresh_keeps_the_corrupt_file_apart() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path(), "version = [\n");
     assert!(store.load().is_err());
     store.save(&Config::default()).unwrap();
     assert_eq!(store.load().unwrap(), Config::default());
-    assert_eq!(
-        fs::read_to_string(store.backup_path()).unwrap(),
-        "version = [\n"
+    assert_eq!(kept_unreadable(dir.path()), ["version = [\n"]);
+    assert!(
+        !store.backup_path().exists(),
+        "an unreadable file never becomes the backup"
     );
+}
+
+/// The contents of the unreadable files kept next to the settings.
+fn kept_unreadable(dir: &Path) -> Vec<String> {
+    entries(dir)
+        .into_iter()
+        .filter(|name| name.starts_with("config.toml.unreadable-"))
+        .map(|name| fs::read_to_string(dir.join(name)).unwrap())
+        .collect()
 }
 
 #[cfg(unix)]

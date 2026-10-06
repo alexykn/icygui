@@ -337,6 +337,29 @@ fn the_demo_and_the_fixture_save_nothing() {
 }
 
 #[test]
+fn only_the_demos_own_environments_are_labelled_demo() {
+    let mut state = AppState::demo(crate::live::demo::config(), now());
+    assert!(state.is_demo_environment());
+    assert!(state.switch_environment(crate::live::demo::STAGING_ID));
+    assert!(state.is_demo_environment());
+    // An environment added while the demo runs talks to a real Icinga.
+    let real = Environment::new(
+        "docker",
+        "https://127.0.0.1:5665",
+        AuthConfig::Basic {
+            username: "icygui".to_owned(),
+        },
+    );
+    let id = real.id.clone();
+    state.save_environment(real, false);
+    assert!(state.switch_environment(&id));
+    assert!(state.is_demo(), "still nothing saved");
+    assert!(!state.is_demo_environment(), "but not simulated");
+    let live = AppState::live(crate::live::demo::config(), UiState::default(), now());
+    assert!(!live.is_demo_environment());
+}
+
+#[test]
 fn refresh_is_gentle() {
     let (mut state, recorder) = connected_fixture();
     let start = Instant::now();

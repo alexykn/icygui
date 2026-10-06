@@ -20,6 +20,8 @@ use super::{AppState, MAX_NOTIFICATIONS};
 /// watched and muted objects) and every group's and dashboard's setting.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NotificationPlan {
+    /// The environment it was read from: it applies to that one only.
+    pub(crate) environment_id: String,
     /// The environment's settings.
     pub(crate) settings: NotificationSettings,
     /// Each group's setting, in sidebar order.
@@ -254,6 +256,7 @@ impl AppState {
     pub(crate) fn notification_plan(&self) -> Option<NotificationPlan> {
         let environment = self.environment()?;
         Some(NotificationPlan {
+            environment_id: environment.id.clone(),
             settings: environment.notifications.clone(),
             groups: environment
                 .groups
@@ -279,9 +282,19 @@ impl AppState {
     }
 
     /// Saves the notification settings from the settings dialog (groups
-    /// and dashboards deleted meanwhile are skipped). Returns whether
-    /// anything changed.
+    /// and dashboards deleted meanwhile are skipped). A plan read from
+    /// another environment than the active one changes nothing: another
+    /// environment's rules and mutes must never overwrite these. Returns
+    /// whether anything changed.
     pub(crate) fn apply_notification_plan(&mut self, plan: NotificationPlan) -> bool {
+        if self.active_environment_id() != Some(plan.environment_id.as_str()) {
+            tracing::warn!(
+                plan = %plan.environment_id,
+                active = ?self.active_environment_id(),
+                "notification settings of another environment were not applied"
+            );
+            return false;
+        }
         self.change_environment(|environment| {
             let mut changed = environment.notifications != plan.settings;
             environment.notifications = plan.settings;
@@ -514,6 +527,18 @@ mod tests {
             setting: ScopeSetting::On,
             dashboards: Vec::new(),
         });
+        // Read from another environment: never applied here.
+        let mut elsewhere = plan.clone();
+        elsewhere.environment_id = "staging".to_owned();
+        assert!(!state.apply_notification_plan(elsewhere));
+        assert!(
+            !state
+                .environment()
+                .unwrap()
+                .notifications
+                .quiet_hours
+                .enabled
+        );
         assert!(state.apply_notification_plan(plan));
         let environment = state.environment().unwrap();
         assert!(environment.notifications.quiet_hours.enabled);

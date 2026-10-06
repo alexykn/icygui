@@ -20,12 +20,12 @@ use gpui::{
     Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use ic_config::Environment;
-use ic_core::{ConnectionFailure, ConnectionReport};
+use ic_core::{CertificateInfo, ConnectionFailure, ConnectionReport};
 use ic_model::Timestamp;
 use ic_ui_kit::input::{InputEvent, InputState};
 use ic_ui_kit::{
-    ActiveTheme as _, Button, DialogBody, Field, FieldTone, Link, Segmented, Switch, TextField,
-    Theme,
+    ActiveTheme as _, Banner, BannerTone, Button, DialogBody, Field, FieldTone, Link, Segmented,
+    Switch, TextField, Theme,
 };
 use secrecy::SecretString;
 
@@ -88,6 +88,9 @@ pub(crate) struct EnvironmentEditor {
     test_task: Option<Task<()>>,
     save_task: Option<Task<()>>,
     error: Option<String>,
+    /// Opened in `--demo`: an environment added here is real, but kept
+    /// only until the demo quits.
+    demo: bool,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -126,24 +129,39 @@ impl EnvironmentEditor {
             })
         };
         let inputs = Inputs {
-            name: input(&form.name, "prod-cluster", window, cx),
+            name: input(&form.name, "e.g. prod-cluster", window, cx),
             url: input(
                 &form.url,
-                "https://icinga-master.example.com:5665",
+                "e.g. https://icinga-master.example.com:5665",
                 window,
                 cx,
             ),
-            username: input(&form.username, "icygui", window, cx),
+            username: input(&form.username, "e.g. icygui", window, cx),
             password: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
                     .placeholder(password_placeholder)
             }),
-            cert_path: input(&form.cert_path, "/path/to/client.crt", window, cx),
-            key_path: input(&form.key_path, "/path/to/client.key", window, cx),
-            author: input(&form.author, "defaults to the API user", window, cx),
-            ca_file: input(&form.ca_file, "/var/lib/icinga2/certs/ca.crt", window, cx),
-            pinned: input(&form.pinned, "AB:CD:… (SHA-256)", window, cx),
+            cert_path: input(
+                &form.cert_path,
+                "e.g. ~/.config/icygui/client.crt",
+                window,
+                cx,
+            ),
+            key_path: input(
+                &form.key_path,
+                "e.g. ~/.config/icygui/client.key",
+                window,
+                cx,
+            ),
+            author: input(&form.author, author_placeholder(form.auth), window, cx),
+            ca_file: input(
+                &form.ca_file,
+                "e.g. /var/lib/icinga2/certs/ca.crt",
+                window,
+                cx,
+            ),
+            pinned: input(&form.pinned, "SHA-256, e.g. AB:CD:…", window, cx),
             server_name: input(&form.server_name, "the name in the certificate", window, cx),
         };
         let mut subscriptions = Vec::new();
@@ -188,9 +206,16 @@ impl EnvironmentEditor {
             test_task: None,
             save_task: None,
             error: None,
+            demo: false,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Says the editor runs in `--demo` (ENV-10).
+    pub(crate) fn in_demo(mut self, demo: bool) -> Self {
+        self.demo = demo;
+        self
     }
 
     /// Where the keyboard goes when the editor opens: the name.
@@ -288,6 +313,21 @@ impl EnvironmentEditor {
         cx: &mut Context<Self>,
     ) {
         self.fill(FormField::Pin, fingerprint, window, cx);
+        self.show_tls = true;
+        self.test = TestState::Idle;
+    }
+
+    /// "Use server name …" after a test whose certificate a trusted CA
+    /// signed for another name (ENV-05): fills the server-name override
+    /// and shows the TLS fields; the next test uses it. Unlike a pin, it
+    /// keeps working when the certificate is renewed.
+    pub(crate) fn use_server_name(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fill(FormField::ServerName, name, window, cx);
         self.show_tls = true;
         self.test = TestState::Idle;
     }
@@ -550,12 +590,17 @@ impl EnvironmentEditor {
             .option("password")
             .option("client certificate")
             .selected(usize::from(self.form.auth == AuthKind::Certificate))
-            .on_select(cx.listener(|this, index: &usize, _, cx| {
+            .on_select(cx.listener(|this, index: &usize, window, cx| {
                 this.form.auth = if *index == 1 {
                     AuthKind::Certificate
                 } else {
                     AuthKind::Password
                 };
+                // Without an API user, the author must be typed.
+                let placeholder = author_placeholder(this.form.auth);
+                this.inputs.author.update(cx, |input, cx| {
+                    input.set_placeholder(placeholder, window, cx);
+                });
                 cx.notify();
             }));
         let login = self.render_login(&issues, cx);
@@ -699,19 +744,43 @@ impl EnvironmentEditor {
                     .child(div().text_color(colors.text_muted).child(message.clone()));
                 if let Some(certificate) = certificate {
                     let fingerprint = certificate.fingerprint();
+                    // A trusted CA signed it, for another name: the server
+                    // name override fixes that for good; a pin breaks at
+                    // the next renewal.
+                    let rename = server_name_offer(message, certificate);
+                    if rename.is_some() {
+                        column = column.child(div().text_color(colors.text_muted).child(format!(
+                            "A trusted CA signed it, but for {}. Connecting by this \
+                             address needs the server name it was issued for.",
+                            certificate.names.join(", ")
+                        )));
+                    }
+                    let trust = Button::new("environment-trust", "trust this certificate")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.trust_presented(fingerprint.clone(), window, cx);
+                        }));
+                    let buttons = match rename {
+                        Some(name) => div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                Button::new(
+                                    "environment-server-name",
+                                    format!("use server name {name}"),
+                                )
+                                .primary()
+                                .on_click(cx.listener(
+                                    move |this, _: &ClickEvent, window, cx| {
+                                        this.use_server_name(name.clone(), window, cx);
+                                    },
+                                )),
+                            )
+                            .child(trust),
+                        None => div().flex().child(trust.primary()),
+                    };
                     column = column
                         .child(certificate_details(certificate, Timestamp::now(), theme))
-                        .child(
-                            div().flex().child(
-                                Button::new("environment-trust", "trust this certificate")
-                                    .primary()
-                                    .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, window, cx| {
-                                            this.trust_presented(fingerprint.clone(), window, cx);
-                                        },
-                                    )),
-                            ),
-                        );
+                        .child(buttons);
                 }
                 column.into_any_element()
             }
@@ -738,7 +807,25 @@ impl EnvironmentEditor {
             Some(base) => format!("Edit environment · {}", base.name),
             None => "Add environment".to_owned(),
         };
-        let mut dialog = DialogBody::new(title)
+        let mut dialog = DialogBody::new(title);
+        let built_in = self
+            .form
+            .base
+            .as_ref()
+            .is_some_and(|base| live::demo::is_built_in(&base.id));
+        if self.demo && !built_in {
+            // Not simulated: say so before anything is sent to it.
+            dialog = dialog.child(
+                Banner::new(
+                    "environment-real",
+                    BannerTone::Warning,
+                    "This environment is a real Icinga, not part of the demo: acknowledgements, \
+                     downtimes and commands sent to it are real.",
+                )
+                .detail("Nothing is saved: it is gone when the demo quits."),
+            );
+        }
+        let mut dialog = dialog
             .child(self.render_fields(cx))
             .child(self.render_test(cx));
         if let Some(error) = self.error.clone() {
@@ -948,10 +1035,92 @@ fn report_view(report: &ConnectionReport, theme: &Theme) -> AnyElement {
 }
 
 /// A failed save, under the form.
+/// The author field's hint: optional with a password (the API user signs),
+/// required with a client certificate (there is no user name to sign
+/// with). Examples say "e.g.", so no hint reads like a typed value.
+fn author_placeholder(auth: AuthKind) -> &'static str {
+    match auth {
+        AuthKind::Password => "defaults to the API user",
+        AuthKind::Certificate => "required: who acknowledges, e.g. m.keller",
+    }
+}
+
+/// The server name to offer after a TLS failure: the certificate's first
+/// DNS name, when its chain checked out and only the name didn't match
+/// (`ic-api` checks the chain before the name, so a name error means a
+/// trusted CA signed it).
+pub(crate) fn server_name_offer(message: &str, certificate: &CertificateInfo) -> Option<String> {
+    let name_error = message.contains("not valid for name") || message.contains("NotValidForName");
+    if !name_error {
+        return None;
+    }
+    certificate
+        .names
+        .iter()
+        .find(|name| name.parse::<std::net::IpAddr>().is_err() && !name.starts_with("*."))
+        .cloned()
+}
+
 fn error_line(error: String, theme: &Theme) -> AnyElement {
     div()
         .text_size(theme.text.small)
         .text_color(theme.states.critical)
         .child(error)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn certificate(names: &[&str]) -> CertificateInfo {
+        CertificateInfo {
+            sha256: [0xab; 32],
+            subject: "CN=icinga-master".to_owned(),
+            issuer: "CN=Icinga CA".to_owned(),
+            names: names.iter().map(|name| (*name).to_owned()).collect(),
+            not_before: Timestamp::EPOCH,
+            not_after: Timestamp::from_unix_seconds(2_000_000_000.0),
+        }
+    }
+
+    #[test]
+    fn the_author_hint_follows_the_login() {
+        assert_eq!(
+            author_placeholder(AuthKind::Password),
+            "defaults to the API user"
+        );
+        assert!(author_placeholder(AuthKind::Certificate).starts_with("required"));
+    }
+
+    #[test]
+    fn a_name_mismatch_offers_the_certificates_name() {
+        // What the Docker Icinga answered for https://127.0.0.1:5665 with
+        // its CA file set.
+        let message = "invalid peer certificate: certificate not valid for name \"127.0.0.1\"; \
+                       certificate is only valid for DnsName(\"icinga-master\")";
+        assert_eq!(
+            server_name_offer(message, &certificate(&["127.0.0.1", "icinga-master"])),
+            Some("icinga-master".to_owned())
+        );
+        assert_eq!(
+            server_name_offer(
+                "invalid peer certificate: NotValidForName",
+                &certificate(&["*.example.com", "icinga.example.com"])
+            ),
+            Some("icinga.example.com".to_owned())
+        );
+        // An unknown CA: pinning (or a CA file) is the answer.
+        assert_eq!(
+            server_name_offer(
+                "invalid peer certificate: UnknownIssuer",
+                &certificate(&["icinga-master"])
+            ),
+            None
+        );
+        assert_eq!(
+            server_name_offer(message, &certificate(&["10.0.0.1"])),
+            None
+        );
+    }
 }

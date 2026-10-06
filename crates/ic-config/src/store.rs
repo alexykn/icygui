@@ -34,9 +34,10 @@ const BACKUP: &str = "settings backup";
 ///
 /// A file that can't be read is reported, never replaced: the app can
 /// offer [`ConfigStore::load_backup`] or start from defaults. Saving over
-/// it then keeps it twice: as the backup, and as a copy that later saves
-/// never replace (`<name>.unreadable-<unix seconds>`), so a file from a
-/// newer icygui or one with a typo can still be recovered.
+/// it keeps it as a copy that later saves never replace
+/// (`<name>.unreadable-<unix seconds>`), so a file from a newer icygui or
+/// one with a typo can still be recovered, and leaves the backup alone:
+/// it still holds the last settings this version could read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigStore {
     path: PathBuf,
@@ -146,8 +147,10 @@ impl ConfigStore {
     /// exist yet. Saving unchanged settings writes nothing.
     ///
     /// When the file being replaced can't be read by this version (not
-    /// TOML, or written by a newer icygui), it is also kept as
-    /// `<name>.unreadable-<unix seconds>`, which later saves leave alone.
+    /// TOML, or written by a newer icygui), it is kept as
+    /// `<name>.unreadable-<unix seconds>`, which later saves leave alone,
+    /// instead of becoming the backup: the backup keeps the last readable
+    /// settings, so starting fresh doesn't lose them.
     ///
     /// # Errors
     ///

@@ -50,7 +50,7 @@ use self::desktop::{ACKNOWLEDGE_ACTION, Desktop, Response};
 use self::notifier::GpuiNotifier;
 use crate::actions::{ActionRequest, ObjectAction};
 use crate::app_state::environments::EnvironmentSaved;
-use crate::app_state::{AppState, ConfigProblem};
+use crate::app_state::{AppState, ConfigProblem, UserNotice};
 use crate::background::window;
 use crate::dev::OpenAtStart;
 use crate::persist::{Persistence, SaveReport};
@@ -92,8 +92,9 @@ pub(crate) enum RecoveryChoice {
 }
 
 /// Work to do on a background thread once the engine has stopped
-/// (deleting a removed environment's password and event log).
-type Cleanup = Box<dyn FnOnce() + Send>;
+/// (deleting a removed environment's password and event log). It returns
+/// what it couldn't do, in sentences for the user.
+type Cleanup = Box<dyn FnOnce() -> Vec<String> + Send>;
 
 /// A notification shown on the desktop, for its clicks.
 #[derive(Clone, Debug)]
@@ -596,12 +597,50 @@ impl Session {
                     cx.notify();
                 });
                 if applied.is_err() {
-                    break;
+                    return;
                 }
                 let _ = this.update(cx, Self::after_events);
             }
-            tracing::debug!("the engine's event stream ended");
+            // The session drops the pump before it stops an engine, so the
+            // stream only ends here when the engine died (a panic on its
+            // thread): say so instead of showing stale data as live.
+            tracing::error!("the engine's event stream ended: the engine stopped on its own");
+            let _ = this.update(cx, Self::engine_stopped_on_its_own);
         })
+    }
+
+    /// The engine died: its link goes (commands to it would vanish), the
+    /// footer and a banner say so and offer a restart (ENV-07).
+    fn engine_stopped_on_its_own(&mut self, cx: &mut Context<Self>) {
+        self.pump = None;
+        self.state.update(cx, |state, cx| {
+            drop(state.take_core());
+            state.engine_stopped(
+                "Icinga's data is no longer updated. The log file has the details; \
+                 Restart starts a new engine."
+                    .to_owned(),
+            );
+            cx.notify();
+        });
+    }
+
+    /// Starts a new engine for the active environment (the banner's
+    /// "Restart" after the engine stopped or couldn't start).
+    pub(crate) fn restart_engine(&mut self, cx: &mut Context<Self>) {
+        tracing::info!("restarting the engine");
+        self.state.update(cx, |state, cx| {
+            state.reset_connection();
+            cx.notify();
+        });
+        self.replace_engine(None, cx);
+    }
+
+    /// Ends the event stream as an engine that died would (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn end_event_stream(&mut self, cx: &mut Context<Self>) {
+        let (sender, events) = unbounded();
+        drop(sender);
+        self.pump = Some(self.spawn_pump(events, cx));
     }
 
     /// Replaces the engine: the running one stops on another thread, the
@@ -637,14 +676,33 @@ impl Session {
             return;
         }
         let work = cx.background_executor().spawn(async move {
-            for cleanup in cleanups {
-                cleanup();
-            }
+            cleanups
+                .into_iter()
+                .flat_map(|cleanup| cleanup())
+                .collect::<Vec<_>>()
         });
         self.stopping = Some(cx.spawn(async move |this, cx| {
-            work.await;
-            let _ = this.update(cx, Self::engine_stopped);
+            let problems = work.await;
+            let _ = this.update(cx, |session, cx| {
+                session.report_leftovers(&problems, cx);
+                session.engine_stopped(cx);
+            });
         }));
+    }
+
+    /// Tells the user what a cleanup couldn't remove (ENV-03: a password
+    /// left in the keychain must not go unnoticed).
+    fn report_leftovers(&self, problems: &[String], cx: &mut Context<Self>) {
+        if problems.is_empty() {
+            return;
+        }
+        self.state.update(cx, |state, cx| {
+            state.report(UserNotice::problem(
+                "Not everything of the environment could be removed.",
+                problems.join(" "),
+            ));
+            cx.notify();
+        });
     }
 
     /// Makes `id` the active environment and connects to it (ENV-01).
@@ -674,8 +732,10 @@ impl Session {
         let secrets = self.secrets.clone();
         cx.spawn(async move |this, cx| {
             let password_changed = password.is_some();
+            let account = environment.id.clone();
             if let Some(password) = password {
-                let account = environment.id.clone();
+                let secrets = secrets.clone();
+                let account = account.clone();
                 let stored = cx
                     .background_executor()
                     .spawn(async move { secrets.set(&account, &password) })
@@ -685,7 +745,21 @@ impl Session {
                     return Err(format!("The password couldn't be stored: {error}"));
                 }
             }
+            // A client certificate replaced the password: the password
+            // leaves the keychain (ENV-03). Deleting nothing is fine.
+            let mut leftovers = Vec::new();
+            if !matches!(environment.auth, AuthConfig::Basic { .. }) {
+                let label = account.clone();
+                let removed = cx
+                    .background_executor()
+                    .spawn(async move { secrets.delete(&account) })
+                    .await;
+                if let Err(error) = removed {
+                    leftovers.push(password_left_over(&label, &error));
+                }
+            }
             this.update(cx, |session, cx| {
+                session.report_leftovers(&leftovers, cx);
                 let saved = session.state.update(cx, |state, cx| {
                     let saved = state.save_environment(environment, password_changed);
                     if saved == EnvironmentSaved::Reconnect {
@@ -719,21 +793,30 @@ impl Session {
         let data_dir = self.event_log_dir();
         let account = id.to_owned();
         let cleanup: Cleanup = Box::new(move || {
+            let mut problems = Vec::new();
             if let Err(error) = secrets.delete(&account) {
-                tracing::warn!(%error, "the deleted environment's password couldn't be removed");
+                problems.push(password_left_over(&account, &error));
             }
             if let Some(data_dir) = data_dir
                 && let Err(error) = ic_core::delete_event_log(&data_dir, &account)
             {
                 tracing::warn!(%error, "the deleted environment's event log couldn't be removed");
+                problems.push(format!(
+                    "Its event log couldn't be removed ({error}); delete {} by hand.",
+                    ic_core::event_log_path(&data_dir, &account).display()
+                ));
             }
+            problems
         });
         if was_active {
             self.replace_engine(Some(cleanup), cx);
         } else {
-            cx.background_executor()
-                .spawn(async move { cleanup() })
-                .detach();
+            let work = cx.background_executor().spawn(async move { cleanup() });
+            cx.spawn(async move |this, cx| {
+                let problems = work.await;
+                let _ = this.update(cx, |session, cx| session.report_leftovers(&problems, cx));
+            })
+            .detach();
         }
         true
     }
@@ -774,9 +857,21 @@ impl Session {
                 Some(password) => Some(password),
                 None if matches!(environment.auth, AuthConfig::Basic { .. }) => {
                     let account = environment.id.clone();
-                    cx.background_executor()
-                        .spawn(async move { secrets.get(&account).ok().flatten() })
-                        .await
+                    let stored = cx
+                        .background_executor()
+                        .spawn(async move { secrets.get(&account) })
+                        .await;
+                    // A locked or missing keychain isn't a missing password.
+                    match stored {
+                        Ok(password) => password,
+                        Err(error) => {
+                            tracing::warn!(error = %error.message, "the keychain couldn't be read");
+                            return Err(ConnectionFailure::Other(format!(
+                                "the keychain couldn't be read: {}",
+                                error.message
+                            )));
+                        }
+                    }
                 }
                 None => None,
             };
@@ -987,6 +1082,18 @@ pub(crate) fn load_settings(store: &ConfigStore) -> Result<Config, Box<ConfigPro
             failure: None,
         })
     })
+}
+
+/// Says that the password of environment `account` stayed in the
+/// keychain, and which entry to remove by hand.
+fn password_left_over(account: &str, error: &ic_core::ports::SecretError) -> String {
+    tracing::warn!(%error, "a password couldn't be removed from the keychain");
+    format!(
+        "Its password is still in the keychain ({}): remove the entry for account {account} \
+         of service {} by hand.",
+        error.message,
+        ic_platform::SERVICE
+    )
 }
 
 /// A problem saying a recovery choice failed with `failure`.

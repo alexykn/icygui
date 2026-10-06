@@ -463,6 +463,7 @@ mod tests {
 
     fn plan() -> NotificationPlan {
         NotificationPlan {
+            environment_id: "prod".to_owned(),
             settings: NotificationSettings::default(),
             groups: vec![GroupPlan {
                 id: "g".to_owned(),

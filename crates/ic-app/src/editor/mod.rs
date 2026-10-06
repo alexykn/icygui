@@ -9,9 +9,12 @@
 //! Every change asks the core for a preview (`Command::PreviewDashboard`)
 //! once typing rests: the filter is validated there (a parse error names
 //! its line and column, marked under the field), and the match count and
-//! rows come back with it. A filter that doesn't work can't be saved.
+//! rows come back with it. A filter that doesn't work can't be saved: a
+//! save parses it at once and waits for a pending preview's verdict.
 //!
-//! Keys: `secondary-s` saves, Escape discards.
+//! Keys: `secondary-s` saves, Escape discards (asking first when something
+//! was changed). Showing another dashboard or tab keeps a changed draft
+//! for the next time the same dashboard is edited.
 
 pub(crate) mod model;
 
@@ -78,6 +81,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
 pub(crate) enum EditorEvent {
     /// Saved (showing the dashboard) or discarded: close the editor.
     Closed,
+    /// Discard asked for while the draft has changes: ask first.
+    DiscardChanges,
     /// Delete the edited dashboard (after asking).
     Delete(DashboardRef),
 }
@@ -105,6 +110,9 @@ enum Preview {
 pub(crate) struct DashboardEditor {
     state: Entity<AppState>,
     target: EditorTarget,
+    /// The dashboard as it was when editing began (the draft's changes
+    /// are against it).
+    saved: DashboardDraft,
     draft: DashboardDraft,
     name: Entity<InputState>,
     filter: Entity<TextareaState>,
@@ -116,6 +124,11 @@ pub(crate) struct DashboardEditor {
     drag: WindowDrag,
     sidebar_open: bool,
     save_error: Option<String>,
+    /// A preview was asked for and hasn't answered yet (the one shown may
+    /// be of an older draft).
+    checking: bool,
+    /// A save waits for the pending preview's verdict on the filter.
+    save_when_checked: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -128,11 +141,13 @@ impl Focusable for DashboardEditor {
 }
 
 impl DashboardEditor {
-    /// An editor for `target`, starting from `draft`
-    /// ([`model::initial_draft`]).
+    /// An editor for `target`, whose dashboard is `saved`
+    /// ([`model::initial_draft`]), starting from `draft` (`saved`, or the
+    /// changes kept from an editor closed earlier).
     pub(crate) fn new(
         state: Entity<AppState>,
         target: EditorTarget,
+        saved: DashboardDraft,
         draft: DashboardDraft,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -180,6 +195,7 @@ impl DashboardEditor {
         let mut editor = Self {
             state,
             target,
+            saved,
             draft,
             name,
             filter,
@@ -191,6 +207,8 @@ impl DashboardEditor {
             drag: WindowDrag::default(),
             sidebar_open: true,
             save_error: None,
+            checking: false,
+            save_when_checked: false,
             _subscriptions: subscriptions,
         };
         editor.request_preview(Duration::ZERO, cx);
@@ -210,6 +228,21 @@ impl DashboardEditor {
     /// What is edited.
     pub(crate) fn target(&self) -> &EditorTarget {
         &self.target
+    }
+
+    /// The draft, when it differs from the saved dashboard.
+    pub(crate) fn changes(&self) -> Option<&DashboardDraft> {
+        (self.draft != self.saved).then_some(&self.draft)
+    }
+
+    /// The edited dashboard's name, for questions about it.
+    pub(crate) fn title(&self) -> String {
+        let name = self.draft.name.trim();
+        if name.is_empty() {
+            "untitled".to_owned()
+        } else {
+            name.to_owned()
+        }
     }
 
     /// The draft as edited so far.
@@ -269,6 +302,7 @@ impl DashboardEditor {
         if !matches!(self.preview, Preview::Ready(Err(_))) {
             self.preview = Preview::Waiting;
         }
+        self.checking = true;
         let view = self.draft.view.clone();
         self.preview_task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
@@ -287,14 +321,33 @@ impl DashboardEditor {
             };
             let _ = this.update(cx, |this, cx| {
                 this.preview = preview;
+                this.checking = false;
+                if std::mem::take(&mut this.save_when_checked) {
+                    this.save(cx);
+                }
                 cx.notify();
             });
         }));
     }
 
     /// Saves the draft: a new dashboard, or the edited one. Refused while
-    /// the filter doesn't work.
+    /// the filter doesn't work: one that doesn't parse at once, one the
+    /// core can't evaluate once its preview says so (a save waits for a
+    /// pending preview).
     fn save(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = model::check_filter(&self.draft.view.filter) {
+            self.save_error = Some(format!("Fix the filter first: {error}"));
+            self.preview = Preview::Ready(Err(error));
+            cx.notify();
+            return;
+        }
+        if self.checking {
+            // The last change hasn't been checked yet: check it now and
+            // save when the answer comes.
+            self.save_when_checked = true;
+            self.request_preview(Duration::ZERO, cx);
+            return;
+        }
         if let Preview::Ready(Err(error)) = &self.preview {
             self.save_error = Some(format!("Fix the filter first: {error}"));
             cx.notify();
@@ -329,13 +382,19 @@ impl DashboardEditor {
         self.discard(cx);
     }
 
-    /// Escape: closes an open dropdown, else leaves without saving.
+    /// Escape: closes an open dropdown, else leaves without saving (asking
+    /// first when the draft has changes).
     fn discard(&mut self, cx: &mut Context<Self>) {
         if self.menus.close() {
             cx.notify();
             return;
         }
-        cx.emit(EditorEvent::Closed);
+        self.save_when_checked = false;
+        if self.changes().is_some() {
+            cx.emit(EditorEvent::DiscardChanges);
+        } else {
+            cx.emit(EditorEvent::Closed);
+        }
     }
 
     fn dismiss_listener(
@@ -351,12 +410,7 @@ impl DashboardEditor {
         let theme = cx.theme();
         let colors = theme.colors;
         let controls = Controls::of(window, cx);
-        let name = self.draft.name.trim();
-        let title = if name.is_empty() {
-            "untitled".to_owned()
-        } else {
-            name.to_owned()
-        };
+        let title = self.title();
         let group = self
             .state
             .read(cx)
@@ -399,9 +453,7 @@ impl DashboardEditor {
             .child(
                 Button::new("editor-discard", "discard")
                     .key_hint("esc")
-                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                        cx.emit(EditorEvent::Closed);
-                    })),
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.discard(cx))),
             )
             .child(
                 Button::new("editor-save", "save dashboard")
@@ -638,7 +690,7 @@ impl DashboardEditor {
         };
         let marker = filter_error.as_deref().and_then(|error| {
             let (line, column) = model::error_position(error)?;
-            model::error_marker(&self.draft.view.filter, line, column)
+            model::error_marker(&self.draft.view.filter, line, column, model::MARKER_CHARS)
         });
         Field::new("filter")
             .status(filter_status, filter_tone)

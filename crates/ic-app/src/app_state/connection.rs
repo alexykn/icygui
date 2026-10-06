@@ -50,6 +50,9 @@ pub(crate) enum NoticeAction {
     ReviewCertificate,
     /// Open the environment's settings (password, URL, files).
     EditEnvironment,
+    /// Start the connection engine again (after it stopped or couldn't
+    /// start).
+    RestartEngine,
 }
 
 impl NoticeAction {
@@ -59,6 +62,7 @@ impl NoticeAction {
             Self::RetryNow => "Retry now",
             Self::ReviewCertificate => "Review certificate…",
             Self::EditEnvironment => "Edit environment…",
+            Self::RestartEngine => "Restart",
         }
     }
 }
@@ -122,8 +126,11 @@ pub(crate) struct ConnectionStatus {
     pub(crate) checks_active: Option<bool>,
     /// Whether this session was connected at some point.
     pub(crate) ever_connected: bool,
-    /// The engine couldn't start (a thread or runtime error).
+    /// The engine couldn't start (a thread or runtime error), or stopped
+    /// on its own.
     pub(crate) engine_error: Option<String>,
+    /// The engine ran and stopped on its own (`engine_error` says why).
+    engine_stopped: bool,
     /// Icinga's version, once connected.
     version: Option<String>,
 }
@@ -139,6 +146,7 @@ impl ConnectionStatus {
             checks_active: None,
             ever_connected: false,
             engine_error: None,
+            engine_stopped: false,
             version: None,
         }
     }
@@ -168,6 +176,7 @@ impl ConnectionStatus {
             self.ever_connected = true;
         }
         self.engine_error = None;
+        self.engine_stopped = false;
         self.state = Some(state);
     }
 
@@ -184,6 +193,23 @@ impl ConnectionStatus {
     /// The engine couldn't start.
     pub(crate) fn on_engine_error(&mut self, error: String) {
         self.engine_error = Some(error);
+        self.engine_stopped = false;
+    }
+
+    /// The engine stopped on its own (its event stream ended): what was
+    /// shown is no longer kept up to date.
+    pub(crate) fn on_engine_stopped(&mut self, error: String) {
+        self.engine_error = Some(error);
+        self.engine_stopped = true;
+    }
+
+    /// The engine's problem in a word or two.
+    fn engine_word(&self) -> &'static str {
+        if self.engine_stopped {
+            "stopped"
+        } else {
+            "not started"
+        }
     }
 
     /// Whether the connection is up and the initial load complete.
@@ -257,16 +283,28 @@ impl ConnectionStatus {
     /// The footer text at `now`: the endpoint and the age of the last event,
     /// or what the connection is doing.
     pub(crate) fn label(&self, now: Timestamp) -> String {
+        let (endpoint, status) = self.label_parts(now);
+        match status {
+            Some(status) => format!("{endpoint} · {status}"),
+            None => endpoint,
+        }
+    }
+
+    /// [`ConnectionStatus::label`] in its two parts: the endpoint (`no
+    /// environment` without one) and the age of the last event or what the
+    /// connection is doing. The footer shortens the endpoint, never
+    /// the part after it (ENV-06): production endpoints are long FQDNs.
+    pub(crate) fn label_parts(&self, now: Timestamp) -> (String, Option<String>) {
         let endpoint = if self.endpoint.is_empty() {
-            "no environment"
+            "no environment".to_owned()
         } else {
-            &self.endpoint
+            self.endpoint.clone()
         };
         if self.engine_error.is_some() {
-            return format!("{endpoint} · not started");
+            return (endpoint, Some(self.engine_word().to_owned()));
         }
         let Some(state) = &self.state else {
-            return endpoint.to_owned();
+            return (endpoint, None);
         };
         let status = match state {
             ConnectionState::Connected { since, .. } => format_compact(self.quiet_for(*since, now)),
@@ -288,14 +326,14 @@ impl ConnectionStatus {
             ConnectionState::MissingSecret => "no password".to_owned(),
             ConnectionState::Misconfigured { .. } => "invalid settings".to_owned(),
         };
-        format!("{endpoint} · {status}")
+        (endpoint, Some(status))
     }
 
     /// The state in a word or two, without times (the tray's tooltip):
     /// `connected`, `reconnecting`, `login refused`, …
     pub(crate) fn short_state(&self) -> &'static str {
         if self.engine_error.is_some() {
-            return "not started";
+            return self.engine_word();
         }
         match &self.state {
             None => "not connected",
@@ -319,7 +357,7 @@ impl ConnectionStatus {
     /// `retrying in 12s (attempt 4): connection refused`.
     pub(crate) fn describe(&self, now: Timestamp) -> String {
         if let Some(error) = &self.engine_error {
-            return format!("not started: {error}");
+            return format!("{}: {error}", self.engine_word());
         }
         let Some(state) = &self.state else {
             return "no environment".to_owned();
@@ -389,12 +427,17 @@ impl ConnectionStatus {
     /// The problem to show over the list at `now`, if any.
     pub(crate) fn notice(&self, environment: &str, now: Timestamp) -> Option<ConnectionNotice> {
         if let Some(error) = &self.engine_error {
+            let title = if self.engine_stopped {
+                "The connection engine stopped: what is shown is no longer updated."
+            } else {
+                "The connection engine couldn't start."
+            };
             return Some(ConnectionNotice {
                 kind: NoticeKind::EngineFailed,
                 tone: Tone::Critical,
-                title: "The connection engine couldn't start.".to_owned(),
+                title: title.to_owned(),
                 detail: Some(error.clone()),
-                actions: Vec::new(),
+                actions: vec![NoticeAction::RestartEngine],
             });
         }
         let endpoint = &self.endpoint;
@@ -595,6 +638,32 @@ mod tests {
         assert_eq!(status.label(at(0.)), "master-01 · no password");
         assert_eq!(ConnectionStatus::idle().health(at(0.)), Health::Idle);
         assert_eq!(ConnectionStatus::idle().label(at(0.)), "no environment");
+        assert_eq!(
+            ConnectionStatus::idle().label_parts(at(0.)),
+            ("no environment".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn the_footer_keeps_the_state_apart_from_a_long_endpoint() {
+        let mut status = connected();
+        status.endpoint = "icinga-master1.prod.example.com".to_owned();
+        status.on_state(ConnectionState::Reconnecting {
+            error: "connection refused".to_owned(),
+            attempt: 4,
+            retry_at: at(12.),
+        });
+        assert_eq!(
+            status.label_parts(at(0.)),
+            (
+                "icinga-master1.prod.example.com".to_owned(),
+                Some("retry in 12s".to_owned())
+            )
+        );
+        assert_eq!(
+            status.label(at(0.)),
+            "icinga-master1.prod.example.com · retry in 12s"
+        );
     }
 
     #[test]
@@ -760,7 +829,24 @@ mod tests {
         assert_eq!(status.label(at(0.)), "master-01 · not started");
         let notice = status.notice("prod-cluster", at(0.)).unwrap();
         assert_eq!(notice.kind, NoticeKind::EngineFailed);
+        assert_eq!(notice.actions, [NoticeAction::RestartEngine]);
         assert!(!status.is_starting());
         assert_eq!(status.progress(), None);
+    }
+
+    #[test]
+    fn an_engine_that_stopped_says_so_and_offers_a_restart() {
+        let mut status = connected();
+        status.on_engine_stopped("the engine's event stream ended".to_owned());
+        assert_eq!(status.health(at(0.)), Health::Failed);
+        assert_eq!(status.label(at(0.)), "master-01 · stopped");
+        assert_eq!(status.short_state(), "stopped");
+        let notice = status.notice("prod-cluster", at(0.)).unwrap();
+        assert_eq!(notice.kind, NoticeKind::EngineFailed);
+        assert!(notice.title.contains("stopped"), "{}", notice.title);
+        assert_eq!(notice.actions, [NoticeAction::RestartEngine]);
+        // A new engine's first state clears it.
+        status.on_state(ConnectionState::Connecting { attempt: 1 });
+        assert_eq!(status.notice("prod-cluster", at(0.)), None);
     }
 }

@@ -15,7 +15,7 @@ use ic_ui_kit::{
     ActiveTheme as _, Banner, BannerTone, Button, EmptyState, Icon, IconName, Link, ProgressBar,
 };
 
-use crate::actions::{EditEnvironment, ReviewCertificate};
+use crate::actions::{EditEnvironment, RestartEngine, ReviewCertificate};
 use crate::app_state::{AppState, ConnectionNotice, NoticeAction, NoticeKind, Tone};
 
 /// The banners to show over a list or tab at `now`.
@@ -121,6 +121,7 @@ fn on_action(
             window.dispatch_action(Box::new(ReviewCertificate), cx);
         }
         NoticeAction::EditEnvironment => window.dispatch_action(Box::new(EditEnvironment), cx),
+        NoticeAction::RestartEngine => window.dispatch_action(Box::new(RestartEngine), cx),
     }
 }
 
@@ -129,6 +130,7 @@ fn action_id(prefix: &str, action: NoticeAction) -> ElementId {
         NoticeAction::RetryNow => "retry",
         NoticeAction::ReviewCertificate => "review-certificate",
         NoticeAction::EditEnvironment => "edit-environment",
+        NoticeAction::RestartEngine => "restart-engine",
     };
     ElementId::Name(SharedString::from(format!("{prefix}-{name}")))
 }

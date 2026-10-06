@@ -23,7 +23,7 @@ const VARS_MAX_LINES: usize = 400;
 
 /// The service pane's subtitle after `on <host>`: `14m · hard 3/3`.
 pub(crate) fn service_subtitle(service: &Service, now: Timestamp) -> String {
-    let since = format::since(service.check.last_state_change, now);
+    let since = format::time_in_state(&service.check, now);
     let attempt = format::attempt(&service.check);
     if since.is_empty() {
         attempt
@@ -35,7 +35,7 @@ pub(crate) fn service_subtitle(service: &Service, now: Timestamp) -> String {
 /// The host pane's subtitle: `10.0.2.13 · up 41d · PING OK rta 0.42ms`.
 pub(crate) fn host_subtitle(host: &Host, now: Timestamp) -> String {
     let state = format::state_word(CheckableState::Host(host.state));
-    let since = format::since(host.check.last_state_change, now);
+    let since = format::time_in_state(&host.check, now);
     let state = if since.is_empty() {
         state.to_owned()
     } else {

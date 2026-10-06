@@ -68,6 +68,9 @@ pub(crate) enum DemoFault {
     MissingSecret,
     /// `misconfigured`: the pinned fingerprint is garbage.
     Misconfigured,
+    /// `pin-mismatch`: another certificate is pinned than the one the
+    /// server presents (renewed, or intercepted: both fingerprints show).
+    PinMismatch,
     /// `outage`: 20 seconds in, the server drops every stream and answers
     /// 503 (the connection is lost and retried).
     Outage,
@@ -87,6 +90,7 @@ impl DemoFault {
             "tls" => Some(Self::Tls),
             "missing-secret" => Some(Self::MissingSecret),
             "misconfigured" => Some(Self::Misconfigured),
+            "pin-mismatch" => Some(Self::PinMismatch),
             "outage" => Some(Self::Outage),
             "slow" => Some(Self::Slow),
             "frozen" => Some(Self::Frozen),
@@ -180,9 +184,16 @@ impl DemoServer {
             Some(DemoFault::Misconfigured) => {
                 (endpoint.url.clone(), Some("not-a-fingerprint".to_owned()))
             }
+            Some(DemoFault::PinMismatch) => (endpoint.url.clone(), Some(other_pin())),
             _ => (endpoint.url.clone(), Some(endpoint.fingerprint.clone())),
         }
     }
+}
+
+/// A well-formed pin of a certificate the demo server doesn't have, for
+/// [`DemoFault::PinMismatch`].
+pub(crate) fn other_pin() -> String {
+    ic_config::format_fingerprint(&[0x5a; 32])
 }
 
 impl Drop for DemoServer {
@@ -351,6 +362,12 @@ impl SecretStore for DemoSecrets {
         self.put(account, None);
         Ok(())
     }
+}
+
+/// Whether `environment_id` is one of the demo's own environments (the
+/// simulated `prod-cluster`, `staging` and `lab`).
+pub(crate) fn is_built_in(environment_id: &str) -> bool {
+    [ENVIRONMENT_ID, STAGING_ID, LAB_ID].contains(&environment_id)
 }
 
 /// The demo server to run for the environment `environment_id`, if it is
@@ -672,6 +689,15 @@ mod tests {
         );
         assert_eq!(DemoFault::parse("outage"), Some(DemoFault::Outage));
         assert_eq!(DemoFault::parse("frozen"), Some(DemoFault::Frozen));
+        assert_eq!(
+            DemoFault::parse("pin-mismatch"),
+            Some(DemoFault::PinMismatch)
+        );
+        assert_eq!(
+            server(Some(DemoFault::PinMismatch)).environment_target(&endpoint),
+            (endpoint.url.clone(), Some(other_pin()))
+        );
+        assert!(ic_config::parse_fingerprint(&other_pin()).is_ok());
         assert_eq!(DemoFault::parse("nope"), None);
     }
 

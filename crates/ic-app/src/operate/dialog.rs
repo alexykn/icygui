@@ -337,6 +337,9 @@ fn text_fields(kind: DialogKind) -> &'static [(FormField, &'static str, bool)] {
 /// An action dialog.
 pub(crate) struct ActionDialog {
     state: Entity<AppState>,
+    /// The environment the objects are in: the dialog sends nothing to
+    /// another one.
+    environment_id: Option<String>,
     kind: DialogKind,
     eligible: Eligible,
     form: Form,
@@ -363,6 +366,11 @@ impl Focusable for ActionDialog {
     }
 }
 
+/// Why an action asked for in one environment isn't sent once another is
+/// active.
+pub(crate) const ENVIRONMENT_CHANGED: &str =
+    "Another environment is active now; nothing was sent. Ask again there.";
+
 impl ActionDialog {
     /// A dialog of `kind` for `eligible`'s objects.
     pub(crate) fn new(
@@ -373,6 +381,7 @@ impl ActionDialog {
         cx: &mut Context<Self>,
     ) -> Self {
         let form = Form::new(kind);
+        let environment_id = state.read(cx).active_environment_id().map(str::to_owned);
         let (author, endpoints, endpoint_default) = {
             let current = state.read(cx);
             let snapshot = current.snapshot();
@@ -436,6 +445,7 @@ impl ActionDialog {
         }
         Self {
             state,
+            environment_id,
             kind,
             eligible,
             form,
@@ -695,7 +705,13 @@ impl ActionDialog {
         }
         let spec =
             ActionSpec::for_objects(self.kind.action(), action, self.eligible.targets.clone());
+        let environment_id = self.environment_id.clone();
         let sent = self.state.update(cx, |state, cx| {
+            // Another environment became active meanwhile (same host
+            // names, maybe production): send nothing there.
+            if state.active_environment_id() != environment_id.as_deref() {
+                return Err(ENVIRONMENT_CHANGED.to_owned());
+            }
             let sent = state.submit(spec);
             cx.notify();
             sent

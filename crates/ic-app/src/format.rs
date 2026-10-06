@@ -19,6 +19,14 @@ pub(crate) fn since(at: Timestamp, now: Timestamp) -> String {
         .unwrap_or_default()
 }
 
+/// How long the object has been in its state ([`since`] of
+/// [`ic_core::snapshot::state_since`]: Icinga's `last_state_change`, or the
+/// last hard change when Icinga reports 0 for an object that has had its
+/// state since the first check).
+pub(crate) fn time_in_state(check: &CheckInfo, now: Timestamp) -> String {
+    since(ic_core::snapshot::state_since(check), now)
+}
+
 /// How long ago `at` was: `12s ago`, or `never`.
 pub(crate) fn ago(at: Option<Timestamp>, now: Timestamp) -> String {
     match at.and_then(Timestamp::non_zero) {

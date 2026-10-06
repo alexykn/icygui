@@ -116,8 +116,11 @@ impl SimState {
 const MAX_CHECKS_PER_TICK: usize = 5_000;
 
 impl World {
-    /// Configures the simulator and spreads the first checks over each
-    /// object's interval.
+    /// Configures the simulator. Each object's first check comes at its
+    /// `next_check`, as Icinga's checker would run it (a soft problem's
+    /// retry a minute after the scenario starts): clients see that time,
+    /// and a later first check would show as late. Objects without a
+    /// `next_check` ahead are spread over their interval.
     pub(crate) fn sim_configure(&mut self, config: &SimulationConfig) {
         self.sim.config = config.clone();
         self.sim.rng = Rng::derive(config.seed, 0x0073_696d);
@@ -128,14 +131,28 @@ impl World {
         self.sim.outage = None;
         self.sim.storm_until = None;
         self.sim.maintenance.clear();
-        let objects: Vec<(String, f64)> = self
+        // Measured from the scenario's load, not the wall clock, so the
+        // same seed tells the same story however long starting took.
+        let start = self.loaded_at;
+        let speed = config.speed.max(0.001);
+        let objects: Vec<(String, f64, f64)> = self
             .all_checkables()
             .filter(|c| c.enable_active_checks)
-            .map(|c| (c.full_name(), c.check_interval))
+            .map(|c| (c.full_name(), c.check_interval, c.next_check))
             .collect();
-        for (object, interval) in objects {
+        for (object, interval, next_check) in objects {
             let ticks = self.sim.ticks(interval);
-            let first = 1 + self.sim.rng.below(ticks);
+            // Drawn for every object, so the seed's story doesn't depend
+            // on which objects have a next check ahead.
+            let spread = 1 + self.sim.rng.below(ticks);
+            let due_in = next_check - start;
+            let first = if due_in.is_finite() && due_in > 0.0 {
+                // Wall-clock seconds to ticks: a tick takes
+                // `tick / speed` real seconds.
+                self.sim.ticks(due_in * speed)
+            } else {
+                spread
+            };
             self.sim.schedule(first, object);
         }
     }

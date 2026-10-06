@@ -165,6 +165,21 @@ impl Query {
         total.positions.dedup();
         Some(total)
     }
+
+    /// Whether every term appears in `candidate` (lowercased characters)
+    /// as it is, not scattered: what "run on all matches" acts on, so a
+    /// fuzzy near-miss never gets acknowledged along. `false` for an empty
+    /// query.
+    pub(crate) fn contained_in(&self, candidate: &[char]) -> bool {
+        !self.terms.is_empty()
+            && self.terms.iter().all(|term| {
+                !term.is_empty()
+                    && term.len() <= candidate.len()
+                    && candidate
+                        .windows(term.len())
+                        .any(|window| window == term.as_slice())
+            })
+    }
 }
 
 /// Matches every whitespace-separated term of `query` against

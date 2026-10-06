@@ -352,6 +352,214 @@ fn an_untrusted_certificate_is_trusted_after_review() {
     );
 }
 
+/// An action dialog or the settings opened for one environment close when
+/// another becomes active (the tray switches without touching the
+/// window): nothing meant for prod-cluster reaches staging, whose hosts
+/// may have the same names.
+#[test]
+fn dialogs_for_one_environment_close_when_another_becomes_active() {
+    run_app(
+        crate::WINDOW_SIZE,
+        demo_app(None),
+        Body::Async(Box::new(|app, cx| {
+            async move {
+                wait_for(&app, &cx, "prod-cluster", CONNECT, |app, cx| {
+                    let state = app.state.read(cx);
+                    connected_to(state, demo::ENDPOINT) && has_rows(state)
+                })
+                .await;
+                let object = ic_model::ObjectKey::service("db-prod-03", "postgres-replication");
+                cx.update(|cx| {
+                    app.state.update(cx, |state, cx| {
+                        let _ = state.request(crate::actions::ActionRequest {
+                            action: crate::actions::ObjectAction::AddComment,
+                            targets: vec![object.clone()],
+                        });
+                        cx.notify();
+                    });
+                });
+                cx.update(|cx| {
+                    app.draw(cx);
+                    assert_eq!(
+                        app.workspace.read(cx).modal(cx),
+                        Some(ModalKind::Action(
+                            crate::operate::dialog::DialogKind::Comment
+                        ))
+                    );
+                });
+                // What the tray's "switch environment" does.
+                cx.update(|cx| {
+                    let session = live::session(cx).unwrap();
+                    session.update(cx, |session, cx| {
+                        session.switch_environment(demo::STAGING_ID, cx);
+                    });
+                });
+                cx.update(|cx| {
+                    app.draw(cx);
+                    assert_eq!(
+                        app.workspace.read(cx).modal(cx),
+                        None,
+                        "the comment for prod-cluster can't be sent to staging"
+                    );
+                });
+                // The settings, opened in staging, close on the way back.
+                cx.update(|cx| {
+                    app.in_window(cx, |window, cx| {
+                        window.dispatch_action(Box::new(crate::actions::OpenSettings), cx);
+                    });
+                });
+                cx.update(|cx| {
+                    app.draw(cx);
+                    assert_eq!(app.workspace.read(cx).modal(cx), Some(ModalKind::Settings));
+                    let session = live::session(cx).unwrap();
+                    session.update(cx, |session, cx| {
+                        session.switch_environment(demo::ENVIRONMENT_ID, cx);
+                    });
+                });
+                cx.update(|cx| {
+                    app.draw(cx);
+                    assert_eq!(app.workspace.read(cx).modal(cx), None);
+                });
+                wait_for(&app, &cx, "prod-cluster again", CONNECT, |app, cx| {
+                    let state = app.state.read(cx);
+                    connected_to(state, demo::ENDPOINT) && has_rows(state)
+                })
+                .await;
+            }
+            .boxed_local()
+        })),
+    );
+}
+
+/// ENV-05's pin mismatch: the environment pins another certificate than
+/// the one the server presents. The editor's test and the banner's review
+/// both show the two fingerprints, and trusting the new one replaces the
+/// pin and connects.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one story: the failure, the editor's test, the review, the trust"
+)]
+fn a_pin_mismatch_shows_both_fingerprints_and_trusts_the_new_certificate() {
+    run_app(
+        crate::WINDOW_SIZE,
+        demo_app(Some(DemoFault::PinMismatch)),
+        Body::Async(Box::new(|app, cx| {
+            async move {
+                wait_for(&app, &cx, "the certificate failure", CONNECT, |app, cx| {
+                    matches!(
+                        app.state.read(cx).connection().state,
+                        Some(ic_core::ConnectionState::TlsFailed {
+                            certificate: Some(_),
+                            ..
+                        })
+                    )
+                })
+                .await;
+                let (presented, id) = cx.update(|cx| {
+                    let state = app.state.read(cx);
+                    let Some(ic_core::ConnectionState::TlsFailed {
+                        certificate: Some(certificate),
+                        ..
+                    }) = state.connection().state.clone()
+                    else {
+                        panic!("the failure went away");
+                    };
+                    let environment = state.environment().unwrap();
+                    assert_eq!(
+                        environment.tls.pinned_sha256.as_deref(),
+                        Some(demo::other_pin().as_str())
+                    );
+                    (certificate.fingerprint(), environment.id.clone())
+                });
+                assert_ne!(presented, demo::other_pin());
+
+                // The editor's "Test connection" reports the mismatch.
+                cx.update(|cx| {
+                    app.in_window(cx, |window, cx| {
+                        app.workspace.update(cx, |workspace, cx| {
+                            workspace.open_environment_editor(Some(&id), window, cx);
+                        });
+                    });
+                });
+                let editor = cx.update(|cx| {
+                    app.draw(cx);
+                    let editor = app.workspace.read(cx).environment_editor().unwrap().clone();
+                    editor.update(cx, EnvironmentEditor::test);
+                    editor
+                });
+                wait_for(&app, &cx, "the test's answer", CONNECT, |_, cx| {
+                    editor.read(cx).test_result().is_some()
+                })
+                .await;
+                cx.update(|cx| {
+                    match editor.read(cx).test_result().unwrap() {
+                        Err(ic_core::ConnectionFailure::CertificateMismatch {
+                            expected,
+                            actual,
+                        }) => {
+                            assert!(crate::environments::certificate::same_fingerprint(
+                                expected,
+                                &ic_config::parse_fingerprint(&demo::other_pin()).unwrap()
+                            ));
+                            assert_eq!(
+                                ic_config::parse_fingerprint(actual).unwrap(),
+                                ic_config::parse_fingerprint(&presented).unwrap()
+                            );
+                        }
+                        other => panic!("expected a pin mismatch, got {other:?}"),
+                    }
+                    app.in_window(cx, |window, cx| {
+                        app.workspace
+                            .update(cx, |workspace, cx| workspace.close_modal(window, cx));
+                    });
+                });
+
+                // The banner's review: both fingerprints, the danger button.
+                cx.update(|cx| {
+                    app.in_window(cx, |window, cx| {
+                        window.dispatch_action(Box::new(crate::actions::ReviewCertificate), cx);
+                    });
+                    app.draw(cx);
+                });
+                let review = cx.update(|cx| {
+                    assert_eq!(
+                        app.workspace.read(cx).modal(cx),
+                        Some(ModalKind::Certificate)
+                    );
+                    let review = app.workspace.read(cx).certificate_review().unwrap().clone();
+                    let (environment, offer) = review.read(cx).offer(cx).unwrap();
+                    assert_eq!(environment, id);
+                    assert_eq!(offer.fingerprint, presented);
+                    assert_eq!(offer.replaces, Some(demo::other_pin()));
+                    review
+                });
+                cx.update(|cx| {
+                    review.update(
+                        cx,
+                        crate::environments::certificate::CertificateReview::trust,
+                    );
+                });
+                wait_for(&app, &cx, "the trusted connection", CONNECT, |app, cx| {
+                    let state = app.state.read(cx);
+                    state.connection().is_connected() && has_rows(state)
+                })
+                .await;
+                cx.update(|cx| {
+                    assert_eq!(app.workspace.read(cx).modal(cx), None);
+                    let environment = app.state.read(cx).environment().unwrap().clone();
+                    assert_eq!(
+                        environment.tls.pinned_sha256.as_deref(),
+                        Some(presented.as_str()),
+                        "the new certificate replaced the pin"
+                    );
+                });
+            }
+            .boxed_local()
+        })),
+    );
+}
+
 #[test]
 fn a_deleted_environment_takes_its_password_and_event_log_along() {
     let dir = tempfile::tempdir().unwrap();
@@ -546,6 +754,150 @@ fn a_password_the_keychain_refuses_keeps_the_form_open() {
                         app.state.read(cx).environments().is_empty(),
                         "nothing saved"
                     );
+                });
+            }
+            .boxed_local()
+        })),
+    );
+}
+
+/// A keychain that is there but can't be used (locked, or the Secret
+/// Service fails): reading and deleting fail too.
+struct BrokenKeychain;
+
+impl SecretStore for BrokenKeychain {
+    fn get(&self, _account: &str) -> Result<Option<SecretString>, SecretError> {
+        Err(SecretError::new("the keychain is locked"))
+    }
+
+    fn set(&self, _account: &str, _secret: &SecretString) -> Result<(), SecretError> {
+        Err(SecretError::new("the keychain is locked"))
+    }
+
+    fn delete(&self, _account: &str) -> Result<(), SecretError> {
+        Err(SecretError::new("the keychain is locked"))
+    }
+}
+
+/// An environment that can't connect (nothing listens on port 1).
+fn unreachable_environment(name: &str) -> Environment {
+    let mut environment = Environment::new(
+        name,
+        "https://127.0.0.1:1",
+        AuthConfig::Basic {
+            username: "icygui".to_owned(),
+        },
+    );
+    environment.tls.use_system_roots = false;
+    environment
+}
+
+fn settings_with(environment: &Environment) -> Config {
+    Config {
+        active_environment: Some(environment.id.clone()),
+        environments: vec![environment.clone()],
+        ..Config::default()
+    }
+}
+
+/// ENV-03: when an environment changes from a password to a client
+/// certificate, its password leaves the keychain.
+#[test]
+fn switching_to_a_client_certificate_removes_the_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path());
+    paths.create_dirs().unwrap();
+    let environment = unreachable_environment("lab");
+    let id = environment.id.clone();
+    paths
+        .config_store()
+        .save(&settings_with(&environment))
+        .unwrap();
+    let secrets = Arc::new(DemoSecrets::default());
+    secrets.put(&id, Some(SecretString::from("old-password")));
+    let keychain = secrets.clone();
+    run_app(
+        crate::WINDOW_SIZE,
+        live_app(paths, secrets),
+        Body::Async(Box::new(move |app, cx| {
+            async move {
+                let mut changed = environment.clone();
+                changed.auth = AuthConfig::ClientCertificate {
+                    cert_path: "/etc/icygui/client.crt".into(),
+                    key_path: "/etc/icygui/client.key".into(),
+                };
+                changed.author = Some("m.keller".to_owned());
+                let task = cx.update(|cx| {
+                    let session = live::session(cx).unwrap();
+                    session.update(cx, |session, cx| {
+                        session.save_environment(changed, None, cx)
+                    })
+                });
+                task.await.unwrap();
+                assert!(keychain.get(&id).unwrap().is_none(), "the password is gone");
+                cx.update(|cx| {
+                    assert!(matches!(
+                        app.state.read(cx).environment().unwrap().auth,
+                        AuthConfig::ClientCertificate { .. }
+                    ));
+                    assert!(app.state.read(cx).notice().is_none(), "nothing left over");
+                });
+            }
+            .boxed_local()
+        })),
+    );
+}
+
+/// ENV-03, ENV-04: a keychain that can't be read or written says so: the
+/// test names the keychain (not a missing password), and a password that
+/// couldn't be deleted with its environment is reported with the entry to
+/// remove by hand.
+#[test]
+fn keychain_failures_are_named_not_swallowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path());
+    paths.create_dirs().unwrap();
+    let environment = unreachable_environment("lab");
+    let id = environment.id.clone();
+    paths
+        .config_store()
+        .save(&settings_with(&environment))
+        .unwrap();
+    run_app(
+        crate::WINDOW_SIZE,
+        live_app(paths, Arc::new(BrokenKeychain)),
+        Body::Async(Box::new(move |app, cx| {
+            async move {
+                let test = cx.update(|cx| {
+                    let session = live::session(cx).unwrap();
+                    session.update(cx, |session, cx| {
+                        session.test_environment(environment.clone(), None, cx)
+                    })
+                });
+                match test.await {
+                    Err(ic_core::ConnectionFailure::Other(message)) => {
+                        assert!(message.contains("keychain couldn't be read"), "{message}");
+                        assert!(message.contains("locked"), "{message}");
+                    }
+                    other => panic!("expected the keychain's error, got {other:?}"),
+                }
+                cx.update(|cx| {
+                    let session = live::session(cx).unwrap();
+                    assert!(session.update(cx, |session, cx| session.delete_environment(&id, cx)));
+                });
+                wait_for(&app, &cx, "the leftover's report", CONNECT, |app, cx| {
+                    app.state
+                        .read(cx)
+                        .notice()
+                        .is_some_and(|notice| notice.problem)
+                })
+                .await;
+                cx.update(|cx| {
+                    let notice = app.state.read(cx).notice().unwrap().clone();
+                    let detail = notice.detail.unwrap_or_default();
+                    assert!(detail.contains("still in the keychain"), "{detail}");
+                    assert!(detail.contains(&id), "names the entry: {detail}");
+                    assert!(app.state.read(cx).environments().is_empty());
                 });
             }
             .boxed_local()

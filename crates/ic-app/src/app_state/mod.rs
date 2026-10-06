@@ -399,6 +399,11 @@ impl AppState {
         self.connection.on_engine_error(error);
     }
 
+    /// The engine stopped on its own (its events ended).
+    pub(crate) fn engine_stopped(&mut self, error: String) {
+        self.connection.on_engine_stopped(error);
+    }
+
     fn send(&self, command: Command) {
         if let Some(core) = &self.core {
             core.send(command);
@@ -407,9 +412,26 @@ impl AppState {
         }
     }
 
-    /// Whether this is the `--demo` environment (or the test fixture).
+    /// Whether this is the `--demo` session (or the test fixture): nothing
+    /// is saved.
     pub(crate) fn is_demo(&self) -> bool {
         self.mode != Mode::Live
+    }
+
+    /// Whether the active environment is simulated: one of `--demo`'s
+    /// built-in environments (or the test fixture), labelled "demo" in the
+    /// title, the footer and the tray (ENV-10). An environment added
+    /// while the demo runs talks to a real Icinga, and its actions are
+    /// real, so it isn't.
+    pub(crate) fn is_demo_environment(&self) -> bool {
+        match self.mode {
+            Mode::Live => false,
+            Mode::Demo => self
+                .active_environment_id()
+                .is_some_and(crate::live::demo::is_built_in),
+            #[cfg(test)]
+            Mode::Fixture => true,
+        }
     }
 
     /// The settings.

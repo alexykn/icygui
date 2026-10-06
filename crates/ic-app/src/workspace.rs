@@ -43,6 +43,7 @@ use crate::actions::{
     OpenNotifications, OpenSettings, ReviewCertificate, SelectDashboard, ShowAbout,
     WORKSPACE_CONTEXT,
 };
+use crate::app_state::editing::DashboardDraft;
 use crate::app_state::{AppState, UserNotice};
 use crate::chrome::{self, Controls, WindowControls, WindowDrag};
 use crate::dashboard::{DashboardEvent, DashboardView};
@@ -150,6 +151,8 @@ pub(crate) enum Confirmed {
     Environment(String),
     /// Send an action (many checks, bulk removals).
     Action(ActionSpec),
+    /// Leave the dashboard editor, dropping its changes.
+    DiscardEdits,
 }
 
 /// A question before something that can't be undone, or that weighs on
@@ -241,8 +244,19 @@ pub(crate) struct Workspace {
     dashboard: Entity<DashboardView>,
     tabs: HashMap<ObjectKey, TabPane>,
     editor: Option<OpenEditor>,
+    /// Changes of an editor that closed because something else was shown:
+    /// editing the same dashboard again continues with them.
+    kept_draft: Option<(EditorTarget, DashboardDraft)>,
     onboarding: Option<(Entity<EnvironmentEditor>, Subscription)>,
     modal: Option<OpenModal>,
+    /// The environment active when the open modal opened.
+    modal_environment: Option<String>,
+    /// The active environment, as last seen: dialogs about another one
+    /// close when it changes.
+    environment: Option<String>,
+    /// A requested action waits for the open modal to close, and the user
+    /// was told.
+    request_waits: bool,
     modal_focus: FocusHandle,
     sidebar_open: bool,
     shown: Shown,
@@ -303,9 +317,13 @@ impl Workspace {
                 }
             }
         });
-        let (shown, title) = {
+        let (shown, title, environment) = {
             let state = state.read(cx);
-            (Shown::Dashboard(state.selected().cloned()), title_of(state))
+            (
+                Shown::Dashboard(state.selected().cloned()),
+                title_of(state),
+                state.active_environment_id().map(str::to_owned),
+            )
         };
         let mut workspace = Self {
             state,
@@ -313,8 +331,12 @@ impl Workspace {
             dashboard,
             tabs: HashMap::new(),
             editor: None,
+            kept_draft: None,
             onboarding: None,
             modal: None,
+            modal_environment: None,
+            environment,
+            request_waits: false,
             modal_focus: cx.focus_handle(),
             sidebar_open: true,
             shown,
@@ -475,6 +497,15 @@ impl Workspace {
         }
     }
 
+    /// The open certificate review.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn certificate_review(&self) -> Option<&Entity<CertificateReview>> {
+        match &self.modal {
+            Some(OpenModal::Certificate(review)) => Some(&review.view),
+            _ => None,
+        }
+    }
+
     /// The open environment editor dialog.
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn environment_editor(&self) -> Option<&Entity<EnvironmentEditor>> {
@@ -507,6 +538,15 @@ impl Workspace {
     /// onboarding form current, and moves the focus when the main area
     /// switches between the dashboard and a tab.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self
+            .state
+            .read(cx)
+            .active_environment_id()
+            .map(str::to_owned);
+        if active != self.environment {
+            self.environment = active;
+            self.environment_changed(window, cx);
+        }
         let state = self.state.read(cx);
         let open: Vec<ObjectKey> = state.tabs().to_vec();
         let shown = match state.active_tab() {
@@ -535,8 +575,9 @@ impl Workspace {
             .editor
             .as_ref()
             .is_some_and(|editor| editor.opened_over != shown)
+            && let Some(editor) = self.editor.take()
         {
-            self.editor = None;
+            self.keep_changes(&editor, cx);
         }
         if shown != self.shown {
             self.shown = shown;
@@ -545,13 +586,61 @@ impl Workspace {
             }
         }
         self.sync_onboarding(window, cx);
-        if self.state.read(cx).has_request() {
-            let request = self.state.update(cx, |state, _| state.take_request());
-            if let Some(request) = request {
-                self.handle_request(request, window, cx);
-            }
-        }
+        self.pick_up_request(window, cx);
         cx.notify();
+    }
+
+    /// Another environment is active (from the footer, the palette or
+    /// the tray): what was opened for the old one goes, so nothing meant
+    /// for it reaches the new one (an acknowledgement for `staging` must
+    /// never go to production). The environment editor and the about
+    /// dialog stay.
+    fn environment_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor = None;
+        self.kept_draft = None;
+        self.request_waits = false;
+        self.state.update(cx, |state, _| {
+            if let Some(request) = state.take_request() {
+                tracing::info!(
+                    action = request.action.label(),
+                    "dropped a request for the previous environment"
+                );
+            }
+        });
+        if !matches!(
+            self.modal,
+            None | Some(OpenModal::Environment(_) | OpenModal::About)
+        ) {
+            self.close_modal(window, cx);
+        }
+    }
+
+    /// Carries out a requested action once no modal is open; while one
+    /// is, the request waits (a desktop notification's Acknowledge while
+    /// the palette is open) and a toast says so.
+    fn pick_up_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.state.read(cx).has_request() {
+            self.request_waits = false;
+            return;
+        }
+        if self.modal.is_some() {
+            if !self.request_waits {
+                self.request_waits = true;
+                self.state.update(cx, |state, cx| {
+                    state.inform(
+                        "An action waits for this dialog",
+                        Some("It opens once the dialog is closed.".to_owned()),
+                    );
+                    cx.notify();
+                });
+            }
+            return;
+        }
+        self.request_waits = false;
+        let request = self.state.update(cx, |state, _| state.take_request());
+        if let Some(request) = request {
+            self.handle_request(request, window, cx);
+        }
     }
 
     /// Shows the onboarding form while there is no environment (not in the
@@ -735,14 +824,21 @@ impl Workspace {
             sidebar.close_menu(cx);
         });
         self.modal = Some(modal);
+        self.modal_environment = self
+            .state
+            .read(cx)
+            .active_environment_id()
+            .map(str::to_owned);
         self.focus_main(window, cx);
         cx.notify();
     }
 
-    /// Closes the open modal; the keyboard goes back to the main area.
+    /// Closes the open modal; the keyboard goes back to the main area, or
+    /// to the dialog of an action that waited for this one.
     pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.modal.take().is_some() {
             self.focus_main(window, cx);
+            self.pick_up_request(window, cx);
             cx.notify();
         }
     }
@@ -909,10 +1005,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.modal.is_some() {
-            // A dialog is open already; the request came from behind it.
-            return;
-        }
         let actions::ActionRequest { action, targets } = request;
         let snapshot = self.state.read(cx).snapshot().clone();
         let eligible = match action {
@@ -1145,15 +1237,29 @@ impl Workspace {
             });
             self.sync(window, cx);
         }
-        let Some(draft) =
+        let Some(saved) =
             crate::editor::model::initial_draft(self.state.read(cx), &target, group_id)
         else {
             return;
         };
+        // Changes kept from the last time this dashboard was edited (a new
+        // one: in the same group) come back.
+        let draft = match self.kept_draft.take() {
+            Some((kept, draft))
+                if kept == target
+                    && (target != EditorTarget::New || draft.group_id == saved.group_id) =>
+            {
+                draft
+            }
+            other => {
+                self.kept_draft = other;
+                saved.clone()
+            }
+        };
         let state = self.state.clone();
         let sidebar_open = self.sidebar_open;
         let view = cx.new(|cx| {
-            let mut editor = DashboardEditor::new(state, target, draft, window, cx);
+            let mut editor = DashboardEditor::new(state, target, saved, draft, window, cx);
             editor.set_sidebar_open(sidebar_open, cx);
             editor
         });
@@ -1167,6 +1273,7 @@ impl Workspace {
                         this.focus_main(window, cx);
                         cx.notify();
                     }
+                    EditorEvent::DiscardChanges => this.confirm_discard(window, cx),
                     EditorEvent::Delete(reference) => {
                         this.confirm_delete_dashboard(reference, window, cx);
                     }
@@ -1179,6 +1286,44 @@ impl Workspace {
         });
         self.focus_main(window, cx);
         cx.notify();
+    }
+
+    /// Keeps the changes of `editor`, closing because something else is
+    /// shown, for the next time the same dashboard is edited, and says so.
+    fn keep_changes(&mut self, editor: &OpenEditor, cx: &mut Context<Self>) {
+        let editor = editor.view.read(cx);
+        let Some(draft) = editor.changes().cloned() else {
+            return;
+        };
+        let title = editor.title();
+        self.kept_draft = Some((editor.target().clone(), draft));
+        self.state.update(cx, |state, cx| {
+            state.inform(
+                format!("Your changes to {title} are kept"),
+                Some("Edit it again to continue, or discard them there.".to_owned()),
+            );
+            cx.notify();
+        });
+    }
+
+    /// Asks before the dashboard editor drops its changes (DASH-04).
+    fn confirm_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let editor = editor.view.read(cx);
+        let detail = match editor.target() {
+            EditorTarget::New => "The new dashboard isn't created.",
+            EditorTarget::Existing(_) => "The dashboard keeps what was saved.",
+        };
+        let confirmation = Confirmation {
+            title: format!("Discard the changes to {}?", editor.title()),
+            detail: detail.to_owned(),
+            confirm: "discard changes",
+            danger: true,
+            action: Confirmed::DiscardEdits,
+        };
+        self.open_modal(OpenModal::Confirm(confirmation), window, cx);
     }
 
     fn confirm_delete_group(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1264,8 +1409,23 @@ impl Workspace {
         let Some(OpenModal::Confirm(confirmation)) = self.modal.take() else {
             return;
         };
+        let same_environment =
+            self.modal_environment.as_deref() == self.state.read(cx).active_environment_id();
         match confirmation.action {
+            Confirmed::Action(spec) if !same_environment => {
+                let label = spec.kind.label();
+                self.state.update(cx, |state, cx| {
+                    state.inform(
+                        format!("Couldn't {label}"),
+                        Some(crate::operate::dialog::ENVIRONMENT_CHANGED.to_owned()),
+                    );
+                    cx.notify();
+                });
+            }
             Confirmed::Action(spec) => self.submit(spec, cx),
+            Confirmed::DiscardEdits => {
+                self.editor = None;
+            }
             Confirmed::Group(id) => {
                 self.state.update(cx, |state, cx| {
                     if state.delete_group(&id) {
@@ -1274,10 +1434,20 @@ impl Workspace {
                 });
             }
             Confirmed::Dashboard(reference) => {
-                if self.editor.as_ref().is_some_and(|editor| {
-                    *editor.view.read(cx).target() == EditorTarget::Existing(reference.clone())
-                }) {
+                let edited = EditorTarget::Existing(reference.clone());
+                if self
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| *editor.view.read(cx).target() == edited)
+                {
                     self.editor = None;
+                }
+                if self
+                    .kept_draft
+                    .as_ref()
+                    .is_some_and(|(target, _)| *target == edited)
+                {
+                    self.kept_draft = None;
                 }
                 self.state.update(cx, |state, cx| {
                     if state.delete_dashboard(&reference) {
@@ -1300,6 +1470,7 @@ impl Workspace {
             }
         }
         self.focus_main(window, cx);
+        self.pick_up_request(window, cx);
         cx.notify();
     }
 
@@ -1335,8 +1506,11 @@ impl Workspace {
         if id.is_some() && environment.is_none() {
             return;
         }
-        let editor = cx
-            .new(|cx| EnvironmentEditor::new(environment.as_ref(), EditorMode::Dialog, window, cx));
+        let demo = self.state.read(cx).is_demo();
+        let editor = cx.new(|cx| {
+            EnvironmentEditor::new(environment.as_ref(), EditorMode::Dialog, window, cx)
+                .in_demo(demo)
+        });
         let events = cx.subscribe_in(
             &editor,
             window,
@@ -1368,6 +1542,22 @@ impl Workspace {
         match id {
             Some(id) => self.open_environment_editor(Some(&id), window, cx),
             None => self.open_environment_editor(None, window, cx),
+        }
+    }
+
+    /// The banner's "Restart": a new engine for the active environment.
+    #[expect(
+        clippy::unused_self,
+        reason = "an action handler; the session does the work"
+    )]
+    fn on_restart_engine(
+        &mut self,
+        _: &actions::RestartEngine,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = live::session(cx) {
+            session.update(cx, live::Session::restart_engine);
         }
     }
 
@@ -1875,6 +2065,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_new_dashboard))
             .on_action(cx.listener(Self::on_review_certificate))
             .on_action(cx.listener(Self::on_edit_environment))
+            .on_action(cx.listener(Self::on_restart_engine))
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_show_about))
             .on_action(cx.listener(Self::on_open_notifications))
@@ -1973,7 +2164,7 @@ fn title_of(state: &AppState) -> SharedString {
         state
             .environment()
             .map(|environment| environment.name.as_str()),
-        state.is_demo(),
+        state.is_demo_environment(),
     )
 }
 

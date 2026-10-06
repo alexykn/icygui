@@ -307,7 +307,7 @@ fn open_main_window(
             state
                 .environment()
                 .map(|environment| environment.name.as_str()),
-            state.is_demo(),
+            state.is_demo_environment(),
         )
     };
     let window = cx.open_window(
@@ -338,6 +338,10 @@ fn open_main_window(
                 WindowBackgroundAppearance::Opaque
             },
             app_id: Some(APP_ID.to_owned()),
+            // X11 shows it in task bars and switchers (BG-06); Wayland
+            // compositors and macOS take the icon of the desktop entry or
+            // the app bundle that matches the app id.
+            icon: window_icon(),
             ..WindowOptions::default()
         },
         |window, cx| {
@@ -347,4 +351,27 @@ fn open_main_window(
     )?;
     cx.activate(true);
     Ok(window)
+}
+
+/// The app icon for the window (the 64 px rendering of the logo).
+fn window_icon() -> Option<Arc<image::RgbaImage>> {
+    const PNG: &[u8] = include_bytes!("../../../assets/icons/icygui-64.png");
+    match image::load_from_memory_with_format(PNG, image::ImageFormat::Png) {
+        Ok(icon) => Some(Arc::new(icon.into_rgba8())),
+        Err(error) => {
+            tracing::warn!(%error, "the window icon couldn't be decoded");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_window_icon_is_the_logo() {
+        let icon = super::window_icon().expect("the bundled icon decodes");
+        assert_eq!(icon.dimensions(), (64, 64));
+        // Not blank: the logo's orange core is opaque.
+        assert!(icon.pixels().any(|pixel| pixel.0[3] == 255));
+    }
 }

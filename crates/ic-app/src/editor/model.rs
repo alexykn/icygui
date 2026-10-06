@@ -82,6 +82,20 @@ pub(crate) fn status_text(result: &DashboardResult) -> String {
     }
 }
 
+/// Checks that `filter` parses, as the core does before evaluating it:
+/// the error names the line and column like the core's (`… (line 1,
+/// column 50)`).
+///
+/// # Errors
+///
+/// The filter doesn't parse.
+pub(crate) fn check_filter(filter: &str) -> Result<(), String> {
+    ic_filter::Filter::parse(filter).map(drop).map_err(|error| {
+        let (line, column) = error.line_column(filter);
+        format!("{} (line {line}, column {column})", error.message)
+    })
+}
+
 /// Where a filter error points: the message's trailing `(line L, column
 /// C)`, as `ic-core` writes it, as 1-based line and column.
 pub(crate) fn error_position(message: &str) -> Option<(usize, usize)> {
@@ -93,15 +107,54 @@ pub(crate) fn error_position(message: &str) -> Option<(usize, usize)> {
     (line > 0 && column > 0).then_some((line, column))
 }
 
+/// How many characters of the offending line the error marker shows: what
+/// fits the inspector's filter field in the monospace font.
+pub(crate) const MARKER_CHARS: usize = 40;
+
 /// The line of `source` an error points at, and a caret under its column
-/// (`^`), for the error marker under the filter field.
-pub(crate) fn error_marker(source: &str, line: usize, column: usize) -> Option<(String, String)> {
-    let text = source.lines().nth(line.checked_sub(1)?)?;
+/// (`^`), for the error marker under the filter field. At most `width`
+/// characters show: a longer line is cut around the column (with `…` where
+/// it was cut), so the caret is always in view.
+pub(crate) fn error_marker(
+    source: &str,
+    line: usize,
+    column: usize,
+    width: usize,
+) -> Option<(String, String)> {
+    let text: Vec<char> = source.lines().nth(line.checked_sub(1)?)?.chars().collect();
     // Past the end of the line (an unexpected end): the caret follows the
     // last character.
-    let width = text.chars().count();
-    let caret = format!("{}^", " ".repeat(column.saturating_sub(1).min(width)));
-    Some((text.to_owned(), caret))
+    let caret_at = column.saturating_sub(1).min(text.len());
+    let width = width.max(12);
+    // The columns the line and its caret need.
+    let span = text.len().max(caret_at + 1);
+    if span <= width {
+        return Some((text.iter().collect(), format!("{}^", " ".repeat(caret_at))));
+    }
+    // A window ending a little after the caret (or at the line's end),
+    // with `…` where the line was cut.
+    let after = 8.min(width / 3);
+    let window_end = (caret_at + 1 + after).min(span);
+    let cut_after = window_end < text.len();
+    let keep = width - 1 - usize::from(cut_after);
+    let (shown, caret_column) = match window_end.checked_sub(keep) {
+        Some(start) if start > 0 => {
+            let end = window_end.min(text.len());
+            let mut shown = String::from("…");
+            shown.extend(&text[start..end]);
+            if cut_after {
+                shown.push('…');
+            }
+            (shown, 1 + caret_at - start)
+        }
+        // The caret is near the start: cut the end only.
+        _ => {
+            let mut shown: String = text[..width - 1].iter().collect();
+            shown.push('…');
+            (shown, caret_at)
+        }
+    };
+    Some((shown, format!("{}^", " ".repeat(caret_column))))
 }
 
 #[cfg(test)]
@@ -114,6 +167,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn filters_are_checked_like_the_core_checks_them() {
+        assert_eq!(check_filter(""), Ok(()));
+        assert_eq!(check_filter("host.vars.role == \"db\""), Ok(()));
+        let error =
+            check_filter("host.vars.role == \"postgres\" && service.state != ").unwrap_err();
+        assert_eq!(error_position(&error), Some((1, 50)), "{error}");
+    }
+
+    #[test]
     fn errors_point_at_their_line_and_column() {
         assert_eq!(
             error_position("unexpected token `&&` (line 2, column 14)"),
@@ -122,12 +184,48 @@ mod tests {
         assert_eq!(error_position("no position"), None);
         assert_eq!(error_position("(line 0, column 1)"), None);
         assert_eq!(error_position("bad (line x, column 1)"), None);
-        let (text, caret) = error_marker("a == 1 &&\nb ==", 2, 5).unwrap();
+        let (text, caret) = error_marker("a == 1 &&\nb ==", 2, 5, MARKER_CHARS).unwrap();
         assert_eq!(text, "b ==");
         assert_eq!(caret, "    ^");
-        let (_, caret) = error_marker("ab", 1, 9).unwrap();
+        let (_, caret) = error_marker("ab", 1, 9, MARKER_CHARS).unwrap();
         assert_eq!(caret, "  ^", "the caret stops after the line");
-        assert!(error_marker("one line", 3, 1).is_none());
+        assert!(error_marker("one line", 3, 1, MARKER_CHARS).is_none());
+    }
+
+    /// The character the caret points at in a marker (`None` past the
+    /// end).
+    fn under_caret(text: &str, caret: &str) -> Option<char> {
+        text.chars().nth(caret.chars().count() - 1)
+    }
+
+    #[test]
+    fn long_lines_are_cut_around_the_error() {
+        let filter = "host.vars.role == \"postgres\" && service.state != ";
+        // The end of the filter, column 50: shown with what leads to it.
+        let (text, caret) = error_marker(filter, 1, 50, 30).unwrap();
+        assert!(text.chars().count() <= 30, "{text}");
+        assert!(caret.chars().count() <= 30, "{caret}");
+        assert!(text.starts_with('…'), "{text}");
+        assert!(text.ends_with("service.state != "), "{text}");
+        assert_eq!(under_caret(&text, &caret), None, "after the last character");
+
+        // An error in the middle of a long line: context on both sides.
+        let long = format!(
+            "{} && oops( && {}",
+            "a == 1 && ".repeat(5),
+            "b == 2 && ".repeat(5)
+        );
+        let column = long.find("oops").unwrap() + 1;
+        let (text, caret) = error_marker(&long, 1, column, 30).unwrap();
+        assert_eq!(text.chars().count(), 30, "{text}");
+        assert!(text.starts_with('…') && text.ends_with('…'), "{text}");
+        assert_eq!(under_caret(&text, &caret), Some('o'));
+        assert!(text.contains("oops("));
+
+        // Near the start: cut at the end only.
+        let (text, caret) = error_marker(&long, 1, 3, 30).unwrap();
+        assert!(!text.starts_with('…') && text.ends_with('…'), "{text}");
+        assert_eq!(under_caret(&text, &caret), Some('='));
     }
 
     #[test]
@@ -149,7 +247,7 @@ mod tests {
         let result = DashboardResult {
             rows: Arc::new(rows),
             summary,
-            error: None,
+            ..DashboardResult::default()
         };
         assert_eq!(status_text(&result), "valid · 11 matches · 2 shown");
         let all = DashboardResult {
@@ -158,7 +256,7 @@ mod tests {
                 ok: 1,
                 ..Summary::default()
             },
-            error: None,
+            ..DashboardResult::default()
         };
         assert_eq!(status_text(&all), "valid · 1 match");
     }

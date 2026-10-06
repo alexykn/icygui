@@ -59,7 +59,7 @@ pub(crate) fn object_row(
             Some(ObjectRow {
                 state: CheckableState::Host(host.state),
                 handled: host.is_handled(),
-                since: format::since(host.check.last_state_change, now),
+                since: format::time_in_state(&host.check, now),
                 name: host.display_name.clone(),
                 host: None,
                 output: output(&host.check, CheckableState::Host(host.state)),
@@ -75,7 +75,7 @@ pub(crate) fn object_row(
             Some(ObjectRow {
                 state,
                 handled: service.is_handled(host_problem),
-                since: format::since(service.check.last_state_change, now),
+                since: format::time_in_state(&service.check, now),
                 name: service.display_name.clone(),
                 host: Some(host.map_or_else(
                     || service_key.host.to_string(),
@@ -358,6 +358,23 @@ mod tests {
         assert_eq!(row.host, None);
         assert_eq!(row.since, "12m");
         assert_eq!(row.state, CheckableState::Host(HostState::Down));
+    }
+
+    #[test]
+    fn a_zero_last_state_change_shows_the_last_hard_change() {
+        // Real Icinga 2.15 for a host that came up down: no
+        // last_state_change, the time is in last_hard_state_change.
+        let mut down = host("k8s-node-11", HostState::Down);
+        down.check.last_state_change = Timestamp::EPOCH;
+        down.check.last_hard_state_change = ago(5. * 3600. + 40. * 60.);
+        let snapshot = snapshot(vec![down.clone()], Vec::new(), Vec::new());
+        let row = object_row(&snapshot, &ObjectKey::host("k8s-node-11"), now()).unwrap();
+        assert_eq!(row.since, "5h");
+        assert!(
+            crate::pane::model::host_subtitle(&down, now()).contains("down 5h"),
+            "{}",
+            crate::pane::model::host_subtitle(&down, now())
+        );
     }
 
     #[test]

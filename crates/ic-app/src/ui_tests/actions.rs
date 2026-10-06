@@ -784,3 +784,33 @@ fn the_panes_menu_offers_the_other_actions_and_copying() {
         );
     });
 }
+
+/// NOTE-01: an action asked for while a dialog is open (a desktop
+/// notification's Acknowledge while the palette is open) waits for it,
+/// says so, and opens once the dialog is closed.
+#[test]
+fn a_request_behind_an_open_dialog_waits_for_it() {
+    run(FixtureOptions::default(), |app, cx| {
+        app.keys(cx, "ctrl-k");
+        assert_eq!(modal(app, cx), Some(ModalKind::Palette));
+        request(app, cx, ObjectAction::Acknowledge, vec![replication()]);
+        assert_eq!(
+            modal(app, cx),
+            Some(ModalKind::Palette),
+            "the palette stays"
+        );
+        assert!(
+            toasts(app, cx)
+                .iter()
+                .any(|(_, title, _)| title == "An action waits for this dialog"),
+            "{:?}",
+            toasts(app, cx)
+        );
+        app.keys(cx, "escape");
+        assert_eq!(
+            modal(app, cx),
+            Some(ModalKind::Action(DialogKind::Acknowledge))
+        );
+        assert_eq!(dialog(app, cx).read(cx).eligible().targets, [replication()]);
+    });
+}

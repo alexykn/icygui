@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ic_model::{
-    CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
+    CheckInfo, CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
     InstanceStatus, Notification, Notified, ObjectKey, Service, ServiceGroup, ServiceKey,
     Timestamp,
 };
@@ -102,13 +102,32 @@ impl Snapshot {
     }
 }
 
+/// When an object's current state began, for "time in state" and the
+/// *last state change* sort: Icinga's `last_state_change`, or, when that
+/// is 0, `last_hard_state_change`. Icinga 2 reports `last_state_change = 0`
+/// for objects that have been in their state since their first check
+/// (a host that came up down), while `last_hard_state_change` has the
+/// time. [`Timestamp::EPOCH`] when neither is known (pending objects).
+#[must_use]
+pub fn state_since(check: &CheckInfo) -> Timestamp {
+    check
+        .last_state_change
+        .non_zero()
+        .or_else(|| check.last_hard_state_change.non_zero())
+        .unwrap_or(Timestamp::EPOCH)
+}
+
 /// A dashboard's rows and counts, evaluated by the runtime.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DashboardResult {
     /// Rows in display order (filtered, sorted, grouped).
     pub rows: Arc<Vec<DashboardRow>>,
-    /// Counts for the summary bar and the sidebar.
+    /// Counts over every matching object (before `problems_only` and
+    /// `hide_handled`): the sidebar's count and dot.
     pub summary: Summary,
+    /// Counts over the objects `rows` lists (after `problems_only` and
+    /// `hide_handled`): the summary bar, which reads as the list's size.
+    pub shown: Summary,
     /// The filter didn't parse or evaluate; `rows` is empty.
     pub error: Option<String>,
 }
@@ -127,8 +146,10 @@ pub enum DashboardRow {
     Object(ObjectKey),
 }
 
-/// Counts over a dashboard's matching objects (before `hide_handled`), for
-/// the summary bar (`12 critical · 29 warning · 24 unknown`) and the sidebar.
+/// Counts over a dashboard's objects: all matching ones
+/// ([`DashboardResult::summary`], the sidebar) or the listed ones
+/// ([`DashboardResult::shown`], the summary bar: `12 critical · 29 warning
+/// · 24 unknown`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Summary {
     /// Critical services.
@@ -152,4 +173,27 @@ pub struct Summary {
     /// The worst unhandled state: the sidebar dot. `None` if nothing is
     /// unhandled.
     pub worst_unhandled: Option<CheckableState>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_state_began_at_the_last_state_change_or_the_last_hard_one() {
+        let at = Timestamp::from_unix_seconds;
+        let mut check = CheckInfo {
+            last_state_change: at(200.0),
+            last_hard_state_change: at(100.0),
+            last_check: Some(at(300.0)),
+            ..CheckInfo::default()
+        };
+        assert_eq!(state_since(&check), at(200.0));
+        // What Icinga 2.15 reports for a host that came up down.
+        check.last_state_change = Timestamp::EPOCH;
+        assert_eq!(state_since(&check), at(100.0));
+        // Never changed: unknown, not the last check.
+        check.last_hard_state_change = Timestamp::EPOCH;
+        assert_eq!(state_since(&check), Timestamp::EPOCH);
+    }
 }

@@ -12,6 +12,8 @@
 //!   quits.
 //! - Two launches of the real app: the second hands over to the first,
 //!   whose window comes forward, and exits.
+//! - Without a notification server, notifications cost one warning and no
+//!   thread or connection each.
 //!
 //! Each test runs its body in a child process of its own under
 //! `dbus-run-session` with a bus that has no activatable services, so
@@ -207,10 +209,9 @@ impl Notifications {
     }
 }
 
-/// Serves the tray host and the notification server; returns the
-/// notifications received and the server's connection (to emit clicks).
-fn serve_desktop() -> (Connection, Connection, Arc<Mutex<Vec<Received>>>) {
-    let watcher = zbus::blocking::connection::Builder::session()
+/// Serves a tray host.
+fn serve_tray() -> Connection {
+    zbus::blocking::connection::Builder::session()
         .unwrap()
         .name("org.kde.StatusNotifierWatcher")
         .unwrap()
@@ -222,7 +223,13 @@ fn serve_desktop() -> (Connection, Connection, Arc<Mutex<Vec<Received>>>) {
         )
         .unwrap()
         .build()
-        .unwrap();
+        .unwrap()
+}
+
+/// Serves the tray host and the notification server; returns the
+/// notifications received and the server's connection (to emit clicks).
+fn serve_desktop() -> (Connection, Connection, Arc<Mutex<Vec<Received>>>) {
+    let watcher = serve_tray();
     let server = Notifications::default();
     let received = server.received.clone();
     let notifications = zbus::blocking::connection::Builder::session()
@@ -431,14 +438,8 @@ fn check_problem_notification(notification: &Received) {
     );
     assert_eq!(
         notification.actions,
-        [
-            "default",
-            "Open",
-            "acknowledge",
-            "Acknowledge",
-            "open",
-            "Open"
-        ]
+        ["default", "", "acknowledge", "Acknowledge", "open", "Open"],
+        "Open once: the body's own action has no label of its own"
     );
     assert!(!notification.body.is_empty());
 }
@@ -539,6 +540,64 @@ fn the_demo_runs_in_the_tray_and_notifies_the_desktop() {
     });
     assert!(status.success(), "{status}");
     eprintln!("notified about {problem}");
+}
+
+/// The threads of process `pid` named `name` (as the kernel shortens it).
+fn threads_named(pid: u32, name: &str) -> usize {
+    fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|task| {
+            fs::read_to_string(task.path().join("comm")).is_ok_and(|comm| comm.trim() == name)
+        })
+        .count()
+}
+
+/// Without a notification server (a tiling WM without a notification
+/// daemon), notifications stay in the centre: one warning, then a pause,
+/// and no thread or bus connection per notification, for an app that runs
+/// in the tray for weeks.
+#[test]
+fn a_missing_notification_server_costs_nothing_per_notification() {
+    if !is_child() {
+        run_child("a_missing_notification_server_costs_nothing_per_notification");
+        return;
+    }
+    let bus = Connection::session().unwrap();
+    let _tray = serve_tray();
+    let (_dir, home) = home();
+    let args = ["--demo", "--background"];
+    let mut app = Running(launch(
+        &home,
+        &args,
+        &[("ICYGUI_DEMO_SEED", "3"), ("ICYGUI_DEMO_STORM", "4")],
+    ));
+    let pid = app.0.id();
+    wait_until("the tray item", 30, || tray_item(&bus, pid).is_some());
+    wait_until("the missing server noticed", 90, || {
+        log_of(&home, &args).contains("no notification server on the session bus")
+    });
+    // Several storms more, each with notifications to post.
+    thread::sleep(Duration::from_secs(14));
+    let log = log_of(&home, &args);
+    assert_eq!(
+        log.matches("no notification server on the session bus")
+            .count(),
+        1,
+        "warned once:\n{log}"
+    );
+    assert!(
+        !log.contains("refused a notification"),
+        "no Notify without a server:\n{log}"
+    );
+    assert!(
+        threads_named(pid, "icygui-notify-c") <= 1,
+        "one listener at most, not one per notification"
+    );
+    let item = tray_item(&bus, pid).unwrap();
+    click(&bus, &item, "Quit icygui");
+    let status = wait_exit(&mut app.0, 20).expect("quits");
+    assert!(status.success());
 }
 
 #[test]

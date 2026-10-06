@@ -246,7 +246,7 @@ impl PaletteIndex {
         // actions on the objects it names follow, and the objects are
         // searched for the rest (`ack db-prod` lists db-prod's objects,
         // not every `backup`).
-        let mut items = best(
+        let mut commands = best(
             &self.commands,
             &Query::new(&query),
             Section::Commands.limit(true),
@@ -255,25 +255,35 @@ impl PaletteIndex {
         let objects_query = match verb(&query) {
             Some((action, rest)) if !rest.is_empty() => {
                 let rest = Query::new(rest);
-                items.extend(self.act_on(&action, &rest));
+                let acts = self.act_on(&action, &rest);
+                if !acts.is_empty() {
+                    // What the verb asked for comes first.
+                    commands.top = Some(i64::MAX);
+                    commands.items.extend(acts);
+                }
                 rest
             }
             _ => Query::new(&query),
         };
+        let mut sections = vec![commands];
         for (section, candidates) in [
             (Section::Dashboards, &self.dashboards),
             (Section::Hosts, &self.hosts),
             (Section::Services, &self.services),
             (Section::Environments, &self.environments),
         ] {
-            items.extend(best(
+            sections.push(best(
                 candidates,
                 &objects_query,
                 section.limit(true),
                 Rank::Score,
             ));
         }
-        items
+        // The section with the best match first, so Enter runs it: `prod`
+        // selects "Switch to prod-cluster", not a scattered match in
+        // "Import dashboards…". Ties keep the usual order.
+        sections.sort_by_key(|found| Reverse(found.top));
+        sections.into_iter().flat_map(|found| found.items).collect()
     }
 
     /// "Acknowledge · <object>" for the objects `rest` names, problems
@@ -291,10 +301,10 @@ impl PaletteIndex {
             .iter()
             .find(|(denied, _)| denied == action)
             .map(|(_, denial)| denial.clone());
-        let pick = |candidates: &[Candidate], limit| best(candidates, rest, limit, rank);
+        let pick = |candidates: &[Candidate], limit| best(candidates, rest, limit, rank).items;
         let services = pick(&self.services, 4);
         let hosts = pick(&self.hosts, 2);
-        services
+        let mut items: Vec<PaletteItem> = services
             .into_iter()
             .chain(hosts)
             .filter_map(|object| {
@@ -310,7 +320,35 @@ impl PaletteIndex {
                     denied: denied.clone(),
                 })
             })
-            .collect()
+            .collect();
+        // Every object the rest names as typed, in one request (design
+        // 1d's "run on all matches"); the dialog or the confirmation shows
+        // how many.
+        let services = all_matches(&self.services, rest, rank);
+        let hosts = all_matches(&self.hosts, rest, rank);
+        let count = services.len() + hosts.len();
+        if count > 1 {
+            let detail = [(services.len(), "service"), (hosts.len(), "host")]
+                .into_iter()
+                .filter(|(count, _)| *count > 0)
+                .map(|(count, noun)| format!("{count} {noun}{}", if count == 1 { "" } else { "s" }))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            items.push(PaletteItem {
+                section: Section::Commands,
+                label: format!("{label} · all {count} matches"),
+                detail,
+                dot: None,
+                key_hint: Some(ALL_MATCHES_KEY),
+                command: PaletteCommand::Act(
+                    action.clone(),
+                    services.into_iter().chain(hosts).collect(),
+                ),
+                matched: Vec::new(),
+                denied,
+            });
+        }
+        items
     }
 }
 
@@ -325,10 +363,46 @@ enum Rank {
     ProblemsOnly,
 }
 
+/// The key that runs a verb on all the objects it names.
+pub(crate) const ALL_MATCHES_KEY: &str = if cfg!(target_os = "macos") {
+    "⌘↵"
+} else {
+    "ctrl-↵"
+};
+
+/// The "all N matches" item of a verb query among `items`: the only item
+/// that acts on several named objects.
+pub(crate) fn all_matches_item(items: &[PaletteItem]) -> Option<usize> {
+    items.iter().position(
+        |item| matches!(&item.command, PaletteCommand::Act(_, targets) if targets.len() > 1),
+    )
+}
+
+/// Every candidate that contains each of `query`'s terms as typed (not a
+/// fuzzy match; problems only for [`Rank::ProblemsOnly`]), as objects.
+fn all_matches(candidates: &[Candidate], query: &Query, rank: Rank) -> Vec<ObjectKey> {
+    candidates
+        .iter()
+        .filter(|candidate| rank != Rank::ProblemsOnly || candidate.problem)
+        .filter(|candidate| query.contained_in(&candidate.haystack))
+        .filter_map(|candidate| candidate.item.command.object().cloned())
+        .collect()
+}
+
+/// What [`best`] found: the items, best first, and the best one's rank.
+struct Found {
+    /// The best item's rank (`None` without items).
+    top: Option<i64>,
+    items: Vec<PaletteItem>,
+}
+
 /// The best `limit` candidates for `query`, ranked by `rank`.
-fn best(candidates: &[Candidate], query: &Query, limit: usize, rank: Rank) -> Vec<PaletteItem> {
+fn best(candidates: &[Candidate], query: &Query, limit: usize, rank: Rank) -> Found {
     if limit == 0 {
-        return Vec::new();
+        return Found {
+            top: None,
+            items: Vec::new(),
+        };
     }
     let mut found: Vec<(i64, usize, Match)> = candidates
         .iter()
@@ -338,8 +412,13 @@ fn best(candidates: &[Candidate], query: &Query, limit: usize, rank: Rank) -> Ve
             let found = query.matches(&candidate.haystack)?;
             let rank = match rank {
                 Rank::Score => i64::from(found.score),
+                // A verb's objects: those named as typed before fuzzy
+                // near-misses (`ack db-prod` lists db-prod's problems
+                // before web-prod's), then the more severe.
                 Rank::ProblemsFirst | Rank::ProblemsOnly => {
-                    i64::from(candidate.severity) * 1_000 + i64::from(found.score)
+                    i64::from(query.contained_in(&candidate.haystack)) * 1_000_000_000
+                        + i64::from(candidate.severity) * 1_000
+                        + i64::from(found.score)
                 }
             };
             Some((rank, index, found))
@@ -347,7 +426,8 @@ fn best(candidates: &[Candidate], query: &Query, limit: usize, rank: Rank) -> Ve
         .collect();
     // Best first; ties keep the index order (stable).
     found.sort_by_key(|(rank, index, _)| (Reverse(*rank), *index));
-    found
+    let top = found.first().map(|(rank, _, _)| *rank);
+    let items = found
         .into_iter()
         .take(limit)
         .map(|(_, index, found)| {
@@ -360,7 +440,8 @@ fn best(candidates: &[Candidate], query: &Query, limit: usize, rank: Rank) -> Ve
                 .collect();
             item
         })
-        .collect()
+        .collect();
+    Found { top, items }
 }
 
 /// The verb a query starts with and the rest (`ack db-prod` →
@@ -971,14 +1052,49 @@ mod tests {
     }
 
     #[test]
-    fn sections_keep_their_order_and_limits() {
+    fn sections_stay_together_within_their_limits() {
         let items = index(&Focus::default()).search("o");
-        let sections: Vec<Section> = items.iter().map(|item| item.section).collect();
-        let mut sorted = sections.clone();
-        sorted.sort();
-        assert_eq!(sections, sorted, "grouped by section, in order");
+        let mut sections: Vec<Section> = items.iter().map(|item| item.section).collect();
         let services = sections.iter().filter(|s| **s == Section::Services).count();
         assert!(services <= 8);
+        let listed = sections.len();
+        sections.dedup();
+        let mut unique = sections.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(sections.len(), unique.len(), "each section in one run");
+        assert!(listed > sections.len());
+    }
+
+    #[test]
+    fn the_section_with_the_best_match_comes_first() {
+        let mut state = AppState::fixture(now());
+        let other = ic_config::Environment::new(
+            "prod-cluster-2",
+            "https://prod-2:5665",
+            ic_config::AuthConfig::Basic {
+                username: "icygui".to_owned(),
+            },
+        );
+        state.save_environment(other, false);
+        let items = PaletteIndex::build(&state, &Focus::default(), now()).search("prod");
+        // Enter runs the first item: a word-start match, never a
+        // scattered one like "Import dashboards…" (i-m-P-o-R-t … O … D).
+        assert_ne!(items[0].label, "Import dashboards…");
+        assert!(
+            items[0].label.to_lowercase().contains("prod"),
+            "{:?}",
+            items.iter().map(|item| &item.label).collect::<Vec<_>>()
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.label == "Switch to prod-cluster-2"),
+            "{items:?}"
+        );
+        // Commands still lead when they match best.
+        let items = PaletteIndex::build(&state, &Focus::default(), now()).search("import");
+        assert_eq!(items[0].label, "Import dashboards…");
     }
 
     #[test]
@@ -1018,6 +1134,50 @@ mod tests {
         );
         assert_eq!(verb("ack"), None);
         assert_eq!(verb("acme thing"), None);
+    }
+
+    #[test]
+    fn a_verb_runs_on_all_matches_as_typed() {
+        let state = AppState::fixture(now());
+        let items = PaletteIndex::build(&state, &Focus::default(), now()).search("ack db-prod");
+        let index = all_matches_item(&items).expect("an all-matches item");
+        let all = &items[index];
+        assert_eq!(all.key_hint, Some(ALL_MATCHES_KEY));
+        let PaletteCommand::Act(ObjectAction::Acknowledge, targets) = &all.command else {
+            panic!("{:?}", all.command);
+        };
+        assert_eq!(
+            all.label,
+            format!("Acknowledge · all {} matches", targets.len())
+        );
+        // The single ones list what is named as typed first.
+        assert!(
+            items[..index]
+                .iter()
+                .take(targets.len().min(4))
+                .all(|item| item.detail.contains("db-prod")),
+            "{items:?}"
+        );
+        assert!(targets.len() > 1);
+        // Every problem on a db-prod host, and nothing else.
+        let snapshot = state.snapshot();
+        let expected = snapshot
+            .services
+            .values()
+            .filter(|service| service.key.host.as_str().contains("db-prod") && service.is_problem())
+            .count()
+            + snapshot
+                .hosts
+                .values()
+                .filter(|host| host.name.as_str().contains("db-prod") && host.is_problem())
+                .count();
+        assert_eq!(targets.len(), expected);
+        for target in targets {
+            assert!(target.to_string().contains("db-prod"), "{target}");
+        }
+        // A scattered match never acts on everything.
+        let fuzzy = PaletteIndex::build(&state, &Focus::default(), now()).search("ack dbprod");
+        assert_eq!(all_matches_item(&fuzzy), None);
     }
 
     #[test]

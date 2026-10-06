@@ -346,7 +346,7 @@ impl Sidebar {
         let mut menu = Menu::new("connection-details").min_width(px(320.));
         match state.environment() {
             Some(environment) => {
-                let title = if state.is_demo() {
+                let title = if state.is_demo_environment() {
                     format!("{} (demo)", environment.name)
                 } else {
                     environment.name.clone()

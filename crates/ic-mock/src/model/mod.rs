@@ -68,6 +68,8 @@ pub(crate) struct PendingExecution {
 pub(crate) struct World {
     /// Seconds added to the wall clock (`advance_clock`).
     pub(crate) clock_offset: f64,
+    /// When the scenario was loaded: its times are shifted to it.
+    pub(crate) loaded_at: f64,
     pub(crate) app: AppInfo,
     pub(crate) hosts: BTreeMap<String, Checkable>,
     /// Services by host name, then short name.

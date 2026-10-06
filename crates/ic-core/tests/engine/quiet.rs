@@ -709,10 +709,15 @@ async fn a_problem_that_begins_while_its_answer_is_on_its_way_notifies() {
                 .check
                 .state_type
                 == StateType::Hard
-                && snapshot.services[service.as_service().unwrap()]
+                // Within a millisecond: the JSON round trip may round the
+                // last digit of the seconds.
+                && (snapshot.services[service.as_service().unwrap()]
                     .check
                     .last_state_change
-                    == stored.check.last_state_change
+                    .as_unix_seconds()
+                    - stored.check.last_state_change.as_unix_seconds())
+                .abs()
+                    < 0.001
         })
         .await;
     engine.shutdown();

@@ -209,9 +209,15 @@ async fn refresh_presses_in_a_row_wait_longer_and_longer() {
     control.clear_requests();
     engine.send(Command::Refresh);
     assert!(wait_until(|| host_lists(&control).len() == 1).await);
-    engine.send(Command::Refresh);
-    assert!(wait_until(|| host_lists(&control).len() == 2).await);
+    // Pressed again until the next reload starts (a press while the first
+    // one still loads is served by it).
+    let pressed = std::time::Instant::now();
+    while host_lists(&control).len() < 2 && pressed.elapsed() < Duration::from_secs(10) {
+        engine.send(Command::Refresh);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let loads = host_lists(&control);
+    assert!(loads.len() >= 2, "{loads:?}");
     let gap = loads[1] - loads[0];
     assert!(
         gap < 4.0 * spacing.as_secs_f64(),

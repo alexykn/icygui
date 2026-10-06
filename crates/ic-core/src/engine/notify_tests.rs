@@ -953,8 +953,10 @@ fn the_first_load_seeds_problems_and_flapping_objects() {
     h.store
         .apply_fetched(Vec::new(), vec![flapping], Detail::Lean, &[], 20);
     h.store.take_discovered();
-    h.notify.seed(&h.store, t(120.0));
+    h.notify
+        .seed(&h.store, &HashSet::new(), t(120.0), &mut h.log);
     assert!(h.notify.has_pending());
+    assert!(h.log.is_empty(), "seeds aren't logged");
     let seeds = mem::take(&mut h.notify.seeds);
     let summary: Vec<(ObjectKey, CheckableState, bool, bool)> = seeds
         .iter()
@@ -975,4 +977,50 @@ fn the_first_load_seeds_problems_and_flapping_objects() {
         panic!();
     };
     assert_eq!(output, "Critical output");
+}
+
+/// A state change the first load's answers already show, but which came
+/// after the stream subscribed (it waited during the load, or a background
+/// start's delay), is judged and logged like any state change; the
+/// problems from before stay seeds, and a flapping object is seeded all
+/// the same.
+#[test]
+fn the_first_load_judges_what_began_after_the_stream_opened() {
+    let mut h = Harness::new();
+    let mut flapping = Service::new("h", "a");
+    flapping.state = ServiceState::Critical;
+    flapping.check.state_type = StateType::Hard;
+    flapping.check.flapping = true;
+    flapping.check.last_state_change = t(110.0);
+    h.store
+        .apply_fetched(Vec::new(), vec![flapping], Detail::Lean, &[], 20);
+    h.store.take_discovered();
+    // h!b (critical) began during the load; so did h!a's state.
+    let began: HashSet<ObjectKey> = [key("a"), key("b")].into_iter().collect();
+    h.notify.seed(&h.store, &began, t(120.0), &mut h.log);
+    let seeds: Vec<ObjectKey> = h
+        .notify
+        .seeds
+        .iter()
+        .map(|(input, _)| input.object.clone())
+        .collect();
+    assert_eq!(seeds, [key("a")], "a flapping object stays a seed");
+    assert_eq!(h.notify.pending.len(), 1);
+    let input = &h.notify.pending[0];
+    assert_eq!(input.object, key("b"));
+    let Change::State {
+        previous,
+        current,
+        output,
+        ..
+    } = &input.change
+    else {
+        panic!("{input:?}");
+    };
+    assert_eq!(*previous, None);
+    assert_eq!(*current, svc(ServiceState::Critical));
+    assert_eq!(output, "Critical output");
+    assert_eq!(h.log.len(), 1);
+    assert_eq!(h.log[0].object, key("b"));
+    assert!(matches!(h.log[0].kind, LogKind::State { .. }));
 }

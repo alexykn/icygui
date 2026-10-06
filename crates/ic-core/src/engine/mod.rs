@@ -42,7 +42,7 @@ mod stream;
 mod sync;
 mod watchdog;
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -106,7 +106,8 @@ pub(crate) enum Internal {
     /// An action finished.
     ActionDone(Box<actions::Finished>),
     /// The dashboards were evaluated for `snapshot`, which is ready to go
-    /// out. `quiet`: nothing but the dashboards could have changed.
+    /// out. `quiet`: nothing but the dashboards could have changed (no
+    /// object, mode or updating set).
     /// `broken`: the evaluation failed (a bug); `dashboards` start over.
     Evaluated {
         dashboards: Box<Dashboards>,
@@ -194,6 +195,9 @@ impl std::fmt::Debug for Connected {
     }
 }
 
+/// The type of a state change line (a quick test before parsing).
+const STATE_CHANGE: &[u8] = b"\"StateChange\"";
+
 /// Icinga's service counts by state at a quiet status poll (see
 /// `quiet.rs`): the node that answered, the counts, when.
 #[derive(Debug)]
@@ -275,6 +279,8 @@ struct Conn {
     /// The next status poll; `None` without `status/query` permission.
     next_status: Option<Instant>,
     status_in_flight: bool,
+    /// When the last status poll was sent.
+    status_sent: Instant,
     /// When a status poll next asks for the cluster nodes' states too (one
     /// more small request: every poll while on screen, every
     /// [`NODES_QUIET_INTERVAL`] off screen); `None` without
@@ -467,6 +473,19 @@ pub(crate) struct Engine {
     continuous_since: Option<Instant>,
     /// The last quiet status poll's counts (kept across sessions).
     quiet_counts: Option<QuietCounts>,
+    /// The last status polls' service counts against the store's: the
+    /// references a switch of the stream without proof is checked against.
+    count_offsets: VecDeque<quiet::CountOffset>,
+    /// The latest of them that a stream line followed.
+    count_heard: Option<quiet::CountOffset>,
+    /// Such a switch being checked.
+    verify: Option<quiet::Verify>,
+    /// The reload such a check asked for, to see whether the counts match
+    /// again once it is in.
+    recheck: Option<quiet::Recheck>,
+    /// Icinga's counts include objects the API user doesn't see: switches
+    /// aren't checked against them.
+    counts_untrusted: bool,
     /// A quiet stream suspected of stalling: when to check, and since when
     /// no line came.
     stall_suspect: Option<(Instant, Instant)>,
@@ -587,6 +606,11 @@ impl Engine {
             load_found: false,
             continuous_since: None,
             quiet_counts: None,
+            count_offsets: VecDeque::new(),
+            count_heard: None,
+            verify: None,
+            recheck: None,
+            counts_untrusted: false,
             stall_suspect: None,
             updating: Arc::default(),
             updating_changed: false,
@@ -772,7 +796,9 @@ impl Engine {
             self.start_load(LoadKind::First);
         }
         if self.handover_at().is_some_and(|at| at <= now) {
-            self.complete_handover();
+            // No line came on both streams: nothing proves the old one
+            // delivered everything sent before the new one subscribed.
+            self.complete_handover(false);
         }
         if self.switch_retry_due().is_some_and(|at| at <= now) {
             self.switch_retry_at = None;
@@ -883,6 +909,7 @@ impl Engine {
         self.focus = quiet::Focus::default();
         self.start_at = None;
         self.stall_suspect = None;
+        self.verify = None;
         self.continuous_since = None;
         self.note_updating();
         // What an aborted load found is real all the same.
@@ -1016,7 +1043,10 @@ impl Engine {
         let notification_events = self.lines.is_some()
             && info.allows(&format!("events/{}", EventKind::Notification.api_name()));
         let check_events = kinds.contains(&EventKind::CheckResult);
-        let woke = self.loaded && self.stream_quiet && !quiet;
+        // The gap is judged by the stream that broke (a quiet one may be
+        // silent for minutes), whatever mode the new one has.
+        let was_quiet = self.stream_quiet;
+        let woke = self.loaded && was_quiet && !quiet;
         if self.stream_quiet != quiet {
             self.stream_quiet = quiet;
             self.mode_changed = true;
@@ -1038,6 +1068,7 @@ impl Engine {
             live_since: None,
             next_status,
             status_in_flight: false,
+            status_sent: Instant::now(),
             next_nodes,
             notifications_allowed,
             notification_events,
@@ -1061,7 +1092,7 @@ impl Engine {
                 self.request_reload(sync::ReloadCause::Reconnect);
             } else {
                 self.adopt_node(true);
-                self.after_reconnect(gap, can_poll_status);
+                self.after_reconnect(gap, was_quiet, can_poll_status);
             }
             if woke {
                 // Live again after quiet mode, through a reconnect (once
@@ -1247,15 +1278,74 @@ impl Engine {
         if first {
             self.load_backoff.reset();
             // What is already wrong doesn't notify, but the rule
-            // engine must know it (before any event about it).
-            let at = self.evaluation_time();
-            self.notify.seed(&self.store, at);
+            // engine must know it (before any event about it); what
+            // changed after the stream subscribed does.
+            let waiting = self.seed_first_load();
             self.go_live();
+            if !waiting.is_empty() {
+                self.on_lines(waiting);
+            }
+            if self.conn.is_none() {
+                // The stream had ended meanwhile.
+                return;
+            }
         }
         if !self.notifications_current {
             self.load_notifications();
         }
         self.publish_changes();
+    }
+
+    /// Seeds the rule engine with the session's first load and returns the
+    /// stream lines that waited meanwhile (applied once live). A state
+    /// change among them that the load's answers already reflect (the
+    /// answer was sent after the line was read, or composed after the
+    /// change although its line came later: [`Store::shows_change`]) began
+    /// after the stream subscribed: it is judged like any change, not
+    /// seeded, so a problem that began during the load, or during a
+    /// background start's delay, notifies. (One the answers don't show yet
+    /// is applied as a change on top of them.)
+    fn seed_first_load(&mut self) -> Vec<ReaderMsg> {
+        let mut waiting = Vec::new();
+        if let Some(receiver) = &mut self.lines {
+            while let Ok(message) = receiver.try_recv() {
+                waiting.push(message);
+            }
+        }
+        let mut began = HashSet::new();
+        for message in &waiting {
+            if let ReaderMsg::Line(seq, line) = message
+                && line
+                    .windows(STATE_CHANGE.len())
+                    .any(|bytes| bytes == STATE_CHANGE)
+                && let Some(Event::StateChange {
+                    object, result, at, ..
+                }) = ic_api::parse_event(line)
+            {
+                if self.store.reflects(&object, *seq) {
+                    began.insert(object);
+                } else if self
+                    .store
+                    .shows_change(&object, result.execution_end.non_zero().unwrap_or(at))
+                {
+                    // Applied on top of the answer, it would take the
+                    // object back (a hard state to soft, say).
+                    self.store.note_reflected(&object, *seq);
+                    began.insert(object);
+                }
+            }
+        }
+        if !began.is_empty() {
+            tracing::info!(
+                count = began.len(),
+                "states that changed while the first load ran are judged, not seeded"
+            );
+        }
+        let at = self.evaluation_time();
+        let mut log = Vec::new();
+        self.notify.seed(&self.store, &began, at, &mut log);
+        self.event_log.record(log);
+        waiting
     }
 
     /// The first load is in: connected and live.
@@ -1404,6 +1494,7 @@ impl Engine {
             return;
         };
         conn.status_in_flight = true;
+        conn.status_sent = now;
         // The cluster nodes' states with it, when due: one more small
         // request by name (the masters and satellites, never the agents).
         let nodes = match conn.next_nodes {
@@ -1486,6 +1577,7 @@ impl Engine {
         conn.status_in_flight = false;
         conn.next_status = Some(Instant::now() + interval);
         let connected = conn.since;
+        let sent = conn.status_sent;
         match result {
             Ok(status) => {
                 if let Some(error) = self.stalled(&status) {
@@ -1494,6 +1586,7 @@ impl Engine {
                     return;
                 }
                 self.watch_quiet_stream(&status);
+                self.check_counts(&status, sent);
                 // Only the same node with another start time restarted: the
                 // masters of an HA zone behind a load balancer each have
                 // their own.
@@ -1682,7 +1775,7 @@ impl Engine {
                     ?error,
                     "the old event stream ended during a switch; the new one takes over"
                 );
-                self.complete_handover();
+                self.complete_handover(false);
                 return;
             }
             let error = error.map_or_else(
@@ -1691,7 +1784,7 @@ impl Engine {
             );
             self.fail(Failure::Transient(error));
         } else if common {
-            self.complete_handover();
+            self.complete_handover(true);
         }
     }
 
@@ -1884,8 +1977,12 @@ impl Engine {
             return;
         }
         if load {
-            // The stream missed something: reconciles stay frequent.
+            // The stream missed something: reconciles stay frequent, and
+            // the status polls' offsets taken meanwhile are no references
+            // (see `quiet.rs`).
             self.load_found = true;
+            self.count_offsets.clear();
+            self.count_heard = None;
         }
         let mut stale = Vec::new();
         for Discovered {

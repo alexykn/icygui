@@ -355,6 +355,19 @@ impl Client {
         }))
     }
 
+    /// How many hosts there are: a list of their names only (about 60
+    /// bytes a host), for sizing an installation without `status/query`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::hosts`].
+    pub async fn host_count(&self) -> Result<usize, ApiError> {
+        let results = self
+            .query::<serde::de::IgnoredAny>("hosts", None, &["name"])
+            .await?;
+        Ok(results.iter().filter(|entry| entry.attrs.is_some()).count())
+    }
+
     /// All services, with `detail`: [`Detail::Lean`] for the initial load
     /// and reconciles of a large installation (about 57 % of the bytes:
     /// no check results, no links), then [`Client::objects`] with

@@ -45,7 +45,7 @@ use crate::actions::{
     ScheduleDowntime, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
     SelectPrevious, ToggleMark,
 };
-use crate::app_state::hydration::row_needs_details;
+use crate::app_state::hydration::row_worth_asking;
 use crate::app_state::{AppState, Hydrated};
 use crate::banner;
 use crate::chrome::WindowDrag;
@@ -120,8 +120,8 @@ impl DashboardView {
         }
     }
 
-    /// Remembers the rows on screen that lack output and, if they changed,
-    /// asks for their details once scrolling rests.
+    /// Remembers the rows on screen and, if they changed, offers them to
+    /// the engine once scrolling rests.
     fn want_details(&mut self, keys: Vec<ObjectKey>, cx: &mut Context<Self>) {
         let wake = self.state.read(cx).wake();
         if keys == self.hydration_wanted.0 && wake == self.hydration_wanted.1 {
@@ -634,8 +634,8 @@ impl DashboardView {
         start..(start + count).min(total)
     }
 
-    /// Asks for the details of the rows on screen that have no output yet
-    /// (debounced; see [`DashboardView::want_details`]).
+    /// Offers the engine the rows on screen, which fetches those it doesn't
+    /// hold current (debounced; see [`DashboardView::want_details`]).
     fn hydrate_rows_on_screen(&mut self, reference: &DashboardRef, cx: &mut Context<Self>) {
         let needs: Vec<ObjectKey> = {
             let state = self.state.read(cx);
@@ -647,7 +647,7 @@ impl DashboardView {
             result.rows[range]
                 .iter()
                 .filter_map(|row| match row {
-                    DashboardRow::Object(key) if row_needs_details(snapshot, key) => {
+                    DashboardRow::Object(key) if row_worth_asking(snapshot, key) => {
                         Some(key.clone())
                     }
                     _ => None,

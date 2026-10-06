@@ -100,8 +100,10 @@ impl Engine {
         } else {
             dashboards::Scope::All
         });
-        self.updating_changed = false;
-        self.mode_changed = false;
+        // The stream's mode and the objects being updated are news of
+        // their own: such a snapshot goes out even if nothing else changed.
+        let news =
+            std::mem::take(&mut self.updating_changed) | std::mem::take(&mut self.mode_changed);
         let refresh_time = self.time_dependent && self.time_refreshed.elapsed() >= TIME_REFRESH;
         let mut snapshot = self.store.snapshot(
             0,
@@ -130,7 +132,7 @@ impl Engine {
         if refresh_time {
             self.time_refreshed = Instant::now();
         }
-        let quiet = !changes.any && !reconfigured && !late_changed;
+        let quiet = !changes.any && !reconfigured && !late_changed && !news && !resumed;
         let data = Data {
             hosts: Arc::clone(&snapshot.hosts),
             services: Arc::clone(&snapshot.services),

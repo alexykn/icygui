@@ -60,8 +60,12 @@
 //!
 //! **Background starts** ([`crate::Start::Background`]): the first load
 //! waits a random delay of up to `Tuning::start_delay_per_thousand` per
-//! 1 000 services (the count from `/v1/status/CIB`, two small requests),
-//! at most `Tuning::start_delay_max`; [`Command::StartNow`] ends it.
+//! 1 000 services (the count from `/v1/status/CIB`, two small requests;
+//! without `status/query`, [`SERVICES_PER_HOST`] per host from a list of
+//! the hosts' names), at most `Tuning::start_delay_max`;
+//! [`Command::StartNow`] ends it. The stream is open meanwhile: a state
+//! that changes during the wait is judged as a change once the load is in
+//! (it notifies), not seeded as already known.
 //!
 //! **A quiet stream that stalls** can be silent for good reasons (no state
 //! changed). Each quiet status poll compares Icinga's service counts by
@@ -104,6 +108,11 @@ pub(super) const WAKE_REFRESH_MAX: usize = 1_000;
 pub(super) const PREFETCH_MAX: usize = 10;
 /// See [`PREFETCH_MAX`].
 pub(super) const PREFETCH_WINDOW: Duration = Duration::from_mins(1);
+
+/// Without `status/query`, a background start estimates the number of
+/// services from the number of hosts at this many per host (the large
+/// installations icygui is measured against have 15).
+pub(super) const SERVICES_PER_HOST: u32 = 15;
 
 /// After a handover, lines of the new stream are checked against the old
 /// stream's for at most this long.
@@ -163,6 +172,75 @@ pub(super) struct Dedupe {
     older_checks: bool,
 }
 
+/// Icinga's service counts by state minus the store's, as a status poll
+/// answered by `node` at `at` found them: constant while the store follows
+/// every state change, whatever the API user may not see or a satellite
+/// leaves out.
+#[derive(Clone, Debug)]
+pub(super) struct CountOffset {
+    node: String,
+    offset: [i64; 4],
+    at: Instant,
+}
+
+impl CountOffset {
+    fn of(node: &str, icinga: [u32; 4], store: [u32; 4], at: Instant) -> Self {
+        let mut offset = [0_i64; 4];
+        for ((offset, icinga), store) in offset.iter_mut().zip(icinga).zip(store) {
+            *offset = i64::from(icinga) - i64::from(store);
+        }
+        Self {
+            node: node.to_owned(),
+            offset,
+            at,
+        }
+    }
+
+    /// The same offset as `other`, from the same node.
+    fn same(&self, other: &Self) -> bool {
+        self.node == other.node && self.offset == other.offset
+    }
+}
+
+/// How many status polls' offsets are kept: the references of a switch's
+/// check (those answered while the old stream still delivered lines; more
+/// than one, so a poll that raced a state change whose event came moments
+/// after the answer is outvoted).
+const OFFSETS_KEPT: usize = 4;
+
+/// A check that can't tell after this many polls ends: with a mismatch
+/// seen, as one that found something missing.
+const VERIFY_TRIES: u32 = 4;
+
+/// A switch whose old stream may have withheld events, being checked.
+#[derive(Debug)]
+pub(super) struct Verify {
+    /// Polls sent before this don't count.
+    since: Instant,
+    /// The offsets the store's counts should still have.
+    references: Vec<CountOffset>,
+    /// A mismatch the previous poll found (a second one confirms it).
+    suspect: Option<CountOffset>,
+    tries: u32,
+}
+
+/// A reload a switch's check asked for: once it is in, the offset should
+/// match the references again; if it doesn't, Icinga's counts include
+/// objects the API user doesn't see, and switches aren't checked against
+/// them any more.
+#[derive(Debug)]
+pub(super) struct Recheck {
+    references: Vec<CountOffset>,
+    asked: Instant,
+}
+
+/// What a poll says about a switch being checked.
+enum Verdict {
+    Fine,
+    Missed,
+    Unsure,
+}
+
 /// The object the user is opening ([`crate::Command::Focus`]).
 #[derive(Debug, Default)]
 pub(super) struct Focus {
@@ -180,8 +258,8 @@ fn line_hash(line: &[u8]) -> u64 {
 }
 
 /// How long a background start waits before its first load: random, up to
-/// `per_thousand` per 1 000 services (`max` when the size is unknown), at
-/// most `max`.
+/// `per_thousand` per 1 000 services (`max` when the size couldn't be
+/// read at all), at most `max`.
 pub(super) fn start_delay(
     services: Option<u32>,
     per_thousand: Duration,
@@ -191,6 +269,30 @@ pub(super) fn start_delay(
         per_thousand.mul_f64(f64::from(services) / 1_000.0).min(max)
     });
     ceiling.mul_f64(fastrand::f64())
+}
+
+/// The installation's size for a background start's delay: Icinga's
+/// service count (`/v1/status/CIB`, with `status/query`), else an estimate
+/// from the number of hosts (a list of their names) at
+/// [`SERVICES_PER_HOST`]; `None` if neither could be read.
+async fn installation_size(client: &ic_api::Client, sized: bool) -> Option<u32> {
+    if sized {
+        match client.status().await {
+            Ok(status) => return Some(status.counts.services()),
+            Err(error) => tracing::debug!(%error, "couldn't read the installation's size"),
+        }
+    }
+    match client.host_count().await {
+        Ok(hosts) => Some(
+            u32::try_from(hosts)
+                .unwrap_or(u32::MAX)
+                .saturating_mul(SERVICES_PER_HOST),
+        ),
+        Err(error) => {
+            tracing::debug!(%error, "couldn't count the hosts");
+            None
+        }
+    }
 }
 
 /// When a check would have replaced `check`'s result (Unix seconds on
@@ -450,7 +552,7 @@ impl Engine {
             );
             self.abandon_switch(&why);
         } else if common {
-            self.complete_handover();
+            self.complete_handover(true);
         }
     }
 
@@ -482,8 +584,10 @@ impl Engine {
 
     /// Ends the overlap: closes the old stream, applies what its reader
     /// had read, then the new stream's lines without those the old one
-    /// brought; the new stream goes on.
-    pub(super) fn complete_handover(&mut self) {
+    /// brought; the new stream goes on. `proven`: a line came on both
+    /// streams; otherwise the next status polls verify that nothing went
+    /// missing ([`Engine::check_counts`]).
+    pub(super) fn complete_handover(&mut self, proven: bool) {
         let Some(switch) = self.switch.take() else {
             return;
         };
@@ -535,6 +639,10 @@ impl Engine {
         self.lines = Some(new_lines);
         self.reader = Some(new_reader);
         let was_quiet = self.stream_quiet;
+        let old_last_line = self
+            .conn
+            .as_ref()
+            .map_or_else(Instant::now, |conn| conn.last_line);
         if let Some(conn) = &mut self.conn {
             conn.check_events = kinds.contains(&EventKind::CheckResult);
             conn.kinds = kinds;
@@ -552,6 +660,7 @@ impl Engine {
         });
         tracing::debug!(
             quiet,
+            proven,
             waiting = buffered.len(),
             "the new event stream took over"
         );
@@ -559,6 +668,9 @@ impl Engine {
             self.woke();
         }
         self.on_lines(buffered);
+        if !proven {
+            self.verify_switch(old_last_line);
+        }
         // Asked for the other mode meanwhile.
         self.want_mode();
     }
@@ -851,20 +963,10 @@ impl Engine {
             done: 0,
             total: Some(super::load::OVERVIEW_QUERIES),
         });
-        if !sized {
-            self.start_after(None);
-            return;
-        }
         let tx = self.internal_tx.clone();
         let session = self.session;
         self.tasks.spawn(async move {
-            let services = match client.status().await {
-                Ok(status) => Some(status.counts.services()),
-                Err(error) => {
-                    tracing::debug!(%error, "couldn't read the installation's size");
-                    None
-                }
-            };
+            let services = installation_size(&client, sized).await;
             let _ = tx.send(Internal::StartSize { session, services });
         });
     }
@@ -897,6 +999,214 @@ impl Engine {
         self.start = Start::User;
         if self.start_at.is_some() {
             self.start_at = Some(Instant::now());
+        }
+    }
+
+    // --- a switch without proof ----------------------------------------------------
+
+    /// A switch ended without a line on both streams (the overlap timed
+    /// out, or the old stream ended), so nothing proves the old stream
+    /// delivered everything sent before the new one subscribed: a status
+    /// poll now, and the store's service counts by state compared with
+    /// Icinga's against the offsets of the polls answered while the old
+    /// stream still delivered lines (`old_last_line`; a stall that began
+    /// later may already show in the others), the last of which is kept
+    /// however long ago it was. If there is none, the latest is the
+    /// reference: the stream's stall watch (a live stream silent while
+    /// checks run, a quiet stream whose counts moved without a line) would
+    /// have caught a stall there. Without
+    /// `status/query` (or a poll before the switch) there is nothing to
+    /// compare: as without a switch, a stall isn't noticed then.
+    pub(super) fn verify_switch(&mut self, old_last_line: Instant) {
+        let Some(conn) = &mut self.conn else {
+            return;
+        };
+        if conn.next_status.is_none() || self.counts_untrusted {
+            return;
+        }
+        let mut references: Vec<CountOffset> = self
+            .count_offsets
+            .iter()
+            .chain(&self.count_heard)
+            .filter(|offset| offset.at <= old_last_line)
+            .cloned()
+            .collect();
+        if references.is_empty() {
+            references.extend(self.count_offsets.back().cloned());
+        }
+        if references.is_empty() {
+            tracing::debug!("the switch can't be checked (no status poll before it)");
+            return;
+        }
+        let now = Instant::now();
+        self.verify = Some(Verify {
+            since: now,
+            references,
+            suspect: None,
+            tries: 0,
+        });
+        if !conn.status_in_flight {
+            conn.next_status = Some(now);
+        }
+    }
+
+    /// A status poll's answer (the poll was sent at `sent`): judges a
+    /// switch being checked ([`Engine::verify_switch`]), else keeps the
+    /// offset of Icinga's service counts against the store's. The offsets
+    /// only differ if the store missed a state change (or one was on its
+    /// way when the poll was answered: a mismatch counts once the next
+    /// poll, at most [`STALL_CONFIRM`] later, finds the same); then the old
+    /// stream withheld events, and a reload (jittered, as after a
+    /// reconnect) brings them.
+    pub(super) fn check_counts(&mut self, status: &InstanceStatus, sent: Instant) {
+        // Lines still waiting: the store lags behind what Icinga counted.
+        let idle =
+            self.lines.as_ref().is_none_or(UnboundedReceiver::is_empty) && self.load.is_none();
+        let now = Instant::now();
+        let current = CountOffset::of(
+            &status.node_name,
+            status.counts.service_states(),
+            self.store.service_states(),
+            now,
+        );
+        if idle {
+            self.recheck_counts(&current);
+        }
+        let confirm = STALL_CONFIRM.min(self.tuning.status_interval);
+        let Some(verify) = &mut self.verify else {
+            // A poll whose counts the quiet watch found moving without a
+            // line isn't a reference.
+            if idle && self.stall_suspect.is_none() && !self.counts_untrusted {
+                // The latest poll a line followed stays a reference
+                // however long the stream is silent since.
+                if let Some(last_line) = self.conn.as_ref().map(|conn| conn.last_line)
+                    && let Some(heard) = self
+                        .count_offsets
+                        .iter()
+                        .rev()
+                        .find(|offset| offset.at <= last_line)
+                {
+                    self.count_heard = Some(heard.clone());
+                }
+                self.count_offsets.push_back(current);
+                while self.count_offsets.len() > OFFSETS_KEPT {
+                    self.count_offsets.pop_front();
+                }
+            }
+            return;
+        };
+        let next = if sent < verify.since {
+            // Sent before the switch ended: ask again at once.
+            Some(now)
+        } else {
+            let verdict = if verify
+                .references
+                .iter()
+                .any(|reference| reference.same(&current))
+            {
+                Verdict::Fine
+            } else if !idle
+                || !verify
+                    .references
+                    .iter()
+                    .any(|reference| reference.node == current.node)
+            {
+                Verdict::Unsure
+            } else if verify
+                .suspect
+                .as_ref()
+                .is_some_and(|suspect| suspect.same(&current))
+            {
+                Verdict::Missed
+            } else {
+                verify.suspect = Some(current);
+                Verdict::Unsure
+            };
+            match verdict {
+                Verdict::Fine => {
+                    tracing::debug!("the switch missed nothing");
+                    self.verify = None;
+                    None
+                }
+                Verdict::Missed => {
+                    let references = std::mem::take(&mut verify.references);
+                    self.verify = None;
+                    self.missed_in_switch(references);
+                    None
+                }
+                Verdict::Unsure => {
+                    verify.tries += 1;
+                    if verify.tries < VERIFY_TRIES {
+                        Some(now + confirm)
+                    } else {
+                        let suspected = verify.suspect.is_some();
+                        let references = std::mem::take(&mut verify.references);
+                        self.verify = None;
+                        if suspected {
+                            self.missed_in_switch(references);
+                        } else {
+                            tracing::debug!(
+                                "the switch couldn't be checked (another node answers)"
+                            );
+                        }
+                        None
+                    }
+                }
+            }
+        };
+        if let Some(at) = next
+            && let Some(conn) = &mut self.conn
+            && let Some(planned) = &mut conn.next_status
+        {
+            *planned = (*planned).min(at);
+        }
+    }
+
+    /// The old stream of a switch withheld state changes: they come with a
+    /// reload, and the stream counts as interrupted (the reconcile's
+    /// stretch starts over).
+    fn missed_in_switch(&mut self, references: Vec<CountOffset>) {
+        tracing::info!(
+            "Icinga's state counts moved beyond what the streams brought during a switch; reloading"
+        );
+        let now = Instant::now();
+        self.continuous_since = Some(now);
+        self.reconcile_streak = 0;
+        self.recheck = Some(Recheck {
+            references,
+            asked: now,
+        });
+        self.request_reload(ReloadCause::Reconnect);
+    }
+
+    /// Once the reload a switch's check asked for is in: the counts match
+    /// the references again, or they can't be trusted (objects the API
+    /// user doesn't see change Icinga's counts too).
+    fn recheck_counts(&mut self, current: &CountOffset) {
+        let Some(recheck) = &self.recheck else {
+            return;
+        };
+        if self.last_load_end.is_none_or(|end| end <= recheck.asked) {
+            return;
+        }
+        if recheck
+            .references
+            .iter()
+            .any(|reference| reference.same(current))
+        {
+            self.recheck = None;
+        } else if recheck
+            .references
+            .iter()
+            .any(|reference| reference.node == current.node)
+        {
+            tracing::info!(
+                "Icinga's state counts include objects this API user doesn't see; switches of the stream aren't checked against them"
+            );
+            self.recheck = None;
+            self.counts_untrusted = true;
+            self.count_offsets.clear();
+            self.count_heard = None;
         }
     }
 

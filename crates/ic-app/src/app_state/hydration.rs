@@ -1,16 +1,19 @@
 //! Which objects to ask the core for full details (output, perfdata,
 //! links), and which were asked for recently.
 //!
-//! Services load lean (docs/performance.md); the UI asks for the details
-//! of the rows on screen that have no output yet (and of a host pane's
-//! service rows), debounced, so scrolling through 30 000 rows costs a
-//! request for the rows it stops on, not for every row it passes. The
-//! object a pane shows is asked for on its own, ahead of these
-//! (`Command::Focus`, `AppState::focus`). An object asked for
-//! within the last five minutes isn't asked for again (a check that never
-//! ran still has no output after its details came), so revisiting rows
-//! costs nothing; waking up from quiet mode forgets them (the engine
-//! dropped what was asked for meanwhile).
+//! Services load lean (docs/performance.md); the UI offers the engine the
+//! rows on screen (and a host pane's service rows), debounced, so
+//! scrolling through 30 000 rows costs a request for the rows it stops on,
+//! not for every row it passes. The engine fetches those it doesn't hold
+//! current: lean services (no output yet) and, after quiet mode, those
+//! whose result a check may have replaced meanwhile (ahead of its refresh
+//! of the other problems); the others cost nothing. The object a pane
+//! shows is asked for on its own, ahead of these (`Command::Focus`,
+//! `AppState::focus`). An object asked for within the last five minutes
+//! isn't asked for again (a check that never ran still has no output after
+//! its details came), so revisiting rows costs nothing; waking up from
+//! quiet mode forgets them (the engine dropped what was asked for
+//! meanwhile, and what it held may have gone stale).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -25,9 +28,26 @@ const MAX_REMEMBERED: usize = 20_000;
 /// The most keys in one `Hydrate` command (a screenful is far less).
 pub(crate) const MAX_PER_REQUEST: usize = 500;
 
-/// Whether a list row for `key` lacks details worth fetching: a service
-/// that has been checked but whose output isn't loaded (pending services
-/// have none to load; hosts always load in full).
+/// Whether a list row for `key` is worth offering the engine: a service
+/// that has been checked (pending ones have nothing to load) or a host
+/// with a result. The engine decides what to fetch (see the module notes).
+pub(crate) fn row_worth_asking(snapshot: &Snapshot, key: &ObjectKey) -> bool {
+    match key {
+        ObjectKey::Service { key } => snapshot
+            .services
+            .get(key)
+            .is_some_and(|service| service.state != ServiceState::Pending),
+        ObjectKey::Host { name } => snapshot
+            .hosts
+            .get(name)
+            .is_some_and(|host| host.check.result.is_some()),
+    }
+}
+
+/// Whether a list row for `key` lacks its output: a service that has been
+/// checked but whose output isn't loaded (pending services have none to
+/// load; hosts always load in full).
+#[cfg(test)]
 pub(crate) fn row_needs_details(snapshot: &Snapshot, key: &ObjectKey) -> bool {
     let ObjectKey::Service { key } = key else {
         return false;
@@ -142,6 +162,24 @@ mod tests {
             &snapshot,
             &ObjectKey::service("h", "gone")
         ));
+    }
+
+    #[test]
+    fn checked_rows_are_offered() {
+        let mut snapshot = snapshot();
+        let mut host = Host::new("h");
+        host.check.result = Some(CheckResult::default());
+        snapshot.hosts = Arc::new([(host.name.clone(), Arc::new(host))].into_iter().collect());
+        for (key, offered) in [
+            (ObjectKey::service("h", "lean"), true),
+            (ObjectKey::service("h", "full"), true),
+            (ObjectKey::service("h", "pending"), false),
+            (ObjectKey::service("h", "gone"), false),
+            (ObjectKey::host("h"), true),
+            (ObjectKey::host("unknown"), false),
+        ] {
+            assert_eq!(row_worth_asking(&snapshot, &key), offered, "{key}");
+        }
     }
 
     #[test]

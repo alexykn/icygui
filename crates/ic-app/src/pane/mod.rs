@@ -41,7 +41,7 @@ use crate::actions::{
     Acknowledge, ActionRequest, AddComment, CheckNow, Dismiss, ObjectAction, PANE_CONTEXT,
     ScheduleDowntime,
 };
-use crate::app_state::hydration::row_needs_details;
+use crate::app_state::hydration::row_worth_asking;
 use crate::app_state::{AppState, Hydrated};
 use crate::banner;
 use crate::chrome::{Controls, WindowDrag};
@@ -232,9 +232,9 @@ impl ObjectPane {
         }
     }
 
-    /// The rows this pane shows that lack details: a host pane's service
-    /// rows without output (the pane's own object is asked for at once,
-    /// [`ObjectPane::want_focus`]).
+    /// The rows this pane offers the engine: a host pane's service rows
+    /// (it fetches those it doesn't hold current; the pane's own object is
+    /// asked for at once, [`ObjectPane::want_focus`]).
     fn details_wanted(&self, cx: &App) -> Vec<ObjectKey> {
         let state = self.state.read(cx);
         let snapshot = state.snapshot();
@@ -248,7 +248,7 @@ impl ObjectPane {
                     .shown
                     .iter()
                     .map(|service| service.object_key())
-                    .filter(|key| row_needs_details(snapshot, key)),
+                    .filter(|key| row_worth_asking(snapshot, key)),
             );
         }
         keys

@@ -7,9 +7,12 @@
 //!   shows the object as the change left it. The initial load produces
 //!   none: it fills the store and seeds the rule engine with its problems
 //!   and flapping objects ([`Notify::seed`]), so the rule engine knows
-//!   what was already wrong without notifying it. Problems an earlier run
-//!   notified (their ids are in the event log) count as notified, so their
-//!   recoveries and acknowledgements follow.
+//!   what was already wrong without notifying it; only a state that
+//!   changed after the event stream subscribed (its `StateChange` line
+//!   waited while the load ran, or while a background start waited) is
+//!   judged as a change. Problems an earlier run notified (their ids are
+//!   in the event log) count as notified, so their recoveries and
+//!   acknowledgements follow.
 //! - `handled` is computed from the store after the change: a problem
 //!   that is acknowledged, in downtime, unreachable through a dependency,
 //!   or (for services) on a host with a problem; Icinga suppresses its
@@ -300,7 +303,20 @@ impl Notify {
     /// comes back, and a flapping object stays quiet until it stops. The
     /// seeds wait for their memberships like inputs. `at`: Icinga's time
     /// as far as it is known.
-    pub(super) fn seed(&mut self, store: &Store, at: Timestamp) {
+    ///
+    /// `began`: objects whose state changed after the event stream
+    /// subscribed, which the load's answers already show (a `StateChange`
+    /// line waited while the load ran, or while a background start waited
+    /// to begin it). Their state is judged and logged like any state
+    /// change (from an unknown previous state), so a problem that began
+    /// meanwhile notifies; a flapping one is seeded all the same.
+    pub(super) fn seed(
+        &mut self,
+        store: &Store,
+        began: &HashSet<ObjectKey>,
+        at: Timestamp,
+        log: &mut Vec<LogEntry>,
+    ) {
         let hosts = store.hosts().iter().map(|(name, host)| {
             (
                 ObjectKey::Host { name: name.clone() },
@@ -313,7 +329,43 @@ impl Notify {
                 ObjectView::of(CheckableState::Service(service.state), &service.check),
             )
         });
-        self.seed_views(store, hosts.chain(services), at);
+        let mut changed = Vec::new();
+        let known = hosts.chain(services).filter_map(|(object, view)| {
+            if !view.flapping && began.contains(&object) {
+                changed.push((object, view));
+                None
+            } else {
+                Some((object, view))
+            }
+        });
+        self.seed_views(store, known, at);
+        for (object, view) in changed {
+            let output = store.current_output(&object).unwrap_or_default().to_owned();
+            let host_problem = host_problem_of(store, &object);
+            self.push(
+                store,
+                &object,
+                Change::State {
+                    previous: None,
+                    current: view.state,
+                    state_type: view.state_type,
+                    since: view.since,
+                    output: output.clone(),
+                },
+                handled(&view, host_problem),
+                at,
+            );
+            log.push(entry_of(
+                &object,
+                LogKind::State {
+                    state: view.state,
+                    state_type: view.state_type,
+                },
+                view.since.non_zero().unwrap_or(at),
+                first_line(&output),
+                None,
+            ));
+        }
     }
 
     /// Objects a fuller view brought that the store had never held (a

@@ -683,10 +683,10 @@ impl SettingsDialog {
                         })),
                 )
                 .child(hint(
-                    "Environments off screen, and the one on screen while the window is \
-                     closed or minimised, follow Icinga without check results: far less \
-                     load on the master, notifications as prompt as ever; outputs catch \
-                     up when you look.",
+                    "Environments off screen, and the one on screen once the window has \
+                     been closed, minimised or otherwise out of sight for half a minute, \
+                     follow Icinga without check results: far less load on the master, \
+                     notifications as prompt as ever; outputs catch up when you look.",
                     theme,
                 ))
                 .into_any_element(),

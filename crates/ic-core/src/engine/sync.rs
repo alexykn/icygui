@@ -138,6 +138,17 @@ impl Restarts {
     }
 }
 
+/// How long a stream may have been silent before a reconnect reloads: a
+/// quiet stream (no check results) may be silent for a whole quiet status
+/// interval longer.
+pub(super) fn long_gap(tuning: &crate::spec::Tuning, quiet: bool) -> Duration {
+    if quiet {
+        tuning.reload_after_gap + tuning.quiet_status_interval
+    } else {
+        tuning.reload_after_gap
+    }
+}
+
 impl Engine {
     /// The periodic reconcile's interval (see the module notes).
     pub(super) fn reconcile_interval(&self) -> Duration {
@@ -201,16 +212,18 @@ impl Engine {
 
     /// The session reconnected (live on the objects it has) after the
     /// stream was silent for `gap`: reload if it may have missed more than
-    /// the events since bring (see the module notes).
-    pub(super) fn after_reconnect(&mut self, gap: Duration, can_poll_status: bool) {
+    /// the events since bring (see the module notes). `was_quiet`: the
+    /// stream that broke was quiet.
+    pub(super) fn after_reconnect(
+        &mut self,
+        gap: Duration,
+        was_quiet: bool,
+        can_poll_status: bool,
+    ) {
         let now = Instant::now();
         // A quiet stream may be silent for a whole quiet status interval
         // (each quiet poll that finds nothing missed counts as hearing it).
-        let long_gap = if self.stream_quiet {
-            self.tuning.reload_after_gap + self.tuning.quiet_status_interval
-        } else {
-            self.tuning.reload_after_gap
-        };
+        let long_gap = long_gap(&self.tuning, was_quiet);
         if std::mem::take(&mut self.reload_now) {
             // The user asked for it.
             self.reload_full = true;
@@ -401,24 +414,31 @@ impl Engine {
 
     // --- hydration ----------------------------------------------------------------------
 
-    /// `Command::Hydrate`: fetches the services among `keys` that are only
-    /// known lean in full (hosts always load in full), deduplicated against
-    /// what is queued or in flight, in rounds of at most 1 000 names and
-    /// requests of 200.
+    /// `Command::Hydrate` (the rows on screen): fetches in full the
+    /// services among `keys` that are only known lean, and, after quiet
+    /// mode, the objects whose result a check may have replaced meanwhile
+    /// (moved ahead of the wake-up refresh's background lane), deduplicated
+    /// against what is queued or in flight, in rounds of at most 1 000
+    /// names and requests of 200. Hosts always load in full.
     pub(super) fn hydrate(&mut self, keys: Vec<ObjectKey>) {
         if self.quiet() {
             tracing::debug!(count = keys.len(), "quiet mode: no hydration");
             return;
         }
-        let wanted: Vec<ObjectKey> = keys
-            .into_iter()
-            .filter(|key| match key {
-                ObjectKey::Host { .. } => false,
-                ObjectKey::Service { key } => {
-                    self.store.services().contains_key(key) && !self.store.is_full(key)
-                }
-            })
-            .collect();
+        let wanted: Vec<ObjectKey> =
+            keys.into_iter()
+                .filter(|key| match key {
+                    ObjectKey::Host { name } => self.store.hosts().get(name).is_some_and(|host| {
+                        host.check.result.is_some() && !self.result_current(key)
+                    }),
+                    ObjectKey::Service { key: service } => {
+                        self.store.services().get(service).is_some_and(|found| {
+                            !self.store.is_full(service)
+                                || (found.check.result.is_some() && !self.result_current(key))
+                        })
+                    }
+                })
+                .collect();
         if wanted.is_empty() {
             return;
         }

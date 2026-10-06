@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use ic_core::{Command, ConnectionState, CoreEvent, LoadPhase, LogKind, Start, Tuning};
 use ic_mock::{MockConfig, MockControl, scenarios};
-use ic_model::{ObjectKey, ServiceState, Timestamp};
+use ic_model::{HostName, HostState, ObjectKey, ServiceState, StateType, Timestamp};
 use ic_rules::{DashboardRef, ScopeSetting};
 use serde_json::Value;
 
@@ -93,6 +93,11 @@ fn lists(control: &MockControl, kind: &str) -> usize {
                 .is_none_or(|body| body.get(kind).is_none())
         })
         .count()
+}
+
+/// Whether `state` is the first load in `wanted`.
+fn loading(state: &ConnectionState, wanted: LoadPhase) -> bool {
+    matches!(state, ConnectionState::Loading { phase, .. } if *phase == wanted)
 }
 
 fn set(control: &MockControl, host: &str, service: &str, state: ServiceState, output: &str) {
@@ -596,6 +601,169 @@ async fn a_background_start_waits_until_the_user_comes() {
     engine.shutdown();
 }
 
+/// A problem that begins while a background start waits (the stream is
+/// open, the store still empty) notifies once the load is in: the load's
+/// answer already shows it, but it began after the session subscribed.
+/// The problems that were there before don't notify.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_problem_that_begins_during_a_background_start_notifies() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.start = Start::Background;
+    launch.tuning = Tuning {
+        start_delay_per_thousand: Duration::from_hours(10_000),
+        start_delay_max: Duration::from_hours(10),
+        ..tuning()
+    };
+    let mut engine = launch.start();
+    engine.send(Command::SetQuiet(true));
+    engine
+        .wait_state(|state| matches!(state, ConnectionState::Loading { .. }))
+        .await;
+    stream_mode(&control, true).await;
+    assert!(wait_until(|| requests_to(&control, "/v1/status/CIB") >= 1).await);
+    // During the wait: a new problem, and a warning that got worse.
+    set(
+        &control,
+        "stg-api-01",
+        "http",
+        ServiceState::Critical,
+        "CRITICAL - began while waiting",
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(lists(&control, "services"), 0, "still waiting");
+    engine.send(Command::StartNow);
+    engine.connected().await;
+    let record = engine.notification().await;
+    assert_eq!(record.intent.title, "CRITICAL · http on stg-api-01");
+    // Logged like any state change.
+    let api = ObjectKey::service("stg-api-01", "http");
+    assert!(state_entries(&engine, &api).await >= 1);
+    // The warnings from before the start stay quiet.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let titles: Vec<String> = engine
+        .notifications()
+        .iter()
+        .map(|record| record.intent.title.clone())
+        .collect();
+    assert_eq!(titles, ["CRITICAL · http on stg-api-01"]);
+    engine.shutdown();
+}
+
+/// A state that changes while a request of the first load is on its way
+/// (its lines come after the request went out, but the answer already
+/// shows the change) is judged too, once: a host that goes down while the
+/// hosts load (a soft and a hard line, which mustn't take the hard state
+/// back to soft), and a hard warning that turns critical while the
+/// problems' details load, each notify once, and nothing else does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_problem_that_begins_while_its_answer_is_on_its_way_notifies() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    // Every answer comes a second late (Icinga answers after the delay).
+    control.set_latency(Duration::from_secs(1));
+    let mut engine = Launch::new(&server).start();
+    engine
+        .wait_state(|state| loading(state, LoadPhase::Hosts))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    control
+        .set_host_state("stg-api-01", HostState::Down, "CRITICAL - no route", true)
+        .unwrap();
+    engine
+        .wait_state(|state| loading(state, LoadPhase::Details))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // One result, hard to hard.
+    set(
+        &control,
+        "stg-db-01",
+        "pg-connections",
+        ServiceState::Critical,
+        "CRITICAL - 99 of 100 connections used",
+    );
+    control.set_latency(Duration::ZERO);
+    engine.connected().await;
+    let host = ObjectKey::host("stg-api-01");
+    let service = ObjectKey::service("stg-db-01", "pg-connections");
+    let mut titles = BTreeSet::new();
+    for _ in 0..2 {
+        titles.insert(engine.notification().await.intent.title);
+    }
+    assert_eq!(
+        titles,
+        BTreeSet::from([
+            "CRITICAL · pg-connections on stg-db-01".to_owned(),
+            "DOWN · stg-api-01".to_owned(),
+        ])
+    );
+    assert_eq!(state_entries(&engine, &host).await, 1, "logged once");
+    assert_eq!(state_entries(&engine, &service).await, 1, "logged once");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(engine.notifications().len(), 2, "nothing else");
+    let stored = control.service("stg-db-01", "pg-connections").unwrap();
+    engine
+        .snapshot(|snapshot| {
+            snapshot.hosts[&HostName::from("stg-api-01")]
+                .check
+                .state_type
+                == StateType::Hard
+                && snapshot.services[service.as_service().unwrap()]
+                    .check
+                    .last_state_change
+                    == stored.check.last_state_change
+        })
+        .await;
+    engine.shutdown();
+}
+
+/// Without `status/query` the installation's size is read from the hosts
+/// (a list of names): a small installation still starts at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_background_start_without_the_status_sizes_from_the_hosts() {
+    let server = mock(MockConfig {
+        users: vec![ic_mock::MockUser::new(
+            "reader",
+            "secret",
+            &["objects/query/*", "events/*"],
+        )],
+        ..MockConfig::with_scenario(scenarios::staging())
+    })
+    .await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.environment.auth = ic_config::AuthConfig::Basic {
+        username: "reader".to_owned(),
+    };
+    launch.secrets = crate::support::FakeSecrets::with(crate::support::ENV_ID, "secret");
+    launch.start = Start::Background;
+    launch.tuning = Tuning {
+        // The default pace, and a maximum longer than this test.
+        start_delay_per_thousand: Duration::from_secs(3),
+        start_delay_max: Duration::from_hours(10),
+        ..tuning()
+    };
+    let started = Instant::now();
+    let mut engine = launch.start();
+    engine.connected().await;
+    eprintln!(
+        "background start without the status: connected after {:?}",
+        started.elapsed()
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let names_only = control.requests().iter().any(|request| {
+        request.path == "/v1/objects/hosts"
+            && request
+                .body
+                .as_ref()
+                .and_then(|body| body.get("attrs"))
+                .is_some_and(|attrs| *attrs == serde_json::json!(["name"]))
+    });
+    assert!(names_only, "sized from the hosts' names");
+    engine.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shown_notification_prefetches_its_object() {
     let server = mock(MockConfig::with_scenario(scenarios::large_with_hosts(
@@ -747,6 +915,114 @@ async fn waking_up_refreshes_problems_whose_results_went_stale() {
     engine.shutdown();
 }
 
+/// After waking up, a row on screen whose result went stale (`Hydrate`)
+/// is fetched ahead of the wake-up refresh of the other problems, however
+/// low it ranks among them (here below the refresh's 1 000).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_waking_the_rows_on_screen_go_before_the_other_problems() {
+    let server = mock(MockConfig::with_scenario(scenarios::large_with_hosts(
+        100, 13,
+    )))
+    .await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        reconcile_interval: Some(Duration::from_millis(300)),
+        quiet_reconcile_interval: Duration::from_millis(300),
+        // The wake-up refresh takes a while (as at production size).
+        request_interval: Duration::from_millis(400),
+        request_burst: 1,
+        ..tuning()
+    };
+    let mut engine = launch.start();
+    settled(&mut engine).await;
+    // 1 000 critical problems (the wake-up refresh's most) and one
+    // warning, the row on screen, which ranks after all of them.
+    let services = ok_services(&control, 1_001, 0);
+    let (row_host, row_service) = services[1_000].clone();
+    let row = ObjectKey::service(&row_host, &row_service);
+    for (host, service) in &services[..1_000] {
+        set(
+            &control,
+            host,
+            service,
+            ServiceState::Critical,
+            "CRITICAL - first",
+        );
+    }
+    set(
+        &control,
+        &row_host,
+        &row_service,
+        ServiceState::Warning,
+        "WARNING - first",
+    );
+    let key = row.as_service().unwrap().clone();
+    engine
+        .snapshot(|snapshot| snapshot.services[&key].state == ServiceState::Warning)
+        .await;
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+
+    // Checked again while quiet, a while later: a quiet reconcile brings
+    // their newer last checks, not their output.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    for (host, service) in &services[..1_000] {
+        let object = ObjectKey::service(host, service);
+        control
+            .process_check_result(&object, 2, "CRITICAL - newer", &[])
+            .unwrap();
+    }
+    control
+        .process_check_result(&row, 1, "WARNING - newer", &[])
+        .unwrap();
+    let last_check = control
+        .service(&row_host, &row_service)
+        .unwrap()
+        .check
+        .last_check
+        .unwrap()
+        .as_unix_seconds();
+    engine
+        .snapshot(|snapshot| {
+            snapshot.services[&key]
+                .check
+                .last_check
+                .is_some_and(|at| (at.as_unix_seconds() - last_check).abs() < 0.01)
+        })
+        .await;
+
+    control.clear_requests();
+    // Waking up, the dashboard asks again for its rows on screen.
+    engine.send(Command::SetQuiet(false));
+    engine.send(Command::Hydrate(vec![row.clone()]));
+    engine
+        .snapshot(|snapshot| {
+            snapshot.services[&key]
+                .check
+                .result
+                .as_ref()
+                .is_some_and(|result| result.output == "WARNING - newer")
+        })
+        .await;
+    // Then the refresh of the other problems (five requests).
+    assert!(wait_until(|| by_name(&control, "services").len() >= 6).await);
+    let requests = by_name(&control, "services");
+    let position = requests
+        .iter()
+        .position(|(_, names)| names.contains(&row.full_name()))
+        .unwrap();
+    let sizes: Vec<usize> = requests.iter().map(|(_, names)| names.len()).collect();
+    eprintln!(
+        "the row on screen came with by-name request {} of {} ({sizes:?})",
+        position + 1,
+        requests.len(),
+    );
+    assert_eq!(position, 0, "{sizes:?}");
+    assert_eq!(sizes[0], 1, "on its own, not in the refresh's order");
+    engine.shutdown();
+}
+
 /// A quiet stream is silent most of the time; one that stalls is found
 /// by Icinga's state counts moving while nothing arrives, and reopened;
 /// the reload after it finds the change.
@@ -795,6 +1071,139 @@ async fn a_quiet_stream_that_stalls_is_reopened() {
     // What the stall hid comes with the reload, and notifies.
     let record = engine.notification().await;
     assert_eq!(record.intent.title, "CRITICAL · http on stg-api-01");
+    engine.shutdown();
+}
+
+/// A switch whose old stream withheld events (it stalled before the
+/// switch, so no line comes on both streams and the overlap times out) is
+/// checked against Icinga's state counts at the next status polls: what
+/// was withheld comes with a reload and notifies, in both directions. A
+/// switch that missed nothing costs no reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_away_from_a_stalled_stream_finds_what_it_withheld() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        status_interval: Duration::from_millis(100),
+        quiet_status_interval: Duration::from_millis(200),
+        stream_handover: Duration::from_millis(500),
+        reload_spacing: Duration::from_millis(100),
+        ..tuning()
+    };
+    let mut engine = launch.start();
+    settled(&mut engine).await;
+    // A busy installation: a check result every 50 ms.
+    let ticker = {
+        let control = control.clone();
+        tokio::spawn(async move {
+            let web = ObjectKey::service("stg-web-02", "http");
+            loop {
+                let _ = control.process_check_result(&web, 0, "HTTP OK", &[]);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+    };
+    let polls = requests_to(&control, "/v1/status/CIB");
+    assert!(wait_until(|| requests_to(&control, "/v1/status/CIB") >= polls + 4).await);
+
+    for (quiet, host) in [(true, "stg-api-01"), (false, "stg-web-01")] {
+        assert_eq!(control.stall_event_streams(), 1);
+        set(
+            &control,
+            host,
+            "http",
+            ServiceState::Critical,
+            "CRITICAL - withheld",
+        );
+        let switched = Instant::now();
+        engine.send(Command::SetQuiet(quiet));
+        let record = engine.notification().await;
+        eprintln!(
+            "quiet {quiet}: the withheld change notified {:?} after the switch",
+            switched.elapsed()
+        );
+        assert_eq!(record.intent.title, format!("CRITICAL · http on {host}"));
+        assert!(switched.elapsed() < Duration::from_secs(10));
+        stream_mode(&control, quiet).await;
+        let polls = requests_to(&control, "/v1/status/CIB");
+        assert!(wait_until(|| requests_to(&control, "/v1/status/CIB") >= polls + 3).await);
+    }
+    assert!(
+        !engine.seen.iter().any(|event| matches!(
+            event,
+            CoreEvent::Connection(ConnectionState::Reconnecting { .. })
+        )),
+        "a reload, no reconnect"
+    );
+
+    // Nothing withheld: the check costs status polls, no reload.
+    control.clear_requests();
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(requests_to(&control, "/v1/status/CIB") >= 1);
+    assert_eq!(lists(&control, "services"), 0, "no reload");
+    ticker.abort();
+    engine.shutdown();
+}
+
+/// A quiet stream may be silent for minutes: when it breaks and the
+/// environment wakes up during the reconnect, the gap is still judged by
+/// the quiet stream's allowance, so a silence a quiet stream is allowed
+/// costs no reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn waking_up_during_a_reconnect_judges_the_gap_by_the_quiet_stream() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        reload_after_gap: Duration::from_secs(1),
+        ..tuning()
+    };
+    let mut engine = launch.start();
+    settled(&mut engine).await;
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    // Longer than a live stream may be silent, well within a quiet one's.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    control.clear_requests();
+    control.set_latency(Duration::from_millis(300));
+    assert_eq!(control.drop_event_streams(), 1);
+    engine.send(Command::SetQuiet(false));
+    stream_mode(&control, false).await;
+    control.set_latency(Duration::ZERO);
+    engine.connected().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(lists(&control, "services"), 0, "no reload");
+    engine.shutdown();
+}
+
+/// Quick flips end in the last mode asked for, and a snapshot says so even
+/// when nothing else changed (the mode alone is news).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quick_flips_end_in_the_last_mode_and_a_snapshot_says_so() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        stream_handover: Duration::from_millis(300),
+        ..tuning()
+    };
+    let mut engine = launch.start();
+    settled(&mut engine).await;
+    for _ in 0..3 {
+        engine.send(Command::SetQuiet(true));
+        engine.send(Command::SetQuiet(false));
+        engine.send(Command::SetQuiet(true));
+        stream_mode(&control, true).await;
+        engine.snapshot(|snapshot| snapshot.quiet).await;
+        engine.send(Command::SetQuiet(false));
+        engine.send(Command::SetQuiet(true));
+        engine.send(Command::SetQuiet(false));
+        stream_mode(&control, false).await;
+        engine.snapshot(|snapshot| !snapshot.quiet).await;
+    }
     engine.shutdown();
 }
 

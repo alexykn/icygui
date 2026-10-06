@@ -51,7 +51,8 @@ use std::sync::Arc;
 use ic_api::Detail;
 use ic_model::{
     CheckInfo, CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
-    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, ServiceKey, Timestamp, Zone,
+    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, ServiceKey, ServiceState,
+    Timestamp, Zone,
 };
 use ic_rules::DashboardRef;
 
@@ -258,6 +259,25 @@ impl Store {
     /// How many hosts and services there are.
     pub(crate) fn object_count(&self) -> usize {
         self.hosts.len() + self.services.len()
+    }
+
+    /// The services by state (ok, warning, critical, unknown) as Icinga's
+    /// `/v1/status/CIB` counts them: by the raw state, which is ok while a
+    /// service is pending.
+    pub(crate) fn service_states(&self) -> [u32; 4] {
+        let mut counts = [0_u32; 4];
+        for service in self.services.values() {
+            let bucket = match service.state {
+                ServiceState::Ok | ServiceState::Pending => 0,
+                ServiceState::Warning => 1,
+                ServiceState::Critical => 2,
+                ServiceState::Unknown => 3,
+            };
+            if let Some(count) = counts.get_mut(bucket) {
+                *count = count.saturating_add(1);
+            }
+        }
+        counts
     }
 
     /// The latest `last_check` of any host or service: a lower bound of
@@ -904,6 +924,35 @@ impl Store {
     /// The endpoints and zones (for the node list's states).
     pub(crate) fn cluster(&self) -> (&[Endpoint], &[Zone]) {
         (&self.endpoints, &self.zones)
+    }
+
+    /// Whether the answer that last wrote `key` already reflects stream
+    /// line `seq` (it was sent after the line was read), so applying the
+    /// line changes nothing ([`Applied::Stale`]).
+    pub(crate) fn reflects(&self, key: &ObjectKey, seq: u64) -> bool {
+        self.seqs.get(key).is_some_and(|seqs| seq <= seqs.fetched)
+    }
+
+    /// Whether what the store holds of `key` already includes a state
+    /// change whose check result ended at `end`: Icinga sets
+    /// `last_state_change` (and, for a hard change, `last_hard_state_change`)
+    /// to that result's `execution_end`, so either being that late or later
+    /// means the answer was composed after the change, even when its line
+    /// came after the request went out.
+    pub(crate) fn shows_change(&self, key: &ObjectKey, end: Timestamp) -> bool {
+        let end = end.as_unix_seconds();
+        self.check(key).is_some_and(|check| {
+            check.last_state_change.as_unix_seconds() >= end
+                || check.last_hard_state_change.as_unix_seconds() >= end
+        })
+    }
+
+    /// The answer that last wrote `key` reflects stream line `seq` and
+    /// those before it ([`Store::shows_change`]): applying them would take
+    /// the object back to an older state, so they become
+    /// [`Applied::Stale`] like lines read before the request went out.
+    pub(crate) fn note_reflected(&mut self, key: &ObjectKey, seq: u64) {
+        self.mark_fetched(key.clone(), seq);
     }
 
     fn evented_after(&self, key: &ObjectKey, started: u64) -> bool {

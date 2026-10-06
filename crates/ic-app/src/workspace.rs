@@ -3,12 +3,17 @@
 //! tab, the dashboard editor (DASH-04), or on the first run without
 //! environments the onboarding form (ENV-08). Over everything, at most
 //! one modal: the command palette (UI-03), the environment editor, the
-//! certificate review (ENV-05), a confirmation, or a file path.
+//! certificate review (ENV-05), an action dialog (ACT-02..06), a
+//! confirmation, or a file path; and in the bottom-right corner the
+//! toasts that report actions (ACT-07).
 //!
 //! The sidebar, the dashboard header, the editors and the palette say
 //! what they want through events; the workspace opens the dialogs and
 //! carries out what was chosen (with `crate::live::Session` for anything
-//! that touches engines, the keychain or files).
+//! that touches engines, the keychain or files). Actions asked for
+//! anywhere (keys, buttons, the palette) arrive through
+//! `AppState::take_request`: the workspace opens their dialog, asks
+//! first, or sends them (`crate::operate`).
 //!
 //! The keyboard belongs to the main area: a click on a spot that takes no
 //! focus of its own (the sidebar, its footer, a header) hands the focus to
@@ -17,11 +22,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle,
-    Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, MouseDownEvent,
+    Action, AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
+    FocusHandle, Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, MouseDownEvent,
     ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task,
     Window, div, prelude::FluentBuilder as _, px,
 };
@@ -44,6 +49,9 @@ use crate::editor::{DashboardEditor, EditorEvent, EditorTarget};
 use crate::environments::{
     CertificateEvent, CertificateReview, EditorMode, EnvironmentEditor, EnvironmentEditorEvent,
 };
+use crate::operate::dialog::{ActionDialog, DialogEvent, DialogKind};
+use crate::operate::forms::{self, describe_objects};
+use crate::operate::{ActionSpec, CHECK_CONFIRM_ABOVE};
 use crate::palette::{CommandPalette, Focus, PaletteCommand, PaletteEvent, Pause};
 use crate::pane::{ObjectPane, PaneMode};
 use crate::sidebar::{Sidebar, SidebarEvent};
@@ -105,6 +113,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
     actions::bind_keys(cx);
     crate::editor::bind_keys(cx);
     crate::palette::bind_keys(cx);
+    crate::operate::dialog::bind_keys(cx);
 }
 
 /// What the main area shows.
@@ -127,19 +136,22 @@ struct OpenEditor {
     _events: Subscription,
 }
 
-/// What a confirmation deletes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Deletion {
-    /// A group and its dashboards.
+/// What a confirmation carries out.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Confirmed {
+    /// Delete a group and its dashboards.
     Group(String),
-    /// A dashboard.
+    /// Delete a dashboard.
     Dashboard(DashboardRef),
-    /// An environment, its password and its event log.
+    /// Delete an environment, its password and its event log.
     Environment(String),
+    /// Send an action (many checks, bulk removals).
+    Action(ActionSpec),
 }
 
-/// A question before something that can't be undone.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A question before something that can't be undone, or that weighs on
+/// Icinga.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Confirmation {
     /// The question.
     pub(crate) title: String,
@@ -147,8 +159,10 @@ pub(crate) struct Confirmation {
     pub(crate) detail: String,
     /// The confirming button's label.
     pub(crate) confirm: &'static str,
+    /// Whether confirming destroys something (a danger-styled button).
+    pub(crate) danger: bool,
     /// What happens on confirming.
-    pub(crate) action: Deletion,
+    pub(crate) action: Confirmed,
 }
 
 /// Which file a path dialog is for.
@@ -188,13 +202,14 @@ enum OpenModal {
     Palette(Held<CommandPalette>),
     Environment(Held<EnvironmentEditor>),
     Certificate(Held<CertificateReview>),
+    Action(Held<ActionDialog>),
     Confirm(Confirmation),
     Path(PathPrompt),
 }
 
 /// Which modal is open, for tests.
 #[cfg(all(test, target_os = "linux"))]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ModalKind {
     /// The command palette.
     Palette,
@@ -202,8 +217,10 @@ pub(crate) enum ModalKind {
     Environment,
     /// The certificate review.
     Certificate,
+    /// An action dialog.
+    Action(DialogKind),
     /// A confirmation.
-    Confirm(Confirmation),
+    Confirm(Box<Confirmation>),
     /// A file path.
     Path,
 }
@@ -409,12 +426,13 @@ impl Workspace {
 
     /// Which modal is open.
     #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn modal(&self) -> Option<ModalKind> {
+    pub(crate) fn modal(&self, cx: &App) -> Option<ModalKind> {
         self.modal.as_ref().map(|modal| match modal {
             OpenModal::Palette(_) => ModalKind::Palette,
             OpenModal::Environment(_) => ModalKind::Environment,
             OpenModal::Certificate(_) => ModalKind::Certificate,
-            OpenModal::Confirm(confirmation) => ModalKind::Confirm(confirmation.clone()),
+            OpenModal::Action(dialog) => ModalKind::Action(dialog.view.read(cx).kind()),
+            OpenModal::Confirm(confirmation) => ModalKind::Confirm(Box::new(confirmation.clone())),
             OpenModal::Path(_) => ModalKind::Path,
         })
     }
@@ -428,6 +446,15 @@ impl Workspace {
         }
     }
 
+    /// The open action dialog.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn action_dialog(&self) -> Option<&Entity<ActionDialog>> {
+        match &self.modal {
+            Some(OpenModal::Action(dialog)) => Some(&dialog.view),
+            _ => None,
+        }
+    }
+
     /// The open environment editor dialog.
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn environment_editor(&self) -> Option<&Entity<EnvironmentEditor>> {
@@ -437,8 +464,14 @@ impl Workspace {
         }
     }
 
-    /// Redraws everything that shows relative times.
+    /// Redraws everything that shows relative times, and lets toasts and
+    /// action markers whose time is up go.
     fn tick(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            if state.tick_actions(Instant::now()) {
+                cx.notify();
+            }
+        });
         self.sidebar.update(cx, |_, cx| cx.notify());
         self.dashboard.update(cx, |_, cx| cx.notify());
         if let Shown::Tab(key) = &self.shown
@@ -492,6 +525,12 @@ impl Workspace {
             }
         }
         self.sync_onboarding(window, cx);
+        if self.state.read(cx).has_request() {
+            let request = self.state.update(cx, |state, _| state.take_request());
+            if let Some(request) = request {
+                self.handle_request(request, window, cx);
+            }
+        }
         cx.notify();
     }
 
@@ -544,6 +583,10 @@ impl Workspace {
                     let handle = review.view.focus_handle(cx);
                     (handle.clone(), handle)
                 }
+                OpenModal::Action(dialog) => (
+                    dialog.view.focus_handle(cx),
+                    dialog.view.read(cx).default_focus(cx),
+                ),
                 OpenModal::Path(prompt) => {
                     let handle = prompt.input.focus_handle(cx);
                     (handle.clone(), handle)
@@ -759,8 +802,9 @@ impl Workspace {
                 }
                 self.request(action, targets, cx);
             }
+            PaletteCommand::Copy { what, text } => self.copy(what, text, cx),
             PaletteCommand::Reload => self.state.update(cx, |state, cx| {
-                if state.refresh(std::time::Instant::now()) {
+                if state.refresh(Instant::now()) {
                     cx.notify();
                 }
             }),
@@ -798,7 +842,8 @@ impl Workspace {
         }
     }
 
-    /// Records an action request (the action dialogs pick it up).
+    /// Asks for an action (refused with a toast if the API user may not
+    /// run it); the state's observer opens its dialog.
     fn request(
         &self,
         action: actions::ObjectAction,
@@ -806,12 +851,97 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |state, cx| {
-            if state
-                .request(actions::ActionRequest { action, targets })
-                .is_err()
-            {
-                cx.notify();
+            // A refusal shows as a toast.
+            let _ = state.request(actions::ActionRequest { action, targets });
+            cx.notify();
+        });
+    }
+
+    // --- Actions (ACT-01..07) -----------------------------------------
+
+    /// Carries out an action asked for: opens its dialog for the objects
+    /// it applies to, asks first (bulk removals, many checks), or sends
+    /// it. When none of the objects qualifies, a toast says why.
+    fn handle_request(
+        &mut self,
+        request: actions::ActionRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modal.is_some() {
+            // A dialog is open already; the request came from behind it.
+            return;
+        }
+        let actions::ActionRequest { action, targets } = request;
+        let snapshot = self.state.read(cx).snapshot().clone();
+        let eligible = match action {
+            actions::ObjectAction::Acknowledge
+            | actions::ObjectAction::RemoveAcknowledgement
+            | actions::ObjectAction::RemoveDowntimes => {
+                forms::eligible(&action, &snapshot, &targets)
             }
+            _ => forms::known(&snapshot, &targets),
+        };
+        if eligible.targets.is_empty() {
+            let detail = match eligible.skipped.as_slice() {
+                [one] => format!(
+                    "{} {}.",
+                    describe_objects(std::slice::from_ref(&one.object)),
+                    one.reason
+                ),
+                _ => format!(
+                    "{}: {}.",
+                    describe_objects(&targets),
+                    eligible.skipped_summary()
+                ),
+            };
+            self.state.update(cx, |state, cx| {
+                state.inform(format!("Nothing to {}", action.label()), Some(detail));
+                cx.notify();
+            });
+            return;
+        }
+        if let Some(kind) = DialogKind::for_action(&action) {
+            let state = self.state.clone();
+            let dialog = cx.new(|cx| ActionDialog::new(state, kind, eligible, window, cx));
+            let events = cx.subscribe_in(
+                &dialog,
+                window,
+                |this, _, event: &DialogEvent, window, cx| match event {
+                    DialogEvent::Close => this.close_modal(window, cx),
+                },
+            );
+            self.open_modal(OpenModal::Action(Held::new(dialog, events)), window, cx);
+            return;
+        }
+        let Some(spec) = ActionSpec::immediate(&action, eligible.targets.clone()) else {
+            return;
+        };
+        match confirmation_for(&spec, &snapshot, &eligible) {
+            Some(confirmation) => {
+                self.open_modal(OpenModal::Confirm(confirmation), window, cx);
+            }
+            None => self.submit(spec, cx),
+        }
+    }
+
+    /// Sends `spec`; a refusal shows as a toast.
+    fn submit(&self, spec: ActionSpec, cx: &mut Context<Self>) {
+        let label = spec.kind.label();
+        self.state.update(cx, |state, cx| {
+            if let Err(error) = state.submit(spec) {
+                state.inform(format!("Couldn't {label}"), Some(error));
+            }
+            cx.notify();
+        });
+    }
+
+    /// Copies `text` and says what was copied.
+    pub(crate) fn copy(&self, what: &str, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.state.update(cx, |state, cx| {
+            state.inform(format!("Copied {what}"), None);
+            cx.notify();
         });
     }
 
@@ -946,7 +1076,8 @@ impl Workspace {
             title: format!("Delete the group {}?", group.name),
             detail,
             confirm: "delete group",
-            action: Deletion::Group(id.to_owned()),
+            danger: true,
+            action: Confirmed::Group(id.to_owned()),
         };
         self.open_modal(OpenModal::Confirm(confirmation), window, cx);
     }
@@ -970,7 +1101,8 @@ impl Workspace {
             detail: "Its view and notification setting are deleted. This can't be undone."
                 .to_owned(),
             confirm: "delete dashboard",
-            action: Deletion::Dashboard(reference.clone()),
+            danger: true,
+            action: Confirmed::Dashboard(reference.clone()),
         };
         self.open_modal(OpenModal::Confirm(confirmation), window, cx);
     }
@@ -995,7 +1127,8 @@ impl Workspace {
                      deleted. Icinga itself isn't touched. This can't be undone."
                 .to_owned(),
             confirm: "delete environment",
-            action: Deletion::Environment(id.to_owned()),
+            danger: true,
+            action: Confirmed::Environment(id.to_owned()),
         };
         self.open_modal(OpenModal::Confirm(confirmation), window, cx);
     }
@@ -1006,14 +1139,15 @@ impl Workspace {
             return;
         };
         match confirmation.action {
-            Deletion::Group(id) => {
+            Confirmed::Action(spec) => self.submit(spec, cx),
+            Confirmed::Group(id) => {
                 self.state.update(cx, |state, cx| {
                     if state.delete_group(&id) {
                         cx.notify();
                     }
                 });
             }
-            Deletion::Dashboard(reference) => {
+            Confirmed::Dashboard(reference) => {
                 if self.editor.as_ref().is_some_and(|editor| {
                     *editor.view.read(cx).target() == EditorTarget::Existing(reference.clone())
                 }) {
@@ -1025,7 +1159,7 @@ impl Workspace {
                     }
                 });
             }
-            Deletion::Environment(id) => {
+            Confirmed::Environment(id) => {
                 let deleted = match live::session(cx) {
                     Some(session) => {
                         session.update(cx, |session, cx| session.delete_environment(&id, cx))
@@ -1400,6 +1534,11 @@ impl Workspace {
                 ModalPlacement::Center,
                 review.view.clone().into_any_element(),
             ),
+            OpenModal::Action(dialog) => (
+                580.,
+                ModalPlacement::Center,
+                dialog.view.clone().into_any_element(),
+            ),
             OpenModal::Confirm(confirmation) => (
                 460.,
                 ModalPlacement::Center,
@@ -1424,7 +1563,15 @@ impl Workspace {
                     Modal::new("modal", px(width), content)
                         .placement(placement)
                         .on_dismiss(cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                            this.close_modal(window, cx);
+                            // A dialog with something typed stays: a stray
+                            // click must not lose it (Escape still closes).
+                            let dirty = matches!(
+                                &this.modal,
+                                Some(OpenModal::Action(dialog)) if dialog.view.read(cx).is_dirty()
+                            );
+                            if !dirty {
+                                this.close_modal(window, cx);
+                            }
                         })),
                 )
                 .into_any_element(),
@@ -1458,7 +1605,11 @@ impl Workspace {
                     )
                     .action(
                         Button::new("confirm-ok", confirmation.confirm)
-                            .variant(ButtonVariant::Danger)
+                            .variant(if confirmation.danger {
+                                ButtonVariant::Danger
+                            } else {
+                                ButtonVariant::Primary
+                            })
                             .key_hint("↵")
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.confirm(window, cx);
@@ -1536,6 +1687,20 @@ impl Render for Workspace {
         };
         let modal = self.render_modal(cx);
         let modal_open = self.modal.is_some();
+        // Above the list's selection bar while rows are marked.
+        let bar = matches!(self.shown, Shown::Dashboard(_))
+            && self.editor.is_none()
+            && self.onboarding.is_none()
+            && self.dashboard.read(cx).has_marks(cx);
+        let toasts = crate::operate::toasts::render(
+            &self.state,
+            if bar {
+                16. + f32::from(crate::dashboard::SELECTION_BAR_HEIGHT)
+            } else {
+                16.
+            },
+            cx,
+        );
         let theme = cx.theme();
         div()
             .id("workspace")
@@ -1569,9 +1734,83 @@ impl Render for Workspace {
                 workspace.child(self.sidebar.clone())
             })
             .child(div().flex().flex_1().min_w_0().h_full().child(main))
+            .children(toasts)
             .children(modal)
             .into_any_element()
     }
+}
+
+/// The question to ask before sending `spec`, if it needs one: checking
+/// many objects at once (a burst of work for the satellites), removing
+/// several acknowledgements, removing downtimes.
+pub(crate) fn confirmation_for(
+    spec: &ActionSpec,
+    snapshot: &ic_core::snapshot::Snapshot,
+    eligible: &forms::Eligible,
+) -> Option<Confirmation> {
+    let what = describe_objects(&spec.objects);
+    let skipped = if eligible.skipped.is_empty() {
+        String::new()
+    } else {
+        format!(" Skipped: {}.", eligible.skipped_summary())
+    };
+    let (title, detail, confirm, danger) = match &spec.kind {
+        actions::ObjectAction::CheckNow if spec.objects.len() > CHECK_CONFIRM_ABOVE => (
+            format!("Check {what} now?"),
+            format!(
+                "Icinga runs their checks at once, forced, on the endpoints that run them.{skipped}"
+            ),
+            "check now",
+            false,
+        ),
+        actions::ObjectAction::RemoveAcknowledgement if spec.objects.len() > 1 => (
+            format!("Remove the acknowledgement of {what}?"),
+            format!(
+                "Their problems count as unhandled again and notify as configured; the \
+                 acknowledgement comments go too.{skipped}"
+            ),
+            "remove acknowledgements",
+            true,
+        ),
+        actions::ObjectAction::RemoveDowntimes => {
+            let count: usize = spec
+                .objects
+                .iter()
+                .map(|object| snapshot.downtimes.get(object).map_or(0, Vec::len))
+                .sum();
+            let downtimes = if count == 1 {
+                "its downtime".to_owned()
+            } else {
+                format!("{count} downtimes")
+            };
+            (
+                format!("Remove the downtimes of {what}?"),
+                format!(
+                    "{} end{} at once, with any downtimes they triggered; the objects notify as \
+                     configured again.{skipped}",
+                    capitalize(&downtimes),
+                    if count == 1 { "s" } else { "" },
+                ),
+                "remove downtimes",
+                true,
+            )
+        }
+        _ => return None,
+    };
+    Some(Confirmation {
+        title,
+        detail,
+        confirm,
+        danger,
+        action: Confirmed::Action(spec.clone()),
+    })
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// The window title for the active environment.

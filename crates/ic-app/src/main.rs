@@ -19,6 +19,7 @@ mod format;
 mod live;
 mod logging;
 mod menu_state;
+mod operate;
 mod palette;
 mod pane;
 mod persist;

@@ -227,6 +227,11 @@ impl CommandPalette {
         let colors = theme.colors;
         let selected = index == self.selected;
         let label = highlighted(&item.label, &item.matched, theme);
+        // An action the API user may not run: faint, with the reason.
+        let (label_color, detail) = match &item.denied {
+            Some(denial) => (colors.text_faint, denial.clone()),
+            None => (colors.text, item.detail.clone()),
+        };
         div()
             .id(("palette-item", index))
             .flex()
@@ -255,7 +260,7 @@ impl CommandPalette {
                     .max_w(px(360.))
                     .truncate()
                     .text_size(theme.text.row)
-                    .text_color(colors.text)
+                    .text_color(label_color)
                     .child(label),
             )
             .child(
@@ -265,7 +270,7 @@ impl CommandPalette {
                     .truncate()
                     .text_size(theme.text.small)
                     .text_color(colors.text_faint)
-                    .child(item.detail.clone()),
+                    .child(detail),
             )
             .when_some(item.key_hint, |row, key| row.child(KeyHint::new(key)))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {

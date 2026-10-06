@@ -3,7 +3,11 @@
 //!
 //! The pane follows links (the service's host, the host's services, parents
 //! and children) with a back button. Action buttons send typed requests to
-//! [`AppState::request`]; their dialogs come with M3.
+//! [`AppState::request`] (the workspace opens their dialogs); an action on
+//! its way shows on its button (`acknowledging…`), a failed one under the
+//! buttons with Icinga's reason. The `···` beside them has the actions
+//! without a key and copies the name, the output and a filter expression
+//! (PANE-05).
 
 mod host;
 pub(crate) mod model;
@@ -13,14 +17,14 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    Window, div, prelude::FluentBuilder as _, px,
+    Focusable, InteractiveElement as _, IntoElement, MouseDownEvent, ParentElement as _, Pixels,
+    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_ui_kit::{
-    ActiveTheme as _, Button, EmptyState, Icon, IconButton, IconName, Link, PaneHeader, Scrollbar,
-    Theme, Tooltip,
+    ActiveTheme as _, Button, EmptyState, GlyphButton, Icon, IconButton, IconName, Link, Menu,
+    MenuItem, PaneHeader, Popover, Scrollbar, Theme, Tooltip,
 };
 
 use crate::actions::{
@@ -32,6 +36,8 @@ use crate::app_state::{AppState, Hydrated};
 use crate::banner;
 use crate::chrome::{Controls, WindowDrag};
 use crate::dashboard::{HYDRATE_DEBOUNCE, SplitLayout};
+use crate::menu_state::{OpenMenu, down_position};
+use crate::operate::expression;
 use crate::workspace::sidebar_reopen;
 
 /// Where the pane is shown.
@@ -129,7 +135,16 @@ pub(crate) struct ObjectPane {
     hydration_wanted: Vec<ObjectKey>,
     /// Asks for them once the pane rests on an object.
     hydrate_task: Option<Task<()>>,
+    /// The `···` menu beside the action buttons.
+    menu: OpenMenu<PaneMenu>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The pane's popup menus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaneMenu {
+    /// `···` beside the action buttons.
+    More,
 }
 
 impl EventEmitter<PaneEvent> for ObjectPane {}
@@ -162,6 +177,7 @@ impl ObjectPane {
             drag: WindowDrag::default(),
             hydration_wanted: Vec::new(),
             hydrate_task: None,
+            menu: OpenMenu::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -321,18 +337,53 @@ impl ObjectPane {
         cx.emit(PaneEvent::Close);
     }
 
-    /// Sends an action request for the shown object (refused, and
-    /// logged, if the API user may not run it).
+    /// Asks for an action on the shown object (refused with a toast if
+    /// the API user may not run it; the workspace opens its dialog).
     fn request(&self, action: ObjectAction, cx: &mut App) {
         let request = ActionRequest {
             action,
             targets: vec![self.object.clone()],
         };
         self.state.update(cx, |state, cx| {
-            if state.request(request).is_err() {
-                cx.notify();
-            }
+            let _ = state.request(request);
+            cx.notify();
         });
+    }
+
+    /// Copies `text` and says what was copied.
+    fn copy(&self, what: &str, text: String, cx: &mut App) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.state.update(cx, |state, cx| {
+            state.inform(format!("Copied {what}"), None);
+            cx.notify();
+        });
+    }
+
+    /// The open popup menu.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn open_menu(&self) -> Option<PaneMenu> {
+        self.menu.current().copied()
+    }
+
+    /// Opens the `···` menu, as its button does.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn open_more_menu(&mut self, cx: &mut Context<Self>) {
+        self.menu.open(PaneMenu::More);
+        cx.notify();
+    }
+
+    /// The `···` menu's items (`output`: the object's output, if loaded).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn more_menu_labels(
+        &self,
+        output: Option<String>,
+        cx: &Context<Self>,
+    ) -> Vec<String> {
+        more_menu(self, output, cx)
+            .item_labels()
+            .into_iter()
+            .map(|label| label.to_string())
+            .collect()
     }
 
     fn on_acknowledge(&mut self, _: &Acknowledge, _: &mut Window, cx: &mut Context<Self>) {
@@ -534,17 +585,27 @@ fn scroll_area(
         .child(Scrollbar::vertical(scroll))
 }
 
-/// The action buttons shared by service and host panes. Actions the API
-/// user may not run are disabled, and their tooltip says why (ENV-09).
+/// The action buttons shared by service and host panes, with the `···`
+/// menu, an action on its way (`acknowledging…` on its button) and the
+/// last failure under them. Actions the API user may not run are
+/// disabled, and their tooltip says why (ENV-09).
 fn action_buttons(
     pane: &ObjectPane,
     acknowledged: bool,
     problem: bool,
+    output: Option<String>,
     cx: &Context<ObjectPane>,
 ) -> impl IntoElement {
     let state = pane.state.read(cx);
+    let pending = state.pending_action(&pane.object);
     let button =
         |id: &'static str, label: &'static str, key: Option<&'static str>, action: ObjectAction| {
+            // The action on its way names itself on its button.
+            if let Some((kind, marker)) = pending
+                && *kind == action
+            {
+                return Button::new(id, marker).disabled(true);
+            }
             let denial = state.action_denial(&action);
             let mut button = Button::new(id, label);
             if let Some(key) = key {
@@ -559,47 +620,288 @@ fn action_buttons(
                 )),
             }
         };
+    let failure = failure_line(pane, cx);
+    let more = more_trigger(pane, output, cx);
     div()
         .flex()
-        .flex_wrap()
-        .gap(px(8.))
-        .when(problem && !acknowledged, |row| {
-            row.child(
-                button(
-                    "acknowledge",
-                    "acknowledge",
-                    Some("a"),
-                    ObjectAction::Acknowledge,
-                )
-                .primary(),
+        .flex_col()
+        .gap(px(10.))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.))
+                .when(problem && !acknowledged, |row| {
+                    row.child(
+                        button(
+                            "acknowledge",
+                            "acknowledge",
+                            Some("a"),
+                            ObjectAction::Acknowledge,
+                        )
+                        .primary(),
+                    )
+                })
+                .when(acknowledged, |row| {
+                    row.child(button(
+                        "remove-ack",
+                        "remove ack",
+                        None,
+                        ObjectAction::RemoveAcknowledgement,
+                    ))
+                })
+                .child(button(
+                    "downtime",
+                    "downtime",
+                    Some("d"),
+                    ObjectAction::ScheduleDowntime,
+                ))
+                .child(button(
+                    "check-now",
+                    "check now",
+                    Some("r"),
+                    ObjectAction::CheckNow,
+                ))
+                .child(button(
+                    "comment",
+                    "comment",
+                    Some("c"),
+                    ObjectAction::AddComment,
+                ))
+                .child(more),
+        )
+        .children(failure)
+}
+
+/// The last failed action on the pane's object, with Icinga's reason and
+/// a way to dismiss it ("failures show on the button that caused them").
+fn failure_line(pane: &ObjectPane, cx: &Context<ObjectPane>) -> Option<impl IntoElement> {
+    let theme = cx.theme();
+    let failure = pane.state.read(cx).action_failure(&pane.object)?;
+    Some(
+        div()
+            .flex()
+            .items_start()
+            .gap(px(8.))
+            .text_size(theme.text.small)
+            .child(
+                div().pt(px(2.)).child(
+                    Icon::new(IconName::TriangleAlert)
+                        .size(theme.metrics.icon_small)
+                        .color(theme.states.critical),
+                ),
             )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(theme.colors.text_muted)
+                    .child(format!(
+                        "{} failed: {}",
+                        failure.action.label(),
+                        failure.reason
+                    )),
+            )
+            .child(
+                Link::new("dismiss-action-failure", "dismiss")
+                    .quiet()
+                    .on_click(cx.listener(|this: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                        let object = this.object.clone();
+                        this.state.update(cx, |state, cx| {
+                            if state.dismiss_action_failure(&object) {
+                                cx.notify();
+                            }
+                        });
+                    })),
+            ),
+    )
+}
+
+/// The `···` beside the action buttons, with its menu while open.
+fn more_trigger(
+    pane: &ObjectPane,
+    output: Option<String>,
+    cx: &Context<ObjectPane>,
+) -> impl IntoElement {
+    let open = pane.menu.is_open(&PaneMenu::More);
+    div()
+        .relative()
+        .flex_none()
+        .child(
+            GlyphButton::new("pane-more", "···")
+                .text_size(px(13.))
+                .color(cx.theme().colors.text_muted)
+                .selected(open)
+                .when(!open, |trigger| {
+                    trigger.tooltip(Tooltip::new("More: check result, command, copy"))
+                })
+                .on_click(
+                    cx.listener(|this: &mut ObjectPane, event: &ClickEvent, _, cx| {
+                        this.menu.toggle(PaneMenu::More, down_position(event));
+                        cx.notify();
+                    }),
+                ),
+        )
+        .when(open, |trigger| {
+            trigger.child(Popover::new(more_menu(pane, output, cx)))
         })
-        .when(acknowledged, |row| {
-            row.child(button(
-                "remove-ack",
-                "remove ack",
-                None,
-                ObjectAction::RemoveAcknowledgement,
-            ))
-        })
-        .child(button(
-            "downtime",
-            "downtime",
-            Some("d"),
-            ObjectAction::ScheduleDowntime,
+}
+
+/// The pane's `···`: the actions without a key, and copying (PANE-05).
+fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>) -> Menu {
+    let state = pane.state.read(cx);
+    let item = |id: &'static str, label: &'static str, action: ObjectAction| {
+        let item = MenuItem::new(id, label);
+        match state.action_denial(&action) {
+            Some(denial) => item.disabled(true).tooltip(Tooltip::new(denial)),
+            None => item.on_click(cx.listener(
+                move |this: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                    this.menu.close();
+                    this.request(action.clone(), cx);
+                    cx.notify();
+                },
+            )),
+        }
+    };
+    let copy = |id: &'static str, label: &'static str, what: &'static str, text: String| {
+        MenuItem::new(id, label).on_click(cx.listener(
+            move |this: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                this.menu.close();
+                this.copy(what, text.clone(), cx);
+                cx.notify();
+            },
         ))
-        .child(button(
-            "check-now",
-            "check now",
-            Some("r"),
-            ObjectAction::CheckNow,
+    };
+    let objects = std::slice::from_ref(&pane.object);
+    let downtimes = state
+        .snapshot()
+        .downtimes
+        .get(&pane.object)
+        .map_or(0, Vec::len);
+    let mut menu = Menu::new("pane-menu")
+        .item(item(
+            "pane-result",
+            "submit check result…",
+            ObjectAction::SubmitCheckResult,
         ))
-        .child(button(
-            "comment",
-            "comment",
-            Some("c"),
-            ObjectAction::AddComment,
+        .item(item(
+            "pane-command",
+            "run command…",
+            ObjectAction::RunCommand,
+        ));
+    if downtimes > 0 {
+        menu = menu.item(item(
+            "pane-remove-downtimes",
+            if downtimes == 1 {
+                "remove its downtime"
+            } else {
+                "remove all its downtimes"
+            },
+            ObjectAction::RemoveDowntimes,
+        ));
+    }
+    menu = menu
+        .separator()
+        .item(copy(
+            "pane-copy-name",
+            "copy name",
+            "the name",
+            expression::names(objects),
         ))
+        .item(copy(
+            "pane-copy-filter",
+            "copy filter expression",
+            "the filter expression",
+            expression::filter(objects),
+        ));
+    if let Some(output) = output.filter(|output| !output.is_empty()) {
+        menu = menu.item(copy(
+            "pane-copy-output",
+            "copy output",
+            "the output",
+            output,
+        ));
+    }
+    // The notes and action URLs, macros resolved (PANE-05).
+    let links = object_links(state.snapshot(), &pane.object);
+    if !links.is_empty() {
+        menu = menu.separator();
+        for (index, (label, url)) in links.into_iter().enumerate() {
+            let target = url.clone();
+            menu = menu.item(
+                MenuItem::new(SharedString::from(format!("pane-open-{index}")), label)
+                    .tooltip(Tooltip::new(format!("Open {url} in the browser")))
+                    .on_click(
+                        cx.listener(move |this: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                            this.menu.close();
+                            cx.open_url(&target);
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
+    }
+    menu.on_dismiss(
+        cx.listener(|this: &mut ObjectPane, event: &MouseDownEvent, _, cx| {
+            this.menu.dismiss(event.position);
+            cx.notify();
+        }),
+    )
+}
+
+/// The object's notes and action URLs that open in a browser, macros
+/// resolved like Icinga Web (`open notes url`, `open action url 2`).
+fn object_links(
+    snapshot: &ic_core::snapshot::Snapshot,
+    object: &ObjectKey,
+) -> Vec<(String, String)> {
+    let (links, scope) = match object {
+        ObjectKey::Host { name } => {
+            let Some(host) = snapshot.hosts.get(name) else {
+                return Vec::new();
+            };
+            (
+                &host.links,
+                model::MacroScope {
+                    host: Some(host),
+                    service: None,
+                },
+            )
+        }
+        ObjectKey::Service { key } => {
+            let Some(service) = snapshot.services.get(key) else {
+                return Vec::new();
+            };
+            (
+                &service.links,
+                model::MacroScope {
+                    host: snapshot.host_of(key).map(AsRef::as_ref),
+                    service: Some(service),
+                },
+            )
+        }
+    };
+    let mut found = Vec::new();
+    for (what, raw) in [
+        ("notes url", &links.notes_url),
+        ("action url", &links.action_url),
+    ] {
+        let urls: Vec<String> = model::link_urls(raw, scope)
+            .into_iter()
+            .filter(|url| model::is_web_link(url))
+            .collect();
+        let several = urls.len() > 1;
+        for (index, url) in urls.into_iter().enumerate() {
+            let label = if several {
+                format!("open {what} {}", index + 1)
+            } else {
+                format!("open {what}")
+            };
+            found.push((label, url));
+        }
+    }
+    found
 }
 
 /// A copy-to-clipboard button, shown while the mouse is over the element
@@ -659,6 +961,20 @@ mod tests {
             BodyLayout::for_width(PaneMode::Tab, px(TAB_TWO_COLUMNS_FROM - 1.)),
             BodyLayout::Tab
         );
+    }
+
+    #[test]
+    fn the_menu_opens_links_with_their_macros_resolved() {
+        let snapshot = crate::fixture::build(Timestamp::from_unix_seconds(1_790_000_000.)).snapshot;
+        let replication = ObjectKey::service("db-prod-03", "postgres-replication");
+        let links = object_links(&snapshot, &replication);
+        assert!(!links.is_empty());
+        for (label, url) in &links {
+            assert!(label.starts_with("open "), "{label}");
+            assert!(url.starts_with("http"), "{url}");
+            assert!(!url.contains('$'), "macros resolved: {url}");
+        }
+        assert!(object_links(&snapshot, &ObjectKey::host("no-such-host")).is_empty());
     }
 
     #[test]

@@ -189,8 +189,10 @@ impl AppState {
         self.notifications.clear();
         self.unread = 0;
         self.paused_until = None;
+        self.requested = None;
         self.last_request = None;
         self.last_denial = None;
+        self.tracker.clear();
         self.restore_environment_ui();
         self.connection = match self.environment() {
             Some(environment) => {

@@ -36,13 +36,16 @@ use crate::chrome::ControlsPreference;
 use crate::dashboard::DashboardView;
 use crate::fixture::FixtureOptions;
 use crate::open_main_window;
+use crate::operate::dialog::DialogKind;
 use crate::pane::{HostTab, ObjectPane};
 use crate::window_state::InitialBounds;
 use crate::workspace::{self, ToggleSidebar, Workspace};
 
+mod actions;
 mod editing;
 mod environments;
 mod live;
+mod live_actions;
 mod states;
 
 /// One headless app at a time.
@@ -466,13 +469,19 @@ fn clicks_select_mark_and_act() {
         app.keys(cx, "x");
         assert_eq!(app.marked(cx), expected);
 
-        // Actions apply to the marked rows, in list order.
+        // Actions apply to the marked rows, in list order: the dialog
+        // opens for them (those Icinga would refuse are skipped).
         app.keys(cx, "a");
         let request = app.state.read(cx).last_request().cloned().unwrap();
         assert_eq!(request.action, ObjectAction::Acknowledge);
         assert_eq!(request.targets, expected);
-
-        // Escape closes the pane first, then clears the marks.
+        assert_eq!(
+            app.workspace.read(cx).modal(cx),
+            Some(workspace::ModalKind::Action(DialogKind::Acknowledge))
+        );
+        // Escape closes the dialog, then the pane, then clears the marks.
+        app.keys(cx, "escape");
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
         app.keys(cx, "escape");
         assert_eq!(app.pane_object(cx), None);
         assert_eq!(app.marked(cx).len(), 3);
@@ -556,6 +565,12 @@ fn open_as_tab_shows_the_pane_full_width() {
         let request = app.state.read(cx).last_request().cloned().unwrap();
         assert_eq!(request.action, ObjectAction::ScheduleDowntime);
         assert_eq!(request.targets, [replication()]);
+        assert_eq!(
+            app.workspace.read(cx).modal(cx),
+            Some(workspace::ModalKind::Action(DialogKind::Downtime))
+        );
+        app.keys(cx, "escape");
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
 
         // Back to the dashboard: the list and its pane are as they were.
         app.state.update(cx, |state, cx| {

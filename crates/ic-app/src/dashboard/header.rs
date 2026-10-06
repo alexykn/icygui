@@ -26,6 +26,8 @@ pub(crate) enum HeaderMenu {
     Sort,
     /// `···`: grouping, the handled toggle, copying the filter.
     Options,
+    /// The selection bar's `···`: more bulk actions, copying.
+    Selection,
 }
 
 /// Which header menu is open.
@@ -304,7 +306,7 @@ impl DashboardView {
             .on_dismiss(Self::dismiss_listener(cx))
     }
 
-    fn dismiss_listener(
+    pub(super) fn dismiss_listener(
         cx: &Context<Self>,
     ) -> impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static {
         cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -332,10 +334,6 @@ impl DashboardView {
             // Nothing matches the filter: the empty state says so.
             return None;
         }
-        let marked = self
-            .lists
-            .get(reference)
-            .map_or(0, |list| list.selection.marked_count());
         let toggle_reference = reference.clone();
         let hide = !view.hide_handled;
         let handled_label = if view.hide_handled {
@@ -343,12 +341,8 @@ impl DashboardView {
         } else {
             "handled shown"
         };
-        let end_text = if marked > 0 {
-            // The 14px gap is about two characters.
-            format!("{marked} selected  {handled_label}")
-        } else {
-            handled_label.to_owned()
-        };
+        // The selection bar under the list counts marked rows.
+        let end_text = handled_label.to_owned();
         let texts: Vec<String> = items
             .iter()
             .map(|(state, count, label)| SummaryItem::new(*state, *count, *label).text())
@@ -359,38 +353,27 @@ impl DashboardView {
             list_width,
             theme,
         );
-        let end = div()
-            .flex()
-            .items_center()
-            .gap(gpui::px(14.))
-            .when(marked > 0, |end| {
-                end.child(
-                    div()
-                        .text_color(colors.accent)
-                        .child(format!("{marked} selected")),
-                )
-            })
-            .child(
-                div()
-                    .id("handled-toggle")
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(colors.text_muted))
-                    .child(handled_label)
-                    .tooltip(Tooltip::text(if view.hide_handled {
-                        "Show acknowledged problems, downtimes and problems on down hosts"
-                    } else {
-                        "Hide acknowledged problems, downtimes and problems on down hosts"
-                    }))
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        let reference = toggle_reference.clone();
-                        this.state.update(cx, |state, cx| {
-                            if state.update_view(&reference, |view| view.hide_handled = hide) {
-                                cx.notify();
-                            }
-                        });
-                    })),
-            );
+        let end = div().flex().items_center().gap(gpui::px(14.)).child(
+            div()
+                .id("handled-toggle")
+                .cursor_pointer()
+                .hover(|style| style.text_color(colors.text_muted))
+                .child(handled_label)
+                .tooltip(Tooltip::text(if view.hide_handled {
+                    "Show acknowledged problems, downtimes and problems on down hosts"
+                } else {
+                    "Hide acknowledged problems, downtimes and problems on down hosts"
+                }))
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    let reference = toggle_reference.clone();
+                    this.state.update(cx, |state, cx| {
+                        if state.update_view(&reference, |view| view.hide_handled = hide) {
+                            cx.notify();
+                        }
+                    });
+                })),
+        );
         Some(
             SummaryBar::new()
                 .children(items.into_iter().map(|(state, count, label)| {

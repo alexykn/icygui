@@ -14,10 +14,14 @@ pub(crate) fn action_permission(action: &ObjectAction) -> &'static str {
         ObjectAction::Acknowledge => "actions/acknowledge-problem",
         ObjectAction::RemoveAcknowledgement => "actions/remove-acknowledgement",
         ObjectAction::ScheduleDowntime => "actions/schedule-downtime",
+        ObjectAction::RemoveDowntimes | ObjectAction::RemoveDowntime(_) => {
+            "actions/remove-downtime"
+        }
         ObjectAction::CheckNow => "actions/reschedule-check",
         ObjectAction::AddComment => "actions/add-comment",
         ObjectAction::RemoveComment(_) => "actions/remove-comment",
-        ObjectAction::RemoveDowntime(_) => "actions/remove-downtime",
+        ObjectAction::SubmitCheckResult => "actions/process-check-result",
+        ObjectAction::RunCommand => "actions/execute-command",
     }
 }
 
@@ -27,10 +31,12 @@ fn action_verb(action: &ObjectAction) -> &'static str {
         ObjectAction::Acknowledge => "acknowledge problems",
         ObjectAction::RemoveAcknowledgement => "remove acknowledgements",
         ObjectAction::ScheduleDowntime => "schedule downtimes",
+        ObjectAction::RemoveDowntimes | ObjectAction::RemoveDowntime(_) => "remove downtimes",
         ObjectAction::CheckNow => "reschedule checks",
         ObjectAction::AddComment => "add comments",
         ObjectAction::RemoveComment(_) => "remove comments",
-        ObjectAction::RemoveDowntime(_) => "remove downtimes",
+        ObjectAction::SubmitCheckResult => "submit check results",
+        ObjectAction::RunCommand => "run commands",
     }
 }
 
@@ -91,6 +97,9 @@ mod tests {
             ObjectAction::AddComment,
             ObjectAction::RemoveComment("c".to_owned()),
             ObjectAction::RemoveDowntime("d".to_owned()),
+            ObjectAction::RemoveDowntimes,
+            ObjectAction::SubmitCheckResult,
+            ObjectAction::RunCommand,
         ];
         for action in &actions {
             let permission = action_permission(action);

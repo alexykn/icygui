@@ -82,7 +82,13 @@ pub(super) fn render(
             now,
             cx,
         ))
-        .child(action_buttons(pane, acknowledged, service.is_problem(), cx));
+        .child(action_buttons(
+            pane,
+            acknowledged,
+            service.is_problem(),
+            full_output(&service.check),
+            cx,
+        ));
     let column = match layout {
         BodyLayout::Pane | BodyLayout::Tab => column
             .when(layout == BodyLayout::Tab, |column| {
@@ -122,6 +128,16 @@ pub(super) fn render(
             ),
     };
     scroll_area("service-pane-body", &pane.scroll, column).into_any_element()
+}
+
+/// The plugin output with the long output, for copying.
+pub(super) fn full_output(check: &ic_model::CheckInfo) -> Option<String> {
+    let result = check.result.as_ref()?;
+    Some(if result.long_output.is_empty() {
+        result.output.clone()
+    } else {
+        format!("{}\n{}", result.output, result.long_output)
+    })
 }
 
 /// A column of sections.

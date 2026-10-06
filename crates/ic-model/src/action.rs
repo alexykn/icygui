@@ -189,6 +189,78 @@ pub enum ActionTarget {
 mod tests {
     use super::*;
 
+    /// ACT-08 (PLAN.md D6): every action is a runtime operation. A new
+    /// variant must be added to `every` (the match below won't compile
+    /// otherwise) and its endpoint judged against the allowed list.
+    #[test]
+    fn only_runtime_operations_exist() {
+        const ALLOWED: [&str; 8] = [
+            "reschedule-check",
+            "acknowledge-problem",
+            "remove-acknowledgement",
+            "schedule-downtime",
+            "remove-downtime",
+            "add-comment",
+            "process-check-result",
+            "execute-command",
+        ];
+        let every = [
+            Action::CheckNow { force: true },
+            Action::Acknowledge {
+                comment: String::new(),
+                sticky: false,
+                persistent: false,
+                expiry: None,
+            },
+            Action::RemoveAcknowledgement,
+            Action::ScheduleDowntime {
+                comment: String::new(),
+                start: Timestamp::from_unix_seconds(0.),
+                end: Timestamp::from_unix_seconds(1.),
+                mode: DowntimeMode::Fixed,
+                all_services: false,
+                child_options: ChildOptions::None,
+                trigger_name: None,
+            },
+            Action::RemoveAllDowntimes,
+            Action::AddComment {
+                text: String::new(),
+                expiry: None,
+            },
+            Action::ProcessCheckResult {
+                exit_status: 0,
+                output: String::new(),
+                perfdata: Vec::new(),
+                ttl: None,
+            },
+            Action::ExecuteCommand {
+                command_type: CommandType::EventCommand,
+                command: None,
+                endpoint: None,
+                macros: Vars::new(),
+                ttl: 1.,
+            },
+        ];
+        for action in &every {
+            match action {
+                Action::CheckNow { .. }
+                | Action::Acknowledge { .. }
+                | Action::RemoveAcknowledgement
+                | Action::ScheduleDowntime { .. }
+                | Action::RemoveAllDowntimes
+                | Action::AddComment { .. }
+                | Action::ProcessCheckResult { .. }
+                | Action::ExecuteCommand { .. } => {}
+            }
+            assert!(
+                ALLOWED.contains(&action.api_name()),
+                "{} is not a runtime operation",
+                action.api_name()
+            );
+            assert!(!action.label().is_empty());
+        }
+    }
+
     #[test]
     fn api_names() {
         assert_eq!(

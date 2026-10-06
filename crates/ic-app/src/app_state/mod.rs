@@ -21,6 +21,7 @@ pub(crate) mod connection;
 pub(crate) mod editing;
 pub(crate) mod environments;
 pub(crate) mod hydration;
+mod operations;
 pub(crate) mod permissions;
 
 use std::collections::VecDeque;
@@ -42,9 +43,12 @@ pub(crate) use self::connection::{
     ConnectionNotice, ConnectionStatus, Health, NoticeAction, NoticeKind, Tone,
 };
 use self::hydration::Hydration;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use self::operations::NOT_CONNECTED;
 use crate::actions::{ActionRequest, ObjectAction};
 #[cfg(test)]
 use crate::fixture::{self, FixtureOptions};
+use crate::operate::tracker::Tracker;
 use crate::persist::{Persistence, SaveReport};
 
 /// The fewest seconds between two reloads the user asks for; Icinga is
@@ -203,10 +207,18 @@ pub(crate) struct AppState {
     save_error: Option<String>,
     dismissed_save_error: Option<String>,
     notice: Option<UserNotice>,
-    /// The last action the user asked for; the dialogs pick it up.
+    /// An action the user asked for, until the workspace picks it up (and
+    /// opens its dialog, asks, or sends it).
+    requested: Option<ActionRequest>,
+    /// The last action the user asked for (tests read it).
     last_request: Option<ActionRequest>,
     /// Why the last action asked for was refused.
     last_denial: Option<String>,
+    /// The actions sent: markers, failures, toasts.
+    tracker: Tracker,
+    /// The id of the last action sent (ids are never reused, not even
+    /// across environments).
+    last_action_id: u64,
     /// Evaluates dashboards for the fixture; the core does that itself.
     #[cfg(test)]
     evaluator: Option<fixture::Evaluator>,
@@ -238,8 +250,11 @@ impl AppState {
             save_error: None,
             dismissed_save_error: None,
             notice: None,
+            requested: None,
             last_request: None,
             last_denial: None,
+            tracker: Tracker::default(),
+            last_action_id: 0,
             #[cfg(test)]
             evaluator: None,
         }
@@ -788,41 +803,6 @@ impl AppState {
         had_tabs
     }
 
-    /// Records an action the user asked for, unless the API user may not
-    /// run it (ENV-09): then the reason comes back. The dialogs pick the
-    /// request up.
-    ///
-    /// # Errors
-    ///
-    /// Why the API user may not run the action.
-    pub(crate) fn request(&mut self, request: ActionRequest) -> Result<(), String> {
-        let targets: Vec<String> = request.targets.iter().map(ObjectKey::full_name).collect();
-        if let Some(denial) = self.action_denial(&request.action) {
-            tracing::info!(action = request.action.label(), ?targets, %denial, "action refused");
-            self.last_denial = Some(denial.clone());
-            return Err(denial);
-        }
-        tracing::info!(
-            action = request.action.label(),
-            ?targets,
-            "action requested"
-        );
-        self.last_request = Some(request);
-        Ok(())
-    }
-
-    /// The last action the user asked for.
-    #[cfg(test)]
-    pub(crate) fn last_request(&self) -> Option<&ActionRequest> {
-        self.last_request.as_ref()
-    }
-
-    /// Why the last action asked for was refused.
-    #[cfg(test)]
-    pub(crate) fn last_denial(&self) -> Option<&str> {
-        self.last_denial.as_deref()
-    }
-
     /// Collapses or expands a sidebar group (saved). Returns whether the
     /// group exists.
     pub(crate) fn toggle_group(&mut self, group_id: &str) -> bool {
@@ -858,10 +838,7 @@ impl AppState {
                 }
             }
             CoreEvent::Permissions(info) => self.permissions = Some(info),
-            CoreEvent::ActionFinished { id, outcome } => {
-                // The action dialogs show outcomes; until then they're logged.
-                tracing::info!(id, ok = outcome.ok, failed = outcome.failed.len(), error = ?outcome.error, "action finished");
-            }
+            CoreEvent::ActionFinished { id, outcome } => self.action_finished(id, &outcome),
             CoreEvent::Notification(record) => {
                 if !record.read {
                     self.unread += 1;
@@ -877,6 +854,7 @@ impl AppState {
     pub(crate) fn set_snapshot(&mut self, snapshot: Arc<Snapshot>) {
         self.connection.on_snapshot(&snapshot);
         self.snapshot = snapshot;
+        self.tracker.settle(&self.snapshot, Instant::now());
     }
 
     /// Recent notifications, newest first (the notification centre's).
@@ -1070,6 +1048,15 @@ impl AppState {
     /// Replaces the API user's permissions.
     pub(crate) fn set_permissions(&mut self, info: Option<ApiInfo>) {
         self.permissions = info;
+    }
+
+    /// The connection drops (the engine waits to reconnect).
+    pub(crate) fn set_connection_lost(&mut self) {
+        self.connection.on_state(ConnectionState::Reconnecting {
+            error: "connect: connection refused".to_owned(),
+            attempt: 1,
+            retry_at: Timestamp::now(),
+        });
     }
 }
 

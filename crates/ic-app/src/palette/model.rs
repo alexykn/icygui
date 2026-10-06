@@ -78,6 +78,14 @@ pub(crate) enum PaletteCommand {
     /// Run an action on these objects (an empty list: the focused or
     /// marked ones).
     Act(ObjectAction, Vec<ObjectKey>),
+    /// Copy text (`what` names it in the confirmation: `the filter
+    /// expression`).
+    Copy {
+        /// What it is.
+        what: &'static str,
+        /// The text.
+        text: String,
+    },
     /// Reload from Icinga.
     Reload,
     /// Show or hide the sidebar.
@@ -133,6 +141,9 @@ pub(crate) struct PaletteItem {
     pub(crate) command: PaletteCommand,
     /// The label's characters the query matched, for highlighting.
     pub(crate) matched: Vec<usize>,
+    /// Why the API user may not run it (ENV-09): shown faint with the
+    /// reason; running it says so in a toast.
+    pub(crate) denied: Option<String>,
 }
 
 /// One indexed candidate.
@@ -160,6 +171,8 @@ pub(crate) struct PaletteIndex {
     hosts: Vec<Candidate>,
     services: Vec<Candidate>,
     environments: Vec<Candidate>,
+    /// Why the API user may not run the verbs' actions (ENV-09).
+    verb_denials: Vec<(ObjectAction, String)>,
 }
 
 /// The objects the palette's actions apply to: the marked rows, else the
@@ -195,6 +208,14 @@ impl PaletteIndex {
             hosts: host_candidates(state),
             services: service_candidates(state),
             environments: environment_candidates(state),
+            verb_denials: VERBS
+                .iter()
+                .filter_map(|(_, action)| {
+                    state
+                        .action_denial(action)
+                        .map(|denial| (action.clone(), denial))
+                })
+                .collect(),
         }
     }
 
@@ -261,6 +282,11 @@ impl PaletteIndex {
         } else {
             Rank::ProblemsFirst
         };
+        let denied = self
+            .verb_denials
+            .iter()
+            .find(|(denied, _)| denied == action)
+            .map(|(_, denial)| denial.clone());
         let pick = |candidates: &[Candidate], limit| best(candidates, rest, limit, rank);
         let services = pick(&self.services, 4);
         let hosts = pick(&self.hosts, 2);
@@ -277,6 +303,7 @@ impl PaletteIndex {
                     key_hint: None,
                     command: PaletteCommand::Act(action.clone(), vec![key]),
                     matched: Vec::new(),
+                    denied: denied.clone(),
                 })
             })
             .collect()
@@ -372,6 +399,7 @@ fn setting(label: String, detail: &str, command: PaletteCommand) -> PaletteItem 
         key_hint: None,
         command,
         matched: Vec::new(),
+        denied: None,
     }
 }
 
@@ -393,6 +421,9 @@ fn action_label(action: &ObjectAction) -> &'static str {
         ObjectAction::RemoveAcknowledgement => "Remove acknowledgement",
         ObjectAction::RemoveComment(_) => "Remove comment",
         ObjectAction::RemoveDowntime(_) => "Remove downtime",
+        ObjectAction::RemoveDowntimes => "Remove downtimes",
+        ObjectAction::SubmitCheckResult => "Submit check result…",
+        ObjectAction::RunCommand => "Run command…",
     }
 }
 
@@ -424,6 +455,7 @@ fn dashboard_candidates(state: &AppState) -> Vec<Candidate> {
                     key_hint: None,
                     command: PaletteCommand::ShowDashboard(reference),
                     matched: Vec::new(),
+                    denied: None,
                 },
                 0,
             ));
@@ -455,6 +487,7 @@ fn host_candidates(state: &AppState) -> Vec<Candidate> {
                     key_hint: None,
                     command: PaletteCommand::OpenObject(host.key()),
                     matched: Vec::new(),
+                    denied: None,
                 },
                 host.severity(),
                 host.is_problem(),
@@ -484,6 +517,7 @@ fn service_candidates(state: &AppState) -> Vec<Candidate> {
                     key_hint: None,
                     command: PaletteCommand::OpenObject(service.object_key()),
                     matched: Vec::new(),
+                    denied: None,
                 },
                 service.severity(),
                 service.is_problem(),
@@ -509,6 +543,7 @@ fn environment_candidates(state: &AppState) -> Vec<Candidate> {
                     key_hint: None,
                     command: PaletteCommand::SwitchEnvironment(environment.id.clone()),
                     matched: Vec::new(),
+                    denied: None,
                 },
                 0,
             )
@@ -550,16 +585,18 @@ fn command(
         key_hint,
         command,
         matched: Vec::new(),
+        denied: None,
     }
 }
 
 /// The commands: actions on the focus, then the rest.
 fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem> {
-    let mut items = action_commands(focus);
+    let (mut items, more_actions) = action_commands(state, focus);
     let has_environment = state.environment().is_some();
     if has_environment {
         items.extend(dashboard_commands(state));
     }
+    items.extend(more_actions);
     items.extend(pause_commands(state, now, has_environment));
     items.push(command(
         "Toggle sidebar",
@@ -588,29 +625,91 @@ fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem>
     items
 }
 
-/// The actions on the focused objects, with their keys.
-fn action_commands(focus: &Focus) -> Vec<PaletteItem> {
+/// The actions on the focused objects, with their keys, then copying
+/// their names and filter expression (PANE-05). Actions the API user may
+/// not run say why (ENV-09).
+fn action_commands(state: &AppState, focus: &Focus) -> (Vec<PaletteItem>, Vec<PaletteItem>) {
     let what = match focus.targets.as_slice() {
-        [] => return Vec::new(),
+        [] => return (Vec::new(), Vec::new()),
         [one] => one.to_string(),
         many => format!("{} objects", many.len()),
     };
-    [
-        (ObjectAction::Acknowledge, "a"),
-        (ObjectAction::ScheduleDowntime, "d"),
-        (ObjectAction::CheckNow, "r"),
-        (ObjectAction::AddComment, "c"),
-    ]
-    .into_iter()
-    .map(|(action, key)| {
-        command(
-            action_label(&action),
-            what.clone(),
-            Some(key),
-            PaletteCommand::Act(action, Vec::new()),
-        )
-    })
-    .collect()
+    let snapshot = state.snapshot();
+    let mut actions = vec![
+        (ObjectAction::Acknowledge, Some("a")),
+        (ObjectAction::ScheduleDowntime, Some("d")),
+        (ObjectAction::CheckNow, Some("r")),
+        (ObjectAction::AddComment, Some("c")),
+        (ObjectAction::SubmitCheckResult, None),
+        (ObjectAction::RunCommand, None),
+    ];
+    // Removals only where there is something to remove.
+    let acknowledged = focus.targets.iter().any(|target| match target {
+        ObjectKey::Host { name } => snapshot
+            .hosts
+            .get(name)
+            .is_some_and(|host| host.check.acknowledgement.is_acknowledged()),
+        ObjectKey::Service { key } => snapshot
+            .services
+            .get(key)
+            .is_some_and(|service| service.check.acknowledgement.is_acknowledged()),
+    });
+    if acknowledged {
+        actions.push((ObjectAction::RemoveAcknowledgement, None));
+    }
+    if focus.targets.iter().any(|target| {
+        snapshot
+            .downtimes
+            .get(target)
+            .is_some_and(|list| !list.is_empty())
+    }) {
+        actions.push((ObjectAction::RemoveDowntimes, None));
+    }
+    let mut items: Vec<PaletteItem> = actions
+        .into_iter()
+        .map(|(action, key)| {
+            let denied = state.action_denial(&action);
+            let mut item = command(
+                action_label(&action),
+                what.clone(),
+                key,
+                PaletteCommand::Act(action, Vec::new()),
+            );
+            item.denied = denied;
+            item
+        })
+        .collect();
+    let names = if focus.targets.len() == 1 {
+        "Copy name"
+    } else {
+        "Copy names"
+    };
+    items.push(command(
+        names,
+        what.clone(),
+        None,
+        PaletteCommand::Copy {
+            what: if focus.targets.len() == 1 {
+                "the name"
+            } else {
+                "the names"
+            },
+            text: crate::operate::expression::names(&focus.targets),
+        },
+    ));
+    items.push(command(
+        "Copy filter expression",
+        what,
+        None,
+        PaletteCommand::Copy {
+            what: "the filter expression",
+            text: crate::operate::expression::filter(&focus.targets),
+        },
+    ));
+    // The keyed actions first; the rest after the other commands, so the
+    // palette's first screen keeps reloading and new dashboards.
+    let rest = items.split_off(4);
+    (items, rest)
 }
 
 /// Reloading, and making or editing dashboards and groups.

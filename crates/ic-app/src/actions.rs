@@ -15,6 +15,10 @@
 //! | | `secondary-enter` | [`OpenAsTab`] |
 //! | `DashboardView`, `ObjectPane` | `a`, `d`, `r`, `c` | [`Acknowledge`], [`ScheduleDowntime`], [`CheckNow`], [`AddComment`] |
 //! | `ObjectPane` (a tab) | `escape` | [`Dismiss`]: back to the dashboard; the tab stays open |
+//! | `ActionDialog` (and its fields) | `tab`, `shift-tab` | next / previous field |
+//! | `ActionDialog > Input` | `enter`, `secondary-enter` | send (`shift-enter`: a new line; the macros field takes `enter` for new lines) |
+//! | `ActionConfirm` | `secondary-enter` | run the command after its confirmation |
+//! | `Modal` | `escape` | close the dialog |
 //! | `Workspace` (everywhere) | `secondary-1` … `secondary-9` | [`SelectDashboard`]: the n-th dashboard in the sidebar |
 //! | | `ctrl-tab`, `ctrl-shift-tab` | [`ActivateNextTab`], [`ActivatePreviousTab`]: cycle through the dashboard and the open tabs |
 //! | | `secondary-w` | [`CloseTab`]: close the tab shown |
@@ -221,9 +225,10 @@ pub(crate) fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// An operator action the user asked for. The dialogs and the core's
-/// `Command`s come with M3; until then a request is logged.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// An operator action the user asked for (a key, a button, the palette).
+/// The workspace opens its dialog, asks first, or sends it at once
+/// (`crate::operate`); every one ends up as one `Command::Action`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ObjectAction {
     /// Open the acknowledge dialog.
     Acknowledge,
@@ -231,7 +236,9 @@ pub(crate) enum ObjectAction {
     RemoveAcknowledgement,
     /// Open the downtime dialog.
     ScheduleDowntime,
-    /// Reschedule the check to now.
+    /// Remove every downtime of the objects.
+    RemoveDowntimes,
+    /// Reschedule the check to now (forced).
     CheckNow,
     /// Open the comment dialog.
     AddComment,
@@ -239,6 +246,10 @@ pub(crate) enum ObjectAction {
     RemoveComment(String),
     /// Remove one downtime, by its full name.
     RemoveDowntime(String),
+    /// Open the dialog for a passive check result.
+    SubmitCheckResult,
+    /// Open the dialog to run a check or event command.
+    RunCommand,
 }
 
 impl ObjectAction {
@@ -248,10 +259,13 @@ impl ObjectAction {
             Self::Acknowledge => "acknowledge",
             Self::RemoveAcknowledgement => "remove acknowledgement",
             Self::ScheduleDowntime => "schedule downtime",
+            Self::RemoveDowntimes => "remove downtimes",
             Self::CheckNow => "check now",
             Self::AddComment => "add comment",
             Self::RemoveComment(_) => "remove comment",
             Self::RemoveDowntime(_) => "remove downtime",
+            Self::SubmitCheckResult => "submit check result",
+            Self::RunCommand => "run command",
         }
     }
 }

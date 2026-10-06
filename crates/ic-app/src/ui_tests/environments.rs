@@ -22,7 +22,7 @@ use crate::environments::{EnvironmentEditor, EnvironmentEditorEvent};
 use crate::fixture::FixtureOptions;
 use crate::live::demo::{self, DemoEndpoint, DemoFault, DemoOptions, DemoSecrets, DemoServer};
 use crate::live::{self, Launch, Session};
-use crate::workspace::{Deletion, ModalKind};
+use crate::workspace::{Confirmed, ModalKind};
 
 /// Generous: the debug build connects to the mock in about a second.
 const CONNECT: Duration = Duration::from_secs(40);
@@ -122,7 +122,7 @@ fn the_first_environment_is_added_from_the_onboarding_form() {
             async move {
                 let editor = cx.update(|cx| {
                     let workspace = app.workspace.read(cx);
-                    assert!(workspace.modal().is_none());
+                    assert!(workspace.modal(cx).is_none());
                     workspace.onboarding().expect("the onboarding form").clone()
                 });
                 cx.update(|cx| {
@@ -313,7 +313,10 @@ fn an_untrusted_certificate_is_trusted_after_review() {
                 // The body's "Review certificate" button.
                 cx.update(|cx| app.click(cx, point(px(820.), px(529.)), Modifiers::default()));
                 let fingerprint = cx.update(|cx| {
-                    assert_eq!(app.workspace.read(cx).modal(), Some(ModalKind::Certificate));
+                    assert_eq!(
+                        app.workspace.read(cx).modal(cx),
+                        Some(ModalKind::Certificate)
+                    );
                     let Some(ic_core::ConnectionState::TlsFailed {
                         certificate: Some(certificate),
                         ..
@@ -334,7 +337,7 @@ fn an_untrusted_certificate_is_trusted_after_review() {
                 })
                 .await;
                 cx.update(|cx| {
-                    assert_eq!(app.workspace.read(cx).modal(), None);
+                    assert_eq!(app.workspace.read(cx).modal(cx), None);
                     let environment = app.state.read(cx).environment().unwrap().clone();
                     assert_eq!(
                         environment.tls.pinned_sha256.as_deref(),
@@ -400,11 +403,14 @@ fn a_deleted_environment_takes_its_password_and_event_log_along() {
                     editor.update(cx, |_, cx| cx.emit(EnvironmentEditorEvent::Delete(id)));
                 });
                 cx.update(|cx| {
-                    let Some(ModalKind::Confirm(confirmation)) = app.workspace.read(cx).modal()
+                    let Some(ModalKind::Confirm(confirmation)) = app.workspace.read(cx).modal(cx)
                     else {
                         panic!("no confirmation");
                     };
-                    assert_eq!(confirmation.action, Deletion::Environment(first_id.clone()));
+                    assert_eq!(
+                        confirmation.action,
+                        Confirmed::Environment(first_id.clone())
+                    );
                     app.keys(cx, "enter");
                 });
                 wait_for(&app, &cx, "lab-b", CONNECT, |app, cx| {
@@ -463,7 +469,10 @@ fn the_environment_editor_names_what_is_missing() {
         ] {
             assert!(issues.contains_key(&field), "{field:?}: {issues:?}");
         }
-        assert_eq!(app.workspace.read(cx).modal(), Some(ModalKind::Environment));
+        assert_eq!(
+            app.workspace.read(cx).modal(cx),
+            Some(ModalKind::Environment)
+        );
         assert_eq!(app.state.read(cx).environments().len(), 1);
         // Editing the existing one starts from its settings.
         app.keys(cx, "escape");

@@ -21,10 +21,10 @@ use crate::live::demo::{self, DemoFault, DemoOptions};
 use crate::live::{self, Launch, RecoveryChoice, Session};
 
 /// Generous: the debug build loads the demo in about a second.
-const LOAD: Duration = Duration::from_secs(40);
+pub(super) const LOAD: Duration = Duration::from_secs(40);
 
 /// The demo (`scenario`, with `fault`), started.
-fn demo_app(
+pub(super) fn demo_app(
     scenario: &'static str,
     fault: Option<DemoFault>,
 ) -> impl FnOnce(&mut App) -> Entity<AppState> + 'static {
@@ -52,7 +52,7 @@ fn dashboard(state: &AppState, name: &str) -> ic_rules::DashboardRef {
 }
 
 /// The object keys of the selected dashboard's rows.
-fn row_keys(state: &AppState) -> Vec<ObjectKey> {
+pub(super) fn row_keys(state: &AppState) -> Vec<ObjectKey> {
     let Some(result) = state
         .selected()
         .and_then(|reference| state.result(reference))
@@ -278,7 +278,7 @@ fn group_by_shows_the_cores_group_headers() {
 }
 
 /// The demo server's control, once the demo runs.
-fn control(cx: &mut App) -> ic_mock::MockControl {
+pub(super) fn control(cx: &mut App) -> ic_mock::MockControl {
     live::session(cx)
         .and_then(|session| session.read(cx).demo_control())
         .expect("the demo server runs")

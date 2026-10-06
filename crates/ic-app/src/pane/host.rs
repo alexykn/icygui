@@ -18,7 +18,7 @@ use ic_ui_kit::{
     TreeTable,
 };
 
-use super::service::{links_table, notes};
+use super::service::{full_output, links_table, notes};
 use super::{
     HostTab, ObjectPane, PaneMode, TAB_CONTENT_WIDTH, TITLE_GROUP, action_buttons, copy_button,
     model, scroll_area,
@@ -63,6 +63,7 @@ pub(super) fn render(
             pane,
             host.check.acknowledgement.is_acknowledged(),
             host.is_problem(),
+            full_output(&host.check),
             cx,
         ))
         .child(tabs);

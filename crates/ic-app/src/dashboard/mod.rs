@@ -9,10 +9,12 @@
 //! ([`selection::ListSelection`]); every dashboard keeps its own selection,
 //! scroll position and open pane.
 
+pub(crate) mod bulk;
 pub(crate) mod header;
 pub(crate) mod rows;
 pub(crate) mod selection;
 
+pub(crate) use self::bulk::SELECTION_BAR_HEIGHT;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use self::header::HeaderMenu;
 
@@ -447,11 +449,9 @@ impl DashboardView {
             return;
         }
         self.state.update(cx, |state, cx| {
-            // A refused action is logged by the state; a disabled button
-            // already says why.
-            if state.request(ActionRequest { action, targets }).is_err() {
-                cx.notify();
-            }
+            // The workspace opens the dialog; a refusal shows as a toast.
+            let _ = state.request(ActionRequest { action, targets });
+            cx.notify();
         });
     }
 
@@ -571,12 +571,17 @@ impl DashboardView {
                             RowEmphasis::new(cursor == Some(index), selection.is_marked(key));
                         let id = row_id(group.as_deref(), key);
                         let clicked = key.clone();
-                        object_row(&snapshot, id, key, show_host, now, theme)
-                            .indent(indent)
-                            .emphasis(emphasis)
-                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        let row = object_row(&snapshot, id, key, show_host, now, theme);
+                        // An action on its way shows instead of the tag.
+                        let row = match self.state.read(cx).pending_label(key) {
+                            Some(pending) => row.tag(pending),
+                            None => row,
+                        };
+                        row.indent(indent).emphasis(emphasis).on_click(cx.listener(
+                            move |this, event: &ClickEvent, window, cx| {
                                 this.click_row(index, &clicked, event.modifiers(), window, cx);
-                            }))
+                            },
+                        ))
                     }
                     DashboardRow::Group { label, count } => {
                         group = Some(label.clone());
@@ -820,6 +825,9 @@ impl DashboardView {
         let summary = reference
             .filter(|_| placeholder.is_none())
             .and_then(|reference| self.render_summary(reference, list_width, cx));
+        let selection_bar = reference
+            .filter(|_| placeholder.is_none())
+            .and_then(|reference| self.render_selection_bar(reference, list_width, cx));
         let body = match (placeholder, reference) {
             (Some(placeholder), _) => placeholder,
             (None, Some(reference)) => self.render_body(reference, cx),
@@ -836,6 +844,17 @@ impl DashboardView {
             .children(banners)
             .children(summary)
             .child(body)
+            .children(selection_bar)
+    }
+
+    /// Whether the selected dashboard has marked rows (the selection bar
+    /// shows; toasts float above it).
+    pub(crate) fn has_marks(&self, cx: &App) -> bool {
+        self.state
+            .read(cx)
+            .selected()
+            .and_then(|reference| self.lists.get(reference))
+            .is_some_and(|list| list.selection.marked_count() > 0)
     }
 }
 

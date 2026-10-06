@@ -16,6 +16,7 @@ use gpui_component::input::{Textarea, TextareaState};
 use crate::theme::{ActiveTheme as _, Theme};
 
 type ToggleHandler = Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
+type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
 
 /// The tone of a [`Field`]'s status text.
@@ -400,6 +401,116 @@ impl RenderOnce for Segmented {
     }
 }
 
+/// A small pill for a quick choice next to a field (`1h`, `2h`, `08:00
+/// tomorrow`): it fills the field in, it doesn't hold a state of its own
+/// (`selected` shows the choice the field holds).
+#[derive(IntoElement)]
+#[must_use = "a chip does nothing unless rendered"]
+pub struct Chip {
+    id: ElementId,
+    label: SharedString,
+    selected: bool,
+    disabled: bool,
+    on_click: Option<ClickHandler>,
+}
+
+impl Chip {
+    /// A chip labelled `label`.
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            selected: false,
+            disabled: false,
+            on_click: None,
+        }
+    }
+
+    /// Shows it as the current choice.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    /// Greys it out and ignores clicks.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Runs `handler` when clicked.
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    /// The label.
+    #[must_use]
+    pub fn label(&self) -> &SharedString {
+        &self.label
+    }
+}
+
+impl fmt::Debug for Chip {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Chip")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("selected", &self.selected)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RenderOnce for Chip {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let enabled = !self.disabled;
+        div()
+            .id(self.id)
+            .role(Role::Button)
+            .aria_label(self.label.clone())
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(22.))
+            .px(px(8.))
+            .rounded(theme.metrics.small_radius)
+            .border_1()
+            .border_color(if self.selected {
+                colors.accent
+            } else {
+                colors.border_header
+            })
+            .bg(colors.element_background)
+            .text_size(theme.text.label)
+            .text_color(if self.selected {
+                colors.accent
+            } else {
+                colors.text_muted
+            })
+            .whitespace_nowrap()
+            .child(self.label)
+            .when(self.disabled, |chip| chip.opacity(0.5))
+            .when(enabled, |chip| {
+                chip.cursor_pointer()
+                    .hover(|style| style.bg(colors.element_hover).text_color(colors.text))
+                    .active(|style| style.bg(colors.element_active))
+            })
+            // Keep the keyboard in the field it fills.
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .when_some(self.on_click.filter(|_| enabled), |chip, handler| {
+                chip.on_click(move |event, window, cx| {
+                    cx.stop_propagation();
+                    handler(event, window, cx);
+                })
+            })
+    }
+}
+
 /// A multi-line text field on the code surface, for filter expressions:
 /// gpui-component's text area in the design's colours. The border turns
 /// accent-coloured while it has the focus and critical while `invalid`.
@@ -504,6 +615,14 @@ mod tests {
             .selected(1);
         assert_eq!(control.options(), ["services", "hosts"]);
         assert_eq!(control.selected, 1);
+    }
+
+    #[test]
+    fn chips_keep_their_label() {
+        let chip = Chip::new("preset", "2h").selected(true);
+        assert_eq!(chip.label(), "2h");
+        assert!(chip.selected);
+        assert!(format!("{chip:?}").contains("2h"));
     }
 
     #[test]

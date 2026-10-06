@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ic_core::Command;
-use ic_model::ObjectKey;
+use ic_model::{Action, ActionTarget, ObjectKey};
 
 use super::CoreLink;
 
@@ -12,6 +12,7 @@ use super::CoreLink;
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Recorder {
     sent: Rc<RefCell<Vec<String>>>,
+    actions: Rc<RefCell<Vec<(u64, ActionTarget, Action)>>>,
     pub(crate) stopped: Rc<RefCell<bool>>,
 }
 
@@ -21,9 +22,15 @@ impl Recorder {
         self.sent.borrow().clone()
     }
 
+    /// The actions sent so far: id, target, action.
+    pub(crate) fn actions(&self) -> Vec<(u64, ActionTarget, Action)> {
+        self.actions.borrow().clone()
+    }
+
     /// Forgets them.
     pub(crate) fn clear(&self) {
         self.sent.borrow_mut().clear();
+        self.actions.borrow_mut().clear();
     }
 }
 
@@ -41,6 +48,12 @@ impl CoreLink for Recorder {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            Command::Action { id, target, action } => {
+                self.actions
+                    .borrow_mut()
+                    .push((*id, target.clone(), action.clone()));
+                format!("Action({id}, {})", action.api_name())
+            }
             other => format!("{other:?}"),
         };
         self.sent.borrow_mut().push(name);

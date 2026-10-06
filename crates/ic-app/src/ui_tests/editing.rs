@@ -21,7 +21,7 @@ use crate::editor::{DashboardEditor, EditorTarget};
 use crate::fixture::FixtureOptions;
 use crate::palette::{CommandPalette, PaletteCommand};
 use crate::sidebar::{RenameTarget, SidebarMenu};
-use crate::workspace::{Deletion, ModalKind};
+use crate::workspace::{Confirmed, ModalKind};
 
 /// The `overview` group's `···` (shown: it holds the selected dashboard).
 const OVERVIEW_MENU: Point<Pixels> = Point {
@@ -105,20 +105,20 @@ fn type_query(app: &Harness, cx: &mut App, query: &str) {
 fn the_palette_finds_and_runs_by_keyboard() {
     run(FixtureOptions::default(), |app, cx| {
         app.keys(cx, "ctrl-k");
-        assert_eq!(app.workspace.read(cx).modal(), Some(ModalKind::Palette));
+        assert_eq!(app.workspace.read(cx).modal(cx), Some(ModalKind::Palette));
         // Typing goes to its field (the keys of the list don't fire).
         app.keys(cx, "n e t w");
         let first = palette(app, cx).read(cx).items()[0].clone();
         assert_eq!(first.label, "network");
         app.keys(cx, "enter");
-        assert_eq!(app.workspace.read(cx).modal(), None);
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
         assert_eq!(app.state.read(cx).selected(), Some(&network()));
 
         // Escape and ctrl-k close it again.
         app.keys(cx, "ctrl-k escape");
-        assert_eq!(app.workspace.read(cx).modal(), None);
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
         app.keys(cx, "ctrl-k ctrl-k");
-        assert_eq!(app.workspace.read(cx).modal(), None);
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
 
         // Up and down move over the results, wrapping; Tab opens an
         // object as a tab.
@@ -183,9 +183,12 @@ fn the_palette_acts_on_the_cursors_object_and_switches_views() {
         app.keys(cx, "ctrl-k");
         type_query(app, cx, "add environment");
         app.keys(cx, "enter");
-        assert_eq!(app.workspace.read(cx).modal(), Some(ModalKind::Environment));
+        assert_eq!(
+            app.workspace.read(cx).modal(cx),
+            Some(ModalKind::Environment)
+        );
         app.keys(cx, "escape");
-        assert_eq!(app.workspace.read(cx).modal(), None);
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
         app.keys(cx, "ctrl-k");
         type_query(app, cx, "toggle sidebar");
         app.keys(cx, "enter");
@@ -243,12 +246,12 @@ fn groups_are_renamed_reordered_and_deleted_from_their_menu() {
         // delete: asks first; Escape keeps it, Enter deletes.
         app.click(cx, OVERVIEW_MENU, Modifiers::default());
         app.click(cx, group_menu_item(363.), Modifiers::default());
-        let Some(ModalKind::Confirm(confirmation)) = app.workspace.read(cx).modal() else {
+        let Some(ModalKind::Confirm(confirmation)) = app.workspace.read(cx).modal(cx) else {
             panic!("no confirmation");
         };
         assert_eq!(
             confirmation.action,
-            Deletion::Group("demo-overview".to_owned())
+            Confirmed::Group("demo-overview".to_owned())
         );
         assert!(
             confirmation.detail.contains("3 dashboards"),
@@ -256,12 +259,12 @@ fn groups_are_renamed_reordered_and_deleted_from_their_menu() {
             confirmation.detail
         );
         app.keys(cx, "escape");
-        assert_eq!(app.workspace.read(cx).modal(), None);
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
         assert_eq!(group_names(app.state.read(cx)).len(), 3);
         app.click(cx, OVERVIEW_MENU, Modifiers::default());
         app.click(cx, group_menu_item(363.), Modifiers::default());
         app.keys(cx, "enter");
-        assert_eq!(app.workspace.read(cx).modal(), None);
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
         assert_eq!(group_names(app.state.read(cx)), ["platform", "lab"]);
         assert_eq!(app.state.read(cx).selected(), Some(&network()));
     });
@@ -322,8 +325,8 @@ fn dashboards_are_duplicated_moved_muted_and_deleted_from_their_menu() {
         );
         app.click(cx, dashboard_menu_item(lab_row, 384.), Modifiers::default());
         assert!(matches!(
-            app.workspace.read(cx).modal(),
-            Some(ModalKind::Confirm(confirmation)) if confirmation.action == Deletion::Dashboard(moved.clone())
+            app.workspace.read(cx).modal(cx),
+            Some(ModalKind::Confirm(confirmation)) if confirmation.action == Confirmed::Dashboard(moved.clone())
         ));
         app.keys(cx, "enter");
         assert!(app.state.read(cx).dashboard(&moved).is_none());
@@ -484,10 +487,10 @@ fn groups_are_exported_and_imported_as_files() {
                         });
                     });
                     app.draw(cx);
-                    assert_eq!(app.workspace.read(cx).modal(), Some(ModalKind::Path));
+                    assert_eq!(app.workspace.read(cx).modal(cx), Some(ModalKind::Path));
                     app.keys(cx, "enter");
                 });
-                cx.update(|cx| assert_eq!(app.workspace.read(cx).modal(), None));
+                cx.update(|cx| assert_eq!(app.workspace.read(cx).modal(cx), None));
                 wait_for(
                     &app,
                     &cx,

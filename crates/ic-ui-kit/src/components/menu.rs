@@ -10,7 +10,7 @@ use gpui::{
     point, prelude::FluentBuilder as _, px, relative,
 };
 
-use crate::components::KeyHint;
+use crate::components::{KeyHint, Tooltip};
 use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 
@@ -33,6 +33,7 @@ pub struct MenuItem {
     checked: Option<bool>,
     key: Option<SharedString>,
     disabled: bool,
+    tooltip: Option<Tooltip>,
     on_click: Option<ClickHandler>,
 }
 
@@ -45,8 +46,15 @@ impl MenuItem {
             checked: None,
             key: None,
             disabled: false,
+            tooltip: None,
             on_click: None,
         }
+    }
+
+    /// Shows a tooltip on hover (why the item is disabled).
+    pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
+        self.tooltip = Some(tooltip);
+        self
     }
 
     /// Shows a check mark slot; `true` draws the mark (radio and toggle
@@ -151,6 +159,9 @@ impl RenderOnce for MenuItem {
                             .text_color(colors.text_strong)
                     })
                     .active(|style| style.bg(colors.element_active))
+            })
+            .when_some(self.tooltip, |item, tooltip| {
+                item.tooltip(tooltip.builder())
             })
             .when_some(self.on_click.filter(|_| enabled), |item, handler| {
                 item.on_click(move |event, window, cx| {

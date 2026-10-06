@@ -35,7 +35,7 @@ use ic_rules::DashboardRef;
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{
     ActiveTheme as _, Button, ButtonVariant, DialogBody, Divider, DividerColor, Field, IconButton,
-    IconName, Modal, ModalPlacement, TextField, Theme, Tooltip,
+    IconName, Modal, ModalPlacement, Root, TextField, Theme, Tooltip,
 };
 
 use crate::actions::{
@@ -153,6 +153,8 @@ pub(crate) enum Confirmed {
     Action(ActionSpec),
     /// Leave the dashboard editor, dropping its changes.
     DiscardEdits,
+    /// Close the window, dropping unsaved work in it.
+    CloseWindow,
 }
 
 /// A question before something that can't be undone, or that weighs on
@@ -251,6 +253,10 @@ pub(crate) struct Workspace {
     modal: Option<OpenModal>,
     /// The environment active when the open modal opened.
     modal_environment: Option<String>,
+    /// The modal the question before closing the window replaced (a
+    /// dialog with something typed), with its environment: it comes back
+    /// when the window stays open.
+    behind_close: Option<(OpenModal, Option<String>)>,
     /// The active environment, as last seen: dialogs about another one
     /// close when it changes.
     environment: Option<String>,
@@ -325,6 +331,13 @@ impl Workspace {
                 state.active_environment_id().map(str::to_owned),
             )
         };
+        // The window manager's close (and macOS's red button) asks first
+        // when unsaved work would be lost; ours does too (`close_window`).
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |workspace, cx| workspace.may_close(window, cx))
+                .unwrap_or(true)
+        });
         let mut workspace = Self {
             state,
             sidebar,
@@ -335,6 +348,7 @@ impl Workspace {
             onboarding: None,
             modal: None,
             modal_environment: None,
+            behind_close: None,
             environment,
             request_waits: false,
             modal_focus: cx.focus_handle(),
@@ -834,9 +848,19 @@ impl Workspace {
     }
 
     /// Closes the open modal; the keyboard goes back to the main area, or
-    /// to the dialog of an action that waited for this one.
+    /// to the dialog of an action that waited for this one. Closing the
+    /// question before closing the window brings back the dialog it
+    /// replaced (unless another environment is active by now).
     pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.modal.take().is_some() {
+        if let Some(closed) = self.modal.take() {
+            let behind = self.behind_close.take();
+            if is_close_question(&closed)
+                && let Some((modal, environment)) = behind
+                && environment.as_deref() == self.state.read(cx).active_environment_id()
+            {
+                self.modal = Some(modal);
+                self.modal_environment = environment;
+            }
             self.focus_main(window, cx);
             self.pick_up_request(window, cx);
             cx.notify();
@@ -1426,6 +1450,13 @@ impl Workspace {
             Confirmed::DiscardEdits => {
                 self.editor = None;
             }
+            Confirmed::CloseWindow => {
+                self.behind_close = None;
+                self.editor = None;
+                self.kept_draft = None;
+                window.remove_window();
+                return;
+            }
             Confirmed::Group(id) => {
                 self.state.update(cx, |state, cx| {
                     if state.delete_group(&id) {
@@ -1476,6 +1507,61 @@ impl Workspace {
 
     fn on_confirm(&mut self, _: &ConfirmModal, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm(window, cx);
+    }
+
+    /// The window is about to close (its close button, the window
+    /// manager). It may, unless that loses unsaved work: the dashboard
+    /// editor's changes (also those kept for the next edit) or a dialog
+    /// with something typed. Then it asks first and stays open; the
+    /// dialog comes back if the window stays.
+    pub(crate) fn may_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.modal.as_ref().is_some_and(is_close_question) {
+            return false;
+        }
+        let lost = self.unsaved_work(cx);
+        if lost.is_empty() {
+            return true;
+        }
+        let behind = self
+            .modal
+            .take()
+            .map(|modal| (modal, self.modal_environment.clone()));
+        let confirmation = Confirmation {
+            title: "Close the window and lose your changes?".to_owned(),
+            detail: format!("Closing it drops {}.", lost.join(" and ")),
+            confirm: "close window",
+            danger: true,
+            action: Confirmed::CloseWindow,
+        };
+        self.open_modal(OpenModal::Confirm(confirmation), window, cx);
+        self.behind_close = behind;
+        false
+    }
+
+    /// What closing the window would lose, in words.
+    fn unsaved_work(&self, cx: &App) -> Vec<String> {
+        let mut lost = Vec::new();
+        if let Some(OpenModal::Action(dialog)) = &self.modal {
+            let dialog = dialog.view.read(cx);
+            if dialog.is_dirty() {
+                lost.push(format!("what you typed in “{}”", dialog.kind().title()));
+            }
+        }
+        if let Some(editor) = &self.editor {
+            let editor = editor.view.read(cx);
+            if editor.changes().is_some() {
+                lost.push(format!("your changes to {}", editor.title()));
+            }
+        }
+        if let Some((_, draft)) = &self.kept_draft {
+            let name = draft.name.trim();
+            lost.push(if name.is_empty() {
+                "the changes kept from your last edit".to_owned()
+            } else {
+                format!("the changes kept for {name}")
+            });
+        }
+        lost
     }
 
     // --- Environments ---------------------------------------------------
@@ -1997,6 +2083,33 @@ impl Workspace {
                 ),
             )
             .into_any_element()
+    }
+}
+
+/// Whether `modal` asks before closing the window.
+fn is_close_question(modal: &OpenModal) -> bool {
+    matches!(
+        modal,
+        OpenModal::Confirm(Confirmation {
+            action: Confirmed::CloseWindow,
+            ..
+        })
+    )
+}
+
+/// Our window controls' close button: closes the window unless that loses
+/// unsaved work, like the window manager's close
+/// ([`Workspace::may_close`]).
+pub(crate) fn close_window(window: &mut Window, cx: &mut App) {
+    let workspace = window
+        .root::<Root>()
+        .flatten()
+        .and_then(|root| root.read(cx).view().clone().downcast::<Workspace>().ok());
+    let close = workspace.is_none_or(|workspace| {
+        workspace.update(cx, |workspace, cx| workspace.may_close(window, cx))
+    });
+    if close {
+        window.remove_window();
     }
 }
 

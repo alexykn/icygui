@@ -26,6 +26,8 @@
 mod dbus;
 pub(crate) mod demo;
 pub(crate) mod desktop;
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos;
 pub(crate) mod notifier;
 
 use std::collections::{HashMap, VecDeque};
@@ -34,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use futures::channel::mpsc::{UnboundedReceiver, unbounded};
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{App, AppContext as _, Context, Entity, Global, Subscription, Task};
 use ic_config::{AuthConfig, Config, ConfigError, ConfigStore, Environment, Paths};
 use ic_core::ports::SecretStore;
@@ -42,12 +44,11 @@ use ic_core::{
     ConnectionFailure, ConnectionReport, CoreEvent, EnvironmentSpec, Ports, SystemClock,
 };
 use ic_model::ObjectKey;
-use ic_rules::NotificationIntent;
 use secrecy::SecretString;
 
 use self::demo::{DemoOptions, DemoSecrets, DemoServer};
 use self::desktop::{ACKNOWLEDGE_ACTION, Desktop, Response};
-use self::notifier::GpuiNotifier;
+use self::notifier::{GpuiNotifier, Raised};
 use crate::actions::{ActionRequest, ObjectAction};
 use crate::app_state::environments::EnvironmentSaved;
 use crate::app_state::{AppState, ConfigProblem, UserNotice};
@@ -101,8 +102,8 @@ type Cleanup = Box<dyn FnOnce() -> Vec<String> + Send>;
 struct Target {
     /// The intent's id.
     tag: String,
-    /// The environment it came from.
-    environment: Option<String>,
+    /// The environment whose engine raised it (its id).
+    environment: String,
     /// Its object.
     object: ObjectKey,
 }
@@ -112,7 +113,8 @@ struct Target {
 pub(crate) struct Session {
     state: Entity<AppState>,
     launch: Launch,
-    notifier: Arc<GpuiNotifier>,
+    /// Where each engine's notifier sends its intents.
+    intents: UnboundedSender<Raised>,
     /// Where passwords are: the keychain, or the demo's memory.
     secrets: Arc<dyn SecretStore>,
     pump: Option<Task<()>>,
@@ -178,24 +180,28 @@ impl Session {
         pending_open: Option<OpenAtStart>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (notifier, intents) = GpuiNotifier::new();
+        let (intents, raised) = GpuiNotifier::channel();
         let (responses, clicks) = unbounded::<Response>();
         let mut tasks = vec![
-            Self::spawn_notifications(intents, cx),
+            Self::spawn_notifications(raised, cx),
             Self::spawn_clicks(clicks, cx),
         ];
         if let Launch::Live { paths, .. } = &launch {
             tasks.push(Self::attach_persistence(&state, paths, cx));
         }
-        // GPUI's backend (macOS) answers here; the D-Bus one (Linux)
-        // sends to `responses` itself.
-        let gpui_responses = responses.clone();
-        cx.on_system_notification_response(move |response, _| {
-            let _ = gpui_responses.unbounded_send(Response {
-                tag: response.tag.to_string(),
-                action: response.action_id.map(|action| action.to_string()),
+        // GPUI's backend answers here where it shows them. Linux (D-Bus)
+        // and macOS (our own delegate, which this would replace) send to
+        // `responses` themselves.
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let gpui_responses = responses.clone();
+            cx.on_system_notification_response(move |response, _| {
+                let _ = gpui_responses.unbounded_send(Response {
+                    tag: response.tag.to_string(),
+                    action: response.action_id.map(|action| action.to_string()),
+                });
             });
-        });
+        }
         #[cfg(all(test, target_os = "linux"))]
         let shown = desktop::RecordingDesktop::default();
         #[cfg(all(test, target_os = "linux"))]
@@ -222,7 +228,7 @@ impl Session {
         Self {
             state,
             launch,
-            notifier: Arc::new(notifier),
+            intents,
             secrets,
             pump: None,
             demo: HashMap::new(),
@@ -284,13 +290,13 @@ impl Session {
 
     /// Shows the core's notifications on the desktop, on the UI thread.
     fn spawn_notifications(
-        mut intents: UnboundedReceiver<NotificationIntent>,
+        mut raised: UnboundedReceiver<Raised>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx| {
-            while let Some(intent) = intents.next().await {
+            while let Some(raised) = raised.next().await {
                 if this
-                    .update(cx, |session, cx| session.post(&intent, cx))
+                    .update(cx, |session, cx| session.post(&raised, cx))
                     .is_err()
                 {
                     break;
@@ -299,20 +305,25 @@ impl Session {
         })
     }
 
-    /// Shows `intent` on the desktop (NOTE-01): with *Acknowledge* for a
-    /// problem the API user may acknowledge, and *Open*.
-    fn post(&mut self, intent: &NotificationIntent, cx: &mut Context<Self>) {
-        let (environment, acknowledge) = {
+    /// Shows an engine's intent on the desktop (NOTE-01): with
+    /// *Acknowledge* for a problem the API user may acknowledge, and
+    /// *Open*. It belongs to the environment whose engine raised it, which
+    /// need not be the active one by now (an engine being replaced, or an
+    /// intent still queued when the user switched): its clicks are checked
+    /// against that environment, and it offers *Acknowledge* only while
+    /// that environment is active (the permissions known are the active
+    /// environment's).
+    fn post(&mut self, raised: &Raised, cx: &mut Context<Self>) {
+        let intent = &raised.intent;
+        let acknowledge = {
             let state = self.state.read(cx);
-            (
-                state.active_environment_id().map(str::to_owned),
-                state.action_denial(&ObjectAction::Acknowledge).is_none(),
-            )
+            state.active_environment_id() == Some(raised.environment.as_str())
+                && state.action_denial(&ObjectAction::Acknowledge).is_none()
         };
         if let Some(object) = &intent.object {
             self.targets.push_front(Target {
                 tag: intent.id.clone(),
-                environment,
+                environment: raised.environment.clone(),
                 object: object.clone(),
             });
             self.targets.truncate(MAX_TARGETS);
@@ -349,19 +360,20 @@ impl Session {
             return;
         };
         tracing::info!(object = %target.object, action = ?response.action, "notification clicked");
-        let active = self.state.update(cx, |state, cx| {
-            if state.mark_notification_read(&target.tag) {
+        let from_active = self.state.update(cx, |state, cx| {
+            let from_active = state.active_environment_id() == Some(target.environment.as_str());
+            if from_active && state.mark_notification_read(&target.tag) {
                 cx.notify();
             }
-            state.active_environment_id().map(str::to_owned)
+            from_active
         });
-        if target.environment != active {
+        if !from_active {
+            // Nothing happens in the active environment: an
+            // acknowledgement for one Icinga must never go to another.
             window::show(cx);
             self.state.update(cx, |state, cx| {
-                state.inform(
-                    "That notification is from another environment",
-                    Some(format!("Switch to it to see {}.", target.object)),
-                );
+                let (title, detail) = other_environment_notice(state, &target);
+                state.inform(title, Some(detail));
                 cx.notify();
             });
             return;
@@ -528,6 +540,7 @@ impl Session {
             return;
         };
         let name = environment.name.clone();
+        let notifier = self.engine_notifier(&environment.id);
         let spec = EnvironmentSpec {
             environment,
             general,
@@ -535,7 +548,7 @@ impl Session {
         };
         let ports = Ports {
             secrets,
-            notifier: self.notifier.clone(),
+            notifier: Arc::new(notifier),
             clock: Arc::new(SystemClock),
         };
         match ic_core::start(spec, ports) {
@@ -547,13 +560,23 @@ impl Session {
                     state.request_notifications()
                 });
                 if let Some(recent) = recent {
-                    // The notification centre starts with the log's.
-                    let state = self.state.downgrade();
-                    cx.spawn(async move |_, cx| {
+                    // The notification centre starts with the log's, unless
+                    // this engine was replaced meanwhile (its notifications
+                    // are another environment's, or already reloaded).
+                    let generation = self.generation;
+                    cx.spawn(async move |this, cx| {
                         if let Ok(records) = recent.await {
-                            let _ = state.update(cx, |state, cx| {
-                                state.load_notifications(records);
-                                cx.notify();
+                            let _ = this.update(cx, |session, cx| {
+                                if session.generation != generation {
+                                    tracing::debug!(
+                                        "a replaced engine's notifications were dropped"
+                                    );
+                                    return;
+                                }
+                                session.state.update(cx, |state, cx| {
+                                    state.load_notifications(records);
+                                    cx.notify();
+                                });
                             });
                         }
                     })
@@ -572,6 +595,12 @@ impl Session {
                 });
             }
         }
+    }
+
+    /// The notifier for an engine of the environment `id`: its intents
+    /// carry that environment.
+    pub(crate) fn engine_notifier(&self, id: &str) -> GpuiNotifier {
+        GpuiNotifier::new(self.intents.clone(), id)
     }
 
     /// Drains the engine's events into the state, a batch per re-render.
@@ -1108,6 +1137,22 @@ fn problem_for(store: &ConfigStore, failure: &str) -> ConfigProblem {
     }
 }
 
+/// What a click on a notification of another environment than the active
+/// one says: which environment it came from, and what it is about.
+fn other_environment_notice(state: &AppState, target: &Target) -> (String, String) {
+    let object = crate::operate::forms::describe_objects(std::slice::from_ref(&target.object));
+    match state.environment_by_id(&target.environment) {
+        Some(environment) => (
+            format!("That notification is from {}", environment.name),
+            format!("Switch to {} to see {object}.", environment.name),
+        ),
+        None => (
+            "That notification is from a removed environment".to_owned(),
+            format!("It was about {object}."),
+        ),
+    }
+}
+
 /// Shows `object`: in a dashboard that lists it, else as a tab, and
 /// brings the window forward (opening it if it was closed). Returns
 /// whether a window shows it.
@@ -1117,10 +1162,11 @@ pub(crate) fn open_object(object: &ObjectKey, cx: &mut App) -> bool {
     })
 }
 
-/// The desktop notifications of this platform: over D-Bus on Linux, with
-/// clicks to `responses`; GPUI's elsewhere.
+/// The desktop notifications of this platform, with clicks to
+/// `responses`: over D-Bus on Linux, through `UNUserNotificationCenter` on
+/// macOS; GPUI's elsewhere.
 #[cfg(not(test))]
-fn desktop_for(responses: futures::channel::mpsc::UnboundedSender<Response>) -> Box<dyn Desktop> {
+fn desktop_for(responses: UnboundedSender<Response>) -> Box<dyn Desktop> {
     #[cfg(target_os = "linux")]
     {
         Box::new(dbus::DbusDesktop::start(
@@ -1129,7 +1175,11 @@ fn desktop_for(responses: futures::channel::mpsc::UnboundedSender<Response>) -> 
             responses,
         ))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(macos::MacDesktop::start(responses))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         drop(responses);
         Box::new(desktop::GpuiDesktop)

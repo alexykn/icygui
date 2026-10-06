@@ -18,11 +18,12 @@ mod theme;
 pub use assets::Assets;
 pub use components::{
     Banner, BannerTone, Button, ButtonColors, ButtonVariant, Chip, CircleSize, CodeBlock,
-    CompactRow, DialogBody, Divider, DividerColor, EmptyState, Field, FieldTone, GlyphButton,
-    IconButton, KeyHint, KvTable, Link, LinkStyle, ListRow, Menu, MenuItem, Modal, ModalPlacement,
-    NoteEntry, Paint, PaneHeader, PerfdataRow, PerfdataTable, Popover, ProgressBar, RowEmphasis,
-    SectionLabel, Segmented, StateCircle, StateDot, SubTabs, SummaryBar, SummaryItem, Switch,
-    TOAST_WIDTH, TextArea, TextField, Toast, ToastTone, Tooltip, TreeLine, TreeTable,
+    CompactRow, DialogBody, Dismissable, Dismissal, Divider, DividerColor, EmptyState, Field,
+    FieldTone, GlyphButton, IconButton, KeyHint, KvTable, Link, LinkStyle, ListRow, Menu, MenuItem,
+    Modal, ModalPlacement, NoteEntry, Paint, PaneHeader, PerfdataRow, PerfdataTable, Popover,
+    ProgressBar, RowEmphasis, SectionLabel, Segmented, StateCircle, StateDot, SubTabs, SummaryBar,
+    SummaryItem, Switch, TOAST_WIDTH, TextArea, TextField, Toast, ToastTone, Tooltip, TreeLine,
+    TreeTable,
 };
 pub use fonts::FontError;
 pub use icon::{Icon, IconName};
@@ -64,6 +65,7 @@ use gpui::App;
 pub fn init(cx: &mut App) -> Result<(), FontError> {
     fonts::register(cx)?;
     gpui_component::init(cx);
+    components::init(cx);
     set_theme(Theme::dark(), cx);
     Ok(())
 }

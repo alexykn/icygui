@@ -3515,6 +3515,7 @@ name = "ic-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
  "chrono",
  "futures",
  "gpui-pre",
@@ -3528,6 +3529,9 @@ dependencies = [
  "ic-rules",
  "ic-ui-kit",
  "image",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
  "schemars",
  "secrecy",
  "serde",

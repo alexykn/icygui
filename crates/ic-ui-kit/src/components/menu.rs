@@ -1,13 +1,15 @@
-//! Popup menus (the list header's sort and `···` menus) and the popover that
-//! places them.
+//! Popup menus (the list header's sort and `···` menus), the popover that
+//! places them, and what makes a shown popup close: Escape, or a press
+//! outside it ([`Dismissable`]).
 
 use std::fmt;
+use std::rc::Rc;
 
 use gpui::{
-    Anchor, AnyElement, App, BoxShadow, ClickEvent, ElementId, InteractiveElement as _,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, RenderOnce, Role,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div,
-    point, prelude::FluentBuilder as _, px, relative,
+    Anchor, AnyElement, AnyWindowHandle, App, BoxShadow, ClickEvent, ElementId, Global,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Point,
+    RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    Window, anchored, deferred, div, point, prelude::FluentBuilder as _, px, relative,
 };
 
 use crate::components::{KeyHint, Tooltip};
@@ -15,7 +17,17 @@ use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
-type DismissHandler = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>;
+type DismissHandler = Rc<dyn Fn(&Dismissal, &mut Window, &mut App) + 'static>;
+
+/// Why a menu or popover closes by itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Dismissal {
+    /// A press outside it, at this window position. The press then does
+    /// its own job too (a click on a row selects it).
+    Press(Point<Pixels>),
+    /// Escape.
+    Escape,
+}
 
 /// Space left and right of an item's content.
 const ITEM_PADDING: f32 = 8.;
@@ -233,12 +245,13 @@ impl Menu {
         self
     }
 
-    /// Runs `handler` on a mouse press outside the menu (close it there).
+    /// Runs `handler` on Escape or a press outside the menu (close it
+    /// there; see [`Dismissable`]).
     pub fn on_dismiss(
         mut self,
-        handler: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+        handler: impl Fn(&Dismissal, &mut Window, &mut App) + 'static,
     ) -> Self {
-        self.on_dismiss = Some(Box::new(handler));
+        self.on_dismiss = Some(Rc::new(handler));
         self
     }
 
@@ -317,8 +330,8 @@ impl RenderOnce for Menu {
                     .into_any_element(),
             })
             .collect();
-        div()
-            .id(self.id)
+        let card = div()
+            .id(self.id.clone())
             .role(Role::Menu)
             .occlude()
             .flex()
@@ -338,10 +351,119 @@ impl RenderOnce for Menu {
             }])
             .font_family(theme.font_family.clone())
             .line_height(theme.line_height)
-            .children(entries)
-            .when_some(self.on_dismiss, |menu, handler| {
-                menu.on_mouse_down_out(move |event, window, cx| handler(event, window, cx))
+            .children(entries);
+        match self.on_dismiss {
+            Some(handler) => Dismissable {
+                id: ElementId::NamedChild(std::sync::Arc::new(self.id), "popup".into()),
+                content: card.into_any_element(),
+                on_dismiss: handler,
+            }
+            .into_any_element(),
+            None => card.into_any_element(),
+        }
+    }
+}
+
+/// A shown popup's dismissal handler, kept current by each render. The
+/// popup's element state holds it: it goes when the popup is no longer
+/// drawn.
+struct ShownPopup {
+    window: AnyWindowHandle,
+    on_dismiss: DismissHandler,
+}
+
+/// The popups drawn, oldest first (dead ones are pruned as they're found).
+#[derive(Default)]
+struct ShownPopups(Vec<WeakEntity<ShownPopup>>);
+
+impl Global for ShownPopups {}
+
+/// Escape closes the newest popup shown in its window before anything else
+/// sees the key (the list behind keeps its marks, the pane stays open).
+/// The popups don't take the keyboard: the list's keys keep working while
+/// one is open. From [`crate::init`].
+pub(crate) fn init(cx: &mut App) {
+    cx.default_global::<ShownPopups>();
+    cx.intercept_keystrokes(|event, window, cx| {
+        let keystroke = &event.keystroke;
+        if keystroke.key != "escape" || keystroke.modifiers.modified() {
+            return;
+        }
+        let here = window.window_handle();
+        let Some(popup) = cx.try_global::<ShownPopups>().and_then(|shown| {
+            shown
+                .0
+                .iter()
+                .rev()
+                .filter_map(WeakEntity::upgrade)
+                .find(|popup| popup.read(cx).window == here)
+        }) else {
+            return;
+        };
+        let on_dismiss = popup.read(cx).on_dismiss.clone();
+        cx.stop_propagation();
+        on_dismiss(&Dismissal::Escape, window, cx);
+    })
+    .detach();
+}
+
+/// A shown menu or popover (`content`) that closes itself: Escape (before
+/// the view behind sees it) or a press outside it calls `on_dismiss`,
+/// which closes it.
+#[derive(IntoElement)]
+#[must_use = "a popup does nothing unless rendered"]
+pub struct Dismissable {
+    id: ElementId,
+    content: AnyElement,
+    on_dismiss: DismissHandler,
+}
+
+impl Dismissable {
+    /// `content` as a popup (`id` unique among the popups of its parent),
+    /// closed through `on_dismiss`.
+    pub fn new(
+        id: impl Into<ElementId>,
+        content: impl IntoElement,
+        on_dismiss: impl Fn(&Dismissal, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            content: content.into_any_element(),
+            on_dismiss: Rc::new(on_dismiss),
+        }
+    }
+}
+
+impl fmt::Debug for Dismissable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Dismissable")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RenderOnce for Dismissable {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let on_dismiss = self.on_dismiss;
+        let registered = on_dismiss.clone();
+        let shown = window.use_keyed_state(self.id.clone(), cx, move |window, cx| {
+            let popup = cx.weak_entity();
+            let shown = cx.default_global::<ShownPopups>();
+            shown.0.retain(|popup| popup.upgrade().is_some());
+            shown.0.push(popup);
+            ShownPopup {
+                window: window.window_handle(),
+                on_dismiss: registered,
+            }
+        });
+        let current = on_dismiss.clone();
+        shown.update(cx, |shown, _| shown.on_dismiss = current);
+        div()
+            .id(self.id)
+            .on_mouse_down_out(move |event, window, cx| {
+                on_dismiss(&Dismissal::Press(event.position), window, cx);
             })
+            .child(self.content)
     }
 }
 

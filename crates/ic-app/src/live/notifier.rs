@@ -2,28 +2,56 @@
 //! every notification that should show (not the silent ones); the intent
 //! goes to the UI thread, which shows it on the desktop
 //! (`super::desktop`).
+//!
+//! Every engine gets its own notifier, which tags its intents with the
+//! engine's environment: an engine that is being replaced can still raise
+//! some, and they must not be taken for the next environment's (a click
+//! on *Acknowledge* would go to the wrong Icinga).
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use ic_core::ports::Notifier;
 use ic_rules::NotificationIntent;
 
-/// Hands intents from the core's thread to the UI thread.
+/// An intent and the environment whose engine raised it.
+#[derive(Clone, Debug)]
+pub(crate) struct Raised {
+    /// The environment's id.
+    pub(crate) environment: String,
+    /// What to show.
+    pub(crate) intent: NotificationIntent,
+}
+
+/// Hands one engine's intents from the core's thread to the UI thread.
 #[derive(Debug)]
 pub(crate) struct GpuiNotifier {
-    sender: UnboundedSender<NotificationIntent>,
+    sender: UnboundedSender<Raised>,
+    environment: String,
 }
 
 impl GpuiNotifier {
-    /// A notifier and the receiver the UI thread drains.
-    pub(crate) fn new() -> (Self, UnboundedReceiver<NotificationIntent>) {
-        let (sender, receiver) = unbounded();
-        (Self { sender }, receiver)
+    /// The channel every engine's notifier sends to, and the receiver the
+    /// UI thread drains.
+    pub(crate) fn channel() -> (UnboundedSender<Raised>, UnboundedReceiver<Raised>) {
+        unbounded()
+    }
+
+    /// A notifier for the engine of `environment` (its id), sending to
+    /// `sender`.
+    pub(crate) fn new(sender: UnboundedSender<Raised>, environment: impl Into<String>) -> Self {
+        Self {
+            sender,
+            environment: environment.into(),
+        }
     }
 }
 
 impl Notifier for GpuiNotifier {
     fn notify(&self, intent: &NotificationIntent) {
-        if self.sender.unbounded_send(intent.clone()).is_err() {
+        let raised = Raised {
+            environment: self.environment.clone(),
+            intent: intent.clone(),
+        };
+        if self.sender.unbounded_send(raised).is_err() {
             tracing::debug!(id = %intent.id, "the UI is gone; notification dropped");
         }
     }
@@ -51,13 +79,20 @@ mod tests {
     }
 
     #[test]
-    fn the_port_hands_intents_to_the_receiver() {
-        let (notifier, mut receiver) = GpuiNotifier::new();
-        notifier.notify(&intent("body"));
-        let received_intent = receiver.try_recv().unwrap();
-        assert_eq!(received_intent.body, "body");
+    fn the_port_hands_intents_to_the_receiver_with_their_environment() {
+        let (sender, mut receiver) = GpuiNotifier::channel();
+        let production = GpuiNotifier::new(sender.clone(), "prod");
+        let staging = GpuiNotifier::new(sender, "staging");
+        production.notify(&intent("body"));
+        staging.notify(&intent("other"));
+        let raised = receiver.try_recv().unwrap();
+        assert_eq!(raised.intent.body, "body");
+        assert_eq!(raised.environment, "prod");
+        let raised = receiver.try_recv().unwrap();
+        assert_eq!(raised.intent.body, "other");
+        assert_eq!(raised.environment, "staging");
         drop(receiver);
         // A notifier whose UI is gone drops intents quietly.
-        notifier.notify(&intent("later"));
+        production.notify(&intent("later"));
     }
 }

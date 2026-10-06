@@ -1,10 +1,12 @@
 //! Which of a view's popup menus is open.
 //!
-//! A press outside an open menu closes it. When that press lands on the
-//! menu's own trigger, the trigger's click must not open it again, so the
-//! press that closed a menu is remembered and its click ignored.
+//! Escape or a press outside an open menu closes it
+//! (`ic_ui_kit::Dismissable`). When that press lands on the menu's own
+//! trigger, the trigger's click must not open it again, so the press that
+//! closed a menu is remembered and its click ignored.
 
 use gpui::{ClickEvent, Pixels, Point};
+use ic_ui_kit::Dismissal;
 
 /// The open menu among those `T` names.
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +63,16 @@ impl<T: Clone + PartialEq> OpenMenu<T> {
     pub(crate) fn dismiss(&mut self, at: Point<Pixels>) {
         if let Some(menu) = self.open.take() {
             self.dismissed = Some((menu, at));
+        }
+    }
+
+    /// The open menu closed by itself (`ic_ui_kit::Menu::on_dismiss`).
+    pub(crate) fn dismissed(&mut self, how: Dismissal) {
+        match how {
+            Dismissal::Press(at) => self.dismiss(at),
+            Dismissal::Escape => {
+                self.close();
+            }
         }
     }
 

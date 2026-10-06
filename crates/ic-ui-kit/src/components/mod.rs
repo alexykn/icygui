@@ -27,7 +27,7 @@ pub use form::{Chip, Field, FieldTone, Segmented, Switch, TextArea};
 pub use header::{PaneHeader, SubTabs};
 pub use link::{Link, LinkStyle};
 pub use list::{CompactRow, ListRow, RowEmphasis};
-pub use menu::{Menu, MenuItem, Popover};
+pub use menu::{Dismissable, Dismissal, Menu, MenuItem, Popover};
 pub use modal::{DialogBody, Modal, ModalPlacement};
 pub use notice::{EmptyState, NoteEntry, TreeLine, TreeTable};
 pub use state::{CircleSize, Paint, StateCircle, StateDot};
@@ -37,3 +37,8 @@ pub use text::{CodeBlock, SectionLabel};
 pub use text_field::TextField;
 pub use toast::{TOAST_WIDTH, Toast, ToastTone};
 pub use tooltip::Tooltip;
+
+/// Sets up what the components need app-wide (from [`crate::init`]).
+pub(crate) fn init(cx: &mut gpui::App) {
+    menu::init(cx);
+}

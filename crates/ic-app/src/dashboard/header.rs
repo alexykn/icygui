@@ -3,16 +3,16 @@
 
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _,
+    MouseButton, ParentElement as _, Pixels, Point, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 use ic_config::{GroupBy, ObjectKind, Sort, SortKey, View};
 use ic_core::snapshot::Summary;
 use ic_model::{CheckableState, HostState, ServiceState};
 use ic_rules::DashboardRef;
 use ic_ui_kit::{
-    ActiveTheme as _, GlyphButton, Menu, MenuItem, PaneHeader, Popover, SummaryBar, SummaryItem,
-    Tooltip,
+    ActiveTheme as _, Dismissal, GlyphButton, Menu, MenuItem, PaneHeader, Popover, SummaryBar,
+    SummaryItem, Tooltip,
 };
 
 use super::DashboardView;
@@ -32,9 +32,9 @@ pub(crate) enum HeaderMenu {
 
 /// Which header menu is open.
 ///
-/// A press outside an open menu closes it; when that press is on the
-/// menu's own trigger, the trigger's click must not open it again, so the
-/// press that closed a menu is remembered.
+/// Escape or a press outside an open menu closes it; when that press is on
+/// the menu's own trigger, the trigger's click must not open it again, so
+/// the press that closed a menu is remembered.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct HeaderMenus {
     open: Option<HeaderMenu>,
@@ -65,6 +65,16 @@ impl HeaderMenus {
     pub(super) fn dismiss(&mut self, at: Point<Pixels>) {
         if let Some(menu) = self.open.take() {
             self.dismissed = Some((menu, at));
+        }
+    }
+
+    /// The open menu closed by itself: a press outside it, or Escape.
+    pub(super) fn dismissed(&mut self, how: Dismissal) {
+        match how {
+            Dismissal::Press(at) => self.dismiss(at),
+            Dismissal::Escape => {
+                self.close();
+            }
         }
     }
 
@@ -308,9 +318,9 @@ impl DashboardView {
 
     pub(super) fn dismiss_listener(
         cx: &Context<Self>,
-    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static {
-        cx.listener(|this, event: &MouseDownEvent, _, cx| {
-            this.menus.dismiss(event.position);
+    ) -> impl Fn(&Dismissal, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(|this, dismissal: &Dismissal, _, cx| {
+            this.menus.dismissed(*dismissal);
             cx.notify();
         })
     }

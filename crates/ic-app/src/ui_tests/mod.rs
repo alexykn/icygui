@@ -803,6 +803,50 @@ fn header_menus_open_and_close() {
     });
 }
 
+#[test]
+fn escape_closes_the_open_menu_before_anything_behind_it() {
+    use crate::pane::PaneMenu;
+    use crate::sidebar::SidebarMenu;
+
+    run(FixtureOptions::default(), |app, cx| {
+        let sidebar = app.workspace.read(cx).sidebar().clone();
+        // Two marked rows and the footer's connection details: Escape
+        // closes the details, the marks stay.
+        app.keys(cx, "j x j x");
+        assert_eq!(app.marked(cx).len(), 2);
+        app.click(cx, point(px(150.), px(880.)), Modifiers::default());
+        assert!(sidebar.read(cx).details_open());
+        app.keys(cx, "escape");
+        assert!(!sidebar.read(cx).details_open(), "the details closed");
+        assert_eq!(app.marked(cx).len(), 2, "the marks stay");
+        app.keys(cx, "escape");
+        assert!(app.marked(cx).is_empty(), "the next Escape is the list's");
+
+        // A pane and a group's `···` menu: Escape closes the menu only.
+        app.keys(cx, "j enter");
+        assert!(app.pane_object(cx).is_some());
+        app.click(cx, point(px(274.), px(59.)), Modifiers::default());
+        assert_eq!(
+            sidebar.read(cx).open_menu(),
+            Some(&SidebarMenu::Group("demo-overview".to_owned()))
+        );
+        app.keys(cx, "escape");
+        assert_eq!(sidebar.read(cx).open_menu(), None);
+        assert!(app.pane_object(cx).is_some(), "the pane stays");
+
+        // The pane's own `···` menu too.
+        let pane = app.dashboard(cx).read(cx).pane(cx).unwrap();
+        pane.update(cx, ObjectPane::open_more_menu);
+        app.draw(cx);
+        assert_eq!(pane.read(cx).open_menu(), Some(PaneMenu::More));
+        app.keys(cx, "escape");
+        assert_eq!(pane.read(cx).open_menu(), None);
+        assert!(app.pane_object(cx).is_some(), "the pane stays");
+        app.keys(cx, "escape");
+        assert_eq!(app.pane_object(cx), None, "the next Escape closes it");
+    });
+}
+
 fn network() -> DashboardRef {
     DashboardRef {
         group_id: "demo-platform".to_owned(),

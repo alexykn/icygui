@@ -6,13 +6,11 @@
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use gpui::{
-    ClickEvent, Context, FontWeight, MouseDownEvent, ParentElement as _, Styled as _, div, px,
-};
+use gpui::{ClickEvent, Context, FontWeight, ParentElement as _, Styled as _, div, px};
 use ic_config::DashboardGroup;
 use ic_model::{Timestamp, format_compact};
 use ic_rules::{DashboardRef, ScopeSetting};
-use ic_ui_kit::{ActiveTheme as _, Menu, MenuItem};
+use ic_ui_kit::{ActiveTheme as _, Dismissal, Menu, MenuItem};
 
 use super::{RenameTarget, Sidebar, SidebarEvent};
 use crate::app_state::AppState;
@@ -30,9 +28,9 @@ impl Sidebar {
     /// A listener that closes the open menu on a press outside it.
     fn dismiss_listener(
         cx: &Context<Self>,
-    ) -> impl Fn(&MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static {
-        cx.listener(|this, event: &MouseDownEvent, _, cx| {
-            this.menus.dismiss(event.position);
+    ) -> impl Fn(&Dismissal, &mut gpui::Window, &mut gpui::App) + 'static {
+        cx.listener(|this, dismissal: &Dismissal, _, cx| {
+            this.menus.dismissed(*dismissal);
             cx.notify();
         })
     }

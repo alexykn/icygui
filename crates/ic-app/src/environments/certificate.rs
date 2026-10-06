@@ -128,6 +128,12 @@ pub(crate) fn mismatch_warning(pinned: &str, presented: &str, theme: &Theme) -> 
             "If it was renewed, trust the new one. If not, someone may be intercepting the \
              connection: check with whoever runs Icinga first.",
         ))
+        .child(div().text_color(colors.text_muted).child(
+            "Several Icinga masters behind this address (a load balancer, round-robin DNS)? \
+             Each has its own certificate and a pin trusts only one of them: set Icinga's CA \
+             file in the environment's TLS settings instead (the user guide's TLS section \
+             explains the names to check).",
+        ))
         .child(
             div()
                 .flex()

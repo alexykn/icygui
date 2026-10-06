@@ -31,7 +31,7 @@ use ic_ui_kit::{
 use super::ActionSpec;
 use super::forms::{
     AckForm, CommandForm, CommentForm, DowntimeForm, Eligible, FormField, Issues, ResultForm,
-    describe_objects,
+    TriggerChoice, describe_objects, trigger_choices,
 };
 use super::when::{self, END_PRESETS, EXPIRY_PRESETS, Preset};
 use crate::actions::ObjectAction;
@@ -128,7 +128,8 @@ impl DialogKind {
         }
     }
 
-    fn title(self) -> &'static str {
+    /// The dialog's title.
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Acknowledge => "Acknowledge",
             Self::Downtime => "Schedule downtime",
@@ -354,6 +355,9 @@ pub(crate) struct ActionDialog {
     endpoints: Vec<String>,
     /// What the endpoint field means when left blank.
     endpoint_default: String,
+    /// Downtimes that could trigger a scheduled one (the objects', their
+    /// hosts' and those hosts' parents').
+    triggers: Vec<TriggerChoice>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -382,9 +386,14 @@ impl ActionDialog {
     ) -> Self {
         let form = Form::new(kind);
         let environment_id = state.read(cx).active_environment_id().map(str::to_owned);
-        let (author, endpoints, endpoint_default) = {
+        let (author, endpoints, endpoint_default, triggers) = {
             let current = state.read(cx);
             let snapshot = current.snapshot();
+            let triggers = if kind == DialogKind::Downtime {
+                trigger_choices(snapshot, &eligible.targets, Timestamp::now())
+            } else {
+                Vec::new()
+            };
             (
                 current
                     .environment()
@@ -396,6 +405,7 @@ impl ActionDialog {
                     .map(|endpoint| endpoint.name.clone())
                     .collect::<Vec<_>>(),
                 endpoint_default(snapshot, &eligible.targets),
+                triggers,
             )
         };
         let mut inputs = Vec::new();
@@ -456,6 +466,7 @@ impl ActionDialog {
             author,
             endpoints,
             endpoint_default,
+            triggers,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -479,7 +490,6 @@ impl ActionDialog {
     }
 
     /// Which dialog this is.
-    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn kind(&self) -> DialogKind {
         self.kind
     }
@@ -1019,12 +1029,68 @@ impl ActionDialog {
         if hosts > 0 {
             blocks.extend(Self::host_options(form, hosts, cx));
         }
-        blocks.push(
-            self.text_field("triggered by", FormField::Trigger, issues)
-                .hint("Another downtime's full name: this one starts when it does (optional).")
-                .into_any_element(),
-        );
+        let trigger = self.text_field("triggered by", FormField::Trigger, issues);
+        blocks.push(if self.triggers.is_empty() {
+            trigger
+                .hint(
+                    "Another downtime's full name: this one starts when it does (optional). \
+                     The pane's downtimes copy theirs.",
+                )
+                .into_any_element()
+        } else {
+            trigger
+                .hint("Another downtime: this one starts when it does (optional). Pick one:")
+                .into_any_element()
+        });
+        if !self.triggers.is_empty() {
+            blocks.push(self.trigger_choices(&form.trigger, cx));
+        }
         blocks
+    }
+
+    /// The downtimes to pick as the trigger: picking one fills the field
+    /// with its name; picking it again clears it.
+    fn trigger_choices(&self, current: &str, cx: &Context<Self>) -> AnyElement {
+        let current = current.trim();
+        div()
+            .flex()
+            .flex_wrap()
+            .gap(px(6.))
+            .children(self.triggers.iter().enumerate().map(|(index, choice)| {
+                let selected = current == choice.name;
+                let name = if selected {
+                    String::new()
+                } else {
+                    choice.name.clone()
+                };
+                Chip::new(
+                    SharedString::from(format!("downtime-trigger-{index}")),
+                    choice.label.clone(),
+                )
+                .selected(selected)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.fill(FormField::Trigger, &name, window, cx);
+                }))
+            }))
+            .into_any_element()
+    }
+
+    /// Picks the trigger choice `index` (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn pick_trigger(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self.triggers[index].name.clone();
+        self.fill(FormField::Trigger, &name, window, cx);
+    }
+
+    /// The downtimes offered as the trigger (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn trigger_offers(&self) -> &[TriggerChoice] {
+        &self.triggers
     }
 
     /// For hosts: their services too, and their child hosts.

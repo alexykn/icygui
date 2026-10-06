@@ -493,6 +493,11 @@ fn a_pin_mismatch_shows_both_fingerprints_and_trusts_the_new_certificate() {
                 })
                 .await;
                 cx.update(|cx| {
+                    // The answer shows under the button, below the pinned
+                    // environment's TLS fields: it is scrolled into view.
+                    app.draw(cx);
+                    app.draw(cx);
+                    assert!(editor.read(cx).test_in_view(), "the answer is in view");
                     match editor.read(cx).test_result().unwrap() {
                         Err(ic_core::ConnectionFailure::CertificateMismatch {
                             expected,

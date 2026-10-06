@@ -220,7 +220,7 @@ fn control(kind: Control, window: &Window, cx: &App) -> Stateful<Div> {
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             match kind {
-                Control::Close => window.remove_window(),
+                Control::Close => crate::workspace::close_window(window, cx),
                 Control::Minimize => window.minimize_window(),
                 Control::Maximize => window.zoom_window(),
             }

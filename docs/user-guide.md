@@ -28,7 +28,7 @@ Other ways:
 
 **Try it without an Icinga:** `icygui --demo` runs the whole app against a simulated Icinga in the same process (a 150-host estate with live changes, problem storms and notifications). Actions work against it; nothing is saved and the keychain isn't touched. The footer shows a *demo* badge.
 
-Command line: `icygui [--demo] [--background]`, `icygui --version`, `icygui --help`. `--background` starts in the tray without a window (what launch at login runs).
+Command line: `icygui [--demo] [--background]`, `icygui --version`, `icygui --help`. `--background` starts in the tray without a window (what launch at login runs); the window opens if no tray shows the icon within 20 seconds.
 
 ## The API user
 
@@ -102,7 +102,7 @@ Start icygui. Without an environment, the window shows the onboarding form:
 | Field | |
 |---|---|
 | name | Shown in the footer and the switcher, e.g. `prod` |
-| URL | `https://<master or load balancer>:5665`. https only |
+| URL | `https://<master or load balancer>:5665`. https only. Behind a load balancer, read [TLS](#tls) first: a pinned certificate doesn't work there |
 | login | *password*: the API user and its password, or *client certificate*: a PEM certificate and its unencrypted PEM key (*browse…* or type the paths; `~` works) |
 | author | Recorded on acknowledgements, downtimes and comments; defaults to the API user. Use your own name |
 | TLS | Folded away until needed: CA file, pinned SHA-256, server name, *also trust the system's root certificates*. See [TLS](#tls) |
@@ -123,6 +123,8 @@ Icinga signs its API certificate with its own CA, so the operating system's root
    openssl x509 -noout -fingerprint -sha256 -in /var/lib/icinga2/certs/$(hostname -f).crt
    ```
    Colons are optional. When the master's certificate is renewed the pin no longer matches, and icygui shows both fingerprints (see below).
+
+   **Not with several masters behind one address.** A pin names exactly one certificate, and each master of an HA zone has its own. Behind a load balancer or round-robin DNS, the first connection that reaches the other master fails as a changed certificate, and icygui stops (it never retries against a certificate it doesn't trust), so notifications stop too. Use the CA file there. Icinga's node certificates name only their own node, so with the CA file either have the masters' certificates include the load balancer's name, or set the environment's URL to one master's own name (*server name* checks one name, not several).
 3. **Trust on first use.** Leave both empty and press *test connection*. When the certificate isn't trusted, icygui shows the certificate it was offered: SHA-256 fingerprint, subject, issuer, names and expiry. Compare the fingerprint with the master's (the `openssl` command above) and press *trust this certificate*: icygui pins it. Never trust a fingerprint you haven't compared.
 
 More settings:
@@ -130,7 +132,7 @@ More settings:
 - **Also trust the system's root certificates:** for an API behind a reverse proxy with a public certificate.
 - **Client certificates:** a PEM certificate and an unencrypted PEM key, for an `ApiUser` with `client_cn`. The key file should be readable only by you.
 
-**When the certificate changes later:** the connection stops (it doesn't retry against an untrusted certificate) and a banner says *certificate not trusted* with *Review certificate…*. A changed pin shows the pinned and the presented fingerprint side by side and *trust the new certificate*. Only trust it if the master's certificate really was renewed.
+**When the certificate changes later:** the connection stops (it doesn't retry against an untrusted certificate) and a banner says *certificate not trusted* with *Review certificate…*. A changed pin shows the pinned and the presented fingerprint side by side and *trust the new certificate*. Only trust it if the master's certificate really was renewed. If another master answered (a load balancer in front of an HA zone), trusting its certificate only moves the problem to the first master: use the CA file instead (see pinning above).
 
 ## Environments
 
@@ -193,6 +195,7 @@ Click a row (or press <kbd>Enter</kbd>) for the **pane** at the right:
 - **Host:** state, address, uptime, output; actions; tabs *services* (OK services folded into `+ N more ok`), *history*, *vars* and *config* (the check configuration and Icinga's feature switches, read-only); parents and children from dependencies.
 - `↗ open as tab` pins the object in the sidebar's *open* section; tabs survive restarts.
 - The pane's `···` menu holds the less common actions (submit check result, run command, remove downtimes), copies the name, the output or a filter expression for the object, and watches or mutes it. Notes URLs and action URLs open in the browser.
+- **Protected custom variables** show `***` in the vars and in links, never their value: names matching `*pw*`, `*pass*`, `*community*` (Icinga Web's defaults, `community` widened to `snmp_community`), `*secret*`, `*token*`, `*auth_pair*`, `*auth_key*` and `*priv_key*`, ignoring case, at any nesting level. Filters still see the real values.
 
 ## Keyboard shortcuts
 
@@ -238,7 +241,7 @@ All actions are runtime operations through Icinga's `/v1/actions`. icygui never 
 | Action | Options |
 |---|---|
 | **Acknowledge** (<kbd>a</kbd>) | Comment; sticky (stays until OK, through other problem states); persistent (keep the comment after the acknowledgement ends); expiry (1h, 4h, 1d, 08:00 tomorrow, or a time). Icinga is never asked to send notifications for it. *Remove acknowledgement* on acknowledged objects |
-| **Schedule downtime** (<kbd>d</kbd>) | Comment; start and end with presets (30m, 1h, 2h, 4h, 8h, 1d, 1w, 08:00 tomorrow); fixed, or flexible with a duration; for hosts: all services too, child hosts (none, triggered, non-triggered); a triggering downtime. *Remove downtime* per downtime, or all of the selection's |
+| **Schedule downtime** (<kbd>d</kbd>) | Comment; start and end with presets (30m, 1h, 2h, 4h, 8h, 1d, 1w, 08:00 tomorrow); fixed, or flexible with a duration; for hosts: all services too, child hosts (none, triggered, non-triggered); a triggering downtime, picked from the current downtimes of the objects, their hosts and those hosts' parents (or any downtime's name, which the pane's downtimes copy). *Remove downtime* per downtime, or all of the selection's |
 | **Check now** (<kbd>r</kbd>) | Forced, at once. More than 20 objects ask first |
 | **Add comment** (<kbd>c</kbd>) | Comment and an optional expiry. Remove comments from the pane |
 | **Submit check result** | State, output, performance data (passive results) |
@@ -284,13 +287,15 @@ Recoveries only notify for problems that notified.
 
 No notifications are sent for what's already wrong when icygui connects, but icygui keeps track of it: a service still critical from before its host went down waits for a fresh check (or five minutes) once the host is back, and an object that is flapping stays quiet until it stops. A problem that notified before icygui restarted (or before you switched environments and back) still notifies its recovery, as long as the event log keeps it. Problems that a reconcile finds after a reconnect do notify, also one that recovered and failed again while your laptop slept.
 
-Platform notes: on macOS, notifications come from the app bundle (allow them in System Settings → Notifications the first time). On Linux they go to your desktop's notification server.
+Platform notes: on macOS, notifications come from the app bundle (allow them in System Settings → Notifications the first time, with sounds); a rule's sound is the system's alert sound, also while icygui is in front. On Linux they go to your desktop's notification server, with a sound by state (critical, warning, recovery) where the server plays sounds.
+
+Clicking a notification from another environment than the active one opens nothing: icygui says which environment it is from, so an acknowledgement never goes to the wrong Icinga.
 
 ## In the background
 
-- **Closing the window** keeps icygui running in the tray (Linux) or the menu bar (macOS), still connected and notifying (Settings → general → *keep running in the tray when the window closes*, on by default). Where no tray icon can be shown (stock GNOME without the AppIndicator extension), closing the window quits, and the settings say so.
+- **Closing the window** keeps icygui running in the tray (Linux) or the menu bar (macOS), still connected and notifying (Settings → general → *keep running in the tray when the window closes*, on by default). Where no tray icon can be shown (stock GNOME without the AppIndicator extension), closing the window quits, and the settings say so. With unsaved work in the window (dashboard editor changes, text typed in an action dialog) it asks first.
 - **The tray icon** is the logo mark tinted with the worst unhandled state of the active environment; its tooltip has the counts; its menu has *Open*, *Pause notifications*, the environments and *Quit*.
-- **Launch at login** (Settings → general) starts icygui in the background, without a window (a launch agent on macOS, an XDG autostart entry on Linux).
+- **Launch at login** (Settings → general) starts icygui in the background, without a window (a launch agent on macOS, an XDG autostart entry on Linux). If no tray shows its icon within 20 seconds (a panel that starts after icygui gets that long), the window opens instead.
 - **One instance:** starting icygui again brings the running one's window forward.
 - **Quit** from the tray, the app menu or <kbd>⌘Q</kbd>.
 

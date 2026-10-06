@@ -265,6 +265,43 @@ fn downtimes_take_presets_and_check_their_window() {
 }
 
 #[test]
+fn a_downtime_is_triggered_by_one_picked_from_the_objects_downtimes() {
+    run(FixtureOptions::default(), |app, cx| {
+        let recorder = record(app, cx);
+        // A service of a host in downtime: the host's is offered.
+        request(
+            app,
+            cx,
+            ObjectAction::ScheduleDowntime,
+            vec![ObjectKey::service("edge-fra-04", "load")],
+        );
+        let offers = dialog(app, cx).read(cx).trigger_offers().to_vec();
+        assert_eq!(offers.len(), 1, "{offers:?}");
+        assert_eq!(offers[0].name, "edge-fra-04!demo-downtime-2");
+        assert!(
+            offers[0]
+                .label
+                .starts_with("edge-fra-04 · rack maintenance · a.ivanova · "),
+            "{}",
+            offers[0].label
+        );
+        type_into(app, cx, FormField::Comment, "after the rack");
+        let dialog_entity = dialog(app, cx);
+        app.in_window(cx, |window, cx| {
+            dialog_entity.update(cx, |dialog, cx| dialog.pick_trigger(0, window, cx));
+        });
+        app.draw(cx);
+        app.keys(cx, "enter");
+        assert_eq!(modal(app, cx), None);
+        let actions = recorder.actions();
+        let [(_, _, Action::ScheduleDowntime { trigger_name, .. })] = actions.as_slice() else {
+            panic!("one downtime: {actions:?}");
+        };
+        assert_eq!(trigger_name.as_deref(), Some("edge-fra-04!demo-downtime-2"));
+    });
+}
+
+#[test]
 fn bulk_actions_apply_to_the_marked_rows_and_skip_what_icinga_refuses() {
     run(FixtureOptions::default(), |app, cx| {
         let recorder = record(app, cx);

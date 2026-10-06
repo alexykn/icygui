@@ -1,26 +1,32 @@
 //! The app around its window (BG-01, BG-05, NOTE-01): the application
 //! menus and their actions, a closed main window coming back with its
-//! state, and desktop notifications from the real core (the demo's
+//! state, closing it asking first when unsaved work would be lost, and
+//! desktop notifications from the real core (the demo's
 //! problem storm) whose *Acknowledge* opens the acknowledge dialog for
-//! their object.
+//! their object, but never for an object of another environment.
 
 use std::time::Duration;
 
 use futures::FutureExt as _;
 use gpui::{App, AppContext as _, Entity, OwnedMenuItem};
+use ic_core::ports::Notifier as _;
 use ic_model::Timestamp;
+use ic_rules::{NotificationIntent, Tone};
 
 use super::live::LOAD;
-use super::{Body, network, replication, run, run_app, wait_for};
-use crate::actions::{OpenSettings, ShowAbout};
+use super::{Body, network, production, replication, run, run_app, wait_for};
+use crate::actions::{ActionRequest, ObjectAction, OpenSettings, ShowAbout};
 use crate::app_state::AppState;
+use crate::app_state::testing::Recorder;
 use crate::background::{menus, window};
+use crate::dashboard::DashboardEvent;
 use crate::fixture::FixtureOptions;
 use crate::live::demo::{self, DemoOptions};
 use crate::live::desktop::{ACKNOWLEDGE_ACTION, Response, Urgency};
 use crate::live::{self, Launch, Session};
-use crate::operate::dialog::DialogKind;
-use crate::workspace::ModalKind;
+use crate::operate::dialog::{ActionDialog, DialogKind};
+use crate::operate::forms::FormField;
+use crate::workspace::{self, Confirmed, ModalKind};
 
 #[test]
 fn the_app_menus_open_settings_and_about() {
@@ -74,15 +80,110 @@ fn a_closed_window_comes_back_with_its_state() {
             .unwrap()
             .view()
             .clone()
-            .downcast::<crate::workspace::Workspace>()
+            .downcast::<workspace::Workspace>()
             .unwrap();
         let shown = workspace.read(cx).dashboard().read(cx).pane_object(cx);
         assert_eq!(shown, Some(replication()));
     });
 }
 
+#[test]
+fn closing_the_window_asks_before_unsaved_work_is_lost() {
+    run(FixtureOptions::default(), |app, cx| {
+        window::install(app.state.clone(), cx);
+        let recorder = Recorder::default();
+        app.state
+            .update(cx, |state, _| state.set_core(Box::new(recorder.clone())));
+        let close = |cx: &mut App| {
+            app.in_window(cx, workspace::close_window);
+        };
+        let asks = |cx: &App, lost: &str| {
+            matches!(
+                app.workspace.read(cx).modal(cx),
+                Some(ModalKind::Confirm(confirmation))
+                    if confirmation.action == Confirmed::CloseWindow
+                        && confirmation.detail.contains(lost)
+            )
+        };
+
+        // A comment typed in the acknowledge dialog: the window asks, and
+        // stays open with the dialog and its text when told so.
+        app.state.update(cx, |state, cx| {
+            let _ = state.request(ActionRequest {
+                action: ObjectAction::Acknowledge,
+                targets: vec![replication()],
+            });
+            cx.notify();
+        });
+        app.draw(cx);
+        let dialog = app.workspace.read(cx).action_dialog().unwrap().clone();
+        app.in_window(cx, |window, cx| {
+            ActionDialog::type_into(&dialog, FormField::Comment, "looking into it", window, cx);
+        });
+        app.draw(cx);
+        close(cx);
+        app.draw(cx);
+        assert!(window::main_window(cx).is_some(), "still open");
+        assert!(asks(cx, "what you typed in “Acknowledge”"));
+        app.keys(cx, "escape");
+        assert_eq!(
+            app.workspace.read(cx).modal(cx),
+            Some(ModalKind::Action(DialogKind::Acknowledge)),
+            "the dialog is back"
+        );
+        assert!(
+            app.workspace
+                .read(cx)
+                .action_dialog()
+                .unwrap()
+                .read(cx)
+                .is_dirty(),
+            "with its text"
+        );
+        app.keys(cx, "escape");
+        assert_eq!(app.workspace.read(cx).modal(cx), None);
+        assert!(recorder.actions().is_empty(), "nothing was sent");
+
+        // The dashboard editor with changes: asks; confirming closes the
+        // window (the app's state stays for the next one).
+        app.dashboard(cx)
+            .update(cx, |_, cx| cx.emit(DashboardEvent::Edit(production())));
+        app.draw(cx);
+        let name = app
+            .workspace
+            .read(cx)
+            .editor()
+            .unwrap()
+            .read(cx)
+            .name_input()
+            .clone();
+        app.in_window(cx, |window, cx| {
+            name.update(cx, |input, cx| input.replace_all("prod", window, cx));
+        });
+        app.draw(cx);
+        close(cx);
+        app.draw(cx);
+        assert!(asks(cx, "your changes to prod"));
+        app.keys(cx, "escape");
+        assert_eq!(app.workspace.read(cx).modal(cx), None, "kept editing");
+        assert!(app.workspace.read(cx).editor().is_some());
+        close(cx);
+        app.in_window(cx, |window, cx| {
+            app.workspace
+                .update(cx, |workspace, cx| workspace.confirm(window, cx));
+        });
+        assert!(window::main_window(cx).is_none(), "closed");
+    });
+}
+
 /// The demo through the real core, with a problem storm a few seconds in.
 fn storming_demo(cx: &mut App) -> Entity<AppState> {
+    demo_with_storms(Some(5), cx)
+}
+
+/// The demo through the real core, with a problem storm every
+/// `storm_every` seconds.
+fn demo_with_storms(storm_every: Option<u64>, cx: &mut App) -> Entity<AppState> {
     let state = cx.new(|_| AppState::demo(demo::config(), Timestamp::now()));
     let session = Session::install(
         state.clone(),
@@ -91,7 +192,7 @@ fn storming_demo(cx: &mut App) -> Entity<AppState> {
                 scenario: "prod-cluster".to_owned(),
                 seed: 3,
                 fault: None,
-                storm_every: Some(5),
+                storm_every,
             },
         },
         None,
@@ -187,6 +288,85 @@ fn desktop_notifications_open_and_acknowledge_their_object() {
                         app.pane_object(cx).or_else(|| state.active_tab().cloned()),
                         Some(object),
                         "the object shows"
+                    );
+                });
+            }
+            .boxed_local()
+        })),
+    );
+}
+
+#[test]
+fn a_notification_of_the_previous_environment_never_acts_on_the_next() {
+    run_app(
+        crate::WINDOW_SIZE,
+        |cx| demo_with_storms(None, cx),
+        Body::Async(Box::new(|app, cx| {
+            async move {
+                let session = cx.update(|cx| live::session(cx).unwrap());
+                // prod-cluster's engine raised a problem that is still
+                // queued for the UI when the user switches to staging.
+                cx.update(|cx| {
+                    session.update(cx, |session, cx| {
+                        session
+                            .engine_notifier(demo::ENVIRONMENT_ID)
+                            .notify(&NotificationIntent {
+                                id: "db-prod-03!postgres-replication:critical:1".to_owned(),
+                                object: Some(replication()),
+                                title: "CRITICAL · postgres-replication on db-prod-03".to_owned(),
+                                subtitle: "overview / production".to_owned(),
+                                body: "CRITICAL - standby lag 412s (> 300s)".to_owned(),
+                                tone: Tone::Critical,
+                                sound: true,
+                                silent: false,
+                                at: Timestamp::now(),
+                            });
+                        assert!(session.switch_environment(demo::STAGING_ID, cx));
+                    });
+                });
+                wait_for(
+                    &app,
+                    &cx,
+                    "the queued notification",
+                    Duration::from_secs(5),
+                    |_, cx| !session.read(cx).shown_notifications().is_empty(),
+                )
+                .await;
+                let posted = cx.update(|cx| {
+                    session
+                        .read(cx)
+                        .shown_notifications()
+                        .into_iter()
+                        .find(|posted| posted.tag.ends_with(":critical:1"))
+                        .unwrap()
+                });
+                assert_eq!(
+                    posted.actions,
+                    [("open", "Open")],
+                    "no Acknowledge for an environment that isn't active"
+                );
+                // Acknowledge anyway (a button shown before the switch):
+                // nothing opens in staging; a toast says where it is from.
+                cx.update(|cx| {
+                    session.update(cx, |session, cx| {
+                        session.notification_clicked(
+                            &Response {
+                                tag: posted.tag.clone(),
+                                action: Some(ACKNOWLEDGE_ACTION.to_owned()),
+                            },
+                            cx,
+                        );
+                    });
+                    app.draw(cx);
+                    let state = app.state.read(cx);
+                    assert_eq!(state.active_environment_id(), Some(demo::STAGING_ID));
+                    assert_eq!(app.workspace.read(cx).modal(cx), None, "no dialog");
+                    assert_eq!(app.pane_object(cx), None, "nothing revealed");
+                    let toast = state.toasts().last().expect("a toast");
+                    assert_eq!(toast.title, "That notification is from prod-cluster");
+                    assert_eq!(
+                        toast.lines,
+                        ["Switch to prod-cluster to see postgres-replication on db-prod-03."]
                     );
                 });
             }

@@ -236,8 +236,9 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
             _instance: instance.take(),
         });
         background::autostart::refresh_at_start(launch_at_login, demo, cx);
-        let hidden = !recovering && background::window::start_hidden(background, cx);
-        if !hidden && !background::window::open_at_start(state, bounds, cx) {
+        if !recovering && background::window::start_hidden(background, cx) {
+            background::window::await_tray_host(state, bounds, cx);
+        } else if !background::window::open_at_start(state, bounds, cx) {
             cx.quit();
             return;
         }

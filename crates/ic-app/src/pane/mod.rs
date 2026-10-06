@@ -18,15 +18,15 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, MouseDownEvent, ParentElement as _, Pixels,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Task, Window, div, prelude::FluentBuilder as _, px,
+    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::ObjectMode;
 use ic_ui_kit::{
-    ActiveTheme as _, Button, EmptyState, GlyphButton, Icon, IconButton, IconName, Link, Menu,
-    MenuItem, PaneHeader, Popover, Scrollbar, Theme, Tooltip,
+    ActiveTheme as _, Button, Dismissal, EmptyState, GlyphButton, Icon, IconButton, IconName, Link,
+    Menu, MenuItem, PaneHeader, Popover, Scrollbar, Theme, Tooltip,
 };
 
 use crate::actions::{
@@ -898,8 +898,8 @@ fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>
         }
     }
     menu.on_dismiss(
-        cx.listener(|this: &mut ObjectPane, event: &MouseDownEvent, _, cx| {
-            this.menu.dismiss(event.position);
+        cx.listener(|this: &mut ObjectPane, dismissal: &Dismissal, _, cx| {
+            this.menu.dismissed(*dismissal);
             cx.notify();
         }),
     )

@@ -351,13 +351,38 @@ pub(super) fn notes(
         }
         column = column.child(div().group(NOTE_GROUP).child(entry));
     }
+    // A downtime's full name, for the schedule-downtime dialog's
+    // "triggered by" (shown nowhere else).
+    let copy_name = |id: String, name: String| {
+        div()
+            .flex_none()
+            .invisible()
+            .group_hover(NOTE_GROUP, gpui::Styled::visible)
+            .child(
+                IconButton::new(gpui::SharedString::from(id), IconName::Copy)
+                    .size(px(20.))
+                    .icon_size(px(12.))
+                    .color(theme.colors.text_faint)
+                    .tooltip(Tooltip::new("Copy the downtime's name"))
+                    .on_click(
+                        cx.listener(move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                            pane.copy("the downtime's name", name.clone(), cx);
+                        }),
+                    ),
+            )
+    };
     for downtime in downtimes {
         let note = model::downtime_note(downtime, now);
-        let entry = note_entry(&note).child(remove(
-            format!("remove-downtime-{}", note.name),
-            "Remove downtime",
-            ObjectAction::RemoveDowntime(note.name.clone()),
-        ));
+        let entry = note_entry(&note)
+            .child(copy_name(
+                format!("copy-downtime-{}", note.name),
+                note.name.clone(),
+            ))
+            .child(remove(
+                format!("remove-downtime-{}", note.name),
+                "Remove downtime",
+                ObjectAction::RemoveDowntime(note.name.clone()),
+            ));
         column = column.child(div().group(NOTE_GROUP).child(entry));
     }
     Some(column.into_any_element())

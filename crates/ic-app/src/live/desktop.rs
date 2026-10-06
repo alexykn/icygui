@@ -12,9 +12,9 @@
 //!
 //! On Linux they go straight to the desktop's notification server over
 //! D-Bus ([`super::dbus`]: one connection, urgency and sound hints, the
-//! desktop entry). On macOS GPUI's `UNUserNotificationCenter` backend
-//! shows them (from the app bundle; it has no urgency or sound settings).
-//! Clicks come back as [`Response`]s.
+//! desktop entry). On macOS they go to `UNUserNotificationCenter`
+//! (`super::macos`, from the app bundle: the system's alert sound when
+//! the rule wants one, no urgency). Clicks come back as [`Response`]s.
 
 use gpui::App;
 use ic_rules::{NotificationIntent, Tone};
@@ -59,7 +59,8 @@ pub(crate) struct Posted {
     pub(crate) body: String,
     /// How insistent.
     pub(crate) urgency: Urgency,
-    /// A freedesktop sound name, or `None` for silence.
+    /// A freedesktop sound name (macOS plays its alert sound for any), or
+    /// `None` for silence.
     pub(crate) sound: Option<&'static str>,
     /// Buttons: id and label.
     pub(crate) actions: Vec<(&'static str, &'static str)>,
@@ -115,12 +116,12 @@ pub(crate) trait Desktop {
     fn show(&self, posted: Posted, cx: &mut App);
 }
 
-/// GPUI's system notifications (macOS).
-#[cfg(all(not(target_os = "linux"), not(test)))]
+/// GPUI's system notifications (neither Linux nor macOS: no sound).
+#[cfg(all(not(any(target_os = "linux", target_os = "macos")), not(test)))]
 #[derive(Debug, Default)]
 pub(crate) struct GpuiDesktop;
 
-#[cfg(all(not(target_os = "linux"), not(test)))]
+#[cfg(all(not(any(target_os = "linux", target_os = "macos")), not(test)))]
 impl Desktop for GpuiDesktop {
     fn show(&self, posted: Posted, cx: &mut App) {
         cx.show_system_notification(system_notification(&posted));
@@ -128,7 +129,7 @@ impl Desktop for GpuiDesktop {
 }
 
 /// `posted` for GPUI.
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
 pub(crate) fn system_notification(posted: &Posted) -> gpui::SystemNotification {
     gpui::SystemNotification {
         tag: gpui::SharedString::from(posted.tag.clone()),

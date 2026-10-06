@@ -7,7 +7,11 @@
 //! never quits by itself: [`closed`] decides. It keeps running only while
 //! the tray icon is there and a tray host shows it (asked off the UI
 //! thread), so the app never runs on unseen with no way back; otherwise
-//! it quits.
+//! it quits. `--background` (launch at login) starts without a window and
+//! waits a while for a tray host, which often starts after the app at
+//! login; with none by then, the window opens.
+
+use std::time::{Duration, Instant};
 
 use gpui::{App, Context, Entity, Global, Window, WindowHandle};
 use ic_ui_kit::Root;
@@ -155,8 +159,16 @@ pub(crate) fn closed(cx: &mut App) {
     .detach();
 }
 
-/// Whether to start without a window (`--background`): only with a tray
-/// icon a tray host shows (asks the session bus, briefly).
+/// How long `--background` waits for a tray host before it opens the
+/// window: at login, panels and their tray hosts often start after the
+/// app.
+const HOST_GRACE: Duration = Duration::from_secs(20);
+/// How often it asks meanwhile.
+const HOST_RETRY: Duration = Duration::from_secs(1);
+
+/// Whether to start without a window (`--background`): only with the tray
+/// icon (the settings want one and it was created). Whether a tray host
+/// shows it is asked off the UI thread afterwards ([`await_tray_host`]).
 pub(crate) fn start_hidden(background: bool, cx: &App) -> bool {
     if !background {
         return false;
@@ -167,17 +179,86 @@ pub(crate) fn start_hidden(background: bool, cx: &App) -> bool {
         );
         return false;
     }
-    if !ic_platform::tray::host_available() {
-        tracing::info!("--background, but no tray host shows the icon: opening the window");
-        return false;
-    }
-    tracing::info!("starting in the background, in the tray");
     true
+}
+
+/// What `--background` does after asking for a tray host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostWait {
+    /// A host shows the icon: stay in the tray.
+    Found,
+    /// None yet: ask again shortly.
+    Retry,
+    /// None within the grace period: open the window.
+    GiveUp,
+}
+
+/// What to do when a tray host is (`available`) or isn't there after
+/// waiting `waited` for one.
+pub(crate) fn host_wait(available: bool, waited: Duration) -> HostWait {
+    if available {
+        HostWait::Found
+    } else if waited < HOST_GRACE {
+        HostWait::Retry
+    } else {
+        HostWait::GiveUp
+    }
+}
+
+/// Started without a window: asks (off the UI thread) for a tray host
+/// that shows the icon, again every second for up to 20 s; with none by
+/// then the window opens (at `bounds`), so the app never runs unseen.
+pub(crate) fn await_tray_host(state: Entity<AppState>, bounds: InitialBounds, cx: &mut App) {
+    let executor = cx.background_executor().clone();
+    cx.spawn(async move |cx| {
+        let started = Instant::now();
+        loop {
+            let available = executor
+                .spawn(async { ic_platform::tray::host_available() })
+                .await;
+            match host_wait(available, started.elapsed()) {
+                HostWait::Found => {
+                    tracing::info!("starting in the background, in the tray");
+                    return;
+                }
+                HostWait::Retry => executor.timer(HOST_RETRY).await,
+                HostWait::GiveUp => break,
+            }
+        }
+        cx.update(|cx| {
+            // Shown meanwhile (the tray, a notification, a second launch).
+            if main_window(cx).is_some() {
+                return;
+            }
+            tracing::info!("--background, but no tray host shows the icon: opening the window");
+            if !open_at_start(state, bounds, cx) {
+                cx.quit();
+            }
+        });
+    })
+    .detach();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_starts_wait_a_while_for_a_tray_host() {
+        assert_eq!(host_wait(true, Duration::ZERO), HostWait::Found);
+        assert_eq!(host_wait(false, Duration::ZERO), HostWait::Retry);
+        assert_eq!(
+            host_wait(false, Duration::from_secs(19)),
+            HostWait::Retry,
+            "the panel may still be starting"
+        );
+        assert_eq!(host_wait(true, Duration::from_secs(19)), HostWait::Found);
+        assert_eq!(
+            host_wait(false, HOST_GRACE),
+            HostWait::GiveUp,
+            "the window opens"
+        );
+    }
 
     #[test]
     fn the_app_keeps_running_only_where_the_tray_shows_it() {

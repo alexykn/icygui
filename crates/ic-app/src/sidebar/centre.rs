@@ -7,14 +7,14 @@
 //! the footer opens the notification settings.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseDownEvent,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
+    px,
 };
 use gpui::{BoxShadow, point};
 use ic_model::Timestamp;
 use ic_rules::Tone;
-use ic_ui_kit::{ActiveTheme as _, Chip, Link, StateDot, Theme, Tooltip};
+use ic_ui_kit::{ActiveTheme as _, Chip, Dismissable, Dismissal, Link, StateDot, Theme, Tooltip};
 
 use super::{Sidebar, SidebarEvent, SidebarMenu};
 use crate::notifications::entry::{self, CentreEntry, SILENT_HINT};
@@ -61,7 +61,7 @@ impl Sidebar {
         let pause_row = has_environment.then(|| self.centre_pause(now, theme, cx));
         let list = Self::centre_list(&entries, theme, cx);
         let footer = Self::centre_footer(has_environment, theme, cx);
-        div()
+        let card = div()
             .id("notification-centre")
             .occlude()
             .flex()
@@ -78,15 +78,20 @@ impl Sidebar {
                 spread_radius: px(0.),
                 inset: false,
             }])
-            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                this.menus.dismiss(event.position);
-                cx.notify();
-            }))
             .child(header)
             .children(pause_row)
             .child(list)
-            .child(footer)
-            .into_any_element()
+            .child(footer);
+        // Escape or a press outside closes it.
+        Dismissable::new(
+            "notification-centre-popup",
+            card,
+            cx.listener(|this, dismissal: &Dismissal, _, cx| {
+                this.menus.dismissed(*dismissal);
+                cx.notify();
+            }),
+        )
+        .into_any_element()
     }
 
     /// `Notifications · 3 unread` and *mark all read*.

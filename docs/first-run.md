@@ -23,6 +23,7 @@ A short checklist for the first time icygui connects to the real Icinga at work.
   openssl x509 -noout -fingerprint -sha256 -in /var/lib/icinga2/certs/$(hostname -f).crt
   ```
 - [ ] If you connect through a load balancer, an alias, an IP address or an SSH tunnel, note the name in the certificate for *server name*.
+- [ ] Several masters behind one address (a load balancer or round-robin DNS in front of an HA zone): use the CA file, **not** a pin. Each master has its own certificate, a pin trusts only one, and the connection stops whenever the other one answers. Icinga's node certificates name only their own node: with the CA file, the masters' certificates must include the load balancer's name, or connect to one master by its own name.
 
 ## 3. Connect
 

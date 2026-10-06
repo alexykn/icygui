@@ -669,6 +669,91 @@ impl Eligible {
     }
 }
 
+/// How many downtimes the schedule-downtime dialog offers as triggers.
+pub(crate) const TRIGGER_CHOICES: usize = 6;
+/// How much of a downtime's comment a trigger choice shows.
+const TRIGGER_COMMENT_CHARS: usize = 32;
+
+/// A downtime that could trigger the one being scheduled (ACT-03).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TriggerChoice {
+    /// Its full name (`host!service!id`), sent as the trigger.
+    pub(crate) name: String,
+    /// What the dialog shows: `core-sw-01 · firmware · alice · 14:00 →
+    /// 16:00`.
+    pub(crate) label: String,
+}
+
+/// The downtimes that could trigger a downtime of `targets`: those of the
+/// targets, of their hosts and of those hosts' parents (dependencies),
+/// that haven't ended; in effect first, then by start; at most
+/// [`TRIGGER_CHOICES`]. Their names appear nowhere else in the UI.
+pub(crate) fn trigger_choices(
+    snapshot: &Snapshot,
+    targets: &[ObjectKey],
+    now: Timestamp,
+) -> Vec<TriggerChoice> {
+    let mut objects: Vec<ObjectKey> = Vec::new();
+    let mut add = |object: ObjectKey| {
+        if !objects.contains(&object) {
+            objects.push(object);
+        }
+    };
+    for target in targets {
+        add(target.clone());
+        let host = ObjectKey::Host {
+            name: target.host_name().clone(),
+        };
+        for dependency in snapshot.dependencies.iter() {
+            if dependency.child == host && matches!(dependency.parent, ObjectKey::Host { .. }) {
+                add(dependency.parent.clone());
+            }
+        }
+        add(host);
+    }
+    let mut downtimes: Vec<&ic_model::Downtime> = objects
+        .iter()
+        .filter_map(|object| snapshot.downtimes.get(object))
+        .flatten()
+        .filter(|downtime| downtime.end_time > now)
+        .collect();
+    downtimes.sort_by(|a, b| {
+        b.in_effect.cmp(&a.in_effect).then(
+            a.start_time
+                .as_unix_seconds()
+                .total_cmp(&b.start_time.as_unix_seconds()),
+        )
+    });
+    downtimes
+        .into_iter()
+        .take(TRIGGER_CHOICES)
+        .map(|downtime| {
+            let mut parts = vec![describe_objects(std::slice::from_ref(&downtime.object))];
+            let comment = downtime.comment.lines().next().unwrap_or_default().trim();
+            if !comment.is_empty() {
+                parts.push(if comment.chars().count() > TRIGGER_COMMENT_CHARS {
+                    let cut: String = comment.chars().take(TRIGGER_COMMENT_CHARS - 1).collect();
+                    format!("{}…", cut.trim_end())
+                } else {
+                    comment.to_owned()
+                });
+            }
+            if !downtime.author.trim().is_empty() {
+                parts.push(downtime.author.trim().to_owned());
+            }
+            parts.push(format!(
+                "{} → {}",
+                crate::format::clock(downtime.start_time, now),
+                crate::format::clock(downtime.end_time, now)
+            ));
+            TriggerChoice {
+                name: downtime.name.clone(),
+                label: parts.join(" · "),
+            }
+        })
+        .collect()
+}
+
 /// `postgres-replication on db-prod-03`, `db-prod-03`, `3 services`,
 /// `2 hosts`, `5 objects`: what an action applies to, in messages.
 pub(crate) fn describe_objects(objects: &[ObjectKey]) -> String {
@@ -1019,6 +1104,71 @@ mod tests {
         let present = known(&snapshot, &objects);
         assert_eq!(present.targets.len(), 4);
         assert_eq!(present.skipped_summary(), "1 gone from Icinga");
+    }
+
+    fn downtime(object: ObjectKey, id: &str, start: f64, end: f64) -> Downtime {
+        Downtime {
+            name: format!("{object}!{id}"),
+            object,
+            author: "alice".to_owned(),
+            comment: "firmware update on the core switches, then a reboot".to_owned(),
+            start_time: later(start),
+            end_time: later(end),
+            fixed: true,
+            duration: 0.,
+            entry_time: now(),
+            trigger_time: None,
+            triggered_by: None,
+            parent: None,
+            in_effect: start <= 0. && end > 0.,
+            config_owned: false,
+        }
+    }
+
+    #[test]
+    fn triggers_are_offered_from_the_objects_their_hosts_and_parents() {
+        let mut snapshot = snapshot();
+        let switch = ObjectKey::host("core-sw-01");
+        let mut downtimes = (*snapshot.downtimes).clone();
+        downtimes.insert(
+            switch.clone(),
+            vec![
+                downtime(switch.clone(), "later", 2., 3.),
+                downtime(switch.clone(), "now", -1., 1.),
+                downtime(switch.clone(), "over", -3., -1.),
+            ],
+        );
+        downtimes.insert(
+            ObjectKey::host("elsewhere"),
+            vec![downtime(ObjectKey::host("elsewhere"), "x", -1., 1.)],
+        );
+        snapshot.downtimes = Arc::new(downtimes);
+        snapshot.dependencies = Arc::new(vec![ic_model::Dependency {
+            name: "db-01!uplink".to_owned(),
+            child: ObjectKey::host("db-01"),
+            parent: switch.clone(),
+        }]);
+        let choices = trigger_choices(&snapshot, &[ObjectKey::service("db-01", "disk")], now());
+        let names: Vec<&str> = choices.iter().map(|choice| choice.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["core-sw-01!now", "db-01!dt", "core-sw-01!later"],
+            "in effect first, the parent's too; ended and unrelated ones not"
+        );
+        assert!(
+            choices[0]
+                .label
+                .starts_with("core-sw-01 · firmware update on the core swi… · alice · "),
+            "{}",
+            choices[0].label
+        );
+        assert!(choices[0].label.contains(" → "));
+        assert_eq!(
+            choices[1].label.matches(" · ").count(),
+            1,
+            "no comment, no author"
+        );
+        assert!(trigger_choices(&snapshot, &[ObjectKey::host("lonely")], now()).is_empty());
     }
 
     #[test]

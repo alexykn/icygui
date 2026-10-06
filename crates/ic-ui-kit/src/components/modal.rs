@@ -5,8 +5,9 @@ use std::fmt;
 
 use gpui::{
     AnyElement, App, BoxShadow, ElementId, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement as _, Pixels, RenderOnce, Role, StatefulInteractiveElement as _,
-    Styled as _, Window, div, point, prelude::FluentBuilder as _, px,
+    MouseDownEvent, ParentElement as _, Pixels, RenderOnce, Role, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, Window, div, point, prelude::FluentBuilder as _,
+    px,
 };
 
 use crate::theme::ActiveTheme as _;
@@ -155,6 +156,7 @@ pub struct DialogBody {
     body: Vec<AnyElement>,
     footer: Vec<AnyElement>,
     footer_start: Vec<AnyElement>,
+    scroll: Option<ScrollHandle>,
 }
 
 impl DialogBody {
@@ -165,7 +167,16 @@ impl DialogBody {
             body: Vec::new(),
             footer: Vec::new(),
             footer_start: Vec::new(),
+            scroll: None,
         }
+    }
+
+    /// Lets `handle` scroll the body: its items are the blocks, in the
+    /// order they were added (`ScrollHandle::scroll_to_item` brings one
+    /// into view, say an answer that appeared under the visible part).
+    pub fn track_scroll(mut self, handle: &ScrollHandle) -> Self {
+        self.scroll = Some(handle.clone());
+        self
     }
 
     /// Adds a block to the body.
@@ -233,6 +244,7 @@ impl RenderOnce for DialogBody {
                     .px(theme.metrics.pane_padding)
                     .py(px(18.))
                     .overflow_y_scroll()
+                    .when_some(self.scroll, |body, handle| body.track_scroll(&handle))
                     .text_size(theme.text.body)
                     .children(self.body),
             )

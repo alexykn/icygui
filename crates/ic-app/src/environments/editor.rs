@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
     Focusable, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    PathPromptOptions, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    PathPromptOptions, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use ic_config::Environment;
 use ic_core::{CertificateInfo, ConnectionFailure, ConnectionReport};
@@ -86,6 +86,8 @@ pub(crate) struct EnvironmentEditor {
     show_tls: bool,
     test: TestState,
     test_task: Option<Task<()>>,
+    /// The dialog's scrolling body.
+    body_scroll: ScrollHandle,
     save_task: Option<Task<()>>,
     error: Option<String>,
     /// Opened in `--demo`: an environment added here is real, but kept
@@ -204,6 +206,7 @@ impl EnvironmentEditor {
             show_tls,
             test: TestState::Idle,
             test_task: None,
+            body_scroll: ScrollHandle::new(),
             save_task: None,
             error: None,
             demo: false,
@@ -361,6 +364,12 @@ impl EnvironmentEditor {
             let _ = this.update(cx, |this, cx| {
                 this.test = TestState::Done(result);
                 this.test_task = None;
+                if this.mode == EditorMode::Dialog {
+                    // The answer shows under the button, often below the
+                    // visible part of the dialog once the TLS fields show:
+                    // scrolled into view once laid out.
+                    this.body_scroll.scroll_to_item(this.test_block());
+                }
                 cx.notify();
             });
         }));
@@ -802,18 +811,45 @@ impl EnvironmentEditor {
         }
     }
 
-    fn render_dialog(&self, cx: &Context<Self>) -> AnyElement {
-        let title = match &self.form.base {
-            Some(base) => format!("Edit environment · {}", base.name),
-            None => "Add environment".to_owned(),
-        };
-        let mut dialog = DialogBody::new(title);
+    /// Whether the dialog warns that the environment is a real Icinga (one
+    /// added while the demo runs).
+    fn warns_real(&self) -> bool {
         let built_in = self
             .form
             .base
             .as_ref()
             .is_some_and(|base| live::demo::is_built_in(&base.id));
-        if self.demo && !built_in {
+        self.demo && !built_in
+    }
+
+    /// The test's block among the dialog body's blocks: after the
+    /// warning, if shown, and the fields.
+    fn test_block(&self) -> usize {
+        usize::from(self.warns_real()) + 1
+    }
+
+    /// Whether the dialog shows the whole test block, or at least its top
+    /// when it is taller than the dialog (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn test_in_view(&self) -> bool {
+        let Some(block) = self.body_scroll.bounds_for_item(self.test_block()) else {
+            return false;
+        };
+        let viewport = self.body_scroll.bounds();
+        let offset = self.body_scroll.offset().y;
+        let (top, bottom) = (block.top() + offset, block.bottom() + offset);
+        let slack = px(1.);
+        top >= viewport.top() - slack
+            && (bottom <= viewport.bottom() + slack || top <= viewport.top() + slack)
+    }
+
+    fn render_dialog(&self, cx: &Context<Self>) -> AnyElement {
+        let title = match &self.form.base {
+            Some(base) => format!("Edit environment · {}", base.name),
+            None => "Add environment".to_owned(),
+        };
+        let mut dialog = DialogBody::new(title).track_scroll(&self.body_scroll);
+        if self.warns_real() {
             // Not simulated: say so before anything is sent to it.
             dialog = dialog.child(
                 Banner::new(

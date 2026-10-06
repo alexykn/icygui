@@ -53,3 +53,12 @@ tracing-subscriber.workspace = true
 # (the zbus ic-platform's tray and keyring use).
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
+# macOS: desktop notifications with sound through UserNotifications (GPUI's
+# backend never sets one); the objc2 crates and features GPUI's macOS
+# backend already builds.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSBundle", "NSError", "NSObject", "NSSet", "NSString", "std"] }
+objc2-user-notifications = "0.3.2"

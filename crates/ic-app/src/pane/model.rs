@@ -21,6 +21,56 @@ pub(crate) const HOST_SERVICES_PREVIEW: usize = 7;
 const VARS_MAX_DEPTH: usize = 8;
 const VARS_MAX_LINES: usize = 400;
 
+/// What a protected custom variable shows instead of its value.
+pub(crate) const PROTECTED_VALUE: &str = "***";
+
+/// Custom variables whose values are never shown (on screen, in shared
+/// screenshots, in links): names matching these patterns, ignoring case,
+/// `*` standing for any characters, at any nesting level. Icinga Web's
+/// default protected custom variables (`*pw*`, `*pass*`, `community`, here
+/// `*community*` so `snmp_community` is covered too) and other names the
+/// ITL and common configs keep credentials in. The values stay in the
+/// store: filters still see them.
+const PROTECTED_VARS: &[&str] = &[
+    "*pw*",
+    "*pass*",
+    "*community*",
+    "*secret*",
+    "*token*",
+    "*auth_pair*",
+    "*auth_key*",
+    "*priv_key*",
+];
+
+/// Whether the custom variable (or dictionary key) `name` holds a secret.
+pub(crate) fn is_protected_var(name: &str) -> bool {
+    let name = name.to_lowercase();
+    PROTECTED_VARS
+        .iter()
+        .any(|pattern| glob_matches(pattern, &name))
+}
+
+/// Whether `text` matches `pattern`, where `*` stands for any characters.
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        // No `*`: the whole text.
+        return rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
+}
+
 /// The service pane's subtitle after `on <host>`: `14m · hard 3/3`.
 pub(crate) fn service_subtitle(service: &Service, now: Timestamp) -> String {
     let since = format::time_in_state(&service.check, now);
@@ -240,7 +290,8 @@ pub(crate) fn host_services(snapshot: &Snapshot, host: &Host, expanded: bool) ->
 
 /// Custom variables as indented lines in key order (as Icinga stores them):
 /// nested dictionaries and arrays get a summary line (`{3}`, `[2]`) followed
-/// by their entries; arrays of plain values stay on one line.
+/// by their entries; arrays of plain values stay on one line. Protected
+/// variables ([`is_protected_var`]) show `***`, whatever they hold.
 pub(crate) fn vars_lines(vars: &Vars) -> Vec<TreeLine> {
     let mut lines = Vec::new();
     for (key, value) in sorted(vars) {
@@ -256,6 +307,10 @@ pub(crate) fn vars_lines(vars: &Vars) -> Vec<TreeLine> {
 
 fn push_var(lines: &mut Vec<TreeLine>, depth: usize, key: String, value: &Value) {
     if lines.len() > VARS_MAX_LINES {
+        return;
+    }
+    if is_protected_var(&key) {
+        lines.push(TreeLine::new(depth, key, PROTECTED_VALUE));
         return;
     }
     let nested = depth < VARS_MAX_DEPTH;
@@ -451,8 +506,8 @@ pub(crate) fn split_urls(raw: &str) -> Vec<&str> {
 /// `$service.display_name$`, …) and custom variables (`$host.vars.role$`,
 /// `$service.vars.team$`; `$vars.x$` is the pane object's own). Values are
 /// inserted as they are, as Icinga Web inserts them, so a variable can hold
-/// a whole base URL or a `host:port`. Macros that don't resolve stay as
-/// written. Characters no URL may contain (spaces, quotes, non-ASCII) are
+/// a whole base URL or a `host:port`; a protected one ([`is_protected_var`])
+/// becomes `***`. Macros that don't resolve stay as written. Characters no URL may contain (spaces, quotes, non-ASCII) are
 /// then percent-encoded, as a browser would, so the platform's URL opener
 /// accepts the result.
 pub(crate) fn resolve_macros(url: &str, scope: MacroScope<'_>) -> String {
@@ -520,15 +575,23 @@ fn macro_value(name: &str, scope: MacroScope<'_>) -> Option<String> {
 }
 
 /// A custom variable's plain value by name, or by a dotted path into nested
-/// dictionaries (`disks.root`). Dictionaries, arrays and null don't resolve.
+/// dictionaries (`disks.root`). Dictionaries, arrays and null don't resolve;
+/// a protected variable, or one inside a protected dictionary, is `***`.
 fn var_at(vars: &Vars, path: &str) -> Option<String> {
     let mut value = vars.get(path);
+    let mut protected = is_protected_var(path);
     if value.is_none() {
         let mut parts = path.split('.');
-        value = vars.get(parts.next()?);
+        let first = parts.next()?;
+        protected = is_protected_var(first);
+        value = vars.get(first);
         for part in parts {
+            protected |= is_protected_var(part);
             value = value?.as_object()?.get(part);
         }
+    }
+    if protected && value.is_some_and(|value| !value.is_null()) {
+        return Some(PROTECTED_VALUE.to_owned());
     }
     match value? {
         Value::String(text) => Some(text.clone()),
@@ -712,6 +775,82 @@ mod tests {
             })
             .collect();
         assert_eq!(lines, expected);
+    }
+
+    #[test]
+    fn protected_vars_never_show_their_values() {
+        let mut vars = Vars::new();
+        vars.insert("mysql_password".to_owned(), json!("hunter2"));
+        vars.insert("SNMP_Community".to_owned(), json!("public"));
+        vars.insert("api_token".to_owned(), json!({ "id": 1, "key": "abc" }));
+        vars.insert(
+            "http_vhosts".to_owned(),
+            json!({ "site": { "http_uri": "/", "http_auth_pair": "user:pw" } }),
+        );
+        vars.insert("snmpv3_priv_key".to_owned(), json!(["k1"]));
+        vars.insert("role".to_owned(), json!("db"));
+        let lines = vars_lines(&vars);
+        let shown: Vec<(usize, &str, &str)> = lines
+            .iter()
+            .map(|line| (line.depth, line.key.as_str(), line.value.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (0, "SNMP_Community", "***"),
+                (0, "api_token", "***"),
+                (0, "http_vhosts", "{1}"),
+                (1, "site", "{2}"),
+                (2, "http_auth_pair", "***"),
+                (2, "http_uri", "/"),
+                (0, "mysql_password", "***"),
+                (0, "role", "db"),
+                (0, "snmpv3_priv_key", "***"),
+            ]
+        );
+        for secret in ["hunter2", "public", "abc", "user:pw", "k1"] {
+            assert!(
+                lines.iter().all(|line| !line.value.contains(secret)),
+                "{secret} shows"
+            );
+        }
+        // Neither do links that use them.
+        let mut host = Host::new("db-01");
+        host.vars = vars;
+        let scope = MacroScope {
+            host: Some(&host),
+            service: None,
+        };
+        assert_eq!(
+            resolve_macros(
+                "https://x/?p=$host.vars.mysql_password$&v=$vars.http_vhosts.site.http_auth_pair$&r=$vars.role$",
+                scope
+            ),
+            "https://x/?p=***&v=***&r=db"
+        );
+    }
+
+    #[test]
+    fn protected_names_match_like_icinga_web() {
+        for name in [
+            "pw",
+            "db_pw",
+            "PASSWORD",
+            "passphrase",
+            "community",
+            "snmp_community",
+            "client_secret",
+            "vault_token",
+        ] {
+            assert!(is_protected_var(name), "{name}");
+        }
+        for name in ["role", "address", "power_supply", "snmp_version", "keys"] {
+            assert!(!is_protected_var(name), "{name}");
+        }
+        assert!(glob_matches("a*b*c", "axxbyyc"));
+        assert!(!glob_matches("a*b*c", "axxcyyb"));
+        assert!(glob_matches("exact", "exact"));
+        assert!(!glob_matches("exact", "exactly"));
     }
 
     #[test]

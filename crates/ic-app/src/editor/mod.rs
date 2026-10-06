@@ -24,7 +24,7 @@ use std::time::Duration;
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, ParentElement as _, Render, SharedString, Stateful,
+    MouseButton, ParentElement as _, Render, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle,
     Window, div, prelude::FluentBuilder as _, px, uniform_list,
 };
@@ -34,9 +34,9 @@ use ic_model::Timestamp;
 use ic_rules::{DashboardRef, ScopeSetting};
 use ic_ui_kit::input::{Escape, InputEvent, InputState, TextareaState};
 use ic_ui_kit::{
-    ActiveTheme as _, Button, EmptyState, Field, FieldTone, Icon, IconName, Link, Menu, MenuItem,
-    Metrics, Popover, Scrollbar, Segmented, SummaryBar, SummaryItem, Switch, TextArea, TextField,
-    Theme,
+    ActiveTheme as _, Button, Dismissal, EmptyState, Field, FieldTone, Icon, IconName, Link, Menu,
+    MenuItem, Metrics, Popover, Scrollbar, Segmented, SummaryBar, SummaryItem, Switch, TextArea,
+    TextField, Theme,
 };
 
 pub(crate) use self::model::EditorTarget;
@@ -404,9 +404,9 @@ impl DashboardEditor {
 
     fn dismiss_listener(
         cx: &Context<Self>,
-    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
-        cx.listener(|this, event: &MouseDownEvent, _, cx| {
-            this.menus.dismiss(event.position);
+    ) -> impl Fn(&Dismissal, &mut Window, &mut App) + 'static {
+        cx.listener(|this, dismissal: &Dismissal, _, cx| {
+            this.menus.dismissed(*dismissal);
             cx.notify();
         })
     }

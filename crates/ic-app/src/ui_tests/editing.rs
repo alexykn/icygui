@@ -16,9 +16,11 @@ use super::{
 };
 use crate::actions::ObjectAction;
 use crate::app_state::AppState;
+use crate::app_state::editing::NEW_DASHBOARD_NAME as NEW;
 use crate::dashboard::DashboardEvent;
 use crate::editor::{DashboardEditor, EditorTarget};
 use crate::fixture::FixtureOptions;
+use crate::operate::tracker::Toast;
 use crate::palette::{CommandPalette, PaletteCommand};
 use crate::sidebar::{RenameTarget, SidebarMenu};
 use crate::workspace::{Confirmed, ModalKind};
@@ -442,7 +444,12 @@ fn a_new_dashboard_is_made_in_the_editor_with_a_live_preview() {
                     assert_eq!(dashboard.view.object_kind, ObjectKind::Services);
                     let result = state.result(state.selected().unwrap()).unwrap();
                     assert!(result.error.is_none());
+                    let kept = |toast: &Toast| toast.title.contains("are kept");
+                    assert!(!state.toasts().any(kept), "nothing left to keep");
                 });
+                // The next new dashboard starts afresh.
+                cx.update(|cx| app.click(cx, OVERVIEW_ADD, Modifiers::default()));
+                cx.update(|cx| assert_eq!(editor(&app, cx).read(cx).draft().name, NEW));
             }
             .boxed_local()
         })),

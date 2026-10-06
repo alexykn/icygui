@@ -1,6 +1,6 @@
 # Icinga 2 desktop client — Rust + GPUI implementation plan
 
-Status: **plan v3.** M0 is done (spike results in `docs/spikes.md`); the crates of M1–M5 are built and reviewed, and the `ic-core` runtime and app integration are next (see §4 for rc1 and v1).
+Status: **plan v3.** M0 is done (spike results in `docs/spikes.md`); M1–M5 are built and reviewed: every crate, the `ic-core` runtime and the whole app (waves 1–4). Wave 5 makes it a releasable rc1 (M6: packaging, documentation, a review and fix pass); see §4 for rc1 and v1.
 Inputs: `design/project/Icinga Client v2.dc.html` (primary design, screens 2a–2c), `design/project/Icinga Client.dc.html` (turn 1: command palette, dashboard editor, detail sub-tabs), `design/chats/chat1.md`, the sidebar screenshot, and the Icinga 2 REST API reference (`doc/12-icinga2-api.md`, Icinga/icinga2 master).
 
 ## 0. Decisions
@@ -184,8 +184,8 @@ crates/
                   linked into the app only for `icygui --demo` (ENV-10).
 spikes/           M0 experiments kept as regression checks (background mode, tray,
                   notifications); `linux-headless.sh` runs them under Xvfb in CI.
-xtask/            cargo xtask: bundle (.app/.dmg, AppImage/.deb), mock (start all mock
-                  environments)
+xtask/            cargo xtask: icons, bundle (.app/.dmg, .deb/.tar.gz), mock (start all
+                  mock environments), screenshots (README images from --demo)
 ```
 
 Dependency graph (arrows = "depends on"):

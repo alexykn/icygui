@@ -9,6 +9,10 @@ use crate::{
     run, target_dir, write,
 };
 
+/// The licence and the notices for what the app bundles (the font, the
+/// icons, the Rust crates), shipped with every bundle.
+const LEGAL_FILES: [&str; 2] = ["LICENSE", "THIRD_PARTY_NOTICES.md"];
+
 const MACOS_TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
 /// Builds and bundles the app; returns the `.app` (macOS) or the install
@@ -79,6 +83,12 @@ fn bundle_macos(binary: &Path, out: &Path, identity: Option<&str>) -> Result<Pat
         &root().join(format!("assets/icons/{APP_NAME}.icns")),
         &contents.join("Resources").join(format!("{APP_NAME}.icns")),
     )?;
+    for notice in LEGAL_FILES {
+        copy(
+            &root().join(notice),
+            &contents.join("Resources").join(notice),
+        )?;
+    }
     write(&contents.join("Info.plist"), info_plist())?;
     write(&contents.join("PkgInfo"), "APPL????")?;
     sign_app(&app, identity)?;
@@ -184,10 +194,12 @@ fn bundle_linux(binary: &Path, out: &Path) -> Result<PathBuf> {
         &root().join("assets/logo/icygui.svg"),
         &tree.join(format!("share/icons/hicolor/scalable/apps/{APP_ID}.svg")),
     )?;
-    copy(
-        &root().join("LICENSE"),
-        &tree.join(format!("share/doc/{APP_NAME}/LICENSE")),
-    )?;
+    for notice in LEGAL_FILES {
+        copy(
+            &root().join(notice),
+            &tree.join(format!("share/doc/{APP_NAME}")).join(notice),
+        )?;
+    }
     println!("bundle: {}", tree.display());
     Ok(tree)
 }

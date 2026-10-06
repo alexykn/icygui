@@ -22,7 +22,10 @@ cargo test --workspace                               # tests
 cargo clippy --workspace --all-targets -- -D warnings  # what CI enforces
 cargo fmt --all
 cargo deny check                                     # licences, advisories, sources
+cargo run -p ic-app -- --demo                        # the app against a simulated Icinga
 ```
+
+`cargo xtask` has the project's other tasks: `mock` (the mock Icinga environments as servers), `screenshots` (below), `icons` (after editing the logo), `bundle` and `package` (see `docs/releasing.md`), `install` (Linux, into `~/.local`) and `version`.
 
 The first build compiles GPUI and takes a few minutes. Dependencies are built with `opt-level = 2` even in dev builds, so the UI stays smooth.
 
@@ -54,10 +57,32 @@ Environment variables for development (the `ICYGUI_DEMO_*` ones only affect `--d
 | `ICYGUI_DEMO_OPEN=service` | Opens an object once it is loaded: `service` (postgres-replication beside the list, screen 2b), `host` (its host db-prod-03, screen 2c), `tab` (postgres-replication as a tab), an object name (`db-prod-03`, `db-prod-03!postgres-replication`) or `tab:<name>`. |
 | `ICYGUI_DEMO_STORM=20` | Starts the simulator's problem storm (24 services fail at once) every 20 seconds instead of every five minutes: a few desktop notifications, the rest silent, then one summary, for the notification centre. |
 | `ICYGUI_WINDOW_CONTROLS=always` | Draws the window's own close/minimise/maximise buttons (`never`, `auto`): on Linux the default depends on the desktop; screenshots under Xvfb need `always`. |
+| `GPUI_X11_SCALE_FACTOR=2` | GPUI's own switch (X11): renders at that scale whatever the display reports; `cargo xtask screenshots` uses 2. |
 
 Actions: `a` acknowledge, `d` downtime, `r` check now and `c` comment act on the marked rows (`x`, shift-click, ctrl/cmd-click, `ctrl-a` / `⌘A`), else on the pane's or the cursor's object; the pane's `···` and the palette also submit passive check results, run commands (after a confirmation), remove downtimes and copy names, filter expressions and output. In the dialogs Tab moves between fields, Enter sends (Shift-Enter for a new line), Escape closes. `--demo` runs every action against its simulated Icinga; against the disposable Docker Icinga only look around (no actions). Results show as toasts in the bottom-right corner; every action is logged at `info` level.
 
 The UI tests in `crates/ic-app/src/ui_tests/` run the real window on GPUI's headless platform (Linux only): keystrokes, clicks and snapshot updates on fixed data (`crates/ic-app/src/fixture/`), and the whole app against the demo's mock through the real core (`ui_tests/live.rs`), no display server needed. `crates/ic-app/tests/background.rs` (Linux) runs the built `icygui` on a private D-Bus session started with `dbus-run-session` (from `dbus`; the test skips with a message when it is missing) with a fake tray host and a fake notification server: the tray's tooltip, icon and menu, a desktop notification and its *Open* button, and a second launch handing over to the first. To see real notifications under Xvfb, run the demo inside `dbus-run-session` with `dunst` (as `spikes/linux-headless.sh` does). With the `ICYGUI_CONTRACT_*` variables of `contract/run-icinga.sh` set, `ui_tests::live::a_real_icinga_loads_read_only` also connects the app to the disposable Icinga (read-only; it refuses any other instance).
+
+## Screenshots and clips (`cargo xtask screenshots`)
+
+The README's images in `docs/screenshots/` are generated from `--demo` (ENV-11), so they stay current with the app. Regenerate them after a visible change and commit the result:
+
+```sh
+sudo apt-get install xvfb xdotool ffmpeg mesa-vulkan-drivers   # once
+cargo xtask screenshots                        # every still and clip (about 3 minutes)
+cargo xtask screenshots --no-gifs              # only the stills
+cargo xtask screenshots --only keyboard,palette  # some scenes, by name
+```
+
+Linux only. It builds the debug app, starts its own Xvfb on a free display (`:90` and up), and runs `icygui --demo` once per scene:
+- with `ICYGUI_DEMO_SEED=7`, `ICYGUI_WINDOW_CONTROLS=always` and the scene's `ICYGUI_DEMO_*` switches (above);
+- with `GPUI_X11_SCALE_FACTOR=2`, so the stills are rendered at twice the size (2880×1800 for the default 1440×900 window) and stay sharp on high-density screens;
+- with a private home, XDG directories and runtime directory under `target/screenshots/`, and without `DBUS_SESSION_BUS_ADDRESS`, so nothing reaches the desktop you run it on (no notifications, no tray icon, no keychain);
+- drives it with `xdotool` (keys, typing, and two clicks at fixed window coordinates) and records it with `ffmpeg`'s `x11grab`.
+
+Stills are one frame reduced to a 256-colour palette (`palettegen`/`paletteuse` without dithering): 90–180 KiB each. Clips are a lossless recording scaled to 1200 px wide at 10 fps and converted with a palette generated for that clip: 0.2–0.5 MiB each, and the command warns above 3 MiB. Everything together stays around 3 MiB. The work directory, `target/screenshots/`, is deleted afterwards; after a failure it stays, with each scene's `app.log` and Xvfb's log.
+
+The scenes are a table in `xtask/src/screenshots.rs` (`SCENES`): a name (the file name), still or clip, the demo switches, and the steps (`Wait`, `Key`, `Type`, `Click`, `Record`). The demo's data is fixed by the seed, but times (`14m` in state, the clock) follow the wall clock, so two runs differ in those details only. A test (`cargo test -p xtask`) checks that every image the README and the user guide show is made by a scene and exists.
 
 ## Lints
 

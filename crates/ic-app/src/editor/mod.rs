@@ -354,6 +354,10 @@ impl DashboardEditor {
             return;
         }
         let draft = self.draft.clone();
+        // Saving selects the dashboard, and the workspace closes an editor
+        // whose dashboard isn't shown any more, keeping its changes: once
+        // saved, there are none to keep.
+        let previous = std::mem::replace(&mut self.saved, draft.clone());
         let saved = self.state.update(cx, |state, cx| {
             let saved = match &self.target {
                 EditorTarget::New => state.add_dashboard(draft),
@@ -365,6 +369,7 @@ impl DashboardEditor {
         if saved.is_some() {
             cx.emit(EditorEvent::Closed);
         } else {
+            self.saved = previous;
             self.save_error = Some("The dashboard or its group no longer exists.".to_owned());
             cx.notify();
         }

@@ -223,7 +223,7 @@ macos_uninstall() {
   rm -rf "/Applications/$APP_NAME.app" "$HOME/Applications/$APP_NAME.app"
   if [ "$PURGE" = 1 ]; then
     rm -rf "$HOME/Library/Application Support/$APP_ID" "$HOME/Library/Caches/$APP_ID" \
-      "$HOME/Library/Logs/$APP_NAME" "$HOME/Library/Preferences/$APP_ID.plist" \
+      "$HOME/Library/Logs/$APP_ID" "$HOME/Library/Preferences/$APP_ID.plist" \
       "$HOME/Library/Saved Application State/$APP_ID.savedState"
     if macos_has_identity; then
       security delete-identity -c "$SIGN_IDENTITY" >/dev/null 2>&1 || true

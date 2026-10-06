@@ -14,6 +14,9 @@
 //! - `version`: print the workspace version (CI compares it with the tag)
 //! - `install`: Linux only, install into `~/.local`
 //! - `mock [args…]`: start the mock Icinga environments (`icinga-mock`)
+//! - `screenshots [--only NAME,…] [--no-gifs]`: Linux only, the README's
+//!   screenshots and clips from `icygui --demo` under Xvfb, into
+//!   `docs/screenshots`
 //!
 //! Signing and notarization read their secrets from the environment; see
 //! `docs/releasing.md`.
@@ -28,6 +31,7 @@ mod bundle;
 mod homebrew;
 mod icon;
 mod release;
+mod screenshots;
 
 use std::env;
 use std::fs;
@@ -58,6 +62,8 @@ pub(crate) struct Flags {
     pub(crate) out: Option<PathBuf>,
     pub(crate) repo: Option<String>,
     pub(crate) notarized: bool,
+    pub(crate) only: Option<String>,
+    pub(crate) no_gifs: bool,
     pub(crate) positional: Vec<String>,
 }
 
@@ -79,6 +85,8 @@ fn parse_flags(args: &[String]) -> Result<Flags> {
             "--dist" => flags.dist = Some(PathBuf::from(value("--dist")?)),
             "--out" => flags.out = Some(PathBuf::from(value("--out")?)),
             "--repo" => flags.repo = Some(value("--repo")?),
+            "--only" => flags.only = Some(value("--only")?),
+            "--no-gifs" => flags.no_gifs = true,
             other if other.starts_with("--") => return Err(format!("unknown flag {other}")),
             other => flags.positional.push(other.to_owned()),
         }
@@ -99,7 +107,8 @@ const USAGE: &str = "usage: cargo xtask <command>
   homebrew --dist DIR --out TAP_DIR [--repo OWNER/NAME] [--notarized]
   version
   install                                 (Linux) install into ~/.local
-  mock [args…]                            start mock Icinga environments";
+  mock [args…]                            start mock Icinga environments
+  screenshots [--only NAME,…] [--no-gifs] (Linux) README images from --demo";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -123,6 +132,7 @@ fn main() -> ExitCode {
         }
         "install" => install(),
         "mock" => mock(rest),
+        "screenshots" => screenshots::screenshots(&flags),
         _ => Err(format!("unknown command {command}\n{USAGE}")),
     });
     match result {

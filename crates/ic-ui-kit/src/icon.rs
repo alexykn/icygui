@@ -15,6 +15,8 @@ pub enum IconName {
     ArrowDown,
     /// `arrow-left`: back to the previous object in a pane.
     ArrowLeft,
+    /// `arrow-left-right`: switch to another environment.
+    ArrowLeftRight,
     /// `arrow-up`: ascending sort.
     ArrowUp,
     /// `arrow-up-right`: "open as tab".
@@ -25,6 +27,8 @@ pub enum IconName {
     BellOff,
     /// `check`: confirmations and checked menu items.
     Check,
+    /// `check-check`: mark notifications read.
+    CheckCheck,
     /// `chevron-down`: an expanded group.
     ChevronDown,
     /// `chevron-right`: a collapsed group.
@@ -39,8 +43,14 @@ pub enum IconName {
     Ellipsis,
     /// `external-link`: notes and action URLs.
     ExternalLink,
+    /// `file-input`: import from a file.
+    FileInput,
+    /// `file-output`: export to a file.
+    FileOutput,
     /// `folder`: host group and service group headers in lists.
     Folder,
+    /// `folder-plus`: a new group.
+    FolderPlus,
     /// `info`: informational notes.
     Info,
     /// `key-round`: a login Icinga refused, a password that is missing.
@@ -57,12 +67,20 @@ pub enum IconName {
     Minus,
     /// `panel-left`: show or hide the sidebar.
     PanelLeft,
+    /// `pause`: pause notifications.
+    Pause,
+    /// `pencil`: edit a dashboard.
+    Pencil,
     /// `plus`: add a dashboard or an environment.
     Plus,
+    /// `power`: quit.
+    Power,
     /// `refresh-cw`: check now.
     Refresh,
     /// `search`: search fields.
     Search,
+    /// `settings`: settings (an environment's, the notifications', the app's).
+    Settings,
     /// `triangle-alert`: errors such as a dashboard filter that fails.
     TriangleAlert,
     /// `unplug`: the connection to Icinga is lost.
@@ -71,14 +89,16 @@ pub enum IconName {
 
 impl IconName {
     /// Every icon, for tests and asset listings.
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 37] = [
         Self::ArrowDown,
         Self::ArrowLeft,
+        Self::ArrowLeftRight,
         Self::ArrowUp,
         Self::ArrowUpRight,
         Self::Bell,
         Self::BellOff,
         Self::Check,
+        Self::CheckCheck,
         Self::ChevronDown,
         Self::ChevronRight,
         Self::Clock,
@@ -86,7 +106,10 @@ impl IconName {
         Self::Copy,
         Self::Ellipsis,
         Self::ExternalLink,
+        Self::FileInput,
+        Self::FileOutput,
         Self::Folder,
+        Self::FolderPlus,
         Self::Info,
         Self::KeyRound,
         Self::Layers,
@@ -95,9 +118,13 @@ impl IconName {
         Self::Maximize,
         Self::Minus,
         Self::PanelLeft,
+        Self::Pause,
+        Self::Pencil,
         Self::Plus,
+        Self::Power,
         Self::Refresh,
         Self::Search,
+        Self::Settings,
         Self::TriangleAlert,
         Self::Unplug,
     ];
@@ -114,11 +141,13 @@ impl From<IconName> for gpui_kit_assets::IconName {
         match name {
             IconName::ArrowDown => Self::ArrowDown,
             IconName::ArrowLeft => Self::ArrowLeft,
+            IconName::ArrowLeftRight => Self::ArrowLeftRight,
             IconName::ArrowUp => Self::ArrowUp,
             IconName::ArrowUpRight => Self::ArrowUpRight,
             IconName::Bell => Self::Bell,
             IconName::BellOff => Self::BellOff,
             IconName::Check => Self::Check,
+            IconName::CheckCheck => Self::CheckCheck,
             IconName::ChevronDown => Self::ChevronDown,
             IconName::ChevronRight => Self::ChevronRight,
             IconName::Clock => Self::Clock,
@@ -126,7 +155,10 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::Copy => Self::Copy,
             IconName::Ellipsis => Self::Ellipsis,
             IconName::ExternalLink => Self::ExternalLink,
+            IconName::FileInput => Self::FileInput,
+            IconName::FileOutput => Self::FileOutput,
             IconName::Folder => Self::Folder,
+            IconName::FolderPlus => Self::FolderPlus,
             IconName::Info => Self::Info,
             IconName::KeyRound => Self::KeyRound,
             IconName::Layers => Self::Layers,
@@ -135,9 +167,13 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::Maximize => Self::Maximize2,
             IconName::Minus => Self::Minus,
             IconName::PanelLeft => Self::PanelLeft,
+            IconName::Pause => Self::Pause,
+            IconName::Pencil => Self::Pencil,
             IconName::Plus => Self::Plus,
+            IconName::Power => Self::Power,
             IconName::Refresh => Self::RefreshCw,
             IconName::Search => Self::Search,
+            IconName::Settings => Self::Settings,
             IconName::TriangleAlert => Self::TriangleAlert,
             IconName::Unplug => Self::Unplug,
         }

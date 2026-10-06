@@ -171,7 +171,7 @@ pub(super) fn host_tab(
     let theme = cx.theme();
     let (lines, since, loading) = pane.history_lines(now, cx);
     let empty = if loading {
-        "Reading the local event log…".to_owned()
+        "Reading the local event log".to_owned()
     } else {
         format!(
             "Nothing recorded yet: state changes, acknowledgements, downtimes and flapping of \
@@ -250,7 +250,7 @@ pub(super) fn service_section(
                     .text_size(theme.text.small)
                     .text_color(theme.colors.text_muted)
                     .child(if loading {
-                        "Reading the local event log…"
+                        "Reading the local event log"
                     } else {
                         "Nothing recorded yet."
                     }),

@@ -623,7 +623,7 @@ mod tests {
             "no marker on prod's rows"
         );
         let toast = state.toasts().last().unwrap();
-        assert_eq!(toast.title, "Acknowledging disk on stg-db-01 in staging…");
+        assert_eq!(toast.title, "Acknowledging disk on stg-db-01 in staging");
         state.apply_from(
             &staging_id,
             ic_core::CoreEvent::ActionFinished {

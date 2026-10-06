@@ -84,6 +84,17 @@ pub struct Fetched {
     pub missing: Vec<ObjectKey>,
 }
 
+/// The result of [`crate::Client::cluster`]: every endpoint (with the zone
+/// that lists it) and the zone tree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Cluster {
+    /// Every endpoint.
+    pub endpoints: Vec<ic_model::Endpoint>,
+    /// Every zone with its endpoints, parent and whether it is global;
+    /// empty without permission to query zones.
+    pub zones: Vec<ic_model::Zone>,
+}
+
 /// The result of [`crate::Client::notifications_named`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FetchedNotifications {

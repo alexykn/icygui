@@ -15,7 +15,7 @@
 //! 3. A form becomes an [`ActionSpec`]; `AppState::submit` sends it to the
 //!    core as one `Command::Action` (the core splits host and service
 //!    targets and batches names) and the [`tracker::Tracker`] marks the
-//!    objects (`ack pending…`) and shows a toast.
+//!    objects (`ack pending`) and shows a toast.
 //! 4. The core's `ActionFinished` updates the toast (done, done for some
 //!    with each failure and Icinga's reason, or failed) and the markers;
 //!    the core re-queries the changed objects, so their new state shows

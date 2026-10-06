@@ -23,7 +23,7 @@ pub use components::{
     ListRow, Menu, MenuItem, Modal, ModalPlacement, NoteEntry, Paint, PaneHeader, PerfdataRow,
     PerfdataTable, Popover, ProgressBar, RowEmphasis, SUB_TAB_GAP, SectionLabel, Segmented,
     StateCircle, StateDot, SubTabs, SummaryBar, SummaryItem, Switch, TOAST_WIDTH, TextArea,
-    TextField, Toast, ToastTone, Tooltip, TreeLine, TreeTable, sub_tab_width,
+    TextField, Toast, ToastTone, Tooltip, TreeLine, TreeTable, chip_width, sub_tab_width,
 };
 pub use fonts::FontError;
 pub use icon::{Icon, IconName};

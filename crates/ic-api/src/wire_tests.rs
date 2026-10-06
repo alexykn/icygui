@@ -339,7 +339,7 @@ fn every_requested_attribute_exists_in_icinga() {
         ("servicegroups.json", GROUP_ATTRS),
         ("dependencies.json", DEPENDENCY_ATTRS),
         ("endpoints.json", ENDPOINT_ATTRS),
-        ("zones.json", ZONE_ATTRS),
+        ("endpoints.json", ENDPOINT_STATE_ATTRS),
         ("zones.json", ZONE_TREE_ATTRS),
         ("notifications.json", NOTIFICATION_ATTRS),
     ];

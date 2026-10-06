@@ -145,7 +145,7 @@ pub(crate) fn render<T: 'static>(
                 div()
                     .text_size(theme.text.small)
                     .text_color(theme.colors.text_muted)
-                    .child("Working…"),
+                    .child("Working"),
             )
         })
         .when_some(problem.failure.clone(), |state, failure| {

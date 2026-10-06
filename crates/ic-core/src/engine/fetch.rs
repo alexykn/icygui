@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ic_api::{ApiError, Client, Detail, Fetched, FetchedNotifications};
-use ic_model::{Dependency, Endpoint, HostGroup, ObjectKey, ServiceGroup};
+use ic_model::{Dependency, HostGroup, ObjectKey, ServiceGroup};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 
@@ -170,7 +170,7 @@ pub(crate) struct Answers {
     pub(super) host_groups: Option<Result<Vec<HostGroup>, ApiError>>,
     pub(super) service_groups: Option<Result<Vec<ServiceGroup>, ApiError>>,
     pub(super) dependencies: Option<Result<Vec<Dependency>, ApiError>>,
-    pub(super) endpoints: Option<Result<Vec<Endpoint>, ApiError>>,
+    pub(super) endpoints: Option<Result<ic_api::Cluster, ApiError>>,
     /// The `Notification` objects re-read: the reader's line count when
     /// the query was sent, and the answer.
     pub(super) notifications: Option<(u64, Result<FetchedNotifications, ApiError>)>,
@@ -539,7 +539,7 @@ impl FetchTask {
                 None
             },
             endpoints: if lists.endpoints {
-                Some(self.client.endpoints().await)
+                Some(self.client.cluster().await)
             } else {
                 None
             },

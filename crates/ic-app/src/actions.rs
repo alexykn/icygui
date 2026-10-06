@@ -171,13 +171,13 @@ pub(crate) struct FocusMain;
 
 /// Shows the certificate of a server whose certificate isn't trusted, to
 /// decide whether to trust it (the connection banner's "Review
-/// certificate…"; the environment settings handle it).
+/// certificate"; the environment settings handle it).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct ReviewCertificate;
 
 /// Opens the active environment's settings (the connection banner's "Edit
-/// environment…" after a refused login, a missing password or settings
+/// environment" after a refused login, a missing password or settings
 /// that can't work).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
@@ -190,7 +190,7 @@ pub(crate) struct EditEnvironment;
 pub(crate) struct RestartEngine;
 
 /// Opens the settings dialog (`secondary-,`; the macOS app menu's
-/// *Settings…*). Without a window, the window opens first.
+/// *Settings*). Without a window, the window opens first.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct OpenSettings;

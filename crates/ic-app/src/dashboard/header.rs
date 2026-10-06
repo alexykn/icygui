@@ -278,7 +278,7 @@ impl DashboardView {
         let edit = reference.clone();
         let mut menu = Menu::new("options-menu")
             .item(
-                MenuItem::new("edit-dashboard", "edit dashboard…").on_click(cx.listener(
+                MenuItem::new("edit-dashboard", "edit dashboard").on_click(cx.listener(
                     move |this, _: &ClickEvent, _, cx| {
                         this.menus.close();
                         cx.emit(super::DashboardEvent::Edit(edit.clone()));

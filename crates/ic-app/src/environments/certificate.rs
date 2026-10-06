@@ -5,7 +5,7 @@
 //!
 //! [`certificate_details`] is shared by the environment editor (after a
 //! failed "Test connection") and [`CertificateReview`], the dialog the
-//! connection banner's "Review certificate…" opens for the running
+//! connection banner's "Review certificate" opens for the running
 //! engine's failure.
 
 use gpui::{
@@ -243,7 +243,7 @@ impl CertificateReview {
 }
 
 impl CertificateReview {
-    /// The dialog's buttons: "edit environment…", cancel, and trusting the
+    /// The dialog's buttons: "edit environment", cancel, and trusting the
     /// certificate (`trust`: whether one can be trusted, and whether that
     /// replaces a pin).
     fn with_buttons(
@@ -254,7 +254,7 @@ impl CertificateReview {
     ) -> DialogBody {
         if let Some(id) = environment_id.clone() {
             dialog = dialog.footer_start(
-                Button::new("certificate-edit", "edit environment…").on_click(cx.listener(
+                Button::new("certificate-edit", "edit environment").on_click(cx.listener(
                     move |_, _: &ClickEvent, _, cx| {
                         cx.emit(CertificateEvent::Edit(id.clone()));
                     },

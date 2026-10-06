@@ -10,11 +10,11 @@ use std::sync::Arc;
 use ic_model::{
     CheckInfo, CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
     InstanceStatus, Notification, Notified, ObjectKey, Service, ServiceGroup, ServiceKey,
-    Timestamp,
+    Timestamp, Zone,
 };
 use ic_rules::DashboardRef;
 
-use crate::topology::ConnectedNode;
+use crate::topology::{ClusterNode, ConnectedNode, cluster_nodes};
 
 /// Everything known about an environment at one point in time.
 #[derive(Clone, Debug, Default)]
@@ -39,6 +39,10 @@ pub struct Snapshot {
     pub dependencies: Arc<Vec<Dependency>>,
     /// Cluster endpoints.
     pub endpoints: Arc<Vec<Endpoint>>,
+    /// The cluster's zones (each with its endpoints and parent; empty
+    /// without `objects/query/Zone`): [`Snapshot::cluster_nodes`] reads
+    /// them.
+    pub zones: Arc<Vec<Zone>>,
     /// Instance status; `None` until first fetched.
     pub status: Option<Arc<InstanceStatus>>,
     /// Icinga's own `Notification` objects (who Icinga notified, and when)
@@ -75,6 +79,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// The cluster's masters and satellites with their state as the node
+    /// the objects come from sees it ([`crate::topology::cluster_nodes`]):
+    /// the switcher's node list.
+    #[must_use]
+    pub fn cluster_nodes(&self) -> Vec<ClusterNode> {
+        cluster_nodes(&self.zones, &self.endpoints, self.node.as_deref())
+    }
+
     /// The host a service runs on.
     #[must_use]
     pub fn host_of(&self, service: &ServiceKey) -> Option<&Arc<Host>> {

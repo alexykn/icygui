@@ -228,7 +228,7 @@ fn the_settings_edit_every_rule_and_refuse_bad_values() {
 #[test]
 fn quiet_hours_and_the_custom_rule_menu_item() {
     run(FixtureOptions::default(), |app, cx| {
-        // The sidebar's "custom rule…" opens the settings with that
+        // The sidebar's "custom rule" opens the settings with that
         // dashboard's own rule.
         let production = super::production();
         let key = ScopeKey::Dashboard(production.group_id.clone(), production.dashboard_id.clone());

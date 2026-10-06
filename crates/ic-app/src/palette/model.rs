@@ -4,14 +4,24 @@
 //! services, environments to switch to, and their settings. Pure, so it's
 //! tested without a window.
 //!
+//! Every row has a mark in the dot's slot: an action on an object shows
+//! the object's state dot (several objects: a stack in the worst state's
+//! colour), a dashboard its summary dot, any other command a small icon.
+//! An action on the focused object is an ordinary object-action row
+//! (`Acknowledge · postgres-replication`, `on db-prod-03 · critical`);
+//! the focus only ranks it first and gives it its key (`a`, `d`, `r`,
+//! `c`), so the object is never listed twice.
+//!
 //! The candidates are indexed (lowercased) once when the palette opens, so
 //! a keystroke over 30 000 services costs one pass of the matcher; only
 //! the best few per section are kept.
 
 use std::cmp::Reverse;
 
-use ic_model::{CheckableState, ObjectKey, Timestamp};
+use ic_core::snapshot::Snapshot;
+use ic_model::{CheckableState, Host, ObjectKey, Service, Timestamp};
 use ic_rules::DashboardRef;
+use ic_ui_kit::IconName;
 
 use super::fuzzy::{Match, Query};
 use crate::actions::ObjectAction;
@@ -143,10 +153,14 @@ pub(crate) struct PaletteItem {
     pub(crate) detail: String,
     /// A state dot, for objects and dashboards.
     pub(crate) dot: Option<Dot>,
-    /// It acts on several objects (a verb's *all N matches*): the dot's
-    /// slot shows a several-objects mark instead, in `dot`'s colour (the
-    /// worst state among them).
+    /// It acts on several objects (a verb's *all N matches*, the marked
+    /// rows): the dot's slot shows a several-objects mark instead, in
+    /// `dot`'s colour (the worst state among them).
     pub(crate) several: bool,
+    /// The mark in the dot's slot of a row without an object or a
+    /// dashboard: a small muted icon that fits the command. Every row has
+    /// a dot, a several-objects mark or an icon: the slot is never empty.
+    pub(crate) icon: Option<IconName>,
     /// The key that does the same, if any.
     pub(crate) key_hint: Option<&'static str>,
     /// What it does.
@@ -177,11 +191,18 @@ struct Candidate {
     /// environment never outranks switching to it (`staging` selects
     /// "Switch to staging").
     secondary: bool,
+    /// An action on the focused objects: ranks above equal matches by
+    /// [`FOCUS_BONUS`].
+    focus: bool,
 }
 
 /// How far a secondary command ranks below an equal match: more than a
 /// label's length or start can make up.
 const SECONDARY_PENALTY: i64 = 16;
+/// How far an action on the focus ranks above an equal match (`mute`
+/// lists muting the open object before muting an environment), not so far
+/// that a scattered match beats a good one.
+const FOCUS_BONUS: i64 = 8;
 
 /// What the palette searches, built when it opens.
 #[derive(Clone, Debug, Default)]
@@ -193,6 +214,9 @@ pub(crate) struct PaletteIndex {
     environments: Vec<Candidate>,
     /// Why the API user may not run the verbs' actions (ENV-09).
     verb_denials: Vec<(ObjectAction, String)>,
+    /// The focused objects: an action on them is the same row however it
+    /// was found.
+    focus: Vec<ObjectKey>,
 }
 
 /// The objects the palette's actions apply to: the marked rows, else the
@@ -224,8 +248,12 @@ impl PaletteIndex {
                 .into_iter()
                 .map(|item| {
                     let secondary = matches!(item.command, PaletteCommand::MuteEnvironment(..));
+                    // Among the commands only the actions on the focus
+                    // have an object's mark.
+                    let focus = item.dot.is_some() || item.several;
                     Candidate {
                         secondary,
+                        focus,
                         ..candidate(item, 0)
                     }
                 })
@@ -242,6 +270,7 @@ impl PaletteIndex {
                         .map(|denial| (action.clone(), denial))
                 })
                 .collect(),
+            focus: focus.targets.clone(),
         }
     }
 
@@ -279,9 +308,26 @@ impl PaletteIndex {
                 let rest = Query::new(rest);
                 let acts = self.act_on(&action, &rest);
                 if !acts.is_empty() {
-                    // What the verb asked for comes first.
+                    // What the verb asked for comes first: its action on
+                    // the focus (named or not), then on the objects named,
+                    // then the commands matching the whole query, each
+                    // object's action once.
                     commands.top = Some(i64::MAX);
-                    commands.items.extend(acts);
+                    let mut items = acts;
+                    for item in std::mem::take(&mut commands.items) {
+                        if !items.iter().any(|other| self.same_action(other, &item)) {
+                            items.push(item);
+                        }
+                    }
+                    if let Some(index) = items.iter().position(|item| {
+                        self.runs(item).is_some_and(|(acting, targets)| {
+                            *acting == action && !targets.is_empty() && targets == self.focus
+                        })
+                    }) {
+                        let item = items.remove(index);
+                        items.insert(0, item);
+                    }
+                    commands.items = items;
                 }
                 rest
             }
@@ -303,7 +349,7 @@ impl PaletteIndex {
         }
         // The section with the best match first, so Enter runs it: `prod`
         // selects "Switch to prod-cluster", not a scattered match in
-        // "Import dashboards…". Ties keep the usual order.
+        // "Import dashboards". Ties keep the usual order.
         sections.sort_by_key(|found| Reverse(found.top));
         sections.into_iter().flat_map(|found| found.items).collect()
     }
@@ -331,14 +377,20 @@ impl PaletteIndex {
             .chain(hosts)
             .filter_map(|object| {
                 let key = object.command.object()?.clone();
+                // The focus's is the row its key runs.
+                let focused = self.focus == [key.clone()];
                 Some(PaletteItem {
                     section: Section::Commands,
                     label: format!("{label} · {}", object.label),
                     detail: object.detail,
                     dot: object.dot,
                     several: false,
-                    key_hint: None,
-                    command: PaletteCommand::Act(action.clone(), vec![key]),
+                    icon: None,
+                    key_hint: if focused { action_key(action) } else { None },
+                    command: PaletteCommand::Act(
+                        action.clone(),
+                        if focused { Vec::new() } else { vec![key] },
+                    ),
                     matched: Vec::new(),
                     denied: denied.clone(),
                 })
@@ -363,18 +415,14 @@ impl PaletteIndex {
                     .filter_map(|candidate| candidate.item.command.object().cloned())
                     .collect()
             };
-            let detail = [(services.len(), "service"), (hosts.len(), "host")]
-                .into_iter()
-                .filter(|(count, _)| *count > 0)
-                .map(|(count, noun)| format!("{count} {noun}{}", if count == 1 { "" } else { "s" }))
-                .collect::<Vec<_>>()
-                .join(" · ");
+            let detail = count_detail(services.len(), hosts.len());
             items.push(PaletteItem {
                 section: Section::Commands,
                 label: format!("{label} · all {count} matches"),
                 detail,
                 dot: worst,
                 several: true,
+                icon: None,
                 key_hint: Some(ALL_MATCHES_KEY),
                 command: PaletteCommand::Act(
                     action.clone(),
@@ -388,6 +436,44 @@ impl PaletteIndex {
             });
         }
         items
+    }
+
+    /// The action `item` runs and the objects it runs on (the focused
+    /// ones for an action on the focus), if it runs one.
+    fn runs<'a>(&'a self, item: &'a PaletteItem) -> Option<(&'a ObjectAction, &'a [ObjectKey])> {
+        match &item.command {
+            PaletteCommand::Act(action, targets) if targets.is_empty() => {
+                Some((action, self.focus.as_slice()))
+            }
+            PaletteCommand::Act(action, targets) => Some((action, targets.as_slice())),
+            _ => None,
+        }
+    }
+
+    /// Whether `a` and `b` run the same action on the same objects.
+    fn same_action(&self, a: &PaletteItem, b: &PaletteItem) -> bool {
+        matches!((self.runs(a), self.runs(b)), (Some(a), Some(b)) if a == b)
+    }
+}
+
+/// `2 services · 1 host`: the objects an action on several runs on.
+fn count_detail(services: usize, hosts: usize) -> String {
+    [(services, "service"), (hosts, "host")]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, noun)| format!("{count} {noun}{}", if count == 1 { "" } else { "s" }))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The key that runs `action` on the focus, if it has one.
+fn action_key(action: &ObjectAction) -> Option<&'static str> {
+    match action {
+        ObjectAction::Acknowledge => Some("a"),
+        ObjectAction::ScheduleDowntime => Some("d"),
+        ObjectAction::CheckNow => Some("r"),
+        ObjectAction::AddComment => Some("c"),
+        _ => None,
     }
 }
 
@@ -451,12 +537,13 @@ fn best(candidates: &[Candidate], query: &Query, limit: usize, rank: Rank) -> Fo
             let found = query.matches(&candidate.haystack)?;
             let rank = match rank {
                 Rank::Score => {
-                    i64::from(found.score)
-                        - if candidate.secondary {
-                            SECONDARY_PENALTY
-                        } else {
-                            0
-                        }
+                    let penalty = if candidate.secondary {
+                        SECONDARY_PENALTY
+                    } else {
+                        0
+                    };
+                    let bonus = if candidate.focus { FOCUS_BONUS } else { 0 };
+                    i64::from(found.score) - penalty + bonus
                 }
                 // A verb's objects: those named as typed before fuzzy
                 // near-misses (`ack db-prod` lists db-prod's problems
@@ -519,16 +606,18 @@ fn object_candidate(item: PaletteItem, severity: u32, problem: bool) -> Candidat
         severity,
         problem,
         secondary: false,
+        focus: false,
     }
 }
 
-fn setting(label: String, detail: &str, command: PaletteCommand) -> PaletteItem {
+fn setting(label: String, detail: &str, icon: IconName, command: PaletteCommand) -> PaletteItem {
     PaletteItem {
         section: Section::Environments,
         label,
         detail: detail.to_owned(),
         dot: None,
         several: false,
+        icon: Some(icon),
         key_hint: None,
         command,
         matched: Vec::new(),
@@ -555,8 +644,8 @@ fn action_label(action: &ObjectAction) -> &'static str {
         ObjectAction::RemoveComment(_) => "Remove comment",
         ObjectAction::RemoveDowntime(_) => "Remove downtime",
         ObjectAction::RemoveDowntimes => "Remove downtimes",
-        ObjectAction::SubmitCheckResult => "Submit check result…",
-        ObjectAction::RunCommand => "Run command…",
+        ObjectAction::SubmitCheckResult => "Submit check result",
+        ObjectAction::RunCommand => "Run command",
     }
 }
 
@@ -586,6 +675,7 @@ fn dashboard_candidates(state: &AppState) -> Vec<Candidate> {
                     detail,
                     dot: Some(Dot::from_summary(summary)),
                     several: false,
+                    icon: None,
                     key_hint: None,
                     command: PaletteCommand::ShowDashboard(reference),
                     matched: Vec::new(),
@@ -604,31 +694,31 @@ fn host_candidates(state: &AppState) -> Vec<Candidate> {
         .snapshot()
         .hosts
         .values()
-        .map(|host| {
-            let state = CheckableState::Host(host.state);
-            let address = if host.display_name == host.name.as_str() {
-                host.address.clone()
-            } else {
-                format!("{} {}", host.name, host.address).trim().to_owned()
-            };
-            let detail = join_detail(&address, crate::format::state_word(state));
-            object_candidate(
-                PaletteItem {
-                    section: Section::Hosts,
-                    label: host.display_name.clone(),
-                    detail,
-                    dot: Some(Dot::for_object(Some(state))),
-                    several: false,
-                    key_hint: None,
-                    command: PaletteCommand::OpenObject(host.key()),
-                    matched: Vec::new(),
-                    denied: None,
-                },
-                host.severity(),
-                host.is_problem(),
-            )
-        })
+        .map(|host| object_candidate(host_item(host), host.severity(), host.is_problem()))
         .collect()
+}
+
+/// A host's row: its display name, then its name and address (when they
+/// differ) and its state.
+fn host_item(host: &Host) -> PaletteItem {
+    let state = CheckableState::Host(host.state);
+    let address = if host.display_name == host.name.as_str() {
+        host.address.clone()
+    } else {
+        format!("{} {}", host.name, host.address).trim().to_owned()
+    };
+    PaletteItem {
+        section: Section::Hosts,
+        label: host.display_name.clone(),
+        detail: join_detail(&address, crate::format::state_word(state)),
+        dot: Some(Dot::for_object(Some(state))),
+        several: false,
+        icon: None,
+        key_hint: None,
+        command: PaletteCommand::OpenObject(host.key()),
+        matched: Vec::new(),
+        denied: None,
+    }
 }
 
 /// Every service: display name, with its host and state after it.
@@ -638,28 +728,127 @@ fn service_candidates(state: &AppState) -> Vec<Candidate> {
         .services
         .values()
         .map(|service| {
-            let state = CheckableState::Service(service.state);
-            let host = snapshot.host_of(&service.key).map_or_else(
-                || service.key.host.to_string(),
-                |host| host.display_name.clone(),
-            );
             object_candidate(
-                PaletteItem {
-                    section: Section::Services,
-                    label: service.display_name.clone(),
-                    detail: join_detail(&format!("on {host}"), crate::format::state_word(state)),
-                    dot: Some(Dot::for_object(Some(state))),
-                    several: false,
-                    key_hint: None,
-                    command: PaletteCommand::OpenObject(service.object_key()),
-                    matched: Vec::new(),
-                    denied: None,
-                },
+                service_item(snapshot, service),
                 service.severity(),
                 service.is_problem(),
             )
         })
         .collect()
+}
+
+/// A service's row: its display name, then `on <host> · <state>`.
+fn service_item(snapshot: &Snapshot, service: &Service) -> PaletteItem {
+    let state = CheckableState::Service(service.state);
+    let host = snapshot.host_of(&service.key).map_or_else(
+        || service.key.host.to_string(),
+        |host| host.display_name.clone(),
+    );
+    PaletteItem {
+        section: Section::Services,
+        label: service.display_name.clone(),
+        detail: join_detail(&format!("on {host}"), crate::format::state_word(state)),
+        dot: Some(Dot::for_object(Some(state))),
+        several: false,
+        icon: None,
+        key_hint: None,
+        command: PaletteCommand::OpenObject(service.object_key()),
+        matched: Vec::new(),
+        denied: None,
+    }
+}
+
+/// What the actions on the focus name: the object as its row shows it
+/// (`postgres-replication`, `on db-prod-03 · critical`, its state dot),
+/// or the marked objects (`3 marked`, `2 services · 1 host`, the worst
+/// state's stack).
+struct Target {
+    label: String,
+    detail: String,
+    dot: Dot,
+    several: bool,
+}
+
+/// The [`Target`] of the actions on `focus` (`None`: nothing focused).
+fn focus_target(state: &AppState, focus: &Focus) -> Option<Target> {
+    let snapshot = state.snapshot();
+    // The object's row, with its severity; one gone from the snapshot
+    // still gets its name.
+    let row = |key: &ObjectKey| -> (PaletteItem, u32) {
+        let found = match key {
+            ObjectKey::Host { name } => snapshot
+                .hosts
+                .get(name)
+                .map(|host| (host_item(host), host.severity())),
+            ObjectKey::Service { key } => snapshot
+                .services
+                .get(key)
+                .map(|service| (service_item(snapshot, service), service.severity())),
+        };
+        found.unwrap_or_else(|| {
+            let mut item = command(
+                &crate::operate::forms::describe_objects(std::slice::from_ref(key)),
+                String::new(),
+                None,
+                IconName::Layers,
+                PaletteCommand::OpenObject(key.clone()),
+            );
+            item.dot = Some(Dot::for_object(None));
+            (item, 0)
+        })
+    };
+    match focus.targets.as_slice() {
+        [] => None,
+        [one] => {
+            let (item, _) = row(one);
+            Some(Target {
+                label: item.label,
+                detail: item.detail,
+                dot: item.dot.unwrap_or(Dot::Empty),
+                several: false,
+            })
+        }
+        many => {
+            let hosts = many
+                .iter()
+                .filter(|key| matches!(key, ObjectKey::Host { .. }))
+                .count();
+            let worst = many
+                .iter()
+                .map(row)
+                .max_by_key(|(_, severity)| *severity)
+                .and_then(|(item, _)| item.dot)
+                .unwrap_or(Dot::Empty);
+            Some(Target {
+                label: format!("{} marked", many.len()),
+                detail: count_detail(many.len() - hosts, hosts),
+                dot: worst,
+                several: true,
+            })
+        }
+    }
+}
+
+/// An action on the focus: `<verb> · <target>`, the target's detail and
+/// mark, like an action on an object a query names.
+fn target_item(
+    verb: &str,
+    target: &Target,
+    key_hint: Option<&'static str>,
+    command: PaletteCommand,
+) -> PaletteItem {
+    PaletteItem {
+        section: Section::Commands,
+        label: format!("{verb} · {}", target.label),
+        detail: target.detail.clone(),
+        dot: Some(target.dot),
+        several: target.several,
+        icon: None,
+        key_hint,
+        command,
+        matched: Vec::new(),
+        denied: None,
+    }
 }
 
 /// Switching to each other environment, editing this one, adding one.
@@ -677,6 +866,7 @@ fn environment_candidates(state: &AppState) -> Vec<Candidate> {
                     detail: url_summary(environment),
                     dot: None,
                     several: false,
+                    icon: Some(IconName::ArrowLeftRight),
                     key_hint: None,
                     command: PaletteCommand::SwitchEnvironment(environment.id.clone()),
                     matched: Vec::new(),
@@ -689,8 +879,9 @@ fn environment_candidates(state: &AppState) -> Vec<Candidate> {
     if let Some(environment) = state.environment() {
         candidates.push(candidate(
             setting(
-                format!("Edit environment {}…", environment.name),
+                format!("Edit environment {}", environment.name),
                 "settings: URL, login, TLS",
+                IconName::Settings,
                 PaletteCommand::EditEnvironment(environment.id.clone()),
             ),
             0,
@@ -698,8 +889,9 @@ fn environment_candidates(state: &AppState) -> Vec<Candidate> {
     }
     candidates.push(candidate(
         setting(
-            "Add environment…".to_owned(),
+            "Add environment".to_owned(),
             "settings",
+            IconName::Plus,
             PaletteCommand::AddEnvironment,
         ),
         0,
@@ -707,11 +899,12 @@ fn environment_candidates(state: &AppState) -> Vec<Candidate> {
     candidates
 }
 
-/// A command item.
+/// A command item without an object: `icon` marks it.
 fn command(
     label: &str,
     detail: String,
     key_hint: Option<&'static str>,
+    icon: IconName,
     command: PaletteCommand,
 ) -> PaletteItem {
     PaletteItem {
@@ -720,6 +913,7 @@ fn command(
         detail,
         dot: None,
         several: false,
+        icon: Some(icon),
         key_hint,
         command,
         matched: Vec::new(),
@@ -745,19 +939,22 @@ fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem>
         } else {
             "ctrl-b"
         }),
+        IconName::PanelLeft,
         PaletteCommand::ToggleSidebar,
     ));
     if has_environment {
         items.push(command(
-            "Import dashboards…",
+            "Import dashboards",
             "from a file".to_owned(),
             None,
+            IconName::FileInput,
             PaletteCommand::ImportDashboards,
         ));
         items.push(command(
-            "Export dashboards…",
+            "Export dashboards",
             "every group, to a file".to_owned(),
             None,
+            IconName::FileOutput,
             PaletteCommand::ExportDashboards,
         ));
     }
@@ -765,22 +962,21 @@ fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem>
 }
 
 /// The actions on the focused objects, with their keys, then copying
-/// their names and filter expression (PANE-05). Actions the API user may
-/// not run say why (ENV-09).
+/// their names and filter expression (PANE-05): rows like the actions on
+/// an object a query names. Actions the API user may not run say why
+/// (ENV-09).
 fn action_commands(state: &AppState, focus: &Focus) -> (Vec<PaletteItem>, Vec<PaletteItem>) {
-    let what = match focus.targets.as_slice() {
-        [] => return (Vec::new(), Vec::new()),
-        [one] => one.to_string(),
-        many => format!("{} objects", many.len()),
+    let Some(target) = focus_target(state, focus) else {
+        return (Vec::new(), Vec::new());
     };
     let snapshot = state.snapshot();
     let mut actions = vec![
-        (ObjectAction::Acknowledge, Some("a")),
-        (ObjectAction::ScheduleDowntime, Some("d")),
-        (ObjectAction::CheckNow, Some("r")),
-        (ObjectAction::AddComment, Some("c")),
-        (ObjectAction::SubmitCheckResult, None),
-        (ObjectAction::RunCommand, None),
+        ObjectAction::Acknowledge,
+        ObjectAction::ScheduleDowntime,
+        ObjectAction::CheckNow,
+        ObjectAction::AddComment,
+        ObjectAction::SubmitCheckResult,
+        ObjectAction::RunCommand,
     ];
     // Removals only where there is something to remove.
     let acknowledged = focus.targets.iter().any(|target| match target {
@@ -794,7 +990,7 @@ fn action_commands(state: &AppState, focus: &Focus) -> (Vec<PaletteItem>, Vec<Pa
             .is_some_and(|service| service.check.acknowledgement.is_acknowledged()),
     });
     if acknowledged {
-        actions.push((ObjectAction::RemoveAcknowledgement, None));
+        actions.push(ObjectAction::RemoveAcknowledgement);
     }
     if focus.targets.iter().any(|target| {
         snapshot
@@ -802,43 +998,35 @@ fn action_commands(state: &AppState, focus: &Focus) -> (Vec<PaletteItem>, Vec<Pa
             .get(target)
             .is_some_and(|list| !list.is_empty())
     }) {
-        actions.push((ObjectAction::RemoveDowntimes, None));
+        actions.push(ObjectAction::RemoveDowntimes);
     }
     let mut items: Vec<PaletteItem> = actions
         .into_iter()
-        .map(|(action, key)| {
+        .map(|action| {
             let denied = state.action_denial(&action);
-            let mut item = command(
+            let mut item = target_item(
                 action_label(&action),
-                what.clone(),
-                key,
+                &target,
+                action_key(&action),
                 PaletteCommand::Act(action, Vec::new()),
             );
             item.denied = denied;
             item
         })
         .collect();
-    let names = if focus.targets.len() == 1 {
-        "Copy name"
-    } else {
-        "Copy names"
-    };
-    items.push(command(
-        names,
-        what.clone(),
+    let one = focus.targets.len() == 1;
+    items.push(target_item(
+        if one { "Copy name" } else { "Copy names" },
+        &target,
         None,
         PaletteCommand::Copy {
-            what: if focus.targets.len() == 1 {
-                "the name"
-            } else {
-                "the names"
-            },
+            what: if one { "the name" } else { "the names" },
             text: crate::operate::expression::names(&focus.targets),
         },
     ));
-    items.push(command(
+    items.push(target_item(
         "Copy filter expression",
-        what,
+        &target,
         None,
         PaletteCommand::Copy {
             what: "the filter expression",
@@ -858,12 +1046,14 @@ fn dashboard_commands(state: &AppState) -> Vec<PaletteItem> {
             "Reload from Icinga",
             "a lean reload of every object".to_owned(),
             None,
+            IconName::Refresh,
             PaletteCommand::Reload,
         ),
         command(
             "New dashboard",
             String::new(),
             Some(crate::sidebar::new_key()),
+            IconName::Plus,
             PaletteCommand::NewDashboard,
         ),
     ];
@@ -874,6 +1064,7 @@ fn dashboard_commands(state: &AppState) -> Vec<PaletteItem> {
             "Edit dashboard",
             dashboard.name.clone(),
             None,
+            IconName::Pencil,
             PaletteCommand::EditDashboard(selected.clone()),
         ));
     }
@@ -881,6 +1072,7 @@ fn dashboard_commands(state: &AppState) -> Vec<PaletteItem> {
         "New group",
         String::new(),
         None,
+        IconName::FolderPlus,
         PaletteCommand::NewGroup,
     ));
     items
@@ -896,6 +1088,7 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
             "Resume notifications",
             crate::notifications::paused_text(environments.len(), until, now),
             None,
+            IconName::Bell,
             PaletteCommand::Resume,
         )],
         None if has_environment => PauseChoice::ALL
@@ -909,34 +1102,14 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
                         String::new()
                     },
                     None,
+                    IconName::Pause,
                     PaletteCommand::Pause(choice),
                 )
             })
             .collect(),
         None => Vec::new(),
     };
-    // With several environments each one mutes on its own too (A5).
-    if several {
-        for environment in environments {
-            let id = &environment.id;
-            match state.environment_paused_until(id, now) {
-                Some(until) => items.push(command(
-                    &format!("Unmute {}", environment.name),
-                    format!("muted until {}", crate::notifications::when(until, now)),
-                    None,
-                    PaletteCommand::MuteEnvironment(id.clone(), None),
-                )),
-                None => items.extend(PauseChoice::ALL.into_iter().map(|choice| {
-                    command(
-                        &format!("Mute {} {}", environment.name, choice.label(now)),
-                        "the other environments still notify".to_owned(),
-                        None,
-                        PaletteCommand::MuteEnvironment(id.clone(), Some(choice)),
-                    )
-                })),
-            }
-        }
-    }
+    items.extend(mute_commands(state, now));
     let unread = state.unread_notifications();
     items.push(command(
         "Notifications",
@@ -946,6 +1119,7 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
             String::new()
         },
         None,
+        IconName::Bell,
         PaletteCommand::OpenNotifications,
     ));
     if unread > 0 {
@@ -953,46 +1127,83 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
             "Mark all notifications read",
             String::new(),
             None,
+            IconName::CheckCheck,
             PaletteCommand::MarkNotificationsRead,
         ));
     }
     if has_environment {
         items.push(command(
-            "Notification settings…",
+            "Notification settings",
             String::new(),
             None,
+            IconName::Settings,
             PaletteCommand::Settings(SettingsTab::Notifications),
         ));
     }
     items.push(command(
-        "Settings…",
+        "Settings",
         String::new(),
         Some(crate::settings::settings_key()),
+        IconName::Settings,
         PaletteCommand::Settings(SettingsTab::General),
     ));
     items.push(command(
         "About icygui",
         String::new(),
         None,
+        IconName::Info,
         PaletteCommand::About,
     ));
     items.push(command(
         "Quit icygui",
         String::new(),
         Some(crate::settings::quit_key()),
+        IconName::Power,
         PaletteCommand::Quit,
     ));
     items
 }
 
-/// Watching, muting and unmuting the focused objects (NOTE-02).
+/// Muting each environment on its own, or unmuting it (A5), with
+/// several environments.
+fn mute_commands(state: &AppState, now: Timestamp) -> Vec<PaletteItem> {
+    let environments = state.environments();
+    let mut items = Vec::new();
+    if environments.len() < 2 {
+        return items;
+    }
+    for environment in environments {
+        let id = &environment.id;
+        match state.environment_paused_until(id, now) {
+            Some(until) => items.push(command(
+                &format!("Unmute {}", environment.name),
+                format!("muted until {}", crate::notifications::when(until, now)),
+                None,
+                IconName::Bell,
+                PaletteCommand::MuteEnvironment(id.clone(), None),
+            )),
+            None => items.extend(PauseChoice::ALL.into_iter().map(|choice| {
+                command(
+                    &format!("Mute {} {}", environment.name, choice.label(now)),
+                    "the other environments still notify".to_owned(),
+                    None,
+                    IconName::BellOff,
+                    PaletteCommand::MuteEnvironment(id.clone(), Some(choice)),
+                )
+            })),
+        }
+    }
+    items
+}
+
+/// Watching, muting and unmuting the focused objects (NOTE-02), as
+/// actions on them.
 fn override_commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem> {
-    if focus.targets.is_empty() || state.environment().is_none() {
+    if state.environment().is_none() {
         return Vec::new();
     }
-    let what = match focus.targets.as_slice() {
-        [one] => one.to_string(),
-        many => format!("{} objects", many.len()),
+    let Some(target) = focus_target(state, focus) else {
+        return Vec::new();
     };
     let current: Vec<_> = focus
         .targets
@@ -1006,29 +1217,29 @@ fn override_commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<Pal
     let targets = focus.targets.clone();
     let mut items = Vec::new();
     if !all_watched {
-        items.push(command(
+        items.push(target_item(
             "Watch",
-            what.clone(),
+            &target,
             None,
             PaletteCommand::Override(OverrideChange::Watch, targets.clone()),
         ));
     }
     for choice in MuteChoice::ALL {
-        items.push(command(
+        items.push(target_item(
             &format!("Mute {}", choice.label(now)),
-            what.clone(),
+            &target,
             None,
             PaletteCommand::Override(OverrideChange::Mute(choice), targets.clone()),
         ));
     }
     if any {
-        items.push(command(
+        items.push(target_item(
             if all_watched {
                 "Stop watching"
             } else {
                 "Unmute"
             },
-            what,
+            &target,
             None,
             PaletteCommand::Override(OverrideChange::Clear, targets),
         ));
@@ -1093,7 +1304,7 @@ mod tests {
         let items = index(&Focus::default()).search("");
         assert_eq!(items[0].section, Section::Commands);
         assert!(items.iter().any(|item| item.section == Section::Dashboards));
-        assert!(items.iter().any(|item| item.label == "Add environment…"));
+        assert!(items.iter().any(|item| item.label == "Add environment"));
         assert!(
             items.iter().all(|item| item.section != Section::Services),
             "objects need a query"
@@ -1160,8 +1371,8 @@ mod tests {
         state.save_environment(other, false);
         let items = PaletteIndex::build(&state, &Focus::default(), now()).search("prod");
         // Enter runs the first item: a word-start match, never a
-        // scattered one like "Import dashboards…" (i-m-P-o-R-t … O … D).
-        assert_ne!(items[0].label, "Import dashboards…");
+        // scattered one like "Import dashboards" (i-m-P-o-R-t … O … D).
+        assert_ne!(items[0].label, "Import dashboards");
         assert!(
             items[0].label.to_lowercase().contains("prod"),
             "{:?}",
@@ -1175,7 +1386,7 @@ mod tests {
         );
         // Commands still lead when they match best.
         let items = PaletteIndex::build(&state, &Focus::default(), now()).search("import");
-        assert_eq!(items[0].label, "Import dashboards…");
+        assert_eq!(items[0].label, "Import dashboards");
     }
 
     #[test]
@@ -1261,21 +1472,115 @@ mod tests {
         assert_eq!(all_matches_item(&fuzzy), None);
     }
 
+    /// The focused object's actions are ordinary object-action rows: its
+    /// name and detail, its state dot; the focus only puts them first and
+    /// gives them their keys, so a query naming it lists it once.
     #[test]
     fn actions_on_the_focus_come_first() {
+        let replication = ObjectKey::service("db-prod-03", "postgres-replication");
         let focus = Focus {
-            targets: vec![ObjectKey::service("db-prod-03", "postgres-replication")],
+            targets: vec![replication.clone()],
         };
-        let items = index(&focus).search("");
-        assert_eq!(items[0].label, "Acknowledge");
-        assert_eq!(items[0].detail, "db-prod-03!postgres-replication");
+        let palette = index(&focus);
+        let items = palette.search("");
+        assert_eq!(items[0].label, "Acknowledge · postgres-replication");
+        assert_eq!(items[0].detail, "on db-prod-03 · critical");
+        assert!(
+            matches!(items[0].dot, Some(Dot::State(_))) && !items[0].several,
+            "{:?}",
+            items[0].dot
+        );
         assert_eq!(items[0].key_hint, Some("a"));
         assert_eq!(
             items[0].command,
             PaletteCommand::Act(ObjectAction::Acknowledge, Vec::new())
         );
-        let check = index(&focus).search("check now");
-        assert_eq!(check[0].label, "Check now");
+        assert_eq!(
+            labels(&items[..4]),
+            [
+                "Acknowledge · postgres-replication",
+                "Schedule downtime · postgres-replication",
+                "Check now · postgres-replication",
+                "Add comment · postgres-replication",
+            ]
+        );
+
+        // Named by a verb query: first, once, with its key.
+        let items = palette.search("ack postgres");
+        assert_eq!(items[0].label, "Acknowledge · postgres-replication");
+        assert_eq!(items[0].key_hint, Some("a"));
+        let acknowledging = |item: &&PaletteItem| {
+            palette.runs(item)
+                == Some((
+                    &ObjectAction::Acknowledge,
+                    std::slice::from_ref(&replication),
+                ))
+        };
+        assert_eq!(
+            items.iter().filter(acknowledging).count(),
+            1,
+            "{:?}",
+            labels(&items)
+        );
+        assert!(
+            items[1..]
+                .iter()
+                .all(|item| matches!(item.key_hint, None | Some(ALL_MATCHES_KEY))),
+            "only the focus has the action's key"
+        );
+        // A query the focus doesn't match still runs on the focus first.
+        let check = palette.search("check now");
+        assert_eq!(check[0].label, "Check now · postgres-replication");
+        assert_eq!(check[0].key_hint, Some("r"));
+
+        // Marked rows: their count and the worst state's stack.
+        let marked = index(&Focus {
+            targets: vec![replication, ObjectKey::host("db-prod-03")],
+        })
+        .search("");
+        assert_eq!(marked[0].label, "Acknowledge · 2 marked");
+        assert_eq!(marked[0].detail, "1 service · 1 host");
+        assert!(marked[0].several && marked[0].dot.is_some());
+    }
+
+    /// Every row has a mark in the dot's slot, names objects as their rows
+    /// do (never `host!service`), and no label ends in `…`.
+    #[test]
+    fn every_row_has_a_mark() {
+        let mut state = AppState::fixture(now());
+        let staging = ic_config::Environment::new(
+            "staging",
+            "https://staging:5665",
+            ic_config::AuthConfig::Basic {
+                username: "icygui".to_owned(),
+            },
+        );
+        state.save_environment(staging, false);
+        for targets in [
+            Vec::new(),
+            vec![ObjectKey::service("db-prod-03", "postgres-replication")],
+            vec![ObjectKey::host("db-prod-03"), ObjectKey::host("db-prod-01")],
+        ] {
+            let palette = PaletteIndex::build(&state, &Focus { targets }, now());
+            for query in [
+                "",
+                "o",
+                "ack db-prod",
+                "mute",
+                "settings",
+                "copy",
+                "staging",
+            ] {
+                for item in palette.search(query) {
+                    assert!(
+                        item.dot.is_some() || item.several || item.icon.is_some(),
+                        "{query}: {item:?}"
+                    );
+                    assert!(!item.label.contains('!'), "{query}: {}", item.label);
+                    assert!(!item.label.ends_with('…'), "{query}: {}", item.label);
+                }
+            }
+        }
     }
 
     #[test]

@@ -87,10 +87,12 @@ pub(crate) enum Internal {
         load: u64,
         step: LoadStep,
     },
-    /// A status poll's answer.
+    /// A status poll's answer, and the cluster nodes' states when they
+    /// were asked for too.
     Status {
         session: u64,
         result: Result<InstanceStatus, ApiError>,
+        nodes: Option<Result<Vec<(String, bool)>, ApiError>>,
     },
     /// A re-query round's answers.
     Fetched { session: u64, answers: Box<Answers> },
@@ -238,6 +240,11 @@ struct Conn {
     /// The next status poll; `None` without `status/query` permission.
     next_status: Option<Instant>,
     status_in_flight: bool,
+    /// When a status poll next asks for the cluster nodes' states too (one
+    /// more small request: every poll while on screen, every
+    /// [`NODES_QUIET_INTERVAL`] off screen); `None` without
+    /// `objects/query/Endpoint`.
+    next_nodes: Option<Instant>,
     /// The API user may read `Notification` objects (cleared when Icinga
     /// refuses them after all).
     notifications_allowed: bool,
@@ -833,6 +840,7 @@ impl Engine {
             !info.allows("objects/query/Service"),
         );
         let can_poll_status = next_status.is_some();
+        let next_nodes = info.allows("objects/query/Endpoint").then(Instant::now);
         self.conn = Some(Conn {
             client,
             info,
@@ -842,6 +850,7 @@ impl Engine {
             live_since: None,
             next_status,
             status_in_flight: false,
+            next_nodes,
             notifications_allowed,
             notification_events,
             notifications_in_flight: false,
@@ -1177,17 +1186,85 @@ impl Engine {
     // --- status poll ------------------------------------------------------------------
 
     fn poll_status(&mut self) {
+        let now = Instant::now();
+        let names = self.node_names();
+        let quiet = if self.active {
+            self.tuning.status_interval
+        } else {
+            NODES_QUIET_INTERVAL
+        };
         let Some(conn) = &mut self.conn else {
             return;
         };
         conn.status_in_flight = true;
+        // The cluster nodes' states with it, when due: one more small
+        // request by name (the masters and satellites, never the agents).
+        let nodes = match conn.next_nodes {
+            Some(at) if at <= now && !names.is_empty() => {
+                conn.next_nodes = Some(now + quiet);
+                Some(names)
+            }
+            _ => None,
+        };
         let client = conn.client.clone();
         let tx = self.internal_tx.clone();
         let session = self.session;
         self.tasks.spawn(async move {
             let result = client.status().await;
-            let _ = tx.send(Internal::Status { session, result });
+            let nodes = match nodes {
+                Some(names) => Some(client.endpoint_states(&names).await),
+                None => None,
+            };
+            let _ = tx.send(Internal::Status {
+                session,
+                result,
+                nodes,
+            });
         });
+    }
+
+    /// The cluster nodes whose states a status poll asks for: the masters
+    /// and satellites but the connected node itself.
+    fn node_names(&self) -> Vec<String> {
+        let Some(conn) = &self.conn else {
+            return Vec::new();
+        };
+        let (endpoints, zones) = self.store.cluster();
+        topology::cluster_nodes(zones, endpoints, Some(&conn.node))
+            .into_iter()
+            .filter(|node| {
+                node.name != conn.node.name && node.state != topology::NodeState::Unknown
+            })
+            .map(|node| node.name)
+            .collect()
+    }
+
+    /// The cluster nodes' states came with a status poll.
+    fn on_node_states(&mut self, nodes: Result<Vec<(String, bool)>, ApiError>) {
+        let Some(conn) = &mut self.conn else {
+            return;
+        };
+        match nodes {
+            Ok(states) => {
+                let local = conn.node.name.clone();
+                self.store.set_endpoint_states(&states, &local);
+            }
+            Err(ApiError::Forbidden(message)) => {
+                tracing::warn!(%message, "the API user may not read the endpoints; not asking again");
+                conn.next_nodes = None;
+            }
+            Err(ApiError::NotFound(_)) => {
+                // A node of the list is gone: the list is reloaded.
+                self.fetch.mark_lists(
+                    Lists {
+                        endpoints: true,
+                        ..Lists::default()
+                    },
+                    Instant::now(),
+                );
+            }
+            Err(error) => tracing::debug!(%error, "the cluster nodes' states couldn't be read"),
+        }
     }
 
     fn on_status(&mut self, result: Result<InstanceStatus, ApiError>) {
@@ -1344,9 +1421,11 @@ impl Engine {
         apply_list(answers.dependencies, "dependencies", |dependencies| {
             self.store.set_dependencies(dependencies);
         });
-        apply_list(answers.endpoints, "endpoints", |endpoints| {
-            self.store.set_endpoints(endpoints);
-        });
+        match answers.endpoints {
+            Some(Ok(cluster)) => self.store.set_cluster(cluster.endpoints, cluster.zones),
+            Some(Err(error)) => tracing::warn!(%error, "couldn't reload the endpoints"),
+            None => {}
+        }
         if let Some((started, result)) = answers.notifications {
             match result {
                 Ok(fetched) => self.store.apply_fetched_notifications(
@@ -1755,7 +1834,14 @@ impl Engine {
                 load,
                 step,
             } if session == self.session => self.on_load(load, step),
-            Internal::Status { session, result } if session == self.session => {
+            Internal::Status {
+                session,
+                result,
+                nodes,
+            } if session == self.session => {
+                if let Some(nodes) = nodes {
+                    self.on_node_states(nodes);
+                }
                 self.on_status(result);
             }
             Internal::Fetched { session, answers } if session == self.session => {
@@ -1799,6 +1885,10 @@ impl Engine {
         tracing::debug!("engine stopped");
     }
 }
+
+/// How often a status poll of an engine off screen asks for the cluster
+/// nodes' states (on screen: every poll).
+const NODES_QUIET_INTERVAL: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// How long stopping waits at most for the event log to write what it was
 /// given.

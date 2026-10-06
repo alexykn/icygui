@@ -237,7 +237,7 @@ fn environments_are_switched_from_the_footer_and_the_palette() {
                     assert!(sidebar.read(cx).details_open());
                     // `staging`, above `lab` and the row that mutes the
                     // environment on screen (30 px).
-                    app.click(cx, point(px(130.), px(720.)), Modifiers::default());
+                    app.click(cx, point(px(130.), px(748.)), Modifiers::default());
                 });
                 wait_for(&app, &cx, "staging", CONNECT, |app, cx| {
                     let state = app.state.read(cx);
@@ -610,7 +610,7 @@ fn a_deleted_environment_takes_its_password_and_event_log_along() {
                 })
                 .await;
                 assert!(log.exists(), "the engine keeps an event log");
-                // edit lab-a… → delete environment… → confirm.
+                // edit lab-a → delete environment → confirm.
                 cx.update(|cx| {
                     app.in_window(cx, |window, cx| {
                         window.dispatch_action(Box::new(crate::actions::EditEnvironment), cx);

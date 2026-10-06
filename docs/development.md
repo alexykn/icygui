@@ -85,6 +85,13 @@ Stills are one frame reduced to a 256-colour palette (`palettegen`/`paletteuse` 
 
 The scenes are a table in `xtask/src/screenshots.rs` (`SCENES`): a name (the file name), still or clip, the demo switches, and the steps (`Wait`, `Key`, `Type`, `Click`, `Record`). The demo's data is fixed by the seed, but times (`14m` in state, the clock) follow the wall clock, so two runs differ in those details only. A test (`cargo test -p xtask`) checks that every image the README and the user guide show is made by a scene and exists.
 
+## UI conventions
+
+- **The design rule.** Everything fits the design (`design/project/*.dc.html`): the theme's tokens (`ic_ui_kit::Theme`) and the kit's components, nothing invented beside them. Nothing changes size or position with the state it shows (a count, a status, a hover, a selection): slots are fixed, long text is cut short, and a menu or card keeps its size while it is open.
+- **Selection** is the selected-row background (`row_selected`), in lists, menus (`MenuItem::selected`: the environment on screen, the connected node) and chips (`Chip::filled`). Check marks only in menus that are lists of choices or toggles (sort, group by, notifications), where every item keeps the check column so the rows line up.
+- **No trailing `…` on labels**: buttons, links, menu items, palette commands, dialog texts and progress text (*add environment*, *Settings*, *Review certificate*, `Loading services`, `ack pending`), and the user guide names them the same way. An ellipsis appears only where text is actually cut short for lack of room (a name, an output line, an excerpt), in the search fields' placeholders the design shows (`Search dashboards…`), and as "and so on" inside example text (`e.g. AB:CD:…`).
+- **Marks in a fixed slot**: every palette row has one in the dot's place (a state dot, the several-objects stack, or a small muted Lucide icon); menu rows with actions keep a slot per action at their right (`ItemAction`), shown or not.
+
 ## Lints
 
 Every crate inherits `[workspace.lints]` from the root `Cargo.toml`: `clippy::pedantic`, plus restriction lints such as no `unwrap`/`expect`/`panic` outside tests and no `println!`. CI treats every warning as an error.

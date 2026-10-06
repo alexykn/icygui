@@ -193,12 +193,12 @@ impl DashboardView {
         Menu::new("selection-menu")
             .item(item(
                 "bulk-result",
-                "submit check result…",
+                "submit check result",
                 ObjectAction::SubmitCheckResult,
             ))
             .item(item(
                 "bulk-command",
-                "run command…",
+                "run command",
                 ObjectAction::RunCommand,
             ))
             .separator()

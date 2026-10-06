@@ -1,7 +1,7 @@
 //! The application menus (BG-05): on macOS the menu bar shows them, with
 //! the shortcuts bound to their actions (`cmd` there, `ctrl` elsewhere).
 //!
-//! - *icygui*: About icygui, Settings… (`⌘,`), Services, Hide icygui
+//! - *icygui*: About icygui, Settings (`⌘,`), Services, Hide icygui
 //!   (`⌘H`), Hide Others (`⌥⌘H`), Show All, Quit icygui (`⌘Q`, which
 //!   quits even when the app keeps running in the tray);
 //! - *Edit*: Undo, Redo, Cut, Copy, Paste, Select All for the text fields
@@ -55,7 +55,7 @@ pub(crate) fn menus(macos: bool) -> Vec<Menu> {
     let mut app = vec![
         MenuItem::action(format!("About {name}"), ShowAbout),
         MenuItem::separator(),
-        MenuItem::action("Settings…", OpenSettings),
+        MenuItem::action("Settings", OpenSettings),
         MenuItem::separator(),
     ];
     if macos {
@@ -182,7 +182,7 @@ mod tests {
             [
                 "About icygui",
                 "—",
-                "Settings…",
+                "Settings",
                 "—",
                 "Services ▸",
                 "—",
@@ -200,7 +200,7 @@ mod tests {
         // Elsewhere without the system's own items.
         assert_eq!(
             names(&menus(false)[0]),
-            ["About icygui", "—", "Settings…", "—", "Quit icygui"]
+            ["About icygui", "—", "Settings", "—", "Quit icygui"]
         );
     }
 

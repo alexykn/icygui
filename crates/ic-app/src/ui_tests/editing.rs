@@ -146,19 +146,16 @@ fn the_palette_finds_and_runs_by_keyboard() {
         app.keys(cx, "tab");
         assert_eq!(app.state.read(cx).active_tab(), Some(&replication()));
 
-        // A verb acts on the objects it names.
+        // A verb acts on the objects it names; the one on screen (the
+        // tab) first, as its key would.
         app.keys(cx, "ctrl-k");
         type_query(app, cx, "ack db-prod");
         let items = palette(app, cx).read(cx).items().to_vec();
-        let ack = items
-            .iter()
-            .position(|item| {
-                item.command == PaletteCommand::Act(ObjectAction::Acknowledge, vec![replication()])
-            })
-            .unwrap();
-        for _ in 0..ack {
-            app.keys(cx, "down");
-        }
+        assert_eq!(items[0].label, "Acknowledge · postgres-replication");
+        assert_eq!(
+            items[0].command,
+            PaletteCommand::Act(ObjectAction::Acknowledge, Vec::new())
+        );
         app.keys(cx, "enter");
         let request = app.state.read(cx).last_request().unwrap().clone();
         assert_eq!(request.action, ObjectAction::Acknowledge);
@@ -190,8 +187,19 @@ fn the_palette_acts_on_the_cursors_object_and_switches_views() {
         let cursor = app.cursor(cx).unwrap().1;
         app.keys(cx, "ctrl-k");
         let items = palette(app, cx).read(cx).items().to_vec();
-        assert_eq!(items[0].label, "Acknowledge");
-        assert_eq!(items[0].detail, cursor.to_string());
+        let ObjectKey::Service { key } = &cursor else {
+            panic!("{cursor}");
+        };
+        let name = app.state.read(cx).snapshot().services[key]
+            .display_name
+            .clone();
+        assert_eq!(items[0].label, format!("Acknowledge · {name}"));
+        assert!(
+            items[0].detail.starts_with(&format!("on {}", key.host)),
+            "{}",
+            items[0].detail
+        );
+        assert_eq!(items[0].key_hint, Some("a"));
         type_query(app, cx, "check now");
         app.keys(cx, "enter");
         let request = app.state.read(cx).last_request().unwrap().clone();

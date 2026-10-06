@@ -1,4 +1,4 @@
-//! The settings dialog (`secondary-,`, the macOS app menu's *Settings…*,
+//! The settings dialog (`secondary-,`, the macOS app menu's *Settings*,
 //! the palette; PLAN.md §2.8), a modal with two tabs:
 //!
 //! - *general*: keep running in the tray when the window closes (BG-01,
@@ -142,7 +142,7 @@ impl Focusable for SettingsDialog {
 
 impl SettingsDialog {
     /// The dialog on `tab`. With `custom`, that group or dashboard starts
-    /// with a custom rule of its own (the sidebar's *custom rule…*).
+    /// with a custom rule of its own (the sidebar's *custom rule*).
     pub(crate) fn new(
         state: Entity<AppState>,
         tab: SettingsTab,
@@ -619,7 +619,7 @@ impl SettingsDialog {
     /// The tray and launch at login (BG-01, BG-03).
     fn render_background(&self, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
         let tray_hint = match self.tray_host {
-            None => "Checking whether this desktop shows tray icons…",
+            None => "Checking whether this desktop shows tray icons",
             Some(true) => {
                 "The tray icon shows the worst unhandled state; its menu opens the window, \
                  pauses notifications, switches environments and quits."
@@ -730,7 +730,7 @@ impl SettingsDialog {
                 .text_color(colors.text_faint)
                 .child(format!("icygui {}", env!("CARGO_PKG_VERSION")))
                 .child(
-                    Link::new("settings-about", "about…")
+                    Link::new("settings-about", "about")
                         .quiet()
                         .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
                             cx.emit(SettingsEvent::About);

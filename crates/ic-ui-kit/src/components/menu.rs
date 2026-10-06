@@ -12,7 +12,7 @@ use gpui::{
     Window, anchored, deferred, div, point, prelude::FluentBuilder as _, px, relative,
 };
 
-use crate::components::{IconButton, KeyHint, Tooltip};
+use crate::components::{KeyHint, Tooltip};
 use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 
@@ -36,26 +36,32 @@ const CHECK_SLOT: f32 = 14.;
 /// Space between the check mark column and the label.
 const ITEM_GAP: f32 = 8.;
 
-/// The group a menu item's hover reveals its [`ItemAction`] in.
+/// The group a menu item's hover reveals its [`ItemAction`]s in.
 const ITEM_GROUP: &str = "menu-item";
 
+/// The width of an [`ItemAction`]'s slot.
+const ACTION_SLOT: f32 = 22.;
+
 /// A small icon button of a [`MenuItem`] for a second command on the same
-/// row (mute this environment, where clicking the row switches to it). It
-/// sits in the item's count slot and shows while the pointer is on the row
-/// (the count hides meanwhile), or always while [`ItemAction::shown`],
-/// like the sidebar rows' `···`: nothing moves either way.
+/// row (this environment's settings, where clicking the row switches to
+/// it). Each sits in a slot of its own at the item's right end, so nothing
+/// moves when it shows: [`ItemAction::always`] ones are always there,
+/// dimmed, brighter while the pointer is on the row or the row is
+/// selected; the others show while the pointer is on the row, or while
+/// [`ItemAction::shown`], like the sidebar rows' `···`.
 #[must_use = "an item action does nothing unless given to a menu item"]
 pub struct ItemAction {
     id: ElementId,
     icon: IconName,
     tooltip: Option<Tooltip>,
+    always: bool,
     shown: bool,
     on_click: ClickHandler,
 }
 
 impl ItemAction {
-    /// An action showing `icon`, running `handler` when clicked (the item's
-    /// own click doesn't run then).
+    /// An action showing `icon` on hover, running `handler` when clicked
+    /// (the item's own click doesn't run then).
     pub fn new(
         id: impl Into<ElementId>,
         icon: IconName,
@@ -65,6 +71,7 @@ impl ItemAction {
             id: id.into(),
             icon,
             tooltip: None,
+            always: false,
             shown: false,
             on_click: Box::new(handler),
         }
@@ -76,11 +83,62 @@ impl ItemAction {
         self
     }
 
-    /// Shows the button (selected) without hovering the row: what it opened
-    /// is showing.
+    /// Always shows it, dimmed, brighter on the row's hover or selection.
+    pub fn always(mut self) -> Self {
+        self.always = true;
+        self
+    }
+
+    /// Shows it highlighted (what it opened is showing), also without
+    /// hovering the row.
     pub fn shown(mut self, shown: bool) -> Self {
         self.shown = shown;
         self
+    }
+
+    /// The action's slot: the icon button, dimmed or hidden until the row
+    /// is hovered (see the type's notes). `selected`: the row is.
+    fn render(self, selected: bool, cx: &App) -> gpui::Stateful<gpui::Div> {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let handler = self.on_click;
+        let resting = if selected || self.shown {
+            colors.text_muted
+        } else {
+            colors.text_faint
+        };
+        let reveal = self.always || self.shown;
+        div()
+            .id(self.id)
+            .role(Role::Button)
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(ACTION_SLOT - 2.))
+            .rounded(theme.metrics.small_radius)
+            .text_color(resting)
+            .when(self.shown, |button| button.bg(colors.element_hover))
+            .when(!reveal, gpui::Styled::invisible)
+            // One group-hover style per element: a later one replaces it.
+            .group_hover(ITEM_GROUP, move |style| {
+                style.visible().text_color(colors.text_muted)
+            })
+            .hover(|style| {
+                style
+                    .bg(colors.element_hover)
+                    .text_color(colors.text_strong)
+            })
+            .cursor_pointer()
+            .child(Icon::new(self.icon).size(px(12.)))
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .when_some(self.tooltip, |button, tooltip| {
+                button.tooltip(tooltip.builder())
+            })
+            .on_click(move |event, window, cx| {
+                cx.stop_propagation();
+                handler(event, window, cx);
+            })
     }
 }
 
@@ -89,6 +147,7 @@ impl fmt::Debug for ItemAction {
         f.debug_struct("ItemAction")
             .field("id", &self.id)
             .field("icon", &self.icon)
+            .field("always", &self.always)
             .field("shown", &self.shown)
             .finish_non_exhaustive()
     }
@@ -97,24 +156,25 @@ impl fmt::Debug for ItemAction {
 /// One entry of a [`Menu`].
 #[derive(IntoElement)]
 #[must_use = "a menu item does nothing unless rendered"]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent looks of one item"
+)]
 pub struct MenuItem {
     id: ElementId,
     label: SharedString,
     checked: Option<bool>,
     key: Option<SharedString>,
-    trailing_icon: Option<IconName>,
     dot: Option<Hsla>,
     detail: Option<(SharedString, Option<Hsla>)>,
-    count: Option<usize>,
-    action: Option<ItemAction>,
+    actions: Vec<ItemAction>,
+    selected: bool,
+    interactive: bool,
     highlighted: bool,
     disabled: bool,
     tooltip: Option<Tooltip>,
     on_click: Option<ClickHandler>,
 }
-
-/// The width kept for a [`MenuItem::count`] (`99+` at the label size).
-const COUNT_SLOT: f32 = 22.;
 
 impl MenuItem {
     /// An item labelled `label`.
@@ -124,11 +184,11 @@ impl MenuItem {
             label: label.into(),
             checked: None,
             key: None,
-            trailing_icon: None,
             dot: None,
             detail: None,
-            count: None,
-            action: None,
+            actions: Vec::new(),
+            selected: false,
+            interactive: true,
             highlighted: false,
             disabled: false,
             tooltip: None,
@@ -156,18 +216,25 @@ impl MenuItem {
         self
     }
 
-    /// Shows `count` at the right end in the accent colour (unread
-    /// notifications, like the footer's badge), nothing for 0. The slot is
-    /// there for every count, so the label and detail never move.
-    pub fn count(mut self, count: usize) -> Self {
-        self.count = Some(count);
+    /// Adds a second command at the right end, in a slot of its own (see
+    /// [`ItemAction`]); several follow each other in order.
+    pub fn action(mut self, action: ItemAction) -> Self {
+        self.actions.push(action);
         self
     }
 
-    /// Adds a second command in the count slot, shown on hover (see
-    /// [`ItemAction`]); the slot is kept even without a count.
-    pub fn action(mut self, action: ItemAction) -> Self {
-        self.action = Some(action);
+    /// Marks the item as the current one with the selected-row background
+    /// of the lists (the environment on screen, the node connected to):
+    /// no check mark column, so every row keeps its alignment.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    /// `false`: a row that only shows something (a cluster node): no
+    /// hover, no pointer, no click; its colours stay as they are.
+    pub fn interactive(mut self, interactive: bool) -> Self {
+        self.interactive = interactive;
         self
     }
 
@@ -198,14 +265,6 @@ impl MenuItem {
         self
     }
 
-    /// Shows a small faint icon after the label, as the sidebar's rows
-    /// show a muted dashboard's bell-off (`None`: none). It takes no room
-    /// from the label, so the label never moves when it comes or goes.
-    pub fn trailing_icon(mut self, icon: Option<IconName>) -> Self {
-        self.trailing_icon = icon;
-        self
-    }
-
     /// Greys the item out and ignores clicks.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
@@ -232,6 +291,12 @@ impl MenuItem {
     pub fn is_checked(&self) -> bool {
         self.checked == Some(true)
     }
+
+    /// Whether the item is marked as the current one.
+    #[must_use]
+    pub fn is_selected(&self) -> bool {
+        self.selected
+    }
 }
 
 impl fmt::Debug for MenuItem {
@@ -240,6 +305,7 @@ impl fmt::Debug for MenuItem {
             .field("id", &self.id)
             .field("label", &self.label)
             .field("checked", &self.checked)
+            .field("selected", &self.selected)
             .field("disabled", &self.disabled)
             .finish_non_exhaustive()
     }
@@ -250,10 +316,18 @@ impl RenderOnce for MenuItem {
         let theme = cx.theme();
         let colors = theme.colors;
         let enabled = !self.disabled;
+        let clickable = enabled && self.interactive;
+        let selected = self.selected;
+        let actions: Vec<_> = self
+            .actions
+            .into_iter()
+            .map(|action| action.render(selected, cx))
+            .collect();
         div()
             .id(self.id)
             .role(Role::MenuItem)
             .aria_label(self.label.clone())
+            .group(ITEM_GROUP)
             .flex()
             .flex_none()
             .items_center()
@@ -269,6 +343,7 @@ impl RenderOnce for MenuItem {
             } else {
                 colors.text
             })
+            .when(selected, |item| item.bg(colors.row_selected))
             .whitespace_nowrap()
             .when_some(self.checked, |item, checked| {
                 item.child(
@@ -310,97 +385,33 @@ impl RenderOnce for MenuItem {
                     ),
                 None => item.child(div().flex_1().child(self.label)),
             })
-            .when_some(self.trailing_icon, |item, icon| {
-                item.child(Icon::new(icon).size(px(11.)).color(colors.text_faint))
-            })
-            .when(self.count.is_some() || self.action.is_some(), |item| {
-                item.group(ITEM_GROUP).child(count_slot(
-                    self.count.unwrap_or_default(),
-                    self.action,
-                    cx,
-                ))
+            .when(!actions.is_empty(), |item| {
+                item.child(div().flex().flex_none().gap(px(2.)).children(actions))
             })
             .when_some(self.key, |item, key| item.child(KeyHint::new(key)))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-            .when(enabled, |item| {
+            .when(clickable, |item| {
                 item.cursor_pointer()
-                    .hover(|style| {
-                        style
-                            .bg(colors.element_hover)
-                            .text_color(colors.text_strong)
+                    .hover(move |style| {
+                        let style = style.text_color(colors.text_strong);
+                        if selected {
+                            style
+                        } else {
+                            style.bg(colors.element_hover)
+                        }
                     })
                     .active(|style| style.bg(colors.element_active))
             })
             .when_some(self.tooltip, |item, tooltip| {
                 item.tooltip(tooltip.builder())
             })
-            .when_some(self.on_click.filter(|_| enabled), |item, handler| {
+            .when_some(self.on_click.filter(|_| clickable), |item, handler| {
                 item.on_click(move |event, window, cx| {
                     cx.stop_propagation();
                     handler(event, window, cx);
                 })
             })
     }
-}
-
-/// A [`MenuItem`]'s count slot: the count (nothing for 0), and the item's
-/// action over it, shown on hover or while [`ItemAction::shown`] (the
-/// count hides meanwhile).
-fn count_slot(count: usize, action: Option<ItemAction>, cx: &App) -> gpui::Div {
-    let theme = cx.theme();
-    let colors = theme.colors;
-    let shown = action.as_ref().is_some_and(|action| action.shown);
-    let slot = div()
-        .relative()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_end()
-        .w(px(COUNT_SLOT))
-        .h_full()
-        .text_size(theme.text.label)
-        .text_color(colors.accent)
-        .child(
-            div()
-                .when(shown, gpui::Styled::invisible)
-                .when(action.is_some(), |count| {
-                    count.group_hover(ITEM_GROUP, gpui::Styled::invisible)
-                })
-                .children(match count {
-                    0 => None,
-                    1..=99 => Some(count.to_string()),
-                    _ => Some("99+".to_owned()),
-                }),
-        );
-    let Some(action) = action else {
-        return slot;
-    };
-    let handler = action.on_click;
-    let button = IconButton::new(action.id, action.icon)
-        .size(px(COUNT_SLOT - 2.))
-        .icon_size(px(12.))
-        .color(colors.text_muted)
-        .selected(action.shown)
-        .on_click(move |event, window, cx| handler(event, window, cx));
-    let button = match action.tooltip {
-        Some(tooltip) => button.tooltip(tooltip),
-        None => button,
-    };
-    slot.child(
-        div()
-            .absolute()
-            .right_0()
-            .top_0()
-            .h_full()
-            .flex()
-            .items_center()
-            .when(!action.shown, |reveal| {
-                reveal
-                    .invisible()
-                    .group_hover(ITEM_GROUP, gpui::Styled::visible)
-            })
-            .child(button),
-    )
 }
 
 enum Entry {
@@ -868,12 +879,12 @@ mod tests {
 
     #[test]
     fn items_record_check_and_disabled_state() {
-        let item = MenuItem::new("edit", "edit dashboard…")
+        let item = MenuItem::new("edit", "edit dashboard")
             .disabled(true)
             .on_click(|_, _, _| {});
         assert!(item.disabled);
         assert!(!item.is_checked());
-        assert_eq!(item.label(), "edit dashboard…");
+        assert_eq!(item.label(), "edit dashboard");
         assert!(MenuItem::new("on", "on").checked(true).is_checked());
     }
 

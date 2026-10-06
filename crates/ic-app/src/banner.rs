@@ -164,11 +164,8 @@ pub(crate) fn connection_body(
     };
     let mut buttons = div().flex().flex_wrap().justify_center().gap(px(8.));
     for (index, action) in notice.actions.iter().enumerate() {
-        let mut button = Button::new(
-            action_id("body", *action),
-            action.label().trim_end_matches('…'),
-        )
-        .on_click(on_action(state, *action));
+        let mut button = Button::new(action_id("body", *action), action.label())
+            .on_click(on_action(state, *action));
         if index == 0 {
             button = button.primary();
         }
@@ -188,16 +185,15 @@ pub(crate) fn connection_body(
 pub(crate) fn loading_body(state: &AppState, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let progress = state.connection().progress();
-    let text = progress.as_ref().map_or_else(
-        || "Connecting…".to_owned(),
-        |progress| progress.text.clone(),
-    );
+    let text = progress
+        .as_ref()
+        .map_or_else(|| "Connecting".to_owned(), |progress| progress.text.clone());
     let fraction = progress.map_or(0., |progress| progress.fraction);
     let name = state
         .environment()
         .map_or_else(String::new, |environment| environment.name.clone());
     EmptyState::new(if name.is_empty() {
-        "Loading…".to_owned()
+        "Loading".to_owned()
     } else {
         format!("Loading {name}")
     })

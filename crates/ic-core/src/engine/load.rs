@@ -133,6 +133,9 @@ impl LoadTask {
 
     /// Tier 1 apart from the hosts, one query after the other.
     async fn overview(&self, done: &AtomicUsize) -> Result<Overview, Failure> {
+        let cluster = Box::pin(self.counted(done, optional("endpoints", self.client.cluster())))
+            .await?
+            .unwrap_or_default();
         Ok(Overview {
             status: self
                 .counted(done, optional("status", self.client.status()))
@@ -149,10 +152,8 @@ impl LoadTask {
             dependencies: self
                 .counted(done, permitted("dependencies", self.client.dependencies()))
                 .await?,
-            endpoints: Box::pin(
-                self.counted(done, permitted("endpoints", self.client.endpoints())),
-            )
-            .await?,
+            endpoints: cluster.endpoints,
+            zones: cluster.zones,
             comments: self
                 .counted(done, permitted("comments", self.client.comments()))
                 .await?,

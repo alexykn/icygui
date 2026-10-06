@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::actions::{self, Batch, TargetKind};
-use crate::detail::{Detail, Fetched, FetchedNotifications};
+use crate::detail::{Cluster, Detail, Fetched, FetchedNotifications};
 use crate::error::ApiError;
 use crate::events::EventStream;
 use crate::info::ApiInfo;
@@ -416,9 +416,20 @@ impl Client {
     ///
     /// As [`Client::hosts`].
     pub async fn endpoints(&self) -> Result<Vec<Endpoint>, ApiError> {
+        Ok(self.cluster().await?.endpoints)
+    }
+
+    /// [`Client::endpoints`] and the zone tree they come with (each zone's
+    /// endpoints, parent and whether it is global; empty without
+    /// permission to query zones): the same three requests.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::hosts`].
+    pub async fn cluster(&self) -> Result<Cluster, ApiError> {
         let (endpoints, zones, application) = futures::join!(
             self.query::<EndpointAttrs>("endpoints", None, wire::ENDPOINT_ATTRS),
-            self.query::<ZoneAttrs>("zones", None, wire::ZONE_ATTRS),
+            self.query::<ZoneAttrs>("zones", None, wire::ZONE_TREE_ATTRS),
             self.status_entry("IcingaApplication"),
         );
         let endpoints = endpoints?;
@@ -437,18 +448,40 @@ impl Client {
                 None
             }
         };
-        let members: Vec<(String, Vec<String>)> = zones
-            .into_iter()
-            .filter_map(|zone| Some((zone.name.0, zone.attrs?.endpoints.0)))
-            .collect();
+        let zones: Vec<Zone> = map_results(zones, "zone", ZoneAttrs::into_model);
         let zone_of = |endpoint: &str| {
-            members
+            zones
                 .iter()
-                .find(|(_, endpoints)| endpoints.iter().any(|name| name == endpoint))
-                .map(|(zone, _)| zone.clone())
+                .find(|zone| zone.endpoints.iter().any(|name| name == endpoint))
+                .map(|zone| zone.name.clone())
         };
-        Ok(map_results(endpoints, "endpoint", |attrs, name| {
+        let endpoints = map_results(endpoints, "endpoint", |attrs, name| {
             attrs.into_model(name, zone_of, local.as_deref())
+        });
+        Ok(Cluster { endpoints, zones })
+    }
+
+    /// Whether each of the endpoints `names` is connected to the node the
+    /// client talks to (Icinga's `connected`; the node's own endpoint says
+    /// `false`), in one small request per [`NAMES_PER_REQUEST`] names:
+    /// keeps a cluster's node list current between loads. Names Icinga
+    /// doesn't know are left out.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::hosts`].
+    pub async fn endpoint_states(&self, names: &[String]) -> Result<Vec<(String, bool)>, ApiError> {
+        let answer = self
+            .query_names::<EndpointAttrs>(
+                "endpoints",
+                "endpoints",
+                names.to_vec(),
+                wire::ENDPOINT_STATE_ATTRS,
+                Split::Never,
+            )
+            .await?;
+        Ok(map_results(answer.found, "endpoint", |attrs, name| {
+            attrs.into_state(name)
         }))
     }
 

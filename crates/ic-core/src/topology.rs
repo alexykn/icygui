@@ -177,6 +177,140 @@ pub(crate) fn walk_order(urls: usize, first: Option<usize>) -> Vec<usize> {
         .collect()
 }
 
+/// The most nodes [`cluster_nodes`] lists: the masters and satellites of
+/// any real cluster, and one request's worth of names when their states
+/// are asked for ([`ic_api::NAMES_PER_REQUEST`]).
+pub(crate) const MAX_CLUSTER_NODES: usize = ic_api::NAMES_PER_REQUEST;
+
+/// A master or satellite of the cluster, for the switcher's node list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterNode {
+    /// The endpoint's name (`master-01`).
+    pub name: String,
+    /// Its zone (`master`, `ams`).
+    pub zone: String,
+    /// Whether it's up, as far as the connected node can tell.
+    pub state: NodeState,
+}
+
+/// A cluster node's state as the node icygui is connected to sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NodeState {
+    /// The node icygui is connected to, or one connected to it.
+    Connected,
+    /// A node the connected node talks to directly (its own zone, the
+    /// parent zone or a child zone) that isn't connected.
+    Disconnected,
+    /// A node further away (a satellite's own satellites): the connected
+    /// node has no connection of its own to it, so its state isn't known
+    /// here.
+    Unknown,
+}
+
+/// The masters and satellites of the cluster, top-level zone first, then
+/// each zone's children in name order (depth first), each zone's endpoints
+/// in its own order; at most [`MAX_CLUSTER_NODES`].
+///
+/// Agents are left out: by Icinga's convention (the node wizard's default)
+/// an agent's zone is a leaf named like its only endpoint. A zone with
+/// child zones, several endpoints or a name of its own is a master's or a
+/// satellite's; so is the zone of the connected node and every zone above
+/// it. Without the zones (no `objects/query/Zone`) the connected node is
+/// all there is to list.
+#[must_use]
+pub(crate) fn cluster_nodes(
+    zones: &[Zone],
+    endpoints: &[ic_model::Endpoint],
+    connected: Option<&ConnectedNode>,
+) -> Vec<ClusterNode> {
+    let local = connected.map(|node| node.name.as_str());
+    let local_zone = connected.and_then(|node| node.zone.as_deref());
+    let zones: Vec<&Zone> = zones.iter().filter(|zone| !zone.global).collect();
+    let zone_named = |name: &str| zones.iter().copied().find(|zone| zone.name == name);
+    let children = |name: &str| -> Vec<&Zone> {
+        let mut children: Vec<&Zone> = zones
+            .iter()
+            .copied()
+            .filter(|zone| zone.parent.as_deref() == Some(name))
+            .collect();
+        children.sort_by(|a, b| a.name.cmp(&b.name));
+        children
+    };
+    // The connected node's zone and every zone above it.
+    let mut path: Vec<&str> = Vec::new();
+    let mut next = local_zone;
+    while let Some(name) = next {
+        if path.contains(&name) {
+            break;
+        }
+        path.push(name);
+        next = zone_named(name).and_then(|zone| zone.parent.as_deref());
+    }
+    let agent_like = |zone: &Zone| {
+        children(&zone.name).is_empty()
+            && zone.endpoints.len() == 1
+            && zone.endpoints[0] == zone.name
+            && !path.contains(&zone.name.as_str())
+    };
+    // Depth first from the top-level zones.
+    let mut order: Vec<&Zone> = Vec::new();
+    let mut stack: Vec<&Zone> = zones
+        .iter()
+        .copied()
+        .filter(|zone| zone.parent.is_none())
+        .collect();
+    stack.sort_by(|a, b| b.name.cmp(&a.name));
+    while let Some(zone) = stack.pop() {
+        if order.iter().any(|seen| seen.name == zone.name) {
+            continue;
+        }
+        order.push(zone);
+        stack.extend(children(&zone.name).into_iter().rev());
+    }
+    // A node's state is known for its own zone, the parent and the
+    // children.
+    let near = |zone: &Zone| match local_zone {
+        Some(local_zone) => {
+            zone.name == local_zone
+                || zone.parent.as_deref() == Some(local_zone)
+                || zone_named(local_zone).and_then(|own| own.parent.as_deref())
+                    == Some(zone.name.as_str())
+        }
+        None => false,
+    };
+    let mut nodes: Vec<ClusterNode> = Vec::new();
+    for zone in order.into_iter().filter(|zone| !agent_like(zone)) {
+        for name in &zone.endpoints {
+            let state = if Some(name.as_str()) == local {
+                NodeState::Connected
+            } else if !near(zone) {
+                NodeState::Unknown
+            } else if endpoints
+                .iter()
+                .any(|endpoint| endpoint.name == *name && endpoint.connected)
+            {
+                NodeState::Connected
+            } else {
+                NodeState::Disconnected
+            };
+            nodes.push(ClusterNode {
+                name: name.clone(),
+                zone: zone.name.clone(),
+                state,
+            });
+        }
+    }
+    if let (Some(node), true) = (connected, nodes.is_empty()) {
+        nodes.push(ClusterNode {
+            name: node.name.clone(),
+            zone: node.zone.clone().unwrap_or_default(),
+            state: NodeState::Connected,
+        });
+    }
+    nodes.truncate(MAX_CLUSTER_NODES);
+    nodes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +462,89 @@ mod tests {
         assert!(ams.same_data(&ams.clone()));
         assert!(!ams.same_data(&fra));
         assert!(!ClusterView::Full.same_data(&ams));
+    }
+
+    fn node(name: &str, zone: &str) -> ConnectedNode {
+        ConnectedNode {
+            url: format!("https://{name}:5665"),
+            url_index: 0,
+            name: name.to_owned(),
+            zone: Some(zone.to_owned()),
+            view: ClusterView::Full,
+            passed_over: Vec::new(),
+        }
+    }
+
+    fn endpoint(name: &str, connected: bool) -> ic_model::Endpoint {
+        ic_model::Endpoint {
+            name: name.to_owned(),
+            zone: String::new(),
+            connected,
+        }
+    }
+
+    #[test]
+    fn masters_and_satellites_are_listed_agents_left_out() {
+        let zones = vec![
+            zone("master", None, &["master-01", "master-02"], false),
+            zone("ams", Some("master"), &["sat-ams-01", "sat-ams-02"], false),
+            zone("fra", Some("master"), &["sat-fra-01"], false),
+            zone(
+                "agent-01.example.com",
+                Some("ams"),
+                &["agent-01.example.com"],
+                false,
+            ),
+            zone("edge", Some("ams"), &["sat-edge-01"], false),
+            zone("global-templates", None, &[], true),
+        ];
+        let endpoints = vec![
+            endpoint("master-01", false),
+            endpoint("master-02", true),
+            endpoint("sat-ams-01", true),
+            endpoint("sat-ams-02", false),
+            endpoint("sat-fra-01", true),
+            endpoint("sat-edge-01", true),
+        ];
+        let nodes = cluster_nodes(&zones, &endpoints, Some(&node("master-01", "master")));
+        let listed: Vec<(&str, &str, NodeState)> = nodes
+            .iter()
+            .map(|node| (node.name.as_str(), node.zone.as_str(), node.state))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("master-01", "master", NodeState::Connected),
+                ("master-02", "master", NodeState::Connected),
+                ("sat-ams-01", "ams", NodeState::Connected),
+                ("sat-ams-02", "ams", NodeState::Disconnected),
+                // A satellite's satellite: the master has no connection of
+                // its own to it.
+                ("sat-edge-01", "edge", NodeState::Unknown),
+                ("sat-fra-01", "fra", NodeState::Connected),
+            ]
+        );
+        // Seen from a satellite: its parent zone and its children are
+        // near, the sibling satellites aren't.
+        let nodes = cluster_nodes(&zones, &endpoints, Some(&node("sat-ams-01", "ams")));
+        let state = |name: &str| nodes.iter().find(|node| node.name == name).unwrap().state;
+        assert_eq!(state("sat-ams-01"), NodeState::Connected);
+        assert_eq!(state("master-01"), NodeState::Disconnected);
+        assert_eq!(state("sat-edge-01"), NodeState::Connected);
+        assert_eq!(state("sat-fra-01"), NodeState::Unknown);
+    }
+
+    #[test]
+    fn without_the_zones_the_connected_node_is_listed() {
+        let nodes = cluster_nodes(&[], &[], Some(&node("master-01", "master")));
+        assert_eq!(
+            nodes,
+            [ClusterNode {
+                name: "master-01".to_owned(),
+                zone: "master".to_owned(),
+                state: NodeState::Connected,
+            }]
+        );
+        assert!(cluster_nodes(&[], &[], None).is_empty());
     }
 }

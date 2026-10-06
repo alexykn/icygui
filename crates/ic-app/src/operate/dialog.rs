@@ -166,7 +166,7 @@ impl DialogKind {
             Self::Downtime => "schedule downtime",
             Self::Comment => "add comment",
             Self::CheckResult => "submit result",
-            Self::Command => "run…",
+            Self::Command => "run",
             Self::Check => "check now",
         }
     }

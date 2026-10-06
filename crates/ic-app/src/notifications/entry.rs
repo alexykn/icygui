@@ -523,18 +523,6 @@ pub(crate) fn silent_hint(silence: &str) -> &'static str {
     }
 }
 
-/// The centre's footer: where the history is kept, and for how long.
-pub(crate) fn kept_text(retention_hours: u32) -> String {
-    let span = if retention_hours.is_multiple_of(24) && retention_hours >= 48 {
-        format!("{} days", retention_hours / 24)
-    } else if retention_hours == 1 {
-        "1 hour".to_owned()
-    } else {
-        format!("{retention_hours} hours")
-    };
-    format!("kept {span} on this computer")
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::FixedOffset;
@@ -808,15 +796,12 @@ mod tests {
     }
 
     #[test]
-    fn the_heading_badge_and_footer_say_how_much_and_how_long() {
+    fn the_heading_and_badge_say_how_much() {
         assert_eq!(summary(0, 0), "");
         assert_eq!(summary(0, 3), "all read");
         assert_eq!(summary(2, 3), "2 unread");
         assert_eq!(badge(0), None);
         assert_eq!(badge(7).as_deref(), Some("7"));
         assert_eq!(badge(250).as_deref(), Some("99+"));
-        assert_eq!(kept_text(48), "kept 2 days on this computer");
-        assert_eq!(kept_text(36), "kept 36 hours on this computer");
-        assert_eq!(kept_text(1), "kept 1 hour on this computer");
     }
 }

@@ -715,7 +715,7 @@ impl EnvironmentEditor {
         }
     }
 
-    /// A path field with a "browse…" link.
+    /// A path field with a "browse" link.
     fn path_field(
         &self,
         label: &'static str,
@@ -740,7 +740,7 @@ impl EnvironmentEditor {
                             .invalid(error.is_some())
                     })),
             )
-            .child(Button::new(id, "browse…").on_click(
+            .child(Button::new(id, "browse").on_click(
                 cx.listener(move |_, _: &ClickEvent, window, cx| Self::browse(field, window, cx)),
             ));
         let field_element = Field::new(label).control(control).error(error);
@@ -1092,7 +1092,7 @@ impl EnvironmentEditor {
                             if show_tls {
                                 "hide"
                             } else {
-                                "CA, pinned certificate, server name…"
+                                "CA, pinned certificate, server name"
                             },
                         )
                         .quiet()
@@ -1120,7 +1120,7 @@ impl EnvironmentEditor {
         let button = Button::new(
             "environment-test",
             if running {
-                "testing…"
+                "testing"
             } else if several {
                 "test all URLs"
             } else {
@@ -1388,7 +1388,7 @@ impl EnvironmentEditor {
         if let Some(base) = &self.form.base {
             let id = base.id.clone();
             dialog = dialog.footer_start(
-                Link::new("environment-delete", "delete environment…")
+                Link::new("environment-delete", "delete environment")
                     .quiet()
                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                         cx.emit(EnvironmentEditorEvent::Delete(id.clone()));
@@ -1405,7 +1405,7 @@ impl EnvironmentEditor {
                     })),
             )
             .action(
-                Button::new("environment-save", if saving { "saving…" } else { "save" })
+                Button::new("environment-save", if saving { "saving" } else { "save" })
                     .primary()
                     .disabled(saving)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save(cx))),
@@ -1460,7 +1460,7 @@ impl EnvironmentEditor {
                             .child(
                                 Button::new(
                                     "onboarding-connect",
-                                    if saving { "connecting…" } else { "connect" },
+                                    if saving { "connecting" } else { "connect" },
                                 )
                                 .primary()
                                 .disabled(saving)
@@ -1621,7 +1621,7 @@ fn node_line(report: &ConnectionReport) -> String {
 fn url_status(test: &TestState, theme: &Theme) -> Option<(String, Hsla)> {
     Some(match test {
         TestState::Idle => return None,
-        TestState::Running => ("testing…".to_owned(), theme.colors.text_faint),
+        TestState::Running => ("testing".to_owned(), theme.colors.text_faint),
         TestState::Done(result) => match result.as_ref() {
             Ok(report) => {
                 let node = &report.node;

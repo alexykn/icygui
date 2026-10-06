@@ -677,7 +677,7 @@ impl DashboardView {
             if state.connection().is_starting() {
                 return banner::loading_body(state, cx);
             }
-            return note(format!("{} is being evaluated…", dashboard.name), theme);
+            return note(format!("{} is being evaluated", dashboard.name), theme);
         };
         if let Some(error) = &result.error {
             return EmptyState::new("This dashboard's filter doesn't work")

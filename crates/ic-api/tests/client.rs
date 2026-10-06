@@ -708,6 +708,74 @@ async fn endpoints_without_zone_permission_still_load() {
     assert_eq!(endpoints[0].zone, "master");
 }
 
+#[tokio::test]
+async fn the_cluster_comes_with_its_zone_tree() {
+    let pki = Pki::new();
+    let server = server_with(
+        pki.issue(SERVER_NAME, &[SERVER_NAME]),
+        |request| match request.path.as_str() {
+            "/v1/objects/endpoints" => ok_json(&json!({ "results": [
+                { "name": "master-01", "attrs": { "connected": false, "zone": "" } },
+                { "name": "sat-ams-01", "attrs": { "connected": true, "zone": "" } }
+            ]})),
+            "/v1/objects/zones" => ok_json(&json!({ "results": [
+                { "name": "master", "attrs": { "endpoints": ["master-01"], "parent": "", "global": false } },
+                { "name": "ams", "attrs": { "endpoints": ["sat-ams-01"], "parent": "master", "global": false } },
+                { "name": "global-templates", "attrs": { "endpoints": null, "parent": "", "global": true } }
+            ]})),
+            _ => error_json(404, "nope"),
+        },
+    )
+    .await;
+    let cluster = client(&server, ca_trust(&pki)).cluster().await.unwrap();
+    assert_eq!(cluster.endpoints[1].zone, "ams");
+    assert_eq!(cluster.zones.len(), 3);
+    assert_eq!(cluster.zones[1].parent.as_deref(), Some("master"));
+    assert!(cluster.zones[2].global);
+    let zones = server
+        .requests()
+        .into_iter()
+        .find(|request| request.path == "/v1/objects/zones")
+        .unwrap();
+    assert_eq!(
+        zones.json()["attrs"],
+        json!(["endpoints", "global", "parent"])
+    );
+}
+
+#[tokio::test]
+async fn endpoint_states_are_asked_for_by_name() {
+    let pki = Pki::new();
+    let server = server_with(
+        pki.issue(SERVER_NAME, &[SERVER_NAME]),
+        |request| match request.path.as_str() {
+            "/v1/objects/endpoints" => ok_json(&json!({ "results": [
+                { "name": "master-02", "attrs": { "connected": true } },
+                { "name": "sat-ams-01", "attrs": { "connected": false } }
+            ]})),
+            _ => error_json(404, "nope"),
+        },
+    )
+    .await;
+    let names = vec!["master-02".to_owned(), "sat-ams-01".to_owned()];
+    let states = client(&server, ca_trust(&pki))
+        .endpoint_states(&names)
+        .await
+        .unwrap();
+    assert_eq!(
+        states,
+        [
+            ("master-02".to_owned(), true),
+            ("sat-ams-01".to_owned(), false)
+        ]
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one small request");
+    let body = requests[0].json();
+    assert_eq!(body["endpoints"], json!(names));
+    assert_eq!(body["attrs"], json!(["connected"]));
+}
+
 /// Answers name-list queries like Icinga: 404 if any name is unknown.
 fn name_list_handler(known: &'static [&'static str]) -> impl Fn(&support::Recorded) -> Reply {
     move |request| {

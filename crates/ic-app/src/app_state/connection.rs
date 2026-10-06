@@ -60,8 +60,8 @@ impl NoticeAction {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::RetryNow => "Retry now",
-            Self::ReviewCertificate => "Review certificate…",
-            Self::EditEnvironment => "Edit environment…",
+            Self::ReviewCertificate => "Review certificate",
+            Self::EditEnvironment => "Edit environment",
             Self::RestartEngine => "Restart",
         }
     }
@@ -105,7 +105,7 @@ pub(crate) enum NoticeKind {
 pub(crate) struct Progress {
     /// 0–1, for the progress bar.
     pub(crate) fraction: f32,
-    /// What is happening: `Loading services…`.
+    /// What is happening: `Loading services`.
     pub(crate) text: String,
 }
 
@@ -451,9 +451,9 @@ impl ConnectionStatus {
             ConnectionState::Connecting { attempt } => (
                 0.02,
                 if *attempt > 1 {
-                    format!("Connecting to {} (attempt {attempt})…", self.endpoint)
+                    format!("Connecting to {} (attempt {attempt})", self.endpoint)
                 } else {
-                    format!("Connecting to {}…", self.endpoint)
+                    format!("Connecting to {}", self.endpoint)
                 },
             ),
             ConnectionState::Loading { phase, done, total } => {
@@ -464,12 +464,12 @@ impl ConnectionStatus {
                 match phase {
                     LoadPhase::Hosts => (
                         0.05 + 0.3 * part(*done, *total),
-                        format!("Loading hosts and groups{}…", counted(*done, *total)),
+                        format!("Loading hosts and groups{}", counted(*done, *total)),
                     ),
-                    LoadPhase::Services => (0.4, "Loading services…".to_owned()),
+                    LoadPhase::Services => (0.4, "Loading services".to_owned()),
                     LoadPhase::Details => (
                         0.7 + 0.3 * part(*done, *total),
-                        format!("Loading problem details{}…", counted(*done, *total)),
+                        format!("Loading problem details{}", counted(*done, *total)),
                     ),
                 }
             }
@@ -479,7 +479,7 @@ impl ConnectionStatus {
     }
 
     /// The notice while reconnecting: when, why, *Retry now*, and
-    /// *Review certificate…* while another URL's certificate isn't trusted
+    /// *Review certificate* while another URL's certificate isn't trusted
     /// (`untrusted`).
     fn reconnecting_notice(
         &self,
@@ -492,7 +492,7 @@ impl ConnectionStatus {
         let endpoint = &self.endpoint;
         let wait = retry_at.remaining_from(now);
         let when = if wait.as_secs() == 0 {
-            "Retrying now…".to_owned()
+            "Retrying now".to_owned()
         } else {
             format!("Retrying in {}.", format_compact(wait))
         };
@@ -667,6 +667,29 @@ mod tests {
         }
     }
 
+    /// The footer names the node it is connected to: another master
+    /// after a failover (ENV-06).
+    #[test]
+    fn the_footer_follows_a_failover() {
+        let mut status = connected();
+        status.on_snapshot(&snapshot(Some(10.), None));
+        assert_eq!(status.label(at(12.)), "master-01 · 2s");
+        status.on_state(ConnectionState::Reconnecting {
+            error: "connection reset".to_owned(),
+            attempt: 1,
+            retry_at: at(16.),
+            untrusted: None,
+        });
+        assert_eq!(status.label(at(12.)), "master-01 · retry in 4s");
+        status.on_state(ConnectionState::Connected {
+            node: full_node("master-02"),
+            version: "r2.15.6-1".to_owned(),
+            since: at(17.),
+        });
+        status.on_snapshot(&snapshot(Some(18.), None));
+        assert_eq!(status.label(at(20.)), "master-02 · 2s");
+    }
+
     #[test]
     fn the_footer_shows_the_age_of_the_last_event() {
         let mut status = connected();
@@ -777,7 +800,7 @@ mod tests {
         assert_eq!(notice.actions, [NoticeAction::RetryNow]);
         assert_eq!(
             status.notice("prod-cluster", at(31.)).unwrap().title,
-            "Connection to master-01 lost. Retrying now…"
+            "Connection to master-01 lost. Retrying now"
         );
 
         let mut never = ConnectionStatus::starting("master-01", None);
@@ -933,7 +956,7 @@ mod tests {
             done: 0,
             total: None,
         });
-        assert_eq!(status.describe(at(0.)), "Loading services…");
+        assert_eq!(status.describe(at(0.)), "Loading services");
         assert_eq!(ConnectionStatus::idle().describe(at(0.)), "no environment");
     }
 
@@ -941,7 +964,7 @@ mod tests {
     fn loading_shows_progress() {
         let mut status = ConnectionStatus::starting("master-01", None);
         let connecting = status.progress().unwrap();
-        assert_eq!(connecting.text, "Connecting to master-01…");
+        assert_eq!(connecting.text, "Connecting to master-01");
         status.on_state(ConnectionState::Loading {
             phase: LoadPhase::Hosts,
             done: 4,
@@ -949,13 +972,13 @@ mod tests {
         });
         let hosts = status.progress().unwrap();
         assert!((hosts.fraction - 0.2).abs() < 1e-6);
-        assert_eq!(hosts.text, "Loading hosts and groups (4/8)…");
+        assert_eq!(hosts.text, "Loading hosts and groups (4/8)");
         status.on_state(ConnectionState::Loading {
             phase: LoadPhase::Services,
             done: 0,
             total: None,
         });
-        assert_eq!(status.progress().unwrap().text, "Loading services…");
+        assert_eq!(status.progress().unwrap().text, "Loading services");
         status.on_state(ConnectionState::Loading {
             phase: LoadPhase::Details,
             done: 500,
@@ -963,7 +986,7 @@ mod tests {
         });
         let details = status.progress().unwrap();
         assert!((details.fraction - 1.).abs() < 1e-6, "clamped");
-        assert_eq!(details.text, "Loading problem details (400/400)…");
+        assert_eq!(details.text, "Loading problem details (400/400)");
         assert!(status.is_starting());
         status.on_state(ConnectionState::Connected {
             node: full_node(""),

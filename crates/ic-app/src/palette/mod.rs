@@ -277,7 +277,18 @@ impl CommandPalette {
                                     .map_or(colors.text_muted, |dot| dot_color(dot, theme)),
                             ),
                         )
-                    }),
+                    })
+                    // A command without an object: its icon, muted.
+                    .when_some(
+                        item.icon.filter(|_| item.dot.is_none() && !item.several),
+                        |slot, icon| {
+                            slot.child(
+                                Icon::new(icon)
+                                    .size(px(COMMAND_MARK))
+                                    .color(colors.text_muted),
+                            )
+                        },
+                    ),
             )
             .child(
                 div()
@@ -477,3 +488,6 @@ fn dot_color(dot: Dot, theme: &Theme) -> gpui::Hsla {
 /// The several-objects mark's size: a stroked icon as heavy as the 7 px
 /// filled dots beside it, centred in their slot.
 const SEVERAL_MARK: f32 = 10.;
+/// A command's icon's size, centred in the dots' slot like the
+/// several-objects mark.
+const COMMAND_MARK: f32 = 11.;

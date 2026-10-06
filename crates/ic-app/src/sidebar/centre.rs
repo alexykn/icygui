@@ -3,11 +3,12 @@
 //!
 //! - The heading counts what is unread in the scope; *mark all read* marks
 //!   what the list shows (the scope, or what a label filter left).
-//! - With several environments a row of tabs in the host pane's style
-//!   picks the scope: one environment (the one on screen when the centre
-//!   opens) or *all*. A scope with unread notifications shows its name in
-//!   the accent colour (colour only: nothing moves); tabs that don't fit
-//!   go into a `···` menu, so the row never wraps.
+//! - With several environments a row of chips at the bottom picks the
+//!   scope: one environment (the one on screen when the centre opens) or
+//!   *all*; the one picked filled with the selected-row background, like
+//!   the lists' selection. A scope with unread notifications shows its
+//!   name in the accent colour (colour only: nothing moves); chips that
+//!   don't fit go into a `···` menu, so the row never wraps.
 //! - The pause row pauses every environment (A5: the pause is global), or
 //!   shows that the environment of the scope is muted on its own, with
 //!   *unmute* (every environment can be muted from the switcher).
@@ -18,8 +19,7 @@
 //!   click on an entry opens its object (switching to its environment)
 //!   and marks it read; a click on its label (`overview`) shows only that
 //!   place's, again shows everything.
-//! - The footer says the history stays on this computer and for how long,
-//!   and opens the notification settings.
+//! - A gear at the bottom right opens the notification settings.
 //!
 //! The card keeps its size and place while it is open: the list has a
 //! fixed height (440 px, less in a short window, so the card always fits
@@ -30,16 +30,16 @@
 use std::collections::HashSet;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
+    px,
 };
 use gpui::{BoxShadow, point};
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::Tone;
 use ic_ui_kit::{
-    ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissable, Dismissal, Icon, IconName, Link, Menu,
-    MenuItem, Popover, SUB_TAB_GAP, StateDot, SubTabs, Theme, Tooltip, sub_tab_width,
+    ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissable, Dismissal, Icon, IconButton, IconName, Link,
+    Menu, MenuItem, Popover, StateDot, Theme, Tooltip, chip_width,
 };
 
 use super::{Sidebar, SidebarEvent, SidebarMenu};
@@ -62,22 +62,22 @@ const LIST_MIN_HEIGHT: f32 = 120.;
 /// the card keeps from the window's top.
 const OUTSIDE: f32 = 50.;
 /// The card's parts around the list: the heading, the pause row, the
-/// footer and the border.
-const CHROME: f32 = 40. + 39. + 36. + 2.;
-/// The scope tabs' row, with several environments.
-const TABS_HEIGHT: f32 = 38.;
+/// bottom bar and the border.
+const CHROME: f32 = 40. + 39. + BAR_HEIGHT + 2.;
+/// The bottom bar's height: the scope chips and the settings gear.
+const BAR_HEIGHT: f32 = 36.;
+/// The space between two scope chips (as between the pause chips).
+const CHIP_GAP: f32 = 6.;
 
-/// The list's height in a window `viewport` high (`tabs`: the scope tabs
-/// show): fixed while the centre is open, so nothing in the card moves
-/// with what the list shows; less in a short window, so the card fits
-/// above the footer.
-pub(super) fn list_height(viewport: f32, tabs: bool) -> f32 {
-    let chrome = CHROME + if tabs { TABS_HEIGHT } else { 0. };
-    (viewport - OUTSIDE - chrome).clamp(LIST_MIN_HEIGHT, LIST_MAX_HEIGHT)
+/// The list's height in a window `viewport` high: fixed while the centre
+/// is open, so nothing in the card moves with what the list shows; less
+/// in a short window, so the card fits above the footer.
+pub(super) fn list_height(viewport: f32) -> f32 {
+    (viewport - OUTSIDE - CHROME).clamp(LIST_MIN_HEIGHT, LIST_MAX_HEIGHT)
 }
-/// The longest environment name a scope tab shows in full.
+/// The longest environment name a scope chip shows in full.
 const TAB_NAME_CHARS: usize = 20;
-/// The scope overflow's trigger.
+/// The scope overflow's chip.
 const MORE: &str = "···";
 
 /// What the centre shows while it is open: its scope, a label filter, the
@@ -91,7 +91,7 @@ pub(super) struct CentreState {
     filter: Option<Place>,
     /// The storms shown expanded, by [`StormGroup::key`].
     expanded: HashSet<String>,
-    /// Whether the scope tabs' `···` menu is open.
+    /// Whether the scope chips' `···` menu is open.
     overflow_open: bool,
     /// The list's scrolling (and where it is drawn).
     list: gpui::ScrollHandle,
@@ -150,17 +150,17 @@ pub(super) fn pause_line(state: &AppState, scope: Option<&Scope>, now: Timestamp
         .unwrap_or(PauseLine::Offer)
 }
 
-/// A scope tab: what it selects and its label.
+/// A scope chip: what it selects and its label.
 struct ScopeTab {
     scope: Scope,
     label: String,
     unread: bool,
 }
 
-/// Which of `widths` (tabs in order, the first always shown) fit in
+/// Which of `widths` (chips in order, the first always shown) fit in
 /// `available` with `gap` between them, keeping `selected` among them; the
 /// rest go behind a trigger `more` wide. Returns the shown and the hidden
-/// tabs' indices, each in order.
+/// chips' indices, each in order.
 pub(super) fn fit_tabs(
     widths: &[f32],
     selected: usize,
@@ -203,7 +203,7 @@ pub(super) fn fit_tabs(
     (shown, hidden)
 }
 
-/// `name` short enough for a tab (`…` at the end).
+/// `name` short enough for a chip (`…` at the end: cut short).
 fn tab_name(name: &str) -> String {
     if name.chars().count() <= TAB_NAME_CHARS {
         name.to_owned()
@@ -311,12 +311,10 @@ impl Sidebar {
         let view = self.view(state, now);
         let has_environment = state.environment().is_some();
         let header = Self::centre_header(&view, theme, cx);
-        let several = state.environments().len() > 1;
-        let scopes = several.then(|| self.centre_scopes(state, theme, cx));
         let pause_row = has_environment.then(|| self.centre_pause(now, theme, cx));
-        let height = list_height(f32::from(self.viewport), several);
+        let height = list_height(f32::from(self.viewport));
         let list = self.centre_list(&view, height, theme, cx);
-        let footer = Self::centre_footer(state, has_environment, theme, cx);
+        let bar = self.centre_bar(state, has_environment, theme, cx);
         let card = div()
             .id("notification-centre")
             .occlude()
@@ -335,10 +333,9 @@ impl Sidebar {
                 inset: false,
             }])
             .child(header)
-            .children(scopes)
             .children(pause_row)
             .child(list)
-            .child(footer);
+            .child(bar);
         // Escape or a press outside closes it.
         Dismissable::new(
             "notification-centre-popup",
@@ -436,9 +433,55 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// The scope tabs (A2): `all`, then every environment; those with
-    /// unread notifications in the accent colour; what doesn't fit behind
-    /// `···`.
+    /// The bottom bar: with several environments the scope chips (A2):
+    /// `all`, then every environment; the one picked filled with the
+    /// selected-row background; those with unread notifications in the
+    /// accent colour; what doesn't fit behind `···`. At the right a gear
+    /// for the notification settings. One left and right edge with the
+    /// heading, the pause row and the list; the bar's height never
+    /// changes.
+    fn centre_bar(
+        &self,
+        state: &AppState,
+        has_environment: bool,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let settings = has_environment.then(|| {
+            IconButton::new("centre-settings", IconName::Settings)
+                .tooltip(Tooltip::new("Notification settings"))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.menus.close();
+                    cx.emit(SidebarEvent::OpenSettings(SettingsTab::Notifications));
+                    cx.notify();
+                }))
+        });
+        let scopes = (state.environments().len() > 1).then(|| self.centre_scopes(state, theme, cx));
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .h(px(BAR_HEIGHT))
+            .px(px(CENTRE_PADDING))
+            .border_t_1()
+            .border_color(colors.border_header)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(CHIP_GAP))
+                    .children(scopes),
+            )
+            .children(settings)
+            .into_any_element()
+    }
+
+    /// The scope chips: `all`, then every environment, those that fit the
+    /// bar beside the gear, then `···` for the rest.
     fn centre_scopes(&self, state: &AppState, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let selected_scope = self.scope(state);
         // `all` shows what the scope picked doesn't: marked for unread
@@ -460,44 +503,34 @@ impl Sidebar {
             .iter()
             .position(|tab| Some(&tab.scope) == selected_scope.as_ref())
             .unwrap_or(0);
-        let size = theme.text.body;
+        let size = theme.text.label;
         let widths: Vec<f32> = tabs
             .iter()
-            .map(|tab| f32::from(sub_tab_width(&tab.label, size)))
+            .map(|tab| f32::from(chip_width(&tab.label, size)))
             .collect();
+        let gear = f32::from(theme.metrics.icon_button) + 8.;
         let (shown, hidden) = fit_tabs(
             &widths,
             selected,
-            CENTRE_WIDTH - 2. * CENTRE_PADDING - 2.,
-            f32::from(SUB_TAB_GAP),
-            f32::from(sub_tab_width(MORE, size)),
+            CENTRE_WIDTH - 2. * CENTRE_PADDING - 2. - gear,
+            CHIP_GAP,
+            f32::from(chip_width(MORE, size)),
         );
-        let shown_scopes: Vec<Scope> = shown
+        let mut chips: Vec<AnyElement> = shown
             .iter()
-            .map(|index| tabs[*index].scope.clone())
+            .map(|index| {
+                let tab = &tabs[*index];
+                let scope = tab.scope.clone();
+                Chip::new(("centre-scope", *index), tab.label.clone())
+                    .filled(*index == selected)
+                    .marked(tab.unread)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.pick_scope(scope.clone());
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
             .collect();
-        let mut row = SubTabs::new("centre-scopes")
-            .selected(
-                shown
-                    .iter()
-                    .position(|index| *index == selected)
-                    .unwrap_or(0),
-            )
-            .on_select({
-                let entity = cx.entity();
-                move |index, _, cx| {
-                    if let Some(scope) = shown_scopes.get(index) {
-                        entity.update(cx, |this, cx| {
-                            this.pick_scope(scope.clone());
-                            cx.notify();
-                        });
-                    }
-                }
-            });
-        for index in &shown {
-            let tab = &tabs[*index];
-            row = row.marked_tab(tab.label.clone(), tab.unread);
-        }
         if !hidden.is_empty() {
             let items: Vec<(Scope, String, bool)> = hidden
                 .iter()
@@ -513,61 +546,44 @@ impl Sidebar {
                     (tab.scope.clone(), name, tab.unread)
                 })
                 .collect();
-            row = row.trailing(self.scope_more(items, theme, cx));
+            chips.push(self.scope_more(items, cx));
         }
         div()
-            .flex_none()
-            .px(px(CENTRE_PADDING))
-            .pt(px(10.))
-            .child(row)
+            .flex()
+            .items_center()
+            .gap(px(CHIP_GAP))
+            .children(chips)
             .into_any_element()
     }
 
-    /// The `···` after the scope tabs that fit, with the others in a menu;
-    /// the accent colour while one of them has unread notifications.
-    fn scope_more(
-        &self,
-        items: Vec<(Scope, String, bool)>,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let colors = theme.colors;
+    /// The `···` chip after the scope chips that fit, with the others in a
+    /// menu above it; the accent colour while one of them has unread
+    /// notifications.
+    fn scope_more(&self, items: Vec<(Scope, String, bool)>, cx: &Context<Self>) -> AnyElement {
         let marked = items.iter().any(|(_, _, unread)| *unread);
         let open = self.centre.overflow_open;
         let count = items.len();
         div()
             .id("centre-scope-more")
             .relative()
-            .cursor_pointer()
-            .text_color(if marked {
-                colors.accent
-            } else if open {
-                colors.text
-            } else {
-                colors.text_muted
-            })
-            .hover(move |style| {
-                style.text_color(if marked {
-                    colors.accent_hover
-                } else {
-                    colors.text
-                })
-            })
-            .child(MORE)
+            .flex_none()
             .when(!open, |trigger| {
                 trigger.tooltip(Tooltip::text(format!("{count} more environments")))
             })
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                cx.stop_propagation();
-                this.centre.overflow_open = !this.centre.overflow_open;
-                cx.notify();
-            }))
+            .child(
+                Chip::new("centre-scope-more-chip", MORE)
+                    .marked(marked)
+                    .filled(open)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.centre.overflow_open = !this.centre.overflow_open;
+                        cx.notify();
+                    })),
+            )
             .when(open, |trigger| {
                 trigger.child(
                     Popover::new(Self::scope_overflow(items, cx))
-                        .align_right()
-                        .gap(px(10.)),
+                        .above()
+                        .gap(px(6.)),
                 )
             })
             .into_any_element()
@@ -781,48 +797,6 @@ impl Sidebar {
             .overflow_y_scroll()
             .pb(px(4.))
             .children(rows)
-            .into_any_element()
-    }
-
-    /// Where the history stays and for how long, and the settings.
-    fn centre_footer(
-        state: &AppState,
-        has_environment: bool,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let colors = theme.colors;
-        let retention = state.config().general.event_log_retention_hours;
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(8.))
-            .h(px(36.))
-            .px(px(CENTRE_PADDING))
-            .border_t_1()
-            .border_color(colors.border_header)
-            .text_size(theme.text.small)
-            .text_color(colors.text_faint)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(entry::kept_text(retention)),
-            )
-            .when(has_environment, |footer| {
-                footer.child(
-                    Link::new("centre-settings", "notification settings…")
-                        .quiet()
-                        .text_size(theme.text.small)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.menus.close();
-                            cx.emit(SidebarEvent::OpenSettings(SettingsTab::Notifications));
-                            cx.notify();
-                        })),
-                )
-            })
             .into_any_element()
     }
 
@@ -1100,19 +1074,18 @@ mod tests {
 
     #[test]
     fn the_list_keeps_its_height_and_fits_short_windows() {
-        // The default window: the full list, with or without tabs.
-        assert!((list_height(900., true) - LIST_MAX_HEIGHT).abs() < f32::EPSILON);
-        assert!((list_height(900., false) - LIST_MAX_HEIGHT).abs() < f32::EPSILON);
+        // The default window: the full list.
+        assert!((list_height(900.) - LIST_MAX_HEIGHT).abs() < f32::EPSILON);
         // The smallest window (560 px): the whole card stays above the
         // footer, the list gets what is left.
-        let short = list_height(560., true);
+        let short = list_height(560.);
         assert!(
             (LIST_MIN_HEIGHT..LIST_MAX_HEIGHT).contains(&short),
             "{short}"
         );
-        assert!(short + CHROME + TABS_HEIGHT + OUTSIDE <= 560.);
+        assert!(short + CHROME + OUTSIDE <= 560.);
         // Never less than a few entries.
-        assert!((list_height(200., true) - LIST_MIN_HEIGHT).abs() < f32::EPSILON);
+        assert!((list_height(200.) - LIST_MIN_HEIGHT).abs() < f32::EPSILON);
     }
 
     #[test]

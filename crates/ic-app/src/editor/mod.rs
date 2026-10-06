@@ -485,7 +485,7 @@ impl DashboardEditor {
                     .max_width(px(520.))
                     .into_any_element();
             }
-            Preview::Waiting => return note("Evaluating…", theme),
+            Preview::Waiting => return note("Evaluating", theme),
             Preview::Unavailable => {
                 return note(
                     "The preview shows once the environment's engine runs.",
@@ -690,7 +690,7 @@ impl DashboardEditor {
             Preview::Ready(Err(error)) => {
                 ("invalid".to_owned(), FieldTone::Bad, Some(error.clone()))
             }
-            Preview::Waiting => ("checking…".to_owned(), FieldTone::Neutral, None),
+            Preview::Waiting => ("checking".to_owned(), FieldTone::Neutral, None),
             Preview::Unavailable => ("not checked".to_owned(), FieldTone::Neutral, None),
         };
         let marker = filter_error.as_deref().and_then(|error| {
@@ -812,7 +812,7 @@ impl DashboardEditor {
         )
     }
 
-    /// What the dashboard shows as, a save error, and "delete dashboard…".
+    /// What the dashboard shows as, a save error, and "delete dashboard".
     fn render_inspector_footer(&self, cx: &Context<Self>) -> Div {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -849,7 +849,7 @@ impl DashboardEditor {
                         },
                         |row, reference| {
                             row.child(
-                                Link::new("editor-delete", "delete dashboard…")
+                                Link::new("editor-delete", "delete dashboard")
                                     .quiet()
                                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                                         cx.emit(EditorEvent::Delete(reference.clone()));

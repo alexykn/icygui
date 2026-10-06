@@ -680,6 +680,9 @@ pub(crate) struct EndpointAttrs {
 /// Attributes requested for endpoints.
 pub(crate) const ENDPOINT_ATTRS: &[&str] = &["name", "zone", "connected"];
 
+/// Attributes requested for an endpoint's connection state alone.
+pub(crate) const ENDPOINT_STATE_ATTRS: &[&str] = &["connected"];
+
 impl EndpointAttrs {
     /// Maps an endpoint; `zone_of` finds the zone listing it (an endpoint's
     /// own `zone` attribute is where it was *defined*, usually empty).
@@ -703,6 +706,15 @@ impl EndpointAttrs {
             zone,
             connected,
         })
+    }
+}
+
+impl EndpointAttrs {
+    /// An endpoint's name (the query result's) and `connected`, as Icinga
+    /// says it.
+    pub(crate) fn into_state(self, full_name: &str) -> Option<(String, bool)> {
+        let name = first_non_empty(full_name, &self.name.0)?.to_owned();
+        Some((name, self.connected.0))
     }
 }
 
@@ -756,9 +768,6 @@ pub(crate) struct ZoneAttrs {
     parent: L<String>,
     global: L<bool>,
 }
-
-/// Attributes requested for zones to find each endpoint's zone.
-pub(crate) const ZONE_ATTRS: &[&str] = &["endpoints"];
 
 /// Attributes requested for the zone tree ([`crate::Client::zones`]).
 pub(crate) const ZONE_TREE_ATTRS: &[&str] = &["endpoints", "global", "parent"];

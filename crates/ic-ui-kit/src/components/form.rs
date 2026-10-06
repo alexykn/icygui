@@ -405,15 +405,37 @@ impl RenderOnce for Segmented {
 /// another gives the text this height too, so the row keeps its height.
 pub const CHIP_HEIGHT: f32 = 22.;
 
+/// A [`Chip`]'s width for `label` at `text_size` (the theme's
+/// `text.label`): the monospaced label, the padding and the border. For
+/// rows of chips that must fit a width (and never wrap).
+#[must_use]
+pub fn chip_width(label: &str, text_size: Pixels) -> Pixels {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "labels are far shorter than 2^23 characters"
+    )]
+    let chars = label.chars().count() as f32;
+    text_size * (chars * crate::theme::CHAR_WIDTH) + px(2. * CHIP_PADDING + 2.)
+}
+
+/// Space left and right of a [`Chip`]'s label.
+const CHIP_PADDING: f32 = 8.;
+
 /// A small pill for a quick choice next to a field (`1h`, `2h`, `08:00
 /// tomorrow`): it fills the field in, it doesn't hold a state of its own
 /// (`selected` shows the choice the field holds).
 #[derive(IntoElement)]
 #[must_use = "a chip does nothing unless rendered"]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent looks of one chip"
+)]
 pub struct Chip {
     id: ElementId,
     label: SharedString,
     selected: bool,
+    filled: bool,
+    marked: bool,
     disabled: bool,
     on_click: Option<ClickHandler>,
 }
@@ -425,9 +447,26 @@ impl Chip {
             id: id.into(),
             label: label.into(),
             selected: false,
+            filled: false,
+            marked: false,
             disabled: false,
             on_click: None,
         }
+    }
+
+    /// Shows it as the one picked of a row of chips that switch a view
+    /// (the notification centre's scopes): the selected-row background of
+    /// the lists, filled, its text bright. Its size doesn't change.
+    pub fn filled(mut self, filled: bool) -> Self {
+        self.filled = filled;
+        self
+    }
+
+    /// Shows the label in the accent colour (something new behind it):
+    /// colour only.
+    pub fn marked(mut self, marked: bool) -> Self {
+        self.marked = marked;
+        self
     }
 
     /// Shows it as the current choice.
@@ -481,18 +520,26 @@ impl RenderOnce for Chip {
             .flex_none()
             .items_center()
             .h(px(CHIP_HEIGHT))
-            .px(px(8.))
+            .px(px(CHIP_PADDING))
             .rounded(theme.metrics.small_radius)
             .border_1()
             .border_color(if self.selected {
                 colors.accent
+            } else if self.filled {
+                colors.row_selected
             } else {
                 colors.border_header
             })
-            .bg(colors.element_background)
+            .bg(if self.filled {
+                colors.row_selected
+            } else {
+                colors.element_background
+            })
             .text_size(theme.text.label)
-            .text_color(if self.selected {
+            .text_color(if self.selected || self.marked {
                 colors.accent
+            } else if self.filled {
+                colors.text_strong
             } else {
                 colors.text_muted
             })
@@ -500,8 +547,21 @@ impl RenderOnce for Chip {
             .child(self.label)
             .when(self.disabled, |chip| chip.opacity(0.5))
             .when(enabled, |chip| {
+                let marked = self.marked || self.selected;
+                let filled = self.filled;
                 chip.cursor_pointer()
-                    .hover(|style| style.bg(colors.element_hover).text_color(colors.text))
+                    .hover(move |style| {
+                        let style = if filled {
+                            style
+                        } else {
+                            style.bg(colors.element_hover)
+                        };
+                        if marked {
+                            style.text_color(colors.accent_hover)
+                        } else {
+                            style.text_color(colors.text)
+                        }
+                    })
                     .active(|style| style.bg(colors.element_active))
             })
             // Keep the keyboard in the field it fills.

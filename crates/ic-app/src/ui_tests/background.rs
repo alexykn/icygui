@@ -43,7 +43,7 @@ fn the_app_menus_open_settings_and_about() {
                 _ => None,
             })
             .collect();
-        assert_eq!(app_menu, ["About icygui", "Settings…", "Quit icygui"]);
+        assert_eq!(app_menu, ["About icygui", "Settings", "Quit icygui"]);
 
         // The menu's actions reach the window (also when it doesn't have
         // the focus: the global handlers).

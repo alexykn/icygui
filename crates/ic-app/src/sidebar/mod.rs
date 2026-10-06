@@ -914,9 +914,10 @@ impl Sidebar {
         let elsewhere = state
             .environments()
             .iter()
-            .filter(|environment| !state.is_active(&environment.id))
-            .map(|environment| (environment.name.as_str(), state.unread_in(&environment.id)))
-            .filter(|(_, unread)| *unread > 0)
+            .filter(|environment| {
+                !state.is_active(&environment.id) && state.unread_in(&environment.id) > 0
+            })
+            .map(|environment| environment.name.as_str())
             .collect::<Vec<_>>();
         let tooltip = menus::status_tooltip(
             name.as_deref(),

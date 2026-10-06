@@ -1762,7 +1762,7 @@ impl Workspace {
         }
     }
 
-    /// The banner's "Review certificate…" (ENV-05).
+    /// The banner's "Review certificate" (ENV-05).
     fn on_review_certificate(
         &mut self,
         _: &ReviewCertificate,

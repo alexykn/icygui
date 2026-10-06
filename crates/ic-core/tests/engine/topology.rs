@@ -18,7 +18,7 @@ use futures::StreamExt as _;
 
 use crate::support::{ENV_ID, Engine, FakeSecrets, Launch, PASSWORD, USER, environment, mock};
 use ic_config::{ApiUrl, AuthConfig, Environment};
-use ic_core::{ClusterView, ConnectedNode, ConnectionState, Tuning, test_connection};
+use ic_core::{ClusterView, ConnectedNode, ConnectionState, NodeState, Tuning, test_connection};
 use ic_mock::{MockConfig, MockServer, MockTls, MockUser, Scenario, scenarios};
 use ic_model::{Endpoint, HostState, ServiceState};
 use secrecy::SecretString;
@@ -779,5 +779,93 @@ async fn a_standby_never_trusted_is_offered_for_trust_while_retrying() {
     let (url, _, certificate) = state.untrusted().unwrap();
     assert_eq!(url, second_url);
     assert!(certificate.is_some());
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cluster_nodes_follow_the_status_poll() {
+    let cluster = cluster();
+    let master = node(&cluster, "master-01").await;
+    let mut engine = Launch {
+        environment: environment_of(&[&master]),
+        tuning: Tuning {
+            status_interval: Duration::from_millis(100),
+            ..tuning()
+        },
+        ..Launch::new(&master)
+    }
+    .start();
+    connected_to(&mut engine, |_| true).await;
+    let states = |snapshot: &ic_core::snapshot::Snapshot| -> Vec<(String, String, NodeState)> {
+        snapshot
+            .cluster_nodes()
+            .into_iter()
+            .map(|node| (node.name, node.zone, node.state))
+            .collect()
+    };
+    let snapshot = engine
+        .snapshot(|snapshot| snapshot.cluster_nodes().len() == 3)
+        .await;
+    assert_eq!(
+        states(&snapshot),
+        [
+            (
+                "master-01".to_owned(),
+                "master".to_owned(),
+                NodeState::Connected
+            ),
+            (
+                "master-02".to_owned(),
+                "master".to_owned(),
+                NodeState::Connected
+            ),
+            (
+                "sat-ams-01".to_owned(),
+                "ams".to_owned(),
+                NodeState::Connected
+            ),
+        ]
+    );
+    // The other master drops out of the cluster: the next status poll
+    // says so.
+    master
+        .control()
+        .set_endpoint_connected("master-02", false)
+        .unwrap();
+    engine
+        .snapshot(|snapshot| {
+            snapshot
+                .cluster_nodes()
+                .iter()
+                .any(|node| node.name == "master-02" && node.state == NodeState::Disconnected)
+        })
+        .await;
+    // One small request per status poll, by name, never for the node
+    // itself.
+    let requests = master.control().requests();
+    let polls = requests
+        .iter()
+        .filter(|request| request.path == "/v1/status/CIB")
+        .count();
+    let asked: Vec<_> = requests
+        .iter()
+        .filter(|request| {
+            request.path == "/v1/objects/endpoints"
+                && request
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| body.get("endpoints").is_some())
+        })
+        .collect();
+    assert!(!asked.is_empty());
+    assert!(asked.len() <= polls, "{} for {polls} polls", asked.len());
+    for request in asked {
+        let body = request.body.as_ref().unwrap();
+        assert_eq!(
+            body["endpoints"],
+            serde_json::json!(["master-02", "sat-ams-01"])
+        );
+        assert_eq!(body["attrs"], serde_json::json!(["connected"]));
+    }
     engine.shutdown();
 }

@@ -4,7 +4,7 @@
 //! The pane follows links (the service's host, the host's services, parents
 //! and children) with a back button. Action buttons send typed requests to
 //! [`AppState::request`] (the workspace opens their dialogs); an action on
-//! its way shows on its button (`acknowledging…`), a failed one under the
+//! its way shows on its button (`acknowledging`), a failed one under the
 //! buttons with Icinga's reason. The `···` beside them has the actions
 //! without a key and copies the name, the output and a filter expression
 //! (PANE-05).
@@ -553,7 +553,7 @@ impl Render for ObjectPane {
 /// or gone.
 fn missing(object: &ObjectKey, loading: bool, theme: &Theme) -> AnyElement {
     if loading {
-        return EmptyState::new(format!("Loading {}…", short_name(object)))
+        return EmptyState::new(format!("Loading {}", short_name(object)))
             .leading(
                 Icon::new(IconName::Loader)
                     .size(px(20.))
@@ -615,7 +615,7 @@ fn scroll_area(
 }
 
 /// The action buttons shared by service and host panes, with the `···`
-/// menu, an action on its way (`acknowledging…` on its button) and the
+/// menu, an action on its way (`acknowledging` on its button) and the
 /// last failure under them. Actions the API user may not run are
 /// disabled, and their tooltip says why (ENV-09).
 fn action_buttons(
@@ -844,12 +844,12 @@ fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>
     let mut menu = Menu::new("pane-menu")
         .item(item(
             "pane-result",
-            "submit check result…",
+            "submit check result",
             ObjectAction::SubmitCheckResult,
         ))
         .item(item(
             "pane-command",
-            "run command…",
+            "run command",
             ObjectAction::RunCommand,
         ));
     if downtimes > 0 {

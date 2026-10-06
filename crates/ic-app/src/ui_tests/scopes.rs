@@ -7,8 +7,7 @@
 //! into its summary and expands; an entry of another environment switches
 //! there and opens its object; opening an object marks its notifications
 //! read; the clock's badge counts the environment on screen and the
-//! switcher lists every environment with its unread notifications and
-//! mute.
+//! switcher lists every environment with its mute.
 
 use gpui::{App, AppContext as _, Modifiers, point, px};
 use ic_core::{CoreEvent, NotificationRecord};
@@ -32,11 +31,11 @@ const SWITCHER: gpui::Point<gpui::Pixels> = gpui::Point {
     x: px(150.),
     y: px(880.),
 };
-/// The centre's `all` tab, while its list is full (440 px: the card's
-/// height no longer changes).
+/// The centre's `all` chip, first in its bottom bar (the list is 440 px
+/// high: the card's height doesn't change).
 const ALL_TAB: gpui::Point<gpui::Pixels> = gpui::Point {
-    x: px(65.),
-    y: px(326.),
+    x: px(72.),
+    y: px(842.),
 };
 /// The first entry's label, list full.
 const FIRST_LABEL: gpui::Point<gpui::Pixels> = gpui::Point {
@@ -51,7 +50,7 @@ const FIRST_ENTRY: gpui::Point<gpui::Pixels> = gpui::Point {
 /// *mark all read* in the centre's heading, list full.
 const MARK_ALL_READ: gpui::Point<gpui::Pixels> = gpui::Point {
     x: px(400.),
-    y: px(285.),
+    y: px(323.),
 };
 
 fn record(
@@ -346,7 +345,7 @@ fn opening_an_object_marks_its_notifications_read() {
 }
 
 #[test]
-fn the_switcher_lists_every_environment_with_unread_and_mute() {
+fn the_switcher_lists_every_environment_with_its_mute() {
     run_app(
         crate::WINDOW_SIZE,
         demo_state,
@@ -359,22 +358,22 @@ fn the_switcher_lists_every_environment_with_unread_and_mute() {
                 cx.notify();
             });
             let rows = switcher_rows(app.state.read(cx), Timestamp::now());
-            let summary: Vec<(&str, bool, bool, usize)> = rows
+            let summary: Vec<(&str, bool, bool)> = rows
                 .iter()
-                .map(|row| (row.name.as_str(), row.active, row.muted, row.unread))
+                .map(|row| (row.name.as_str(), row.active, row.muted))
                 .collect();
             assert_eq!(
                 summary,
                 [
-                    ("prod-cluster", true, false, 13),
-                    ("staging", false, true, 8),
-                    ("lab", false, false, 0),
+                    ("prod-cluster", true, false),
+                    ("staging", false, true),
+                    ("lab", false, false),
                 ]
             );
             // The footer opens it; a row switches (ENV-01).
             app.click(cx, SWITCHER, Modifiers::default());
             assert!(sidebar(app, cx).read(cx).details_open());
-            app.click(cx, point(px(130.), px(720.)), Modifiers::default());
+            app.click(cx, point(px(130.), px(748.)), Modifiers::default());
             let state = app.state.read(cx);
             assert_eq!(state.active_environment_id(), Some(demo::STAGING_ID));
             // The badge follows the environment on screen (A3).
@@ -436,19 +435,19 @@ fn the_centre_keeps_its_place_whatever_it_shows() {
 }
 
 /// A5: any environment is muted from the switcher, the one on screen
-/// stays as it is: a row's bell (on hover, in its count's place) points the
+/// stays as it is: a row's bell (on hover, left of its gear) points the
 /// mute row at that environment; the row's click still switches.
 #[test]
 fn any_environment_is_muted_from_the_switcher() {
     /// staging's row and its bell.
     const STAGING_BELL: gpui::Point<gpui::Pixels> = gpui::Point {
-        x: px(405.),
-        y: px(720.),
+        x: px(384.),
+        y: px(748.),
     };
     /// The mute row's `1h`.
     const ONE_HOUR: gpui::Point<gpui::Pixels> = gpui::Point {
         x: px(300.),
-        y: px(776.),
+        y: px(804.),
     };
     run_app(
         crate::WINDOW_SIZE,
@@ -493,7 +492,7 @@ fn the_switcher_keeps_its_width_while_reconnecting() {
     /// The mute row's `1h`, as while connected.
     const ONE_HOUR: gpui::Point<gpui::Pixels> = gpui::Point {
         x: px(300.),
-        y: px(776.),
+        y: px(804.),
     };
     run_app(
         crate::WINDOW_SIZE,
@@ -531,7 +530,7 @@ fn the_switcher_keeps_its_width_while_reconnecting() {
 }
 
 /// The smallest window (900 × 560) with 11 environments: the switcher fits
-/// above the footer (its list scrolls), so *add environment…* is there to
+/// above the footer (its list scrolls), so *add environment* is there to
 /// click.
 #[test]
 fn the_switcher_fits_the_smallest_window_with_many_environments() {
@@ -546,10 +545,10 @@ fn the_switcher_fits_the_smallest_window_with_many_environments() {
             assert_eq!(app.state.read(cx).environments().len(), 11);
             app.click(cx, point(px(150.), px(540.)), Modifiers::default());
             assert!(sidebar(app, cx).read(cx).details_open());
-            app.click(cx, point(px(150.), px(475.)), Modifiers::default());
+            app.click(cx, point(px(150.), px(503.)), Modifiers::default());
             assert!(
                 app.workspace.read(cx).environment_editor().is_some(),
-                "add environment… was in the window"
+                "add environment was in the window"
             );
         })),
     );

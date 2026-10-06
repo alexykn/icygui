@@ -24,6 +24,7 @@ use crate::app_state::environments::url_summary;
 use crate::app_state::{AppState, Health, permissions};
 use crate::notifications::{PauseChoice, when};
 use crate::settings::ScopeKey;
+use ic_core::NodeState;
 
 /// The connection details' width (fixed: a long error or another
 /// environment's state never widens it, so nothing in it moves sideways).
@@ -35,24 +36,26 @@ const DETAILS_WIDTH_SEVERAL: f32 = 360.;
 /// item, a detail line and the gap between lines, the parts around the
 /// lists), so the popover fits above the footer in any window.
 mod budget {
-    /// A menu item (an environment row, *Reload*, *add*, *edit*).
+    /// A menu item (an environment or node row, *Reload*, *add*).
     pub(super) const ROW: f32 = 28.;
     /// A detail line (12 px text) and the gap after it.
     pub(super) const LINE: f32 = 20.;
-    /// The detail lines the budget keeps room for before the environment
-    /// list gets less (status, node, view, two URLs passed over, version,
-    /// last event, API user and one more).
+    /// The detail lines the budget keeps room for before the lists get
+    /// less (status, node, view, two URLs passed over, version, last
+    /// event, API user and one more).
     pub(super) const LINES: f32 = 9.;
     /// Under the window's height: the footer, the gap above it and the
     /// margin the popover keeps from the window's top.
     pub(super) const OUTSIDE: f32 = 50.;
     /// The title, its separator, *Reload* and its separator.
     pub(super) const TOP: f32 = 42. + 9. + ROW + 9.;
+    /// Above the node list: its separator and label.
+    pub(super) const NODES: f32 = 9. + 23.;
     /// Around the environment list: its separator and label, the mute row
-    /// (several environments), a separator, *add* and *edit*, the card's
-    /// padding and border.
-    pub(super) const BOTTOM: f32 = 9. + 23. + 30. + 9. + 2. * ROW + 10.;
-    /// The fewest environment rows shown before the list scrolls.
+    /// (several environments), a separator, *add*, the card's padding and
+    /// border.
+    pub(super) const BOTTOM: f32 = 9. + 23. + 30. + 9. + ROW + 10.;
+    /// The fewest rows a list shows before it scrolls.
     pub(super) const MIN_ROWS: usize = 3;
     /// The least height the detail lines get.
     pub(super) const MIN_LINES: f32 = 60.;
@@ -62,33 +65,43 @@ mod budget {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct SwitcherBudget {
     /// The environment rows shown at once (the list scrolls beyond).
-    pub(super) rows: usize,
-    /// The environment list's height.
-    pub(super) list: f32,
+    pub(super) environments: usize,
+    /// The cluster node rows shown at once (the list scrolls beyond).
+    pub(super) nodes: usize,
     /// The most the detail lines take (they scroll beyond).
     pub(super) lines: f32,
 }
 
-/// The switcher's environment list and detail lines in a window `viewport`
-/// high, for `environments` environments: how many rows the list shows
-/// (whole rows; it scrolls beyond) and how tall the detail lines may be
-/// (they scroll beyond). Neither depends on the connection's state, so
+/// The switcher's lists in a window `viewport` high, for `environments`
+/// environments and `nodes` cluster nodes: how many rows each list shows
+/// (whole rows; it scrolls beyond; at least three of each, one more for
+/// each in turn as room allows) and how tall the detail lines may be
+/// (they scroll beyond). None of it depends on the connection's state, so
 /// nothing in the popover moves when that changes; a short window shows
 /// fewer rows and lines, never fewer controls.
-pub(super) fn switcher_budget(viewport: f32, environments: usize) -> SwitcherBudget {
-    use budget::{BOTTOM, LINE, LINES, MIN_LINES, MIN_ROWS, OUTSIDE, ROW, TOP};
+pub(super) fn switcher_budget(viewport: f32, environments: usize, nodes: usize) -> SwitcherBudget {
+    use budget::{BOTTOM, LINE, LINES, MIN_LINES, MIN_ROWS, NODES, OUTSIDE, ROW, TOP};
     let available = viewport - OUTSIDE;
-    let room = available - TOP - BOTTOM - LINES * LINE;
-    let count = environments.max(1);
-    let mut rows = count;
-    while rows > MIN_ROWS.min(count) && height_of(rows, ROW) > room {
-        rows -= 1;
+    let around = TOP + BOTTOM + if nodes > 0 { NODES } else { 0. };
+    let room = available - around - LINES * LINE;
+    let environments = environments.max(1);
+    let mut shown = (MIN_ROWS.min(environments), MIN_ROWS.min(nodes));
+    loop {
+        let before = shown;
+        if shown.0 < environments && height_of(shown.0 + shown.1 + 1, ROW) <= room {
+            shown.0 += 1;
+        }
+        if shown.1 < nodes && height_of(shown.0 + shown.1 + 1, ROW) <= room {
+            shown.1 += 1;
+        }
+        if shown == before {
+            break;
+        }
     }
-    let list = height_of(rows, ROW);
     SwitcherBudget {
-        rows,
-        list,
-        lines: (available - TOP - BOTTOM - list - 8.).max(MIN_LINES),
+        environments: shown.0,
+        nodes: shown.1,
+        lines: (available - around - height_of(shown.0 + shown.1, ROW) - 8.).max(MIN_LINES),
     }
 }
 
@@ -100,11 +113,6 @@ pub(super) fn switcher_budget(viewport: f32, environments: usize) -> SwitcherBud
 fn height_of(count: usize, height: f32) -> f32 {
     count as f32 * height
 }
-
-/// How far the switcher's mute row is indented inside a menu element, so
-/// its text starts where the items' labels do (the menu's check column
-/// and its gap).
-const MUTE_ROW_INDENT: f32 = 22.;
 
 /// The notification settings a scope can take here (a custom rule is
 /// edited in the notification settings).
@@ -229,7 +237,7 @@ impl Sidebar {
         menu = menu.item(
             Self::emit_item(
                 "group-notify-custom",
-                "custom rule…",
+                "custom rule",
                 SidebarEvent::CustomRule(ScopeKey::Group(id.clone())),
                 cx,
             )
@@ -238,13 +246,13 @@ impl Sidebar {
         menu.separator()
             .item(Self::emit_item(
                 "group-export",
-                "export group…",
+                "export group",
                 SidebarEvent::ExportGroups(vec![id.clone()]),
                 cx,
             ))
             .item(Self::emit_item(
                 "group-delete",
-                "delete group…",
+                "delete group",
                 SidebarEvent::DeleteGroup(id),
                 cx,
             ))
@@ -268,7 +276,7 @@ impl Sidebar {
         let mut menu = Menu::new("dashboard-menu")
             .item(Self::emit_item(
                 "dashboard-edit",
-                "edit dashboard…",
+                "edit dashboard",
                 SidebarEvent::EditDashboard(reference.clone()),
                 cx,
             ))
@@ -332,7 +340,7 @@ impl Sidebar {
         menu = menu.item(
             Self::emit_item(
                 "dashboard-notify-custom",
-                "custom rule…",
+                "custom rule",
                 SidebarEvent::CustomRule(ScopeKey::Dashboard(
                     reference.group_id.clone(),
                     reference.dashboard_id.clone(),
@@ -344,7 +352,7 @@ impl Sidebar {
         menu.separator()
             .item(Self::emit_item(
                 "dashboard-delete",
-                "delete dashboard…",
+                "delete dashboard",
                 SidebarEvent::DeleteDashboard(reference.clone()),
                 cx,
             ))
@@ -384,7 +392,7 @@ impl Sidebar {
             .item(
                 Self::emit_item(
                     "footer-import",
-                    "import dashboards…",
+                    "import dashboards",
                     SidebarEvent::ImportGroups,
                     cx,
                 )
@@ -393,7 +401,7 @@ impl Sidebar {
             .item(
                 Self::emit_item(
                     "footer-export",
-                    "export all dashboards…",
+                    "export all dashboards",
                     SidebarEvent::ExportGroups(Vec::new()),
                     cx,
                 )
@@ -404,8 +412,8 @@ impl Sidebar {
 
     /// The connection details above the footer status (ENV-06): the
     /// environment, the endpoint and its version, the state, the last
-    /// event, the API user and "Reload from Icinga"; then the environment
-    /// switcher (ENV-01) with "add environment…" and "edit …".
+    /// event, the API user, the cluster's nodes and "Reload from Icinga";
+    /// then the environment switcher (ENV-01) with "add environment".
     pub(super) fn details_menu(&self, now: Timestamp, cx: &Context<Self>) -> Menu {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -418,7 +426,12 @@ impl Sidebar {
         } else {
             DETAILS_WIDTH
         };
-        let budget = switcher_budget(f32::from(self.viewport), state.environments().len());
+        let nodes = node_rows(state);
+        let budget = switcher_budget(
+            f32::from(self.viewport),
+            state.environments().len(),
+            nodes.len(),
+        );
         let mut menu = Menu::new("connection-details").width(px(width));
         match state.environment() {
             Some(environment) => {
@@ -463,6 +476,16 @@ impl Sidebar {
                         .overflow_y_scroll()
                         .children(lines),
                 );
+                if !nodes.is_empty() {
+                    menu = menu
+                        .separator()
+                        .label(list_label("nodes", nodes.len(), budget.nodes))
+                        .scrolled(
+                            "cluster-nodes",
+                            Self::node_items(nodes, theme),
+                            px(height_of(budget.nodes, budget::ROW)),
+                        );
+                }
                 let can_reload = !connection.is_starting();
                 menu = menu.separator().item(
                     MenuItem::new("reload", "Reload from Icinga")
@@ -490,14 +513,39 @@ impl Sidebar {
             .on_dismiss(Self::dismiss_listener(cx))
     }
 
+    /// The cluster's masters and satellites (`node_rows`) as menu rows in
+    /// the environments' style: a dot (green connected, red not, grey
+    /// when the connected node can't tell), the name, the zone dimmed; the
+    /// node icygui is connected to with the selected-row background. They
+    /// only show: no hover, no click.
+    fn node_items(nodes: Vec<NodeRow>, theme: &ic_ui_kit::Theme) -> Vec<MenuItem> {
+        nodes
+            .into_iter()
+            .enumerate()
+            .map(|(index, node)| {
+                let color = match node.state {
+                    Some(NodeState::Connected) => theme.states.ok,
+                    Some(NodeState::Disconnected) => theme.states.critical,
+                    Some(NodeState::Unknown) | None => theme.states.pending,
+                };
+                MenuItem::new(("cluster-node", index), node.name)
+                    .dot(color)
+                    .detail(node.zone)
+                    .selected(node.current)
+                    .interactive(false)
+                    .tooltip(Tooltip::new(node.hint))
+            })
+            .collect()
+    }
+
     /// The environment switcher (ENV-01, B) under the details: every
     /// environment with its health (the footer's dot), its node and the
-    /// age of its last event, its unread notifications (A3) and a bell-off
-    /// when muted on its own (A5); the one on screen checked. The list is
-    /// `list_height` at most and scrolls beyond. With several, a row's
-    /// bell (on hover, in its count's place) points the mute row under
-    /// the list at that environment (the one on screen until then); then
-    /// "add environment…" and "edit …".
+    /// age of its last event; the one on screen with the selected-row
+    /// background (no check mark, so every row keeps its alignment). At
+    /// the right of each row a bell (on hover; a bell-off while muted)
+    /// points the mute row under the list at it (A5), and a gear opens its
+    /// settings without switching. The list scrolls beyond the budget's
+    /// rows. Then "add environment".
     fn with_switcher(
         &self,
         mut menu: Menu,
@@ -506,15 +554,13 @@ impl Sidebar {
         budget: SwitcherBudget,
         cx: &Context<Self>,
     ) -> Menu {
-        let theme = cx.theme();
         let environments = state.environments();
         if !environments.is_empty() {
-            // A list cut short by a short window says that it scrolls.
-            menu = menu.separator().label(if budget.rows < environments.len() {
-                format!("{} environments · scroll for more", environments.len())
-            } else {
-                "environments".to_owned()
-            });
+            menu = menu.separator().label(list_label(
+                "environments",
+                environments.len(),
+                budget.environments,
+            ));
         }
         let several = environments.len() > 1;
         let target = self
@@ -526,87 +572,102 @@ impl Sidebar {
             .mute_target
             .as_deref()
             .filter(|id| state.environment_by_id(id).is_some());
-        let mut items = Vec::new();
-        for row in switcher_rows(state, now) {
-            let SwitcherRow {
-                id,
-                name,
-                active: is_active,
-                health,
-                detail,
-                partial,
-                muted,
-                unread,
-            } = row;
-            let item = MenuItem::new(
-                gpui::ElementId::Name(format!("environment-{id}").into()),
-                name.clone(),
-            )
-            .checked(is_active)
-            .dot(super::health_color(health, theme));
-            let item = if partial {
-                item.detail_colored(detail, theme.states.warning)
-            } else {
-                item.detail(detail)
-            };
-            let item = if several {
-                let target = id.clone();
-                item.action(
-                    ItemAction::new(
-                        gpui::ElementId::Name(format!("environment-bell-{id}").into()),
-                        // The row's bell-off says it is muted; the button
-                        // is the notifications' bell either way.
-                        IconName::Bell,
-                        cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.mute_target = Some(target.clone());
-                            cx.notify();
-                        }),
-                    )
-                    .shown(picked == Some(id.as_str()))
-                    .tooltip(Tooltip::new(if muted {
-                        format!("{name} is muted: unmute…")
-                    } else {
-                        format!("Mute {name}…")
-                    })),
-                )
-            } else {
-                item
-            };
-            items.push(
-                item.trailing_icon((several && muted).then_some(IconName::BellOff))
-                    .count(unread)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.menus.close();
-                        if !is_active {
-                            cx.emit(SidebarEvent::SwitchEnvironment(id.clone()));
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        menu = menu.scrolled("environment-list", items, px(budget.list));
+        let items = switcher_rows(state, now)
+            .into_iter()
+            .map(|row| Self::switcher_item(row, several, picked, cx))
+            .collect();
+        menu = menu.scrolled(
+            "environment-list",
+            items,
+            px(height_of(budget.environments, budget::ROW)),
+        );
         if several && let Some(environment) = target {
             menu = menu.element(Self::mute_row(environment, state, now, cx));
         }
-        menu = menu.separator().item(Self::emit_item(
+        menu.separator().item(Self::emit_item(
             "add-environment",
-            "add environment…",
+            "add environment",
             SidebarEvent::AddEnvironment,
             cx,
-        ));
-        if let Some(environment) = state.environment() {
-            let id = environment.id.clone();
-            menu = menu.item(
-                MenuItem::new("edit-environment", format!("edit {}…", environment.name)).on_click(
-                    cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.menus.close();
-                        cx.emit(SidebarEvent::EditEnvironment(id.clone()));
-                        cx.notify();
-                    }),
-                ),
-            );
-        }
-        menu
+        ))
+    }
+
+    /// One environment's switcher row: its health dot, name and detail,
+    /// the bell (when there are several) and the gear at the right; a
+    /// click switches to it.
+    fn switcher_item(
+        row: SwitcherRow,
+        several: bool,
+        picked: Option<&str>,
+        cx: &Context<Self>,
+    ) -> MenuItem {
+        let theme = cx.theme();
+        let SwitcherRow {
+            id,
+            name,
+            active: is_active,
+            health,
+            detail,
+            partial,
+            muted,
+        } = row;
+        let item = MenuItem::new(
+            gpui::ElementId::Name(format!("environment-{id}").into()),
+            name.clone(),
+        )
+        .selected(is_active)
+        .dot(super::health_color(health, theme));
+        let item = if partial {
+            item.detail_colored(detail, theme.states.warning)
+        } else {
+            item.detail(detail)
+        };
+        let item = if several {
+            let target = id.clone();
+            let bell = ItemAction::new(
+                gpui::ElementId::Name(format!("environment-bell-{id}").into()),
+                if muted {
+                    IconName::BellOff
+                } else {
+                    IconName::Bell
+                },
+                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.mute_target = Some(target.clone());
+                    cx.notify();
+                }),
+            )
+            .shown(picked == Some(id.as_str()))
+            .tooltip(Tooltip::new(if muted {
+                format!("{name} is muted: unmute")
+            } else {
+                format!("Mute {name}")
+            }));
+            // A muted environment's bell-off always shows.
+            item.action(if muted { bell.always() } else { bell })
+        } else {
+            item
+        };
+        let edit = id.clone();
+        item.action(
+            ItemAction::new(
+                gpui::ElementId::Name(format!("environment-settings-{id}").into()),
+                IconName::Settings,
+                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.menus.close();
+                    cx.emit(SidebarEvent::EditEnvironment(edit.clone()));
+                    cx.notify();
+                }),
+            )
+            .always()
+            .tooltip(Tooltip::new(format!("Settings of {name}"))),
+        )
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.menus.close();
+            if !is_active {
+                cx.emit(SidebarEvent::SwitchEnvironment(id.clone()));
+            }
+            cx.notify();
+        }))
     }
 
     /// Mutes one environment (A5; the one on screen, or the one whose bell
@@ -624,11 +685,10 @@ impl Sidebar {
         let theme = cx.theme();
         let colors = theme.colors;
         let id = environment.id.clone();
-        // Its text lines up with the environments' names (after the
-        // menu's check column). It takes the menu's width rather than
-        // setting it (zero width, at least all of it), so the menu keeps
-        // its width whether the environment is muted or not; the name
-        // truncates instead.
+        // Its text lines up with the items' labels. It takes the menu's
+        // width rather than setting it (zero width, at least all of it), so
+        // the menu keeps its width whether the environment is muted or
+        // not; the name truncates instead.
         let row = div()
             .id("environment-mute")
             .flex()
@@ -636,7 +696,6 @@ impl Sidebar {
             .gap(px(6.))
             .w(px(0.))
             .min_w_full()
-            .pl(px(MUTE_ROW_INDENT))
             .text_size(theme.text.small);
         match state.environment_paused_until(&id, now) {
             Some(until) => row
@@ -752,8 +811,6 @@ pub(crate) struct SwitcherRow {
     pub(crate) partial: bool,
     /// Muted on its own (a bell-off).
     pub(crate) muted: bool,
-    /// Its unread notifications.
-    pub(crate) unread: usize,
 }
 
 /// The switcher's rows (ENV-01, B): every environment, in order.
@@ -782,12 +839,78 @@ pub(crate) fn switcher_rows(state: &AppState, now: Timestamp) -> Vec<SwitcherRow
             SwitcherRow {
                 active: state.is_active(&id),
                 muted: state.environment_paused_until(&id, now).is_some(),
-                unread: state.unread_in(&id),
                 name: environment.name.clone(),
                 id,
                 health,
                 detail,
                 partial,
+            }
+        })
+        .collect()
+}
+
+/// A section label: `nodes`, or `12 nodes · scroll for more` when a short
+/// window shows fewer rows than there are.
+fn list_label(what: &str, count: usize, shown: usize) -> String {
+    if shown < count {
+        format!("{count} {what} · scroll for more")
+    } else {
+        what.to_owned()
+    }
+}
+
+/// A master or satellite of the environment on screen, for the switcher.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NodeRow {
+    /// The endpoint's name.
+    pub(crate) name: String,
+    /// Its zone.
+    pub(crate) zone: String,
+    /// Its state, while connected (`None`: not connected now, so not
+    /// known).
+    pub(crate) state: Option<NodeState>,
+    /// It is the node icygui is connected to.
+    pub(crate) current: bool,
+    /// The row's tooltip.
+    pub(crate) hint: String,
+}
+
+/// The cluster's masters and satellites of the environment on screen
+/// (`Snapshot::cluster_nodes`): their states only while connected.
+pub(crate) fn node_rows(state: &AppState) -> Vec<NodeRow> {
+    let connection = state.connection();
+    let connected = connection.is_connected();
+    let current = connection
+        .node
+        .as_ref()
+        .filter(|_| connected)
+        .map(|node| node.name.clone());
+    let via = current.clone().unwrap_or_default();
+    state
+        .snapshot()
+        .cluster_nodes()
+        .into_iter()
+        .map(|node| {
+            let is_current = current.as_deref() == Some(node.name.as_str());
+            let state = connected.then_some(node.state);
+            let hint = match state {
+                _ if is_current => format!("{}: icygui is connected to it", node.name),
+                Some(NodeState::Connected) => format!("{}: connected to {via}", node.name),
+                Some(NodeState::Disconnected) => {
+                    format!("{}: not connected to {via}", node.name)
+                }
+                Some(NodeState::Unknown) => format!(
+                    "{}: {via} has no connection of its own to it, so its state isn't known here",
+                    node.name
+                ),
+                None => format!("{}: not known while not connected", node.name),
+            };
+            NodeRow {
+                name: node.name,
+                zone: node.zone,
+                state,
+                current: is_current,
+                hint,
             }
         })
         .collect()
@@ -855,7 +978,7 @@ pub(super) fn status_tooltip(
     demo: bool,
     connection: &str,
     view: Option<&str>,
-    elsewhere: &[(&str, usize)],
+    elsewhere: &[&str],
 ) -> String {
     let mut text = match name {
         Some(name) if demo => format!("{name} (demo) · {connection}"),
@@ -866,12 +989,9 @@ pub(super) fn status_tooltip(
         let _ = write!(text, " · {view}");
     }
     text.push_str(": environments and connection details");
+    // Which, not how many: the counts are the notification centre's.
     if !elsewhere.is_empty() {
-        let unread: Vec<String> = elsewhere
-            .iter()
-            .map(|(name, unread)| format!("{name} {unread} unread"))
-            .collect();
-        let _ = write!(text, " · {}", unread.join(", "));
+        let _ = write!(text, " · unread notifications in {}", elsewhere.join(", "));
     }
     text
 }
@@ -1025,24 +1145,33 @@ mod tests {
 
     #[test]
     fn the_switcher_fits_any_window_whatever_the_state() {
-        // The default window shows every environment of a big list.
-        let big = switcher_budget(900., 11);
-        assert_eq!(big.rows, 11);
-        assert!((big.list - 11. * budget::ROW).abs() < f32::EPSILON);
+        // The default window shows every environment of a big list and
+        // every node of a cluster of three.
+        let big = switcher_budget(900., 11, 3);
+        assert_eq!((big.environments, big.nodes), (11, 3));
         assert!(big.lines >= 9. * budget::LINE - 4., "{big:?}");
-        // The smallest window (560 px) with 11 environments: three rows
-        // and the lines scroll, the controls stay; the whole popover fits
-        // above the footer.
-        let small = switcher_budget(560., 11);
-        assert_eq!(small.rows, 3);
+        // The smallest window (560 px) with 11 environments and 6 nodes:
+        // three rows of each, the lines scroll, the controls stay; the
+        // whole popover fits above the footer.
+        let small = switcher_budget(560., 11, 6);
+        assert_eq!((small.environments, small.nodes), (3, 3));
         assert!(
-            budget::TOP + small.lines + 8. + small.list + budget::BOTTOM + budget::OUTSIDE
+            budget::TOP
+                + budget::NODES
+                + small.lines
+                + 8.
+                + height_of(6, budget::ROW)
+                + budget::BOTTOM
+                + budget::OUTSIDE
                 <= 560. + 0.5,
             "{small:?}"
         );
-        // A few environments show all of them.
-        assert_eq!(switcher_budget(560., 2).rows, 2);
-        assert_eq!(switcher_budget(900., 1).rows, 1);
+        // A few environments and no nodes (not connected yet): all of them.
+        assert_eq!(switcher_budget(560., 2, 0).environments, 2);
+        assert_eq!(switcher_budget(900., 1, 0).environments, 1);
+        // Room goes to each list in turn.
+        let tall = switcher_budget(700., 9, 9);
+        assert!(tall.environments.abs_diff(tall.nodes) <= 1, "{tall:?}");
     }
 
     #[test]
@@ -1069,10 +1198,10 @@ mod tests {
                 true,
                 "sat-ams-01 · 2s",
                 Some("partial view: zone ams"),
-                &[("staging", 3), ("lab", 1)]
+                &["staging", "lab"]
             ),
             "prod-cluster (demo) · sat-ams-01 · 2s · partial view: zone ams: environments \
-             and connection details · staging 3 unread, lab 1 unread"
+             and connection details · unread notifications in staging, lab"
         );
         assert_eq!(
             status_tooltip(None, false, "no environment", None, &[]),

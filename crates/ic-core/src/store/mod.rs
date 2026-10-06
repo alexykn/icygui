@@ -51,7 +51,7 @@ use std::sync::Arc;
 use ic_api::Detail;
 use ic_model::{
     CheckInfo, CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
-    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, ServiceKey, Timestamp,
+    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, ServiceKey, Timestamp, Zone,
 };
 use ic_rules::DashboardRef;
 
@@ -125,6 +125,8 @@ pub(crate) struct Overview {
     pub(crate) dependencies: Vec<Dependency>,
     /// Endpoints.
     pub(crate) endpoints: Vec<Endpoint>,
+    /// Zones (empty without permission).
+    pub(crate) zones: Vec<Zone>,
     /// Comments.
     pub(crate) comments: Vec<Comment>,
     /// Downtimes.
@@ -142,6 +144,7 @@ pub(crate) struct Store {
     service_groups: Arc<Vec<ServiceGroup>>,
     dependencies: Arc<Vec<Dependency>>,
     endpoints: Arc<Vec<Endpoint>>,
+    zones: Arc<Vec<Zone>>,
     status: Option<Arc<InstanceStatus>>,
     /// Icinga's own `Notification` objects, by host or service, each list
     /// by name.
@@ -534,6 +537,7 @@ impl Store {
             service_groups: Arc::clone(&self.service_groups),
             dependencies: Arc::clone(&self.dependencies),
             endpoints: Arc::clone(&self.endpoints),
+            zones: Arc::clone(&self.zones),
             status: self.status.clone(),
             icinga_notifications: Arc::clone(&self.icinga_notifications),
             dashboards,
@@ -585,6 +589,7 @@ impl Store {
             &mut self.changes,
         );
         set_list(&mut self.endpoints, overview.endpoints, &mut self.changes);
+        set_list(&mut self.zones, overview.zones, &mut self.changes);
 
         let mut comments: BTreeMap<ObjectKey, Vec<Comment>> = BTreeMap::new();
         for comment in overview.comments {
@@ -853,9 +858,39 @@ impl Store {
         set_list(&mut self.dependencies, dependencies, &mut self.changes);
     }
 
-    /// Replaces the endpoints.
-    pub(crate) fn set_endpoints(&mut self, endpoints: Vec<Endpoint>) {
+    /// Replaces the endpoints and the zones.
+    pub(crate) fn set_cluster(&mut self, endpoints: Vec<Endpoint>, zones: Vec<Zone>) {
         set_list(&mut self.endpoints, endpoints, &mut self.changes);
+        set_list(&mut self.zones, zones, &mut self.changes);
+    }
+
+    /// Sets the endpoints' `connected` as Icinga reported it (by name;
+    /// `local`, the node the engine talks to, stays connected: Icinga
+    /// reports its own endpoint as not connected).
+    pub(crate) fn set_endpoint_states(&mut self, states: &[(String, bool)], local: &str) {
+        let changed = self.endpoints.iter().any(|endpoint| {
+            endpoint.name != local
+                && states.iter().any(|(name, connected)| {
+                    *name == endpoint.name && *connected != endpoint.connected
+                })
+        });
+        if !changed {
+            return;
+        }
+        for endpoint in Arc::make_mut(&mut self.endpoints) {
+            if endpoint.name == local {
+                continue;
+            }
+            if let Some((_, connected)) = states.iter().find(|(name, _)| *name == endpoint.name) {
+                endpoint.connected = *connected;
+            }
+        }
+        self.changes.any = true;
+    }
+
+    /// The endpoints and zones (for the node list's states).
+    pub(crate) fn cluster(&self) -> (&[Endpoint], &[Zone]) {
+        (&self.endpoints, &self.zones)
     }
 
     fn evented_after(&self, key: &ObjectKey, started: u64) -> bool {

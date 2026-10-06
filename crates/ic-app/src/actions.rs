@@ -20,6 +20,7 @@
 //! | | `secondary-w` | [`CloseTab`]: close the tab shown |
 //! | | `secondary-b` | `ToggleSidebar` |
 //! | | — | [`FocusMain`]: hand the keyboard to the list or the tab shown (Enter and Escape in the sidebar search do this) |
+//! | | — | [`ReviewCertificate`], [`EditEnvironment`]: from the connection banner |
 //!
 //! `secondary` is cmd on macOS and ctrl elsewhere. Single letters are bound
 //! only in the list and pane contexts, so they never reach text fields.
@@ -159,6 +160,20 @@ pub(crate) struct CloseTab;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct FocusMain;
+
+/// Shows the certificate of a server whose certificate isn't trusted, to
+/// decide whether to trust it (the connection banner's "Review
+/// certificate…"; the environment settings handle it).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct ReviewCertificate;
+
+/// Opens the active environment's settings (the connection banner's "Edit
+/// environment…" after a refused login, a missing password or settings
+/// that can't work).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct EditEnvironment;
 
 /// Registers the default key bindings of the workspace, the list and the
 /// panes.

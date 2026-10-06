@@ -179,8 +179,9 @@ crates/
                   ServicePane, HostPane, dialogs, CommandPalette, Settings,
                   NotificationCenter), actions + keymap, bridge between ic-core and GPUI,
                   GPUI-backed Notifier.
-  ic-mock/        dev/test only, never shipped: Icinga 2 API look-alike (§3.6) with
-                  scenario data, simulator and fault injection; lib + `icinga-mock` binary.
+  ic-mock/        Icinga 2 API look-alike (§3.6) with scenario data, simulator and fault
+                  injection; lib + `icinga-mock` binary. For tests and development, and
+                  linked into the app only for `icygui --demo` (ENV-10).
 spikes/           M0 experiments kept as regression checks (background mode, tray,
                   notifications); `linux-headless.sh` runs them under Xvfb in CI.
 xtask/            cargo xtask: bundle (.app/.dmg, AppImage/.deb), mock (start all mock
@@ -197,7 +198,7 @@ ic-app ──► ic-ui-kit ──► (gpui, gpui-component), ic-model
                ├────► ic-rules ──► ic-filter ──► ic-model
                └────► ic-config ──► ic-model
 
-ic-mock ──► ic-model, ic-filter          (dev-dependency of ic-api, ic-core, ic-app tests)
+ic-mock ──► ic-model, ic-filter          (dev-dependency of ic-api, ic-core; ic-app links it for `--demo`)
 ```
 
 `ic-mock` keeps its own wire structs, written from the API docs, instead of sharing `ic-api`'s, so a mistake in `ic-api`'s serde mapping can't be mirrored by the mock and go unnoticed.

@@ -9,11 +9,13 @@ mod host;
 pub(crate) mod model;
 mod service;
 
+use std::time::Instant;
+
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_ui_kit::{
@@ -25,9 +27,11 @@ use crate::actions::{
     Acknowledge, ActionRequest, AddComment, CheckNow, Dismiss, ObjectAction, PANE_CONTEXT,
     ScheduleDowntime,
 };
-use crate::app_state::AppState;
+use crate::app_state::hydration::{pane_wants_details, row_needs_details};
+use crate::app_state::{AppState, Hydrated};
+use crate::banner;
 use crate::chrome::{Controls, WindowDrag};
-use crate::dashboard::SplitLayout;
+use crate::dashboard::{HYDRATE_DEBOUNCE, SplitLayout};
 use crate::workspace::sidebar_reopen;
 
 /// Where the pane is shown.
@@ -120,6 +124,11 @@ pub(crate) struct ObjectPane {
     /// shows the window controls and the sidebar button in its header.
     sidebar_open: bool,
     drag: WindowDrag,
+    /// The objects last asked for their details (the pane's own and, in a
+    /// host pane, its service rows without output).
+    hydration_wanted: Vec<ObjectKey>,
+    /// Asks for them once the pane rests on an object.
+    hydrate_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -151,8 +160,60 @@ impl ObjectPane {
             focus_handle: cx.focus_handle(),
             sidebar_open: true,
             drag: WindowDrag::default(),
+            hydration_wanted: Vec::new(),
+            hydrate_task: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The objects this pane shows that lack details: a service's own (its
+    /// output and links), a host pane's service rows without output.
+    fn details_wanted(&self, cx: &App) -> Vec<ObjectKey> {
+        let state = self.state.read(cx);
+        let snapshot = state.snapshot();
+        let mut keys = Vec::new();
+        if pane_wants_details(snapshot, &self.object) {
+            keys.push(self.object.clone());
+        }
+        if let ObjectKey::Host { name } = &self.object
+            && self.host_tab == HostTab::Services
+            && let Some(host) = snapshot.hosts.get(name)
+        {
+            keys.extend(
+                model::host_services(snapshot, host, self.show_all_ok)
+                    .shown
+                    .iter()
+                    .map(|service| service.object_key())
+                    .filter(|key| row_needs_details(snapshot, key)),
+            );
+        }
+        keys
+    }
+
+    /// Asks for the details of what the pane shows, once it rests on it
+    /// (moving the cursor through a list with the pane open asks only for
+    /// where it stops).
+    fn want_details(&mut self, cx: &mut Context<Self>) {
+        let keys = self.details_wanted(cx);
+        if keys == self.hydration_wanted {
+            return;
+        }
+        self.hydration_wanted.clone_from(&keys);
+        if keys.is_empty() {
+            self.hydrate_task = None;
+            return;
+        }
+        self.hydrate_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HYDRATE_DEBOUNCE).await;
+            let _ = this.update(cx, |this, cx| {
+                let outcome = this
+                    .state
+                    .update(cx, |state, _| state.hydrate(keys, Instant::now()));
+                if outcome == Hydrated::NotNow {
+                    this.hydration_wanted.clear();
+                }
+            });
+        }));
     }
 
     /// The object shown.
@@ -260,13 +321,18 @@ impl ObjectPane {
         cx.emit(PaneEvent::Close);
     }
 
-    /// Sends an action request for the shown object.
+    /// Sends an action request for the shown object (refused, and
+    /// logged, if the API user may not run it).
     fn request(&self, action: ObjectAction, cx: &mut App) {
         let request = ActionRequest {
             action,
             targets: vec![self.object.clone()],
         };
-        self.state.update(cx, |state, _| state.request(request));
+        self.state.update(cx, |state, cx| {
+            if state.request(request).is_err() {
+                cx.notify();
+            }
+        });
     }
 
     fn on_acknowledge(&mut self, _: &Acknowledge, _: &mut Window, cx: &mut Context<Self>) {
@@ -355,20 +421,31 @@ impl ObjectPane {
 
 impl Render for ObjectPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.want_details(cx);
         let theme = cx.theme().clone();
         let header = self.render_header(window, cx);
         let snapshot = self.state.read(cx).snapshot().clone();
         let now = Timestamp::now();
         let layout = self.body_layout(window, &theme);
+        let loading = {
+            let state = self.state.read(cx);
+            state.has_no_objects() && state.connection().is_starting()
+        };
         let body = match &self.object {
             ObjectKey::Service { key } => match snapshot.services.get(key) {
                 Some(service) => service::render(self, &snapshot, service, now, layout, cx),
-                None => missing(&self.object, &theme),
+                None => missing(&self.object, loading, &theme),
             },
             ObjectKey::Host { name } => match snapshot.hosts.get(name) {
                 Some(host) => host::render(self, &snapshot, host, now, cx),
-                None => missing(&self.object, &theme),
+                None => missing(&self.object, loading, &theme),
             },
+        };
+        // A tab is the whole main area: the connection banners show over it.
+        let banners = if self.mode == PaneMode::Tab {
+            banner::banners(&self.state, now, cx)
+        } else {
+            Vec::new()
         };
         div()
             .id("object-pane")
@@ -387,12 +464,24 @@ impl Render for ObjectPane {
                     .on_action(cx.listener(Self::on_dismiss))
             })
             .child(header)
+            .children(banners)
             .child(body)
     }
 }
 
-/// The pane body for an object the snapshot no longer has.
-fn missing(object: &ObjectKey, theme: &Theme) -> AnyElement {
+/// The pane body for an object the snapshot doesn't have: still loading,
+/// or gone.
+fn missing(object: &ObjectKey, loading: bool, theme: &Theme) -> AnyElement {
+    if loading {
+        return EmptyState::new(format!("Loading {}…", short_name(object)))
+            .leading(
+                Icon::new(IconName::Loader)
+                    .size(px(20.))
+                    .color(theme.colors.accent),
+            )
+            .detail("It shows as soon as the objects are loaded.")
+            .into_any_element();
+    }
     EmptyState::new(format!("{} is gone", short_name(object)))
         .leading(
             Icon::new(IconName::TriangleAlert)
@@ -445,46 +534,72 @@ fn scroll_area(
         .child(Scrollbar::vertical(scroll))
 }
 
-/// The action buttons shared by service and host panes.
-fn action_buttons(acknowledged: bool, problem: bool, cx: &Context<ObjectPane>) -> impl IntoElement {
-    let request = |action: ObjectAction| {
-        cx.listener(move |this: &mut ObjectPane, _: &ClickEvent, _, cx| {
-            this.request(action.clone(), cx);
-        })
-    };
+/// The action buttons shared by service and host panes. Actions the API
+/// user may not run are disabled, and their tooltip says why (ENV-09).
+fn action_buttons(
+    pane: &ObjectPane,
+    acknowledged: bool,
+    problem: bool,
+    cx: &Context<ObjectPane>,
+) -> impl IntoElement {
+    let state = pane.state.read(cx);
+    let button =
+        |id: &'static str, label: &'static str, key: Option<&'static str>, action: ObjectAction| {
+            let denial = state.action_denial(&action);
+            let mut button = Button::new(id, label);
+            if let Some(key) = key {
+                button = button.key_hint(key);
+            }
+            match denial {
+                Some(denial) => button.disabled(true).tooltip(Tooltip::new(denial)),
+                None => button.on_click(cx.listener(
+                    move |this: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                        this.request(action.clone(), cx);
+                    },
+                )),
+            }
+        };
     div()
         .flex()
         .flex_wrap()
         .gap(px(8.))
         .when(problem && !acknowledged, |row| {
             row.child(
-                Button::new("acknowledge", "acknowledge")
-                    .primary()
-                    .key_hint("a")
-                    .on_click(request(ObjectAction::Acknowledge)),
+                button(
+                    "acknowledge",
+                    "acknowledge",
+                    Some("a"),
+                    ObjectAction::Acknowledge,
+                )
+                .primary(),
             )
         })
         .when(acknowledged, |row| {
-            row.child(
-                Button::new("remove-ack", "remove ack")
-                    .on_click(request(ObjectAction::RemoveAcknowledgement)),
-            )
+            row.child(button(
+                "remove-ack",
+                "remove ack",
+                None,
+                ObjectAction::RemoveAcknowledgement,
+            ))
         })
-        .child(
-            Button::new("downtime", "downtime")
-                .key_hint("d")
-                .on_click(request(ObjectAction::ScheduleDowntime)),
-        )
-        .child(
-            Button::new("check-now", "check now")
-                .key_hint("r")
-                .on_click(request(ObjectAction::CheckNow)),
-        )
-        .child(
-            Button::new("comment", "comment")
-                .key_hint("c")
-                .on_click(request(ObjectAction::AddComment)),
-        )
+        .child(button(
+            "downtime",
+            "downtime",
+            Some("d"),
+            ObjectAction::ScheduleDowntime,
+        ))
+        .child(button(
+            "check-now",
+            "check now",
+            Some("r"),
+            ObjectAction::CheckNow,
+        ))
+        .child(button(
+            "comment",
+            "comment",
+            Some("c"),
+            ObjectAction::AddComment,
+        ))
 }
 
 /// A copy-to-clipboard button, shown while the mouse is over the element

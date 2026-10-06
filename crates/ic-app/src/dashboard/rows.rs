@@ -27,6 +27,9 @@ pub(crate) struct ObjectRow {
     pub(crate) output: String,
     /// The right-aligned tag: why the problem is handled, or flapping.
     pub(crate) tag: Option<String>,
+    /// `late 12m`: Icinga still reported the check overdue when asked
+    /// (PERF-08).
+    pub(crate) late: Option<String>,
 }
 
 /// A group header (`group_by`).
@@ -49,6 +52,7 @@ pub(crate) fn object_row(
     now: Timestamp,
 ) -> Option<ObjectRow> {
     let comments = snapshot.comments.get(key).map(Vec::as_slice);
+    let late = late_label(snapshot, key, now);
     match key {
         ObjectKey::Host { name } => {
             let host = snapshot.hosts.get(name)?;
@@ -60,6 +64,7 @@ pub(crate) fn object_row(
                 host: None,
                 output: output(&host.check, CheckableState::Host(host.state)),
                 tag: tag(&host.check, comments, None),
+                late,
             })
         }
         ObjectKey::Service { key: service_key } => {
@@ -82,9 +87,23 @@ pub(crate) fn object_row(
                     comments,
                     host.map(AsRef::as_ref).filter(|_| service.is_problem()),
                 ),
+                late,
             })
         }
     }
+}
+
+/// `late 12m` for an object whose check is late: how long ago Icinga
+/// expected its result (the deadline is on Icinga's clock, close enough to
+/// ours for minutes).
+pub(crate) fn late_label(snapshot: &Snapshot, key: &ObjectKey, now: Timestamp) -> Option<String> {
+    let deadline = snapshot.late.get(key)?;
+    let overdue = deadline.elapsed_until(now);
+    Some(if overdue.as_secs() == 0 {
+        "late".to_owned()
+    } else {
+        format!("late {}", ic_model::format_compact(overdue))
+    })
 }
 
 /// The header row for a group of `count` rows labelled `label`.
@@ -388,6 +407,33 @@ mod tests {
         let header = group_row(&snapshot, &by_group, "Production databases", 1, now());
         assert_eq!(header.count, "1 service");
         assert_eq!(header.host, None);
+    }
+
+    #[test]
+    fn late_checks_are_flagged() {
+        let mut snapshot = snapshot(
+            vec![host("h", HostState::Up)],
+            vec![service("h", "s", ServiceState::Ok, "OK")],
+            Vec::new(),
+        );
+        let key = ObjectKey::service("h", "s");
+        assert_eq!(object_row(&snapshot, &key, now()).unwrap().late, None);
+        snapshot.late = Arc::new([(key.clone(), ago(12. * 60.))].into_iter().collect());
+        assert_eq!(
+            object_row(&snapshot, &key, now()).unwrap().late.as_deref(),
+            Some("late 12m")
+        );
+        snapshot.late = Arc::new([(key.clone(), now())].into_iter().collect());
+        assert_eq!(
+            object_row(&snapshot, &key, now()).unwrap().late.as_deref(),
+            Some("late")
+        );
+        assert_eq!(
+            object_row(&snapshot, &ObjectKey::host("h"), now())
+                .unwrap()
+                .late,
+            None
+        );
     }
 
     #[test]

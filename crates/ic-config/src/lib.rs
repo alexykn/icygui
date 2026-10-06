@@ -7,6 +7,8 @@
 //! - [`Config::validate`] finds settings that load but can't work (bad URLs,
 //!   missing names, duplicate ids, unparsable fingerprints).
 //! - [`export_groups`] and [`import_groups`] share dashboards as files.
+//! - [`StateStore`] keeps the [`UiState`] (window size and position, open
+//!   tabs, selected dashboards) in a file of its own next to the data.
 //!
 //! Secrets never appear here: passwords live in the OS keychain under the
 //! environment's id, saving refuses settings that would write one into the
@@ -23,6 +25,7 @@ mod model;
 mod paths;
 mod share;
 mod store;
+mod ui_state;
 mod validate;
 
 pub use config::new_id;
@@ -37,4 +40,7 @@ pub use model::{
 pub use paths::Paths;
 pub use share::{export_groups, import_groups};
 pub use store::ConfigStore;
+pub use ui_state::{
+    EnvironmentUiState, MAX_TABS, StateStore, UI_STATE_VERSION, UiState, WindowState,
+};
 pub use validate::{MIN_EVENT_LOG_RETENTION_HOURS, MIN_RECONCILE_INTERVAL_SECS, ValidationIssue};

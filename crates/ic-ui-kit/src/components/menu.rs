@@ -165,6 +165,7 @@ enum Entry {
     Item(MenuItem),
     Label(SharedString),
     Separator,
+    Element(AnyElement),
 }
 
 /// A popup menu's card: items with check marks and key hints, section
@@ -198,6 +199,14 @@ impl Menu {
     /// Adds a faint section label (`sort by`).
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.entries.push(Entry::Label(label.into()));
+        self
+    }
+
+    /// Adds arbitrary content (key/value lines, a status paragraph),
+    /// padded like an item.
+    pub fn element(mut self, element: impl IntoElement) -> Self {
+        self.entries
+            .push(Entry::Element(element.into_any_element()));
         self
     }
 
@@ -238,7 +247,7 @@ impl Menu {
             .iter()
             .filter_map(|entry| match entry {
                 Entry::Item(item) => Some(item.label.clone()),
-                Entry::Label(_) | Entry::Separator => None,
+                Entry::Label(_) | Entry::Separator | Entry::Element(_) => None,
             })
             .collect()
     }
@@ -288,6 +297,13 @@ impl RenderOnce for Menu {
                     .h(px(1.))
                     .bg(colors.border_window)
                     .into_any_element(),
+                Entry::Element(element) => div()
+                    .px(px(ITEM_PADDING))
+                    .py(px(4.))
+                    .text_size(theme.text.body)
+                    .text_color(colors.text)
+                    .child(element)
+                    .into_any_element(),
             })
             .collect();
         div()
@@ -332,6 +348,7 @@ impl RenderOnce for Menu {
 pub struct Popover {
     content: AnyElement,
     align_right: bool,
+    above: bool,
     gap: Pixels,
 }
 
@@ -341,8 +358,16 @@ impl Popover {
         Self {
             content: content.into_any_element(),
             align_right: false,
+            above: false,
             gap: px(4.),
         }
+    }
+
+    /// Opens the popover above the parent instead of under it (for
+    /// triggers at the bottom of the window, like the sidebar footer).
+    pub fn above(mut self) -> Self {
+        self.above = true;
+        self
     }
 
     /// Aligns the popover's right edge with the parent's.
@@ -362,6 +387,7 @@ impl fmt::Debug for Popover {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Popover")
             .field("align_right", &self.align_right)
+            .field("above", &self.above)
             .field("gap", &self.gap)
             .finish_non_exhaustive()
     }
@@ -369,17 +395,23 @@ impl fmt::Debug for Popover {
 
 impl RenderOnce for Popover {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let anchor = if self.align_right {
-            Anchor::TopRight
-        } else {
-            Anchor::TopLeft
+        let anchor = match (self.above, self.align_right) {
+            (false, false) => Anchor::TopLeft,
+            (false, true) => Anchor::TopRight,
+            (true, false) => Anchor::BottomLeft,
+            (true, true) => Anchor::BottomRight,
         };
-        // An empty box at the parent's bottom corner; the content hangs
-        // from it.
+        // An empty box at the parent's bottom corner (top corner when
+        // above); the content hangs from it (stands on it).
         div()
             .absolute()
-            .top(relative(1.))
-            .mt(self.gap)
+            .map(|corner| {
+                if self.above {
+                    corner.bottom(relative(1.)).mb(self.gap)
+                } else {
+                    corner.top(relative(1.)).mt(self.gap)
+                }
+            })
             .map(|corner| {
                 if self.align_right {
                     corner.right_0()

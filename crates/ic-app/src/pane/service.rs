@@ -56,8 +56,9 @@ pub(super) fn render(
                 .show_range(layout != BodyLayout::Pane)
                 .into_any_element()
         });
-    let check = check_table(service, now).into_any_element();
-    let notes = notes(snapshot, &key, now, cx);
+    let readable = pane.state.read(cx).can_read_notifications();
+    let check = check_table(snapshot, &key, service, readable, now).into_any_element();
+    let notes = notes(pane, snapshot, &key, now, cx);
     let vars = vars(service).map(IntoElement::into_any_element);
     let groups =
         groups(snapshot, service, host.map(|host| host.groups.as_slice())).into_any_element();
@@ -77,10 +78,11 @@ pub(super) fn render(
             service,
             host.map(|host| host.display_name.as_str()),
             handled,
+            crate::dashboard::rows::late_label(snapshot, &key, now),
             now,
             cx,
         ))
-        .child(action_buttons(acknowledged, service.is_problem(), cx));
+        .child(action_buttons(pane, acknowledged, service.is_problem(), cx));
     let column = match layout {
         BodyLayout::Pane | BodyLayout::Tab => column
             .when(layout == BodyLayout::Tab, |column| {
@@ -131,6 +133,7 @@ fn title(
     service: &Service,
     host_name: Option<&str>,
     handled: bool,
+    late: Option<String>,
     now: Timestamp,
     cx: &Context<ObjectPane>,
 ) -> impl IntoElement {
@@ -196,7 +199,14 @@ fn title(
                                     },
                                 )),
                         )
-                        .child(format!("\u{a0}· {}", model::service_subtitle(service, now))),
+                        .child(format!("\u{a0}· {}", model::service_subtitle(service, now)))
+                        .when_some(late, |line, late| {
+                            line.child(
+                                div()
+                                    .text_color(theme.states.warning)
+                                    .child(format!("\u{a0}· {late}")),
+                            )
+                        }),
                 ),
         )
 }
@@ -250,8 +260,14 @@ fn output(service: &Service, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn check_table(service: &Service, now: Timestamp) -> KvTable {
-    model::check_rows(&service.check, now)
+fn check_table(
+    snapshot: &Snapshot,
+    key: &ObjectKey,
+    service: &Service,
+    readable: Option<bool>,
+    now: Timestamp,
+) -> KvTable {
+    model::object_check_rows(snapshot, key, &service.check, readable, now)
         .into_iter()
         .fold(KvTable::new().title("check"), |table, (key, value)| {
             table.row(key, value)
@@ -261,6 +277,7 @@ fn check_table(service: &Service, now: Timestamp) -> KvTable {
 /// Comments, acknowledgements and downtimes, each with a remove button
 /// (acknowledgements are removed with the "remove ack" button).
 pub(super) fn notes(
+    pane: &ObjectPane,
     snapshot: &Snapshot,
     key: &ObjectKey,
     now: Timestamp,
@@ -280,24 +297,27 @@ pub(super) fn notes(
     if comments.is_empty() && downtimes.is_empty() {
         return None;
     }
-    // Shown while the mouse is over its note, like the copy buttons.
+    let state = pane.state.read(cx);
+    // Shown while the mouse is over its note, like the copy buttons;
+    // disabled with the reason when the API user may not remove it.
     let remove = |id: String, tooltip: &'static str, action: ObjectAction| {
+        let button = IconButton::new(gpui::SharedString::from(id), IconName::Close)
+            .size(px(20.))
+            .icon_size(px(12.))
+            .color(theme.colors.text_faint);
+        let button = match state.action_denial(&action) {
+            Some(denial) => button.disabled(true).tooltip(Tooltip::new(denial)),
+            None => button.tooltip(Tooltip::new(tooltip)).on_click(cx.listener(
+                move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                    pane.request(action.clone(), cx);
+                },
+            )),
+        };
         div()
             .flex_none()
             .invisible()
             .group_hover(NOTE_GROUP, gpui::Styled::visible)
-            .child(
-                IconButton::new(gpui::SharedString::from(id), IconName::Close)
-                    .size(px(20.))
-                    .icon_size(px(12.))
-                    .color(theme.colors.text_faint)
-                    .tooltip(Tooltip::new(tooltip))
-                    .on_click(
-                        cx.listener(move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
-                            pane.request(action.clone(), cx);
-                        }),
-                    ),
-            )
+            .child(button)
     };
     let mut column = div().flex().flex_col().gap(px(14.));
     for comment in comments {

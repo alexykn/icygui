@@ -32,20 +32,29 @@ The first build compiles GPUI and takes a few minutes. Dependencies are built wi
 - **Load and scale tests** run only against `ic-mock` (its `large` scenario and `MockControl::burst`) or `contract/scale/benchmark.sh`, which starts its own Icinga in Docker on localhost. Never point a load test at a production Icinga.
 - **Against a production Icinga,** the only test is normal use of the app: connect and look around, which costs one lean load like an Icinga Web session.
 
-## Demo data and development switches
+## Running the app
 
-Until the core is wired up (M2), `cargo run -p ic-app` shows the built-in demo: the design's dashboards and objects (`crates/ic-app/src/demo/`). Environment variables for development (the `ICYGUI_DEMO_*` ones only affect the demo):
+- `cargo run -p ic-app` connects to the active environment of the settings file (the first one if none is marked). Without environments it says so; the environment editor comes with the settings.
+- `cargo run -p ic-app -- --demo` runs the whole app against a simulated Icinga in the same process: an `ic_mock::MockServer` with the `prod-cluster` scenario (the design's sample data in a 150-host estate) and its simulator running (checks at their intervals, new problems, recoveries, flapping, outages, downtimes, a problem storm every five minutes), through the real `ic-core`. Actions work against it. Nothing is saved, the keychain isn't touched, and the event log lives in a temporary directory.
+- `--version` and `--help` print and exit without opening a window.
+
+Files (from `ic_config::Paths`): the settings in `config.toml` (with `config.toml.bak`), the window size and position, open tabs and selected dashboards in `state.toml` in the data directory, the event logs (`events-<environment id>.sqlite3`) in the data directory, and the log in `icygui.log` (rotated at 10 MiB, four old files kept) in the log directory. A settings file that can't be read is never replaced silently: the window offers to restore the backup, start fresh (the broken file is kept as `config.toml.unreadable-<time>`), try again, or quit.
+
+Environment variables for development (the `ICYGUI_DEMO_*` ones only affect `--demo`):
 
 | Variable | Effect |
 | --- | --- |
-| `ICYGUI_DEMO_ROWS=20000` | Adds that many generated services and selects the `lab / load-test` dashboard that lists them, to check that scrolling stays smooth. |
+| `RUST_LOG=icygui=debug,ic_core=debug` | The log filter (default `info`). |
+| `ICYGUI_DEMO_SCENARIO=large` | Serves another `ic_mock` scenario: `prod-cluster` (default), `staging`, `lab`, or `large` (production scale: 2 000 hosts, 30 000 services), to check that loading and scrolling stay smooth. |
+| `ICYGUI_DEMO_SEED=7` | Fixes the simulator's seed (the default changes every run), for reproducible screenshots. |
+| `ICYGUI_DEMO_FAULT=auth` | Shows a connection failure on purpose: `offline` (reconnecting with a countdown), `auth` (login refused), `tls` (certificate not trusted), `missing-secret`, `misconfigured`, `outage` (the connection is lost 20 s in), `slow` (every answer takes 0.9 s, so the load's progress shows) or `frozen` (the simulated Icinga stops checking, so checks are marked late after about two minutes). |
 | `ICYGUI_DEMO_DASHBOARD=databases` | Selects a dashboard by name at start. |
-| `ICYGUI_DEMO_OPEN=service` | Opens an object at start: `service` (postgres-replication beside the list, screen 2b), `host` (its host db-prod-03, screen 2c), `tab` (postgres-replication as a tab), an object name (`db-prod-03`, `db-prod-03!postgres-replication`) or `tab:<name>`. |
+| `ICYGUI_DEMO_OPEN=service` | Opens an object once it is loaded: `service` (postgres-replication beside the list, screen 2b), `host` (its host db-prod-03, screen 2c), `tab` (postgres-replication as a tab), an object name (`db-prod-03`, `db-prod-03!postgres-replication`) or `tab:<name>`. |
 | `ICYGUI_WINDOW_CONTROLS=always` | Draws the window's own close/minimise/maximise buttons (`never`, `auto`): on Linux the default depends on the desktop; screenshots under Xvfb need `always`. |
 
-Action buttons and their keys (acknowledge, downtime, check now, comment) are logged at `info` level; their dialogs come with M3.
+Action buttons and their keys (acknowledge, downtime, check now, comment) are checked against the API user's permissions and logged at `info` level; their dialogs come with the actions.
 
-The UI tests in `crates/ic-app/src/ui_tests.rs` run the real window on GPUI's headless platform (Linux only): keystrokes, clicks and snapshot updates, no display server needed.
+The UI tests in `crates/ic-app/src/ui_tests/` run the real window on GPUI's headless platform (Linux only): keystrokes, clicks and snapshot updates on fixed data (`crates/ic-app/src/fixture/`), and the whole app against the demo's mock through the real core (`ui_tests/live.rs`), no display server needed. With the `ICYGUI_CONTRACT_*` variables of `contract/run-icinga.sh` set, `ui_tests::live::a_real_icinga_loads_read_only` also connects the app to the disposable Icinga (read-only; it refuses any other instance).
 
 ## Lints
 

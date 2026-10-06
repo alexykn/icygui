@@ -1,7 +1,8 @@
 //! GPUI tests: the real window on GPUI's headless platform (no display
 //! server, no GPU: layout, text shaping, focus, key bindings and hit testing
 //! run; painting is discarded), driven by keystrokes, mouse clicks and
-//! snapshot updates.
+//! snapshot updates. Most run on the test fixture; [`live`] runs the whole
+//! app against a real core and an in-process mock Icinga.
 //!
 //! GPUI's `TestAppContext` needs its `test-support` feature, which would build
 //! a second copy of GPUI; the headless platform needs nothing extra. It runs
@@ -17,8 +18,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use futures::FutureExt as _;
+use futures::future::LocalBoxFuture;
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Entity, Keystroke, Modifiers, MouseButton,
+    AnyWindowHandle, App, AppContext as _, AsyncApp, Entity, Keystroke, Modifiers, MouseButton,
     MouseDownEvent, MouseUpEvent, Pixels, PlatformInput, Point, Size, Window, point, px, size,
 };
 use ic_config::{GroupBy, Sort, SortKey};
@@ -31,10 +34,14 @@ use crate::actions::ObjectAction;
 use crate::app_state::AppState;
 use crate::chrome::ControlsPreference;
 use crate::dashboard::DashboardView;
-use crate::demo::DemoOptions;
+use crate::fixture::FixtureOptions;
 use crate::open_main_window;
 use crate::pane::{HostTab, ObjectPane};
+use crate::window_state::InitialBounds;
 use crate::workspace::{self, ToggleSidebar, Workspace};
+
+mod live;
+mod states;
 
 /// One headless app at a time.
 static HEADLESS: Mutex<()> = Mutex::new(());
@@ -188,19 +195,50 @@ fn secondary() -> Modifiers {
     Modifiers::secondary_key()
 }
 
-/// Runs `test` in a headless app with the demo (and `options`) in the main
-/// window at the design's size. Panics inside are caught, the app quits,
-/// and the panic is re-raised on the test thread.
-fn run(options: DemoOptions, test: impl FnOnce(&Harness, &mut App) + 'static) {
+/// Runs `test` in a headless app with the fixture (and `options`) in the
+/// main window at the design's size. Panics inside are caught, the app
+/// quits, and the panic is re-raised on the test thread.
+fn run(options: FixtureOptions, test: impl FnOnce(&Harness, &mut App) + 'static) {
     run_sized(options, crate::WINDOW_SIZE, test);
 }
 
 /// [`run`] with the main window `window_size` large (headless windows can't
 /// be resized once open).
 fn run_sized(
-    options: DemoOptions,
+    options: FixtureOptions,
     window_size: Size<Pixels>,
     test: impl FnOnce(&Harness, &mut App) + 'static,
+) {
+    run_app(
+        window_size,
+        move |cx| cx.new(|_| AppState::fixture_with(Timestamp::now(), options)),
+        Body::Sync(Box::new(test)),
+    );
+}
+
+/// A test that waits for the app (a live core, timers): it gets the
+/// harness and the app's async context and runs on the app's event loop.
+type AsyncTest = Box<dyn FnOnce(Rc<Harness>, AsyncApp) -> LocalBoxFuture<'static, ()>>;
+
+/// A test that runs to completion inside the app's start-up callback.
+type SyncTest = Box<dyn FnOnce(&Harness, &mut App)>;
+
+/// How a test drives the app.
+enum Body {
+    /// Runs to completion before the event loop does anything else.
+    Sync(SyncTest),
+    /// Runs on the event loop, so tasks, timers and the core's events
+    /// make progress while it waits.
+    Async(AsyncTest),
+}
+
+/// Runs `body` in a headless app whose main window (`window_size`) shows
+/// the state `setup` creates. Panics inside are caught, the app quits, and
+/// the panic is re-raised on the test thread.
+fn run_app(
+    window_size: Size<Pixels>,
+    setup: impl FnOnce(&mut App) -> Entity<AppState> + 'static,
+    body: Body,
 ) {
     let _guard = HEADLESS.lock().unwrap_or_else(PoisonError::into_inner);
     // A hung event loop must fail the run instead of blocking it.
@@ -227,8 +265,9 @@ fn run_sized(
             // server-side decorations.
             cx.set_global(ControlsPreference::Always);
             workspace::bind_keys(cx);
-            let state = cx.new(|_| AppState::demo_with(Timestamp::now(), options));
-            let handle = open_main_window(state.clone(), window_size, cx).unwrap();
+            let state = setup(cx);
+            let handle =
+                open_main_window(state.clone(), InitialBounds::Centered(window_size), cx).unwrap();
             let workspace = handle
                 .read(cx)
                 .unwrap()
@@ -242,16 +281,57 @@ fn run_sized(
                 window: handle.into(),
             };
             harness.draw(cx);
-            let outcome = catch_unwind(AssertUnwindSafe(|| test(&harness, cx)));
-            if let Err(panic) = outcome {
-                *record.borrow_mut() = Some(panic);
+            match body {
+                Body::Sync(test) => {
+                    let outcome = catch_unwind(AssertUnwindSafe(|| test(&harness, cx)));
+                    if let Err(panic) = outcome {
+                        *record.borrow_mut() = Some(panic);
+                    }
+                    // Quitting takes effect once the event loop runs.
+                    cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+                }
+                Body::Async(test) => {
+                    let harness = Rc::new(harness);
+                    cx.spawn(async move |cx| {
+                        let outcome = AssertUnwindSafe(test(harness, cx.clone()))
+                            .catch_unwind()
+                            .await;
+                        if let Err(panic) = outcome {
+                            *record.borrow_mut() = Some(panic);
+                        }
+                        cx.update(|cx| cx.quit());
+                    })
+                    .detach();
+                }
             }
-            // Quitting takes effect once the event loop runs.
-            cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
         });
     finished.store(true, Ordering::SeqCst);
     if let Some(panic) = failure.borrow_mut().take() {
         resume_unwind(panic);
+    }
+}
+
+/// Waits (drawing the window every 50 ms, so views render and ask for what
+/// they need) until `condition` holds, at most `timeout`.
+async fn wait_for(
+    app: &Harness,
+    cx: &AsyncApp,
+    what: &str,
+    timeout: Duration,
+    mut condition: impl FnMut(&Harness, &mut App) -> bool,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if cx.update(|cx| {
+            app.draw(cx);
+            condition(app, cx)
+        }) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        cx.background_executor()
+            .timer(Duration::from_millis(50))
+            .await;
     }
 }
 
@@ -268,7 +348,7 @@ fn replication() -> ObjectKey {
 
 #[test]
 fn the_main_window_renders_and_reacts() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         assert!(app.workspace.read(cx).is_sidebar_open());
 
         // ctrl-b and the footer button dispatch ToggleSidebar.
@@ -319,7 +399,7 @@ fn the_main_window_renders_and_reacts() {
 
 #[test]
 fn the_keyboard_moves_the_cursor_and_opens_the_pane() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         assert_eq!(app.cursor(cx), None, "nothing selected at start");
         app.keys(cx, "j");
         assert_eq!(app.cursor(cx), Some((0, app.row_key(cx, 0))));
@@ -357,7 +437,7 @@ fn the_keyboard_moves_the_cursor_and_opens_the_pane() {
 
 #[test]
 fn clicks_select_mark_and_act() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         app.click(cx, row_position(2), Modifiers::default());
         let third = app.row_key(cx, 2);
         assert_eq!(app.cursor(cx), Some((2, third.clone())));
@@ -417,7 +497,7 @@ fn clicks_select_mark_and_act() {
 
 #[test]
 fn the_selection_survives_snapshot_updates() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         app.keys(cx, "j j enter");
         assert_eq!(app.cursor(cx), Some((1, replication())));
         app.keys(cx, "shift-j");
@@ -462,7 +542,7 @@ fn the_selection_survives_snapshot_updates() {
 
 #[test]
 fn open_as_tab_shows_the_pane_full_width() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         app.keys(cx, "j j enter ctrl-enter");
         assert_eq!(app.state.read(cx).active_tab(), Some(&replication()));
         assert_eq!(app.state.read(cx).tabs(), [replication()]);
@@ -519,7 +599,7 @@ fn open_as_tab_shows_the_pane_full_width() {
 
 #[test]
 fn the_pane_follows_links_and_goes_back() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         let dashboard = app.dashboard(cx);
         dashboard.update(cx, |view, cx| view.open_object(&replication(), cx));
         app.draw(cx);
@@ -562,7 +642,7 @@ fn the_pane_follows_links_and_goes_back() {
 
 #[test]
 fn sorting_and_grouping_keep_the_selection() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         app.keys(cx, "j j");
         assert_eq!(app.cursor(cx).map(|(_, key)| key), Some(replication()));
         let changed = app.state.update(cx, |state, cx| {
@@ -594,7 +674,7 @@ fn sorting_and_grouping_keep_the_selection() {
 
 #[test]
 fn every_pane_and_dashboard_renders() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         let snapshot = app.state.read(cx).snapshot().clone();
         let dashboard = app.dashboard(cx);
         let objects: Vec<ObjectKey> = snapshot
@@ -634,7 +714,7 @@ fn every_pane_and_dashboard_renders() {
 #[test]
 fn twenty_thousand_rows_render_only_whats_on_screen() {
     run(
-        DemoOptions {
+        FixtureOptions {
             generated_rows: 20_000,
         },
         |app, cx| {
@@ -676,7 +756,7 @@ fn twenty_thousand_rows_render_only_whats_on_screen() {
 fn header_menus_open_and_close() {
     use crate::dashboard::HeaderMenu;
 
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         let dashboard = app.dashboard(cx);
         // `severity ↓` sits left of the 22px `···` button, 18px from the
         // window's right edge with 12px between them.
@@ -720,7 +800,7 @@ fn sidebar_item(index: usize) -> Point<Pixels> {
 
 #[test]
 fn clicks_outside_the_list_keep_the_keys_working() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         // The sidebar's empty space below the groups.
         app.click(cx, point(px(150.), px(700.)), Modifiers::default());
         app.keys(cx, "j j enter");
@@ -765,7 +845,7 @@ fn clicks_outside_the_list_keep_the_keys_working() {
 
 #[test]
 fn the_keyboard_switches_dashboards_and_tabs() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         app.keys(cx, "ctrl-4");
         assert_eq!(app.state.read(cx).selected(), Some(&network()));
         app.keys(cx, "j");
@@ -824,7 +904,7 @@ fn the_keyboard_switches_dashboards_and_tabs() {
 
 #[test]
 fn a_host_with_many_notes_keeps_its_services_in_reach() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         let host = ObjectKey::host("db-prod-03");
         app.state.update(cx, |state, cx| {
             let old = state.snapshot().clone();
@@ -871,7 +951,7 @@ fn a_host_with_many_notes_keeps_its_services_in_reach() {
 fn a_narrow_window_narrows_the_pane_then_covers_the_list() {
     // A 1280px laptop screen: the list keeps 440px, the pane gives way.
     run_sized(
-        DemoOptions::default(),
+        FixtureOptions::default(),
         size(px(1280.), px(800.)),
         |app, cx| {
             app.keys(cx, "j enter");
@@ -887,7 +967,7 @@ fn a_narrow_window_narrows_the_pane_then_covers_the_list() {
     );
     // The 900px minimum: the pane covers the list; Escape shows it again.
     run_sized(
-        DemoOptions::default(),
+        FixtureOptions::default(),
         size(px(900.), px(600.)),
         |app, cx| {
             app.keys(cx, "j enter");
@@ -909,7 +989,7 @@ fn a_narrow_window_narrows_the_pane_then_covers_the_list() {
 
 #[test]
 fn a_click_spanning_a_reorder_selects_nothing() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         let pressed = app.row_key(cx, 2);
         app.press(cx, row_position(2), Modifiers::default());
         // A snapshot moves the rows while the button is down.
@@ -934,7 +1014,7 @@ fn a_click_spanning_a_reorder_selects_nothing() {
 
 #[test]
 fn a_cursor_whose_object_left_takes_no_action() {
-    run(DemoOptions::default(), |app, cx| {
+    run(FixtureOptions::default(), |app, cx| {
         app.keys(cx, "j j");
         assert_eq!(app.cursor(cx).map(|(_, key)| key), Some(replication()));
         // The replication check recovers and leaves the list.

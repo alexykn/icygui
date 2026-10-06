@@ -1,10 +1,12 @@
-//! Built-in demo data: the design's `prod-cluster` sample objects as an
-//! `ic_config::Config` and an `ic_core::snapshot::Snapshot`.
+//! Test fixture: the design's `prod-cluster` sample objects as an
+//! `ic_config::Config` and an `ic_core::snapshot::Snapshot`, for unit and
+//! UI tests that need fixed data without a core (the app itself, including
+//! `--demo`, always runs the real core: `crate::live`).
 //!
-//! It stands in for the live core until the runtime exists. Dashboards are
-//! evaluated here ([`evaluate`]) with the rules the core will use, so
-//! counts, dots, rows and summaries agree. [`DemoOptions::generated_rows`]
-//! adds a generated `load` environment for testing large lists.
+//! Dashboards are evaluated here ([`evaluate`]) with the rules the core
+//! uses, so counts, dots, rows and summaries agree.
+//! [`FixtureOptions::generated_rows`] adds generated services for testing
+//! large lists.
 
 mod evaluate;
 mod generated;
@@ -30,7 +32,7 @@ pub(crate) const ENDPOINT: &str = "master-01";
 
 /// What to add to the design's sample data.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct DemoOptions {
+pub(crate) struct FixtureOptions {
     /// Generated services for load testing, listed by the `lab / load-test`
     /// dashboard (which is then selected at start). 0 adds nothing.
     pub(crate) generated_rows: usize,
@@ -38,7 +40,7 @@ pub(crate) struct DemoOptions {
 
 /// The demo's configuration, snapshot and initial selection.
 #[derive(Clone, Debug)]
-pub(crate) struct Demo {
+pub(crate) struct Fixture {
     /// One environment, `prod-cluster`, with three dashboard groups.
     pub(crate) config: Config,
     /// Objects and evaluated dashboards.
@@ -102,12 +104,12 @@ impl Evaluator {
 
 /// Builds the demo as of `now`; times in state are relative to it.
 #[cfg(test)]
-pub(crate) fn build(now: Timestamp) -> Demo {
-    build_with(now, DemoOptions::default())
+pub(crate) fn build(now: Timestamp) -> Fixture {
+    build_with(now, FixtureOptions::default())
 }
 
 /// Builds the demo as of `now` with `options`.
-pub(crate) fn build_with(now: Timestamp, options: DemoOptions) -> Demo {
+pub(crate) fn build_with(now: Timestamp, options: FixtureOptions) -> Fixture {
     let mut hosts = objects::hosts(now);
     let mut services = objects::services(now, &hosts);
     if options.generated_rows > 0 {
@@ -204,7 +206,7 @@ pub(crate) fn build_with(now: Timestamp, options: DemoOptions) -> Demo {
             dashboard_id: "demo-overview-production".to_owned(),
         }
     };
-    Demo {
+    Fixture {
         config,
         snapshot,
         selected,
@@ -328,7 +330,7 @@ const DASHBOARDS: &[(&str, &[DashboardSpec])] = &[
     ),
 ];
 
-/// Lists every generated service (`DemoOptions::generated_rows`).
+/// Lists every generated service (`FixtureOptions::generated_rows`).
 const LOAD_TEST: DashboardSpec = spec(
     "load-test",
     ObjectKind::Services,
@@ -347,7 +349,7 @@ mod tests {
 
     use super::*;
 
-    fn demo() -> Demo {
+    fn demo() -> Fixture {
         build(Timestamp::from_unix_seconds(1_790_000_000.))
     }
 
@@ -358,7 +360,7 @@ mod tests {
         }
     }
 
-    fn result<'a>(demo: &'a Demo, group: &str, dashboard: &str) -> &'a DashboardResult {
+    fn result<'a>(demo: &'a Fixture, group: &str, dashboard: &str) -> &'a DashboardResult {
         demo.snapshot
             .dashboards
             .get(&reference(group, dashboard))
@@ -651,7 +653,7 @@ mod tests {
     fn generated_rows_get_their_own_dashboard() {
         let generated = build_with(
             Timestamp::from_unix_seconds(1_790_000_000.),
-            DemoOptions {
+            FixtureOptions {
                 generated_rows: 500,
             },
         );

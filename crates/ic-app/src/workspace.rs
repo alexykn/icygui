@@ -20,18 +20,24 @@ use ic_rules::DashboardRef;
 use ic_ui_kit::{ActiveTheme as _, Divider, DividerColor, IconButton, IconName, Theme, Tooltip};
 
 use crate::actions::{
-    self, ActivateNextTab, ActivatePreviousTab, CloseTab, FocusMain, SelectDashboard,
-    WORKSPACE_CONTEXT,
+    self, ActivateNextTab, ActivatePreviousTab, CloseTab, EditEnvironment, FocusMain,
+    ReviewCertificate, SelectDashboard, WORKSPACE_CONTEXT,
 };
 use crate::app_state::AppState;
-use crate::chrome::{Controls, WindowControls};
+use crate::chrome::{Controls, WindowControls, WindowDrag};
 use crate::dashboard::DashboardView;
 use crate::pane::{ObjectPane, PaneMode};
 use crate::sidebar::Sidebar;
+use crate::{recovery, window_state};
 
-/// How often relative times (time in state, the footer's last event)
-/// refresh (UI-04).
+/// How often relative times (time in state, the footer's last event, the
+/// reconnect countdown) refresh (UI-04). Only the rows on screen are
+/// rebuilt, so this costs the same for 30 000 rows as for 10.
 const CLOCK_TICK: Duration = Duration::from_secs(1);
+
+/// The window's size and position are saved this long after it last
+/// moved or changed size (BG-06).
+const WINDOW_SAVE_DELAY: Duration = Duration::from_millis(750);
 
 /// Shows or hides the sidebar.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
@@ -65,6 +71,10 @@ pub(crate) struct Workspace {
     tabs: HashMap<ObjectKey, TabPane>,
     sidebar_open: bool,
     shown: Shown,
+    /// The recovery screen's header moves the window.
+    drag: WindowDrag,
+    /// Saves the window's bounds once it stops moving.
+    save_window: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     _clock: Task<()>,
 }
@@ -88,6 +98,9 @@ impl Workspace {
             cx.on_focus_lost(window, |this, window, cx| {
                 this.focus_main(window, cx);
             }),
+            cx.observe_window_bounds(window, |this, window, cx| {
+                this.window_moved(window, cx);
+            }),
         ];
         let clock = cx.spawn(async move |this, cx| {
             loop {
@@ -106,12 +119,78 @@ impl Workspace {
             tabs: HashMap::new(),
             sidebar_open: true,
             shown,
+            drag: WindowDrag::default(),
+            save_window: None,
             _subscriptions: subscriptions,
             _clock: clock,
         }
     }
 
+    /// The window moved or changed size: remember where, and save it once
+    /// it rests. A maximized window keeps the size it returns to.
+    fn window_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut current = window_state::to_state(window.window_bounds());
+        let changed = self.state.update(cx, |state, _| {
+            if current.maximized
+                && let Some(previous) = state.window_state()
+            {
+                current = ic_config::WindowState {
+                    maximized: true,
+                    ..previous
+                };
+            }
+            state.set_window_state(current)
+        });
+        if !changed {
+            return;
+        }
+        let state = self.state.downgrade();
+        self.save_window = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(WINDOW_SAVE_DELAY).await;
+            let _ = state.update(cx, |state, _| state.save_ui());
+        }));
+    }
+
+    /// Shows `key`: in the first dashboard that lists it (the selected one
+    /// first), with its pane open, or else as a tab (a notification's
+    /// click, the startup switches).
+    pub(crate) fn reveal(&mut self, key: &ObjectKey, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.state.read(cx).dashboard_showing(key);
+        match target {
+            Some(reference) => {
+                self.state.update(cx, |state, cx| {
+                    if state.select(reference) {
+                        cx.notify();
+                    }
+                });
+                self.sync(window, cx);
+                self.dashboard
+                    .update(cx, |dashboard, cx| dashboard.open_object(key, cx));
+            }
+            None => self.state.update(cx, |state, cx| {
+                if state.open_tab(key.clone()) {
+                    cx.notify();
+                }
+            }),
+        }
+    }
+
+    /// Puts the cursor on `cursor` and shows `pane` in its pane, as after
+    /// following a link (screen 2c at start).
+    pub(crate) fn reveal_linked(
+        &mut self,
+        cursor: &ObjectKey,
+        pane: ObjectKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal(cursor, window, cx);
+        self.dashboard
+            .update(cx, |dashboard, cx| dashboard.open_linked(cursor, pane, cx));
+    }
+
     /// The dashboard view.
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn dashboard(&self) -> &Entity<DashboardView> {
         &self.dashboard
     }
@@ -262,7 +341,17 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(problem) = self.state.read(cx).config_problem().cloned() {
+            return div()
+                .id("workspace")
+                .size_full()
+                .font_family(cx.theme().font_family.clone())
+                .line_height(cx.theme().line_height)
+                .text_color(cx.theme().colors.text)
+                .child(recovery::render(&problem, &self.drag, window, cx))
+                .into_any_element();
+        }
         let theme = cx.theme();
         let main = match &self.shown {
             Shown::Tab(key) => self
@@ -289,6 +378,13 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::close_tab))
+            // The environment settings handle these (the banner's links).
+            .on_action(|_: &ReviewCertificate, _, _| {
+                tracing::info!("reviewing the certificate is part of the environment settings");
+            })
+            .on_action(|_: &EditEnvironment, _, _| {
+                tracing::info!("the environment settings open here");
+            })
             .flex()
             .size_full()
             .bg(theme.colors.window_background)
@@ -299,6 +395,7 @@ impl Render for Workspace {
                 workspace.child(self.sidebar.clone())
             })
             .child(div().flex().flex_1().min_w_0().h_full().child(main))
+            .into_any_element()
     }
 }
 

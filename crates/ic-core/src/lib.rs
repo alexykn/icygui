@@ -47,6 +47,10 @@ pub use command::{
 pub use error::CoreError;
 pub use event_log::{delete_event_log, event_log_path};
 pub use handle::{CoreHandle, start, start_with_tuning};
+/// The API user and permissions ([`CoreEvent::Permissions`]) and a server
+/// certificate ([`ConnectionState::TlsFailed`], [`fetch_certificate`]),
+/// re-exported so the UI can name them without depending on `ic-api`.
+pub use ic_api::{ApiInfo, CertificateInfo};
 pub use ports::SystemClock;
 pub use probe::{
     ConnectionFailure, ConnectionReport, REQUIRED_PERMISSIONS, fetch_certificate,

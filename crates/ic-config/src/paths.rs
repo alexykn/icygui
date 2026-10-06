@@ -7,6 +7,7 @@ use directories::{BaseDirs, ProjectDirs};
 use crate::error::ConfigError;
 use crate::files::create_private_dir;
 use crate::store::ConfigStore;
+use crate::ui_state::StateStore;
 
 /// Reverse-DNS qualifier, organisation and application name: the bundle
 /// identifier is `io.github.alexykn.icygui`.
@@ -16,6 +17,9 @@ const APPLICATION: &str = "icygui";
 
 /// The settings file's name.
 const CONFIG_FILE: &str = "config.toml";
+
+/// The UI state file's name, in the data directory.
+const STATE_FILE: &str = "state.toml";
 
 /// The locations of icygui's files.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +82,17 @@ impl Paths {
     /// A [`ConfigStore`] for [`Paths::config_file`].
     pub fn config_store(&self) -> ConfigStore {
         ConfigStore::new(self.config_file.clone())
+    }
+
+    /// The UI state file (window size and position, open tabs):
+    /// `state.toml` in [`Paths::data_dir`].
+    pub fn state_file(&self) -> PathBuf {
+        self.data_dir.join(STATE_FILE)
+    }
+
+    /// A [`StateStore`] for [`Paths::state_file`].
+    pub fn state_store(&self) -> StateStore {
+        StateStore::new(self.state_file())
     }
 
     /// Creates the settings, data and log directories if they are missing,
@@ -156,6 +171,8 @@ mod tests {
             paths.config_store().backup_path(),
             root.join("config.toml.bak")
         );
+        assert_eq!(paths.state_file(), root.join("data").join("state.toml"));
+        assert_eq!(paths.state_store().path(), paths.state_file());
     }
 
     #[test]

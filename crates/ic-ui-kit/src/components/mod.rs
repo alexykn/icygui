@@ -2,6 +2,7 @@
 //! [`gpui::RenderOnce`] elements configured with builder methods; they read
 //! colours and sizes from the active [`crate::Theme`].
 
+mod banner;
 mod button;
 mod divider;
 mod header;
@@ -16,6 +17,7 @@ mod text;
 mod text_field;
 mod tooltip;
 
+pub use banner::{Banner, BannerTone, ProgressBar};
 pub use button::{Button, ButtonColors, ButtonVariant, GlyphButton, IconButton, KeyHint};
 pub use divider::{Divider, DividerColor};
 pub use header::{PaneHeader, SubTabs};

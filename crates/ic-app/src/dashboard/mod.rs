@@ -18,11 +18,12 @@ pub(crate) use self::header::HeaderMenu;
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Render,
-    ScrollStrategy, Styled as _, Subscription, UniformListScrollHandle, Window, div,
+    ScrollStrategy, Styled as _, Subscription, Task, UniformListScrollHandle, Window, div,
     prelude::FluentBuilder as _, px, uniform_list,
 };
 use ic_config::{GroupBy, View};
@@ -42,9 +43,15 @@ use crate::actions::{
     ScheduleDowntime, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
     SelectPrevious, ToggleMark,
 };
-use crate::app_state::AppState;
+use crate::app_state::hydration::row_needs_details;
+use crate::app_state::{AppState, Hydrated};
+use crate::banner;
 use crate::chrome::WindowDrag;
 use crate::pane::{ObjectPane, PaneEvent, PaneMode};
+
+/// The rows on screen are asked for their details once scrolling has
+/// rested this long, so flinging through a long list costs one request.
+pub(crate) const HYDRATE_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// A dashboard's list state.
 struct ListUi {
@@ -68,8 +75,13 @@ pub(crate) struct DashboardView {
     sidebar_open: bool,
     drag: WindowDrag,
     /// The rows built in the last frame: the rows on screen. Sets the page
-    /// size, and tells the core which rows to load details for (M2).
+    /// size.
     visible: Range<usize>,
+    /// The rows on screen without output, last asked for (or about to
+    /// be).
+    hydration_wanted: Vec<ObjectKey>,
+    /// Asks for them once scrolling rests.
+    hydrate_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -90,8 +102,35 @@ impl DashboardView {
             sidebar_open: true,
             drag: WindowDrag::default(),
             visible: 0..0,
+            hydration_wanted: Vec::new(),
+            hydrate_task: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Remembers the rows on screen that lack output and, if they changed,
+    /// asks for their details once scrolling rests.
+    fn want_details(&mut self, keys: Vec<ObjectKey>, cx: &mut Context<Self>) {
+        if keys == self.hydration_wanted {
+            return;
+        }
+        self.hydration_wanted.clone_from(&keys);
+        if keys.is_empty() {
+            self.hydrate_task = None;
+            return;
+        }
+        self.hydrate_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HYDRATE_DEBOUNCE).await;
+            let _ = this.update(cx, |this, cx| {
+                let outcome = this
+                    .state
+                    .update(cx, |state, _| state.hydrate(keys, Instant::now()));
+                if outcome == Hydrated::NotNow {
+                    // Not connected yet: the next frame asks again.
+                    this.hydration_wanted.clear();
+                }
+            });
+        }));
     }
 
     /// Tells the view whether the sidebar is shown (the header then needs no
@@ -374,8 +413,12 @@ impl DashboardView {
         if targets.is_empty() {
             return;
         }
-        self.state.update(cx, |state, _| {
-            state.request(ActionRequest { action, targets });
+        self.state.update(cx, |state, cx| {
+            // A refused action is logged by the state; a disabled button
+            // already says why.
+            if state.request(ActionRequest { action, targets }).is_err() {
+                cx.notify();
+            }
         });
     }
 
@@ -520,6 +563,56 @@ impl DashboardView {
             .collect()
     }
 
+    /// The rows on screen in `reference`'s list, from its scroll position
+    /// and height (every row is equally tall). The list's own calls to
+    /// build rows can't say this: it also builds the first row to measure
+    /// it.
+    fn rows_on_screen(&self, reference: &DashboardRef, total: usize, cx: &App) -> Range<usize> {
+        let Some(list) = self.lists.get(reference) else {
+            return 0..0;
+        };
+        let row_height = f32::from(Metrics::with_rule(cx.theme().metrics.row_height));
+        let scroll = list.scroll.0.borrow();
+        let viewport = f32::from(scroll.base_handle.bounds().size.height);
+        let offset = -f32::from(scroll.base_handle.offset().y);
+        if row_height <= 0. || viewport <= 0. {
+            return 0..0;
+        }
+        let first = (offset.max(0.) / row_height).floor();
+        let count = (viewport / row_height).ceil() + 1.;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "row indices from non-negative, finite pixel ratios"
+        )]
+        let (first, count) = (first as usize, count as usize);
+        let start = first.min(total);
+        start..(start + count).min(total)
+    }
+
+    /// Asks for the details of the rows on screen that have no output yet
+    /// (debounced; see [`DashboardView::want_details`]).
+    fn hydrate_rows_on_screen(&mut self, reference: &DashboardRef, cx: &mut Context<Self>) {
+        let needs: Vec<ObjectKey> = {
+            let state = self.state.read(cx);
+            let Some(result) = state.result(reference) else {
+                return;
+            };
+            let range = self.rows_on_screen(reference, result.rows.len(), cx);
+            let snapshot = state.snapshot();
+            result.rows[range]
+                .iter()
+                .filter_map(|row| match row {
+                    DashboardRow::Object(key) if row_needs_details(snapshot, key) => {
+                        Some(key.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        self.want_details(needs, cx);
+    }
+
     fn render_body(&self, reference: &DashboardRef, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let state = self.state.read(cx);
@@ -527,7 +620,21 @@ impl DashboardView {
             return note("This dashboard no longer exists.", theme);
         };
         let view = &dashboard.view;
+        if let Some(denial) = state.query_denial(view.object_kind) {
+            return EmptyState::new("No permission")
+                .leading(
+                    Icon::new(IconName::Lock)
+                        .size(px(20.))
+                        .color(theme.colors.text_muted),
+                )
+                .detail(denial)
+                .max_width(px(560.))
+                .into_any_element();
+        }
         let Some(result) = state.result(reference) else {
+            if state.connection().is_starting() {
+                return banner::loading_body(state, cx);
+            }
             return note(format!("{} is being evaluated…", dashboard.name), theme);
         };
         if let Some(error) = &result.error {
@@ -586,6 +693,12 @@ impl Render for DashboardView {
             .map(|pane| pane.view.clone());
         let main_width = SplitLayout::main_width(window, self.sidebar_open, &cx.theme().metrics);
         let split = SplitLayout::for_width(main_width, &cx.theme().metrics);
+        // The list shows unless a pane covers it.
+        if let Some(reference) = &reference
+            && (pane.is_none() || split != SplitLayout::Cover)
+        {
+            self.hydrate_rows_on_screen(reference, cx);
+        }
         let root = div()
             .id("dashboard-view")
             .key_context(DASHBOARD_CONTEXT)
@@ -620,42 +733,76 @@ impl Render for DashboardView {
             (Some(pane), SplitLayout::Side { pane_width }) => Some((pane, pane_width)),
             (None, _) => None,
         };
-        let theme = cx.theme();
         let list_width = match pane_width {
             Some((_, pane_width)) => main_width - pane_width - Metrics::RULE,
             None => main_width,
         };
-        let header = self.render_header(reference.as_ref(), window, cx);
-        let summary = reference
-            .as_ref()
-            .and_then(|reference| self.render_summary(reference, list_width, cx));
-        let body = if let Some(reference) = &reference {
-            self.render_body(reference, cx)
-        } else {
-            let text = if self.state.read(cx).environment().is_some() {
-                "Select a dashboard in the sidebar."
-            } else {
-                "Add an environment to start monitoring."
-            };
-            note(text, theme)
-        };
-        root.child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .when(pane_width.is_some(), |list| {
-                    list.border_r_1().border_color(theme.colors.border_split)
-                })
-                .child(header)
-                .children(summary)
-                .child(body),
-        )
+        let column = self.render_list_column(reference.as_ref(), list_width, window, cx);
+        let split_border = cx.theme().colors.border_split;
+        root.child(column.when(pane_width.is_some(), |list| {
+            list.border_r_1().border_color(split_border)
+        }))
         .when_some(pane_width, |view, (pane, width)| {
             view.child(div().flex().flex_none().w(width).h_full().child(pane))
         })
+    }
+}
+
+impl DashboardView {
+    /// The list's column: header, load progress, banners, summary bar and
+    /// body. Before anything arrived, a connection problem or the load
+    /// fills the body; afterwards they show over the (last known) list.
+    fn render_list_column(
+        &mut self,
+        reference: Option<&DashboardRef>,
+        list_width: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let header = self.render_header(reference, window, cx);
+        let theme = cx.theme();
+        let now = Timestamp::now();
+        let state = self.state.read(cx);
+        let placeholder = if state.environment().is_none() {
+            Some(no_environment(theme))
+        } else if state.has_no_objects() {
+            match state.connection_notice(now) {
+                Some(notice) => Some(banner::connection_body(&self.state, &notice, cx)),
+                None if state.connection().is_starting() => Some(banner::loading_body(state, cx)),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let banners = if placeholder.is_some() {
+            Vec::new()
+        } else {
+            banner::banners(&self.state, now, cx)
+        };
+        let progress = if placeholder.is_some() {
+            None
+        } else {
+            banner::progress(state)
+        };
+        let summary = reference
+            .filter(|_| placeholder.is_none())
+            .and_then(|reference| self.render_summary(reference, list_width, cx));
+        let body = match (placeholder, reference) {
+            (Some(placeholder), _) => placeholder,
+            (None, Some(reference)) => self.render_body(reference, cx),
+            (None, None) => note("Select a dashboard in the sidebar.", theme),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(header)
+            .children(progress)
+            .children(banners)
+            .children(summary)
+            .child(body)
     }
 }
 
@@ -730,6 +877,10 @@ fn object_row(
                 .detail(row.output);
             let list_row = match row.host.filter(|_| show_host) {
                 Some(host) => list_row.context("on", host),
+                None => list_row,
+            };
+            let list_row = match row.late {
+                Some(late) => list_row.flag(late),
                 None => list_row,
             };
             match row.tag {
@@ -839,6 +990,22 @@ fn empty_dashboard(
     EmptyState::new(title)
         .leading(ok)
         .detail("Everything this dashboard shows is OK.")
+        .into_any_element()
+}
+
+/// The main area without an environment (UI-05).
+fn no_environment(theme: &Theme) -> AnyElement {
+    EmptyState::new("No environment yet")
+        .leading(
+            Icon::new(IconName::Plus)
+                .size(px(20.))
+                .color(theme.colors.text_muted),
+        )
+        .detail(
+            "Add an Icinga environment to start monitoring, or run icygui --demo to try \
+             the app against a simulated Icinga.",
+        )
+        .max_width(px(560.))
         .into_any_element()
 }
 

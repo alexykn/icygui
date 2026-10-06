@@ -17,11 +17,11 @@ mod theme;
 
 pub use assets::Assets;
 pub use components::{
-    Button, ButtonColors, ButtonVariant, CircleSize, CodeBlock, CompactRow, Divider, DividerColor,
-    EmptyState, GlyphButton, IconButton, KeyHint, KvTable, Link, LinkStyle, ListRow, Menu,
-    MenuItem, NoteEntry, Paint, PaneHeader, PerfdataRow, PerfdataTable, Popover, RowEmphasis,
-    SectionLabel, StateCircle, StateDot, SubTabs, SummaryBar, SummaryItem, TextField, Tooltip,
-    TreeLine, TreeTable,
+    Banner, BannerTone, Button, ButtonColors, ButtonVariant, CircleSize, CodeBlock, CompactRow,
+    Divider, DividerColor, EmptyState, GlyphButton, IconButton, KeyHint, KvTable, Link, LinkStyle,
+    ListRow, Menu, MenuItem, NoteEntry, Paint, PaneHeader, PerfdataRow, PerfdataTable, Popover,
+    ProgressBar, RowEmphasis, SectionLabel, StateCircle, StateDot, SubTabs, SummaryBar,
+    SummaryItem, TextField, Tooltip, TreeLine, TreeTable,
 };
 pub use fonts::FontError;
 pub use icon::{Icon, IconName};

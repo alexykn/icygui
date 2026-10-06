@@ -53,8 +53,14 @@ pub(super) fn render(
         .gap(px(20.))
         .px(theme.metrics.pane_inset)
         .pt(theme.metrics.pane_padding)
-        .child(title(host, now, theme))
+        .child(title(
+            host,
+            crate::dashboard::rows::late_label(snapshot, &key, now),
+            now,
+            theme,
+        ))
         .child(action_buttons(
+            pane,
             host.check.acknowledgement.is_acknowledged(),
             host.is_problem(),
             cx,
@@ -62,7 +68,7 @@ pub(super) fn render(
         .child(tabs);
     let content = match pane.host_tab {
         HostTab::Services => {
-            let notes = notes(snapshot, &key, now, cx).map(|notes| {
+            let notes = notes(pane, snapshot, &key, now, cx).map(|notes| {
                 div()
                     .px(theme.metrics.pane_inset)
                     .py(px(16.))
@@ -79,7 +85,7 @@ pub(super) fn render(
         }
         HostTab::History => history_tab(host, pane.state.read(cx).started_at(), now, theme),
         HostTab::Vars => vars_tab(host, theme),
-        HostTab::Config => config_tab(snapshot, host, now, cx),
+        HostTab::Config => config_tab(pane, snapshot, host, now, cx),
     };
     div()
         .flex()
@@ -94,7 +100,7 @@ pub(super) fn render(
         .into_any_element()
 }
 
-fn title(host: &Host, now: Timestamp, theme: &Theme) -> impl IntoElement {
+fn title(host: &Host, late: Option<String>, now: Timestamp, theme: &Theme) -> impl IntoElement {
     let colors = theme.colors;
     div()
         .group(TITLE_GROUP)
@@ -138,10 +144,24 @@ fn title(host: &Host, now: Timestamp, theme: &Theme) -> impl IntoElement {
                 )
                 .child(
                     div()
-                        .truncate()
+                        .flex()
+                        .min_w_0()
                         .text_size(theme.text.body)
                         .text_color(colors.text_muted)
-                        .child(model::host_subtitle(host, now)),
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(model::host_subtitle(host, now)),
+                        )
+                        .when_some(late, |line, late| {
+                            line.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.states.warning)
+                                    .child(format!("\u{a0}· {late}")),
+                            )
+                        }),
                 ),
         )
 }
@@ -240,13 +260,15 @@ fn vars_tab(host: &Host, theme: &Theme) -> AnyElement {
 }
 
 fn config_tab(
+    pane: &ObjectPane,
     snapshot: &Snapshot,
     host: &Host,
     now: Timestamp,
     cx: &Context<ObjectPane>,
 ) -> AnyElement {
     let theme = cx.theme();
-    let check = model::check_rows(&host.check, now)
+    let readable = pane.state.read(cx).can_read_notifications();
+    let check = model::object_check_rows(snapshot, &host.key(), &host.check, readable, now)
         .into_iter()
         .fold(KvTable::new().title("check"), |table, (key, value)| {
             table.row(key, value)

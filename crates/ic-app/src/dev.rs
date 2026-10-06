@@ -1,26 +1,36 @@
 //! Development switches read from the environment, for screenshots and load
-//! tests. They only apply to the built-in demo.
+//! tests. They only apply to `--demo`.
 //!
-//! - `ICYGUI_DEMO_ROWS=20000` adds that many generated services and selects
-//!   the `lab / load-test` dashboard that lists them.
+//! - `ICYGUI_DEMO_SCENARIO=large` serves another `ic_mock` scenario
+//!   (`prod-cluster`, the default; `staging`; `lab`; `large`, production
+//!   scale with 2 000 hosts and 30 000 services).
+//! - `ICYGUI_DEMO_SEED=7` fixes the simulator's seed (the same seed tells
+//!   the same story; the default changes every run).
 //! - `ICYGUI_DEMO_DASHBOARD=databases` selects a dashboard by name.
+//! - `ICYGUI_DEMO_FAULT` shows a connection failure on purpose: `offline`,
+//!   `auth`, `tls`, `missing-secret`, `misconfigured`, `outage` (lost
+//!   after 20 s), `slow` (every answer takes 0.9 s) or `frozen` (Icinga
+//!   stops checking: checks become late).
 //! - `ICYGUI_DEMO_OPEN` opens an object at start: `service` (the design's
 //!   postgres-replication, screen 2b), `host` (its host db-prod-03 beside
 //!   the list, screen 2c), `tab` (postgres-replication as a tab), or an
 //!   object name (`db-prod-03`, `db-prod-03!postgres-replication`, or
 //!   `tab:<name>` for a tab).
 
-use ic_model::{ObjectKey, ServiceKey};
+use ic_model::ObjectKey;
 
-/// Generated rows for load tests.
-pub(crate) const ROWS_ENV: &str = "ICYGUI_DEMO_ROWS";
+use crate::live::demo::DemoFault;
+
+/// The demo's scenario.
+pub(crate) const SCENARIO_ENV: &str = "ICYGUI_DEMO_SCENARIO";
+/// The demo simulator's seed.
+pub(crate) const SEED_ENV: &str = "ICYGUI_DEMO_SEED";
+/// A connection failure the demo shows on purpose.
+pub(crate) const FAULT_ENV: &str = "ICYGUI_DEMO_FAULT";
 /// The dashboard selected at start.
 pub(crate) const DASHBOARD_ENV: &str = "ICYGUI_DEMO_DASHBOARD";
 /// The object opened at start.
 pub(crate) const OPEN_ENV: &str = "ICYGUI_DEMO_OPEN";
-
-/// The most generated rows accepted; more would only exhaust memory.
-const MAX_ROWS: usize = 1_000_000;
 
 /// What to open at start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,8 +52,12 @@ pub(crate) enum OpenAtStart {
 /// The switches that are set.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DevOptions {
-    /// `ICYGUI_DEMO_ROWS`.
-    pub(crate) generated_rows: usize,
+    /// `ICYGUI_DEMO_SCENARIO`.
+    pub(crate) scenario: Option<String>,
+    /// `ICYGUI_DEMO_SEED`.
+    pub(crate) seed: Option<u64>,
+    /// `ICYGUI_DEMO_FAULT`.
+    pub(crate) fault: Option<DemoFault>,
     /// `ICYGUI_DEMO_DASHBOARD`.
     pub(crate) dashboard: Option<String>,
     /// `ICYGUI_DEMO_OPEN`.
@@ -59,21 +73,31 @@ impl DevOptions {
     /// Reads the switches through `get`; values that don't parse are
     /// ignored with a warning.
     pub(crate) fn parse(get: impl Fn(&str) -> Option<String>) -> Self {
-        let generated_rows = get(ROWS_ENV)
-            .and_then(|value| {
-                let parsed = value.trim().replace('_', "").parse::<usize>().ok();
-                if parsed.is_none() {
-                    tracing::warn!(%value, "{ROWS_ENV} is not a number; ignoring it");
-                }
-                parsed
-            })
-            .map_or(0, |rows| rows.min(MAX_ROWS));
+        let scenario = get(SCENARIO_ENV)
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
+        let seed = get(SEED_ENV).and_then(|value| {
+            let parsed = value.trim().replace('_', "").parse::<u64>().ok();
+            if parsed.is_none() {
+                tracing::warn!(%value, "{SEED_ENV} is not a number; ignoring it");
+            }
+            parsed
+        });
+        let fault = get(FAULT_ENV).and_then(|value| {
+            let parsed = DemoFault::parse(&value);
+            if parsed.is_none() {
+                tracing::warn!(%value, "{FAULT_ENV} names no fault; ignoring it");
+            }
+            parsed
+        });
         let dashboard = get(DASHBOARD_ENV)
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty());
         let open = get(OPEN_ENV).and_then(|value| parse_open(value.trim()));
         Self {
-            generated_rows,
+            scenario,
+            seed,
+            fault,
             dashboard,
             open,
         }
@@ -81,7 +105,11 @@ impl DevOptions {
 
     /// Whether any switch is set.
     pub(crate) fn any(&self) -> bool {
-        self.generated_rows > 0 || self.dashboard.is_some() || self.open.is_some()
+        self.scenario.is_some()
+            || self.seed.is_some()
+            || self.fault.is_some()
+            || self.dashboard.is_some()
+            || self.open.is_some()
     }
 }
 
@@ -106,15 +134,7 @@ fn parse_open(value: &str) -> Option<OpenAtStart> {
 }
 
 fn object(name: &str) -> Option<ObjectKey> {
-    let name = name.trim();
-    if name.is_empty() {
-        return None;
-    }
-    match ServiceKey::parse(name) {
-        Some(key) => Some(ObjectKey::Service { key }),
-        None if !name.contains('!') => Some(ObjectKey::host(name)),
-        None => None,
-    }
+    crate::app_state::parse_object(name)
 }
 
 #[cfg(test)]
@@ -139,12 +159,15 @@ mod tests {
     }
 
     #[test]
-    fn rows_accept_separators_and_are_capped() {
-        assert_eq!(parse(&[(ROWS_ENV, "20_000")]).generated_rows, 20_000);
-        assert_eq!(parse(&[(ROWS_ENV, " 500 ")]).generated_rows, 500);
-        assert_eq!(parse(&[(ROWS_ENV, "lots")]).generated_rows, 0);
-        assert_eq!(parse(&[(ROWS_ENV, "999999999")]).generated_rows, MAX_ROWS);
-        assert!(parse(&[(ROWS_ENV, "1")]).any());
+    fn scenario_and_seed() {
+        let options = parse(&[(SCENARIO_ENV, " large "), (SEED_ENV, "1_000")]);
+        assert_eq!(options.scenario.as_deref(), Some("large"));
+        assert_eq!(options.seed, Some(1_000));
+        assert!(options.any());
+        assert_eq!(parse(&[(SEED_ENV, "lots")]).seed, None);
+        assert_eq!(parse(&[(SCENARIO_ENV, "")]).scenario, None);
+        assert_eq!(parse(&[(FAULT_ENV, "auth")]).fault, Some(DemoFault::Auth));
+        assert_eq!(parse(&[(FAULT_ENV, "everything")]).fault, None);
     }
 
     #[test]

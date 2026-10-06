@@ -41,6 +41,14 @@ pub enum IconName {
     ExternalLink,
     /// `folder`: host group and service group headers in lists.
     Folder,
+    /// `info`: informational notes.
+    Info,
+    /// `key-round`: a login Icinga refused, a password that is missing.
+    KeyRound,
+    /// `loader-circle`: loading.
+    Loader,
+    /// `lock`: a server certificate that isn't trusted.
+    Lock,
     /// `maximize-2`: the window maximise control.
     Maximize,
     /// `minus`: the window minimise control.
@@ -55,11 +63,13 @@ pub enum IconName {
     Search,
     /// `triangle-alert`: errors such as a dashboard filter that fails.
     TriangleAlert,
+    /// `unplug`: the connection to Icinga is lost.
+    Unplug,
 }
 
 impl IconName {
     /// Every icon, for tests and asset listings.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 27] = [
         Self::ArrowDown,
         Self::ArrowLeft,
         Self::ArrowUp,
@@ -75,6 +85,10 @@ impl IconName {
         Self::Ellipsis,
         Self::ExternalLink,
         Self::Folder,
+        Self::Info,
+        Self::KeyRound,
+        Self::Loader,
+        Self::Lock,
         Self::Maximize,
         Self::Minus,
         Self::PanelLeft,
@@ -82,6 +96,7 @@ impl IconName {
         Self::Refresh,
         Self::Search,
         Self::TriangleAlert,
+        Self::Unplug,
     ];
 
     /// The asset path [`crate::Assets`] serves the SVG under.
@@ -109,6 +124,10 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::Ellipsis => Self::Ellipsis,
             IconName::ExternalLink => Self::ExternalLink,
             IconName::Folder => Self::Folder,
+            IconName::Info => Self::Info,
+            IconName::KeyRound => Self::KeyRound,
+            IconName::Loader => Self::LoaderCircle,
+            IconName::Lock => Self::Lock,
             IconName::Maximize => Self::Maximize2,
             IconName::Minus => Self::Minus,
             IconName::PanelLeft => Self::PanelLeft,
@@ -116,6 +135,7 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::Refresh => Self::RefreshCw,
             IconName::Search => Self::Search,
             IconName::TriangleAlert => Self::TriangleAlert,
+            IconName::Unplug => Self::Unplug,
         }
     }
 }

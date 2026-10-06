@@ -279,10 +279,11 @@ impl WindowDrag {
 }
 
 /// A name for the window title, shown by window switchers.
-pub(crate) fn window_title(environment: Option<&str>) -> SharedString {
-    match environment {
-        Some(name) => format!("{name} — icygui").into(),
-        None => "icygui".into(),
+pub(crate) fn window_title(environment: Option<&str>, demo: bool) -> SharedString {
+    match (environment, demo) {
+        (Some(name), false) => format!("{name} — icygui").into(),
+        (Some(name), true) => format!("{name} (demo) — icygui").into(),
+        (None, _) => "icygui".into(),
     }
 }
 
@@ -388,7 +389,14 @@ mod tests {
 
     #[test]
     fn window_titles_name_the_environment() {
-        assert_eq!(window_title(Some("prod-cluster")), "prod-cluster — icygui");
-        assert_eq!(window_title(None), "icygui");
+        assert_eq!(
+            window_title(Some("prod-cluster"), false),
+            "prod-cluster — icygui"
+        );
+        assert_eq!(
+            window_title(Some("prod-cluster"), true),
+            "prod-cluster (demo) — icygui"
+        );
+        assert_eq!(window_title(None, false), "icygui");
     }
 }

@@ -161,6 +161,7 @@ pub struct ListRow {
     context: Option<(SharedString, SharedString)>,
     detail: Option<SharedString>,
     tag: Option<SharedString>,
+    flag: Option<SharedString>,
     emphasis: RowEmphasis,
     header: bool,
     indent: Pixels,
@@ -177,6 +178,7 @@ impl ListRow {
             context: None,
             detail: None,
             tag: None,
+            flag: None,
             emphasis: RowEmphasis::None,
             header: false,
             indent: px(0.),
@@ -217,6 +219,13 @@ impl ListRow {
     /// The right-aligned tag (`ack m.keller`, `downtime`, `flapping`).
     pub fn tag(mut self, tag: impl Into<SharedString>) -> Self {
         self.tag = Some(tag.into());
+        self
+    }
+
+    /// A warning-coloured marker before the tag: `late 12m` for a check
+    /// that is overdue.
+    pub fn flag(mut self, flag: impl Into<SharedString>) -> Self {
+        self.flag = Some(flag.into());
         self
     }
 
@@ -268,6 +277,7 @@ impl fmt::Debug for ListRow {
             .field("title", &self.title_text())
             .field("detail", &self.detail)
             .field("tag", &self.tag)
+            .field("flag", &self.flag)
             .field("emphasis", &self.emphasis)
             .field("header", &self.header)
             .field("indent", &self.indent)
@@ -349,6 +359,15 @@ impl RenderOnce for ListRow {
                         )
                     }),
             )
+            .when_some(self.flag, |row, flag| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(theme.text.label)
+                        .text_color(theme.states.warning)
+                        .child(flag),
+                )
+            })
             .when_some(self.tag, |row, tag| {
                 row.child(
                     div()
@@ -546,10 +565,12 @@ mod tests {
             .context("on", "web-edge-02")
             .detail("SSL CRITICAL - certificate expires in 2 days")
             .tag("ack m.keller")
+            .flag("late 12m")
             .emphasis(RowEmphasis::Selected)
             .on_click(|_, _, _| {});
         assert_eq!(row.title_text(), "http-tls on web-edge-02");
         assert_eq!(row.tag.as_deref(), Some("ack m.keller"));
+        assert_eq!(row.flag.as_deref(), Some("late 12m"));
         assert!(row.on_click.is_some());
         assert!(format!("{row:?}").contains("web-edge-02"));
 

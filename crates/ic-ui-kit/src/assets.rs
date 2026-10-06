@@ -26,6 +26,10 @@ gpui_kit_assets::icon_assets!(
         Ellipsis,
         ExternalLink,
         Folder,
+        Info,
+        KeyRound,
+        LoaderCircle,
+        Lock,
         Maximize2,
         Minus,
         PanelLeft,
@@ -33,6 +37,7 @@ gpui_kit_assets::icon_assets!(
         RefreshCw,
         Search,
         TriangleAlert,
+        Unplug,
     ]
 );
 

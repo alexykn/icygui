@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use ic_core::snapshot::Snapshot;
 use ic_model::{
-    CheckInfo, CheckableState, Comment, CommentKind, Downtime, Features, Host, ObjectKey, Service,
-    ServiceState, Timestamp, Vars,
+    CheckInfo, CheckableState, Comment, CommentKind, Downtime, Features, Host, Notified, ObjectKey,
+    Service, ServiceState, Timestamp, Vars,
 };
 use ic_ui_kit::TreeLine;
 use serde_json::Value;
@@ -115,6 +115,75 @@ pub(crate) fn check_rows(check: &CheckInfo, now: Timestamp) -> Vec<(&'static str
     if !check.features.active_checks {
         rows.push(("active checks", "disabled in Icinga".to_owned()));
     }
+    rows
+}
+
+/// The most users the "notified" row names before `+N`.
+const NOTIFIED_USERS_SHOWN: usize = 3;
+
+/// The "notified" row (PANE-06, design 2b: `dba-oncall · 14:32`): who
+/// Icinga notified about the current problem and when it last notified
+/// anyone, from its `Notification` objects. `readable` is whether the API
+/// user may read them (`None` while unknown).
+pub(crate) fn notified_text(notified: &Notified, readable: Option<bool>, now: Timestamp) -> String {
+    if readable == Some(false) {
+        return "unknown (needs objects/query/Notification)".to_owned();
+    }
+    let users = match notified.users.len() {
+        0 => String::new(),
+        count if count <= NOTIFIED_USERS_SHOWN => notified.users.join(", "),
+        count => format!(
+            "{} +{}",
+            notified.users[..NOTIFIED_USERS_SHOWN].join(", "),
+            count - NOTIFIED_USERS_SHOWN
+        ),
+    };
+    let when = notified
+        .last_notification
+        .and_then(Timestamp::non_zero)
+        .map(|at| format::clock(at, now));
+    match (users.is_empty(), when) {
+        (true, None) => "not notified".to_owned(),
+        (true, Some(when)) => format!("last {when}"),
+        (false, None) => users,
+        (false, Some(when)) => format!("{users} · {when}"),
+    }
+}
+
+/// The "late" row: when Icinga expected the result and how long ago
+/// (PERF-08); `None` unless the check is late.
+pub(crate) fn late_text(deadline: Option<Timestamp>, now: Timestamp) -> Option<String> {
+    let deadline = deadline?;
+    let overdue = deadline.elapsed_until(now);
+    Some(format!(
+        "expected {} · {} overdue",
+        format::clock(deadline, now),
+        ic_model::format_compact(overdue)
+    ))
+}
+
+/// The check rows of an object with its "late" and "notified" rows: the
+/// service pane's `check` section and the host pane's config tab.
+pub(crate) fn object_check_rows(
+    snapshot: &Snapshot,
+    key: &ObjectKey,
+    check: &CheckInfo,
+    readable: Option<bool>,
+    now: Timestamp,
+) -> Vec<(&'static str, String)> {
+    let mut rows = check_rows(check, now);
+    if let Some(late) = late_text(snapshot.late.get(key).copied(), now) {
+        // Right after "last / next", which it explains.
+        let at = rows
+            .iter()
+            .position(|(label, _)| *label == "last / next")
+            .map_or(rows.len(), |index| index + 1);
+        rows.insert(at, ("late", late));
+    }
+    rows.push((
+        "notified",
+        notified_text(&snapshot.notified(key), readable, now),
+    ));
     rows
 }
 
@@ -496,7 +565,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::demo;
+    use crate::fixture;
 
     const NOW: f64 = 1_790_000_000.;
 
@@ -510,7 +579,7 @@ mod tests {
 
     #[test]
     fn subtitles_follow_the_design() {
-        let demo = demo::build(now());
+        let demo = fixture::build(now());
         let service =
             &demo.snapshot.services[&ServiceKey::new("db-prod-03", "postgres-replication")];
         assert_eq!(service_subtitle(service, now()), "14m · hard 3/3");
@@ -526,7 +595,7 @@ mod tests {
 
     #[test]
     fn check_rows_match_the_design() {
-        let demo = demo::build(now());
+        let demo = fixture::build(now());
         let service =
             &demo.snapshot.services[&ServiceKey::new("db-prod-03", "postgres-replication")];
         let rows: BTreeMap<_, _> = check_rows(&service.check, now()).into_iter().collect();
@@ -566,7 +635,7 @@ mod tests {
 
     #[test]
     fn host_services_collapse_ok_ones_like_the_design() {
-        let demo = demo::build(now());
+        let demo = fixture::build(now());
         let host = &demo.snapshot.hosts[&ic_model::HostName::new("db-prod-03")];
         let preview = host_services(&demo.snapshot, host, false);
         let names: Vec<&str> = preview
@@ -676,7 +745,7 @@ mod tests {
         assert_eq!(note.meta[0], "acknowledged");
         assert_eq!(note.body, "renewal in progress");
 
-        let demo = demo::build(now());
+        let demo = fixture::build(now());
         let downtime = &demo.snapshot.downtimes[&ObjectKey::host("edge-fra-04")][0];
         let note = downtime_note(downtime, now());
         assert_eq!(note.marker, "↓");
@@ -687,7 +756,7 @@ mod tests {
 
     #[test]
     fn future_and_untriggered_downtimes() {
-        let demo = demo::build(now());
+        let demo = fixture::build(now());
         let mut downtime = demo.snapshot.downtimes[&ObjectKey::host("edge-fra-04")][0].clone();
         downtime.in_effect = false;
         downtime.start_time = Timestamp::from_unix_seconds(NOW + 600.);
@@ -850,5 +919,62 @@ mod tests {
         assert_eq!(rows.len(), 6);
         assert_eq!(rows[0], ("active checks", true));
         assert_eq!(rows[4], ("flap detection", false));
+    }
+
+    #[test]
+    fn the_notified_row_names_users_and_time() {
+        let at = Timestamp::from_unix_seconds(NOW - 600.);
+        let notified = |users: &[&str], last: Option<Timestamp>| Notified {
+            last_notification: last,
+            users: users.iter().map(|user| (*user).to_owned()).collect(),
+        };
+        let clock = format::clock(at, now());
+        assert_eq!(
+            notified_text(&notified(&["dba-oncall"], Some(at)), Some(true), now()),
+            format!("dba-oncall · {clock}")
+        );
+        assert_eq!(
+            notified_text(&notified(&["a", "b", "c", "d", "e"], None), None, now()),
+            "a, b, c +2"
+        );
+        assert_eq!(
+            notified_text(&notified(&[], Some(at)), Some(true), now()),
+            format!("last {clock}"),
+            "after a recovery nobody is notified about a problem"
+        );
+        assert_eq!(
+            notified_text(&Notified::default(), Some(true), now()),
+            "not notified"
+        );
+        assert_eq!(
+            notified_text(&Notified::default(), Some(false), now()),
+            "unknown (needs objects/query/Notification)"
+        );
+    }
+
+    #[test]
+    fn late_checks_get_a_row_after_last_and_next() {
+        let fixture = fixture::build(now());
+        let key = ObjectKey::service("db-prod-03", "postgres-replication");
+        let service = fixture
+            .snapshot
+            .services
+            .get(key.as_service().unwrap())
+            .unwrap();
+        let rows = object_check_rows(&fixture.snapshot, &key, &service.check, Some(true), now());
+        assert!(rows.iter().all(|(label, _)| *label != "late"));
+        assert_eq!(
+            rows.last().unwrap(),
+            &("notified", "not notified".to_owned())
+        );
+
+        let mut snapshot = fixture.snapshot.clone();
+        let deadline = Timestamp::from_unix_seconds(NOW - 12. * 60.);
+        snapshot.late = Arc::new([(key.clone(), deadline)].into_iter().collect());
+        let rows = object_check_rows(&snapshot, &key, &service.check, Some(true), now());
+        let late = rows.iter().position(|(label, _)| *label == "late").unwrap();
+        assert_eq!(rows[late - 1].0, "last / next");
+        assert!(rows[late].1.ends_with("12m overdue"), "{}", rows[late].1);
+        assert_eq!(late_text(None, now()), None);
     }
 }

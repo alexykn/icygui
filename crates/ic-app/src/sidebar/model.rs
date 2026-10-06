@@ -196,10 +196,10 @@ mod tests {
     use ic_model::{HostState, ServiceState, Timestamp};
 
     use super::*;
-    use crate::demo;
+    use crate::fixture;
 
-    fn setup() -> demo::Demo {
-        demo::build(Timestamp::from_unix_seconds(1_790_000_000.))
+    fn setup() -> fixture::Fixture {
+        fixture::build(Timestamp::from_unix_seconds(1_790_000_000.))
     }
 
     fn names<'a>(groups: &[SidebarGroup<'a>]) -> Vec<(&'a str, Vec<&'a str>)> {

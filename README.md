@@ -26,6 +26,10 @@ Pass options with `… | bash -s -- --uninstall`.
 
 macOS builds aren't notarized by Apple yet. The installer handles that: it re-signs the app with a local identity created once on your Mac, and Gatekeeper doesn't block a curl download. If you download the `.dmg` from the [releases page](https://github.com/alexykn/icygui/releases) in a browser instead, open the app once via System Settings → Privacy & Security → *Open Anyway*. Linux `.deb` packages are on the releases page too.
 
+To try the app without an Icinga, run `icygui --demo`: the whole app against a simulated Icinga in the same process (the design's production estate with live changes, problem storms and notifications). Nothing is saved.
+
+Settings live in `~/.config/icygui/config.toml` (Linux) or `~/Library/Application Support/io.github.alexykn.icygui/config.toml` (macOS), passwords in the system keychain, logs in `~/.local/state/icygui/logs` or `~/Library/Logs/io.github.alexykn.icygui`.
+
 Status: in development. See [`PLAN.md`](PLAN.md) for the plan and decisions, and [`docs/architecture.md`](docs/architecture.md) for the crate contracts.
 
 ## Icinga API user
@@ -49,7 +53,7 @@ object ApiUser "icygui" {
 }
 ```
 
-`objects/query/Notification` and `events/Notification` let the panes show whom Icinga notified about a problem, and when; without them that row stays empty and everything else works.
+`objects/query/Notification` and `events/Notification` let the panes show whom Icinga notified about a problem, and when; without them that row says so and everything else works.
 
 For operators, add `actions/reschedule-check`, `actions/acknowledge-problem`, `actions/remove-acknowledgement`, `actions/schedule-downtime`, `actions/remove-downtime`, `actions/add-comment`, `actions/remove-comment`, `actions/process-check-result` and, optionally, `actions/execute-command`. Buttons for actions the user isn't allowed to run are disabled.
 

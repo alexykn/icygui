@@ -16,6 +16,16 @@
           "column": 3
         }
       ]
+    },
+    {
+      "owner": "rust-unlocated",
+      "pattern": [
+        {
+          "regexp": "^(error)(\\[\\S+\\])?: (.*)$",
+          "severity": 1,
+          "message": 3
+        }
+      ]
     }
   ]
 }

@@ -54,6 +54,8 @@ jobs:
         run: echo "::add-matcher::.github/rust-problem-matcher.json"
 
       - name: Clippy (pedantic, warnings are errors)
+        env:
+          CARGO_TERM_COLOR: never   # plain lines, so the problem matcher can read them
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test

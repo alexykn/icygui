@@ -139,6 +139,7 @@ pub(crate) fn build_with(now: Timestamp, options: DemoOptions) -> Demo {
         endpoints: Arc::new(objects::endpoints()),
         status: Some(Arc::new(objects::status(now))),
         dashboards: Arc::default(),
+        ..Snapshot::default()
     };
 
     let mut groups = Vec::new();

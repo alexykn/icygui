@@ -2,12 +2,15 @@
 //! links), and which were asked for recently.
 //!
 //! Services load lean (docs/performance.md); the UI asks for the details
-//! of the rows on screen that have no output yet and of an opened pane,
-//! debounced, so scrolling through 30 000 rows costs a request for the
-//! rows it stops on, not for every row it passes. An object asked for
+//! of the rows on screen that have no output yet (and of a host pane's
+//! service rows), debounced, so scrolling through 30 000 rows costs a
+//! request for the rows it stops on, not for every row it passes. The
+//! object a pane shows is asked for on its own, ahead of these
+//! (`Command::Focus`, `AppState::focus`). An object asked for
 //! within the last five minutes isn't asked for again (a check that never
 //! ran still has no output after its details came), so revisiting rows
-//! costs nothing.
+//! costs nothing; waking up from quiet mode forgets them (the engine
+//! dropped what was asked for meanwhile).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -32,16 +35,6 @@ pub(crate) fn row_needs_details(snapshot: &Snapshot, key: &ObjectKey) -> bool {
     snapshot.services.get(key).is_some_and(|service| {
         service.check.result.is_none() && service.state != ServiceState::Pending
     })
-}
-
-/// Whether an opened pane for `key` should ask for full details: any known
-/// service (lean ones lack their links even after a check result came;
-/// the core skips services it holds in full).
-pub(crate) fn pane_wants_details(snapshot: &Snapshot, key: &ObjectKey) -> bool {
-    match key {
-        ObjectKey::Service { key } => snapshot.services.contains_key(key),
-        ObjectKey::Host { .. } => false,
-    }
 }
 
 /// Remembers what was asked for.
@@ -84,9 +77,9 @@ impl Hydration {
         fresh
     }
 
-    /// Forgets everything (another server, or a reload replaced the
-    /// objects).
-    #[cfg(test)]
+    /// Forgets everything: the environment woke up from quiet mode, whose
+    /// engine dropped what was asked for meanwhile, so the rows on screen
+    /// are asked for again.
     pub(crate) fn forget(&mut self) {
         self.requested.clear();
     }
@@ -146,20 +139,6 @@ mod tests {
         );
         assert!(!row_needs_details(&snapshot, &ObjectKey::host("h")));
         assert!(!row_needs_details(
-            &snapshot,
-            &ObjectKey::service("h", "gone")
-        ));
-    }
-
-    #[test]
-    fn panes_ask_for_every_known_service() {
-        let snapshot = snapshot();
-        assert!(pane_wants_details(
-            &snapshot,
-            &ObjectKey::service("h", "full")
-        ));
-        assert!(!pane_wants_details(&snapshot, &ObjectKey::host("h")));
-        assert!(!pane_wants_details(
             &snapshot,
             &ObjectKey::service("h", "gone")
         ));

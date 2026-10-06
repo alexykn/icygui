@@ -7,7 +7,8 @@
 //! never quits by itself: [`closed`] decides. It keeps running only while
 //! the tray icon is there and a tray host shows it (asked off the UI
 //! thread), so the app never runs on unseen with no way back; otherwise
-//! it quits. `--background` (launch at login) starts without a window and
+//! it quits. Running on in the tray, the window counts as hidden for
+//! quiet mode ([`super::presence`]). `--background` (launch at login) starts without a window and
 //! waits a while for a tray host, which often starts after the app at
 //! login; with none by then, the window opens.
 
@@ -41,6 +42,12 @@ pub(crate) fn main_window(cx: &App) -> Option<WindowHandle<Root>> {
 /// Shows the main window: brings it forward, or opens it again where it
 /// was (the saved bounds). Returns whether a window is shown.
 pub(crate) fn show(cx: &mut App) -> bool {
+    let state = cx.try_global::<MainState>().map(|main| main.0.clone());
+    // The environment on screen wakes up before anything opens in it (the
+    // system reports the window visible only later).
+    if let Some(state) = &state {
+        super::presence::shown(state, cx);
+    }
     if let Some(window) = main_window(cx) {
         let shown = window
             .update(cx, |_, window, _| window.activate_window())
@@ -48,7 +55,7 @@ pub(crate) fn show(cx: &mut App) -> bool {
         cx.activate(true);
         return shown;
     }
-    let Some(state) = cx.try_global::<MainState>().map(|main| main.0.clone()) else {
+    let Some(state) = state else {
         return false;
     };
     let bounds = window_state::initial_bounds(
@@ -148,6 +155,9 @@ pub(crate) fn closed(cx: &mut App) {
             match after_close(super::tray::is_shown(cx), available) {
                 AfterClose::KeepRunning => {
                     tracing::info!("the window closed: running in the tray");
+                    if let Some(state) = cx.try_global::<MainState>().map(|main| main.0.clone()) {
+                        super::presence::hidden(&state, cx);
+                    }
                 }
                 AfterClose::Quit => {
                     tracing::info!("the window closed and no tray host shows the icon: quitting");

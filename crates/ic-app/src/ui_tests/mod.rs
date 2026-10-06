@@ -49,6 +49,7 @@ mod every_environment;
 mod live;
 mod live_actions;
 mod notifications;
+mod quiet;
 mod scopes;
 mod states;
 mod topology;

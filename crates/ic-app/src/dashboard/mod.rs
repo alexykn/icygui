@@ -87,8 +87,9 @@ pub(crate) struct DashboardView {
     /// size.
     visible: Range<usize>,
     /// The rows on screen without output, last asked for (or about to
-    /// be).
-    hydration_wanted: Vec<ObjectKey>,
+    /// be), and in which wake of the environment (`AppState::wake`): after
+    /// waking up from quiet mode they are asked for again.
+    hydration_wanted: (Vec<ObjectKey>, u64),
     /// Asks for them once scrolling rests.
     hydrate_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -113,7 +114,7 @@ impl DashboardView {
             sidebar_open: true,
             drag: WindowDrag::default(),
             visible: 0..0,
-            hydration_wanted: Vec::new(),
+            hydration_wanted: (Vec::new(), 0),
             hydrate_task: None,
             _subscriptions: subscriptions,
         }
@@ -122,10 +123,11 @@ impl DashboardView {
     /// Remembers the rows on screen that lack output and, if they changed,
     /// asks for their details once scrolling rests.
     fn want_details(&mut self, keys: Vec<ObjectKey>, cx: &mut Context<Self>) {
-        if keys == self.hydration_wanted {
+        let wake = self.state.read(cx).wake();
+        if keys == self.hydration_wanted.0 && wake == self.hydration_wanted.1 {
             return;
         }
-        self.hydration_wanted.clone_from(&keys);
+        self.hydration_wanted = (keys.clone(), wake);
         if keys.is_empty() {
             self.hydrate_task = None;
             return;
@@ -138,7 +140,7 @@ impl DashboardView {
                     .update(cx, |state, _| state.hydrate(keys, Instant::now()));
                 if outcome == Hydrated::NotNow {
                     // Not connected yet: the next frame asks again.
-                    this.hydration_wanted.clear();
+                    this.hydration_wanted.0.clear();
                 }
             });
         }));
@@ -203,7 +205,7 @@ impl DashboardView {
             return;
         };
         if let Some(pane) = &list.pane {
-            pane.view.update(cx, |pane, cx| pane.show(key, cx));
+            pane.view.update(cx, |pane, cx| pane.open(key, cx));
         } else {
             let state = self.state.clone();
             let sidebar_open = self.sidebar_open;

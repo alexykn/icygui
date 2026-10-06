@@ -25,6 +25,7 @@ pub(crate) mod hydration;
 mod notifications;
 mod operations;
 pub(crate) mod permissions;
+mod presence;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -222,6 +223,16 @@ pub(crate) struct AppState {
     /// The id of the last action sent (ids are never reused, not even
     /// across environments).
     last_action_id: u64,
+    /// The main window is hidden (closed to the tray, out of sight, or not
+    /// opened yet in a start in the background): the environment on
+    /// screen is quiet too (PERF-09).
+    window_hidden: bool,
+    /// The window has shown since the app started: engines start their
+    /// first load at once (`ic_core::Start::User`).
+    user_present: bool,
+    /// Counts the times the environment on screen woke up from quiet mode
+    /// (or another came on screen).
+    wake: u64,
     /// Evaluates dashboards for the fixture; the core does that itself.
     #[cfg(test)]
     evaluator: Option<fixture::Evaluator>,
@@ -256,6 +267,10 @@ impl AppState {
             last_denial: None,
             tracker: Tracker::default(),
             last_action_id: 0,
+            // A window opens at start unless `start_hidden` says otherwise.
+            window_hidden: false,
+            user_present: true,
+            wake: 0,
             #[cfg(test)]
             evaluator: None,
             #[cfg(test)]

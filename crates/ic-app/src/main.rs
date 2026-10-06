@@ -241,6 +241,10 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
         });
         background::autostart::refresh_at_start(launch_at_login, demo, cx);
         if !recovering && background::window::start_hidden(background, cx) {
+            // Nobody looks yet: every environment is quiet and the first
+            // loads wait a moment proportional to the installation's size
+            // (PERF-09), until the window shows.
+            state.update(cx, |state, _| state.start_hidden());
             background::window::await_tray_host(state, bounds, cx);
         } else if !background::window::open_at_start(state, bounds, cx) {
             cx.quit();

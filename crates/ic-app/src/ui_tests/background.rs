@@ -71,9 +71,15 @@ fn a_closed_window_comes_back_with_its_state() {
         app.in_window(cx, |window, _| window.remove_window());
         assert!(window::main_window(cx).is_none());
         assert_eq!(app.state.read(cx).selected(), Some(&network()));
+        // Running in the tray, the window counts as hidden (quiet mode,
+        // PERF-09; `presence` waits a grace first).
+        app.state
+            .update(cx, |state, _| state.set_window_hidden(true));
 
-        // A notification's click opens it again, showing the object.
+        // A notification's click opens it again, showing the object, and
+        // the environment on screen wakes up.
         assert!(live::open_object(&replication(), cx));
+        assert!(!app.state.read(cx).window_hidden(), "shown again");
         let reopened = window::main_window(cx).expect("a new window");
         let workspace = reopened
             .read(cx)

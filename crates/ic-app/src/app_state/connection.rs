@@ -9,7 +9,9 @@ use ic_core::{ClusterView, ConnectedNode, ConnectionState};
 use ic_model::{Timestamp, format_compact};
 
 /// Events older than this make a live connection look stale (PLAN.md §2.1),
-/// unless Icinga ran no checks in the last minute (then nothing is sent).
+/// unless Icinga ran no checks in the last minute (then nothing is sent),
+/// or the stream is quiet (PERF-09: it carries no check results and may be
+/// silent for many minutes).
 pub(crate) const STALE_AFTER_SECS: u64 = 30;
 
 /// How the footer colours the connection status.
@@ -18,7 +20,7 @@ pub(crate) enum Health {
     /// Connected with recent events (green).
     Live,
     /// Connected, but no event for more than 30 seconds while Icinga is
-    /// checking (yellow).
+    /// checking and the stream isn't quiet (yellow).
     Stale,
     /// Lost; retrying with backoff (red).
     Reconnecting,
@@ -168,6 +170,12 @@ pub(crate) struct ConnectionStatus {
     /// Whether Icinga ran active checks in the last minute (from the
     /// status poll); `None` while unknown.
     pub(crate) checks_active: Option<bool>,
+    /// The event stream carries no check results (quiet mode, PERF-09):
+    /// its silence says nothing about the connection.
+    pub(crate) quiet: bool,
+    /// When the stream came back from quiet mode: its silence counts from
+    /// then.
+    live_since: Option<Timestamp>,
     /// Whether this session was connected at some point.
     pub(crate) ever_connected: bool,
     /// The engine couldn't start (a thread or runtime error), or stopped
@@ -189,6 +197,8 @@ impl ConnectionStatus {
             state: None,
             last_event_at: None,
             checks_active: None,
+            quiet: false,
+            live_since: None,
             ever_connected: false,
             engine_error: None,
             engine_stopped: false,
@@ -225,12 +235,21 @@ impl ConnectionStatus {
 
     /// The core published `snapshot`.
     pub(crate) fn on_snapshot(&mut self, snapshot: &Snapshot) {
+        self.on_snapshot_at(snapshot, Timestamp::now());
+    }
+
+    /// The core published `snapshot`, received at `now`.
+    pub(crate) fn on_snapshot_at(&mut self, snapshot: &Snapshot, now: Timestamp) {
         if snapshot.last_event_at.is_some() {
             self.last_event_at = snapshot.last_event_at;
         }
         if let Some(status) = &snapshot.status {
             self.checks_active = Some(status.checks_per_minute >= 1.);
         }
+        if self.quiet && !snapshot.quiet {
+            self.live_since = Some(now);
+        }
+        self.quiet = snapshot.quiet;
     }
 
     /// The engine couldn't start.
@@ -303,8 +322,8 @@ impl ConnectionStatus {
                 | ConnectionState::Misconfigured { .. },
             ) => Health::Failed,
             Some(ConnectionState::Connected { since, .. }) => {
-                let quiet = self.quiet_for(*since, now).as_secs() > STALE_AFTER_SECS;
-                if quiet && self.checks_active != Some(false) {
+                let silent = self.quiet_for(*since, now).as_secs() > STALE_AFTER_SECS;
+                if silent && !self.quiet && self.checks_active != Some(false) {
                     Health::Stale
                 } else {
                     Health::Live
@@ -314,8 +333,13 @@ impl ConnectionStatus {
     }
 
     /// How long nothing arrived: since the last event, or since the
-    /// connection came up if no event arrived after that.
+    /// connection came up (or the stream came back from quiet mode) if no
+    /// event arrived after that.
     fn quiet_for(&self, since: Timestamp, now: Timestamp) -> std::time::Duration {
+        let since = match self.live_since {
+            Some(live) if live > since => live,
+            _ => since,
+        };
         let last = match self.last_event_at {
             Some(at) if at > since => at,
             _ => since,
@@ -350,6 +374,8 @@ impl ConnectionStatus {
             return (endpoint, None);
         };
         let status = match state {
+            // A quiet stream's age says nothing (PERF-09).
+            ConnectionState::Connected { .. } if self.quiet => "quiet".to_owned(),
             ConnectionState::Connected { since, .. } => format_compact(self.quiet_for(*since, now)),
             ConnectionState::Connecting { attempt } if *attempt > 1 => {
                 format!("connecting ({attempt})")
@@ -717,6 +743,29 @@ mod tests {
         let mut unknown = connected();
         unknown.on_snapshot(&snapshot(None, None));
         assert_eq!(unknown.health(at(31.)), Health::Stale);
+    }
+
+    /// PERF-09: a quiet stream may be silent for many minutes; its
+    /// environment isn't stale and says it's quiet instead of the age of
+    /// its last event. Back live, the silence counts from then.
+    #[test]
+    fn a_quiet_stream_is_not_stale() {
+        let mut status = connected();
+        let quiet = Snapshot {
+            quiet: true,
+            ..snapshot(Some(10.), Some(120.))
+        };
+        status.on_snapshot_at(&quiet, at(10.));
+        assert_eq!(status.health(at(900.)), Health::Live);
+        assert_eq!(status.label(at(900.)), "master-01 · quiet");
+        assert_eq!(status.describe(at(900.)), "connected for 15m");
+        // Awake: the full stream is back at 900 s.
+        status.on_snapshot_at(&snapshot(None, Some(120.)), at(900.));
+        assert_eq!(status.health(at(905.)), Health::Live, "not stale at once");
+        assert_eq!(status.label(at(905.)), "master-01 · 5s");
+        assert_eq!(status.health(at(931.)), Health::Stale, "silent while live");
+        status.on_snapshot_at(&snapshot(Some(930.), Some(120.)), at(930.));
+        assert_eq!(status.health(at(931.)), Health::Live);
     }
 
     #[test]

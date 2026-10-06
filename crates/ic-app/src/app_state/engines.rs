@@ -44,6 +44,9 @@ pub(crate) struct EngineSlot {
     pub(super) hydration: Hydration,
     /// When the user last asked for a reload.
     pub(super) last_refresh: Option<Instant>,
+    /// Whether the engine was told to be quiet (PERF-09; an engine starts
+    /// live).
+    pub(super) quiet: bool,
 }
 
 impl EngineSlot {
@@ -70,6 +73,7 @@ impl EngineSlot {
             update_pending: false,
             hydration: Hydration::default(),
             last_refresh: None,
+            quiet: false,
         }
     }
 
@@ -181,9 +185,10 @@ impl AppState {
     }
 
     /// Connects environment `id`'s slot to its running engine: an inactive
-    /// one is told it isn't on screen, and every engine gets the pause in
-    /// force for it. A link for an environment removed meanwhile is
-    /// dropped (which stops that engine).
+    /// one is told it isn't on screen, one nobody looks at that it is
+    /// quiet (PERF-09), and every engine gets the pause in force for it. A
+    /// link for an environment removed meanwhile is dropped (which stops
+    /// that engine).
     pub(crate) fn set_core_for(&mut self, id: &str, core: Box<dyn CoreLink>) {
         let active = self.is_active(id);
         let pause = self.effective_pause(id, ic_model::Timestamp::now());
@@ -195,7 +200,12 @@ impl AppState {
         if !active {
             slot.send(Command::SetActive(false));
         }
-        if let Some(until) = pause {
+        // Commands sent right after the start apply before the first
+        // connect: a quiet engine opens its stream quiet.
+        self.announce_quiet_to(id);
+        if let Some(until) = pause
+            && let Some(slot) = self.slot_mut(id)
+        {
             slot.send(Command::PauseNotifications(Some(until)));
         }
     }
@@ -243,7 +253,12 @@ impl AppState {
             self.reset_connection();
         } else if let Some(environment) = self.config.environment(id) {
             let mut slot = EngineSlot::starting(environment);
-            slot.core = self.parked.remove(id).and_then(|old| old.core);
+            if let Some(old) = self.parked.remove(id)
+                && old.core.is_some()
+            {
+                slot.core = old.core;
+                slot.quiet = old.quiet;
+            }
             self.parked.insert(id.to_owned(), slot);
         }
     }
@@ -346,12 +361,14 @@ impl AppState {
         }
     }
 
-    /// Tells every engine whether its environment is the one on screen.
-    pub(super) fn announce_active(&self) {
+    /// Tells every engine whether its environment is the one on screen,
+    /// then whether it is quiet.
+    pub(super) fn announce_active(&mut self) {
         self.engine.send(Command::SetActive(true));
         for slot in self.parked.values() {
             slot.send(Command::SetActive(false));
         }
+        self.announce_quiet();
     }
 
     /// Environment `id`'s latest snapshot.

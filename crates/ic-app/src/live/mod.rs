@@ -614,11 +614,12 @@ impl Session {
         secrets: Arc<dyn SecretStore>,
         cx: &mut Context<Self>,
     ) {
-        let (environment, general) = {
+        let (environment, general, start) = {
             let state = self.state.read(cx);
             (
                 state.environment_by_id(id).cloned(),
                 state.config().general.clone(),
+                state.start_mode(),
             )
         };
         let Some(environment) = environment else {
@@ -632,7 +633,10 @@ impl Session {
             environment,
             general,
             data_dir,
-            start: ic_core::Start::User,
+            // Started at login without the window, the first load waits a
+            // moment proportional to the installation (PERF-09) until the
+            // window shows (`Command::StartNow`).
+            start,
         };
         let ports = Ports {
             secrets,

@@ -8,13 +8,21 @@
 //! buttons with Icinga's reason. The `···` beside them has the actions
 //! without a key and copies the name, the output and a filter expression
 //! (PANE-05).
+//!
+//! The object the pane shows is the one the user opens: it is asked for in
+//! full at once, ahead of everything else (`Command::Focus`; once the
+//! cursor rests when it moves through the list), and again when the
+//! environment wakes up from quiet mode (PERF-09). The pane never waits
+//! for the answer: it shows what the snapshot has, and a small `updating`
+//! hint in a fixed slot of its header when fresher details take longer
+//! than [`UPDATING_HINT_AFTER`].
 
 mod history;
 mod host;
 pub(crate) mod model;
 mod service;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
@@ -33,7 +41,7 @@ use crate::actions::{
     Acknowledge, ActionRequest, AddComment, CheckNow, Dismiss, ObjectAction, PANE_CONTEXT,
     ScheduleDowntime,
 };
-use crate::app_state::hydration::{pane_wants_details, row_needs_details};
+use crate::app_state::hydration::row_needs_details;
 use crate::app_state::{AppState, Hydrated};
 use crate::banner;
 use crate::chrome::{Controls, WindowDrag};
@@ -60,6 +68,15 @@ const TAB_SIDE_WIDTH: f32 = 340.;
 const TAB_COLUMN_GAP: f32 = 40.;
 /// A service tab at least this wide shows two columns.
 const TAB_TWO_COLUMNS_FROM: f32 = 1000.;
+
+/// The cursor moving through the list asks for the object it rests on
+/// after this long, not for every row it passes.
+const FOCUS_DEBOUNCE: Duration = Duration::from_millis(150);
+/// The `updating` hint shows when fresher details take longer than this.
+pub(crate) const UPDATING_HINT_AFTER: Duration = Duration::from_millis(300);
+/// The width of the hint's slot in the header, kept whether it shows or
+/// not, so nothing beside it moves.
+const UPDATING_SLOT_WIDTH: f32 = 84.;
 
 /// How a pane's body is laid out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,11 +150,24 @@ pub(crate) struct ObjectPane {
     /// shows the window controls and the sidebar button in its header.
     sidebar_open: bool,
     drag: WindowDrag,
-    /// The objects last asked for their details (the pane's own and, in a
-    /// host pane, its service rows without output).
-    hydration_wanted: Vec<ObjectKey>,
+    /// The objects last asked for their details (a host pane's service
+    /// rows without output), and in which wake of the environment.
+    hydration_wanted: (Vec<ObjectKey>, u64),
     /// Asks for them once the pane rests on an object.
     hydrate_task: Option<Task<()>>,
+    /// The object last asked for at once (`Command::Focus`), in which wake
+    /// of the environment (`AppState::wake`): asked again when either
+    /// changes.
+    focused: Option<(ObjectKey, u64)>,
+    /// Asks for it.
+    focus_task: Option<Task<()>>,
+    /// The object shown next comes from the cursor moving through the
+    /// list: asked for once it rests there.
+    focus_when_resting: bool,
+    /// The object shown and since when it has been updating.
+    updating_since: Option<(ObjectKey, Instant)>,
+    /// Draws the pane again when the hint is due.
+    updating_task: Option<Task<()>>,
     /// The `···` menu beside the action buttons.
     menu: OpenMenu<PaneMenu>,
     /// The local event log's entries for the shown object (PANE-04).
@@ -188,8 +218,13 @@ impl ObjectPane {
             focus_handle: cx.focus_handle(),
             sidebar_open: true,
             drag: WindowDrag::default(),
-            hydration_wanted: Vec::new(),
+            hydration_wanted: (Vec::new(), 0),
             hydrate_task: None,
+            focused: None,
+            focus_task: None,
+            focus_when_resting: false,
+            updating_since: None,
+            updating_task: None,
             menu: OpenMenu::default(),
             log: None,
             log_task: None,
@@ -197,15 +232,13 @@ impl ObjectPane {
         }
     }
 
-    /// The objects this pane shows that lack details: a service's own (its
-    /// output and links), a host pane's service rows without output.
+    /// The rows this pane shows that lack details: a host pane's service
+    /// rows without output (the pane's own object is asked for at once,
+    /// [`ObjectPane::want_focus`]).
     fn details_wanted(&self, cx: &App) -> Vec<ObjectKey> {
         let state = self.state.read(cx);
         let snapshot = state.snapshot();
         let mut keys = Vec::new();
-        if pane_wants_details(snapshot, &self.object) {
-            keys.push(self.object.clone());
-        }
         if let ObjectKey::Host { name } = &self.object
             && self.host_tab == HostTab::Services
             && let Some(host) = snapshot.hosts.get(name)
@@ -226,10 +259,11 @@ impl ObjectPane {
     /// where it stops).
     fn want_details(&mut self, cx: &mut Context<Self>) {
         let keys = self.details_wanted(cx);
-        if keys == self.hydration_wanted {
+        let wake = self.state.read(cx).wake();
+        if keys == self.hydration_wanted.0 && wake == self.hydration_wanted.1 {
             return;
         }
-        self.hydration_wanted.clone_from(&keys);
+        self.hydration_wanted = (keys.clone(), wake);
         if keys.is_empty() {
             self.hydrate_task = None;
             return;
@@ -241,15 +275,80 @@ impl ObjectPane {
                     .state
                     .update(cx, |state, _| state.hydrate(keys, Instant::now()));
                 if outcome == Hydrated::NotNow {
-                    this.hydration_wanted.clear();
+                    this.hydration_wanted.0.clear();
                 }
             });
         }));
     }
 
+    /// Asks for the shown object in full, ahead of everything else
+    /// (`Command::Focus`): at once when the user opened it, once the cursor
+    /// rests when it moved there, and again when the environment wakes up.
+    /// The engine sends nothing when it holds the object current. Not
+    /// connected, it is asked for on a later render.
+    fn want_focus(&mut self, cx: &mut Context<Self>) {
+        let wake = self.state.read(cx).wake();
+        // Only the next change of object can come from the cursor.
+        let resting = std::mem::take(&mut self.focus_when_resting);
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|(key, at)| *key == self.object && *at == wake)
+        {
+            return;
+        }
+        self.focused = Some((self.object.clone(), wake));
+        let delay = if resting {
+            FOCUS_DEBOUNCE
+        } else {
+            Duration::ZERO
+        };
+        let key = self.object.clone();
+        self.focus_task = Some(cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.object == key && !this.state.read(cx).focus(&key) {
+                    this.focused = None;
+                }
+            });
+        }));
+    }
+
+    /// Whether the shown object has been updating (`Snapshot::updating`)
+    /// for longer than [`UPDATING_HINT_AFTER`]: its header says so then.
+    fn updating_hint(&mut self, updating: bool, cx: &mut Context<Self>) -> bool {
+        if !updating {
+            self.updating_since = None;
+            self.updating_task = None;
+            return false;
+        }
+        let now = Instant::now();
+        if let Some((key, since)) = &self.updating_since
+            && *key == self.object
+        {
+            return now.saturating_duration_since(*since) >= UPDATING_HINT_AFTER;
+        }
+        self.updating_since = Some((self.object.clone(), now));
+        self.updating_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(UPDATING_HINT_AFTER).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }));
+        false
+    }
+
     /// The object shown.
     pub(crate) fn object(&self) -> &ObjectKey {
         &self.object
+    }
+
+    /// Whether the header shows the `updating` hint.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn shows_updating(&self) -> bool {
+        self.updating_since.as_ref().is_some_and(|(key, since)| {
+            *key == self.object && since.elapsed() >= UPDATING_HINT_AFTER
+        })
     }
 
     /// Whether the back button has somewhere to go.
@@ -270,9 +369,22 @@ impl ObjectPane {
         &self.scroll
     }
 
-    /// Shows `object`, forgetting the back history (the list's cursor
-    /// moved).
+    /// Shows `object` the list's cursor moved to, forgetting the back
+    /// history: asked for in full once the cursor rests.
     pub(crate) fn show(&mut self, object: ObjectKey, cx: &mut Context<Self>) {
+        if self.object == object {
+            return;
+        }
+        self.focus_when_resting = true;
+        self.history.clear();
+        self.switch_to(object, cx);
+        cx.notify();
+    }
+
+    /// Shows `object` the user opened (a click, Enter, a notification, the
+    /// palette), forgetting the back history: asked for in full at once.
+    pub(crate) fn open(&mut self, object: ObjectKey, cx: &mut Context<Self>) {
+        self.focus_when_resting = false;
         if self.object == object {
             return;
         }
@@ -439,7 +551,7 @@ impl ObjectPane {
         });
     }
 
-    fn render_header(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+    fn render_header(&self, updating: bool, window: &Window, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let controls = Controls::of(window, cx);
         let label = match self.object {
@@ -468,7 +580,7 @@ impl ObjectPane {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.back(cx))),
             );
         }
-        header = header.label(label);
+        header = header.label(label).status(updating_slot(updating, theme));
         let header = match self.mode {
             PaneMode::Split => header
                 .child(
@@ -500,11 +612,13 @@ impl ObjectPane {
 
 impl Render for ObjectPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.want_focus(cx);
         self.want_details(cx);
         self.want_history(cx);
         let theme = cx.theme().clone();
-        let header = self.render_header(window, cx);
         let snapshot = self.state.read(cx).snapshot().clone();
+        let updating = self.updating_hint(snapshot.is_updating(&self.object), cx);
+        let header = self.render_header(updating, window, cx);
         let now = Timestamp::now();
         let layout = self.body_layout(window, &theme);
         let loading = {
@@ -547,6 +661,35 @@ impl Render for ObjectPane {
             .children(banners)
             .child(body)
     }
+}
+
+/// The header's slot for the `updating` hint: always there and as wide,
+/// empty unless fresher details of the shown object take a moment
+/// (PERF-09).
+fn updating_slot(updating: bool, theme: &Theme) -> impl IntoElement {
+    div()
+        .id("pane-updating")
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(5.))
+        .w(px(UPDATING_SLOT_WIDTH))
+        .when(updating, |slot| {
+            slot.child(
+                Icon::new(IconName::Loader)
+                    .size(theme.metrics.icon_small)
+                    .color(theme.colors.text_faint),
+            )
+            .child(
+                div()
+                    .text_size(theme.text.small)
+                    .text_color(theme.colors.text_faint)
+                    .child("updating"),
+            )
+            .tooltip(Tooltip::text(
+                "Fetching the latest details from Icinga; shown meanwhile is what icygui has",
+            ))
+        })
 }
 
 /// The pane body for an object the snapshot doesn't have: still loading,

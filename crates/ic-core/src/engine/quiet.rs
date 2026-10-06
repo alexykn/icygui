@@ -604,11 +604,14 @@ impl Engine {
         else {
             return false;
         };
+        // Strictly older: a check's result and its state change carry the
+        // same end, and the attempts of one problem can come within a
+        // millisecond (passive results, a burst).
         let end = result.execution_end.non_zero().unwrap_or(*at);
         self.store
             .check(object)
             .and_then(|check| check.last_check)
-            .is_some_and(|last| end.as_unix_seconds() + 0.001 < last.as_unix_seconds())
+            .is_some_and(|last| end.as_unix_seconds() < last.as_unix_seconds())
     }
 
     // --- waking up -----------------------------------------------------------------

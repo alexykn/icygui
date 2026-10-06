@@ -602,14 +602,15 @@ impl Engine {
         mut internal_rx: UnboundedReceiver<Internal>,
         mut shutdown: oneshot::Receiver<()>,
     ) {
+        // Pruned before any query can reach the log (a history asked for
+        // right after the start is among the commands below).
+        self.prune(Instant::now());
         // Commands sent right after the start (quiet mode, say) apply
         // before the first connect opens the stream.
         while let Ok(command) = commands.try_recv() {
             self.on_command(command);
         }
         self.connect();
-        // Pruned before any query can reach the log.
-        self.prune(Instant::now());
         let mut lines = Vec::new();
         let mut new_lines = Vec::new();
         loop {

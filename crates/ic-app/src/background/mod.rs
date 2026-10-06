@@ -5,6 +5,8 @@
 //!
 //! - [`window`]: the main window closes and comes back; quitting only on
 //!   purpose (BG-01);
+//! - [`presence`]: whether anybody can see the window, for quiet mode
+//!   (PERF-09);
 //! - [`tray`]: the tray icon, tinted with the worst unhandled state, its
 //!   tooltip and menu (BG-02, REL-07);
 //! - [`autostart`]: launch at login, `--background` (BG-03);
@@ -16,5 +18,6 @@
 pub(crate) mod autostart;
 pub(crate) mod instance;
 pub(crate) mod menus;
+pub(crate) mod presence;
 pub(crate) mod tray;
 pub(crate) mod window;

@@ -28,10 +28,10 @@ use crate::operate::forms::FormField;
 use crate::workspace::ModalKind;
 
 /// The demo's environments.
-const EVERY: [&str; 3] = [demo::ENVIRONMENT_ID, demo::STAGING_ID, demo::LAB_ID];
+pub(super) const EVERY: [&str; 3] = [demo::ENVIRONMENT_ID, demo::STAGING_ID, demo::LAB_ID];
 
 /// Waits until every demo environment's engine is connected with objects.
-async fn every_environment_connected(app: &Harness, cx: &AsyncApp) {
+pub(super) async fn every_environment_connected(app: &Harness, cx: &AsyncApp) {
     wait_for(
         app,
         cx,
@@ -68,7 +68,7 @@ fn quiet_service(snapshot: &Snapshot) -> ObjectKey {
 }
 
 /// A quiet service of environment `id`, and its server's control.
-fn victim(
+pub(super) fn victim(
     cx: &AsyncApp,
     app: &Harness,
     session: &gpui::Entity<Session>,
@@ -82,7 +82,7 @@ fn victim(
 }
 
 /// Makes `object` a hard CRITICAL in Icinga.
-fn break_it(control: &MockControl, object: &ObjectKey) {
+pub(super) fn break_it(control: &MockControl, object: &ObjectKey) {
     let ObjectKey::Service { key } = object else {
         unreachable!("a service")
     };
@@ -99,7 +99,7 @@ fn break_it(control: &MockControl, object: &ObjectKey) {
 
 /// The desktop notification about `object` turning critical, if one was
 /// shown.
-fn posted_about(session: &Session, object: &ObjectKey) -> Option<Posted> {
+pub(super) fn posted_about(session: &Session, object: &ObjectKey) -> Option<Posted> {
     let prefix = format!("{object}:critical:");
     session
         .shown_notifications()
@@ -279,9 +279,16 @@ fn an_environment_off_screen_notifies_and_is_acknowledged_there() {
     );
 }
 
+/// Whether `control`'s Icinga has exactly one event stream, live (with
+/// check results) or quiet (without; PERF-09).
+pub(super) fn one_stream(control: &MockControl, live: bool) -> bool {
+    let streams = control.event_stream_stats();
+    streams.len() == 1 && streams[0].types.contains(&"CheckResult") == live
+}
+
 /// ENV-01, D2: switching shows what the other environment's engine has at
-/// once (it ran all along), costs Icinga nothing (no reload, one stream
-/// per environment), and the environment off screen keeps its stream.
+/// once (it ran all along) and reloads nothing; every environment keeps
+/// one stream: the one on screen live, the others quiet (PERF-09).
 #[test]
 fn switching_is_instant_and_keeps_every_stream() {
     run_app(
@@ -317,8 +324,16 @@ fn switching_is_instant_and_keeps_every_stream() {
                         assert!(!state.has_no_objects(), "{id}: its objects at once");
                     });
                 }
+                // The streams follow (the old one closes once the new
+                // one overlaps it).
+                wait_for(&app, &cx, "one stream each", CONNECT, |_, _| {
+                    EVERY
+                        .iter()
+                        .zip(&controls)
+                        .all(|(id, control)| one_stream(control, *id == demo::ENVIRONMENT_ID))
+                })
+                .await;
                 for (control, before) in controls.iter().zip(before) {
-                    assert_eq!(control.event_streams(), 1, "one stream per environment");
                     assert_eq!(loads(control), before, "switching reloads nothing");
                 }
             }

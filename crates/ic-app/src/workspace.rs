@@ -45,6 +45,7 @@ use crate::actions::{
 };
 use crate::app_state::editing::DashboardDraft;
 use crate::app_state::{AppState, UserNotice};
+use crate::background::presence;
 use crate::chrome::{self, Controls, WindowControls, WindowDrag};
 use crate::dashboard::{DashboardEvent, DashboardView};
 use crate::editor::{DashboardEditor, EditorEvent, EditorTarget};
@@ -281,6 +282,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // A window is open: the environment on screen is live (the system
+        // may first report it hidden until it is mapped; only changes
+        // count).
+        presence::shown(&state, cx);
         let sidebar = cx.new(|cx| Sidebar::new(state.clone(), window, cx));
         let dashboard = cx.new(|cx| DashboardView::new(state.clone(), cx));
         // Keyboard shortcuts reach the list through the focus path.
@@ -296,6 +301,11 @@ impl Workspace {
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
                 this.window_moved(window, cx);
+            }),
+            // Out of sight for a while (minimised, another desktop), the
+            // environment on screen turns quiet too (PERF-09).
+            cx.observe_window_visibility(window, |this, visibility, _, cx| {
+                presence::visibility_changed(&this.state, visibility, cx);
             }),
             cx.subscribe_in(
                 &sidebar,

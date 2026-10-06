@@ -30,6 +30,7 @@ pub struct PaneHeader {
     label: Option<SharedString>,
     padding: Option<Pixels>,
     leading: Vec<AnyElement>,
+    status: Option<AnyElement>,
     trailing: Vec<AnyElement>,
     on_close: Option<CloseHandler>,
 }
@@ -44,6 +45,7 @@ impl PaneHeader {
             label: None,
             padding: None,
             leading: Vec::new(),
+            status: None,
             trailing: Vec::new(),
             on_close: None,
         }
@@ -77,6 +79,14 @@ impl PaneHeader {
     /// Adds an element before the title (window controls, a sidebar toggle).
     pub fn leading(mut self, element: impl IntoElement) -> Self {
         self.leading.push(element.into_any_element());
+        self
+    }
+
+    /// An element right after the title, subtitle and label, at the left
+    /// (the pane's `updating` hint). Give it a fixed width when what it
+    /// shows comes and goes, so nothing beside it moves.
+    pub fn status(mut self, element: impl IntoElement) -> Self {
+        self.status = Some(element.into_any_element());
         self
     }
 
@@ -155,6 +165,7 @@ impl RenderOnce for PaneHeader {
                         .child(subtitle),
                 )
             })
+            .children(self.status)
             .child(div().flex_1())
             .children(self.trailing)
             .when_some(self.on_close, |header, handler| {
@@ -385,9 +396,11 @@ mod tests {
             .label("service")
             .title("postgres-replication")
             .subtitle("service problems")
+            .status(div())
             .child(div())
             .on_close(|_, _, _| {});
         assert_eq!(header.label.as_deref(), Some("service"));
+        assert!(header.status.is_some());
         assert_eq!(header.trailing.len(), 1);
         assert!(header.on_close.is_some());
         assert!(format!("{header:?}").contains("postgres-replication"));

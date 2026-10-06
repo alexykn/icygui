@@ -616,7 +616,7 @@ impl SettingsDialog {
         blocks
     }
 
-    /// The tray and launch at login (BG-01, BG-03).
+    /// The tray, launch at login and quiet mode (BG-01, BG-03, PERF-09).
     fn render_background(&self, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
         let tray_hint = match self.tray_host {
             None => "Checking whether this desktop shows tray icons",
@@ -670,6 +670,26 @@ impl SettingsDialog {
                 )
                 .child(hint(login_hint, theme))
                 .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    Switch::new("settings-quiet-mode", self.general.quiet_when_hidden)
+                        .label("quiet mode when hidden")
+                        .on_change(cx.listener(|this, on: &bool, _, cx| {
+                            this.general.quiet_when_hidden = *on;
+                            cx.notify();
+                        })),
+                )
+                .child(hint(
+                    "Environments off screen, and the one on screen while the window is \
+                     closed or minimised, follow Icinga without check results: far less \
+                     load on the master, notifications as prompt as ever; outputs catch \
+                     up when you look.",
+                    theme,
+                ))
+                .into_any_element(),
         ]
     }
 
@@ -717,7 +737,8 @@ impl SettingsDialog {
                 })
                 .child(hint(
                     "A lean reload of every object catches what the event stream missed. \
-                     Adaptive: every 5 minutes below 5 000 objects, every 15 above.",
+                     Adaptive: from every 5 minutes for a small Icinga to every 15 at \
+                     30 000 objects, up to an hour while the stream runs without a break.",
                     theme,
                 ))
                 .into_any_element(),

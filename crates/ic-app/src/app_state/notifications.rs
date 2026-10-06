@@ -475,15 +475,20 @@ impl AppState {
     }
 
     /// Takes new app-wide settings (keep running in the tray, launch at
-    /// login, event log retention, reconcile interval): saved, and every
-    /// environment's engine told. Returns whether they changed.
+    /// login, event log retention, reconcile interval, quiet mode): saved,
+    /// and every environment's engine told (and, for quiet mode, whether
+    /// it is quiet now). Returns whether they changed.
     pub(crate) fn set_general(&mut self, general: &General) -> bool {
         if self.config.general == *general {
             return false;
         }
+        let quiet_changed = self.config.general.quiet_when_hidden != general.quiet_when_hidden;
         self.config.general = general.clone();
         self.save_config();
         self.send_to_every_engine(|| Command::UpdateGeneral(general.clone()));
+        if quiet_changed {
+            self.announce_quiet();
+        }
         true
     }
 }

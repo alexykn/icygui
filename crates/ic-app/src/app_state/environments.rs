@@ -195,11 +195,16 @@ impl AppState {
     /// engine stays (the session replaces it).
     pub(crate) fn reset_connection(&mut self) {
         let core = self.engine.core.take();
+        let quiet = self.engine.quiet && core.is_some();
         self.engine = match self.environment() {
             Some(environment) => EngineSlot::starting(environment),
             None => EngineSlot::idle(),
         };
         self.engine.core = core;
+        self.engine.quiet = quiet;
+        // The next engine knows nothing yet: the views ask it again for
+        // what they show (the opened object, the rows on screen).
+        self.wake += 1;
         // The pauses are the app's: the next engine gets them
         // (`set_core_for`).
         self.forget_window_requests();
@@ -421,8 +426,8 @@ mod tests {
         state.set_core_for(&staging_id, Box::new(staging_core.clone()));
         assert_eq!(
             staging_core.sent(),
-            ["SetActive(false)"],
-            "an engine off screen is told so"
+            ["SetActive(false)", "SetQuiet(true)"],
+            "an engine off screen is told so, and that nobody looks (PERF-09)"
         );
         state.apply_from(
             &staging_id,
@@ -446,11 +451,16 @@ mod tests {
         assert!(state.switch_environment(&staging_id));
         assert_eq!(state.snapshot().revision, 3, "staging shows at once");
         assert!(state.connection().is_connected());
-        assert_eq!(staging_core.sent(), ["SetActive(false)", "SetActive(true)"]);
         assert_eq!(
-            prod.sent().last().map(String::as_str),
-            Some("SetActive(false)")
+            staging_core.sent(),
+            [
+                "SetActive(false)",
+                "SetQuiet(true)",
+                "SetActive(true)",
+                "SetQuiet(false)"
+            ]
         );
+        assert_eq!(prod.sent(), ["SetActive(false)", "SetQuiet(true)"]);
         // Events of the environment now off screen go to its slot.
         state.apply_from(
             &prod_id,
@@ -540,7 +550,11 @@ mod tests {
         state.set_core_for(&staging_id, Box::new(next.clone()));
         assert_eq!(
             next.sent(),
-            ["SetActive(false)".to_owned(), pause(Some(two_hours))]
+            [
+                "SetActive(false)".to_owned(),
+                "SetQuiet(true)".to_owned(),
+                pause(Some(two_hours))
+            ]
         );
         // On screen, the clock shows staging's mute.
         assert!(state.switch_environment(&staging_id));

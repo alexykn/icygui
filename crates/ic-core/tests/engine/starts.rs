@@ -3,8 +3,12 @@
 //! together, each with its real tiered load and event stream, either all
 //! at once (users opening the app) or as background starts (launch at
 //! login, each waiting its size-proportional random delay). Prints when
-//! each was connected and the master's memory (sampled with `docker
-//! stats`), to calibrate the pacing factors in docs/performance.md.
+//! each was connected, the master's memory (sampled with `docker stats`)
+//! and how long a small by-name query of another client (`curl`, every
+//! half second: someone opening an object meanwhile) takes before and
+//! during the starts, to calibrate the pacing factors in
+//! docs/performance.md. `ICYGUI_SCALE_DELAY_PER_THOUSAND_MS` and
+//! `ICYGUI_SCALE_DELAY_MAX_S` try other background-start factors.
 //!
 //! Ignored, and a no-op without `ICYGUI_SCALE_URL`. Like the contract
 //! tests it refuses anything but the local container before a single
@@ -89,6 +93,53 @@ fn sample_memory(container: String, stop: Arc<AtomicBool>) -> std::thread::JoinH
     })
 }
 
+/// Sends a small by-name query (one service, two attributes, as a pane
+/// opens it) every half second with `curl` until stopped: the response
+/// times in seconds, as anyone else using the master sees them.
+fn probe_latency(
+    url: String,
+    credentials: String,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<Vec<f64>> {
+    std::thread::spawn(move || {
+        let query = format!(
+            "{url}/v1/objects/services?service=web-0000.prod.example.com!ping4\
+             &attrs=state&attrs=last_check_result"
+        );
+        let mut times = Vec::new();
+        while !stop.load(Ordering::SeqCst) {
+            let output = Process::new("curl")
+                .args(["-sk", "-o", "/dev/null", "-w", "%{time_total}", "-u"])
+                .arg(&credentials)
+                .args(["-H", "Accept: application/json", "--max-time", "60"])
+                .arg(&query)
+                .output();
+            if let Ok(output) = output
+                && let Ok(seconds) = String::from_utf8_lossy(&output.stdout).trim().parse()
+            {
+                times.push(seconds);
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        times
+    })
+}
+
+/// `share` (0–1) of the sorted `values`.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "percentiles of a few hundred samples"
+)]
+fn percentile(values: &[f64], share: f64) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    let index = ((values.len() as f64 - 1.0) * share).round() as usize;
+    values[index]
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs contract/scale/starts.sh's local Docker Icinga"]
 #[expect(clippy::too_many_lines, reason = "one measurement, step by step")]
@@ -133,9 +184,32 @@ async fn many_clients_start_at_once() {
         .unwrap()
         .expect("the container's certificate");
     let pin = ic_api::format_fingerprint(&certificate.sha256);
+    let mut tuning = Tuning::default();
+    if let Some(per_thousand) = std::env::var("ICYGUI_SCALE_DELAY_PER_THOUSAND_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        tuning.start_delay_per_thousand = Duration::from_millis(per_thousand);
+    }
+    if let Some(max) = std::env::var("ICYGUI_SCALE_DELAY_MAX_S")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        tuning.start_delay_max = Duration::from_secs(max);
+    }
+    let credentials = format!("{user}:{password}");
+    // The master's response time at rest.
+    let idle_stop = Arc::new(AtomicBool::new(false));
+    let idle_probe = probe_latency(url.clone(), credentials.clone(), Arc::clone(&idle_stop));
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    idle_stop.store(true, Ordering::SeqCst);
+    let mut idle = idle_probe.join().unwrap();
+    idle.sort_by(f64::total_cmp);
+
     let baseline = memory_mib(&container).unwrap_or_default();
     let stop = Arc::new(AtomicBool::new(false));
     let sampler = sample_memory(container.clone(), Arc::clone(&stop));
+    let probe = probe_latency(url.clone(), credentials, Arc::clone(&stop));
 
     let started = Instant::now();
     let mut engines = Vec::new();
@@ -154,7 +228,7 @@ async fn many_clients_start_at_once() {
         let launch = Launch {
             environment,
             secrets,
-            tuning: Tuning::default(),
+            tuning: tuning.clone(),
             general: General::default(),
             now: ic_model::Timestamp::now().as_unix_seconds(),
             data_dir: None,
@@ -203,6 +277,8 @@ async fn many_clients_start_at_once() {
     tokio::time::sleep(Duration::from_secs(5)).await;
     stop.store(true, Ordering::SeqCst);
     let peak = sampler.join().unwrap();
+    let mut busy = probe.join().unwrap();
+    busy.sort_by(f64::total_cmp);
     for mut engine in engines {
         engine.shutdown();
     }
@@ -214,10 +290,12 @@ async fn many_clients_start_at_once() {
         list[index].as_secs_f64()
     };
     eprintln!(
-        "{clients} {} starts, {services} services: connected (problem lists complete) \
-         min {:.1} s, median {:.1} s, max {:.1} s; first load complete (Icinga's notifications \
-         too) median {:.1} s, max {:.1} s; all done after {:.1} s",
+        "{clients} {} starts ({} s per 1 000 services, at most {} s), {services} services: \
+         connected (problem lists complete) min {:.1} s, median {:.1} s, max {:.1} s; first load \
+         complete (Icinga's notifications too) median {:.1} s, max {:.1} s; all done after {:.1} s",
         if background { "background" } else { "user" },
+        tuning.start_delay_per_thousand.as_secs_f64(),
+        tuning.start_delay_max.as_secs(),
         at(&connected, 0.0),
         at(&connected, 0.5),
         at(&connected, 1.0),
@@ -228,5 +306,14 @@ async fn many_clients_start_at_once() {
     eprintln!(
         "master memory: {baseline:.0} MiB before, peak {peak:.0} MiB (+{:.0} MiB)",
         peak - baseline
+    );
+    eprintln!(
+        "master response time (one service by name): at rest median {:.0} ms; during the starts \
+         median {:.0} ms, 95th percentile {:.0} ms, max {:.0} ms ({} samples)",
+        percentile(&idle, 0.5) * 1_000.0,
+        percentile(&busy, 0.5) * 1_000.0,
+        percentile(&busy, 0.95) * 1_000.0,
+        percentile(&busy, 1.0) * 1_000.0,
+        busy.len()
     );
 }

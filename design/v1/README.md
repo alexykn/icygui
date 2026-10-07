@@ -74,8 +74,11 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
   dot in the rows' mark column, the name, the address and status faint, and
   the per-state counts on the right. Its services are standard list rows
   under it, **with no indent**. Every host **collapses**: a chevron at the
-  band's left (at the x of 04's view-header chevron), a click on it, or ←/→
-  with the cursor on the band. A collapsed host keeps its band and its counts.
+  band's left (at the x of 04's view-header chevron), a click on the chevron
+  only, or ←/→ with the cursor on the band. **The band has two click
+  targets** (user, 2026-10-07): the chevron collapses or expands and does
+  nothing else; a click anywhere else on the band (dot, name, address,
+  status, counts) opens the host in the pane, as Enter does. A collapsed host keeps its band and its counts.
   Collapsing only changes what shows: summaries, counts, *mark all problems*
   and ctrl-a still cover every host, and a collapsed host with marked rows
   gets the marked tint and bar on its band, so no mark is out of sight. This
@@ -90,8 +93,9 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
   its first 7 and `+ 12 more`); a click, Enter or → on it shows the whole host
   in place (the list is virtualised), and the same slot then reads `− show
   fewer` (click, Enter or ←), so nothing else moves. While an expanded host
-  scrolls, its band sticks to the top of the list. A click on a host band's
-  name opens the host in the pane; the chevron and ←/→ collapse it. Paging
+  scrolls, its band sticks to the top of the list. A click on a host band
+  (anywhere but its chevron) opens the host in the pane; the chevron and ←/→
+  collapse it. Paging
   and collapsing only change what shows (summaries, counts and *mark all
   problems* cover every service). rc1's `+ N more ok` becomes `+ N more`.
 - **Handled problems: shown or hidden per kind.** Icinga's *handled* has
@@ -685,7 +689,7 @@ bulk dialog; 10g hosts selected without a verb; 10h the combined multi-host
 view, paged by count, one host collapsed; 10i pinned as a tab, and *save as
 dashboard*; 10j *mark all problems*; 10k a host expanded in place by `+ N
 more` (no pane, full width, sticky band, `− show fewer`); 10l a click on a
-host's name opens the host pane (a paged host; the pane pages its own
+host's band (anywhere but the chevron) opens the host pane (a paged host; the pane pages its own
 services, `+ 16 more`).
 
 **Behaviour**
@@ -754,9 +758,10 @@ counts the services by state and ends with `3 hosts · 63 services`.
   → shows the whole host in place, downward, and the slot reads `− show
   fewer`; nothing opens, and the expansion lasts while the view is open.
   While an expanded host scrolls, its band sticks to the top of the list
-  (10k). A click on the host's **name** (or Enter on its band) opens the
-  host in the pane, which pages its own services the same way (10l): the
-  name opens the pane, `+ N more` only expands in place.
+  (10k). A click on the host's **band** anywhere but its chevron (or Enter on
+  the band) opens the host in the pane, which pages its own services the
+  same way (10l): the band opens the pane, the chevron only collapses or
+  expands, `+ N more` only expands in place.
 - **Collapsible hosts:** the collapse chevron at the left of each band, at the
   x of 04's view-header chevron (the dot, the name and the counts keep their
   places). A click on the chevron, or ←/→ with the cursor on the band,

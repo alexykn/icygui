@@ -18,7 +18,7 @@ const dashMenu = menu([
   '-', { label: 'notifications', right: sw(true) }, { label: 'notification settings', det: 'custom times' },
   '-', { label: 'delete dashboard' },
 ], { x: 280, y: 196, w: 290 });
-const mainList = listHeader({ title: 'databases', subtitle: '4 views' }) + summary([['crit', 1, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown']], '2 handled hidden') + `<div class="list">${rows(ROWS.filter((r) => /db-|postgres|mysql/.test(r[1] + r[2])))}</div>`;
+const mainList = listHeader({ title: 'databases', subtitle: '4 views' }) + summary([['crit', 1, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown']], handledEnd(2)) + `<div class="list">${rows(ROWS.filter((r) => /db-|postgres|mysql/.test(r[1] + r[2])))}</div>`;
 shot('8a', '08-yaml-a-dashboard-menu', 'The dashboard’s <i>···</i> menu (the row’s glyph stays highlighted while the menu is open): <i>copy as YAML</i> sits next to <i>duplicate</i>, with <i>export to file</i> under it. The YAML holds the dashboard with all its views, filters, sort and display settings. Notification settings (the <i>notifications</i> switch and <i>notification settings</i> under it, topic 12) are never part of it: they stay with each person’s icygui.',
   appWindow(mainList, { groups: groupsMenuOpen, activeItem: 'databases' }) + dashMenu);
 
@@ -62,7 +62,7 @@ const stgRows = [
   ['warn', 'pg-connections', 'db-stg-01', 'WARNING - 92 of 100 per-db limit (orders)', '41m'],
   ['warn', 'disk /var', 'k8s-stg-node-03', 'DISK WARNING - /var 86% used', '2h'],
 ];
-const stagingMain = listHeader({ subtitle: 'service problems' }) + summary([['warn', 3, 'warning']], 'handled hidden') + `<div class="list">${rows(stgRows)}</div>`;
+const stagingMain = listHeader({ subtitle: 'service problems' }) + summary([['warn', 3, 'warning']], handledEnd(0)) + `<div class="list">${rows(stgRows)}</div>`;
 shot('8d', '08-yaml-d-paste-entry', 'A colleague’s icygui, on staging: the footer’s + menu gets <i>paste dashboards</i> (ctrl-v while the sidebar has the keyboard), between importing and exporting files. It opens the preview below; nothing is imported yet.',
   appWindow(stagingMain, { groups: stagingGroups, foot: { env: 'staging', node: 'stg-master-01', age: '1s' } }) + footMenu);
 

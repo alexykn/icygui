@@ -44,7 +44,7 @@ const F = (...parts) => parts.map((p) => `<span>${p}</span>`).join('') ;
 const footIdle = F('↑↓ navigate', '<span class="k">shift-↑↓</span> select', '↵ run', 'ctrl-↵ run on all matches') + '<span class="grow"></span><span>esc</span>';
 const footSel = (n, what, extra = '') => `<span class="cnt">${n} selected</span><span>↵ ${what}</span><span class="grow"></span>${extra}<span>esc clear</span>`;
 
-const bg = appWindow(listHeader({ title: 'databases', subtitle: 'service problems' }) + summary([['crit', 1, 'critical'], ['warn', 5, 'warning'], ['unk', 1, 'unknown']], '2 handled hidden') +
+const bg = appWindow(listHeader({ title: 'databases', subtitle: 'service problems' }) + summary([['crit', 1, 'critical'], ['warn', 5, 'warning'], ['unk', 1, 'unknown']], handledEnd(2)) +
   `<div class="list">${rows([
     ['crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'],
     ['unk', 'mysql-replication', 'db-mysql-03', 'UNKNOWN - connection refused', '2h'],
@@ -106,42 +106,72 @@ shot('10g', '10-multiselect-g-hosts', 'Without a verb: three hosts selected with
   bg + pal(noVerb), { crops: PCROP('10-multiselect-g-zoom') });
 
 // ---- 10h: the combined view -----------------------------------------
+// Each host pages by count, like rc1's host pane (HOST_SERVICES_PREVIEW = 7):
+// its problems first, worst first, never hidden; OK services fill the rest of
+// the 7 rows in name order; "+ N more" expands the host in place and becomes
+// "− show fewer" in the same slot.
+const OKS = {
+  apt: 'APT OK: 0 packages available for upgrade', cpu: 'OK - 5min load 18%', 'disk /': 'DISK OK - 41% used',
+  'disk /var/lib/postgresql': 'DISK OK - 63% used', load: 'OK - load average 2.1, 1.9, 1.8', memory: 'OK - 58% used',
+  'ntp-offset': 'OK - offset 0.3 ms', 'pg-autovacuum': 'POSTGRES_AUTOVAC OK: last run 41m ago', 'pg-backends': 'POSTGRES_BACKENDS OK: 38 of 200',
+  'pg-bloat': 'POSTGRES_BLOAT OK: 3% wasted', 'pg-connections': 'POSTGRES_CONNECTIONS OK: 41 of 200 per db', 'pg-locks': 'POSTGRES_LOCKS OK: total locks 88 (waiting 0)',
+  'pg-wal-archive': 'OK - last archived 12s ago', 'postgres-replication': 'OK - standby lag 0s', 'reboot-required': 'OK - no reboot required',
+  smart: 'OK - 4/4 disks healthy', ssh: 'SSH OK - OpenSSH_9.6p1', swap: 'SWAP OK - 100% free', 'systemd-units': 'OK - 0 failed units',
+};
+const OKSINCE = ['2d', '40d', '12d', '6d', '3d', '9d', '41d', '1d', '41d', '6d', '2d', '41d', '1h', '41d', '9d', '41d', '41d', '41d', '6d', '41d', '41d', '41d', '41d'];
+const okRows = (names) => names.map((n) => ['ok', n, OKS[n], OKSINCE[Object.keys(OKS).indexOf(n)]]);
+const ALL19 = Object.keys(OKS);
 const H = [
-  { name: 'db-prod-01', addr: '10.0.2.11', out: 'up 41d · PING OK - rta 0.38ms', counts: [['warn', 1], ['ok', 20]], svcs: [['warn', 'load', 'WARNING - load average 14.2, 12.8, 11.1', '1h']], more: 20 },
-  { name: 'db-prod-02', addr: '10.0.2.12', out: 'up 41d · PING OK - rta 0.41ms', counts: [['ok', 19]], svcs: [], more: 19 },
-  { name: 'db-prod-03', addr: '10.0.2.13', out: 'up 41d · PING OK - rta 0.42ms', counts: [['crit', 1], ['warn', 1], ['ok', 21]], svcs: [['crit', 'postgres-replication', 'CRITICAL - standby lag 412s (> 300s)', '14m'], ['warn', 'pg-connections', 'WARNING - 182 of 200 per-db limit (orders)', '22m']], more: 21 },
+  { name: 'db-prod-01', addr: '10.0.2.11', out: 'up 41d · PING OK - rta 0.38ms', counts: [['warn', 1], ['ok', 20]], total: 21,
+    problems: [['warn', 'load', 'WARNING - load average 14.2, 12.8, 11.1', '1h']], oks: ALL19.filter((n) => n !== 'load').concat(['vm-tools', 'zfs-arc']) },
+  { name: 'db-prod-02', addr: '10.0.2.12', out: 'up 41d · PING OK - rta 0.41ms', counts: [['ok', 19]], total: 19, problems: [], oks: ALL19 },
+  { name: 'db-prod-03', addr: '10.0.2.13', out: 'up 41d · PING OK - rta 0.42ms', counts: [['crit', 1], ['warn', 1], ['ok', 21]], total: 23,
+    problems: [['crit', 'postgres-replication', 'CRITICAL - standby lag 412s (> 300s)', '14m'], ['warn', 'pg-connections', 'WARNING - 182 of 200 per-db limit (orders)', '22m']],
+    oks: ALL19.filter((n) => !['postgres-replication', 'pg-connections'].includes(n)).concat(['pgbouncer', 'vm-tools', 'wal-g', 'zfs-arc']) },
 ];
+Object.assign(OKS, { 'vm-tools': 'OK - open-vm-tools running', 'zfs-arc': 'OK - ARC hit ratio 97%', pgbouncer: 'OK - 2 pools, 0 waiting', 'wal-g': 'OK - last backup 3h ago' });
+const PREVIEW = 7;
 // A host is a group-header band of the grouped list (36px, the collapse
 // chevron at its left as on 04's view headers, the state dot in the mark
-// column, counts at the right); its services are plain list rows.
-function hostHeaderRow(h, { marked, sel, collapsed } = {}) {
+// column, counts at the right); its services are plain list rows. A click on
+// the name opens the host in the pane; the chevron (or ←/→) collapses it.
+function hostHeaderRow(h, { marked, sel, collapsed, sticky } = {}) {
   const c = h.counts.map(([st, n]) => `<span>${dot(st, 'd7')}${n}</span>`).join('');
-  return `<div class="ghb${marked ? ' marked' : ''}${sel ? ' sel' : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span><div class="lead">${dot('ok')}</div>
+  return `<div class="ghb${marked ? ' marked' : ''}${sel ? ' sel' : ''}${sticky ? ' sticky' : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span><div class="lead">${dot('ok')}</div>
     <div class="t"><span class="n">${h.name}</span><span class="a">${h.addr}</span><span class="o">${h.out}</span></div>
     <span class="cs">${c}</span></div>`;
 }
+// The rows of one host: problems (never hidden), then OK ones up to 7 rows,
+// then the paging row. expanded: every service, and "− show fewer".
+function hostRows(h, { marked = '', expanded = false, from = 0 } = {}) {
+  const keep = expanded ? h.total : Math.min(h.total, Math.max(PREVIEW, h.problems.length));
+  const list = h.problems.concat(okRows(h.oks)).slice(0, keep).slice(from);
+  let out = list.map(([st, n, o, t]) => row([st, n, h.name, o, t], { marked: marked === 'problems' && st !== 'ok' })).join('');
+  const label = expanded ? '− show fewer' : `+ ${h.total - keep} more`;
+  if (h.total > PREVIEW) out += `<div class="morerow"><span></span><span>${label}</span></div>`;
+  return out;
+}
 // marked: 'hosts' | 'problems' | '' (the view arrives with nothing marked)
 // collapsed: indices of the hosts folded to their header band
-function combined({ marked = '', cursor = -1, collapsed = [] } = {}) {
+function combined({ marked = '', cursor = -1, collapsed = [], expanded = [] } = {}) {
   let out = '';
   H.forEach((h, i) => {
     out += hostHeaderRow(h, { marked: marked === 'hosts', sel: cursor === i, collapsed: collapsed.includes(i) });
     if (collapsed.includes(i)) return;
-    out += h.svcs.map(([st, n, o, s]) => row([st, n, h.name, o, s], { marked: marked === 'problems' })).join('');
-    out += `<div class="morerow"><span></span><span>+ ${h.more} more ok</span></div>`;
+    out += hostRows(h, { marked, expanded: expanded.includes(i) });
   });
   return out;
 }
 // The bar is always there in this view, so nothing moves when rows get
 // marked: empty, it offers "mark all problems"; with marks, the actions.
-const selBarEmpty = `<div class="selbar"><span class="faint" style="margin-right:4px">nothing marked</span><span class="faint">x marks a row · ctrl-a marks all</span><span class="grow"></span>
+const selBarEmpty = `<div class="selbar"><span class="faint" style="margin-right:4px;flex:none">nothing marked</span><span class="faint trunc">x marks a row · ctrl-a marks all</span><span class="grow"></span>
   <span class="faint" style="width:14ch;text-align:right">3 services</span>${btn('mark all problems', { icon: 'list-filter', hov: false })}</div>`;
 const selBarProblems = `<div class="selbar"><span class="n" style="min-width:19ch">3 services marked</span>${btn('acknowledge', { key: 'a', primary: true })}${btn('downtime', { key: 'd' })}${btn('check now', { key: 'r' })}${btn('comment', { key: 'c' })}<span class="glyph">···</span><span class="grow"></span><span class="faint">clear</span>${kh('esc')}</div>`;
-const multiHeader = (pinned) => `<div class="hbar"><span class="title">3 hosts</span><span class="subtitle">db-prod-01, db-prod-02, db-prod-03</span><span class="grow"></span>
-  ${pinned ? '<span class="quiet" style="visibility:hidden">↗ pin as tab</span>' : '<span class="quiet">↗ pin as tab</span>'}${btn('save as dashboard', { icon: 'layout-dashboard' })}<span class="x">×</span></div>`;
-const multiMain = (pinned, marked = '', collapsed = []) => multiHeader(pinned) + summary([['crit', 1, 'critical'], ['warn', 2, 'warning'], ['ok', 60, 'ok']], '3 hosts · 63 services') + `<div class="list">${combined({ marked, collapsed })}</div>` + (marked ? selBarProblems : selBarEmpty);
+const multiHeader = (pinned) => `<div class="hbar"><span class="title">3 hosts</span><span class="subtitle trunc">db-prod-01, db-prod-02, db-prod-03</span><span class="grow"></span>
+  <span class="x">×</span>${pinned ? '<span class="quiet" style="visibility:hidden">↗ pin as tab</span>' : '<span class="quiet">↗ pin as tab</span>'}${btn('save as dashboard', { icon: 'layout-dashboard' })}</div>`;
+const multiMain = (pinned, marked = '', collapsed = [], expanded = []) => multiHeader(pinned) + summary([['crit', 1, 'critical'], ['warn', 2, 'warning'], ['ok', 60, 'ok']], '3 hosts · 63 services') + `<div class="list">${combined({ marked, collapsed, expanded })}</div>` + (marked ? selBarProblems : selBarEmpty);
 const groupsNoActive = [{ name: 'overview', items: SIDEBAR_GROUPS[0].items }, SIDEBAR_GROUPS[1], SIDEBAR_GROUPS[2]];
-shot('10h', '10-multiselect-h-combined-view', 'Enter opened the three hosts together in the main area. It is a grouped list by host, built from the list’s parts: each host is a group-header band (36px, its state dot in the rows’ mark column, the name, the address and its check output faint, the counts per state at the right), its problems are ordinary list rows under it (the same circle, time and text column as on every dashboard), and its OK services fold into a <i>+ N more ok</i> line in the text column. The view arrives with <b>nothing marked</b>: the palette’s selection chose what to show, not what to act on. The bulk bar under the list is always there in this view, so nothing moves when rows get marked; empty, it offers <i>mark all problems</i> (the 3 services with an unhandled problem). It is a normal list: x, shift-↓, ctrl-a and the pane work as everywhere. <b>Every host collapses</b>, as 04’s view headers do: the chevron at the left of its band, a click on the band’s chevron, or ←/→ with the cursor on the band. Here db-prod-01 is collapsed: its band stays with its counts on the right (one warning, 20 ok), its rows hide. Collapsing only changes what shows: the summary, the counts and <i>mark all problems</i> still cover every host, and a collapsed host with marked rows gets the marked tint on its band, so no mark is out of sight.',
+shot('10h', '10-multiselect-h-combined-view', 'Enter opened the three hosts together in the main area. It is a grouped list by host, built from the list’s parts: each host is a group-header band (36px, its state dot in the rows’ mark column, the name, the address and its check output faint, the counts per state at the right) and its services are ordinary list rows under it. <b>Each host pages by count</b>, as the host pane does: up to 7 rows, its problems first (worst first, never hidden, even beyond 7), then OK services in name order to fill the 7; a <i>+ N more</i> row follows (db-prod-02, all OK: its first 7, then <i>+ 12 more</i>). A click, Enter or → on <i>+ N more</i> shows the whole host in place (10k). A click on a host’s name opens it in the pane. The view arrives with <b>nothing marked</b>: the palette’s selection chose what to show, not what to act on. The bulk bar under the list is always there, so nothing moves when rows get marked; empty, it offers <i>mark all problems</i>. It is a normal list: x, shift-↓, ctrl-a and the pane work as everywhere. <b>Every host collapses</b>, as 04’s view headers do: the chevron at the left of its band, or ←/→ with the cursor on the band. Here db-prod-01 is collapsed: its band stays with its counts on the right, its rows hide. Collapsing and paging only change what shows: the summary, the counts and <i>mark all problems</i> cover every service of every host, and a collapsed host with marked rows gets the marked tint on its band.',
   appWindow(multiMain(false, '', [0]), { groups: groupsNoActive, activeGroup: '' }), { crops: '10-multiselect-h-zoom:300,40,1140,330' });
 
 // ---- 10i: pinned + save as dashboard ---------------------------------
@@ -159,7 +189,20 @@ shot('10i', '10-multiselect-i-pinned-and-save', 'Pinned: <i>↗ pin as tab</i> p
   appWindow(multiMain(true), { groups: groupsNoActive, activeGroup: '', after: openSec }) + modal(560, saveDlg));
 
 // ---- 10j: mark all problems ------------------------------------------
-shot('10j', '10-multiselect-j-mark-problems', '<i>mark all problems</i> marked the three services with an unhandled problem (2px accent bar, marked tint), and the bar turned into the selection bar in place: the count, then acknowledge, downtime, check now, comment. A host that is down or unreachable would be marked too. Esc clears the marks and the bar goes back to <i>mark all problems</i>.',
-  appWindow(multiMain(false, 'problems'), { groups: groupsNoActive, activeGroup: '' }), { crops: '10-multiselect-j-zoom:300,100,1140,800' });
+shot('10j', '10-multiselect-j-mark-problems', '<i>mark all problems</i> marked the three services with an unhandled problem (2px accent bar, marked tint), and the bar turned into the selection bar in place: the count, then acknowledge, downtime, check now, comment. db-prod-02, all OK, is collapsed here, so every marked row is in view; paging never hides a problem, so <i>mark all problems</i> marks only rows that are on the page. A host that is down or unreachable would be marked too. Esc clears the marks and the bar goes back to <i>mark all problems</i>.',
+  appWindow(multiMain(false, 'problems', [1]), { groups: groupsNoActive, activeGroup: '' }), { crops: '10-multiselect-j-zoom:300,100,1140,800' });
+
+// ---- 10k: a host shown in full, and opened in the pane ----------------
+const H2 = H[1];
+const hostPane2 = `<div class="pane">${paneHeader('host')}<div class="col" style="gap:20px;padding:20px 24px 0;flex:none">
+  ${paneTitle({ st: 'ok', label: 'UP', name: 'db-prod-02', sub: '10.0.2.12 · up 41d · PING OK - Packet loss = 0%, RTA = 0.41 ms' })}
+  ${actionButtons({ firstDis: true })}
+  <div class="subtabs"><span class="on">services 19</span><span>history</span><span>vars</span><span>config</span></div></div>
+  <div class="col">${okRows(H2.oks.slice(0, 7)).map(([st, n, o, t]) => `<div class="crow">${circle(st, 14)}<div class="col" style="gap:2px;min-width:0"><span class="n">${n}</span><span class="o">${o}</span></div><span class="s">${t}</span></div>`).join('')}
+  <div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 12 more</div></div></div>`;
+const tail = `${hostHeaderRow(H2, { sticky: true, sel: true })}${hostRows(H2, { expanded: true, from: 11 })}${hostHeaderRow(H[2])}${hostRows(H[2])}`;
+shot('10k', '10-multiselect-k-host-expanded', '<i>+ 12 more</i> on db-prod-02 showed all 19 of its services in place; the list scrolled down to its end, where the same slot now reads <b>− show fewer</b> (click, Enter or ←), so nothing below it moved. While its rows scroll, the host’s band stays at the top of the list (a sticky header), so its chevron and its name are always at hand. A click on the name opened db-prod-02 in the pane, where the host pane pages its services the same way (7 rows, <i>+ 12 more</i>). The expansion is kept while the view is open; the list is virtualised, so a host with hundreds of services costs nothing.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 560px"><div class="col" style="min-height:0">${multiHeader(false)}${summary([['crit', 1, 'critical'], ['warn', 2, 'warning'], ['ok', 60, 'ok']], '3 hosts · 63 services')}<div class="list">${tail}</div>${selBarEmpty}</div>${hostPane2}</div>`, { groups: groupsNoActive, activeGroup: '' }),
+  { crops: '10-multiselect-k-zoom:300,40,580,860' });
 </script>
 </body></html>

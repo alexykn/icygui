@@ -47,6 +47,7 @@ const swServices = [
   ['ok', 'bgp-peers', 'OK - 6/6 peers established', '21d', true],
   ['ok', 'cpu', 'OK - 5min load 11%', '40d', true],
   ['ok', 'environment', 'OK - temperature 38°C, 4/4 fans, 2/2 PSUs', '213d', true],
+  ['ok', 'memory', 'OK - 41% used', '40d', true],
   ['pend', 'netflow-export', 'waiting for the first check result', '2m', true],
 ];
 const hostPane = `<div class="pane">${paneHeader('host', { back: true })}${bannerSwitch}
@@ -55,11 +56,11 @@ const hostPane = `<div class="pane">${paneHeader('host', { back: true })}${banne
   ${actionButtons({ firstDis: true, keys: false })}
   <div class="subtabs"><span class="on">services 18</span><span>history</span><span>vars</span><span>config</span></div></div>
   <div class="col">${swServices.map(([st, n, o, s, h]) => `<div class="crow">${circle(st, 14, h)}<div class="col" style="gap:2px;min-width:0"><span class="n">${n}</span><span class="o">${o}</span></div><span class="s">${s}</span></div>`).join('')}
-  <div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 12 more ok</div></div></div>`;
+  <div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 11 more</div></div></div>`;
 const selBar = `<div style="display:flex;align-items:center;gap:8px;height:40px;padding:0 18px;border-top:1px solid var(--bd-header);background:var(--pane-bg);font-size:12px;flex:none">
   <span class="acc" style="margin-right:4px;min-width:12ch">3 selected</span>${btn('ack', { primary: true })}${btn('downtime')}${btn('check')}${btn('comment')}<span class="glyph">···</span><span class="grow"></span><span class="faint">clear</span></div>`;
 shot('3b', '03-light-b-states', 'Every state in light: filled and hollow circles, a pending one, <i>late</i>, the tags, three marked rows (the accent bar and tint) beside the selected one, the selection bar, and topic 01’s downtime banner in the host pane. The host and its services are in downtime, so all of them are hollow (hollow = handled, whatever the state).',
-  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${listHeader({ subtitle: 'service problems' })}${summary([['crit', 6, 'critical'], ['warn', 4, 'warning'], ['unk', 2, 'unknown']], 'handled shown')}<div class="list">${netRows.map(([r, o]) => row(r, o)).join('')}</div>${selBar}</div>${hostPane}</div>`,
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${listHeader({ subtitle: 'service problems' })}${summary([['crit', 6, 'critical'], ['warn', 4, 'warning'], ['unk', 2, 'unknown']], handledEnd(4, true))}<div class="list">${netRows.map(([r, o]) => row(r, o)).join('')}</div>${selBar}</div>${hostPane}</div>`,
     { activeGroup: 'platform', activeItem: 'network' }), L);
 
 // 3c: palette over the window in light
@@ -86,7 +87,7 @@ function sheet() {
   const sr = [['crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'], ['warn', 'pg-connections', 'db-prod-03', 'WARNING - 182 of 200 per-db limit (orders)', '22m'], ['unk', 'kubelet', 'k8s-node-04', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m'], ['ok', 'load', 'db-prod-01', 'OK - load average 3.1, 2.8, 2.6', '2d'], ['pend', 'netflow-export', 'sw-core-ams-02', 'waiting for the first check result', '2m']];
   const ban = (tone, tint, ic, t, sub) => `<div class="banner" style="--tone:var(--${tone});--tint:var(--${tint})"><span style="color:var(--${tone})">${icon(ic, 14)}</span><div class="col" style="gap:2px;min-width:0"><span style="font-size:12.5px;color:var(--t-strong)">${t}</span><span class="trunc" style="font-size:12px;color:var(--t-muted)">${sub}</span></div><span class="grow"></span><span class="acc" style="font-size:12px">retry now</span></div>`;
   return `<div style="height:100%;display:flex;flex-direction:column;background:var(--win-bg)">
-    ${summary([['crit', 4, 'critical'], ['warn', 28, 'warning'], ['unk', 6, 'unknown'], ['ok', 312, 'ok']], '28 handled hidden')}
+    ${summary([['crit', 4, 'critical'], ['warn', 28, 'warning'], ['unk', 6, 'unknown'], ['ok', 312, 'ok']], handledEnd(28))}
     ${row(sr[0], { sel: true })}${row(sr[1], { marked: true })}${row(sr[2], { hover: true })}${row(sr[0], { handled: true, tag: 'downtime 1h 48m' })}${row(sr[3])}${row(sr[4])}
     <div class="col" style="gap:14px;padding:18px">
       <div class="btns">${btn('acknowledge', { key: 'a', primary: true })}${btn('downtime', { key: 'd' })}${btn('check now', { key: 'r', hov: true })}${btn('comment', { key: 'c', dis: true })}${btn('remove 24 downtimes', { danger: true })}</div>

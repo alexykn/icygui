@@ -229,6 +229,9 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .sum { display: flex; align-items: center; gap: 18px; height: 36px; padding: 0 18px; border-bottom: 1px solid var(--bd-header); font-size: 12px; color: var(--t-muted); flex: none; white-space: nowrap; overflow: hidden; }
 .sum .it { display: flex; align-items: center; gap: 7px; }
 .sum .end { margin-left: auto; color: var(--t-faint); }
+/* the handled slot: fixed width, right-aligned, so the counts never move */
+.sum .hend { display: inline-block; min-width: 19ch; text-align: right; }
+.sum .hbtn { color: var(--accent); }
 
 /* ---- list rows (ListRow, CompactRow) -------------------------------- */
 .list { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
@@ -543,7 +546,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .mini > span { display: block; height: 100%; background: var(--accent); }
 .row .tag .left { color: var(--accent); }
 .row .tag .more { color: var(--t-muted); display: flex; align-items: center; gap: 4px; }
-.selbar { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 18px; border-top: 1px solid var(--bd-header); background: var(--pane-bg); font-size: 12px; flex: none; }
+.selbar { display: flex; align-items: center; gap: 8px; height: 40px; white-space: nowrap; padding: 0 18px; border-top: 1px solid var(--bd-header); background: var(--pane-bg); font-size: 12px; flex: none; }
 .selbar .n { color: var(--accent); margin-right: 4px; min-width: 12ch; }  /* fixed slot for the count ("999 selected"), so the buttons never move when it gains a digit */
 .tgrp { display: flex; align-items: center; gap: 8px; height: 20px; padding-top: 6px; color: var(--t-muted); font-size: 11.5px; flex: none; }
 .tgrp:first-child { padding-top: 0; }
@@ -623,6 +626,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .ghb.marked { background: var(--row-marked); }
 .ghb.marked::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--accent); }
 .ghb.sel { background: var(--row-sel); }
+.ghb.sticky { z-index: 2; box-shadow: 0 6px 12px -6px var(--shadow-strong); }  /* the host whose rows are scrolling keeps its band at the top */
 .morerow { display: grid; grid-template-columns: 44px minmax(0,1fr); gap: 14px; align-items: center; height: 30px; padding: 0 18px; border-bottom: 1px solid var(--bd-row); font-size: 12px; color: var(--t-faint); flex: none; }
 
 /* ---- NEW v1: palette multi-select (topic 10) ------------------------- */

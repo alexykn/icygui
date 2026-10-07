@@ -99,7 +99,13 @@ function listHeader({ title = 'overview', subtitle = 'service problems', demo = 
     ${extra}${demo ? '<span class="demo-badge">demo</span>' : ''}${sort ? `<span class="right">${sort}</span>` : ''}${more ? '<span class="glyph">···</span>' : ''}</div>`;
 }
 
-function summary(items = [['crit', 4, 'critical'], ['warn', 28, 'warning'], ['unk', 6, 'unknown']], end = '28 handled hidden') {
+// The summary bar's handled slot (rc1's "N handled hidden" toggle, now a
+// button in a fixed, right-aligned slot): hiding, "28 hidden · show"; after a
+// click, "28 handled · hide". The view saves the choice, as rc1 did.
+function handledEnd(n, shown = false) {
+  return `<span class="hend">${shown ? `${n} handled` : `${n} hidden`}<span class="faint"> · </span><span class="hbtn">${shown ? 'hide' : 'show'}</span></span>`;
+}
+function summary(items = [['crit', 4, 'critical'], ['warn', 28, 'warning'], ['unk', 6, 'unknown']], end = handledEnd(28)) {
   return `<div class="sum">${items.map(([st, n, w]) => `<span class="it">${dot(st, 'd9')}${n} ${w}</span>`).join('')}<span class="end">${end}</span></div>`;
 }
 
@@ -118,9 +124,12 @@ function rows(list = ROWS, opts = {}) {
   return list.map((r, i) => row(r, typeof opts === 'function' ? opts(r, i) : opts[i] || {})).join('');
 }
 
+// The pane's × sits LEFT of "↗ open as tab", in a fixed slot, on every
+// platform, so it never sits next to a window's close button (topic 13). A
+// pane that is already a tab keeps the tab slot, empty, so the × never moves.
 function paneHeader(kind = 'service', { back = false, tab = true } = {}) {
   return `<div class="hbar pane-h">${back ? `<span class="muted">${icon('arrow-left', 13)}</span>` : ''}<span class="label">${kind}</span><span class="grow"></span>
-    ${tab ? `<span class="quiet">↗ open as tab</span>` : ''}<span class="x">×</span></div>`;
+    <span class="x">×</span><span class="quiet"${tab ? '' : ' style="visibility:hidden"'}>↗ open as tab</span></div>`;
 }
 
 function paneTitle({ st = 'crit', label = 'CRIT', ring = false, name, sub }) {

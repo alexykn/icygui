@@ -21,7 +21,7 @@ const dbGroups = [
   SIDEBAR_GROUPS[1], SIDEBAR_GROUPS[2],
 ];
 
-// ---- databases list (handled shown) ----------------------------------------
+// ---- databases list (handled shown: 2 handled · hide) ----------------------------------------
 const dbRows = [
   [['unk', 'mysql-replication', 'db-mysql-03', 'UNKNOWN - connection refused', '2h'], {}],
   [['warn', 'pg-connections', 'db-prod-03', 'WARNING - 182 of 200 per-db limit (orders)', '22m'], {}],
@@ -33,7 +33,7 @@ const dbRows = [
 ];
 function dbList(selIndex) {
   return listHeader({ title: 'databases', subtitle: 'service problems' }) +
-    summary([['crit', 2, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown']], 'handled shown') +
+    summary([['crit', 2, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown']], handledEnd(2, true)) +
     `<div class="list">${dbRows.map(([r, o], i) => row(r, { ...o, sel: i === selIndex })).join('')}</div>`;
 }
 
@@ -61,7 +61,7 @@ shot('1a', '01-downtimes-a-fixed-banner',
 // ---- 1b: Variant B, header strip ------------------------------------------------
 const stripHeader = `<div class="hbar pane-h dts"><span class="label">service</span>
   <span class="acc" style="display:flex;align-items:center;gap:8px;font-size:12px">${icon('calendar-clock', 13)}<span class="med">in downtime</span><span>1h 48m left</span><span class="faint">until 16:00</span></span>
-  <span class="grow"></span><span class="quiet">↗ open as tab</span><span class="x">×</span><div class="prog"><span style="width:40%"></span></div></div>`;
+  <span class="grow"></span><span class="x">×</span><span class="quiet">↗ open as tab</span><div class="prog"><span style="width:40%"></span></div></div>`;
 const detailsB = `<div class="col" style="gap:8px">${seclabel('downtime')}
   <div class="dte">${icon('calendar-clock', 13)}<div class="col" style="min-width:0"><span class="d1">fixed · 13:00 → 16:00 today · 1h 48m left</span>
   <span class="d2"><span class="au">j.berg</span> <span class="meta">12:41</span> Failover drill on db-prod-01: the standby on db-prod-03 lags until the replica rebuild is done.</span></div>${btn('remove downtime', { sm: true })}</div></div>`;
@@ -89,7 +89,7 @@ const k8sRows = [
 ];
 function k8sList(sel) {
   return listHeader({ title: 'kubernetes', subtitle: 'service problems' }) +
-    summary([['crit', 2, 'critical'], ['warn', 3, 'warning'], ['unk', 1, 'unknown']], 'handled shown') +
+    summary([['crit', 2, 'critical'], ['warn', 3, 'warning'], ['unk', 1, 'unknown']], handledEnd(2, true)) +
     `<div class="list">${k8sRows.map(([r, o], i) => row(r, { ...o, sel: i === sel })).join('')}</div>`;
 }
 const bannerHost = dtBanner({
@@ -155,7 +155,7 @@ const bannerFuture = dtBanner({
 shot('1e', '01-downtimes-e-scheduled-future',
   'A downtime scheduled for tonight on a problem that is unhandled now: grey, with the circle still filled. The list row hints at it in its tag (<i>downtime at 22:00</i>), so whoever is on call sees that it is covered later, not now.',
   appWindow(withPane(
-    listHeader() + summary([['crit', 1, 'critical'], ['warn', 8, 'warning'], ['unk', 5, 'unknown']], '9 handled hidden') + `<div class="list">${ovRows.map(([r, o], i) => row(r, { ...o, sel: i === 6 })).join('')}</div>`,
+    listHeader() + summary([['crit', 1, 'critical'], ['warn', 8, 'warning'], ['unk', 5, 'unknown']], handledEnd(9)) + `<div class="list">${ovRows.map(([r, o], i) => row(r, { ...o, sel: i === 6 })).join('')}</div>`,
     servicePane({
       banner: bannerFuture,
       title: paneTitle({ st: 'warn', label: 'WARN', name: 'haproxy-backend', sub: 'on <a>lb-prod-02</a> · 9m · hard 3/3' }),
@@ -199,13 +199,15 @@ const swServices = [
   ['ok', 'cpu', 'OK - 5min load 11%', '40d', true],
   ['ok', 'environment', 'OK - temperature 38°C, 4/4 fans, 2/2 PSUs', '213d', true],
   ['ok', 'memory', 'OK - 41% used', '40d', true],
+  ['ok', 'ntp-offset', 'OK - offset 0.4 ms', '40d', true],
+  ['ok', 'power', 'OK - 2/2 PSUs, 410 W', '213d', true],
 ];
 const swRows = swServices.map(([st, n, o, s, h]) => `<div class="crow">${circle(st, 14, h)}<div class="col" style="gap:2px;min-width:0"><span class="n">${n}</span><span class="o">${o}</span></div><span class="s">${s}</span></div>`).join('') +
-  `<div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 13 more ok</div>`;
+  `<div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 11 more</div>`;
 shot('1f', '01-downtimes-f-host-several',
   'The host pane with three downtimes: the one in effect fills the banner. It covers the host and its 18 services, so the host and every service are hollow (handled), the OK ones as green rings. Its last line says what else is scheduled, and the services tab lists the others, each with its own remove (×, shown on hover). A downtime that comes from the config (ScheduledDowntime) shows a lock: removing it would only bring it back.',
   appWindow(withPane(
-    listHeader({ title: 'network', subtitle: 'service problems' }) + summary([['crit', 2, 'critical'], ['warn', 1, 'warning'], ['unk', 1, 'unknown']], 'handled shown') + `<div class="list">${netRows.map(([r, o], i) => row(r, { ...o, sel: i === 3 })).join('')}</div>`,
+    listHeader({ title: 'network', subtitle: 'service problems' }) + summary([['crit', 2, 'critical'], ['warn', 1, 'warning'], ['unk', 1, 'unknown']], handledEnd(1, true)) + `<div class="list">${netRows.map(([r, o], i) => row(r, { ...o, sel: i === 3 })).join('')}</div>`,
     `<div class="pane">${paneHeader('host', { back: true })}${bannerSwitch}${hostTop}<div class="col" style="min-height:0">${otherDts}${swRows}</div></div>`),
     { groups: netGroups, activeGroup: 'platform', activeItem: 'network' }));
 
@@ -259,7 +261,7 @@ const hintRows = [
 ];
 shot('1h', '01-downtimes-h-list-hint',
   'Hollow = handled, in every list: an object whose downtime is in effect is a hollow circle in its state colour <b>whatever its state</b>, so an OK service in downtime is a hollow green ring (here <i>all services</i>, which lists OK services too). A downtime that is not in effect yet (scheduled for 22:00, or flexible and not started) keeps the filled circle. The tag in faint text carries the time left (<i>downtime 1h 48m</i>), says when the downtime comes from the host, and hints at a later one (<i>downtime at 22:00</i>). No new colour or column, and nothing moves.',
-  appWindow(listHeader({ title: 'all services', subtitle: 'every service · problems first' }) + summary([['crit', 5, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown'], ['ok', 1204, 'ok']], 'handled shown') +
+  appWindow(listHeader({ title: 'all services', subtitle: 'every service · problems first' }) + summary([['crit', 5, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown'], ['ok', 1204, 'ok']], handledEnd(43, true)) +
     `<div class="list">${hintRows.map(([r, o]) => row(r, o)).join('')}</div>`, { groups: allGroups, activeGroup: 'platform', activeItem: 'all services' }),
   { crops: '01-downtimes-h-list-hint-zoom:300,240,1140,620' });
 
@@ -269,9 +271,9 @@ const k4Pane = `<div class="pane">${paneHeader('host', { back: true })}<div clas
   ${paneTitle({ st: 'ok', label: 'UP', name: 'k8s-node-04', sub: '10.0.4.24 · up 61d · PING OK - Packet loss = 0%, RTA = 0.41 ms' })}
   <div class="btns">${btn('acknowledge', { key: 'a', dis: true })}${btn('downtime', { key: 'd', hov: true })}${btn('check now', { key: 'r' })}${btn('comment', { key: 'c' })}<span class="glyph">···</span></div>
   <div class="subtabs"><span class="on">services 23</span><span>history</span><span>vars</span><span>config</span></div></div>
-  <div class="col">${[['unk', 'kubelet', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m'], ['ok', 'calico-node', 'OK - BGP established with 6 peers', '12d'], ['ok', 'containerd', 'PROCS OK: 412 processes', '12d'], ['ok', 'disk /', 'DISK OK - 41% used', '61d'], ['ok', 'disk /var', 'DISK OK - 58% used', '61d'], ['ok', 'load', 'OK - load average 2.1, 2.4, 2.2', '9d']]
+  <div class="col">${[['unk', 'kubelet', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m'], ['ok', 'calico-node', 'OK - BGP established with 6 peers', '12d'], ['ok', 'containerd', 'PROCS OK: 412 processes', '12d'], ['ok', 'disk /', 'DISK OK - 41% used', '61d'], ['ok', 'disk /var', 'DISK OK - 58% used', '61d'], ['ok', 'load', 'OK - load average 2.1, 2.4, 2.2', '9d'], ['ok', 'memory', 'OK - 58% used', '12d']]
     .map(([st, n, o, t]) => `<div class="crow">${circle(st, 14)}<div class="col" style="gap:2px;min-width:0"><span class="n">${n}</span><span class="o">${o}</span></div><span class="s">${t}</span></div>`).join('')}
-  <div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 17 more ok</div></div></div>`;
+  <div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 16 more</div></div></div>`;
 const k4Targets = [`<div class="t">${dot('ok', 'd7')}<span>k8s-node-04</span><span class="faint">host</span></div>`]
   .concat(k4Services.map((n) => `<div class="t">${dot(n === 'kubelet' ? 'unk' : 'ok', 'd7')}<span>${n} on k8s-node-04</span></div>`)).join('');
 const dtBody = `<div class="col" style="gap:8px">${sw(true, 'all services: the host and its 23 services')}

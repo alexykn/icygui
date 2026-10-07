@@ -40,7 +40,7 @@ const dbRows = [
   ['warn', 'load', 'db-prod-01', 'WARNING - load average 14.2, 12.8, 11.1', '1h'],
   ['warn', 'mysql-slow-queries', 'db-mysql-01', 'WARNING - 41 slow queries in 5m (> 20)', '3h'],
 ];
-const list = (sel) => listHeader({ title: 'databases', subtitle: 'service problems' }) + summary([['crit', 1, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown']], '2 handled hidden') + `<div class="list">${rows(dbRows, (r, i) => ({ sel: i === sel }))}</div>`;
+const list = (sel) => listHeader({ title: 'databases', subtitle: 'service problems' }) + summary([['crit', 1, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown']], handledEnd(2)) + `<div class="list">${rows(dbRows, (r, i) => ({ sel: i === sel }))}</div>`;
 const R = (s) => `<span class="r">${s}</span>`;
 // one unbreakable argument of the command line: the flag and its value
 const A = (flag, value = '') => `<span class="a">${flag}${value}</span>`;

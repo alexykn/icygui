@@ -42,7 +42,7 @@ function ackPalette({ cursor = 0, blocks = [], allCursor = false, preview = fals
 }
 const F = (...parts) => parts.map((p) => `<span>${p}</span>`).join('') ;
 const footIdle = F('↑↓ navigate', '<span class="k">shift-↑↓</span> select', '↵ run', 'ctrl-↵ run on all matches') + '<span class="grow"></span><span>esc</span>';
-const footSel = (n, what, extra = '') => `<span class="cnt">${n} selected</span><span>↵ ${what}</span>${extra}<span class="grow"></span><span>esc clear</span>`;
+const footSel = (n, what, extra = '') => `<span class="cnt">${n} selected</span><span>↵ ${what}</span><span class="grow"></span>${extra}<span>esc clear</span>`;
 
 const bg = appWindow(listHeader({ title: 'databases', subtitle: 'service problems' }) + summary([['crit', 1, 'critical'], ['warn', 5, 'warning'], ['unk', 1, 'unknown']], '2 handled hidden') +
   `<div class="list">${rows([
@@ -135,8 +135,8 @@ function combined({ marked = '', cursor = -1, collapsed = [] } = {}) {
 // The bar is always there in this view, so nothing moves when rows get
 // marked: empty, it offers "mark all problems"; with marks, the actions.
 const selBarEmpty = `<div class="selbar"><span class="faint" style="margin-right:4px">nothing marked</span><span class="faint">x marks a row · ctrl-a marks all</span><span class="grow"></span>
-  ${btn('mark all problems', { icon: 'list-filter', hov: false })}<span class="faint">3 services</span></div>`;
-const selBarProblems = `<div class="selbar"><span class="n">3 services marked</span>${btn('acknowledge', { key: 'a', primary: true })}${btn('downtime', { key: 'd' })}${btn('check now', { key: 'r' })}${btn('comment', { key: 'c' })}<span class="glyph">···</span><span class="grow"></span><span class="faint">clear</span>${kh('esc')}</div>`;
+  <span class="faint" style="width:14ch;text-align:right">3 services</span>${btn('mark all problems', { icon: 'list-filter', hov: false })}</div>`;
+const selBarProblems = `<div class="selbar"><span class="n" style="min-width:19ch">3 services marked</span>${btn('acknowledge', { key: 'a', primary: true })}${btn('downtime', { key: 'd' })}${btn('check now', { key: 'r' })}${btn('comment', { key: 'c' })}<span class="glyph">···</span><span class="grow"></span><span class="faint">clear</span>${kh('esc')}</div>`;
 const multiHeader = (pinned) => `<div class="hbar"><span class="title">3 hosts</span><span class="subtitle">db-prod-01, db-prod-02, db-prod-03</span><span class="grow"></span>
   ${pinned ? '<span class="quiet" style="visibility:hidden">↗ pin as tab</span>' : '<span class="quiet">↗ pin as tab</span>'}${btn('save as dashboard', { icon: 'layout-dashboard' })}<span class="x">×</span></div>`;
 const multiMain = (pinned, marked = '', collapsed = []) => multiHeader(pinned) + summary([['crit', 1, 'critical'], ['warn', 2, 'warning'], ['ok', 60, 'ok']], '3 hosts · 63 services') + `<div class="list">${combined({ marked, collapsed })}</div>` + (marked ? selBarProblems : selBarEmpty);

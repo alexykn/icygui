@@ -92,8 +92,16 @@ const CMS = [
   ['ok', false, 'backup-01', null, 'host', 'user', 'dba-oncall', 'Mon 09:14', 'repository moves to backup-02 on Thursday night, see CHG-4480', 'comment'],
   ['warn', false, 'cert-expiry', 'vpn-gw-01', '1d', 'user', 'm.keller', 'Tue 16:40', 'new certificate arrives Friday; leave this warning until then', 'expires Fri 12:00'],
 ];
+// the comment tag in fixed slots, all left-aligned: the kind's icon and word
+// ("acknowledgement" is the longest), then the detail ("expires Fri 12:00"),
+// so the icons line up and a changing detail moves nothing
+const cmTag = (kind, tag) => {
+  const [word, detail = ''] = tag.split(' · ');
+  const isKind = word === 'acknowledgement' || word === 'comment';
+  return `<span style="display:flex;align-items:center;gap:6px;width:calc(15ch + 17px);text-align:left">${kind === 'ack' ? `<span class="acc">${icon('check', 11)}</span>` : `<span class="faint">${icon('message-square', 11)}</span>`}${isKind ? word : 'comment'}</span><span style="width:17ch;text-align:left">${isKind ? detail : word}</span>`;
+};
 const cmRow = ([st, ring, name, host, cap, kind, au2, at, text, tag], o = {}) =>
-  row([st, name, host, `${au2} ${at} · ${text}`, cap], { ...o, handled: ring, hostRow: !host, tag: `<span style="display:flex;align-items:center;gap:6px">${kind === 'ack' ? `<span class="acc">${icon('check', 11)}</span>` : `<span class="faint">${icon('message-square', 11)}</span>`}${tag}</span>` });
+  row([st, name, host, `${au2} ${at} · ${text}`, cap], { ...o, handled: ring, hostRow: !host, tag: cmTag(kind, tag) });
 const cmMarks = { 0: 1, 2: 1, 3: 1, 5: 1 };
 shot('7d', '07-lists-d-comments', 'Every comment: user comments and the comments of acknowledgements (✓, with sticky or the expiry), newest problem first. Downtime and flapping comments are left out because the downtime list covers them (the summary bar’s end says so and shows them on a click). Four marked: the bar offers <i>remove comments</i>. One of the four is an acknowledgement, which removing a comment can’t undo, so the dialog lists it as skipped (<i>remove the acknowledgement instead</i>).',
   appWindow(listHeader({ title: 'comments', subtitle: 'prod-cluster · every object', sort: 'newest ↓', extra: onlyMine(false) }) +

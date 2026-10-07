@@ -1,57 +1,82 @@
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>icygui v1 · 12 notification times</title>
+<html><head><meta charset="utf-8"><title>icygui v1 · 12 notifications on or off, and when</title>
 <link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="settings.js"></script><script src="views.js"></script></head>
 <body class="canvas">
-<div class="topic-head"><span class="topic-id">12</span><span class="topic-name">Notification times: defaults, and custom times per group or dashboard</span></div>
-<p class="topic-intro">Engineers set up themselves when notifications are active. There are no fixed presets: a team’s “9 to 5” or “24/7” is just the times they set. <b>The settings panel’s notifications page holds the defaults</b> for an environment (today’s quiet hours, turned into the times notifications are active, with the rule that goes with them: critical and down at any time) and says that they are defaults. Every group and dashboard <b>inherits</b> them unless it is set to <b>custom</b>; the page lists, per environment, the groups and dashboards that override them, each with a link. In a group’s notification settings (its <i>···</i> menu) and in the dashboard editor’s notifications row, <i>inherit</i> is the default and says what it inherits; <i>custom</i> drops down <b>the same controls</b> as the settings page, in place, for that group or dashboard only. A group’s custom times pass on to its dashboards that inherit. In the sidebar, a group or dashboard with its own times shows a faint clock in a fixed slot, which stays empty otherwise, so nothing moves. Wall clock: Wed 7 Oct, 14:12.</p>
+<div class="topic-head"><span class="topic-id">12</span><span class="topic-name">Notifications: on or off per group and dashboard, and when</span><span class="topic-id" style="background:#f2d974">revised: opt-in</span></div>
+<p class="topic-intro"><b>Notifications are opt-in.</b> Nothing notifies until someone turns notifications on for a group or a dashboard. Groups are off by default; a dashboard follows its group unless it is set itself, on or off. Nothing called <i>inherit</i> or <i>default</i> ever turns notifications on.
+Each group and each dashboard has <b>two separate things</b>: (1) <b>on or off</b>, a switch; (2) <b>when</b>: <i>default</i>, the default times and rule from the settings panel, or <i>custom</i>, its own times. Turning notifications on uses whichever <i>when</i> applies. For a dashboard, <i>default</i> means its group’s times: the group’s custom times if it has them, otherwise the environment’s defaults.
+Engineers set the times themselves; there are no fixed presets (a team’s “9 to 5” or “24/7” is just the times they set). <b>The settings panel’s notifications page holds the defaults</b> per environment and says that they are defaults, used by the groups and dashboards that are turned on; it lists which ones are on and which of those use custom times. A group’s notification settings (its <i>···</i> menu) and the dashboard editor’s notifications row show the switch first, then <i>when</i>; <i>custom</i> drops down <b>the same controls</b> as the settings page, in place. Both <i>···</i> menus get a quick <b>notifications</b> switch above <i>notification settings</i>. In the sidebar, a fixed slot shows a faint bell when a group or dashboard notifies, the clock instead when it uses custom times set on it, and nothing when it is off, so nothing moves. Wall clock: Wed 7 Oct, 14:12.</p>
 <div class="shots"></div>
 <script>
 // ---- data ------------------------------------------------------------------
-const clockMark = icon('clock', 12);
+// prod-cluster as set up in these frames:
+//   overview group: off. overview, host problems follow it (off);
+//     production is on by itself (default times); databases is on by itself
+//     with custom times (the DBAs' hours).
+//   platform group: on, custom times (Mon–Fri 09:00 → 17:00). network and
+//     certificates follow it; kubernetes is on by itself with custom times
+//     (always); all services is off by itself.
+//   lab group: off.
+// The sidebar's fixed slot: bell = notifies with the default times (for a
+// dashboard: its group's), clock = notifies with custom times set on it,
+// empty = off.
+const BELL = icon('bell', 12);
+const CLOCK = icon('clock', 12);
 const GROUPS12 = [
-  { name: 'overview', items: [['overview', 'crit', 38], ['production', 'crit', 38], ['databases', 'crit', 7, '', clockMark], ['host problems', 'crit', 7]] },
-  { name: 'platform', mark: clockMark, items: [['network', 'unk', 5], ['kubernetes', 'crit', 9, '', clockMark], ['certificates', 'warn', 1], ['all services', 'crit', 38]] },
+  { name: 'overview', mark: '', items: [['overview', 'crit', 38], ['production', 'crit', 38, '', BELL], ['databases', 'crit', 7, '', CLOCK], ['host problems', 'crit', 7]] },
+  { name: 'platform', mark: CLOCK, items: [['network', 'unk', 5, '', BELL], ['kubernetes', 'crit', 9, '', CLOCK], ['certificates', 'warn', 1, '', BELL], ['all services', 'crit', 38]] },
   SIDEBAR_GROUPS[2],
 ];
-const groupsWith = (over = {}) => GROUPS12.map((g) => ({ ...g, ...(over[g.name] || {}) }));
+// before the platform team turned their group on (12b): only kubernetes, set
+// on by itself, notifies in platform
+const GROUPS12_BEFORE = [
+  GROUPS12[0],
+  { name: 'platform', mark: '', items: [['network', 'unk', 5], ['kubernetes', 'crit', 9, '', CLOCK], ['certificates', 'warn', 1], ['all services', 'crit', 38]] },
+  SIDEBAR_GROUPS[2],
+];
+const groupsWith = (over = {}, base = GROUPS12) => base.map((g) => ({ ...g, ...(over[g.name] || {}) }));
 const mainList = listHeader() + summary() + `<div class="list">${rows()}</div>`;
 const DEFAULTS = 'Mon–Fri 07:00 → 22:00 · Sat–Sun 09:00 → 20:00';
 const rowsGap0 = (html) => `<div class="col rows0" style="gap:0">${html}</div>`;
 
-// ---- 12a: the settings page: defaults and who overrides them --------------
-shot('12a', '12-times-a-settings-defaults', 'Settings → notifications, scrolled to <i>notification times</i>. The section says these are the <b>defaults</b> for prod-cluster, which every group and dashboard inherits unless it is set to custom. The times are rows of days and a window (several windows, each day in any of them); outside them, notifications go silently into the centre; <i>critical and down at any time</i> is the exception that goes with them. Below, <i>custom times</i> lists per environment every group and dashboard that overrides the defaults, with its times and a link that opens its notification settings.',
+// ---- 12a: the settings page: the defaults, and which groups and dashboards are on
+shot('12a', '12-times-a-settings-defaults', 'Settings → notifications, scrolled to <i>notification times</i>. The section says these are the <b>defaults</b> for prod-cluster, used by the groups and dashboards that have notifications turned on, unless one has custom times, and that nothing notifies until a group or a dashboard is turned on (groups are off by default). The times are rows of days and a window (several windows, each day in any of them); outside them, notifications go silently into the centre; <i>critical and down at any time</i> goes with them. Below, <b>turned on</b> lists per environment the groups and dashboards that notify and what each uses: <i>default times</i> (faint) or its custom times, with a link that opens its notification settings. The environment line counts them; lab has nothing turned on, so it doesn’t notify.',
   settingsOver({ page: 'notifications', part: 1, section: 2 }, appWindow(mainList, { groups: groupsWith(), slots: true })));
 
 // ---- the group's notification settings dialog -----------------------------
-const dashList = (custom) => `<div class="col" style="gap:6px">${seclabel('its dashboards')}
+// what each of platform's dashboards does, before (12b) and after (12c) the
+// group was turned on
+const DASH_BEFORE = [['unk', 'network', 'off, as platform'], ['crit', 'kubernetes', 'on · set on the dashboard · custom: always'], ['warn', 'certificates', 'off, as platform'], ['crit', 'all services', 'off · set on the dashboard']];
+const DASH_AFTER = [['unk', 'network', 'on, as platform · platform’s times'], ['crit', 'kubernetes', 'on · set on the dashboard · custom: always'], ['warn', 'certificates', 'on, as platform · platform’s times'], ['crit', 'all services', 'off · set on the dashboard']];
+const dashList = (list) => `<div class="col" style="gap:6px">${seclabel('its dashboards')}
   <div class="targets" style="gap:0">
-    ${[['unk', 'network', ''], ['crit', 'kubernetes', 'custom: always'], ['warn', 'certificates', ''], ['crit', 'all services', '']].map(([st, n, own]) =>
-      `<div class="t">${dot(st, 'd7')}<span>${n}</span><span class="faint">${own || (custom ? 'inherits platform’s custom times' : 'inherits platform, so the defaults')}</span></div>`).join('')}
+    ${list.map(([st, n, what]) => `<div class="t">${dot(st, 'd7')}<span>${n}</span><span class="faint">${what}</span></div>`).join('')}
   </div></div>`;
-const inherited = `<div class="col" style="gap:6px;padding:12px 14px;border-radius:6px;background:var(--code-bg);font-size:12.5px">
-  <span class="faint" style="font-size:11.5px">inherited from prod-cluster’s defaults</span>
+const defaultsBox = `<div class="col" style="gap:6px;padding:12px 14px;border-radius:6px;background:var(--code-bg);font-size:12.5px">
+  <span class="faint" style="font-size:11.5px">prod-cluster’s default times</span>
   <span style="color:var(--t)">${DEFAULTS}</span>
   <span class="sec">critical and down at any time</span>
-  <span style="display:flex;align-items:center;gap:8px;margin-top:2px"><span class="faint">now: notifying, until 22:00</span><span class="grow"></span><span class="lnk" style="display:flex;align-items:center;gap:4px;color:var(--accent);font-size:12px">change the defaults${icon('arrow-up-right', 12)}</span></span></div>`;
-function groupDialog(custom) {
-  const head = srow('notification times', custom ? 'Its own, passed on to dashboards that inherit.' : 'Inherit: the environment’s defaults.', seg(['inherit', 'custom'], custom ? 1 : 0));
-  const body = custom
-    ? rowsGap0(head + timesRows({ mode: 1, windows: [['1111100', '09:00', '17:00']], loud: true, sub: true }) +
-        `<div class="srow sub" style="padding:10px 0 10px 20px;min-height:0;color:var(--t-faint);font-size:12px">now: notifying, until 17:00 · replaces prod-cluster’s defaults</div>`) + dashList(true)
-    : rowsGap0(head) + inherited + dashList(false);
+  <span style="display:flex;align-items:center;gap:8px;margin-top:2px"><span class="faint">used once notifications are on</span><span class="grow"></span><span class="lnk" style="display:flex;align-items:center;gap:4px;color:var(--accent);font-size:12px">change the defaults${icon('arrow-up-right', 12)}</span></span></div>`;
+function groupDialog(on) {
+  const onRow = srow('notifications', on ? 'on · custom times: Mon–Fri 09:00 → 17:00, critical and down at any time' : 'off · nothing in platform notifies, except dashboards turned on themselves', sw(on));
+  const whenRow = srow('when', on ? 'Its own times, passed on to its dashboards set to default.' : 'The environment’s default times and rule.', seg(['default', 'custom'], on ? 1 : 0));
+  const body = on
+    ? rowsGap0(onRow + whenRow + timesRows({ mode: 1, windows: [['1111100', '09:00', '17:00']], loud: true, sub: true }) +
+        `<div class="srow sub" style="padding:10px 0 10px 20px;min-height:0;color:var(--t-faint);font-size:12px">now: notifying, until 17:00 · replaces prod-cluster’s defaults</div>`) + dashList(DASH_AFTER)
+    : rowsGap0(onRow + whenRow) + defaultsBox + dashList(DASH_BEFORE);
   return dialog({
     title: 'Notification settings', what: 'platform · group in prod-cluster · 4 dashboards', body,
     footStart: 'changes apply at once',
     actions: btn('done', { key: '↵', primary: true }),
   });
 }
-const bgGroup = appWindow(mainList, { groups: groupsWith({ platform: { menu: true, mark: '' } }), activeGroup: 'platform', activeItem: '', slots: true });
-shot('12b', '12-times-b-group-inherit', 'A group’s <i>···</i> → <i>notification settings</i> (frame 12f), set to <b>inherit</b>, the default. Under the toggle, what it inherits: the environment’s default times and their rule, and whether it is notifying now, with a link to change the defaults in the settings panel. The box lists the group’s dashboards and what each one uses, so it is clear what the choice affects.',
-  bgGroup + modal(640, groupDialog(false)), { crops: '12-times-b-zoom:400,120,640,660' });
+const bgGroupBefore = appWindow(mainList, { groups: groupsWith({ platform: { menu: true } }, GROUPS12_BEFORE), activeGroup: 'platform', activeItem: '', slots: true });
+shot('12b', '12-times-b-group-off', 'A group’s <i>···</i> → <i>notification settings</i> (12f). The <b>notifications switch comes first</b>: platform is <b>off</b>, as every group is until someone turns it on, and the summary says what that means. Then <b>when</b>: <i>default</i> shows the environment’s default times and rule, used once notifications are on, with a link to change them in the settings panel. The times can be set before turning the group on. The box lists the group’s dashboards and what each does: following the group (off), or set on the dashboard itself; kubernetes is on with its own times, so it notifies while its group is off (its clock in the sidebar).',
+  bgGroupBefore + modal(640, groupDialog(false)), { crops: '12-times-b-zoom:400,120,640,660' });
 
-const bgGroupCustom = appWindow(mainList, { groups: groupsWith({ platform: { menu: true } }), activeGroup: 'platform', activeItem: '', slots: true });
-shot('12c', '12-times-c-group-custom', '<b>custom</b> drops down, in place, the same controls as the settings page’s notification times, for this group only: here the platform team’s “9 to 5”, Mon–Fri 09:00 → 17:00, with critical and down at any time. The line under them says what it replaces. The dashboards that inherit now follow the group’s times; kubernetes keeps its own. The group’s clock appears in the sidebar at once, in its fixed slot.',
-  bgGroupCustom + modal(640, groupDialog(true)), { crops: '12-times-c-zoom:400,60,640,780' });
+const bgGroupAfter = appWindow(mainList, { groups: groupsWith({ platform: { menu: true } }), activeGroup: 'platform', activeItem: '', slots: true });
+shot('12c', '12-times-c-group-custom', 'The group <b>turned on, with custom times</b>: <i>custom</i> drops down, in place, the same controls as the settings page, for this group only (the platform team’s “9 to 5”, Mon–Fri 09:00 → 17:00, critical and down at any time). The summary under the switch says what applies; the line under the controls says what they replace. network and certificates follow the group, so they now notify with its times; kubernetes keeps its own; all services is set off on the dashboard and stays off. The sidebar marks appear at once in their fixed slots: platform’s clock, and bells for the dashboards that follow it.',
+  bgGroupAfter + modal(640, groupDialog(true)), { crops: '12-times-c-zoom:400,40,640,820' });
 
 // ---- 12d: the dashboard editor's notifications row ---------------------------
 const VIEWS12 = [['tiles', 'clusters', '4 tiles'], ['list', 'failing services', '6 matches'], ['list', 'replication lag', 'nothing'], ['stream', 'db events', '8 lines']];
@@ -59,14 +84,16 @@ const insp12 = `<div class="pane" style="background:var(--win-bg)">
   <div class="hbar pane-h" style="padding:0 18px"><span class="title" style="font-size:13.5px">dashboard</span><span class="grow"></span><span class="right faint">4 views</span></div>
   <div class="col" style="gap:16px;padding:16px 18px;overflow:hidden">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">name</div><span class="input">databases</span></div><div class="field"><div class="lab">group</div>${select('overview')}</div></div>
-    <div class="field"><div class="lab">notifications<span class="st faint">replaces the defaults</span></div>
-      <span class="seg" style="display:flex"><span style="flex:1">inherit</span><span class="on" style="flex:1">custom</span></span>
+    <div class="field"><div class="lab">notifications<span class="st faint">set on this dashboard</span></div>
+      <span style="display:flex;align-items:center;gap:10px;height:24px">${sw(true, 'on')}<span class="faint" style="font-size:12px">overview is off</span><span class="grow"></span><span style="color:var(--accent);font-size:12px">follow overview</span></span>
+      <div class="lab" style="margin-top:6px">when</div>
+      <span class="seg" style="display:flex"><span style="flex:1">default</span><span class="on" style="flex:1">custom</span></span>
       <div class="col" style="gap:10px;margin-top:4px;padding:2px 0 2px 12px;border-left:1px solid var(--bd-window)">
         ${timesFields({ mode: 1, windows: [['1111100', '06:00', '23:00'], ['0000011', '08:00', '20:00']], loud: true })}
-        <span class="faint" style="font-size:11.5px;line-height:1.45">now: notifying, until 23:00. Inherit would use overview’s: prod-cluster’s defaults, ${DEFAULTS}.</span>
+        <span class="faint" style="font-size:11.5px;line-height:1.45">now: notifying, until 23:00. Default would be overview’s times: prod-cluster’s defaults, ${DEFAULTS}.</span>
       </div></div>
     <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px;margin:0 -6px">
-      ${VIEWS12.map(([d, n, m], i) => `<div class="vrow"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon(DISPLAY_ICON[d], 13)}</span><span class="vn">${n}</span><span class="vm">${m}</span><span class="glyph" style="font-size:12px">···</span></div>`).join('')}</div></div>
+      ${VIEWS12.map(([d, n, m]) => `<div class="vrow"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon(DISPLAY_ICON[d], 13)}</span><span class="vn">${n}</span><span class="vm">${m}</span><span class="glyph" style="font-size:12px">···</span></div>`).join('')}</div></div>
   </div></div>`;
 const editorHeader12 = `<div class="hbar"><span class="title">databases</span><span class="acc" style="font-size:12px">editing · overview</span><span class="grow"></span>${btn('discard', { key: 'esc' })}${btn('save dashboard', { key: 'ctrl-s', primary: true })}</div>`;
 const dbRows12 = [
@@ -80,27 +107,40 @@ const dbRows12 = [
 const preview12 = `<div class="col" style="min-height:0;overflow:hidden">${editorHeader12}
   ${viewHeader({ name: 'clusters', display: 'tiles', filter: 'host groups pg-*, mysql-*, redis-*', counts: [['crit', 1], ['warn', 4], ['unk', 1]], sort: 'name ↑', collapsed: true })}
   ${viewHeader({ name: 'failing services', display: 'list', filter: '(host.vars.role == "postgres" || host.vars.role == "mysql") && service.problem && !service.handled', counts: [['crit', 1], ['warn', 4], ['unk', 1]] })}<div class="vbody">${rows(dbRows12)}</div></div>`;
-shot('12d', '12-times-d-editor-custom', 'The dashboard editor’s <i>notifications</i> row, in the inspector with the dashboard’s name and group (it belongs to the dashboard, not to a view). Set to <b>custom</b>, it drops down the same controls, stacked for the narrow column: always, at set times or never; each window as its days with its from and to under them; <i>add times</i>; critical and down at any time. Here the DBAs’ extended hours, two windows. The faint line says what <i>inherit</i> would use instead. It is saved with the dashboard, like the rest of the editor.',
+shot('12d', '12-times-d-editor-custom', 'The dashboard editor’s <i>notifications</i> row, in the inspector with the dashboard’s name and group (it belongs to the dashboard, not to a view). The <b>switch first</b>: databases is <b>on, set on this dashboard</b>, while its group overview is off; <i>follow overview</i> hands the choice back to the group. Then <b>when</b>: <i>custom</i> drops down the same controls, stacked for the narrow column (the DBAs’ extended hours, two windows; critical and down at any time). The faint line says what applies now and what <i>default</i> would use. It is saved with the dashboard, like the rest of the editor.',
   appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 372px">${preview12}${insp12}</div>`, { groups: groupsWith(), activeItem: 'databases', slots: true }),
-  { crops: '12-times-d-zoom:1068,40,372,620' });
+  { crops: '12-times-d-zoom:1068,40,372,680' });
 
-// ---- 12e: the sidebar hint ----------------------------------------------------
+// ---- 12e: the sidebar marks -----------------------------------------------------
 const tip12 = `<div class="tip" style="left:122px;top:198px;flex-direction:column;gap:3px;padding:6px 9px">
-  <span style="display:flex;align-items:center;gap:8px"><span class="faint">${icon('clock', 12)}</span><span class="strong">platform: its own notification times</span></span>
+  <span style="display:flex;align-items:center;gap:8px"><span class="faint">${CLOCK}</span><span class="strong">platform: on, its own times</span></span>
   <span class="muted">Mon–Fri 09:00 → 17:00 · critical and down at any time</span>
-  <span class="faint">notifying now, until 17:00</span></div>`;
-shot('12e', '12-times-e-sidebar-hint', 'In the sidebar, a faint clock marks a group or a dashboard with its own times: platform (a group), kubernetes and databases (dashboards). The clock sits in a fixed slot after a group’s name and before a dashboard’s count; the slot is there, empty, for everything that inherits, so setting custom times moves nothing. Hovering the clock says what the times are and whether they are notifying now.',
+  <span class="faint">notifying now, until 17:00 · 3 of its 4 dashboards on</span></div>`;
+shot('12e', '12-times-e-sidebar-marks', 'The sidebar’s fixed slot, after a group’s name and before a dashboard’s count, says whether it notifies at all: a faint <b>bell</b> when it does with the default times (for a dashboard: its group’s), a faint <b>clock</b> instead when it uses custom times set on it, and <b>nothing</b> when it is off. Here the overview group is off, but production (bell) and databases (clock) are turned on by themselves; platform is on with its own times (clock), network and certificates follow it (bells), kubernetes has its own times, all services is off; lab is off. The slot is always reserved, so turning notifications on or off moves nothing. Hovering a mark says what applies and whether it is notifying now.',
   appWindow(mainList, { groups: groupsWith(), slots: true }) + tip12,
   { crops: '12-times-e-zoom:0,40,560,420' });
 
-// ---- 12f: where a group's notification settings open ------------------------
+// ---- 12f: the group's ··· menu: the quick switch ---------------------------------
 const groupMenu12 = menu([
   { label: 'new dashboard', key: 'ctrl-n' }, { label: 'rename' }, { label: 'new group' }, { label: 'move up' }, { label: 'move down' }, { label: 'collapse' },
-  '-', { label: 'notification settings', det: 'custom', hov: true },
+  '-', { label: 'notifications', right: sw(true), hov: true }, { label: 'notification settings', det: 'custom times' },
   '-', { label: 'copy group as YAML' }, { label: 'export group to file' },
   '-', { label: 'delete group' },
-], { x: 250, y: 330, w: 270 });
-shot('12f', '12-times-f-group-menu', 'The group’s <i>···</i> menu: today’s four notification choices (inherit, on, off, custom rule) become one entry, <i>notification settings</i>, which opens the dialog of 12b and 12c. The faint detail says <i>inherit</i> or <i>custom</i>. A dashboard’s <i>···</i> has the same entry; it opens the editor at the notifications row.',
+], { x: 250, y: 330, w: 290 });
+shot('12f', '12-times-f-group-menu', 'The group’s <i>···</i> menu: a <b>notifications</b> row with a switch (the switch without its label) turns the whole group on or off in one click, right above <i>notification settings</i>, which opens the dialog of 12b and 12c; its faint detail says <i>default times</i> or <i>custom times</i>. The two rows replace rc1’s four notification choices (inherit, on, off, custom rule).',
   appWindow(mainList, { groups: groupsWith({ platform: { menu: true } }), activeGroup: 'platform', activeItem: '', slots: true }) + groupMenu12);
+
+// ---- 12g: a dashboard's ··· menu, following its group ------------------------------
+const glyphSel = '<span class="glyph sel" style="font-size:13px">···</span>';
+const groupsDashMenu = groupsWith({ overview: { items: [['overview', 'crit', 38], ['production', 'crit', 38, '', BELL], ['databases', 'crit', 7, '', CLOCK], ['host problems', 'crit', '', glyphSel]] } });
+const dashMenu12 = menu([
+  { label: 'edit dashboard' }, { label: 'rename' }, { label: 'duplicate' },
+  { label: 'copy as YAML', key: 'ctrl-shift-c' }, { label: 'export to file' },
+  { label: 'move up' }, { label: 'move down' }, 'move to', { label: 'platform' }, { label: 'lab' },
+  '-', { label: 'notifications', det: 'as overview', right: sw(false), hov: true }, { label: 'notification settings', det: 'default times' },
+  '-', { label: 'delete dashboard' },
+], { x: 280, y: 196, w: 290 });
+shot('12g', '12-times-g-dashboard-menu', 'A dashboard’s <i>···</i> menu has the same two rows. host problems follows its group, so the switch shows the group’s state (off) and the faint <i>as overview</i> says where it comes from. Flipping it sets the dashboard itself (as production was turned on), and the detail goes away; the editor’s <i>follow overview</i> hands it back. Here <i>notification settings</i> opens the editor at the notifications row (12d).',
+  appWindow(mainList, { groups: groupsDashMenu, activeItem: 'host problems', slots: true }) + dashMenu12);
 </script>
 </body></html>

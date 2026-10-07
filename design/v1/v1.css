@@ -544,7 +544,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .row .tag .left { color: var(--accent); }
 .row .tag .more { color: var(--t-muted); display: flex; align-items: center; gap: 4px; }
 .selbar { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 18px; border-top: 1px solid var(--bd-header); background: var(--pane-bg); font-size: 12px; flex: none; }
-.selbar .n { color: var(--accent); margin-right: 4px; }
+.selbar .n { color: var(--accent); margin-right: 4px; min-width: 12ch; }  /* fixed slot for the count ("999 selected"), so the buttons never move when it gains a digit */
 .tgrp { display: flex; align-items: center; gap: 8px; height: 20px; padding-top: 6px; color: var(--t-muted); font-size: 11.5px; flex: none; }
 .tgrp:first-child { padding-top: 0; }
 
@@ -564,7 +564,8 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .tr .ic { color: var(--t-muted); }
 .tr .nm { color: var(--t-strong); }
 .tr .meta { color: var(--t-faint); font-size: 12px; }
-.tr .st { margin-left: auto; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+.tr .st { margin-left: auto; font-size: 12px; display: grid; grid-template-columns: 11ch 11ch; gap: 8px; align-items: center; }  /* two fixed slots, both left-aligned: the status ("exists here" is the longest), then the choice ("· keep both"); switching a choice changes only its word */
+.tr .st > span { white-space: nowrap; }
 .tr .new { color: var(--ok-text); }
 .tr .cf { color: var(--warn-text); }
 .trd { padding: 2px 8px 10px 58px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--t-muted); }
@@ -634,7 +635,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .blk.preview { background: transparent; }
 .blk.preview::after { border-style: dashed; }
 .prow.hov { background: var(--row-hover); }
-.pal-foot .cnt { color: var(--accent); }
+.pal-foot .cnt { color: var(--accent); min-width: 14ch; }  /* fixed slot ("all 999 selected" fits with the gap), so the hints after it never move */
 .pal-foot .k { color: var(--t-muted); }
 .ptr { position: absolute; z-index: 70; width: 0; height: 0; }
 

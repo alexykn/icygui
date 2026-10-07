@@ -7,7 +7,7 @@
 const SETTINGS_PAGES = [
   ['general', 'settings', ['in the background']],
   ['appearance', 'sun-moon', ['theme and size', 'lists', 'preview']],
-  ['notifications', 'bell', ['this environment', 'default rule', 'notification times', 'custom times', 'storm control', 'watched and muted']],
+  ['notifications', 'bell', ['this environment', 'default rule', 'notification times', 'turned on', 'storm control', 'watched and muted']],
   ['icinga', 'server', ['reconcile', 'event log', 'environments']],
   ['keymap', 'keyboard', []],
   ['advanced', 'wrench', ['logs', 'files', 'about']],
@@ -81,10 +81,10 @@ function pageNotifications(part = 0) {
   if (part === 0) {
     return ssec('this environment') +
       srow('environment', 'Notification rules belong to an environment; each one notifies on its own.', select('prod-cluster', 180)) +
-      srow('notifications for prod-cluster', 'Desktop notifications from this environment’s rules.', sw(true)) +
+      srow('notifications for prod-cluster', 'Off silences every group and dashboard here; on, only those turned on notify.', sw(true)) +
       srow('pause all', 'Every environment, until it runs out; the tray and the centre can resume.', chip('30m') + chip('1h') + chip('until 08:00')) +
       srow('show plugin output', 'The output’s first line in desktop notifications. Off for shared screens and the lock screen.', sw(true)) +
-      ssec('default rule', 'groups and dashboards notify with it unless they say otherwise') +
+      ssec('default rule', 'for the groups and dashboards that are turned on') +
       srow('states', 'Recoveries follow problems that notified.', chip('critical', { sel: 1 }) + chip('warning') + chip('unknown', { sel: 1 }) + chip('down', { sel: 1 }) + chip('unreachable') + chip('recovery', { sel: 1 })) +
       srow('events', 'Also notify when these start or end.', chip('acknowledgements') + chip('downtimes') + chip('flapping')) +
       srow('hard states only', 'Soft states are retries in progress.', sw(true)) +
@@ -95,21 +95,26 @@ function pageNotifications(part = 0) {
   const note = (html) => `<div class="srow" style="border-top:1px solid var(--bd-row);padding:12px 0;grid-template-columns:16px minmax(0,1fr);gap:10px;align-items:start;color:var(--t-muted);font-size:12px;line-height:1.5"><span class="faint" style="padding-top:1px">${icon('info', 14)}</span><span>${html}</span></div>`;
   const envHead = (name, n, st = 'ok') => `<div style="display:flex;align-items:center;gap:8px;padding:12px 0 6px;font-size:12px;color:var(--t-sec)">${dot(st, 'd6')}<span>${name}</span><span class="faint">· ${n}</span></div>`;
   const open = `<span class="lnk" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--accent)">open${icon('arrow-up-right', 12)}</span>`;
-  // one line per override: what it is, its times, a link to its settings
-  const custom = (ic, name, kind, summary) => `<div style="display:grid;grid-template-columns:14px 110px 170px minmax(0,1fr) auto;gap:10px;align-items:center;height:36px;border-top:1px solid var(--bd-row);font-size:12.5px;white-space:nowrap">
-    <span style="display:flex;justify-content:center">${ic}</span><span class="strong">${name}</span><span class="faint" style="font-size:12px">${kind}</span><span class="sec trunc" style="font-size:12px">${summary}</span>${open}</div>`;
+  // one line per group or dashboard that is turned on: what it is, the
+  // times it uses (custom in normal text, the defaults faint), a link to its
+  // notification settings
+  const onRow = (ic, name, kind, summary) => `<div style="display:grid;grid-template-columns:14px 104px 160px minmax(0,1fr) auto;gap:10px;align-items:center;height:36px;border-top:1px solid var(--bd-row);font-size:12.5px;white-space:nowrap">
+    <span style="display:flex;justify-content:center">${ic}</span><span class="strong">${name}</span><span class="faint" style="font-size:12px">${kind}</span><span class="trunc" style="font-size:12px">${summary}</span>${open}</div>`;
+  const cus = (t) => `<span class="sec">custom: ${t}</span>`;
+  const def = '<span class="faint">default times</span>';
   const folder = `<span class="muted">${icon('folder', 13)}</span>`;
-  return ssec('notification times', 'defaults · now: notifying, until 22:00') +
-    note(`<span class="strong">These are the defaults for prod-cluster.</span> Every group and dashboard uses them (<i>inherit</i>) unless it is set to <i>custom</i>: then its own times replace these, for it alone. A group’s custom times pass on to its dashboards that inherit.`) +
+  return ssec('notification times', 'defaults') +
+    note(`<span class="strong">These are the defaults for prod-cluster.</span> The groups and dashboards that have notifications turned on use them, unless one has custom times: then its own times replace these, for it alone. Nothing notifies until a group or a dashboard is turned on; groups are off by default.`) +
     timesRows({ mode: 1, windows: [['1111100', '07:00', '22:00'], ['0000011', '09:00', '20:00']], loud: true }) +
-    ssec('custom times', 'groups and dashboards that override the defaults') +
-    envHead('prod-cluster', '3 of 12') +
-    custom(folder, 'platform', 'group', 'Mon–Fri 09:00 → 17:00 · critical and down at any time') +
-    custom(dot('crit', 'd7'), 'kubernetes', 'dashboard in platform', 'always') +
-    custom(dot('crit', 'd7'), 'databases', 'dashboard in overview', 'Mon–Fri 06:00 → 23:00, Sat–Sun 08:00 → 20:00') +
-    envHead('staging', '1 of 5') +
-    custom(folder, 'releases', 'group', 'Mon–Fri 09:00 → 17:00') +
-    envHead('lab', 'none: everything uses lab’s defaults', 'warn') +
+    ssec('turned on', 'the groups and dashboards that notify, and the times they use') +
+    envHead('prod-cluster', '4 on · 3 with custom times') +
+    onRow(folder, 'platform', 'group · 3 of 4 on', cus('Mon–Fri 09:00 → 17:00, critical any time')) +
+    onRow(dot('crit', 'd7'), 'kubernetes', 'dashboard in platform', cus('always')) +
+    onRow(dot('crit', 'd7'), 'production', 'dashboard in overview', def) +
+    onRow(dot('crit', 'd7'), 'databases', 'dashboard in overview', cus('Mon–Fri 06:00 → 23:00, Sat–Sun 08:00 → 20:00')) +
+    envHead('staging', '1 on') +
+    onRow(folder, 'releases', 'group · 2 of 2 on', def) +
+    envHead('lab', 'nothing turned on: lab doesn’t notify', 'warn') +
     ssec('storm control') +
     srow('storm threshold', 'Beyond it, one summary notification.', `<span class="muted" style="font-size:12px">at most</span>${inp('5', 44)}<span class="muted" style="font-size:12px">in</span>${inp('10', 44)}<span class="muted" style="font-size:12px">seconds</span>`);
 }
@@ -167,17 +172,14 @@ function pageSearch() {
   const grp = (label) => `<div class="ssec" style="padding-top:20px"><span style="color:var(--t-sec)">${label}</span></div>`;
   return grp('general') +
     srow('', 'Out of sight for half a minute: follow Icinga without check results. Far less load on the master.', sw(true), { nameHtml: hl('quiet mode when hidden') }) +
-    grp('notifications · quiet hours') +
-    srow('', 'Notifications in the window go to the centre without a desktop notification.', sw(true), { nameHtml: `record silently at night <span class="faint" style="font-size:12px">· ${hl('quiet hours')}</span>` }) +
-    srow('from and to', 'May cross midnight; the days are the ones it starts on.', inp('22:00', 72) + `<span class="faint">→</span>` + inp('07:00', 72), { sub: true }) +
-    srow('days', '', ['mo', 'tu', 'we', 'th', 'fr', 'sa', 'su'].map((d, i) => chip(d, { sel: i < 5 })).join(''), { sub: true }) +
-    srow('critical and down still notify out loud', `During ${hl('quiet')} hours.`, sw(true), { sub: true }) +
+    grp(`notifications · notification times <span class="faint">· formerly ${hl('quiet hours')}</span>`) +
+    timesRows({ mode: 1, windows: [['1111100', '07:00', '22:00'], ['0000011', '09:00', '20:00']], loud: true }) +
     `<div class="ssec" style="padding-top:24px"><span>no matches in appearance, icinga, keymap, advanced</span></div>`;
 }
 
 function settingsNav({ page = 'general', search = '', section = 0 }) {
   let html = '';
-  const counts = { general: 1, notifications: 4 };
+  const counts = { general: 1, notifications: 3 };
   for (const [name, ic, subs] of SETTINGS_PAGES) {
     const active = !search && name === page;
     const dim = search && !counts[name];
@@ -192,7 +194,7 @@ function settingsWindow({ page = 'general', search = '', part = 0, section = 0, 
   const body = search ? pageSearch() : pages[page]();
   const subtitles = { general: 'for icygui on this computer', appearance: 'for icygui on this computer', notifications: 'for prod-cluster · on this computer only', icinga: 'for icygui on this computer', keymap: 'keymap.toml', advanced: 'for icygui on this computer' };
   const head = search
-    ? `<span class="title">5 settings</span><span class="subtitle">match “quiet”</span>`
+    ? `<span class="title">4 settings</span><span class="subtitle">match “quiet”</span>`
     : `<span class="title">${title || page}</span><span class="subtitle">${subtitle || subtitles[page]}</span>`;
   return `<div class="swin">
     <div class="snav">

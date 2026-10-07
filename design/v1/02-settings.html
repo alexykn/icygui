@@ -14,9 +14,9 @@ shot('2b', '02-settings-b-general', 'General: the three background switches. The
   settingsWindow({ page: 'general' }), W);
 shot('2c', '02-settings-c-appearance', 'Appearance: theme (follow system, dark, light), interface size, row density and times in lists, each a segmented control. A live preview shows the chosen density (here compact with clock times; compact drops the output line).',
   settingsWindow({ page: 'appearance' }), W);
-shot('2d', '02-settings-d-notifications', 'Notifications, top: the environment whose rules these are (a dropdown, since rules are per environment), the master switch, pause, the new <i>show plugin output</i> switch, then the default rule with its chips and switches. The nav lists the page’s sections; the one in view is marked on the guide line.',
+shot('2d', '02-settings-d-notifications', 'Notifications, top: the environment whose rules these are (a dropdown, since rules are per environment), the environment’s master switch (off silences every group and dashboard of the environment; on never turns one on, since notifications are opt-in, topic 12), pause, the new <i>show plugin output</i> switch, then the default rule with its chips and switches, for the groups and dashboards that are turned on. The nav lists the page’s sections; the one in view is marked on the guide line.',
   settingsWindow({ page: 'notifications', part: 0, section: 0 }), W);
-shot('2e', '02-settings-e-notifications-more', 'Notifications, scrolled (revised with topic 12): the <i>notification times</i> are the defaults, and the page says so; the <i>custom times</i> section lists, per environment, the groups and dashboards that override them, each with a link to its notification settings. Storm control follows, then watched and muted objects.',
+shot('2e', '02-settings-e-notifications-more', 'Notifications, scrolled (revised with topic 12): the <i>notification times</i> are the defaults, and the page says so: they apply to the groups and dashboards that have notifications turned on, and nothing notifies until one is. <i>turned on</i> lists, per environment, the groups and dashboards that notify and the times each uses (default or custom), each with a link to its notification settings. Storm control follows, then watched and muted objects.',
   settingsWindow({ page: 'notifications', part: 1, section: 2 }), W);
 shot('2f', '02-settings-f-icinga', 'Icinga: reconcile (adaptive or fixed, a field for the seconds when fixed), the event log’s retention, and the environments, each with its health dot and connection summary and a gear that opens its editor (today’s environment editor dialog).',
   settingsWindow({ page: 'icinga' }), W);
@@ -24,7 +24,7 @@ shot('2g', '02-settings-g-keymap', 'Keymap: every shortcut, searchable by name o
   settingsWindow({ page: 'keymap', subtitle: 'keymap.toml · 46 shortcuts' }), W);
 shot('2h', '02-settings-h-advanced', 'Advanced: the log level, and buttons that open the log and config folders in the file manager. About moves here.',
   settingsWindow({ page: 'advanced' }), W);
-shot('2i', '02-settings-i-search', 'Searching “quiet”: the nav dims the categories without a match and counts the matches of the others; the page lists the matching rows from every category under the category’s name, with the match in the accent colour (as in the palette). The rows work in place. Esc clears the search.',
+shot('2i', '02-settings-i-search', 'Searching “quiet”: the nav dims the categories without a match and counts the matches of the others; the page lists the matching rows from every category under the category’s name, with the match in the accent colour (as in the palette). The default notification times are found by their rc1 name, <i>quiet hours</i>, and come as a whole section. The rows work in place. Esc clears the search.',
   settingsWindow({ search: 'quiet' }), W);
 </script>
 </body></html>

@@ -19,7 +19,7 @@ const dashMenu = menu([
   '-', { label: 'delete dashboard' },
 ], { x: 280, y: 196, w: 250 });
 const mainList = listHeader({ title: 'databases', subtitle: '4 views' }) + summary([['crit', 1, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown']], '2 handled hidden') + `<div class="list">${rows(ROWS.filter((r) => /db-|postgres|mysql/.test(r[1] + r[2])))}</div>`;
-shot('8a', '08-yaml-a-dashboard-menu', 'The dashboard’s <i>···</i> menu (the row’s glyph stays highlighted while the menu is open): <i>copy as YAML</i> sits next to <i>duplicate</i>, with <i>export to file</i> under it. The YAML holds the dashboard with all its views, filters, sort and display settings, and its notification setting.',
+shot('8a', '08-yaml-a-dashboard-menu', 'The dashboard’s <i>···</i> menu (the row’s glyph stays highlighted while the menu is open): <i>copy as YAML</i> sits next to <i>duplicate</i>, with <i>export to file</i> under it. The YAML holds the dashboard with all its views, filters, sort and display settings. Notification settings are never part of it: they stay with each person’s icygui.',
   appWindow(mainList, { groups: groupsMenuOpen, activeItem: 'databases' }) + dashMenu);
 
 // 8b: group menu + toast
@@ -32,7 +32,7 @@ const groupMenu = menu([
   '-', { label: 'copy group as YAML', hov: true }, { label: 'export group to file' },
   '-', { label: 'delete group' },
 ], { x: 250, y: 86, w: 250 });
-const toastHtml = toast({ title: 'Copied overview as YAML', lines: ['4 dashboards · 7 views · 112 lines', 'Paste with ctrl-v on a sidebar.'], right: 16, bottom: 16 });
+const toastHtml = toast({ title: 'Copied overview as YAML', lines: ['4 dashboards · 7 views · 110 lines', 'Paste with ctrl-v on a sidebar.'], right: 16, bottom: 16 });
 shot('8b', '08-yaml-b-group-menu-toast', 'The group’s <i>···</i>: <i>copy group as YAML</i> above <i>export group to file</i>. After copying, a toast (bottom right, the OK tone) says what went to the clipboard and how to paste it. Copying sends nothing anywhere: the text only goes to the clipboard.',
   appWindow(listHeader() + summary() + `<div class="list">${rows()}</div>`, { groups: groupsGroupOpen }) + groupMenu + toastHtml,
   { crops: '08-yaml-b-toast-zoom:1040,760,400,140' });
@@ -54,7 +54,7 @@ shot('8c', '08-yaml-c-palette', 'The palette finds the copy commands by “yaml�
 // 8d: paste in another icygui: footer + menu
 const footMenu = menu([{ label: 'new dashboard', key: 'ctrl-n' }, { label: 'new group' }, '-', { label: 'import dashboards' }, { label: 'paste dashboards', key: 'ctrl-v', hov: true }, { label: 'export all dashboards' }], { x: 104, y: 690, w: 260 });
 const stagingGroups = [
-  { name: 'overview', items: [['overview', 'warn', 3], ['databases', 'ok', ''], ['deploy-checks', 'ok', '']] },
+  { name: 'overview', items: [['overview', 'warn', 3], ['databases', 'ok', ''], ['host problems', 'ok', ''], ['deploy-checks', 'ok', '']] },
   { name: 'releases', items: [['canary', 'ok', ''], ['rollbacks', 'pend', '']] },
 ];
 const stgRows = [
@@ -73,10 +73,8 @@ const Y = [
   ['', 'version: 2'],
   ['', 'groups:'],
   ['', '  - name: overview'],
-  ['', '    notifications: inherit'],
   ['', '    dashboards:'],
   ['hl', '      - name: databases'],
-  ['hl', '        notifications: on'],
   ['hl', '        views:'],
   ['hl', '          - name: clusters'],
   ['hl', '            display: summary-tiles'],
@@ -109,32 +107,37 @@ function yaml(lines, { from = 1, err } = {}) {
   }).join('')}</div>`;
 }
 const segc = (opts, on) => `<span class="seg" style="height:24px;align-self:flex-start">${opts.map((o, i) => `<span class="${i === on ? 'on' : ''}" style="padding:0 10px">${o}</span>`).join('')}</span>`;
-const tree = `<div class="tree">
-  <div class="tr"><span class="ic">${icon('folder', 13)}</span><span class="nm">overview</span><span class="meta">4 dashboards</span><span class="st"><span class="cf">exists here</span><span class="faint">· merge</span></span></div>
-  <div class="tr sub sel">${dot('ok', 'd7')}<span class="nm">databases</span><span class="meta">4 views</span><span class="st"><span class="cf">name taken</span><span class="faint">· keep both</span></span></div>
-  <div class="trd">${segc(['replace the one here', 'keep both', 'skip'], 1)}
+const dbDetail = `<div class="trd">${segc(['replace the one here', 'keep both', 'skip'], 1)}
     <span>imported as <span class="strong">databases 2</span>; the dashboard already in overview stays as it is.</span>
-    <span class="chk-line"><span class="c-warn">${icon('triangle-alert', 12)}</span><span>host groups pg-orders and mysql-legacy don’t exist on staging: the clusters view shows 2 of its 4 tiles.</span></span></div>
+    <span class="chk-line"><span class="c-warn">${icon('triangle-alert', 12)}</span><span>host groups pg-orders and mysql-legacy don’t exist on staging: the clusters view shows 2 of its 4 tiles.</span></span></div>`;
+const grpDetail = `<div class="trd">${segc(['merge into the one here', 'keep both'], 0)}
+    <span>the dashboards go into <span class="strong">overview</span> here, after the 4 it has; databases and host problems are there already and follow their own choice.</span>
+    <span class="faint">keep both: imported as a new group <span class="sec">overview 2</span>, with all 4 dashboards.</span></div>`;
+const tree = (sel = 'databases') => `<div class="tree">
+  <div class="tr${sel === 'overview' ? ' sel' : ''}"><span class="ic">${icon('folder', 13)}</span><span class="nm">overview</span><span class="meta">4 dashboards</span><span class="st"><span class="cf">exists here</span><span class="faint">· merge</span></span></div>
+  ${sel === 'overview' ? grpDetail : ''}
+  <div class="tr sub${sel === 'databases' ? ' sel' : ''}">${dot('ok', 'd7')}<span class="nm">databases</span><span class="meta">4 views</span><span class="st"><span class="cf">name taken</span><span class="faint">· keep both</span></span></div>
+  ${sel === 'databases' ? dbDetail : ''}
   <div class="tr sub">${dot('ok', 'd7')}<span class="nm">production</span><span class="meta">1 view</span><span class="st"><span class="new">new</span></span></div>
-  <div class="tr sub">${dot('ok', 'd7')}<span class="nm">host problems</span><span class="meta">1 view</span><span class="st"><span class="cf">name taken</span><span class="faint">· skip</span></span></div>
+  <div class="tr sub">${dot('ok', 'd7')}<span class="nm">host problems</span><span class="meta">1 view</span><span class="st"><span class="cf">name taken</span><span class="faint">· keep both</span></span></div>
   <div class="tr sub">${dot('pend', 'd7')}<span class="nm">all services</span><span class="meta">1 view</span><span class="st"><span class="new">new</span></span></div>
 </div>`;
 const checks = `<div class="col" style="gap:6px;padding:12px 2px 0;border-top:1px solid var(--bd-header)">
   <span class="chk-line"><span class="c-ok">${icon('check', 12)}</span><span>format icygui-dashboards, version 2 · all 7 filters parse</span></span>
-  <span class="chk-line" style="align-items:center"><span class="muted">${icon('info', 12)}</span><span>notification settings come along (databases: on)</span><span class="grow"></span>${sw(true, '<span class="nowrap">keep them</span>')}</span>
 </div>`;
-const preview = `<div class="dlg-h"><span>Paste dashboards</span><span class="what">from the clipboard · into staging</span></div>
+const preview = (sel) => `<div class="dlg-h"><span>Paste dashboards</span><span class="what">from the clipboard · into staging</span></div>
   <div style="display:grid;grid-template-columns:minmax(0,1fr) 452px;gap:24px;padding:18px 20px;min-height:0">
     <div class="col" style="gap:12px;min-width:0">
       <span class="sec" style="font-size:12.5px">1 group with 4 dashboards, copied 14:12 from prod-cluster.</span>
-      ${tree}${checks}
+      ${tree(sel)}${checks}
     </div>
-    <div class="col" style="gap:8px;min-width:0"><div style="display:flex;align-items:center"><span class="seclabel">YAML</span><span class="grow"></span><span class="faint" style="font-size:11.5px">112 lines · databases marked</span></div>
-      <div style="height:470px;overflow:hidden;position:relative">${yaml(Y)}<div style="position:absolute;right:3px;top:150px;width:4px;height:120px;border-radius:2px;background:var(--el-active)"></div></div></div>
+    <div class="col" style="gap:8px;min-width:0"><div style="display:flex;align-items:center"><span class="seclabel">YAML</span><span class="grow"></span><span class="faint" style="font-size:11.5px">110 lines · ${sel} marked</span></div>
+      <div style="height:470px;overflow:hidden;position:relative">${yaml(sel === 'overview' ? Y.map(([c, t], i) => [i >= 3 && c !== 'c' ? 'hl' : c, t]) : Y)}<div style="position:absolute;right:3px;top:150px;width:4px;height:120px;border-radius:2px;background:var(--el-active)"></div></div></div>
   </div>
-  <div class="dlg-f"><span class="start">nothing changes until you import · undo with ctrl-z</span><span class="grow"></span>${btn('cancel', { key: 'esc' })}${btn('import 3 dashboards', { key: '↵', primary: true })}</div>`;
-shot('8e', '08-yaml-e-import-preview', 'The import preview. On the left is what the YAML holds, as a tree, each clash with its choice: the group exists (merge into it, or a new group), and a dashboard’s name is taken (replace, keep both, skip). The selected row explains its choice and what doesn’t fit this environment (host groups that don’t exist here). Below: the format check, and whether the notification settings come along. On the right is the YAML itself, with the selected dashboard’s lines marked. The button counts what will be imported.',
-  appWindow(stagingMain, { groups: stagingGroups, foot: { env: 'staging', node: 'stg-master-01', age: '1s' } }) + modal(1040, preview));
+  <div class="dlg-f"><span class="start">nothing changes until you import · undo with ctrl-z</span><span class="grow"></span>${btn('cancel', { key: 'esc' })}${btn('import 4 dashboards', { key: '↵', primary: true })}</div>`;
+shot('8e', '08-yaml-e-import-preview', 'The import preview, with the defaults. On the left is what the YAML holds, as a tree, each clash with its choice: the group exists here (<b>merge</b> by default, or keep both), and a dashboard’s name is taken (replace, <b>keep both</b> preselected, skip). The selected row explains its choice and what doesn’t fit this environment (host groups that don’t exist here). Below: the format check. Notification settings are never in the YAML, so nothing about them is asked: imported dashboards and groups inherit this icygui’s defaults. On the right is the YAML itself, with the selected dashboard’s lines marked. The button counts what will be imported.',
+  appWindow(stagingMain, { groups: stagingGroups, foot: { env: 'staging', node: 'stg-master-01', age: '1s' } }) + modal(1040, preview('databases')));
+
 
 // 8f: error
 const bad = [
@@ -160,5 +163,7 @@ const errDlg = `<div class="dlg-h"><span>Paste dashboards</span><span class="wha
   <div class="dlg-f"><span class="start"></span><span class="grow"></span>${btn('close', { key: 'esc' })}${btn('import 0 dashboards', { primary: true, dis: true })}</div>`;
 shot('8f', '08-yaml-f-paste-error', 'When the YAML is broken: the dialog shows the problem at its place in the text, with the line marked and the character underlined (the editor’s error style, topic 09), and imports nothing. Other refusals: a newer format version (<i>update icygui to import this</i>) and unknown fields (listed, ignored).',
   appWindow(stagingMain, { groups: stagingGroups, foot: { env: 'staging', node: 'stg-master-01', age: '1s' } }) + modal(640, errDlg));
+shot('8g', '08-yaml-g-group-clash', 'The group row selected: a clashing group merges by default (its dashboards go into the group that is already here, each clashing dashboard with its own choice), and <i>keep both</i> imports it as a new group <i>overview 2</i> instead. The whole group is marked in the YAML.',
+  appWindow(stagingMain, { groups: stagingGroups, foot: { env: 'staging', node: 'stg-master-01', age: '1s' } }) + modal(1040, preview('overview')));
 </script>
 </body></html>

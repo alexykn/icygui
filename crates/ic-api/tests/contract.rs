@@ -4,8 +4,8 @@
 //! `ICYGUI_CONTRACT_*` variables the script prints) and otherwise pass
 //! without doing anything, unless `ICYGUI_CONTRACT_REQUIRED` is set (the
 //! nightly contract workflow sets it): then missing variables fail every
-//! test. They only read: queries, status, the event stream, and a refused
-//! action as the read-only `viewer` user.
+//! test. They only read: queries, status, the event streams (all types, and
+//! quiet mode's), and a refused action as the read-only `viewer` user.
 //!
 //! They load every object several times, which is fine for the small
 //! disposable instance but is load a production Icinga must not get from a
@@ -35,7 +35,8 @@ use ic_api::{
     fetch_server_certificate,
 };
 use ic_model::{
-    Action, ActionTarget, Event, EventKind, HostState, Links, ObjectKey, Service, ServiceState,
+    Action, ActionTarget, Event, EventKind, HostState, Links, ObjectCounts, ObjectKey, Service,
+    ServiceState,
 };
 use raw::Raw;
 use secrecy::SecretString;
@@ -235,6 +236,65 @@ async fn real_icinga_queries() {
             .iter()
             .any(|zone| zone.global && zone.endpoints.is_empty())
     );
+}
+
+/// What the node list and quiet mode ask for besides the loads (ENV-06,
+/// PERF-09): the nodes' `connected` flags by name, the hosts' count for
+/// sizing a background start, and the CIB's service counts that quiet
+/// mode's stall and switch checks compare with the store's.
+#[tokio::test]
+async fn real_icinga_node_states_and_counts() {
+    let Some(contract) = fixture().await else {
+        return;
+    };
+    let raw = contract.raw();
+    wait_for_first_checks(&raw).await;
+    let client = contract.client();
+    let node = client.status().await.unwrap().node_name;
+
+    // The node's own endpoint says it isn't connected (to itself): the
+    // engine never asks for it, the node it talks to is connected.
+    let states = client.endpoint_states(std::slice::from_ref(&node)).await;
+    assert_eq!(states.unwrap(), [(node.clone(), false)]);
+    // A name Icinga doesn't know fails the whole request ("No objects
+    // found.", 404), so the client leaves every name of it out.
+    let names = [node.clone(), "icygui-no-such-endpoint".to_owned()];
+    let answer = raw
+        .query(
+            "endpoints",
+            &json!({ "endpoints": names, "attrs": ["connected"] }),
+        )
+        .await;
+    assert_eq!(answer.status, 404, "{}", answer.json());
+    assert_eq!(answer.json()["status"], "No objects found.");
+    assert_eq!(client.endpoint_states(&names).await.unwrap(), []);
+
+    let hosts = client.hosts().await.unwrap();
+    assert_eq!(client.host_count().await.unwrap(), hosts.len());
+
+    // The counts by state are the services' raw states: a service never
+    // checked (the fixtures' passive ones) counts as unknown. The fixtures'
+    // states never change, so the two answers agree.
+    let services = client.services(Detail::Lean).await.unwrap();
+    let counts = client.status().await.unwrap().counts;
+    let mut expected = [0_u32; 4];
+    for service in &services {
+        expected[ObjectCounts::service_index(service.state)] += 1;
+    }
+    assert!(
+        services
+            .iter()
+            .any(|service| service.state == ServiceState::Pending),
+        "a pending service"
+    );
+    assert_eq!(counts.service_states(), expected, "{counts:?}");
+    let pending = services
+        .iter()
+        .filter(|service| service.state == ServiceState::Pending)
+        .count();
+    assert_eq!(usize::try_from(counts.services_pending).unwrap(), pending);
+    assert_eq!(usize::try_from(counts.services()).unwrap(), services.len());
+    assert_eq!(usize::try_from(counts.hosts()).unwrap(), hosts.len());
 }
 
 /// Every attribute the client asks for exists: Icinga 2.15 rejects a
@@ -549,9 +609,16 @@ async fn real_icinga_event_stream() {
     let Some(contract) = fixture().await else {
         return;
     };
-    let mut stream = contract
-        .client()
+    let client = contract.client();
+    let mut stream = client
         .events("icygui-contract-ic-api", &EventKind::ALL)
+        .await
+        .unwrap();
+    // Quiet mode's stream (PERF-09): every type but check results, opened
+    // alongside (state changes, which the fixtures don't have, come as
+    // `StateChange` with `vars_after`: see the recorded `events.ndjson`).
+    let mut quiet = client
+        .events("icygui-contract-ic-api-quiet", &EventKind::QUIET)
         .await
         .unwrap();
     // Active checks run every 20–30 s in the fixtures. Every check result
@@ -569,5 +636,13 @@ async fn real_icinga_event_stream() {
             assert!(after.attempt >= 1, "{event:?}");
             break;
         }
+    }
+    // The quiet stream stayed open and brought no check result meanwhile.
+    while let Ok(next) = tokio::time::timeout(Duration::from_millis(500), quiet.next()).await {
+        let event = next.expect("the quiet stream is open").unwrap();
+        assert!(
+            !matches!(event, Event::CheckResult { .. }),
+            "a check result on the quiet stream: {event:?}"
+        );
     }
 }

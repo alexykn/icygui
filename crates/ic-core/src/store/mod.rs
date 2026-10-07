@@ -51,7 +51,7 @@ use std::sync::Arc;
 use ic_api::Detail;
 use ic_model::{
     CheckInfo, CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
-    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, ServiceKey, ServiceState,
+    InstanceStatus, Notification, ObjectCounts, ObjectKey, Service, ServiceGroup, ServiceKey,
     Timestamp, Zone,
 };
 use ic_rules::DashboardRef;
@@ -262,17 +262,13 @@ impl Store {
     }
 
     /// The services by state (ok, warning, critical, unknown) as Icinga's
-    /// `/v1/status/CIB` counts them: by the raw state, which is ok while a
-    /// service is pending.
+    /// `/v1/status/CIB` counts them: by the raw state, which is unknown
+    /// while a service is pending ([`ObjectCounts::service_index`]), so a
+    /// pending service's first check result moves both alike.
     pub(crate) fn service_states(&self) -> [u32; 4] {
         let mut counts = [0_u32; 4];
         for service in self.services.values() {
-            let bucket = match service.state {
-                ServiceState::Ok | ServiceState::Pending => 0,
-                ServiceState::Warning => 1,
-                ServiceState::Critical => 2,
-                ServiceState::Unknown => 3,
-            };
+            let bucket = ObjectCounts::service_index(service.state);
             if let Some(count) = counts.get_mut(bucket) {
                 *count = count.saturating_add(1);
             }

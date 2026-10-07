@@ -32,7 +32,10 @@
 //! take part in notification decisions are evaluated, and only their
 //! memberships (and sort order) are kept current: their rows and
 //! summaries, which nobody sees while quiet, are rebuilt when quiet mode
-//! ends; the dashboards left out are evaluated in full then.
+//! ends; the dashboards left out are evaluated in full then. A dashboard
+//! that has no rows and summary yet (quiet since the start, or new or
+//! refiltered while quiet) has no result until then, rather than an empty
+//! one: it is being evaluated, not empty.
 //!
 //! A filter that doesn't parse, or fails to evaluate for some object (a
 //! type error such as `"a" < 1`, an unknown function), sets
@@ -163,7 +166,8 @@ impl Dashboards {
         }
     }
 
-    /// The latest results.
+    /// The latest results: every dashboard's, but for one quiet mode
+    /// hasn't built rows and a summary for yet.
     #[cfg(test)]
     pub(crate) fn results(&self) -> &Arc<BTreeMap<DashboardRef, DashboardResult>> {
         &self.results
@@ -185,6 +189,8 @@ impl Dashboards {
     /// `refresh_time` re-evaluates filters that call `get_time()`. Stops
     /// early, leaving the results stale, once `cancel` is set (shutdown).
     /// Returns the results; they are the same `Arc` when nothing changed.
+    /// A dashboard whose rows and summary were never built (quiet mode)
+    /// is left out.
     pub(crate) fn update(
         &mut self,
         data: &Data,
@@ -220,15 +226,14 @@ impl Dashboards {
                 any_changed |= board.finish(data);
             }
         }
-        let stale = self.results.len() != self.boards.len()
-            || self
-                .boards
-                .iter()
-                .any(|board| !self.results.contains_key(&board.reference));
+        // A board quiet mode never finished has no result yet: an empty
+        // one would read as "nothing matches" until quiet mode ends.
+        let finished = || self.boards.iter().filter(|board| board.finished);
+        let stale = self.results.len() != finished().count()
+            || finished().any(|board| !self.results.contains_key(&board.reference));
         if any_changed || stale {
             self.results = Arc::new(
-                self.boards
-                    .iter()
+                finished()
                     .map(|board| (board.reference.clone(), board.result.clone()))
                     .collect(),
             );
@@ -445,6 +450,9 @@ struct Board {
     rows_dirty: bool,
     summary_dirty: bool,
     result: DashboardResult,
+    /// `result` holds rows and a summary built by [`Board::finish`] (not
+    /// yet for a board quiet mode only kept the memberships of).
+    finished: bool,
 }
 
 impl Board {
@@ -463,6 +471,7 @@ impl Board {
             rows_dirty: true,
             summary_dirty: true,
             result: DashboardResult::default(),
+            finished: false,
         }
     }
 
@@ -719,6 +728,7 @@ impl Board {
         };
         self.rows_dirty = false;
         self.summary_dirty = false;
+        self.finished = true;
         if result == self.result {
             return false;
         }

@@ -521,8 +521,10 @@ impl Client {
     /// Whether each of the endpoints `names` is connected to the node the
     /// client talks to (Icinga's `connected`; the node's own endpoint says
     /// `false`), in one small request per [`NAMES_PER_REQUEST`] names:
-    /// keeps a cluster's node list current between loads. Names Icinga
-    /// doesn't know are left out.
+    /// keeps a cluster's node list current between loads. Icinga fails a
+    /// whole request with `404 No objects found.` if one of its names is
+    /// unknown; then none of its names comes back (no halving: the caller
+    /// reloads the endpoint list instead).
     ///
     /// # Errors
     ///

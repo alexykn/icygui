@@ -337,6 +337,21 @@ impl MockControl {
         Ok(())
     }
 
+    /// Removes a cluster endpoint (and its zone's mention of it) without an
+    /// event, as a configuration deployment does until the client notices
+    /// the restart: a by-name query naming it fails as a whole.
+    ///
+    /// # Errors
+    /// Unknown endpoint.
+    pub fn remove_endpoint(&self, name: &str) -> Result<(), MockError> {
+        let mut world = self.world();
+        world.endpoints.remove(name).ok_or_else(|| unknown(name))?;
+        for zone in world.zones.values_mut() {
+            zone.endpoints.retain(|endpoint| endpoint != name);
+        }
+        Ok(())
+    }
+
     /// Emits `ObjectModified` for an object, as a configuration deployment
     /// would (the mock never changes configuration itself).
     ///

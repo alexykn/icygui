@@ -646,6 +646,50 @@ fn quiet_mode_keeps_only_the_memberships_notifications_need() {
 }
 
 #[test]
+fn a_dashboard_quiet_since_the_start_has_no_result_rather_than_an_empty_one() {
+    // An environment off screen from the start: only memberships.
+    let data = sample();
+    let views = [("p", view("service.state != 0")), ("all", view(""))];
+    let mut dashboards = Dashboards::default();
+    dashboards.configure(&environment(&views));
+    dashboards.set_scope(Scope::Quiet(None));
+    let results = dashboards.update(&data, &all(), false, &AtomicBool::new(false));
+    assert!(
+        results.is_empty(),
+        "being evaluated, not 'nothing matches': {results:?}"
+    );
+    assert_eq!(
+        dashboards.memberships(&s("web-1", "http")),
+        [reference("p"), reference("all")]
+    );
+
+    // On screen: every one has its rows and summary.
+    dashboards.set_scope(Scope::All);
+    let results = dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
+    assert_eq!(results.len(), 2);
+    assert_eq!(result(&dashboards, "p").summary.critical, 2);
+
+    // Refiltered while quiet again: its old rows don't fit the new filter,
+    // and there are no new ones yet; the other one keeps its result.
+    dashboards.set_scope(Scope::Quiet(None));
+    dashboards.configure(&environment(&[
+        ("p", view("service.state == 2")),
+        ("all", view("")),
+    ]));
+    let results = dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
+    assert_eq!(
+        results.keys().collect::<Vec<_>>(),
+        [&reference("all")],
+        "{results:?}"
+    );
+    dashboards.set_scope(Scope::All);
+    dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
+    let mut rows = names(result(&dashboards, "p"));
+    rows.sort();
+    assert_eq!(rows, ["db-1!pg", "db-2!pg"]);
+}
+
+#[test]
 fn display_settings_restyle_without_re_evaluating() {
     let mut data = sample();
     let mut v = view("service.state != 0");

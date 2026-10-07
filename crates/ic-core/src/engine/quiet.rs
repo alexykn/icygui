@@ -363,6 +363,9 @@ impl Engine {
             }
             // Every dashboard again (those left out in full).
             self.dashboards_resume = true;
+            if self.active {
+                self.nodes_on_screen();
+            }
         }
         self.want_mode();
     }

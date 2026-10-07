@@ -290,15 +290,18 @@ async fn switching_modes_loses_and_repeats_no_event() {
             *state = ServiceState::Ok;
         }
         stream_mode(&control, quiet).await;
+        // A snapshot cut before the switch completed may already show
+        // every change (on a slow machine): the one that says the mode
+        // comes after it.
         let expected = changed.clone();
-        let snapshot = engine
+        engine
             .snapshot(|snapshot| {
-                expected.iter().all(|(key, state)| {
-                    snapshot.services[key.as_service().unwrap()].state == *state
-                })
+                snapshot.quiet == quiet
+                    && expected.iter().all(|(key, state)| {
+                        snapshot.services[key.as_service().unwrap()].state == *state
+                    })
             })
             .await;
-        assert_eq!(snapshot.quiet, quiet);
     }
     let snapshot = engine
         .snapshot(|snapshot| {
@@ -1150,6 +1153,50 @@ async fn a_switch_away_from_a_stalled_stream_finds_what_it_withheld() {
     assert!(requests_to(&control, "/v1/status/CIB") >= 1);
     assert_eq!(lists(&control, "services"), 0, "no reload");
     ticker.abort();
+    engine.shutdown();
+}
+
+/// A pending service's first check result moves Icinga's counts from
+/// unknown (its raw state until then) to its state, and the store's alike:
+/// the switch right after it finds nothing missing and costs no reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_check_result_before_a_switch_costs_no_reload() {
+    let server = mock(MockConfig::with_scenario(scenarios::lab())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        status_interval: Duration::from_millis(100),
+        quiet_status_interval: Duration::from_millis(200),
+        stream_handover: Duration::from_millis(300),
+        reload_spacing: Duration::from_millis(100),
+        ..tuning()
+    };
+    let mut engine = launch.start();
+    settled(&mut engine).await;
+    let pending = ObjectKey::service("lab-02", "ping4");
+    let ObjectKey::Service { key } = &pending else {
+        unreachable!()
+    };
+    assert_eq!(
+        engine.latest().unwrap().services[key].state,
+        ServiceState::Pending
+    );
+    let polls = requests_to(&control, "/v1/status/CIB");
+    assert!(wait_until(|| requests_to(&control, "/v1/status/CIB") >= polls + 4).await);
+
+    control
+        .process_check_result(&pending, 0, "PING OK - first result", &[])
+        .unwrap();
+    engine
+        .snapshot(|snapshot| snapshot.services[key].state == ServiceState::Ok)
+        .await;
+    control.clear_requests();
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    // The check after the overlap timed out: a few polls, then done.
+    let polls = requests_to(&control, "/v1/status/CIB");
+    assert!(wait_until(|| requests_to(&control, "/v1/status/CIB") >= polls + 5).await);
+    assert_eq!(lists(&control, "services"), 0, "no reload");
     engine.shutdown();
 }
 

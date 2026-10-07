@@ -1118,3 +1118,37 @@ fn a_partial_view_hides_what_it_leaves_out_until_a_full_one_brings_it_back() {
     assert_eq!(gone, [(key("h", "b"), true), (key("h", "c"), true)]);
     assert_eq!(store.hidden_count(), 0);
 }
+
+#[test]
+fn service_counts_follow_icinga_with_pending_services_as_unknown() {
+    let mut store = loaded();
+    let mut pending = service("h", "new", ServiceState::Pending);
+    pending.check.last_check = None;
+    store.replace_services(
+        vec![
+            service("h", "a", ServiceState::Ok),
+            service("h", "b", ServiceState::Critical),
+            pending,
+        ],
+        Detail::Lean,
+        11,
+    );
+    // Icinga's raw state of a service never checked is 3 (unknown), and
+    // `/v1/status/CIB` counts it there.
+    assert_eq!(store.service_states(), [1, 0, 1, 1]);
+
+    // Its first result, OK: Icinga moves it from unknown to ok, so does
+    // the store (the offset between them stays).
+    let mut checked = service("h", "new", ServiceState::Ok);
+    checked.check.last_check = Some(t(200.0));
+    store.replace_services(
+        vec![
+            service("h", "a", ServiceState::Ok),
+            service("h", "b", ServiceState::Critical),
+            checked,
+        ],
+        Detail::Lean,
+        12,
+    );
+    assert_eq!(store.service_states(), [2, 0, 1, 0]);
+}

@@ -869,3 +869,139 @@ async fn the_cluster_nodes_follow_the_status_poll() {
     }
     engine.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cluster_nodes_are_current_when_the_environment_comes_on_screen() {
+    let cluster = cluster();
+    let master = node(&cluster, "master-01").await;
+    let interval = Duration::from_secs(3);
+    let mut engine = Launch {
+        environment: environment_of(&[&master]),
+        tuning: Tuning {
+            status_interval: interval,
+            quiet_status_interval: Duration::from_mins(10),
+            ..tuning()
+        },
+        ..Launch::new(&master)
+    }
+    .start();
+    connected_to(&mut engine, |_| true).await;
+    // Off screen and quiet, as the app keeps an environment it doesn't
+    // show: the nodes' states come every 5 minutes.
+    engine.send(ic_core::Command::SetActive(false));
+    engine.send(ic_core::Command::SetQuiet(true));
+    let control = master.control();
+    let asked = || {
+        control
+            .requests()
+            .iter()
+            .filter(|request| {
+                request.path == "/v1/objects/endpoints"
+                    && request
+                        .body
+                        .as_ref()
+                        .is_some_and(|body| body.get("endpoints").is_some())
+            })
+            .count()
+    };
+    assert!(crate::support::wait_until(|| asked() == 1).await);
+    tokio::time::sleep(interval + Duration::from_millis(200)).await;
+    control.set_endpoint_connected("master-02", false).unwrap();
+
+    // Switched to: the states, older than the on-screen interval, come at
+    // once rather than with the next poll on the old schedule.
+    let switched = std::time::Instant::now();
+    engine.send(ic_core::Command::SetActive(true));
+    engine.send(ic_core::Command::SetQuiet(false));
+    engine
+        .snapshot(|snapshot| {
+            snapshot
+                .cluster_nodes()
+                .iter()
+                .any(|node| node.name == "master-02" && node.state == NodeState::Disconnected)
+        })
+        .await;
+    assert!(
+        switched.elapsed() < interval,
+        "at once: {:?}",
+        switched.elapsed()
+    );
+    assert_eq!(asked(), 2);
+
+    // Away and back right after: they are current, nothing more is asked.
+    engine.send(ic_core::Command::SetQuiet(true));
+    engine.send(ic_core::Command::SetActive(false));
+    engine.send(ic_core::Command::SetActive(true));
+    engine.send(ic_core::Command::SetQuiet(false));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(asked(), 2);
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cluster_node_that_is_gone_reloads_the_node_list() {
+    let cluster = cluster();
+    let master = node(&cluster, "master-01").await;
+    let mut engine = Launch {
+        environment: environment_of(&[&master]),
+        tuning: Tuning {
+            status_interval: Duration::from_millis(100),
+            ..tuning()
+        },
+        ..Launch::new(&master)
+    }
+    .start();
+    connected_to(&mut engine, |_| true).await;
+    engine
+        .snapshot(|snapshot| snapshot.cluster_nodes().len() == 3)
+        .await;
+    // master-02 leaves the cluster unannounced: Icinga answers the next
+    // node query naming it with a 404 for all of them.
+    let control = master.control();
+    control.remove_endpoint("master-02").unwrap();
+    control.set_endpoint_connected("sat-ams-01", false).unwrap();
+    let snapshot = engine
+        .snapshot(|snapshot| {
+            snapshot
+                .cluster_nodes()
+                .iter()
+                .any(|node| node.name == "sat-ams-01" && node.state == NodeState::Disconnected)
+        })
+        .await;
+    let names: Vec<String> = snapshot
+        .cluster_nodes()
+        .into_iter()
+        .map(|node| node.name)
+        .collect();
+    assert_eq!(names, ["master-01", "sat-ams-01"]);
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_single_node_costs_no_poll_when_it_comes_on_screen() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let mut engine = Launch {
+        tuning: Tuning {
+            status_interval: Duration::from_secs(3),
+            ..tuning()
+        },
+        ..Launch::new(&server)
+    }
+    .start();
+    engine.connected().await;
+    // No other node to ask about: switching back and forth asks nothing.
+    let control = server.control();
+    control.clear_requests();
+    for _ in 0..3 {
+        engine.send(ic_core::Command::SetActive(false));
+        engine.send(ic_core::Command::SetActive(true));
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let polls = control
+        .requests()
+        .iter()
+        .filter(|request| request.path.starts_with("/v1/status"))
+        .count();
+    assert_eq!(polls, 0);
+    engine.shutdown();
+}

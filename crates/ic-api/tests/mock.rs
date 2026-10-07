@@ -1,8 +1,9 @@
 //! The client against `ic-mock`, the in-process Icinga look-alike: pinning
 //! to its self-signed certificate, the tiered loads (lean and full) of the
 //! `prod_cluster` and `large` scenarios, objects by name with deleted names,
-//! actions with per-object results, the event stream (with a burst), and
-//! error mapping.
+//! actions with per-object results, the event stream (with a burst), the
+//! node list's and quiet mode's requests as Icinga answers them, and error
+//! mapping.
 //!
 //! The full-size `large` load is `#[ignore]`d (slow in debug builds):
 //! `cargo test -p ic-api --test mock -- --ignored --nocapture` prints its
@@ -212,6 +213,67 @@ async fn nodes_report_their_name_and_the_zone_tree() {
         Err(ApiError::Forbidden(_))
     ));
     assert!(matches!(client.zones().await, Err(ApiError::Forbidden(_))));
+}
+
+/// The node list's and quiet mode's requests, as the contract tests check
+/// them against Icinga (`real_icinga_node_states_and_counts`).
+#[tokio::test]
+async fn node_states_and_counts_like_icinga() {
+    let cluster = scenarios::prod_cluster();
+    let master = start(MockConfig {
+        tls: MockTls::CaSigned,
+        ..MockConfig::with_scenario(cluster.for_node("master-01"))
+    })
+    .await;
+    let client = root(&master);
+    assert_eq!(
+        client
+            .endpoint_states(&["master-01".to_owned(), "sat-ams-01".to_owned()])
+            .await
+            .unwrap(),
+        [
+            ("master-01".to_owned(), false),
+            ("sat-ams-01".to_owned(), true)
+        ]
+    );
+    let names = [
+        "sat-ams-01".to_owned(),
+        "icygui-no-such-endpoint".to_owned(),
+    ];
+    let raw = Raw::new(
+        &url(&master),
+        None,
+        master.ca_pem().unwrap().as_bytes(),
+        ROOT.0,
+        ROOT.1,
+    );
+    let answer = raw
+        .query(
+            "endpoints",
+            &json!({ "endpoints": names, "attrs": ["connected"] }),
+        )
+        .await;
+    assert_eq!(answer.status, 404, "{}", answer.json());
+    assert_eq!(answer.json()["status"], "No objects found.");
+    assert_eq!(client.endpoint_states(&names).await.unwrap(), []);
+
+    // `lab` has a service never checked: counted as unknown.
+    let lab = start(MockConfig::with_scenario(scenarios::lab())).await;
+    let client = root(&lab);
+    let hosts = client.hosts().await.unwrap();
+    assert_eq!(client.host_count().await.unwrap(), hosts.len());
+    let services = client.services(Detail::Lean).await.unwrap();
+    assert!(
+        services
+            .iter()
+            .any(|service| service.state == ServiceState::Pending)
+    );
+    let mut expected = [0_u32; 4];
+    for service in &services {
+        expected[ic_model::ObjectCounts::service_index(service.state)] += 1;
+    }
+    let counts = client.status().await.unwrap().counts;
+    assert_eq!(counts.service_states(), expected, "{counts:?}");
 }
 
 // --- Tiered loading ----------------------------------------------------------

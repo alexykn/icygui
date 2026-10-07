@@ -75,6 +75,9 @@ use stream::ReaderMsg;
 use sync::Restarts;
 use watchdog::Watchdog;
 
+/// The cluster nodes a status poll asked for, and their states.
+type NodeStates = (Vec<String>, Result<Vec<(String, bool)>, ApiError>);
+
 /// Messages from the engine's background tasks.
 #[derive(Debug)]
 pub(crate) enum Internal {
@@ -99,7 +102,7 @@ pub(crate) enum Internal {
     Status {
         session: u64,
         result: Result<InstanceStatus, ApiError>,
-        nodes: Option<Result<Vec<(String, bool)>, ApiError>>,
+        nodes: Option<NodeStates>,
     },
     /// A re-query round's answers.
     Fetched { session: u64, answers: Box<Answers> },
@@ -286,6 +289,9 @@ struct Conn {
     /// [`NODES_QUIET_INTERVAL`] off screen); `None` without
     /// `objects/query/Endpoint`.
     next_nodes: Option<Instant>,
+    /// When a status poll last asked for them (before the first: the load
+    /// brought them, `live_since`).
+    nodes_asked: Option<Instant>,
     /// The API user may read `Notification` objects (cleared when Icinga
     /// refuses them after all).
     notifications_allowed: bool,
@@ -1070,6 +1076,7 @@ impl Engine {
             status_in_flight: false,
             status_sent: Instant::now(),
             next_nodes,
+            nodes_asked: None,
             notifications_allowed,
             notification_events,
             notifications_in_flight: false,
@@ -1500,6 +1507,7 @@ impl Engine {
         let nodes = match conn.next_nodes {
             Some(at) if at <= now && !names.is_empty() => {
                 conn.next_nodes = Some(now + quiet);
+                conn.nodes_asked = Some(now);
                 Some(names)
             }
             _ => None,
@@ -1510,7 +1518,10 @@ impl Engine {
         self.tasks.spawn(async move {
             let result = client.status().await;
             let nodes = match nodes {
-                Some(names) => Some(client.endpoint_states(&names).await),
+                Some(names) => {
+                    let states = client.endpoint_states(&names).await;
+                    Some((names, states))
+                }
                 None => None,
             };
             let _ = tx.send(Internal::Status {
@@ -1519,6 +1530,44 @@ impl Engine {
                 nodes,
             });
         });
+    }
+
+    /// The environment came on screen (switched to, or the window shown
+    /// again; not while quiet): the cluster nodes' states, asked for every
+    /// 5 minutes off screen, come with a status poll at once unless they
+    /// are younger than the on-screen interval, so the switcher's nodes are
+    /// current (ENV-01, ENV-06). At most one such poll per interval; none
+    /// while a load runs (it brings them) or without other nodes to ask
+    /// about.
+    pub(super) fn nodes_on_screen(&mut self) {
+        if self.phase != Phase::Live || self.node_names().is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let interval = self.tuning.status_interval;
+        let Some(conn) = &mut self.conn else {
+            return;
+        };
+        let Some(next) = &mut conn.next_nodes else {
+            return;
+        };
+        // The load that made the session live brought them too.
+        let asked = conn
+            .nodes_asked
+            .or_else(|| conn.live_since.map(|(at, _)| at));
+        match asked {
+            Some(asked) if now.saturating_duration_since(asked) < interval => {
+                *next = (*next).min(asked + interval);
+            }
+            _ => {
+                *next = now;
+                if !conn.status_in_flight
+                    && let Some(status) = &mut conn.next_status
+                {
+                    *status = now;
+                }
+            }
+        }
     }
 
     /// The cluster nodes whose states a status poll asks for: the masters
@@ -1537,8 +1586,9 @@ impl Engine {
             .collect()
     }
 
-    /// The cluster nodes' states came with a status poll.
-    fn on_node_states(&mut self, nodes: Result<Vec<(String, bool)>, ApiError>) {
+    /// The cluster nodes' states (of the nodes `asked` for) came with a
+    /// status poll.
+    fn on_node_states(&mut self, asked: &[String], nodes: Result<Vec<(String, bool)>, ApiError>) {
         let Some(conn) = &mut self.conn else {
             return;
         };
@@ -1546,20 +1596,26 @@ impl Engine {
             Ok(states) => {
                 let local = conn.node.name.clone();
                 self.store.set_endpoint_states(&states, &local);
+                if asked
+                    .iter()
+                    .any(|name| !states.iter().any(|(state, _)| state == name))
+                {
+                    // A node of the list is gone (Icinga then fails the
+                    // whole request: none came back): the list is reloaded,
+                    // and the next poll asks for the nodes it has.
+                    tracing::debug!("a cluster node is gone; reloading the endpoints");
+                    self.fetch.mark_lists(
+                        Lists {
+                            endpoints: true,
+                            ..Lists::default()
+                        },
+                        Instant::now(),
+                    );
+                }
             }
             Err(ApiError::Forbidden(message)) => {
                 tracing::warn!(%message, "the API user may not read the endpoints; not asking again");
                 conn.next_nodes = None;
-            }
-            Err(ApiError::NotFound(_)) => {
-                // A node of the list is gone: the list is reloaded.
-                self.fetch.mark_lists(
-                    Lists {
-                        endpoints: true,
-                        ..Lists::default()
-                    },
-                    Instant::now(),
-                );
             }
             Err(error) => tracing::debug!(%error, "the cluster nodes' states couldn't be read"),
         }
@@ -2075,7 +2131,9 @@ impl Engine {
     }
 
     /// `Command::SetActive`: an environment on screen gets its snapshots
-    /// at the normal pace, and what changed at once when it comes back.
+    /// at the normal pace, and what changed (and, unless quiet, its cluster
+    /// nodes' states: [`Engine::nodes_on_screen`]) at once when it comes
+    /// back.
     fn set_active(&mut self, active: bool) {
         if self.active == active {
             return;
@@ -2083,6 +2141,9 @@ impl Engine {
         tracing::debug!(environment = %self.spec.environment.name, active, "on screen");
         self.active = active;
         if active {
+            if !self.quiet() {
+                self.nodes_on_screen();
+            }
             self.publish_changes();
         }
     }
@@ -2185,8 +2246,8 @@ impl Engine {
                 result,
                 nodes,
             } if session == self.session => {
-                if let Some(nodes) = nodes {
-                    self.on_node_states(nodes);
+                if let Some((asked, nodes)) = nodes {
+                    self.on_node_states(&asked, nodes);
                 }
                 self.on_status(result);
             }

@@ -68,7 +68,11 @@ Facts learned from the real instance that the client must respect:
   `last_state_change`, `last_hard_state_change` and `previous_state_change`
   0. Services report `state` 3 (UNKNOWN, the default raw state); hosts map
   that default to `state` 1 (`Host::CalculateState`). The state means
-  nothing until the first check.
+  nothing until the first check, but `/v1/status/CIB` counts such a
+  service as unknown (`num_services_unknown`, and `num_services_pending`).
+- An endpoint's `connected` is `false` for the node that answers (its own
+  endpoint); quiet mode's event stream (every type but `CheckResult`)
+  opens with the `icygui` user's `events/*`.
 - A fresh start schedules every object's first check within
   `min(check_interval, 60 s)` (`Checkable::Start`).
 - A filter that fails for any object fails the whole query with

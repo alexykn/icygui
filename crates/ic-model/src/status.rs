@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::state::ServiceState;
 use crate::time::Timestamp;
 
 /// What the connected Icinga instance reports about itself.
@@ -45,8 +46,9 @@ pub struct InstanceStatus {
 /// Icinga's object counts by state (`/v1/status/CIB`, `num_hosts_*` and
 /// `num_services_*`). Every host is up, down or unreachable (Icinga counts
 /// an unreachable host there whatever its state); every service is ok,
-/// warning, critical or unknown (a pending one is counted in its state
-/// too, and in `services_pending`).
+/// warning, critical or unknown by its raw state, which is unknown until
+/// its first check (so a pending service is counted as unknown, and in
+/// `services_pending`; see [`ObjectCounts::service_index`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObjectCounts {
     /// Reachable hosts that are up.
@@ -99,5 +101,35 @@ impl ObjectCounts {
             self.services_critical,
             self.services_unknown,
         ]
+    }
+
+    /// Where [`ObjectCounts::service_states`] counts a service in `state`
+    /// (0 ok, 1 warning, 2 critical, 3 unknown): Icinga counts by the raw
+    /// `state`, which is 3 (unknown) until the first check result, so a
+    /// pending service is counted as unknown (checked against Icinga 2.15
+    /// by the contract tests).
+    #[must_use]
+    pub fn service_index(state: ServiceState) -> usize {
+        match state {
+            ServiceState::Ok => 0,
+            ServiceState::Warning => 1,
+            ServiceState::Critical => 2,
+            ServiceState::Unknown | ServiceState::Pending => 3,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pending_service_counts_as_unknown_like_in_icinga() {
+        let index = ObjectCounts::service_index;
+        assert_eq!(index(ServiceState::Ok), 0);
+        assert_eq!(index(ServiceState::Warning), 1);
+        assert_eq!(index(ServiceState::Critical), 2);
+        assert_eq!(index(ServiceState::Unknown), 3);
+        assert_eq!(index(ServiceState::Pending), 3);
     }
 }

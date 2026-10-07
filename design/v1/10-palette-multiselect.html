@@ -4,7 +4,7 @@
 <body class="canvas">
 <div class="topic-head"><span class="topic-id">10</span><span class="topic-name">Selecting several objects in the palette</span></div>
 <p class="topic-intro">The palette learns to select several rows. <b>shift-↑↓</b> extends the selection from the cursor, <b>ctrl-a</b> (⌘A) selects every match, <b>ctrl-click</b> (⌘-click) toggles a row and <b>shift-click</b> selects a range. The selection is drawn as <b>one rounded outline per block of selected rows</b>, filled with the marked-row tint of the lists; the cursor keeps its selected-row background inside it. There are no check marks, and a row never moves when it is selected. Only object rows can be selected: hosts, services, and actions on them. Commands, dashboards and environments are skipped. The footer counts the selection and says what Enter does.
-<b>With a verb</b> (<i>ack db</i>), Enter opens ONE dialog for every selected object, listing each one. <b>Without a verb</b> (<i>db-prod</i>), Enter opens the selected hosts together, like Icinga Web's multi-host view: a summary row per host with its services under it, and the bulk action bar. That view can be pinned as a tab or saved as a dashboard. A verb query now lists <b>every</b> match (it used to stop at six), so the <i>all N matches</i> row, now first, counts objects you can see. Editing the query clears the selection. Esc clears the selection first and closes the palette on the second press.</p>
+<b>With a verb</b> (<i>ack db</i>), Enter opens ONE dialog for every selected object, listing each one. <b>Without a verb</b> (<i>db-prod</i>), Enter opens the selected hosts together, like Icinga Web's multi-host view: a summary row per host with its services under it, and a bulk action bar. The view arrives with nothing marked, and its bar offers <i>mark all problems</i>. A selection of services only opens the same way, grouped by their hosts. That view can be pinned as a tab or saved as a dashboard. A verb query now lists <b>every</b> match (it used to stop at six), so the <i>all N matches</i> row, now first, counts objects you can see. Editing the query clears the selection. Esc clears the selection first and closes the palette on the second press.</p>
 <div class="shots"></div>
 <script>
 // ---- data -------------------------------------------------------------
@@ -102,7 +102,7 @@ const noVerb = `<div class="pal-in"><span class="gt">›</span><span class="q">d
   <div class="pal-list"><div class="pal-sec">hosts</div>${withBlocks(hosts, [[0, 2]])}
   <div class="pal-sec">services</div>${svcRow('crit', 'postgres-replication', '03', 'critical')}${svcRow('warn', 'pg-connections', '03', 'warning')}${svcRow('warn', 'pg-bloat', '05', 'warning')}${svcRow('warn', 'load', '01', 'warning')}</div>
   <div class="pal-foot">${footSel(3, 'open together', '<span>⇥ open as a tab</span>')}</div>`;
-shot('10g', '10-multiselect-g-hosts', 'Without a verb: three hosts selected with shift-↓. Enter opens them together (next frame) and Tab opens them as a tab straight away. Hosts and services can be mixed: a selected service shows under its host in the combined view.',
+shot('10g', '10-multiselect-g-hosts', 'Without a verb: three hosts selected with shift-↓. Enter opens them together (next frame) and Tab opens them as a tab straight away. Hosts and services can be mixed: a selected service shows under its host in the combined view, and services alone are grouped by their hosts. Typing in the query clears the selection.',
   bg + pal(noVerb), { crops: PCROP('10-multiselect-g-zoom') });
 
 // ---- 10h: the combined view -----------------------------------------
@@ -118,23 +118,27 @@ function hostHeaderRow(h, { marked, sel } = {}) {
     <div class="text"><span class="t1"><span class="n" style="font-weight:600">${h.name}</span><span class="on">  ${h.addr}</span></span><span class="t2">${h.out}</span></div>
     <span class="tag" style="gap:12px;color:var(--t-muted)">${c}</span></div>`;
 }
-function combined({ marked = true, cursor = -1 } = {}) {
+// marked: 'hosts' | 'problems' | '' (the view arrives with nothing marked)
+function combined({ marked = '', cursor = -1 } = {}) {
   let out = '';
   H.forEach((h, i) => {
-    out += hostHeaderRow(h, { marked, sel: cursor === i });
-    out += h.svcs.map(([st, n, o, s]) => row([st, n, h.name, o, s], { cls: 'indent', hostRow: true })).join('');
+    out += hostHeaderRow(h, { marked: marked === 'hosts', sel: cursor === i });
+    out += h.svcs.map(([st, n, o, s]) => row([st, n, h.name, o, s], { cls: 'indent', hostRow: true, marked: marked === 'problems' })).join('');
     out += `<div style="display:flex;align-items:center;height:30px;padding:0 18px 0 76px;border-bottom:1px solid var(--bd-row);font-size:12px;color:var(--t-faint)">+ ${h.more} more ok</div>`;
   });
   return out;
 }
-const selBar = `<div class="selbar"><span class="n">3 hosts selected</span>${btn('acknowledge', { key: 'a', primary: true, dis: true })}${btn('downtime', { key: 'd' })}${btn('check now', { key: 'r' })}${btn('comment', { key: 'c' })}<span class="glyph">···</span><span class="grow"></span><span class="faint">clear</span>${kh('esc')}</div>`;
+// The bar is always there in this view, so nothing moves when rows get
+// marked: empty, it offers "mark all problems"; with marks, the actions.
+const selBarEmpty = `<div class="selbar"><span class="faint" style="margin-right:4px">nothing marked</span><span class="faint">x marks a row · ctrl-a marks all</span><span class="grow"></span>
+  ${btn('mark all problems', { icon: 'list-filter', hov: false })}<span class="faint">3 services</span></div>`;
+const selBarProblems = `<div class="selbar"><span class="n">3 services marked</span>${btn('acknowledge', { key: 'a', primary: true })}${btn('downtime', { key: 'd' })}${btn('check now', { key: 'r' })}${btn('comment', { key: 'c' })}<span class="glyph">···</span><span class="grow"></span><span class="faint">clear</span>${kh('esc')}</div>`;
 const multiHeader = (pinned) => `<div class="hbar"><span class="title">3 hosts</span><span class="subtitle">db-prod-01, db-prod-02, db-prod-03</span><span class="grow"></span>
   ${pinned ? '<span class="quiet" style="visibility:hidden">↗ pin as tab</span>' : '<span class="quiet">↗ pin as tab</span>'}${btn('save as dashboard', { icon: 'layout-dashboard' })}<span class="x">×</span></div>`;
-const tipAck = `<div class="tip" style="left:452px;top:806px">the hosts are up: mark their problems to acknowledge them</div>`;
-const multiMain = (pinned) => multiHeader(pinned) + summary([['crit', 1, 'critical'], ['warn', 2, 'warning'], ['ok', 60, 'ok']], '3 hosts · 63 services') + `<div class="list">${combined()}</div>` + selBar;
+const multiMain = (pinned, marked = '') => multiHeader(pinned) + summary([['crit', 1, 'critical'], ['warn', 2, 'warning'], ['ok', 60, 'ok']], '3 hosts · 63 services') + `<div class="list">${combined({ marked })}</div>` + (marked ? selBarProblems : selBarEmpty);
 const groupsNoActive = [{ name: 'overview', items: SIDEBAR_GROUPS[0].items }, SIDEBAR_GROUPS[1], SIDEBAR_GROUPS[2]];
-shot('10h', '10-multiselect-h-combined-view', 'Enter opened the three hosts together in the main area. Each host has a summary row (the grouped list’s header band: its state, address, uptime and service counts) with its problems under it, and its OK services folded into <i>+ N more ok</i>. The host rows are marked (the selection came along), so the bulk action bar under the list acts on the three hosts. Acknowledge is disabled because they are up; the tooltip says how to act on their problems instead (mark the rows). It is a normal list: x, shift-↓, ctrl-a and the pane work as everywhere.',
-  appWindow(multiMain(false), { groups: groupsNoActive, activeGroup: '' }) + tipAck);
+shot('10h', '10-multiselect-h-combined-view', 'Enter opened the three hosts together in the main area. Each host has a summary row (the grouped list’s header band: its state, address, uptime and service counts) with its problems under it, and its OK services folded into <i>+ N more ok</i>. The view arrives with <b>nothing marked</b>: the palette’s selection chose what to show, not what to act on. The bulk bar under the list is always there in this view, so nothing moves when rows get marked; empty, it offers <i>mark all problems</i> (the 3 services with an unhandled problem). It is a normal list: x, shift-↓, ctrl-a and the pane work as everywhere.',
+  appWindow(multiMain(false), { groups: groupsNoActive, activeGroup: '' }), { crops: '10-multiselect-h-zoom:300,640,1140,260' });
 
 // ---- 10i: pinned + save as dashboard ---------------------------------
 const openSec = `<div class="sb-group"><div class="sb-gh active"><span class="name">open</span></div>
@@ -149,5 +153,9 @@ const saveDlg = dialog({
 });
 shot('10i', '10-multiselect-i-pinned-and-save', 'Pinned: <i>↗ pin as tab</i> put the view in the sidebar’s <i>open</i> section, with the worst state’s dot, where it survives restarts. Its slot in the header stays, empty, so nothing moves. <i>save as dashboard</i> asks for a name and a group, and whether to keep these three hosts (a filter by name) or the query that found them (<i>match("db-prod*", host.name)</i>). The new dashboard is a grouped list by host, and the editor can change it later.',
   appWindow(multiMain(true), { groups: groupsNoActive, activeGroup: '', after: openSec }) + modal(560, saveDlg));
+
+// ---- 10j: mark all problems ------------------------------------------
+shot('10j', '10-multiselect-j-mark-problems', '<i>mark all problems</i> marked the three services with an unhandled problem (2px accent bar, marked tint), and the bar turned into the selection bar in place: the count, then acknowledge, downtime, check now, comment. A host that is down or unreachable would be marked too. Esc clears the marks and the bar goes back to <i>mark all problems</i>.',
+  appWindow(multiMain(false, 'problems'), { groups: groupsNoActive, activeGroup: '' }), { crops: '10-multiselect-j-zoom:300,100,1140,800' });
 </script>
 </body></html>

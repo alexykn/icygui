@@ -8,7 +8,7 @@
 <script>
 const L = { theme: 'light' };
 // ---- the sidebar: the cluster section and the groups (shared, v1.js) ------------
-const win = (main, { top = '', ...o } = {}) => clusterWindow(main, { cluster: top, ...o });
+const win = (main, { top = '', ...o } = {}) => clusterWindow(main, { cluster: top, on: 'both', ...o });
 
 // ---- threads (the same data as round 2) ---------------------------------------
 const SW_TEXT = 'Line card swap in slot 3 (CHG-4468): Po12 to edge-ams is down during the swap.';

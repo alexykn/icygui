@@ -1,7 +1,7 @@
 // Multi-view dashboards (topic 04), shared with the host-group grid (05).
 
-const DISPLAY_ICON = { list: 'list', grouped: 'rows-3', grid: 'layout-grid', tiles: 'chart-bar', stream: 'activity' };
-const DISPLAY_NAME = { list: 'list', grouped: 'grouped list', grid: 'host-group grid', tiles: 'summary tiles', stream: 'event stream' };
+const DISPLAY_ICON = { list: 'list', grouped: 'rows-3', grid: 'layout-grid', tiles: 'chart-bar', stream: 'activity', handling: 'users', downtimes: 'calendar-clock' };
+const DISPLAY_NAME = { list: 'list', grouped: 'grouped list', grid: 'host-group grid', tiles: 'summary tiles', stream: 'event stream', handling: 'handling', downtimes: 'downtimes' };
 
 // A view's header: collapse chevron, display icon, name, filter summary,
 // counts, its own sort and ···. focus: the accent bar of the view holding the
@@ -14,7 +14,8 @@ const DISPLAY_NAME = { list: 'list', grouped: 'grouped list', grid: 'host-group 
 // nothing handled the slot stays empty, so nothing moves. The counts are
 // unhandled counts; show and hide never change them.
 function viewHeader({ name, display = 'list', filter = '', counts = [], sort = 'severity ↓', collapsed = false, focus = false, picked = false, empty = '', live = false, sortOpen = false, more = true, handled = null }) {
-  const c = counts.map(([st, n]) => `<span>${dot(st, 'd7')}${n}</span>`).join('');
+  // a count is [state, n], or ready HTML for kinds that count other things (handling: ✓ 2)
+  const c = counts.map((x) => (typeof x === 'string' ? `<span>${x}</span>` : `<span>${dot(x[0], 'd7')}${x[1]}</span>`)).join('');
   const hasSlot = display === 'list' || display === 'grouped';
   const hs = !hasSlot ? '' : `<span class="hs">${handled && handled[0] ? `${handled[1] ? `${handled[0]} handled` : `${handled[0]} hidden`}<span class="faint"> · </span><span class="hbtn">${handled[1] ? 'hide' : 'show'}</span>` : ''}</span>`;
   return `<div class="vh${focus || picked ? ' focus' : ''}${picked ? ' picked' : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span>

@@ -725,3 +725,9 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .tml .mk.acc { color: var(--accent); }
 .tml .s .k { color: var(--t-muted); } .tml .s .k.acc { color: var(--accent); }
 .ghb.tlb .r { text-align: right; font-size: 11.5px; }
+
+/* round 4/5: "copy filter from", a small button in a fixed slot at the top
+ * right of every filter field (topics 09, 14) */
+.fx.cp { padding-right: 36px; }
+.fx .fxcp { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: var(--t-faint); }
+.fx .fxcp.on { background: var(--el-hover); color: var(--t); }

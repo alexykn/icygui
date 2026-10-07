@@ -218,19 +218,20 @@ function dte({ ic = 'calendar-clock', d1, au, meta = '', body, hov }) {
 
 // ---- the sidebar's cluster section (topic 14, round 3; used by 06 and 14):
 // fixed at the top, above the groups: the environment's handling, downtimes
-// and cluster health, each with its mark in the dot slot and its count in the
+// and events (the same views without a filter, round 5) and cluster health, each with its mark in the dot slot and its count in the
 // count slot (health: the cluster's state dot, no count).
 const sbIconSlot = (ic) => `<span class="faint" style="width:8px;display:flex;justify-content:center">${icon(ic, 11)}</span>`;
 const clusterSection = ({ active = '', health = 'ok' } = {}) => `<div class="sb-group" style="padding:0 0 6px;margin-bottom:6px;border-bottom:1px solid var(--bd-header)">
   <div class="sb-gh"><span class="name">cluster</span><span class="faint" style="font-size:12px">prod-cluster</span></div>
   <div class="sb-item${active === 'handling' ? ' active' : ''}">${sbIconSlot('users')}<span class="label">handling</span><span class="count">20</span></div>
   <div class="sb-item${active === 'downtimes' ? ' active' : ''}">${sbIconSlot('calendar-clock')}<span class="label">downtimes</span><span class="count">5</span></div>
+  <div class="sb-item${active === 'events' ? ' active' : ''}">${sbIconSlot('activity')}<span class="label">events</span><span class="count"></span></div>
   <div class="sb-item${active === 'health' ? ' active' : ''}">${dot(health)}<span class="label">health</span><span class="count"></span></div></div>`;
-// platform with its own handling and downtimes entries ('both', 'handling', 'none')
+// platform; with round 3's group entries ('both', 'handling'), or a plain folder ('none', round 5)
 const platformGroup = (on = 'both') => ({ name: 'platform', items: [...(on === 'both' || on === 'handling' ? [['handling', 'ic-users', 6]] : []), ...(on === 'both' ? [['downtimes', 'ic-calendar-clock', 3]] : []), ['network', 'unk', 5], ['kubernetes', 'crit', 9], ['certificates', 'warn', 1], ['all services', 'crit', 38]] });
 const clusterGroups = (on = 'both') => [SIDEBAR_GROUPS[0], platformGroup(on), SIDEBAR_GROUPS[2]];
 // a group's own entries carry an icon in the mark slot instead of a state dot
 const sbWithIcons = (html) => html.replace(/<span class="dot ic-([a-z-]+) *"><\/span>/g, (m, n) => sbIconSlot(n));
 // the main window with the cluster section and the round-3 groups
-const clusterWindow = (main, { cluster = '', health = 'ok', activeGroup = '', activeItem = '', on = 'both', menuOn = false, foot = {} } = {}) => sbWithIcons(appWindow(main, {
+const clusterWindow = (main, { cluster = '', health = 'ok', activeGroup = '', activeItem = '', on = 'none', menuOn = false, foot = {} } = {}) => sbWithIcons(appWindow(main, {
   groups: clusterGroups(on).map((g) => (menuOn && g.name === 'platform' ? { ...g, menu: true } : g)), activeGroup, activeItem, foot, before: clusterSection({ active: cluster, health }) }));

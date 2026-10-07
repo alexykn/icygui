@@ -59,7 +59,7 @@ per frame, plus `-zoom` crops of the details.
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
-| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r4-kinds.html` (round 4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 5 (+5 light) | model approved; round 4 (dashboard kinds, copy filter) for review |
+| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 4 (+1 zoom, +4 light) | model approved; round 5 (view kinds) for review |
 
 ---
 
@@ -360,6 +360,16 @@ and the settings of an event stream view.
 - **Counting:** every view whose objects are problems counts toward the
   sidebar's count and dot and toward notifications, each object once even
   when several views show it. A view header's counts are unhandled counts.
+  Handling, downtimes and event-stream views never count and never notify.
+- **View kinds (topic 14, round 5):** list, grouped list, host-group grid,
+  summary tiles, and, not counted, event stream, **handling** and
+  **downtimes** (topic 14's threads and timeline, each with its own filter).
+  *New dashboard* offers starting points (problems list, handling, downtimes,
+  events), each a dashboard with that one view.
+- **Sidebar rule:** a dashboard with a problem view shows its worst state's
+  dot and its problem count; a dashboard with only handling, downtimes or
+  event views shows its first view's kind icon and that view's count
+  (objects being handled, downtimes in effect, none for events).
 - **The view header** is 36px (the summary bar's height) on the pane surface
   (`pane_background`), so it reads as a band between views and differs from
   a grouped list's group-header bands (`row_header`, darker). In order: a
@@ -387,7 +397,8 @@ and the settings of an event stream view.
   has a drag handle, the display icon, the name, what it matches, and `···`
   (move up/down with alt-↑↓, duplicate, collapse by default, remove).
   `+ add view` asks for the display first (list, grouped list, host-group
-  grid, summary tiles, event stream); every view's filter field has *copy
+  grid, summary tiles, and under a faint *not counted in the sidebar, never
+  notify*: event stream, handling, downtimes); every view's filter field has *copy
   filter from* at its top right (topic 09, 14-r4-e); the new view starts from the
   dashboard's filter and goes under the selected one. Below a rule come the
   selected view's settings, which depend on its display (display and lists
@@ -465,9 +476,9 @@ with a satellite gone.
 
 **Decisions**
 
-- **One page per environment.** It is reached from *health*, the third
-  entry of the sidebar's fixed **cluster** section at the top (topic 14,
-  round 3: handling, downtimes, health), with the cluster's state dot in the
+- **One page per environment.** It is reached from *health*, the last
+  entry of the sidebar's fixed **cluster** section at the top (topic 14:
+  handling, downtimes, events, health), with the cluster's state dot in the
   mark slot and no count; also from a `cluster health` row under the nodes in
   the footer switcher (a heart-pulse icon in the mark slot, a faint `zones,
   queues, checks/min` hint) and *cluster health* in the palette. All open
@@ -1088,9 +1099,64 @@ notification centre; 13n the tray menu and a toast in light mode.
 
 ## 14 Comments, acknowledgements and downtimes
 
-### Round 4 (current): handling and downtimes as kinds of dashboard
+### Round 5 (current): handling and downtimes as view kinds
 
-**Status: for the user's review.** Replaces round 3's group scope.
+**Status: for the user's review.** Makes round 4 coherent with topic 04.
+
+**Shows** (`14-r5-view-kinds.html`, each dark and `-light`): 14-r5-a *new
+dashboard* with starting points; 14-r5-b 04's editor for *voip handling*,
+its handling view selected and *add view* open; 14-r5-c the *voip* dashboard
+with a problems list, a handling view and a downtimes timeline; 14-r5-d the
+sidebar rule (with a zoom of the sidebar), *voip downtimes* open.
+
+**Decisions**
+
+- **View kinds, not dashboard kinds.** *handling* and *downtimes* are kinds
+  of **view**, next to list, grouped list, host-group grid, summary tiles and
+  event stream. A dashboard is a stack of views, each with its own filter
+  (04); a full-page handling dashboard is a dashboard with one handling view
+  (with one view the view is the page: chips and threads, no view header).
+  Views of any kind combine freely (14-r5-c).
+- **Counting (04's rule, unchanged):** only problem views (list, grouped
+  list, host-group grid, summary tiles) count toward the sidebar number and
+  notifications. Handling, downtimes and event views never notify; the
+  editor says so in one faint line, and *add view* groups them under a faint
+  label *not counted in the sidebar, never notify*.
+- **New dashboard (14-r5-a):** the group's **+** and the footer's **+ → new
+  dashboard ›** offer **starting points**: *problems list*, *handling*,
+  *downtimes*, *events*, each with its icon and one line. Each creates a
+  dashboard with that one view and opens the editor; more views can be added
+  there. Nothing about the start is fixed.
+- **The editor is 04's (14-r5-b)** for every dashboard: the views list, *add
+  view* with the full list of kinds, the selected view's settings. A
+  handling view: display, filter (09's autocomplete, *copy filter from* at
+  its top right, live status `matches 214 objects · 4 being handled`),
+  *opens with* (the chip) and sort. A downtimes view: the same with *opens
+  as* `timeline | list` and *shows* (in effect, upcoming, from config).
+  There is no "kind" field and no notifications row for these views.
+- **In a multi-view dashboard (14-r5-c)** each view has 04's 36px header: a
+  handling view's header counts its kinds (✓ acknowledged, ● in downtime,
+  ● upcoming, comments; a click filters, like the chips of a one-view page)
+  and shows its sort; a downtimes view's header counts in effect and upcoming
+  and shows its mode.
+- **The sidebar rule (14-r5-d):** a dashboard with at least one problem view
+  shows its worst state's dot and its problem count, as today (*voip*, red,
+  3). A dashboard with **only** handling, downtimes or event views shows its
+  **first view's kind icon** in the mark slot and that view's count: handling
+  = objects being handled (*voip handling*, 4), downtimes = in effect now
+  (*voip downtimes*, 1), events = no count.
+- **The cluster section** is now **handling, downtimes, events, health**: the
+  first three are the same views without a filter (events with the activity
+  icon and no count); health keeps the cluster's state dot (topic 06).
+  Groups stay plain folders (round 4).
+- **Dropped from round 4:** the dashboard-kind editors (14-r4-b, 14-r4-c) and
+  their *kind* field; the kind menu (14-r4-a) becomes the starting points.
+  **Kept:** *copy filter from* (14-r4-e), on every view's filter field.
+
+### Round 4: handling and downtimes as kinds of dashboard
+
+**Status: superseded by round 5** (view kinds), except *copy filter from*
+(14-r4-e), which stays. Round 4 replaced round 3's group scope.
 
 **Shows** (`14-r4-kinds.html`, each dark and `-light`): 14-r4-a the *new
 dashboard* choice of kind (the group's + in dark, the footer's + in light);

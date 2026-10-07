@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>icygui</title>
+  <!-- App icon: Icinga's orange warning circle with an orbit and the design's
+       blue accent node, on a dark tile in the macOS icon grid (824 px tile,
+       100 px margin). Source of truth for every icon size: `cargo xtask icons`. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b3036"/>
+      <stop offset="1" stop-color="#15181b"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb35c"/>
+      <stop offset="1" stop-color="#f2862f"/>
+    </linearGradient>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="135%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000000" flood-opacity="0.38"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" filter="url(#shadow)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#ffffff" stroke-opacity="0.09" stroke-width="3"/>
+  <path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" fill="none" stroke="url(#orange)" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="512" cy="512" r="178" fill="url(#orange)"/>
+  <circle cx="718.5" cy="305.5" r="44" fill="#74ade8"/>
+</svg>

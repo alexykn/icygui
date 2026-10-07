@@ -1,0 +1,38 @@
+[package]
+name = "ic-core"
+description = "Application engine: environment runtime, sync engine, object store, commands."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+futures.workspace = true
+ic-api.workspace = true
+ic-config.workspace = true
+ic-filter.workspace = true
+ic-model.workspace = true
+ic-rules.workspace = true
+secrecy.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Jitter for reconnect backoff (no cryptographic needs).
+fastrand = "2.5.0"
+# Local wall-clock time for quiet hours (`SystemClock::local`).
+jiff = "0.2.37"
+# The local event log (SQLite, compiled in: no system library needed).
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
+# Unique event stream queue names (`icygui-<uuid>`).
+uuid = { version = "1.27.0", features = ["v4"] }
+
+[dev-dependencies]
+ic-mock = { path = "../ic-mock" }
+serde_json.workspace = true
+tempfile = "3.27.0"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "sync", "time", "macros"] }

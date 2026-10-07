@@ -1,0 +1,1 @@
+{"results":[{"child_downtimes":[{"legacy_id":2,"name":"behind-node-11!c9a89e28-a384-4263-aecf-bc8912ea0a9f","service_downtimes":[]}],"code":200,"legacy_id":1,"name":"k8s-node-11!e96da238-4aa1-4be6-9fb4-b2d9c7f706ca","service_downtimes":[],"status":"Successfully scheduled downtime 'k8s-node-11!e96da238-4aa1-4be6-9fb4-b2d9c7f706ca' for object 'k8s-node-11'."}]}

@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><meta name="design_doc_mode" content="canvas"><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"><style>body{margin:0;background:#0e0f12;font-family:'IBM Plex Sans',system-ui,sans-serif;color:#dcdfe4}a{color:#6fa3ef;text-decoration:none}a:hover{color:#9cc0f5}.dv-turn{padding:40px 44px 32px;scroll-margin-top:16px}.dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 8px}.dv-tid{font:600 10px 'JetBrains Mono',monospace;padding:3px 7px;background:#dcdfe4;color:#0e0f12;border-radius:4px}.dv-tname{font:600 14px/1.2 'IBM Plex Sans',sans-serif;color:#dcdfe4}.dv-opts{display:flex;flex-wrap:wrap;gap:48px;align-items:flex-start}.dv-opt{flex:none;display:flex;flex-direction:column;gap:10px;scroll-margin-top:16px}.dv-oid{font:600 10.5px 'JetBrains Mono',monospace;padding:3px 7px;background:#262a31;color:#dcdfe4;border-radius:5px}.dv-olabel{display:flex;align-items:baseline;gap:8px;font:400 12px/1.3 'IBM Plex Sans',sans-serif;color:#9097a3}.dv-opt:target .dv-oid{background:#6fa3ef;color:#0e0f12}.dv-next{margin:28px 0 0;font:12px/1.5 'IBM Plex Sans',sans-serif;color:#7a8190}</style></helmet>
+<section class="dv-turn" id="t1">
+<div class="dv-thd"><a class="dv-tid" href="#t1">1</a><span class="dv-tname">Icinga 2 desktop client: dense dark GPUI-style workspace, vertical tabs</span></div>
+<p style="margin:0 0 28px;max-width:860px;font-size:13px;line-height:1.6;color:#9097a3;text-wrap:pretty">Assumptions: talks to the Icinga 2 REST API (port 5665) directly, no Icinga Web needed. Dashboards and opened objects share one vertical tab rail, the way an editor puts files and panes together. Every dashlet is a saved API filter plus a visualization. Keyboard first: ⌘K palette, single-key actions on detail views. 1440×900 window, 13px base type, IBM Plex Sans + JetBrains Mono.</p>
+<div class="dv-opts">
+<sc-for list="{{ screens }}" as="s" hint-placeholder-count="4">
+<div class="dv-opt" id="{{ s.id }}">
+<div class="dv-olabel"><a class="dv-oid" href="#{{ s.id }}">{{ s.id }}</a>{{ s.label }}</div>
+<div style="position:relative;width:1440px;height:900px;background:#15171b;border:1px solid #2f333b;border-radius:10px;overflow:hidden;display:grid;grid-template-rows:38px minmax(0,1fr) 26px;box-shadow:0 30px 80px rgba(0,0,0,.5)">
+
+<div style="display:flex;align-items:center;gap:14px;padding:0 12px;background:#1a1d22;border-bottom:1px solid #2a2e35">
+<div style="display:flex;gap:8px"><span style="width:12px;height:12px;border-radius:50%;background:#3a3f48"></span><span style="width:12px;height:12px;border-radius:50%;background:#3a3f48"></span><span style="width:12px;height:12px;border-radius:50%;background:#3a3f48"></span></div>
+<div style="display:flex;align-items:center;gap:8px;padding:4px 9px;border-radius:6px;background:#20242a;font-size:12px;color:#dcdfe4"><span style="width:7px;height:7px;border-radius:2px;background:#6fa3ef;transform:rotate(45deg)"></span>prod-cluster<span style="color:#626875">▾</span></div>
+<div style="font-size:12px;color:#626875;display:flex;gap:6px"><span>{{ s.crumb1 }}</span><span>/</span><span style="color:#9097a3">{{ s.crumb2 }}</span></div>
+<div style="flex:1"></div>
+<div style="width:420px;height:26px;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid #2a2e35;border-radius:6px;background:#15171b;color:#626875;font-size:12px"><span style="flex:1">Search hosts, services, commands…</span><span style="font:500 10.5px 'JetBrains Mono',monospace;padding:1px 5px;border:1px solid #343943;border-radius:4px;color:#9097a3">⌘K</span></div>
+<div style="flex:1"></div>
+<div style="display:flex;align-items:center;gap:6px;font:500 11px 'JetBrains Mono',monospace;color:#9097a3"><span style="width:6px;height:6px;border-radius:50%;background:#5bc28a"></span>icinga-master-01:5665</div>
+<div style="width:24px;height:24px;border-radius:50%;background:#2b3a52;color:#9cc0f5;display:grid;place-items:center;font-size:10.5px;font-weight:600">MK</div>
+</div>
+
+<div style="display:grid;grid-template-columns:236px minmax(0,1fr);min-height:0">
+<div style="background:#1a1d22;border-right:1px solid #2a2e35;display:flex;flex-direction:column;min-height:0;padding:10px 8px;gap:2px">
+<div style="height:28px;display:flex;align-items:center;gap:8px;padding:0 9px;margin:0 0 8px;border:1px solid #2a2e35;border-radius:6px;background:#15171b;font-size:12px;color:#626875"><span style="flex:1">Filter tabs</span><span style="font:10.5px 'JetBrains Mono',monospace">⌘P</span></div>
+<div style="display:flex;align-items:center;padding:6px 10px 4px;font:600 10.5px 'IBM Plex Sans',sans-serif;letter-spacing:.08em;color:#626875"><span style="flex:1">DASHBOARDS</span><span>+</span></div>
+<sc-for list="{{ s.dashTabs }}" as="t" hint-placeholder-count="6">
+<div style="display:flex;align-items:center;gap:9px;height:29px;padding:0 8px 0 10px;border-radius:6px;background:{{ t.bg }};color:{{ t.fg }};font-size:13px">
+<span style="width:7px;height:7px;border-radius:50%;background:{{ t.dot }};flex:none"></span>
+<span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.label }}</span>
+<span style="font:500 11px 'JetBrains Mono',monospace;color:{{ t.countColor }}">{{ t.count }}</span>
+</div>
+</sc-for>
+<div style="display:flex;align-items:center;padding:16px 10px 4px;font:600 10.5px 'IBM Plex Sans',sans-serif;letter-spacing:.08em;color:#626875"><span style="flex:1">OPEN</span><span style="font-weight:400;letter-spacing:0">close all</span></div>
+<sc-for list="{{ s.openTabs }}" as="t" hint-placeholder-count="3">
+<div style="display:flex;align-items:center;gap:9px;height:40px;padding:0 8px 0 10px;border-radius:6px;background:{{ t.bg }};color:{{ t.fg }}">
+<span style="width:7px;height:7px;border-radius:50%;background:{{ t.dot }};flex:none"></span>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px"><span style="font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.label }}</span><span style="font:400 10.5px 'JetBrains Mono',monospace;color:#626875;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.sub }}</span></div>
+<span style="font-size:13px;color:{{ t.closeColor }}">×</span>
+</div>
+</sc-for>
+<div style="flex:1"></div>
+<div style="display:flex;align-items:center;gap:8px;height:30px;padding:0 10px;border-radius:6px;color:#9097a3;font-size:12.5px;border:1px dashed #343943"><span style="flex:1">New dashboard</span><span style="font:10.5px 'JetBrains Mono',monospace;color:#626875">⌘N</span></div>
+</div>
+
+<div style="min-width:0;min-height:0;display:flex;flex-direction:column;background:#15171b">
+
+<sc-if value="{{ s.showDash }}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;align-items:center;gap:14px;height:56px;padding:0 20px;border-bottom:1px solid #2a2e35;flex:none">
+<div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:16px;font-weight:600;color:#eef0f3">Production</span><span style="font:400 11px 'JetBrains Mono',monospace;color:#626875">host.vars.env = "prod" · 412 hosts · 3,104 services</span></div>
+<div style="flex:1"></div>
+<div style="display:flex;border:1px solid #2a2e35;border-radius:6px;overflow:hidden;font-size:12px"><span style="padding:5px 10px;background:#262a31;color:#dcdfe4">Unhandled</span><span style="padding:5px 10px;color:#9097a3">All</span></div>
+<div style="display:flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid #2a2e35;border-radius:6px;font-size:12px;color:#9097a3"><span style="width:6px;height:6px;border-radius:50%;background:#5bc28a"></span>Live · 10s</div>
+<div style="padding:5px 12px;border-radius:6px;background:#262a31;font-size:12px;color:#dcdfe4">Edit layout</div>
+</div>
+<div style="flex:1;min-height:0;padding:16px 20px;display:grid;grid-template-columns:minmax(0,1fr) 380px;grid-template-rows:auto auto minmax(0,1fr);gap:14px">
+
+<div style="grid-column:1 / 3;display:grid;grid-template-columns:1fr 1.5fr;gap:14px">
+<div style="background:#1a1d22;border:1px solid #2a2e35;border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;justify-content:space-between;font-size:12px;color:#9097a3"><span style="font-weight:600;color:#dcdfe4">Hosts</span><span style="font-family:'JetBrains Mono',monospace">412</span></div>
+<div style="display:flex;height:6px;border-radius:3px;overflow:hidden;gap:2px"><span style="flex:404;background:#5bc28a"></span><span style="flex:6;background:#ec6a5e"></span><span style="flex:8;background:#b38ae6"></span></div>
+<div style="display:flex;gap:24px">
+<div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 22px 'JetBrains Mono',monospace;color:#5bc28a">404</span><span style="font-size:11px;color:#626875">Up</span></div>
+<div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 22px 'JetBrains Mono',monospace;color:#ec6a5e">3</span><span style="font-size:11px;color:#626875">Down · 1 handled</span></div>
+<div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 22px 'JetBrains Mono',monospace;color:#b38ae6">5</span><span style="font-size:11px;color:#626875">Unreachable</span></div>
+</div>
+</div>
+<div style="background:#1a1d22;border:1px solid #2a2e35;border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;justify-content:space-between;font-size:12px;color:#9097a3"><span style="font-weight:600;color:#dcdfe4">Services</span><span style="font-family:'JetBrains Mono',monospace">3,104</span></div>
+<div style="display:flex;height:6px;border-radius:3px;overflow:hidden;gap:2px"><span style="flex:3021;background:#5bc28a"></span><span style="flex:41;background:#e5b84b"></span><span style="flex:18;background:#ec6a5e"></span><span style="flex:24;background:#b38ae6"></span></div>
+<div style="display:flex;gap:28px">
+<div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 22px 'JetBrains Mono',monospace;color:#5bc28a">3,021</span><span style="font-size:11px;color:#626875">OK</span></div>
+<div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 22px 'JetBrains Mono',monospace;color:#ec6a5e">18</span><span style="font-size:11px;color:#626875">Critical · 12 unhandled</span></div>
+<div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 22px 'JetBrains Mono',monospace;color:#e5b84b">41</span><span style="font-size:11px;color:#626875">Warning · 29 unhandled</span></div>
+<div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 22px 'JetBrains Mono',monospace;color:#b38ae6">24</span><span style="font-size:11px;color:#626875">Unknown</span></div>
+</div>
+</div>
+</div>
+
+<div style="grid-row:2 / 4;background:#1a1d22;border:1px solid #2a2e35;border-radius:8px;display:flex;flex-direction:column;min-height:0;overflow:hidden">
+<div style="display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;border-bottom:1px solid #2a2e35;flex:none"><span style="font-size:12.5px;font-weight:600">Unhandled service problems</span><span style="font:500 11px 'JetBrains Mono',monospace;color:#626875">41</span><span style="flex:1"></span><span style="font:400 11px 'JetBrains Mono',monospace;color:#626875">sort: severity ↓</span></div>
+<div style="display:grid;grid-template-columns:78px 128px 150px minmax(0,1fr) 58px 40px;gap:12px;padding:7px 14px;font:600 10.5px 'IBM Plex Sans',sans-serif;letter-spacing:.06em;color:#626875;border-bottom:1px solid #22262c"><span>STATE</span><span>HOST</span><span>SERVICE</span><span>OUTPUT</span><span>SINCE</span><span>TRY</span></div>
+<sc-for list="{{ problems }}" as="r" hint-placeholder-count="9">
+<div style="display:grid;grid-template-columns:78px 128px 150px minmax(0,1fr) 58px 40px;gap:12px;align-items:center;height:33px;padding:0 14px;border-bottom:1px solid #1f2328;background:{{ r.rowBg }};font-size:12.5px">
+<span><span style="font:600 10.5px 'JetBrains Mono',monospace;padding:2px 6px;border-radius:4px;color:{{ r.c }};background:{{ r.cbg }}">{{ r.state }}</span></span>
+<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#dcdfe4">{{ r.host }}</span>
+<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#dcdfe4">{{ r.service }}</span>
+<span style="font:400 11.5px 'JetBrains Mono',monospace;color:#9097a3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.output }}</span>
+<span style="font:400 11.5px 'JetBrains Mono',monospace;color:#9097a3">{{ r.dur }}</span>
+<span style="font:400 11.5px 'JetBrains Mono',monospace;color:#626875">{{ r.att }}</span>
+</div>
+</sc-for>
+<div style="padding:12px 14px 6px;display:flex;align-items:center;gap:10px;font-size:12px;color:#9097a3;border-top:1px solid #2a2e35;margin-top:auto"><span style="font-weight:600;color:#dcdfe4">Hostgroups</span><span style="font:11px 'JetBrains Mono',monospace;color:#626875">1 square = 1 host</span></div>
+<div style="padding:4px 14px 14px;display:grid;grid-template-columns:1fr 1fr;gap:8px 28px">
+<sc-for list="{{ matrix }}" as="g" hint-placeholder-count="8">
+<div style="display:grid;grid-template-columns:112px minmax(0,1fr);align-items:center;gap:10px">
+<span style="font:400 11.5px 'JetBrains Mono',monospace;color:#9097a3;white-space:nowrap">{{ g.name }}</span>
+<div style="display:flex;flex-wrap:wrap;gap:3px"><sc-for list="{{ g.cells }}" as="c"><span style="width:10px;height:10px;border-radius:2px;background:{{ c }}"></span></sc-for></div>
+</div>
+</sc-for>
+</div>
+</div>
+
+<div style="background:#1a1d22;border:1px solid #2a2e35;border-radius:8px;overflow:hidden">
+<div style="display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;border-bottom:1px solid #2a2e35"><span style="font-size:12.5px;font-weight:600">Host problems</span><span style="font:500 11px 'JetBrains Mono',monospace;color:#626875">8</span></div>
+<sc-for list="{{ hostProblems }}" as="h" hint-placeholder-count="4">
+<div style="display:flex;align-items:center;gap:10px;min-height:38px;padding:5px 14px;border-bottom:1px solid #1f2328">
+<span style="font:600 10.5px 'JetBrains Mono',monospace;padding:2px 6px;border-radius:4px;color:{{ h.c }};background:{{ h.cbg }};min-width:40px;text-align:center">{{ h.state }}</span>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column"><span style="font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ h.host }}</span><span style="font:400 10.5px 'JetBrains Mono',monospace;color:#626875;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ h.sub }}</span></div>
+<span style="font:400 11px 'JetBrains Mono',monospace;color:#9097a3">{{ h.dur }}</span>
+</div>
+</sc-for>
+</div>
+
+<div style="background:#1a1d22;border:1px solid #2a2e35;border-radius:8px;overflow:hidden;min-height:0">
+<div style="display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;border-bottom:1px solid #2a2e35"><span style="font-size:12.5px;font-weight:600">Event stream</span><span style="flex:1"></span><span style="width:6px;height:6px;border-radius:50%;background:#5bc28a"></span></div>
+<div style="padding:6px 0">
+<sc-for list="{{ events }}" as="e" hint-placeholder-count="6">
+<div style="display:grid;grid-template-columns:62px 8px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 14px">
+<span style="font:400 11px 'JetBrains Mono',monospace;color:#626875">{{ e.t }}</span>
+<span style="width:7px;height:7px;border-radius:50%;background:{{ e.c }}"></span>
+<div style="display:flex;flex-direction:column;gap:1px;min-width:0"><span style="font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:{{ e.c }};font-weight:600">{{ e.kind }}</span> {{ e.obj }}</span><span style="font-size:11.5px;color:#626875;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.note }}</span></div>
+</div>
+</sc-for>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ s.isDetail }}" hint-placeholder-val="{{ false }}">
+<div style="padding:18px 24px 0;border-bottom:1px solid #2a2e35;display:flex;flex-direction:column;gap:14px;flex:none">
+<div style="display:flex;align-items:flex-start;gap:14px">
+<div style="padding:6px 10px;border-radius:6px;background:rgba(236,106,94,.14);color:#ec6a5e;font:600 12px 'JetBrains Mono',monospace;letter-spacing:.04em">CRITICAL</div>
+<div style="display:flex;flex-direction:column;gap:4px;flex:1">
+<span style="font-size:20px;font-weight:600;color:#eef0f3">postgres-replication</span>
+<span style="font-size:12.5px;color:#9097a3">on <a href="#1b">db-prod-03</a> · for 14m 22s · attempt 3/3 · hard state · not acknowledged</span>
+</div>
+<div style="display:flex;gap:8px">
+<sc-for list="{{ actions }}" as="a" hint-placeholder-count="4">
+<div style="display:flex;align-items:center;gap:8px;height:30px;padding:0 10px;border-radius:6px;background:{{ a.bg }};color:{{ a.fg }};font-size:12.5px;border:1px solid {{ a.bd }}">{{ a.label }}<span style="font:500 10.5px 'JetBrains Mono',monospace;padding:0 4px;border-radius:3px;background:rgba(255,255,255,.08);color:{{ a.kc }}">{{ a.key }}</span></div>
+</sc-for>
+</div>
+</div>
+<div style="display:flex;gap:20px;font-size:12.5px">
+<sc-for list="{{ subTabs }}" as="st" hint-placeholder-count="6">
+<span style="padding:0 0 10px;color:{{ st.fg }};border-bottom:2px solid {{ st.bd }}">{{ st.label }}</span>
+</sc-for>
+</div>
+</div>
+<div style="flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 340px">
+<div style="padding:20px 24px;display:flex;flex-direction:column;gap:22px;min-width:0">
+<div style="display:flex;flex-direction:column;gap:8px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font:600 10.5px 'IBM Plex Sans',sans-serif;letter-spacing:.08em;color:#626875">PLUGIN OUTPUT</span><span style="flex:1"></span><span style="font:400 11px 'JetBrains Mono',monospace;color:#626875">check_postgres · 1.82s · via sat-ams-01</span></div>
+<div style="background:#111316;border:1px solid #2a2e35;border-radius:8px;padding:14px 16px;font:400 12.5px/1.7 'JetBrains Mono',monospace;color:#c9cdd4;white-space:pre-wrap"><span style="color:#ec6a5e">POSTGRES_REPLICATION CRITICAL</span>: standby db-prod-03 lag 412s (crit &gt; 300s)
+  primary   db-prod-01  lsn 4A/9C21F0D8
+  standby   db-prod-03  lsn 4A/2E77A120  replay paused: <span style="color:#e5b84b">false</span>
+  wal_receiver  streaming · last msg 00:00:41 ago
+  slot      repl_db03   active · retained 1.8 GiB</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px">
+<span style="font:600 10.5px 'IBM Plex Sans',sans-serif;letter-spacing:.08em;color:#626875">PERFORMANCE DATA</span>
+<sc-for list="{{ perf }}" as="p" hint-placeholder-count="4">
+<div style="display:grid;grid-template-columns:200px minmax(0,1fr) 120px;gap:16px;align-items:center">
+<span style="font:400 12px 'JetBrains Mono',monospace;color:#9097a3">{{ p.label }}</span>
+<div style="position:relative;height:8px;border-radius:4px;background:#22262c">
+<span style="position:absolute;left:0;top:0;bottom:0;width:{{ p.pct }};border-radius:4px;background:{{ p.c }}"></span>
+<span style="position:absolute;top:-4px;bottom:-4px;width:2px;left:{{ p.warn }};background:#e5b84b;opacity:{{ p.tickOp }}"></span>
+<span style="position:absolute;top:-4px;bottom:-4px;width:2px;left:{{ p.crit }};background:#ec6a5e;opacity:{{ p.tickOp }}"></span>
+</div>
+<span style="font:500 12px 'JetBrains Mono',monospace;color:{{ p.vc }};text-align:right">{{ p.val }}</span>
+</div>
+</sc-for>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center"><span style="font:600 10.5px 'IBM Plex Sans',sans-serif;letter-spacing:.08em;color:#626875;flex:1">STATE HISTORY · 24H</span><span style="font:400 11px 'JetBrains Mono',monospace;color:#626875">availability 97.9%</span></div>
+<div style="display:flex;height:22px;border-radius:4px;overflow:hidden;gap:2px">
+<sc-for list="{{ history }}" as="h" hint-placeholder-count="7"><span style="flex:{{ h.w }};background:{{ h.c }}"></span></sc-for>
+</div>
+<div style="display:flex;justify-content:space-between;font:400 10.5px 'JetBrains Mono',monospace;color:#626875"><span>-24h</span><span>-18h</span><span>-12h</span><span>-6h</span><span>now</span></div>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<span style="font:600 10.5px 'IBM Plex Sans',sans-serif;letter-spacing:.08em;color:#626875">COMMENTS</span>
+<div style="display:flex;gap:12px;padding:12px 14px;background:#1a1d22;border:1px solid #2a2e35;border-radius:8px">
+<div style="width:26px;height:26px;border-radius:50%;background:#3a2f4d;color:#cbb0ef;display:grid;place-items:center;font-size:10.5px;font-weight:600;flex:none">JB</div>
+<div style="display:flex;flex-direction:column;gap:3px"><span style="font-size:12px;color:#9097a3"><span style="color:#dcdfe4;font-weight:500">j.berg</span> · 13:58 · expires 16:00</span><span style="font-size:13px;line-height:1.5">Failover drill on db-prod-01 at 15:00. Expect replication lag on 03 until the drill ends.</span></div>
+</div>
+</div>
+</div>
+<div style="border-left:1px solid #2a2e35;background:#181a1f;padding:20px;display:flex;flex-direction:column;gap:18px">
+<sc-for list="{{ details }}" as="d" hint-placeholder-count="3">
+<div style="display:flex;flex-direction:column;gap:8px">
+<span style="font:600 10.5px 'IBM Plex Sans',sans-serif;letter-spacing:.08em;color:#626875">{{ d.title }}</span>
+<sc-for list="{{ d.rows }}" as="kv">
+<div style="display:grid;grid-template-columns:120px minmax(0,1fr);gap:10px;font-size:12px"><span style="color:#9097a3">{{ kv.k }}</span><span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:{{ kv.c }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ kv.v }}</span></div>
+</sc-for>
+</div>
+</sc-for>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ s.isEdit }}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;align-items:center;gap:14px;height:56px;padding:0 20px;border-bottom:1px solid #2a2e35;background:#1b2230;flex:none">
+<div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:16px;font-weight:600;color:#eef0f3">Databases <span style="font-size:12px;font-weight:500;color:#6fa3ef;margin-left:6px">Editing layout</span></span><span style="font:400 11px 'JetBrains Mono',monospace;color:#626875">Drag to move · drag corner to resize · 12-column grid</span></div>
+<div style="flex:1"></div>
+<div style="padding:5px 12px;border-radius:6px;border:1px solid #343943;font-size:12px;color:#9097a3">Discard</div>
+<div style="padding:5px 12px;border-radius:6px;background:#6fa3ef;font-size:12px;font-weight:600;color:#0e1520">Save dashboard</div>
+</div>
+<div style="flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 372px">
+<div style="padding:16px 20px;display:grid;grid-template-columns:repeat(12,minmax(0,1fr));grid-template-rows:150px 260px minmax(0,1fr);gap:14px;background-image:radial-gradient(#262a31 1px,transparent 1px);background-size:16px 16px">
+<sc-for list="{{ editDashlets }}" as="d" hint-placeholder-count="4">
+<div style="grid-column:{{ d.col }};grid-row:{{ d.row }};position:relative;background:#1a1d22;border:1px {{ d.bs }} {{ d.bc }};border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:8px;box-shadow:{{ d.shadow }}">
+<div style="display:flex;align-items:center;gap:8px"><span style="font:13px 'JetBrains Mono',monospace;color:#626875;letter-spacing:-2px">⋮⋮</span><span style="font-size:12.5px;font-weight:600">{{ d.title }}</span><span style="flex:1"></span><span style="font:500 10.5px 'JetBrains Mono',monospace;color:#9097a3;padding:1px 6px;border-radius:4px;background:#262a31">{{ d.viz }}</span></div>
+<span style="font:400 11px 'JetBrains Mono',monospace;color:#626875;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ d.q }}</span>
+<div style="flex:1;display:flex;flex-direction:column;gap:7px;padding-top:4px">
+<sc-for list="{{ d.lines }}" as="l"><div style="display:flex;gap:8px;align-items:center"><span style="width:8px;height:8px;border-radius:2px;background:{{ l.c }}"></span><span style="height:6px;border-radius:3px;background:#262a31;width:{{ l.w }}"></span></div></sc-for>
+</div>
+<span style="position:absolute;right:4px;bottom:4px;width:10px;height:10px;border-right:2px solid {{ d.bc }};border-bottom:2px solid {{ d.bc }};border-radius:0 0 4px 0"></span>
+</div>
+</sc-for>
+<div style="grid-column:9 / 13;grid-row:2 / 4;border:1.5px dashed #343943;border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:#626875;font-size:12.5px"><span style="font-size:20px;color:#9097a3">+</span>Add dashlet<span style="font:10.5px 'JetBrains Mono',monospace">A</span></div>
+</div>
+<div style="border-left:1px solid #2a2e35;background:#1a1d22;padding:18px;display:flex;flex-direction:column;gap:18px;min-height:0">
+<div style="display:flex;align-items:center"><span style="font-size:13.5px;font-weight:600;flex:1">Dashlet</span><span style="font:400 11px 'JetBrains Mono',monospace;color:#626875">8 × 2 · col 1</span></div>
+<div style="display:flex;flex-direction:column;gap:6px"><span style="font-size:11.5px;color:#9097a3">Title</span><div style="height:30px;display:flex;align-items:center;padding:0 10px;border:1px solid #6fa3ef;border-radius:6px;background:#15171b;font-size:12.5px">Replication health<span style="width:1px;height:14px;background:#6fa3ef;margin-left:1px"></span></div></div>
+<div style="display:flex;flex-direction:column;gap:6px"><span style="font-size:11.5px;color:#9097a3">Source</span>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);border:1px solid #2a2e35;border-radius:6px;overflow:hidden;font-size:12px;text-align:center"><span style="padding:6px 0;background:#262a31;color:#dcdfe4">Services</span><span style="padding:6px 0;color:#9097a3">Hosts</span><span style="padding:6px 0;color:#9097a3">Events</span><span style="padding:6px 0;color:#9097a3">Downtimes</span></div></div>
+<div style="display:flex;flex-direction:column;gap:6px"><div style="display:flex;font-size:11.5px;color:#9097a3"><span style="flex:1">Filter</span><span style="font-family:'JetBrains Mono',monospace;color:#5bc28a">✓ valid · 12 matches</span></div>
+<div style="border:1px solid #2a2e35;border-radius:6px;background:#111316;padding:10px 12px;font:400 12px/1.75 'JetBrains Mono',monospace;color:#c9cdd4"><span style="color:#6fa3ef">host.vars.role</span> <span style="color:#9097a3">==</span> <span style="color:#5bc28a">"postgres"</span> <span style="color:#b38ae6">&amp;&amp;</span><br><span style="color:#6fa3ef">match</span>(<span style="color:#5bc28a">"*replication*"</span>, <span style="color:#6fa3ef">service.name</span>) <span style="color:#b38ae6">&amp;&amp;</span><br><span style="color:#6fa3ef">service.state</span> <span style="color:#9097a3">!=</span> <span style="color:#e5b84b">0</span></div></div>
+<div style="display:flex;flex-direction:column;gap:6px"><span style="font-size:11.5px;color:#9097a3">Visualization</span>
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
+<sc-for list="{{ vizOpts }}" as="v" hint-placeholder-count="6"><div style="padding:9px 10px;border-radius:6px;border:1px solid {{ v.bd }};background:{{ v.bg }};font-size:12px;color:{{ v.fg }}">{{ v.label }}</div></sc-for>
+</div></div>
+<div style="display:flex;flex-direction:column;gap:6px"><span style="font-size:11.5px;color:#9097a3">Columns</span>
+<div style="display:flex;flex-wrap:wrap;gap:6px">
+<sc-for list="{{ cols }}" as="c" hint-placeholder-count="6"><span style="padding:3px 8px;border-radius:4px;font:400 11.5px 'JetBrains Mono',monospace;background:{{ c.bg }};color:{{ c.fg }};border:1px solid {{ c.bd }}">{{ c.label }}</span></sc-for>
+</div></div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+<div style="display:flex;flex-direction:column;gap:6px"><span style="font-size:11.5px;color:#9097a3">Sort</span><div style="height:30px;display:flex;align-items:center;padding:0 10px;border:1px solid #2a2e35;border-radius:6px;font-size:12px">Severity ↓<span style="flex:1"></span><span style="color:#626875">▾</span></div></div>
+<div style="display:flex;flex-direction:column;gap:6px"><span style="font-size:11.5px;color:#9097a3">Refresh</span><div style="height:30px;display:flex;align-items:center;padding:0 10px;border:1px solid #2a2e35;border-radius:6px;font-size:12px">Live stream<span style="flex:1"></span><span style="color:#626875">▾</span></div></div>
+</div>
+<div style="flex:1"></div>
+<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#9097a3"><span style="width:28px;height:16px;border-radius:8px;background:#6fa3ef;position:relative"><span style="position:absolute;right:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff"></span></span>Show in tab badge count</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ s.isPalette }}" hint-placeholder-val="{{ false }}">
+<div style="position:absolute;inset:38px 0 26px 0;background:rgba(8,9,11,.55);display:flex;justify-content:center;padding-top:70px">
+<div style="width:640px;align-self:flex-start;background:#1d2026;border:1px solid #343943;border-radius:10px;box-shadow:0 24px 70px rgba(0,0,0,.6);overflow:hidden">
+<div style="display:flex;align-items:center;gap:10px;height:48px;padding:0 16px;border-bottom:1px solid #2a2e35"><span style="font:500 14px 'JetBrains Mono',monospace;color:#6fa3ef">›</span><span style="font-size:15px;color:#eef0f3">ack db-prod<span style="display:inline-block;width:1.5px;height:16px;background:#6fa3ef;vertical-align:-3px;margin-left:1px"></span></span><span style="flex:1"></span><span style="font:400 11px 'JetBrains Mono',monospace;color:#626875">14 results</span></div>
+<sc-for list="{{ palette }}" as="g" hint-placeholder-count="3">
+<div style="padding:6px 6px 4px">
+<div style="padding:6px 10px 4px;font:600 10.5px 'IBM Plex Sans',sans-serif;letter-spacing:.08em;color:#626875">{{ g.title }}</div>
+<sc-for list="{{ g.items }}" as="i">
+<div style="display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:6px;background:{{ i.bg }}">
+<span style="width:7px;height:7px;border-radius:50%;background:{{ i.dot }};flex:none"></span>
+<span style="font-size:13px;color:#dcdfe4">{{ i.label }}</span>
+<span style="font-size:12px;color:#626875;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ i.sub }}</span>
+<span style="font:500 10.5px 'JetBrains Mono',monospace;color:#9097a3">{{ i.key }}</span>
+</div>
+</sc-for>
+</div>
+</sc-for>
+<div style="display:flex;gap:18px;padding:10px 16px;border-top:1px solid #2a2e35;font:400 11px 'JetBrains Mono',monospace;color:#626875"><span>↑↓ navigate</span><span>↵ run</span><span>⇥ open as tab</span><span>⌘↵ run on all matches</span><span style="flex:1"></span><span>esc</span></div>
+</div>
+</div>
+</sc-if>
+
+</div>
+</div>
+
+<div style="display:flex;align-items:center;gap:16px;padding:0 12px;background:#1a1d22;border-top:1px solid #2a2e35;font:400 11px 'JetBrains Mono',monospace;color:#9097a3">
+<span style="display:flex;align-items:center;gap:6px"><span style="width:7px;height:7px;border-radius:50%;background:#ec6a5e"></span>12 critical</span>
+<span style="display:flex;align-items:center;gap:6px"><span style="width:7px;height:7px;border-radius:50%;background:#e5b84b"></span>29 warning</span>
+<span style="display:flex;align-items:center;gap:6px"><span style="width:7px;height:7px;border-radius:50%;background:#b38ae6"></span>24 unknown</span>
+<span style="display:flex;align-items:center;gap:6px"><span style="width:7px;height:7px;border-radius:50%;background:#ec6a5e"></span>3 hosts down</span>
+<span style="flex:1"></span>
+<span>event stream · 2s ago</span><span>1,284 hosts · 9,812 services</span><span>r2.14.3</span>
+</div>
+
+</div>
+</div>
+</sc-for>
+</div>
+<p class="dv-next">Try next: "Show an expanded/collapsed (icon-only) tab rail" · "Add a light theme for <a class="dv-oid" href="#1a">1a</a>" · "Design the acknowledge and downtime dialogs"</p>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  renderVals() {
+    const C = { crit: '#ec6a5e', warn: '#e5b84b', ok: '#5bc28a', unk: '#b38ae6', mute: '#626875' };
+    const a = (h) => h + '24';
+    const dashDefs = [
+      ['overview', 'Overview', C.crit, '12', C.crit],
+      ['prod', 'Production', C.crit, '41', C.crit],
+      ['net', 'Network', C.unk, '5', C.unk],
+      ['db', 'Databases', C.crit, '4', C.crit],
+      ['k8s', 'Kubernetes', C.warn, '7', C.warn],
+      ['oncall', 'My on-call', C.ok, '', C.mute],
+      ['certs', 'TLS certificates', C.warn, '3', C.warn],
+    ];
+    const openDefs = [
+      ['svc', 'postgres-replication', 'db-prod-03', C.crit],
+      ['host', 'web-edge-02', 'host · 23 services', C.warn],
+      ['list', 'Services · disk*', 'filter view · 186', C.ok],
+    ];
+    const tabs = (active) => ({
+      dashTabs: dashDefs.map(([k, label, dot, count, cc]) => ({ label, dot, count, countColor: cc, bg: k === active ? '#2a2f37' : 'transparent', fg: k === active ? '#f0f2f5' : '#b4bac4' })),
+      openTabs: openDefs.map(([k, label, sub, dot]) => ({ label, sub, dot, bg: k === active ? '#2a2f37' : 'transparent', fg: k === active ? '#f0f2f5' : '#b4bac4', closeColor: k === active ? '#9097a3' : 'transparent' })),
+    });
+    const screens = [
+      { id: '1a', label: 'Dashboard: Production (vertical tabs, dashlets)', crumb1: 'Dashboards', crumb2: 'Production', showDash: true, ...tabs('prod') },
+      { id: '1b', label: 'Service detail opened as a tab', crumb1: 'db-prod-03', crumb2: 'postgres-replication', isDetail: true, ...tabs('svc') },
+      { id: '1c', label: 'Custom dashboard: edit layout + dashlet inspector', crumb1: 'Dashboards', crumb2: 'Databases', isEdit: true, ...tabs('db') },
+      { id: '1d', label: '⌘K command palette: act on objects without leaving the dashboard', crumb1: 'Dashboards', crumb2: 'Production', showDash: true, isPalette: true, ...tabs('prod') },
+    ];
+    const P = (state, host, service, output, dur, att) => {
+      const c = { CRIT: C.crit, WARN: C.warn, UNKN: C.unk }[state];
+      return { state, host, service, output, dur, att, c, cbg: a(c), rowBg: 'transparent' };
+    };
+    const problems = [
+      P('CRIT', 'db-prod-03', 'postgres-replication', 'CRITICAL - standby lag 412s (> 300s)', '14m', '3/3'),
+      P('CRIT', 'mq-prod-01', 'rabbitmq-queue', 'CRITICAL - queue orders.retry depth 18,402', '6m', '3/3'),
+      P('CRIT', 'k8s-node-07', 'disk /var', 'DISK CRITICAL - /var 97% used (1.2 GiB free)', '38m', '5/5'),
+      P('CRIT', 'web-edge-02', 'http-tls', 'SSL CRITICAL - certificate expires in 2d', '2h 4m', '4/4'),
+      P('WARN', 'lb-prod-02', 'haproxy-backend', 'WARNING - backend api: 2/6 servers down', '9m', '3/3'),
+      P('WARN', 'api-gw-01', 'http-latency', 'WARNING - p95 1.84s (> 1.5s)', '21m', '3/3'),
+      P('WARN', 'db-prod-01', 'load', 'WARNING - load average 14.2, 12.8, 11.1', '1h 2m', '4/4'),
+      P('WARN', 'cache-02', 'redis-memory', 'WARNING - used_memory 81% of maxmemory', '3h', '3/3'),
+      P('UNKN', 'backup-01', 'borg-last-run', 'UNKNOWN - repository lock held by PID 4412', '52m', '3/3'),
+      P('UNKN', 'k8s-node-04', 'kubelet', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m', '2/3'),
+    ];
+    problems[0].rowBg = '#20242b';
+    const H = (state, host, sub, dur, c) => ({ state, host, sub, dur, c, cbg: a(c) });
+    const hostProblems = [
+      H('DOWN', 'k8s-node-11', '10.0.4.31 · PING 100% loss', '12m', C.crit),
+      H('DOWN', 'edge-fra-04', '185.22.10.4 · in downtime until 16:00', '1h 8m', C.crit),
+      H('DOWN', 'store-ams-02', '10.8.1.12 · PING 100% loss', '3m', C.crit),
+      H('UNRE', '5 hosts', 'behind parent sw-core-ams-02', '11m', C.unk),
+    ];
+    const events = [
+      { t: '14:32:08', c: C.crit, kind: 'CRITICAL', obj: 'postgres-replication', note: 'db-prod-03 · hard state after 3 attempts' },
+      { t: '14:30:51', c: '#6fa3ef', kind: 'ACK', obj: 'http-tls on web-edge-02', note: 'm.keller: renewal in progress' },
+      { t: '14:28:14', c: C.ok, kind: 'OK', obj: 'nginx-workers on web-edge-01', note: 'recovered after 6m' },
+      { t: '14:21:40', c: C.unk, kind: 'DOWNTIME', obj: 'edge-fra-04', note: 'a.ivanova · 2h · rack maintenance' },
+      { t: '14:19:02', c: C.warn, kind: 'WARNING', obj: 'http-latency on api-gw-01', note: 'soft → hard' },
+      { t: '14:12:33', c: C.ok, kind: 'OK', obj: 'disk / on k8s-node-03', note: 'recovered after 41m' },
+    ];
+    const groups = [['web-frontend', 24, { 5: C.warn }], ['api', 18, { 2: C.warn }], ['databases', 12, { 2: C.crit, 0: C.warn }], ['kubernetes', 40, { 6: C.crit, 10: C.crit, 3: C.unk, 21: C.warn }], ['queue', 8, { 0: C.crit }], ['storage', 16, { 9: C.unk }], ['edge-fra', 10, { 3: C.crit }], ['edge-ams', 12, { 1: C.crit, 7: C.unk, 8: C.unk, 9: C.unk, 10: C.unk, 11: C.unk }]];
+    const matrix = groups.map(([name, n, m]) => ({ name, cells: Array.from({ length: n }, (_, i) => m[i] || '#2f5c45') }));
+    const actions = [
+      { label: 'Acknowledge', key: 'A', bg: '#6fa3ef', fg: '#0e1520', bd: '#6fa3ef', kc: '#0e1520' },
+      { label: 'Downtime', key: 'D', bg: '#20242a', fg: '#dcdfe4', bd: '#2f333b', kc: '#9097a3' },
+      { label: 'Check now', key: 'R', bg: '#20242a', fg: '#dcdfe4', bd: '#2f333b', kc: '#9097a3' },
+      { label: 'Comment', key: 'C', bg: '#20242a', fg: '#dcdfe4', bd: '#2f333b', kc: '#9097a3' },
+    ];
+    const subTabs = ['Overview', 'History', 'Notifications · 3', 'Comments · 1', 'Dependencies', 'Config'].map((label, i) => ({ label, fg: i === 0 ? '#eef0f3' : '#9097a3', bd: i === 0 ? '#6fa3ef' : 'transparent' }));
+    const perf = [
+      { label: 'replication_lag', val: '412 s', pct: '68%', warn: '10%', crit: '50%', c: C.crit, vc: C.crit, tickOp: 1 },
+      { label: 'wal_retained', val: '1.8 GiB', pct: '45%', warn: '50%', crit: '75%', c: '#4a7fc9', vc: '#dcdfe4', tickOp: 1 },
+      { label: 'active_connections', val: '182 / 500', pct: '36%', warn: '80%', crit: '90%', c: '#4a7fc9', vc: '#dcdfe4', tickOp: 1 },
+      { label: 'standby_count', val: '1 of 2', pct: '50%', warn: '0%', crit: '0%', c: C.warn, vc: C.warn, tickOp: 0 },
+    ];
+    const history = [{ w: 22, c: C.ok }, { w: 1.5, c: C.warn }, { w: 38, c: C.ok }, { w: 2, c: C.crit }, { w: 27, c: C.ok }, { w: 4, c: C.warn }, { w: 5.5, c: C.crit }];
+    const W = '#dcdfe4';
+    const details = [
+      { title: 'CHECK', rows: [{ k: 'Command', v: 'check_postgres', c: W }, { k: 'Interval', v: '60s · retry 15s', c: W }, { k: 'Last check', v: '14:32:08 (12s ago)', c: W }, { k: 'Next check', v: 'in 48s', c: W }, { k: 'Endpoint', v: 'sat-ams-01', c: W }, { k: 'Latency', v: '0.004s', c: W }] },
+      { title: 'NOTIFICATIONS', rows: [{ k: 'Enabled', v: 'yes', c: C.ok }, { k: 'Last sent', v: '14:32:10 → dba-oncall', c: W }, { k: 'Escalation', v: 'in 16m → infra-lead', c: C.warn }, { k: 'Flapping', v: 'no (4.2%)', c: W }] },
+      { title: 'CUSTOM VARS', rows: [{ k: 'role', v: 'postgres', c: W }, { k: 'env', v: 'prod', c: W }, { k: 'pg_cluster', v: 'orders-main', c: W }, { k: 'lag_crit', v: '300', c: W }, { k: 'runbook', v: 'wiki/db/replication-lag', c: '#6fa3ef' }] },
+      { title: 'GROUPS', rows: [{ k: 'Service', v: 'databases, replication', c: W }, { k: 'Host', v: 'db-prod, linux-servers', c: W }] },
+    ];
+    const L = (arr) => arr.map(([c, w]) => ({ c, w }));
+    const editDashlets = [
+      { title: 'Replication health', viz: 'Table', q: 'host.vars.role == "postgres" && match("*replication*", …)', col: '1 / 9', row: '1 / 2', bs: 'solid', bc: '#6fa3ef', shadow: '0 0 0 3px rgba(111,163,239,.18)', lines: L([[C.crit, '70%'], [C.ok, '55%'], [C.ok, '62%']]) },
+      { title: 'DB hosts', viz: 'Summary', q: 'hostgroup: databases', col: '9 / 13', row: '1 / 2', bs: 'dashed', bc: '#343943', shadow: 'none', lines: L([[C.ok, '80%'], [C.crit, '20%']]) },
+      { title: 'Slow queries & locks', viz: 'List', q: 'match("pg_*lock*", service.name) || service.name == "pg_slow"', col: '1 / 6', row: '2 / 4', bs: 'dashed', bc: '#343943', shadow: 'none', lines: L([[C.warn, '75%'], [C.warn, '60%'], [C.ok, '68%'], [C.ok, '50%'], [C.ok, '72%'], [C.ok, '44%']]) },
+      { title: 'Backup runs', viz: 'Timeline', q: 'service.vars.kind == "backup"', col: '6 / 9', row: '2 / 4', bs: 'dashed', bc: '#343943', shadow: 'none', lines: L([[C.ok, '82%'], [C.unk, '64%'], [C.ok, '70%'], [C.ok, '58%']]) },
+    ];
+    const vizOpts = ['Table', 'List', 'Summary', 'Matrix', 'Timeline', 'Perf graph'].map((label, i) => ({ label, bg: i === 0 ? '#22304a' : '#15171b', bd: i === 0 ? '#6fa3ef' : '#2a2e35', fg: i === 0 ? '#eef0f3' : '#9097a3' }));
+    const cols = [['state', 1], ['host', 1], ['service', 1], ['output', 1], ['last_state_change', 1], ['attempt', 0], ['vars.pg_cluster', 0], ['+ add', 0]].map(([label, on]) => ({ label, bg: on ? '#262a31' : 'transparent', fg: on ? '#dcdfe4' : '#626875', bd: on ? '#343943' : '#2a2e35' }));
+    const I = (label, sub, dot, key, sel) => ({ label, sub, dot, key, bg: sel ? '#2a3140' : 'transparent' });
+    const palette = [
+      { title: 'COMMANDS', items: [I('Acknowledge problem', 'postgres-replication on db-prod-03', C.crit, '↵', 1), I('Acknowledge all problems', 'db-prod-03 · 2 services', C.crit, '', 0), I('Acknowledge all problems', 'db-prod-01 · 1 service', C.warn, '', 0)] },
+      { title: 'HOSTS', items: [I('db-prod-01', '10.0.2.11 · 1 warning', C.warn, '⇥', 0), I('db-prod-02', '10.0.2.12 · all ok', C.ok, '⇥', 0), I('db-prod-03', '10.0.2.13 · 1 critical', C.crit, '⇥', 0)] },
+      { title: 'DASHBOARDS', items: [I('Databases', '4 dashlets · 4 problems', C.crit, '⌘4', 0)] },
+    ];
+    return { screens, problems, hostProblems, events, matrix, actions, subTabs, perf, history, details, editDashlets, vizOpts, cols, palette };
+  }
+}
+</script>
+</body>
+</html>

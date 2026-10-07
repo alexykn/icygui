@@ -1,0 +1,12 @@
+# The workflows pin their actions to commits (with the version as a
+# comment); this keeps the pins current. Cargo dependencies are updated by
+# hand (`cargo update`), with cargo-deny checking every change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

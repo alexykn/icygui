@@ -1,0 +1,86 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "spikes", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+license = "MIT"
+
+[workspace.dependencies]
+# Internal crates
+ic-api = { path = "crates/ic-api" }
+ic-config = { path = "crates/ic-config" }
+ic-core = { path = "crates/ic-core" }
+ic-filter = { path = "crates/ic-filter" }
+ic-model = { path = "crates/ic-model" }
+ic-platform = { path = "crates/ic-platform" }
+ic-rules = { path = "crates/ic-rules" }
+ic-ui-kit = { path = "crates/ic-ui-kit" }
+
+# UI. gpui-component pins an exact GPUI snapshot (`gpui-pre`); we depend on the
+# same package under the name `gpui` so both share one set of GPUI types.
+# Bump the two together.
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "wayland", "x11"] }
+gpui-component = { version = "=0.7.1", default-features = false }
+
+# Platform
+# The `ksni` backend talks StatusNotifierItem over D-Bus directly, so Linux
+# needs no GTK main loop next to GPUI's.
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+
+# Shared
+anyhow = "1"
+futures = "0.3"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+secrecy = "0.10"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Lints shared by every crate (`[lints] workspace = true`). CI runs clippy with
+# `-D warnings`, so every `warn` here fails the build.
+[workspace.lints.rust]
+# Denied, not forbidden: ic-platform's macOS adapters opt back in per module
+# with `#[expect(unsafe_code, reason = "...")]` and SAFETY comments.
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+# Restriction lints we opt into.
+allow_attributes = "warn"                 # use #[expect] so stale exceptions fail
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+expect_used = "warn"
+panic = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+unwrap_used = "warn"
+
+# Pedantic lints that fight GPUI's builder style: every builder method would
+# need #[must_use], which adds noise without catching real mistakes there.
+must_use_candidate = "allow"
+
+[profile.dev]
+# GPUI is slow to build unoptimised and slow to run without optimisation;
+# optimise dependencies only so our own crates still compile quickly.
+debug = "limited"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

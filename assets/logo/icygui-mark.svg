@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="190 190 644 644" width="644" height="644">
+  <title>icygui</title>
+  <!-- The mark without its tile, for documentation and light surfaces. -->
+  <defs>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb35c"/>
+      <stop offset="1" stop-color="#f2862f"/>
+    </linearGradient>
+  </defs>
+  <path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" fill="none" stroke="url(#orange)" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="512" cy="512" r="178" fill="url(#orange)"/>
+  <circle cx="718.5" cy="305.5" r="44" fill="#74ade8"/>
+</svg>

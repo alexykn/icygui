@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only token: nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  check:
+    name: clippy + test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
+            libwayland-dev libfontconfig-dev libfreetype-dev \
+            dbus libglib2.0-bin  # ic-platform's tray, notification and keyring tests run on a private session bus
+
+      - name: Make sure the Metal toolchain is available
+        if: runner.os == 'macOS'
+        # Xcode 26 ships the Metal compiler as a separate download.
+        run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Report compiler messages as annotations
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
+      - name: Clippy (pedantic, warnings are errors)
+        env:
+          CARGO_TERM_COLOR: never   # plain lines, so the problem matcher can read them
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        env:
+          CARGO_TERM_COLOR: never   # plain lines, so the problem matcher can read failures
+        run: cargo test --workspace --locked
+
+      - name: Bundle the app (ad-hoc signed on macOS)
+        # Also checks that the binary prints the workspace version.
+        run: cargo xtask bundle
+
+      - name: --version and --help without a window (REL-06)
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            bin=target/bundle/icygui.app/Contents/MacOS/icygui
+          else
+            bin=target/bundle/icygui/bin/icygui
+          fi
+          test "$(env -u DISPLAY -u WAYLAND_DISPLAY "$bin" --version)" = "icygui $(cargo xtask version)"
+          env -u DISPLAY -u WAYLAND_DISPLAY "$bin" --help | grep -q -- --background
+
+      - name: Installer smoke test
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends desktop-file-utils
+          desktop-file-validate target/bundle/icygui/share/applications/*.desktop
+          shellcheck -s bash install.sh spikes/linux-headless.sh contract/run-icinga.sh
+          version=$(cargo xtask version)
+          release="$RUNNER_TEMP/release/v$version"
+          mkdir -p "$release"
+          tar --owner=0 --group=0 -czf "$release/icygui-$version-linux-x86_64.tar.gz" -C target/bundle icygui
+          (cd "$release" && sha256sum icygui-*.tar.gz > SHA256SUMS)
+          (cd "$RUNNER_TEMP/release" && python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 1
+          home=$(mktemp -d)
+          HOME="$home" ICYGUI_DOWNLOAD_URL=http://127.0.0.1:8765 ./install.sh --version "$version"
+          test -x "$home/.local/bin/icygui"
+          desktop="$home/.local/share/applications/io.github.alexykn.icygui.desktop"
+          grep -qx "Exec=$home/.local/bin/icygui" "$desktop"
+          desktop-file-validate "$desktop"
+          test -f "$home/.local/share/icons/hicolor/256x256/apps/io.github.alexykn.icygui.png"
+          HOME="$home" ./install.sh --uninstall --purge
+          test ! -e "$home/.local/bin/icygui"
+          test ! -e "$desktop"
+
+      - name: Background-mode spike (headless)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            xvfb mesa-vulkan-drivers dbus dbus-x11 dunst libglib2.0-bin
+          cargo build -p spikes --bin background --locked
+          spikes/linux-headless.sh
+
+  deny:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1

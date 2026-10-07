@@ -1,0 +1,1766 @@
+//! The environment editor (ENV-02): name, the cluster's HTTPS URLs in
+//! order of preference (add, reorder, remove and test each; ENV-12),
+//! password or client certificate login, author, and the TLS settings (CA
+//! file and system roots for every URL, a pinned SHA-256 and server-name
+//! override per URL); "Test connection" (ENV-04) with the node that
+//! answers and how much of the cluster it sees, the API user, Icinga's
+//! version and the permissions the client would miss, and trust on first
+//! use when the certificate isn't trusted (ENV-05).
+//!
+//! It shows as a dialog (add or edit; delete from there too) and, on the
+//! first run without environments, as the onboarding form in the main
+//! area (ENV-08). Passwords go from their masked field straight to the
+//! keychain when saved (`crate::live::Session::save_environment`); they
+//! are never stored in the settings or logged.
+
+use std::collections::BTreeMap;
+
+use gpui::{
+    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    PathPromptOptions, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+};
+use ic_config::{ApiUrl, Environment};
+use ic_core::{CertificateInfo, ClusterView, ConnectionFailure, ConnectionReport};
+use ic_model::Timestamp;
+use ic_ui_kit::input::{InputEvent, InputState};
+use ic_ui_kit::{
+    ActiveTheme as _, Banner, BannerTone, Button, DialogBody, Field, FieldTone, IconButton,
+    IconName, Link, Segmented, Switch, TextField, Theme, Tooltip,
+};
+use secrecy::SecretString;
+
+use super::certificate::{certificate_details, mismatch_warning};
+use super::form::{AuthKind, EnvironmentForm, FormField, UrlForm};
+use crate::app_state::environments::EnvironmentSaved;
+use crate::app_state::permissions;
+use crate::live;
+
+/// Where the editor is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EditorMode {
+    /// A dialog over the window (add, edit).
+    Dialog,
+    /// The main area on the first run without environments (ENV-08).
+    Onboarding,
+}
+
+/// What the editor asks the workspace to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EnvironmentEditorEvent {
+    /// Saved: close it.
+    Close,
+    /// *cancel*: close it, asking first when something changed.
+    Cancel,
+    /// Delete the edited environment (after asking).
+    Delete(String),
+}
+
+/// A URL's test and its answer.
+#[derive(Clone, Debug, PartialEq)]
+enum TestState {
+    Idle,
+    Running,
+    Done(Box<Result<ConnectionReport, ConnectionFailure>>),
+}
+
+/// The text fields that aren't per URL, by form field.
+struct Inputs {
+    name: Entity<InputState>,
+    username: Entity<InputState>,
+    password: Entity<InputState>,
+    cert_path: Entity<InputState>,
+    key_path: Entity<InputState>,
+    author: Entity<InputState>,
+    ca_file: Entity<InputState>,
+}
+
+/// Which text field of a URL row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UrlPart {
+    Url,
+    Pin,
+    ServerName,
+}
+
+/// One URL of the list: its text fields and its test (ENV-12).
+struct UrlRow {
+    /// Stable while the row lives (element ids, test answers), whatever
+    /// its position.
+    key: u64,
+    url: Entity<InputState>,
+    pinned: Entity<InputState>,
+    server_name: Entity<InputState>,
+    /// Counts edits: a test answer for an older version is dropped.
+    edits: u64,
+    test: TestState,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// The environment editor view.
+pub(crate) struct EnvironmentEditor {
+    mode: EditorMode,
+    form: EnvironmentForm,
+    /// The form as it opened: anything else is a change worth asking
+    /// about before it is dropped.
+    initial: EnvironmentForm,
+    inputs: Inputs,
+    /// The URL rows, in the form's order.
+    urls: Vec<UrlRow>,
+    /// The next row's key.
+    next_key: u64,
+    /// Problems are shown once saving was tried.
+    show_issues: bool,
+    /// The TLS settings are shown (they start folded away unless one is
+    /// set: most installations need none, or trust on first use).
+    show_tls: bool,
+    /// The tests running (one URL after the other).
+    test_task: Option<Task<()>>,
+    /// The dialog's scrolling body.
+    body_scroll: ScrollHandle,
+    save_task: Option<Task<()>>,
+    error: Option<String>,
+    /// Opened in `--demo`: an environment added here is real, but kept
+    /// only until the demo quits.
+    demo: bool,
+    focus_handle: FocusHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<EnvironmentEditorEvent> for EnvironmentEditor {}
+
+impl Focusable for EnvironmentEditor {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EnvironmentEditor {
+    /// An editor for `environment` (`None`: a new one).
+    pub(crate) fn new(
+        environment: Option<&Environment>,
+        mode: EditorMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let form = environment.map_or_else(EnvironmentForm::new_environment, EnvironmentForm::edit);
+        let password_placeholder = if form.is_new() {
+            "the API user's password"
+        } else {
+            "unchanged (kept in the keychain)"
+        };
+        let input = |value: &str,
+                     placeholder: &'static str,
+                     window: &mut Window,
+                     cx: &mut Context<Self>| {
+            let value = value.to_owned();
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .default_value(value)
+            })
+        };
+        let inputs = Inputs {
+            name: input(&form.name, "e.g. prod-cluster", window, cx),
+            username: input(&form.username, "e.g. icygui", window, cx),
+            password: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder(password_placeholder)
+            }),
+            cert_path: input(
+                &form.cert_path,
+                "e.g. ~/.config/icygui/client.crt",
+                window,
+                cx,
+            ),
+            key_path: input(
+                &form.key_path,
+                "e.g. ~/.config/icygui/client.key",
+                window,
+                cx,
+            ),
+            author: input(&form.author, author_placeholder(form.auth), window, cx),
+            ca_file: input(
+                &form.ca_file,
+                "e.g. /var/lib/icinga2/certs/ca.crt",
+                window,
+                cx,
+            ),
+        };
+        let mut subscriptions = Vec::new();
+        for (field, entity) in [
+            (FormField::Name, &inputs.name),
+            (FormField::Username, &inputs.username),
+            (FormField::Password, &inputs.password),
+            (FormField::CertPath, &inputs.cert_path),
+            (FormField::KeyPath, &inputs.key_path),
+            (FormField::Author, &inputs.author),
+            (FormField::CaFile, &inputs.ca_file),
+        ] {
+            subscriptions.push(cx.subscribe_in(
+                entity,
+                window,
+                move |this: &mut Self, input, event: &InputEvent, _, cx| match event {
+                    InputEvent::Change => {
+                        let value = input.read(cx).value().to_string();
+                        this.set_field(field, value);
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { .. } => this.save(cx),
+                    InputEvent::Focus | InputEvent::Blur => {}
+                },
+            ));
+        }
+        inputs.name.update(cx, |name, cx| name.focus(window, cx));
+        let show_tls = !form.ca_file.trim().is_empty()
+            || form
+                .urls
+                .iter()
+                .any(|url| !url.pinned.trim().is_empty() || !url.server_name.trim().is_empty())
+            || !form.use_system_roots;
+        let rows = form.urls.clone();
+        let mut editor = Self {
+            mode,
+            initial: form.clone(),
+            form,
+            inputs,
+            urls: Vec::new(),
+            next_key: 0,
+            show_issues: false,
+            show_tls,
+            test_task: None,
+            body_scroll: ScrollHandle::new(),
+            save_task: None,
+            error: None,
+            demo: false,
+            focus_handle: cx.focus_handle(),
+            _subscriptions: subscriptions,
+        };
+        for row in &rows {
+            let row = editor.new_row(row, window, cx);
+            editor.urls.push(row);
+        }
+        editor.initial = editor.form.clone();
+        editor
+    }
+
+    /// The text fields of a URL row, wired to the form.
+    fn new_row(&mut self, form: &UrlForm, window: &mut Window, cx: &mut Context<Self>) -> UrlRow {
+        let key = self.next_key;
+        self.next_key += 1;
+        let input = |value: &str,
+                     placeholder: &'static str,
+                     window: &mut Window,
+                     cx: &mut Context<Self>| {
+            let value = value.to_owned();
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .default_value(value)
+            })
+        };
+        let url = input(
+            &form.url,
+            "e.g. https://icinga-master.example.com:5665",
+            window,
+            cx,
+        );
+        let pinned = input(&form.pinned, "SHA-256, e.g. AB:CD:…", window, cx);
+        let server_name = input(&form.server_name, "the name in the certificate", window, cx);
+        let subscriptions = [
+            (UrlPart::Url, &url),
+            (UrlPart::Pin, &pinned),
+            (UrlPart::ServerName, &server_name),
+        ]
+        .into_iter()
+        .map(|(part, entity)| {
+            cx.subscribe_in(
+                entity,
+                window,
+                move |this: &mut Self, input, event: &InputEvent, _, cx| match event {
+                    InputEvent::Change => {
+                        let value = input.read(cx).value().to_string();
+                        if let Some(index) = this.row_index(key) {
+                            let field = match part {
+                                UrlPart::Url => FormField::Url(index),
+                                UrlPart::Pin => FormField::Pin(index),
+                                UrlPart::ServerName => FormField::ServerName(index),
+                            };
+                            this.set_field(field, value);
+                        }
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { .. } => this.save(cx),
+                    InputEvent::Focus | InputEvent::Blur => {}
+                },
+            )
+        })
+        .collect();
+        UrlRow {
+            key,
+            url,
+            pinned,
+            server_name,
+            edits: 0,
+            test: TestState::Idle,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// The position of the URL row `key`.
+    fn row_index(&self, key: u64) -> Option<usize> {
+        self.urls.iter().position(|row| row.key == key)
+    }
+
+    /// "+ add URL": a new row at the end, focused, its `https://`
+    /// selected, so a URL typed or pasted replaces it.
+    fn add_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.form.add_url() else {
+            return;
+        };
+        let row = self.new_row(&self.form.urls[index].clone(), window, cx);
+        row.url.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        self.urls.push(row);
+        self.error = None;
+        cx.notify();
+    }
+
+    /// Removes the URL row `key` (not the last one).
+    fn remove_url(&mut self, key: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self.row_index(key)
+            && self.form.remove_url(index)
+        {
+            self.urls.remove(index);
+            self.error = None;
+            cx.notify();
+        }
+    }
+
+    /// Moves the URL row `key` one place up (preferred) or down.
+    fn move_url(&mut self, key: u64, up: bool, cx: &mut Context<Self>) {
+        if let Some(index) = self.row_index(key)
+            && self.form.move_url(index, up)
+        {
+            let other = if up { index - 1 } else { index + 1 };
+            self.urls.swap(index, other);
+            self.error = None;
+            cx.notify();
+        }
+    }
+
+    /// Says the editor runs in `--demo` (ENV-10).
+    pub(crate) fn in_demo(mut self, demo: bool) -> Self {
+        self.demo = demo;
+        self
+    }
+
+    /// Where the keyboard goes when the editor opens: the name.
+    pub(crate) fn default_focus(&self, cx: &App) -> FocusHandle {
+        self.inputs.name.focus_handle(cx)
+    }
+
+    /// The form as edited so far.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn form(&self) -> &EnvironmentForm {
+        &self.form
+    }
+
+    /// The problems shown next to the fields.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn shown_issues(&self) -> BTreeMap<FormField, String> {
+        self.issues()
+    }
+
+    /// A field's text input (tests type into it).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn input(&self, field: FormField) -> Option<&Entity<InputState>> {
+        self.input_for(field)
+    }
+
+    /// The last test's answer for the first URL.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn test_result(&self) -> Option<&Result<ConnectionReport, ConnectionFailure>> {
+        self.test_result_of(0)
+    }
+
+    /// The last test's answer for the URL at `index`.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn test_result_of(
+        &self,
+        index: usize,
+    ) -> Option<&Result<ConnectionReport, ConnectionFailure>> {
+        match &self.urls.get(index)?.test {
+            TestState::Done(result) => Some(result.as_ref()),
+            TestState::Idle | TestState::Running => None,
+        }
+    }
+
+    /// "+ add URL" (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn add_url_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_url(window, cx);
+    }
+
+    /// Moves the URL at `index` up or down (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn move_url_row(&mut self, index: usize, up: bool, cx: &mut Context<Self>) {
+        if let Some(row) = self.urls.get(index) {
+            self.move_url(row.key, up, cx);
+        }
+    }
+
+    /// Removes the URL at `index` (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn remove_url_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(row) = self.urls.get(index) {
+            self.remove_url(row.key, cx);
+        }
+    }
+
+    /// Tests the URL at `index` only (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn test_url(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(row) = self.urls.get(index) {
+            let key = row.key;
+            self.run_tests(vec![key], false, cx);
+        }
+    }
+
+    /// Why the last save failed.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    fn input_for(&self, field: FormField) -> Option<&Entity<InputState>> {
+        Some(match field {
+            FormField::Name => &self.inputs.name,
+            FormField::Urls => return None,
+            FormField::Url(index) => &self.urls.get(index)?.url,
+            FormField::Username => &self.inputs.username,
+            FormField::Password => &self.inputs.password,
+            FormField::CertPath => &self.inputs.cert_path,
+            FormField::KeyPath => &self.inputs.key_path,
+            FormField::Author => &self.inputs.author,
+            FormField::CaFile => &self.inputs.ca_file,
+            FormField::Pin(index) => &self.urls.get(index)?.pinned,
+            FormField::ServerName(index) => &self.urls.get(index)?.server_name,
+        })
+    }
+
+    fn set_field(&mut self, field: FormField, value: String) {
+        let form = &mut self.form;
+        match field {
+            FormField::Name => form.name = value,
+            FormField::Urls => {}
+            FormField::Url(index) | FormField::Pin(index) | FormField::ServerName(index) => {
+                let Some(url) = form.urls.get_mut(index) else {
+                    return;
+                };
+                match field {
+                    FormField::Url(_) => url.url = value,
+                    FormField::Pin(_) => url.pinned = value,
+                    _ => url.server_name = value,
+                }
+                // An edited URL's earlier test no longer says anything.
+                if let Some(row) = self.urls.get_mut(index) {
+                    row.edits += 1;
+                    row.test = TestState::Idle;
+                }
+            }
+            FormField::Username => form.username = value,
+            FormField::Password => form.password_typed = !value.is_empty(),
+            FormField::CertPath => form.cert_path = value,
+            FormField::KeyPath => form.key_path = value,
+            FormField::Author => form.author = value,
+            FormField::CaFile => form.ca_file = value,
+        }
+        self.error = None;
+    }
+
+    /// Sets a field's text, as if typed (trusting a certificate fills the
+    /// pin, a file prompt a path).
+    fn fill(
+        &mut self,
+        field: FormField,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.input_for(field).cloned() else {
+            return;
+        };
+        input.update(cx, |input, cx| input.set_value(value.clone(), window, cx));
+        self.set_field(field, value);
+        cx.notify();
+    }
+
+    /// "Trust this certificate" after a failed test of the URL at `index`
+    /// (ENV-05): pins `fingerprint` for that URL and shows the TLS fields,
+    /// so the pin saving keeps is in view; the next test uses it.
+    pub(crate) fn trust_presented(
+        &mut self,
+        index: usize,
+        fingerprint: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fill(FormField::Pin(index), fingerprint, window, cx);
+        self.show_tls = true;
+    }
+
+    /// "Use server name …" after a test of the URL at `index` whose
+    /// certificate a trusted CA signed for another name (ENV-05): fills
+    /// that URL's server-name override and shows the TLS fields; the next
+    /// test uses it. Unlike a pin, it keeps working when the certificate
+    /// is renewed.
+    pub(crate) fn use_server_name(
+        &mut self,
+        index: usize,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fill(FormField::ServerName(index), name, window, cx);
+        self.show_tls = true;
+    }
+
+    /// The typed password, if any (only for password login).
+    /// Whether anything differs from how the editor opened (a field, a URL,
+    /// a trusted certificate, a typed password): leaving then asks first.
+    pub(crate) fn has_changes(&self) -> bool {
+        self.form != self.initial
+    }
+
+    /// What leaving drops, for the question: `the new environment`, or
+    /// the edited one's name as it was.
+    pub(crate) fn subject(&self) -> String {
+        match &self.form.base {
+            Some(base) => base.name.clone(),
+            None => "the new environment".to_owned(),
+        }
+    }
+
+    fn typed_password(&self, cx: &App) -> Option<SecretString> {
+        if self.form.auth != AuthKind::Password {
+            return None;
+        }
+        let value = self.inputs.password.read(cx).value();
+        (!value.is_empty()).then(|| SecretString::from(value.to_string()))
+    }
+
+    /// "Test connection" (ENV-04): every URL, one after the other.
+    pub(crate) fn test(&mut self, cx: &mut Context<Self>) {
+        let keys = self.urls.iter().map(|row| row.key).collect();
+        self.run_tests(keys, true, cx);
+    }
+
+    /// Tests the URL rows `keys`, one after the other (gentle on a
+    /// cluster: one login, the node's name and the zones each; ENV-12).
+    /// A test started meanwhile replaces this one. `reveal`: scroll the
+    /// answers under the test button into view (a row's own test answers
+    /// under the row, where the user is).
+    fn run_tests(&mut self, keys: Vec<u64>, reveal: bool, cx: &mut Context<Self>) {
+        // A test still running is dropped (with its task).
+        for row in &mut self.urls {
+            if row.test == TestState::Running {
+                row.test = TestState::Idle;
+            }
+        }
+        let Some(session) = live::session(cx) else {
+            for row in &mut self.urls {
+                if keys.contains(&row.key) {
+                    row.test = TestState::Done(Box::new(Err(ConnectionFailure::Other(
+                        "testing needs the running app".to_owned(),
+                    ))));
+                }
+            }
+            cx.notify();
+            return;
+        };
+        let environment = self.form.to_environment();
+        let password = self.typed_password(cx);
+        let mut plan = Vec::new();
+        for key in keys {
+            if let Some(index) = self.row_index(key) {
+                let row = &mut self.urls[index];
+                row.test = TestState::Running;
+                plan.push((key, row.edits, index));
+            }
+        }
+        self.test_task = Some(cx.spawn(async move |this, cx| {
+            for (key, edits, index) in plan {
+                let Ok(task) = this.update(cx, |_, cx| {
+                    session.update(cx, |session, cx| {
+                        session.test_environment(environment.clone(), index, password.clone(), cx)
+                    })
+                }) else {
+                    return;
+                };
+                let result = task.await;
+                let updated = this.update(cx, |this, cx| {
+                    if let Some(row) = this.urls.iter_mut().find(|row| row.key == key)
+                        && row.edits == edits
+                    {
+                        row.test = TestState::Done(Box::new(result));
+                    }
+                    if reveal && this.mode == EditorMode::Dialog {
+                        // The answers show under the button, often below
+                        // the visible part of the dialog once the TLS
+                        // fields show: scrolled into view once laid out.
+                        this.body_scroll.scroll_to_item(this.test_block());
+                    }
+                    cx.notify();
+                });
+                if updated.is_err() {
+                    return;
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.test_task = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Whether a test runs.
+    fn testing(&self) -> bool {
+        self.urls.iter().any(|row| row.test == TestState::Running)
+    }
+
+    /// Saves (after checking the form): the password into the keychain,
+    /// then the settings; the engine (re)starts as needed.
+    pub(crate) fn save(&mut self, cx: &mut Context<Self>) {
+        if self.save_task.is_some() {
+            return;
+        }
+        self.show_issues = true;
+        if !self.form.issues().is_empty() {
+            cx.notify();
+            return;
+        }
+        let Some(session) = live::session(cx) else {
+            self.error = Some("Saving needs the running app.".to_owned());
+            cx.notify();
+            return;
+        };
+        let environment = self.form.to_environment();
+        let password = self.typed_password(cx);
+        let task = session.update(cx, |session, cx| {
+            session.save_environment(environment, password, cx)
+        });
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            let saved = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.save_task = None;
+                match saved {
+                    Ok(saved) => {
+                        tracing::debug!(?saved, "environment saved");
+                        if saved != EnvironmentSaved::Unchanged || this.mode == EditorMode::Dialog {
+                            cx.emit(EnvironmentEditorEvent::Close);
+                        }
+                    }
+                    Err(error) => this.error = Some(error),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Asks the system for a file for `field` (CA, certificate, key); the
+    /// text field takes typed paths too, so a desktop without a file
+    /// chooser only loses the button's convenience.
+    fn browse(field: FormField, window: &Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        let window_handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let chosen = match paths.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Err(error)) => {
+                    tracing::info!(%error, "no file chooser; type the path instead");
+                    None
+                }
+                Ok(Ok(None)) | Err(_) => None,
+            };
+            if let Some(path) = chosen {
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.fill(field, path.display().to_string(), window, cx);
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn issues(&self) -> BTreeMap<FormField, String> {
+        if self.show_issues {
+            self.form.issues()
+        } else {
+            BTreeMap::new()
+        }
+    }
+
+    /// A labelled text field, with its problem.
+    fn text_field(
+        &self,
+        label: impl Into<SharedString>,
+        field: FormField,
+        hint: Option<&'static str>,
+        issues: &BTreeMap<FormField, String>,
+    ) -> Field {
+        let error = issues.get(&field).cloned();
+        let mut field_element = Field::new(label);
+        if let Some(input) = self.input_for(field) {
+            field_element = field_element.control(
+                TextField::new(input)
+                    .bordered(true)
+                    .invalid(error.is_some()),
+            );
+        }
+        let field_element = field_element.error(error);
+        match hint {
+            Some(hint) => field_element.hint(hint),
+            None => field_element,
+        }
+    }
+
+    /// A path field with a "browse" link.
+    fn path_field(
+        &self,
+        label: &'static str,
+        field: FormField,
+        hint: Option<&'static str>,
+        issues: &BTreeMap<FormField, String>,
+        cx: &Context<Self>,
+    ) -> Field {
+        let error = issues.get(&field).cloned();
+        let id = SharedString::from(format!("browse-{field:?}"));
+        let control = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .children(self.input_for(field).map(|input| {
+                        TextField::new(input)
+                            .bordered(true)
+                            .invalid(error.is_some())
+                    })),
+            )
+            .child(Button::new(id, "browse").on_click(
+                cx.listener(move |_, _: &ClickEvent, window, cx| Self::browse(field, window, cx)),
+            ));
+        let field_element = Field::new(label).control(control).error(error);
+        match hint {
+            Some(hint) => field_element.hint(hint),
+            None => field_element,
+        }
+    }
+
+    /// The login fields: user and password, or certificate and key.
+    fn render_login(&self, issues: &BTreeMap<FormField, String>, cx: &Context<Self>) -> AnyElement {
+        match self.form.auth {
+            AuthKind::Password => div()
+                .flex()
+                .gap(px(10.))
+                .child(div().flex_1().min_w_0().child(self.text_field(
+                    "API user",
+                    FormField::Username,
+                    None,
+                    issues,
+                )))
+                .child(div().flex_1().min_w_0().child(self.text_field(
+                    "password",
+                    FormField::Password,
+                    None,
+                    issues,
+                )))
+                .into_any_element(),
+            AuthKind::Certificate => div()
+                .flex()
+                .flex_col()
+                .gap(px(14.))
+                .child(self.path_field(
+                    "certificate file",
+                    FormField::CertPath,
+                    Some("PEM; the ApiUser's client_cn names its CN"),
+                    issues,
+                    cx,
+                ))
+                .child(self.path_field(
+                    "key file",
+                    FormField::KeyPath,
+                    Some("PEM, unencrypted"),
+                    issues,
+                    cx,
+                ))
+                .into_any_element(),
+        }
+    }
+
+    /// The TLS fields: the CA file (for every URL: Icinga's CA covers
+    /// every node of the cluster), each URL's pin and server name, and
+    /// the system roots.
+    fn render_tls(
+        &self,
+        issues: &BTreeMap<FormField, String>,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = cx.theme();
+        let several = self.form.urls.len() > 1;
+        let mut fields = vec![
+            self.path_field(
+                "CA file",
+                FormField::CaFile,
+                Some(if several {
+                    "Icinga's CA certificate, to trust every node's certificate (recommended: it \
+                     covers the whole cluster)."
+                } else {
+                    "Icinga's CA certificate, to trust the API's certificate."
+                }),
+                issues,
+                cx,
+            )
+            .into_any_element(),
+        ];
+        if several {
+            // Per URL: a caption, then its pin and server name side by side.
+            for (index, url) in self.form.urls.iter().enumerate() {
+                let caption = format!("URL {} · {}", index + 1, ApiUrl::new(&url.url).label());
+                fields.push(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(theme.text.label)
+                                .text_color(theme.colors.text_faint)
+                                .child(caption),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(10.))
+                                .child(div().flex_1().min_w_0().child(self.text_field(
+                                    "pinned SHA-256",
+                                    FormField::Pin(index),
+                                    None,
+                                    issues,
+                                )))
+                                .child(div().flex_1().min_w_0().child(self.text_field(
+                                    "server name",
+                                    FormField::ServerName(index),
+                                    None,
+                                    issues,
+                                ))),
+                        )
+                        .into_any_element(),
+                );
+            }
+            fields.push(
+                div()
+                    .text_size(theme.text.label)
+                    .text_color(theme.colors.text_faint)
+                    .child(
+                        "A pinned certificate is trusted exactly (no CA or name check); a server \
+                         name is checked instead of the URL's host.",
+                    )
+                    .into_any_element(),
+            );
+        } else {
+            fields.push(
+                self.text_field(
+                    "pinned SHA-256",
+                    FormField::Pin(0),
+                    Some("Trust exactly this certificate (no CA or name check)."),
+                    issues,
+                )
+                .into_any_element(),
+            );
+            fields.push(
+                self.text_field(
+                    "server name",
+                    FormField::ServerName(0),
+                    Some("Check the certificate against this name instead of the URL's host."),
+                    issues,
+                )
+                .into_any_element(),
+            );
+        }
+        fields.push(
+            Switch::new("environment-system-roots", self.form.use_system_roots)
+                .label("also trust the system's root certificates")
+                .on_change(cx.listener(|this, on: &bool, _, cx| {
+                    this.form.use_system_roots = *on;
+                    cx.notify();
+                }))
+                .into_any_element(),
+        );
+        fields
+    }
+
+    /// One URL row: its field, and with several URLs its `test`, up, down
+    /// and remove; its test's answer (or its problem) under it.
+    fn render_url_row(
+        &self,
+        index: usize,
+        row: &UrlRow,
+        issues: &BTreeMap<FormField, String>,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
+        let theme = cx.theme();
+        let several = self.urls.len() > 1;
+        let count = self.urls.len();
+        let key = row.key;
+        let error = issues.get(&FormField::Url(index)).cloned();
+        let status = url_status(&row.test, theme);
+        let mut line = div().flex().items_center().gap(px(8.)).child(
+            div().flex_1().min_w_0().child(
+                TextField::new(&row.url)
+                    .bordered(true)
+                    .invalid(error.is_some()),
+            ),
+        );
+        if several {
+            line = line
+                .child(
+                    Button::new(
+                        SharedString::from(format!("environment-url-test-{key}")),
+                        "test",
+                    )
+                    .disabled(row.test == TestState::Running)
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.run_tests(vec![key], false, cx);
+                        },
+                    )),
+                )
+                .child(
+                    IconButton::new(
+                        SharedString::from(format!("environment-url-up-{key}")),
+                        IconName::ArrowUp,
+                    )
+                    .disabled(index == 0)
+                    .tooltip(Tooltip::new("Prefer this URL"))
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.move_url(key, true, cx);
+                        },
+                    )),
+                )
+                .child(
+                    IconButton::new(
+                        SharedString::from(format!("environment-url-down-{key}")),
+                        IconName::ArrowDown,
+                    )
+                    .disabled(index + 1 == count)
+                    .tooltip(Tooltip::new("Prefer the next URL"))
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.move_url(key, false, cx);
+                        },
+                    )),
+                )
+                .child(
+                    IconButton::new(
+                        SharedString::from(format!("environment-url-remove-{key}")),
+                        IconName::Close,
+                    )
+                    .tooltip(Tooltip::new("Remove this URL"))
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.remove_url(key, cx);
+                        },
+                    )),
+                );
+        }
+        let below = match (error, status) {
+            (Some(error), _) => Some((SharedString::from(error), theme.states.critical)),
+            (None, Some((text, color))) => Some((SharedString::from(text), color)),
+            (None, None) => None,
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(line)
+            .when_some(below, |row, (text, color)| {
+                row.child(
+                    div()
+                        .truncate()
+                        .text_size(theme.text.label)
+                        .text_color(color)
+                        .child(text),
+                )
+            })
+    }
+
+    /// The URL list (ENV-12): one row per URL in order of preference, each
+    /// with its test's answer (or its problem) under it; with several, a
+    /// row's `test`, up, down and remove; `+ add URL` under the list.
+    fn render_urls(&self, issues: &BTreeMap<FormField, String>, cx: &Context<Self>) -> Field {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let several = self.urls.len() > 1;
+        let rows = self
+            .urls
+            .iter()
+            .enumerate()
+            .map(|(index, row)| self.render_url_row(index, row, issues, cx));
+        let add = div().flex().when(self.form.can_add_url(), |line| {
+            line.child(
+                Link::new("environment-url-add", "+ add URL")
+                    .quiet()
+                    .text_size(theme.text.label)
+                    .tooltip(Tooltip::new(
+                        "Another node of the same cluster: the other master of an HA zone, or a \
+                         satellite to fall back on",
+                    ))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.add_url(window, cx);
+                    })),
+            )
+        });
+        let list = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .children(rows)
+            .child(add)
+            .text_color(colors.text);
+        let field = Field::new(if several { "URLs" } else { "URL" })
+            .control(list)
+            .error(issues.get(&FormField::Urls).cloned());
+        field.hint(if several {
+            "In order of preference. A master of the top-level zone sees the whole cluster; a \
+             satellite only its zone, so it is used while no master answers."
+        } else {
+            "The Icinga 2 API, https only, usually port 5665. Add the other nodes of an HA \
+             cluster as further URLs."
+        })
+    }
+
+    /// The form's fields.
+    fn render_fields(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let issues = self.issues();
+        // A problem in a TLS field shows the TLS fields.
+        let show_tls = self.show_tls || issues.keys().any(|field| field.is_tls());
+        let auth = Segmented::new("environment-auth")
+            .option("password")
+            .option("client certificate")
+            .selected(usize::from(self.form.auth == AuthKind::Certificate))
+            .on_select(cx.listener(|this, index: &usize, window, cx| {
+                this.form.auth = if *index == 1 {
+                    AuthKind::Certificate
+                } else {
+                    AuthKind::Password
+                };
+                // Without an API user, the author must be typed.
+                let placeholder = author_placeholder(this.form.auth);
+                this.inputs.author.update(cx, |input, cx| {
+                    input.set_placeholder(placeholder, window, cx);
+                });
+                cx.notify();
+            }));
+        let login = self.render_login(&issues, cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(self.text_field("name", FormField::Name, None, &issues))
+            .child(self.render_urls(&issues, cx))
+            .child(Field::new("login").control(auth))
+            .child(login)
+            .child(self.text_field(
+                "author",
+                FormField::Author,
+                Some("Recorded on acknowledgements, downtimes and comments."),
+                &issues,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .pt(px(6.))
+                    .pb(px(2.))
+                    .border_b_1()
+                    .border_color(theme.colors.border_header)
+                    .text_size(theme.text.label)
+                    .text_color(theme.colors.text_faint)
+                    .child("TLS")
+                    .child(div().flex_1())
+                    .child(
+                        Link::new(
+                            "environment-tls-toggle",
+                            if show_tls {
+                                "hide"
+                            } else {
+                                "CA, pinned certificate, server name"
+                            },
+                        )
+                        .quiet()
+                        .text_size(theme.text.label)
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                this.show_tls = !this.show_tls;
+                                cx.notify();
+                            },
+                        )),
+                    ),
+            )
+            .when(show_tls, |fields| {
+                fields.children(self.render_tls(&issues, cx))
+            })
+            .into_any_element()
+    }
+
+    /// "Test connection" and what it found, per URL.
+    fn render_test(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let colors = theme.colors;
+        let running = self.testing();
+        let several = self.urls.len() > 1;
+        let button = Button::new(
+            "environment-test",
+            if running {
+                "testing…"
+            } else if several {
+                "test all URLs"
+            } else {
+                "test connection"
+            },
+        )
+        .disabled(running)
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.test(cx)));
+        let results: Vec<AnyElement> = self
+            .urls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let TestState::Done(result) = &row.test else {
+                    return None;
+                };
+                let body = match result.as_ref() {
+                    Ok(report) => report_view(report, &theme),
+                    Err(failure) => Self::failure_view(index, row.key, failure, &theme, cx),
+                };
+                let caption = several.then(|| {
+                    let url = self
+                        .form
+                        .urls
+                        .get(index)
+                        .map(|url| ApiUrl::new(&url.url).label());
+                    div()
+                        .truncate()
+                        .text_size(theme.text.label)
+                        .text_color(colors.text_faint)
+                        .child(format!("URL {} · {}", index + 1, url.unwrap_or_default()))
+                });
+                Some(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .children(caption)
+                        .child(body)
+                        .into_any_element(),
+                )
+            })
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(button)
+                    .child(
+                        div()
+                            .text_size(theme.text.label)
+                            .text_color(colors.text_faint)
+                            .child(if several {
+                                "Logs in at each URL in turn; changes nothing."
+                            } else {
+                                "Logs in and reads the permissions; changes nothing."
+                            }),
+                    ),
+            )
+            .children(results)
+            .into_any_element()
+    }
+
+    /// What an untrusted certificate offers: its details and *trust this
+    /// certificate* for the URL at `index` (row `key`), and *use server
+    /// name …* when a trusted CA signed it for another name.
+    fn certificate_offer(
+        index: usize,
+        key: u64,
+        message: &str,
+        certificate: &CertificateInfo,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let mut column = div().flex().flex_col().gap(px(8.));
+        let fingerprint = certificate.fingerprint();
+        // A trusted CA signed it, for another name: the server
+        // name override fixes that for good; a pin breaks at
+        // the next renewal.
+        let rename = server_name_offer(message, certificate);
+        if rename.is_some() {
+            column = column.child(div().text_color(colors.text_muted).child(format!(
+                "A trusted CA signed it, but for {}. Connecting by this \
+                 address needs the server name it was issued for.",
+                certificate.names.join(", ")
+            )));
+        }
+        let trust = Button::new(
+            SharedString::from(format!("environment-trust-{key}")),
+            "trust this certificate",
+        )
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.trust_presented(index, fingerprint.clone(), window, cx);
+        }));
+        let buttons = match rename {
+            Some(name) => div()
+                .flex()
+                .gap(px(8.))
+                .child(
+                    Button::new(
+                        SharedString::from(format!("environment-server-name-{key}")),
+                        format!("use server name {name}"),
+                    )
+                    .primary()
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, window, cx| {
+                            this.use_server_name(index, name.clone(), window, cx);
+                        },
+                    )),
+                )
+                .child(trust),
+            None => div().flex().child(trust.primary()),
+        };
+
+        column
+            .child(certificate_details(certificate, Timestamp::now(), theme))
+            .child(buttons)
+            .into_any_element()
+    }
+
+    /// A failed test of the URL at `index` (row `key`): why, and for TLS
+    /// failures the certificate with "Trust this certificate" (it fills
+    /// that URL's pin; saving keeps it).
+    fn failure_view(
+        index: usize,
+        key: u64,
+        failure: &ConnectionFailure,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let headline = |text: String| {
+            div()
+                .text_color(theme.states.critical)
+                .font_weight(FontWeight::MEDIUM)
+                .child(text)
+        };
+        let column = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .text_size(theme.text.small);
+        match failure {
+            ConnectionFailure::Unauthorized => column
+                .child(headline("Icinga refused the login.".to_owned()))
+                .child(
+                    div()
+                        .text_color(colors.text_muted)
+                        .child("Check the API user and its password (or client certificate)."),
+                )
+                .into_any_element(),
+            ConnectionFailure::Unreachable(message) => column
+                .child(headline("The server can't be reached.".to_owned()))
+                .child(div().text_color(colors.text_muted).child(message.clone()))
+                .into_any_element(),
+            ConnectionFailure::Other(message) => {
+                column.child(headline(message.clone())).into_any_element()
+            }
+            ConnectionFailure::Tls {
+                message,
+                certificate,
+            } => {
+                let mut column = column
+                    .child(headline(
+                        "The server's certificate isn't trusted.".to_owned(),
+                    ))
+                    .child(div().text_color(colors.text_muted).child(message.clone()));
+                if let Some(certificate) = certificate {
+                    column = column.child(Self::certificate_offer(
+                        index,
+                        key,
+                        message,
+                        certificate,
+                        theme,
+                        cx,
+                    ));
+                }
+                column.into_any_element()
+            }
+            ConnectionFailure::CertificateMismatch { expected, actual } => {
+                let actual_pin = actual.clone();
+                column
+                    .child(mismatch_warning(expected, actual, theme))
+                    .child(
+                        div().flex().child(
+                            Button::new(
+                                SharedString::from(format!("environment-trust-new-{key}")),
+                                "trust the new certificate",
+                            )
+                            .variant(ic_ui_kit::ButtonVariant::Danger)
+                            .on_click(cx.listener(
+                                move |this, _: &ClickEvent, window, cx| {
+                                    this.trust_presented(index, actual_pin.clone(), window, cx);
+                                },
+                            )),
+                        ),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// Whether the dialog warns that the environment is a real Icinga (one
+    /// added while the demo runs).
+    fn warns_real(&self) -> bool {
+        let built_in = self
+            .form
+            .base
+            .as_ref()
+            .is_some_and(|base| live::demo::is_built_in(&base.id));
+        self.demo && !built_in
+    }
+
+    /// The test's block among the dialog body's blocks: after the
+    /// warning, if shown, and the fields.
+    fn test_block(&self) -> usize {
+        usize::from(self.warns_real()) + 1
+    }
+
+    /// Whether the dialog shows the whole test block, or at least its top
+    /// when it is taller than the dialog (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn test_in_view(&self) -> bool {
+        let Some(block) = self.body_scroll.bounds_for_item(self.test_block()) else {
+            return false;
+        };
+        let viewport = self.body_scroll.bounds();
+        let offset = self.body_scroll.offset().y;
+        let (top, bottom) = (block.top() + offset, block.bottom() + offset);
+        let slack = px(1.);
+        top >= viewport.top() - slack
+            && (bottom <= viewport.bottom() + slack || top <= viewport.top() + slack)
+    }
+
+    fn render_dialog(&self, cx: &Context<Self>) -> AnyElement {
+        let title = match &self.form.base {
+            Some(base) => format!("Edit environment · {}", base.name),
+            None => "Add environment".to_owned(),
+        };
+        let mut dialog = DialogBody::new(title).track_scroll(&self.body_scroll);
+        if self.warns_real() {
+            // Not simulated: say so before anything is sent to it.
+            dialog = dialog.child(
+                Banner::new(
+                    "environment-real",
+                    BannerTone::Warning,
+                    "This environment is a real Icinga, not part of the demo: acknowledgements, \
+                     downtimes and commands sent to it are real.",
+                )
+                .detail("Nothing is saved: it is gone when the demo quits."),
+            );
+        }
+        let mut dialog = dialog
+            .child(self.render_fields(cx))
+            .child(self.render_test(cx));
+        if let Some(error) = self.error.clone() {
+            dialog = dialog.child(error_line(error, cx.theme()));
+        }
+        if let Some(base) = &self.form.base {
+            let id = base.id.clone();
+            dialog = dialog.footer_start(
+                Link::new("environment-delete", "delete environment")
+                    .quiet()
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.emit(EnvironmentEditorEvent::Delete(id.clone()));
+                    })),
+            );
+        }
+        let saving = self.save_task.is_some();
+        dialog
+            .action(
+                Button::new("environment-cancel", "cancel")
+                    .key_hint("esc")
+                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                        cx.emit(EnvironmentEditorEvent::Cancel);
+                    })),
+            )
+            .action(
+                Button::new("environment-save", if saving { "saving…" } else { "save" })
+                    .primary()
+                    .disabled(saving)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save(cx))),
+            )
+            .into_any_element()
+    }
+
+    fn render_onboarding(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let saving = self.save_task.is_some();
+        div()
+            .id("onboarding")
+            .size_full()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(22.))
+                    .w(px(560.))
+                    .mx_auto()
+                    .py(px(48.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(theme.text.title)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(colors.text_strong)
+                                    .child("Connect to Icinga"),
+                            )
+                            .child(div().text_size(theme.text.body).text_color(colors.text_muted).child(
+                                "icygui talks to the Icinga 2 REST API directly. Add your first \
+                                 environment here; more can be added later and switched between \
+                                 from the status in the sidebar's footer.",
+                            )),
+                    )
+                    .child(self.render_fields(cx))
+                    .child(self.render_test(cx))
+                    .when_some(self.error.clone(), |column, error| {
+                        column.child(error_line(error, theme))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(
+                                Button::new(
+                                    "onboarding-connect",
+                                    if saving { "connecting…" } else { "connect" },
+                                )
+                                .primary()
+                                .disabled(saving)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save(cx))),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_size(theme.text.label)
+                                    .text_color(colors.text_faint)
+                                    .child("Just looking around? Start icygui --demo."),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for EnvironmentEditor {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match self.mode {
+            EditorMode::Dialog => self.render_dialog(cx),
+            EditorMode::Onboarding => self.render_onboarding(cx),
+        };
+        div()
+            .id("environment-editor")
+            .track_focus(&self.focus_handle)
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .when(self.mode == EditorMode::Onboarding, gpui::Styled::size_full)
+            .child(content)
+    }
+}
+
+/// A successful test (ENV-04): the API user, Icinga's version, the
+/// user's permissions and those the client would miss.
+fn report_view(report: &ConnectionReport, theme: &Theme) -> AnyElement {
+    let colors = theme.colors;
+    let missing = &report.missing_permissions;
+    let required = ic_core::REQUIRED_PERMISSIONS.len();
+    let (tone, summary) = if missing.is_empty() {
+        (
+            FieldTone::Good,
+            format!("all {required} permissions the client uses"),
+        )
+    } else if permissions::missing_needed(missing) == 0 {
+        // The user guide's ApiUser: run command is opt-in.
+        (
+            FieldTone::Good,
+            format!(
+                "all {} permissions the client needs; run command's is opt-in",
+                required - missing.len()
+            ),
+        )
+    } else {
+        (
+            FieldTone::Bad,
+            format!("{} of {required} permissions missing", missing.len()),
+        )
+    };
+    let line = |key: &'static str, value: String| {
+        div()
+            .flex()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(96.))
+                    .text_color(colors.text_muted)
+                    .child(key),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(colors.text)
+                    .child(value),
+            )
+    };
+    let version = if report.info.version.is_empty() {
+        report.status.version.clone()
+    } else {
+        report.info.version.clone()
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .text_size(theme.text.small)
+        .child(
+            div()
+                .pb(px(4.))
+                .text_color(theme.states.ok)
+                .font_weight(FontWeight::MEDIUM)
+                .child(format!("Connected as {}", report.info.user)),
+        )
+        .child(line("node", node_line(report)))
+        .child(line("Icinga", version))
+        .child(line(
+            "permissions",
+            if report.info.permissions.is_empty() {
+                "none".to_owned()
+            } else {
+                report.info.permissions.join(", ")
+            },
+        ))
+        .child(
+            div()
+                .flex()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(96.))
+                        .text_color(colors.text_muted)
+                        .child("client"),
+                )
+                .child(div().text_color(tone.color(theme)).child(summary)),
+        )
+        .when(!missing.is_empty(), |column| {
+            column.child(
+                div()
+                    .pl(px(108.))
+                    .flex()
+                    .flex_col()
+                    .text_color(colors.text_muted)
+                    .children(
+                        missing
+                            .iter()
+                            .map(|permission| div().child(permission.clone())),
+                    ),
+            )
+        })
+        .into_any_element()
+}
+
+/// The node line of a test report: `master-01 · zone master · full
+/// view`, or for a partial view also what that means.
+fn node_line(report: &ConnectionReport) -> String {
+    let node = &report.node;
+    let mut parts = vec![node.name.clone()];
+    if let Some(zone) = &node.zone {
+        parts.push(format!("zone {zone}"));
+    }
+    parts.push(match &node.view {
+        ClusterView::Full => "full view: the whole cluster".to_owned(),
+        ClusterView::Partial { zone } => {
+            format!("partial view: only zone {zone} and below; used while no master answers")
+        }
+        ClusterView::Unverified { reason } => format!("view not verified: {reason}"),
+    });
+    parts.join(" · ")
+}
+
+/// A URL row's test, in a few words under it: the node and its view
+/// (green for the whole cluster, yellow for a part), or why it failed.
+fn url_status(test: &TestState, theme: &Theme) -> Option<(String, Hsla)> {
+    Some(match test {
+        TestState::Idle => return None,
+        TestState::Running => ("testing…".to_owned(), theme.colors.text_faint),
+        TestState::Done(result) => match result.as_ref() {
+            Ok(report) => {
+                let node = &report.node;
+                let color = match node.view {
+                    ClusterView::Full => theme.states.ok,
+                    ClusterView::Partial { .. } => theme.states.warning,
+                    ClusterView::Unverified { .. } => theme.colors.text_faint,
+                };
+                (format!("{} · {}", node.name, node.view.label()), color)
+            }
+            Err(failure) => failure_status(failure, theme),
+        },
+    })
+}
+
+/// A failed URL test in a few words.
+fn failure_status(failure: &ConnectionFailure, theme: &Theme) -> (String, Hsla) {
+    (
+        match failure {
+            ConnectionFailure::Unauthorized => "login refused".to_owned(),
+            ConnectionFailure::Tls { .. } => "certificate not trusted".to_owned(),
+            ConnectionFailure::CertificateMismatch { .. } => {
+                "the certificate doesn't match the pinned one".to_owned()
+            }
+            ConnectionFailure::Unreachable(_) => "can't be reached".to_owned(),
+            ConnectionFailure::Other(message) => message.clone(),
+        },
+        theme.states.critical,
+    )
+}
+
+/// The author field's hint: optional with a password (the API user signs),
+/// required with a client certificate (there is no user name to sign
+/// with). Examples say "e.g.", so no hint reads like a typed value.
+fn author_placeholder(auth: AuthKind) -> &'static str {
+    match auth {
+        AuthKind::Password => "defaults to the API user",
+        AuthKind::Certificate => "required: who acknowledges, e.g. m.keller",
+    }
+}
+
+/// The server name to offer after a TLS failure: the certificate's first
+/// DNS name, when its chain checked out and only the name didn't match
+/// (`ic-api` checks the chain before the name, so a name error means a
+/// trusted CA signed it).
+pub(crate) fn server_name_offer(message: &str, certificate: &CertificateInfo) -> Option<String> {
+    let name_error = message.contains("not valid for name") || message.contains("NotValidForName");
+    if !name_error {
+        return None;
+    }
+    certificate
+        .names
+        .iter()
+        .find(|name| name.parse::<std::net::IpAddr>().is_err() && !name.starts_with("*."))
+        .cloned()
+}
+
+fn error_line(error: String, theme: &Theme) -> AnyElement {
+    div()
+        .text_size(theme.text.small)
+        .text_color(theme.states.critical)
+        .child(error)
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn certificate(names: &[&str]) -> CertificateInfo {
+        CertificateInfo {
+            sha256: [0xab; 32],
+            subject: "CN=icinga-master".to_owned(),
+            issuer: "CN=Icinga CA".to_owned(),
+            names: names.iter().map(|name| (*name).to_owned()).collect(),
+            not_before: Timestamp::EPOCH,
+            not_after: Timestamp::from_unix_seconds(2_000_000_000.0),
+        }
+    }
+
+    #[test]
+    fn the_author_hint_follows_the_login() {
+        assert_eq!(
+            author_placeholder(AuthKind::Password),
+            "defaults to the API user"
+        );
+        assert!(author_placeholder(AuthKind::Certificate).starts_with("required"));
+    }
+
+    #[test]
+    fn a_name_mismatch_offers_the_certificates_name() {
+        // What the Docker Icinga answered for https://127.0.0.1:5665 with
+        // its CA file set.
+        let message = "invalid peer certificate: certificate not valid for name \"127.0.0.1\"; \
+                       certificate is only valid for DnsName(\"icinga-master\")";
+        assert_eq!(
+            server_name_offer(message, &certificate(&["127.0.0.1", "icinga-master"])),
+            Some("icinga-master".to_owned())
+        );
+        assert_eq!(
+            server_name_offer(
+                "invalid peer certificate: NotValidForName",
+                &certificate(&["*.example.com", "icinga.example.com"])
+            ),
+            Some("icinga.example.com".to_owned())
+        );
+        // An unknown CA: pinning (or a CA file) is the answer.
+        assert_eq!(
+            server_name_offer(
+                "invalid peer certificate: UnknownIssuer",
+                &certificate(&["icinga-master"])
+            ),
+            None
+        );
+        assert_eq!(
+            server_name_offer(message, &certificate(&["10.0.0.1"])),
+            None
+        );
+    }
+}

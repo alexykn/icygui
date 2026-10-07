@@ -1,0 +1,57 @@
+{
+  "problemMatcher": [
+    {
+      "owner": "rust",
+      "pattern": [
+        {
+          "regexp": "^(warning|error)(\\[(\\S+)\\])?: (.*)$",
+          "severity": 1,
+          "code": 3,
+          "message": 4
+        },
+        {
+          "regexp": "^\\s*-->\\s+(.+?):(\\d+):(\\d+)$",
+          "file": 1,
+          "line": 2,
+          "column": 3
+        }
+      ]
+    },
+    {
+      "owner": "rust-unlocated",
+      "pattern": [
+        {
+          "regexp": "^(error)(\\[\\S+\\])?: (.*)$",
+          "severity": 1,
+          "message": 3
+        }
+      ]
+    },
+    {
+      "owner": "rust-test-panic",
+      "pattern": [
+        {
+          "regexp": "^thread '([^']+)'(?: \\(\\d+\\))? panicked at (.+?):(\\d+):(\\d+):$",
+          "code": 1,
+          "file": 2,
+          "line": 3,
+          "column": 4
+        },
+        {
+          "regexp": "^(.*)$",
+          "message": 1
+        }
+      ]
+    },
+    {
+      "owner": "rust-test-failed",
+      "pattern": [
+        {
+          "regexp": "^test (\\S+) \\.\\.\\. (FAILED)$",
+          "message": 1,
+          "code": 2
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+[package]
+name = "ic-app"
+description = "Icinga 2 desktop client: the GPUI application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "icygui"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+# Local clock times in the panes (comment and downtime times). Already in the
+# dependency graph through GPUI, with the same (default) features.
+chrono = "0.4.45"
+futures.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+ic-config.workspace = true
+ic-core.workspace = true
+# The dashboard editor parses a filter before saving it.
+ic-filter.workspace = true
+# `icygui --demo` (ENV-10) serves a simulated Icinga in-process.
+ic-mock = { path = "../ic-mock" }
+ic-model.workspace = true
+ic-platform.workspace = true
+ic-rules.workspace = true
+ic-ui-kit.workspace = true
+# The window icon (`WindowOptions::icon` is GPUI's `image::RgbaImage`):
+# the same version and PNG decoder GPUI already builds.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+# Actions with data (`SelectDashboard(3)`) are built from keymap JSON: GPUI's
+# `Action` derive needs `Deserialize` and `JsonSchema` for them. Both are
+# already in GPUI's dependency graph with the same features.
+schemars = "1"
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The demo's event log lives in a temporary directory.
+tempfile = "3.27.0"
+# The demo server's runtime (the same tokio ic-core and ic-mock use).
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Linux: desktop notifications with urgency and sound over the session bus
+# (the zbus ic-platform's tray and keyring use).
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
+# macOS: desktop notifications with sound through UserNotifications (GPUI's
+# backend never sets one); the objc2 crates and features GPUI's macOS
+# backend already builds.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSBundle", "NSError", "NSObject", "NSSet", "NSString", "std"] }
+objc2-user-notifications = "0.3.2"

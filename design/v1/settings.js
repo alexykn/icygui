@@ -92,7 +92,9 @@ function pageNotifications(part = 0) {
       srow('states', 'Recoveries follow problems that notified.', chip('critical', { sel: 1 }) + chip('warning') + chip('unknown', { sel: 1 }) + chip('down', { sel: 1 }) + chip('unreachable') + chip('recovery', { sel: 1 })) +
       srow('events', 'Also notify when these start or end.', chip('acknowledgements') + chip('downtimes') + chip('flapping')) +
       srow('hard states only', 'Soft states are retries in progress.', sw(true)) +
-      srow('skip handled problems', 'Acknowledged, in downtime, or the host is down.', sw(true)) +
+      srow('skip acknowledged', 'Problems someone has acknowledged; the acknowledgement says someone is on it.', sw(true)) +
+      srow('skip in downtime', 'Hosts and services whose downtime is in effect.', sw(true)) +
+      srow('skip services of hosts that are down', 'The host going down still notifies; this only spares you its services, one by one.', sw(true)) +
       srow('only after', 'A problem must last this long first (5m, 1h; 0 = at once).', inp('0', 80)) +
       srow('play a sound', 'The system’s alert sound, by state where the desktop plays sounds.', sw(true));
   }

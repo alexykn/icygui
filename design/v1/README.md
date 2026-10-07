@@ -1044,7 +1044,11 @@ quick switch; 12g a dashboard's `···` menu, following its group.
   none to the desktop. A window may cross midnight.
 - **Settings → notifications (12a)** holds the **defaults** per environment
   (the `environment` dropdown at the top of the page): the default rule
-  (states, events, hard states only, skip handled, only after, sound) and the
+  (states, events, hard states only, skip acknowledged, skip in downtime,
+  skip services of hosts that are down, only after, sound; the three skips
+  are separate switches, user 2026-10-07: a host going down is not the same
+  as it being handled, and the host's own down notification is never
+  skipped by the third) and the
   default notification times (rc1's quiet hours, turned into the times
   notifications are active). The section says explicitly that these are
   defaults, used by the groups and dashboards that have notifications turned

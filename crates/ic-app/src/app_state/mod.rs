@@ -782,9 +782,10 @@ impl AppState {
         true
     }
 
-    /// [`AppState::update_view`] for the view the dashboard page shows
+    /// [`AppState::update_view`] for a dashboard's primary view
     /// (`crate::dashboard::primary_view`): all of a single-view dashboard,
     /// which the page shows as rc1 did.
+    #[cfg(test)]
     pub(crate) fn update_primary_view(
         &mut self,
         reference: &DashboardRef,
@@ -801,12 +802,15 @@ impl AppState {
 
     /// The view header's (or summary bar's) handled button: `N hidden ·
     /// show` shows every handled problem, `N handled · hide` hides them
-    /// again as before ([`ic_config::HandledSetting::toggled`]); saved with
-    /// the view. Returns whether the view changed.
+    /// again ([`handled_after_click`]); saved with the view. Returns
+    /// whether the view changed.
     pub(crate) fn toggle_handled(&mut self, reference: &DashboardRef, view_id: &str) -> bool {
         let defaults = self.handled_defaults();
+        let hidden = self
+            .view_result(reference, view_id)
+            .map_or(0, |result| result.hidden);
         self.update_view(reference, view_id, |view| {
-            view.handled = view.handled.toggled(defaults);
+            view.handled = handled_after_click(view.handled, defaults, hidden);
         })
     }
 
@@ -1319,6 +1323,38 @@ fn would_list(
         _ => return false,
     };
     matches && (!view.problems_only || problem) && !hidden
+}
+
+/// A view's handled setting after a click on its handled button, which
+/// reads `N hidden · show` while the view hides `hidden` handled problems
+/// and `N handled · hide` while they show:
+///
+/// - *show*: every handled problem shows (the kinds the view chose are
+///   kept for later);
+/// - *hide*, after *show*: back to what hid them before
+///   ([`ic_config::HandledSetting::toggled`]);
+/// - *hide* while the settings hide only some kinds and nothing is hidden
+///   (say only `host down`, and acknowledged problems show): every kind is
+///   hidden, on this view.
+pub(crate) fn handled_after_click(
+    setting: ic_config::HandledSetting,
+    defaults: HideHandled,
+    hidden: u32,
+) -> ic_config::HandledSetting {
+    use ic_config::{HandledMode, HandledSetting};
+    if hidden > 0 {
+        HandledSetting {
+            mode: HandledMode::Show,
+            hide: setting.hide,
+        }
+    } else if setting.hidden(defaults).any() && setting.hidden(defaults) != HideHandled::ALL {
+        HandledSetting {
+            mode: HandledMode::Hide,
+            hide: HideHandled::ALL,
+        }
+    } else {
+        setting.toggled(defaults)
+    }
 }
 
 /// An object from its full name: `host` or `host!service`.

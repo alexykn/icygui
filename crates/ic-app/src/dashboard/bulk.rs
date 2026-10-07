@@ -69,7 +69,11 @@ impl DashboardView {
         list_width: Pixels,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
-        let marked = self.lists.get(reference)?.selection.marked_keys();
+        let ui = self.pages.get(reference)?;
+        if ui.selection.marked_count() == 0 {
+            return None;
+        }
+        let marked = ui.selection.marked_in(ui.objects());
         if marked.is_empty() {
             return None;
         }
@@ -260,8 +264,8 @@ impl DashboardView {
     /// Unmarks every row.
     fn clear_marks(&mut self, cx: &mut Context<Self>) {
         if let Some(reference) = self.sync(cx)
-            && let Some(list) = self.lists.get_mut(&reference)
-            && list.selection.clear_marks()
+            && let Some(ui) = self.pages.get_mut(&reference)
+            && ui.selection.clear_marks()
         {
             cx.notify();
         }

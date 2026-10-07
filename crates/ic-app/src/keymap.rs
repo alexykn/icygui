@@ -339,7 +339,11 @@ const CATALOGUE: &[(&str, &[&str])] = &[
     ("open the pane, as a tab", &["OpenSelected", "OpenAsTab"]),
     ("close the pane, clear the marks", &["Dismiss"]),
     ("remove the marked rows", &["RemoveSelected"]),
-    ("unfold, fold a host's downtime", &["Unfold", "Fold"]),
+    (
+        "unfold, fold a view, a host or a host's downtime",
+        &["Unfold", "Fold"],
+    ),
+    ("next view, previous view", &["NextView", "PreviousView"]),
     ("only mine", &["ToggleOnlyMine"]),
     ("next sort", &["NextSort"]),
     (

@@ -203,15 +203,11 @@ fn services_tab(
             }),
         )
     });
-    let toggle = if services.hidden > 0 {
-        Some(format!("+ {} more ok", services.hidden))
-    } else if services.total > model::HOST_SERVICES_PREVIEW
-        && services.shown.len() == services.total
-    {
-        Some("− show fewer".to_owned())
-    } else {
-        None
-    };
+    // `+ N more`, and `− show fewer` in the same slot (the shared paging
+    // rule, as in every host-with-services view).
+    let toggle = services
+        .pages
+        .then(|| crate::paging::more_label(services.hidden));
     div()
         .flex()
         .flex_col()

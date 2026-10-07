@@ -1,64 +1,79 @@
-//! The main area for a dashboard: the list (screen 2a) with its header and
-//! summary bar, and the detail pane beside it (screens 2b and 2c). Where the
-//! window is too narrow for both, the pane narrows down to a minimum and
-//! then covers the list ([`SplitLayout`]).
+//! The main area for a dashboard: its page (screen 2a; topic 04: every
+//! view stacked, each under its header) and the detail pane beside it
+//! (screens 2b and 2c). Where the window is too narrow for both, the pane
+//! narrows down to a minimum and then covers the page ([`SplitLayout`]).
 //!
-//! Rows are rendered with GPUI's `uniform_list`, which builds only the rows
-//! on screen: nothing per frame scales with the number of rows. The
-//! selection follows objects by key across snapshot updates
-//! ([`selection::ListSelection`]); every dashboard keeps its own selection,
-//! scroll position and open pane.
+//! The page ([`page::Page`]) is one list of items with exact heights: a
+//! single list view shows as rc1 did (its rows under the dashboard's
+//! header and summary bar); a dashboard with several views shows each view
+//! under its 36px header. The page scrolls as a whole and builds only the
+//! items on screen, so nothing per frame scales with the number of rows.
+//! One cursor moves through every view ([`cursor::PageSelection`]); it
+//! follows its row, band or host by identity across snapshot updates.
+//! Every dashboard keeps its own cursor, marks, folds, scroll position and
+//! open pane.
+//!
+//! Grouped lists are the host-with-services style (README, *Rules that
+//! span the topics*): a band per host (its state dot in the rows' mark
+//! column, name, address and status, per-state counts), its services as
+//! plain rows without indent, up to seven of them (`+ N more` shows the
+//! rest in place), and a chevron that only collapses or expands the host;
+//! a click anywhere else on the band opens the host in the pane.
 
 pub(crate) mod bulk;
+pub(crate) mod cursor;
+pub(crate) mod draw;
 pub(crate) mod header;
+pub(crate) mod page;
 pub(crate) mod rows;
 pub(crate) mod selection;
 
 pub(crate) use self::bulk::SELECTION_BAR_HEIGHT;
 pub(crate) use self::header::{HeaderMenu, HeaderMenus};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Render,
-    ScrollStrategy, Styled as _, Subscription, Task, UniformListScrollHandle, Window, div,
-    prelude::FluentBuilder as _, uniform_list,
+    ScrollHandle, Styled as _, Subscription, Task, UniformListScrollHandle, Window, div, point,
+    prelude::FluentBuilder as _,
 };
-use ic_config::{GroupBy, ListTimes, View};
+use ic_config::{ListTimes, ObjectKind, View};
 use ic_core::snapshot::{DashboardResult, DashboardRow, ViewResult};
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::{
     ActiveTheme as _, CircleSize, CodeBlock, Density, EmptyState, Icon, IconName, Link, ListRow,
-    Metrics, RowEmphasis, Scrollbar, StateCircle, Theme, px,
+    Metrics, StateCircle, Theme, px,
 };
 
-use self::selection::ListSelection;
+use self::cursor::PageSelection;
+use self::page::{Folds, GroupFilter, Id, ItemKind, Page, PageInput, Sizes, Stop};
 use crate::actions::{
     Acknowledge, ActionRequest, AddComment, CheckNow, DASHBOARD_CONTEXT, Dismiss,
-    ExtendSelectionNext, ExtendSelectionPrevious, MarkAll, ObjectAction, OpenAsTab, OpenSelected,
-    ScheduleDowntime, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
-    SelectPrevious, ToggleMark,
+    ExtendSelectionNext, ExtendSelectionPrevious, MarkAll, NextView, ObjectAction, OpenAsTab,
+    OpenSelected, PreviousView, ScheduleDowntime, SelectFirst, SelectLast, SelectNext,
+    SelectPageDown, SelectPageUp, SelectPrevious, ToggleMark,
 };
 use crate::app_state::hydration::row_worth_asking;
 use crate::app_state::{AppState, Hydrated};
 use crate::banner;
 use crate::chrome::WindowDrag;
+use crate::lists::view::{Fold, Unfold};
 use crate::pane::{ObjectPane, PaneEvent, PaneMode};
 
 /// The rows on screen are asked for their details once scrolling has
 /// rested this long, so flinging through a long list costs one request.
 pub(crate) const HYDRATE_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// The view this page shows: a dashboard's first list view, else its first
-/// view. A single-view dashboard (every dashboard from rc1) shows as rc1
-/// did; until the page shows every view (topic 04), a multi-view one shows
-/// its first list. A dashboard without views (a settings file edited by
-/// hand) reads as the default view.
+/// The view an rc1-style page shows and the editor edits: a dashboard's
+/// first list view, else its first view. A single-view dashboard (every
+/// dashboard from rc1) shows as rc1 did. A dashboard without views (a
+/// settings file edited by hand) reads as the default view.
 pub(crate) fn primary_view(views: &[View]) -> &View {
     static NONE: std::sync::LazyLock<View> = std::sync::LazyLock::new(View::default);
     views
@@ -68,7 +83,7 @@ pub(crate) fn primary_view(views: &[View]) -> &View {
         .unwrap_or(&NONE)
 }
 
-/// The result of the view this page shows ([`primary_view`]).
+/// The result of the [`primary_view`].
 pub(crate) fn primary_result<'a>(
     result: &'a DashboardResult,
     views: &[View],
@@ -76,13 +91,17 @@ pub(crate) fn primary_result<'a>(
     result.view(&primary_view(views).id)
 }
 
-/// The rows of the view this page shows (the shared `Arc`; empty when it
-/// isn't a list or has no result yet).
-fn primary_rows(state: &AppState, reference: &DashboardRef) -> Option<Arc<Vec<DashboardRow>>> {
-    let (_, dashboard) = state.dashboard(reference)?;
-    let result = state.view_result(reference, &primary_view(&dashboard.views).id)?;
-    Some(result.list_rows().cloned().unwrap_or_default())
+/// Whether a dashboard shows its views under headers (topic 04): several
+/// views, or one that isn't a list. A single list view shows as rc1 did,
+/// under the dashboard's header and summary bar.
+pub(crate) fn is_multi_view(views: &[View]) -> bool {
+    views.len() > 1 || views.first().is_some_and(|view| !view.is_list())
 }
+
+/// The pane's width beside a page of several views (4b): narrower than
+/// beside a single list, so the views' headers keep their counts, handled
+/// slot, sort and `···`.
+const MULTI_VIEW_PANE: f32 = 560.;
 
 /// How long the cursor follows an object revealed while the rows were
 /// quiet mode's ([`Reveal`]) at most: the handover to the live stream
@@ -101,14 +120,70 @@ struct Reveal {
     since: Instant,
 }
 
-/// A dashboard's list state.
-struct ListUi {
-    selection: ListSelection,
-    scroll: UniformListScrollHandle,
-    pane: Option<OpenPane>,
+/// What a page was built from: it is built again when any of it changes.
+#[derive(Clone, Debug, PartialEq)]
+struct Built {
+    /// The snapshot (by address: every snapshot is a new `Arc`).
+    snapshot: usize,
+    views: Vec<View>,
+    folds: Folds,
+    filter: Option<GroupFilter>,
+    width: Pixels,
+    sizes: Sizes,
+    denied: [bool; 2],
 }
 
-/// The pane open beside the list.
+/// A dashboard's page state.
+struct PageUi {
+    selection: PageSelection,
+    scroll: ScrollHandle,
+    pane: Option<OpenPane>,
+    folds: Folds,
+    filter: Option<GroupFilter>,
+    page: Rc<Page>,
+    built: Option<Built>,
+    /// Event streams' own scrolling, by view.
+    streams: HashMap<Id, UniformListScrollHandle>,
+}
+
+impl PageUi {
+    fn new() -> Self {
+        Self {
+            selection: PageSelection::default(),
+            scroll: ScrollHandle::new(),
+            pane: None,
+            folds: Folds::default(),
+            filter: None,
+            page: Rc::default(),
+            built: None,
+            streams: HashMap::new(),
+        }
+    }
+
+    /// The stop under the cursor.
+    fn cursor_entry(&self) -> Option<(usize, &Stop)> {
+        let position = self.selection.cursor()?;
+        Some((position, &self.page.stops().get(position)?.stop))
+    }
+
+    /// The view holding the cursor (its header shows the accent bar).
+    fn focused_view(&self) -> Option<usize> {
+        let (_, stop) = self.cursor_entry()?;
+        self.page.view_index(stop.view())
+    }
+
+    /// Every object of the page's views, view by view (for the marks'
+    /// order).
+    fn objects(&self) -> Vec<ObjectKey> {
+        self.page
+            .views
+            .iter()
+            .flat_map(page::ViewPage::objects)
+            .collect()
+    }
+}
+
+/// The pane open beside the page.
 struct OpenPane {
     view: Entity<ObjectPane>,
     _events: Subscription,
@@ -121,23 +196,24 @@ pub(crate) enum DashboardEvent {
     Edit(DashboardRef),
 }
 
-/// The dashboard list with its header, summary bar and detail pane.
+/// The dashboard page with its header, summary bar and detail pane.
 pub(crate) struct DashboardView {
     state: Entity<AppState>,
     focus_handle: FocusHandle,
-    lists: HashMap<DashboardRef, ListUi>,
+    pages: HashMap<DashboardRef, PageUi>,
     menus: HeaderMenus,
     sidebar_open: bool,
     drag: WindowDrag,
-    /// The rows built in the last frame: the rows on screen. Sets the page
-    /// size.
+    /// The page's width as last drawn (grids and tiles lay out to it).
+    width: Pixels,
+    /// The items built in the last frame: the items on screen.
     visible: Range<usize>,
     /// The times the object rows built in the last frame show, for tests.
     #[cfg(test)]
     shown_times: Vec<String>,
     /// Where the selection bar's buttons start, as last drawn, for tests.
     #[cfg(test)]
-    pub(crate) selection_buttons_x: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
+    pub(crate) selection_buttons_x: Rc<std::cell::Cell<Option<Pixels>>>,
     /// The rows on screen without output, last asked for (or about to
     /// be), and in which wake of the environment (`AppState::wake`): after
     /// waking up from quiet mode they are asked for again.
@@ -163,15 +239,16 @@ impl DashboardView {
         Self {
             state,
             focus_handle: cx.focus_handle(),
-            lists: HashMap::new(),
+            pages: HashMap::new(),
             menus: HeaderMenus::default(),
             sidebar_open: true,
             drag: WindowDrag::default(),
+            width: crate::WINDOW_SIZE.width,
             visible: 0..0,
             #[cfg(test)]
             shown_times: Vec::new(),
             #[cfg(test)]
-            selection_buttons_x: std::rc::Rc::default(),
+            selection_buttons_x: Rc::default(),
             hydration_wanted: (Vec::new(), 0),
             hydrate_task: None,
             reveal: None,
@@ -210,8 +287,8 @@ impl DashboardView {
     pub(crate) fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.sidebar_open != open {
             self.sidebar_open = open;
-            // A pane covering a narrow list needs the window controls then.
-            for pane in self.lists.values().filter_map(|list| list.pane.as_ref()) {
+            // A pane covering a narrow page needs the window controls then.
+            for pane in self.pages.values().filter_map(|ui| ui.pane.as_ref()) {
                 pane.view
                     .update(cx, |pane, cx| pane.set_sidebar_open(open, cx));
             }
@@ -226,9 +303,7 @@ impl DashboardView {
         let Some(reference) = self.sync(cx) else {
             return;
         };
-        if let Some(list) = self.lists.get_mut(&reference) {
-            put_cursor_on(list, key);
-        }
+        self.put_cursor_on(&reference, key, cx);
         self.open_pane(&reference, key.clone(), cx);
         self.reveal = self.state.read(cx).rows_settling().then(|| Reveal {
             dashboard: reference,
@@ -249,21 +324,17 @@ impl DashboardView {
         let Some(reference) = self.sync(cx) else {
             return;
         };
-        if let Some(open) = self
-            .lists
-            .get(&reference)
-            .and_then(|list| list.pane.as_ref())
-        {
+        if let Some(open) = self.pages.get(&reference).and_then(|ui| ui.pane.as_ref()) {
             open.view.update(cx, |view, cx| view.show(pane, cx));
         }
     }
 
-    /// Opens `key`'s pane beside the list, or shows `key` in the open one.
+    /// Opens `key`'s pane beside the page, or shows `key` in the open one.
     fn open_pane(&mut self, reference: &DashboardRef, key: ObjectKey, cx: &mut Context<Self>) {
-        let Some(list) = self.lists.get_mut(reference) else {
+        let Some(ui) = self.pages.get_mut(reference) else {
             return;
         };
-        if let Some(pane) = &list.pane {
+        if let Some(pane) = &ui.pane {
             pane.view.update(cx, |pane, cx| pane.open(key, cx));
         } else {
             let state = self.state.clone();
@@ -279,7 +350,7 @@ impl DashboardView {
                     this.close_pane(&closed, cx);
                 }
             });
-            list.pane = Some(OpenPane {
+            ui.pane = Some(OpenPane {
                 view,
                 _events: events,
             });
@@ -290,9 +361,9 @@ impl DashboardView {
     fn close_pane(&mut self, reference: &DashboardRef, cx: &mut Context<Self>) -> bool {
         self.reveal = None;
         let closed = self
-            .lists
+            .pages
             .get_mut(reference)
-            .and_then(|list| list.pane.take())
+            .and_then(|ui| ui.pane.take())
             .is_some();
         if closed {
             cx.notify();
@@ -300,75 +371,198 @@ impl DashboardView {
         closed
     }
 
-    /// Makes sure the selected dashboard has its list state and that the
-    /// selection refers to its current rows. Cheap when nothing changed.
+    /// Makes sure the selected dashboard has its page state and that its
+    /// page is built from the current views, results and folds. Cheap
+    /// when nothing changed.
     fn sync(&mut self, cx: &App) -> Option<DashboardRef> {
         let state = self.state.read(cx);
-        if self.lists.len() > 1 {
-            self.lists
+        if self.pages.len() > 1 {
+            self.pages
                 .retain(|reference, _| state.dashboard(reference).is_some());
         }
         let reference = state.selected()?.clone();
-        let rows = primary_rows(state, &reference).unwrap_or_default();
-        let list = self
-            .lists
+        let (_, dashboard) = state.dashboard(&reference)?;
+        let snapshot = state.snapshot();
+        let multi = is_multi_view(&dashboard.views);
+        let denied = [
+            state.query_denial(ObjectKind::Services).is_some(),
+            state.query_denial(ObjectKind::Hosts).is_some(),
+        ];
+        let sizes = Sizes::of(cx.theme());
+        let width = self.width;
+        let ui = self
+            .pages
             .entry(reference.clone())
-            .or_insert_with(|| ListUi {
-                selection: ListSelection::new(rows.clone()),
-                scroll: UniformListScrollHandle::new(),
-                pane: None,
+            .or_insert_with(PageUi::new);
+        let fresh = ui.built.as_ref().is_some_and(|built| {
+            built.snapshot == std::sync::Arc::as_ptr(snapshot) as usize
+                && built.views == dashboard.views
+                && built.folds == ui.folds
+                && built.filter == ui.filter
+                && built.width == width
+                && built.sizes == sizes
+                && built.denied == denied
+        });
+        if !fresh {
+            let page = Page::build(&PageInput {
+                views: &dashboard.views,
+                result: state.result(&reference),
+                snapshot,
+                folds: &ui.folds,
+                filter: ui.filter.as_ref(),
+                multi,
+                denied,
+                width,
+                sizes,
             });
-        let changed = list.selection.update_rows(&rows);
+            if ui.selection.marked_count() > 0 {
+                let listed: HashSet<ObjectKey> = page
+                    .views
+                    .iter()
+                    .flat_map(page::ViewPage::objects)
+                    .collect();
+                ui.selection.update(&page, |key| listed.contains(key));
+            } else {
+                ui.selection.update(&page, |_| true);
+            }
+            ui.page = Rc::new(page);
+            ui.built = Some(Built {
+                snapshot: std::sync::Arc::as_ptr(snapshot) as usize,
+                views: dashboard.views.clone(),
+                folds: ui.folds.clone(),
+                filter: ui.filter.clone(),
+                width,
+                sizes,
+                denied,
+            });
+        }
         if let Some(reveal) = &self.reveal
             && reveal.dashboard == reference
         {
             let settling = state.rows_settling();
-            let placed = (changed || !settling) && put_cursor_on(list, &reveal.key);
-            if (placed && !settling) || reveal.since.elapsed() > REVEAL_FOLLOW {
+            let key = reveal.key.clone();
+            let since = reveal.since;
+            let placed = (!fresh || !settling) && self.place_on(&reference, &key);
+            if (placed && !settling) || since.elapsed() > REVEAL_FOLLOW {
                 self.reveal = None;
             }
         }
         Some(reference)
     }
 
-    /// Runs `change` on the selected dashboard's selection; scrolls to the
+    /// Puts the cursor on `key`'s first stop on the page (no unfolding)
+    /// and scrolls it to the middle. Returns whether the page shows it.
+    fn place_on(&mut self, reference: &DashboardRef, key: &ObjectKey) -> bool {
+        let Some(ui) = self.pages.get_mut(reference) else {
+            return false;
+        };
+        let page = ui.page.clone();
+        let Some(position) = page
+            .stops()
+            .iter()
+            .position(|entry| matches!(&entry.stop, Stop::Row { key: row, .. } if row == key))
+            .or_else(|| {
+                page.stops()
+                    .iter()
+                    .position(|entry| entry.stop.object(&page).as_ref() == Some(key))
+            })
+        else {
+            return false;
+        };
+        ui.selection.place(&page, position);
+        reveal_stop(ui, &page, position, true);
+        true
+    }
+
+    /// Puts the cursor on `key`, unfolding what hides it (its view, its
+    /// host, its host's paging), and scrolls it into view.
+    fn put_cursor_on(&mut self, reference: &DashboardRef, key: &ObjectKey, cx: &mut Context<Self>) {
+        if self.place_on(reference, key) {
+            return;
+        }
+        let Some(ui) = self.pages.get_mut(reference) else {
+            return;
+        };
+        let page = ui.page.clone();
+        let views = self
+            .state
+            .read(cx)
+            .dashboard(reference)
+            .map(|(_, dashboard)| dashboard.views.clone())
+            .unwrap_or_default();
+        let mut unfolded = false;
+        for view in &page.views {
+            let has = view
+                .rows
+                .iter()
+                .any(|row| matches!(row, DashboardRow::Object(object) if object == key));
+            if !has {
+                continue;
+            }
+            if view.collapsed
+                && let Some(config) = views.iter().find(|candidate| *candidate.id == *view.id)
+            {
+                ui.folds.set_view(config, false);
+            }
+            for group in &view.groups {
+                let member = group.members.iter().position(
+                    |&row| matches!(&view.rows[row], DashboardRow::Object(object) if object == key),
+                );
+                if let Some(member) = member {
+                    ui.folds.set_group(&view.id, &group.id, false);
+                    if member >= group.shown {
+                        ui.folds.set_expanded(&view.id, &group.id, true);
+                    }
+                }
+            }
+            unfolded = true;
+            break;
+        }
+        if unfolded {
+            self.sync(cx);
+            self.place_on(reference, key);
+        }
+    }
+
+    /// Runs `change` on the selected dashboard's cursor; scrolls to the
     /// cursor and, if the pane is open, shows the cursor's object in it.
     fn change_selection(
         &mut self,
         cx: &mut Context<Self>,
-        change: impl FnOnce(&mut ListSelection) -> Option<usize>,
+        change: impl FnOnce(&mut PageSelection, &Page) -> Option<usize>,
     ) {
         let Some(reference) = self.sync(cx) else {
             return;
         };
         self.reveal = None;
-        let Some(list) = self.lists.get_mut(&reference) else {
+        let Some(ui) = self.pages.get_mut(&reference) else {
             return;
         };
-        if let Some(index) = change(&mut list.selection) {
-            list.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
-            if let (Some(pane), Some(key)) = (&list.pane, list.selection.cursor_key()) {
-                let key = key.clone();
+        let page = ui.page.clone();
+        if let Some(position) = change(&mut ui.selection, &page) {
+            reveal_stop(ui, &page, position, false);
+            if let Some(pane) = &ui.pane
+                && let Some(key) = page
+                    .stops()
+                    .get(position)
+                    .and_then(|entry| entry.stop.object(&page))
+            {
                 pane.view.update(cx, |pane, cx| pane.show(key, cx));
             }
         }
         cx.notify();
     }
 
-    fn page_size(&self) -> isize {
-        isize::try_from(self.visible.len().saturating_sub(1).max(1)).unwrap_or(1)
-    }
-
     fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_selection(cx, |selection| selection.move_by(1));
+        self.change_selection(cx, |selection, page| selection.move_by(page, 1));
     }
 
     fn select_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_selection(cx, |selection| selection.move_by(-1));
+        self.change_selection(cx, |selection, page| selection.move_by(page, -1));
     }
 
     fn extend_next(&mut self, _: &ExtendSelectionNext, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_selection(cx, |selection| selection.extend_by(1));
+        self.change_selection(cx, |selection, page| selection.extend_by(page, 1));
     }
 
     fn extend_previous(
@@ -377,55 +571,342 @@ impl DashboardView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.change_selection(cx, |selection| selection.extend_by(-1));
+        self.change_selection(cx, |selection, page| selection.extend_by(page, -1));
     }
 
     fn select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_selection(cx, |selection| selection.move_to_end(false));
+        self.change_selection(cx, |selection, page| selection.move_to_end(page, false));
     }
 
     fn select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_selection(cx, |selection| selection.move_to_end(true));
+        self.change_selection(cx, |selection, page| selection.move_to_end(page, true));
     }
 
     fn select_page_down(&mut self, _: &SelectPageDown, _: &mut Window, cx: &mut Context<Self>) {
-        let page = self.page_size();
-        self.change_selection(cx, |selection| selection.move_page(page));
+        self.move_page(true, cx);
     }
 
     fn select_page_up(&mut self, _: &SelectPageUp, _: &mut Window, cx: &mut Context<Self>) {
-        let page = self.page_size();
-        self.change_selection(cx, |selection| selection.move_page(-page));
+        self.move_page(false, cx);
+    }
+
+    /// Moves the cursor a screenful down (or up): to the stop a viewport's
+    /// height away.
+    fn move_page(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let viewport = self
+            .sync(cx)
+            .and_then(|reference| self.pages.get(&reference))
+            .map(viewport_height)
+            .unwrap_or_default();
+        self.change_selection(cx, |selection, page| {
+            let Some(position) = selection.cursor() else {
+                return selection.move_by(page, if forward { 1 } else { -1 });
+            };
+            let item = page.stops()[position].item;
+            let y = if forward {
+                page.top(item) + viewport
+            } else {
+                page.top(item) - viewport
+            };
+            let target_item = page.item_at(y.max(px(0.)))?;
+            let target = page
+                .stop_at_or_after(target_item)
+                .and_then(|target| page.body_stop_near(target, forward))
+                .or_else(|| page.body_stop_near(page.stops().len().saturating_sub(1), false))?;
+            let target = if forward {
+                target.max(position)
+            } else {
+                target.min(position)
+            };
+            selection.place(page, target).then_some(target)
+        });
     }
 
     fn toggle_mark(&mut self, _: &ToggleMark, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_selection(cx, |selection| {
-            selection
-                .toggle_mark_at_cursor()
-                .then(|| selection.cursor())
-                .flatten()
-        });
+        self.change_selection(cx, PageSelection::toggle_mark_at_cursor);
     }
 
+    /// ctrl-a: marks every row of the view holding the cursor (else the
+    /// first list), its folded and paged-away rows too.
     fn mark_all(&mut self, _: &MarkAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_selection(cx, |selection| {
-            selection.mark_all();
-            None
-        });
+        let Some(reference) = self.sync(cx) else {
+            return;
+        };
+        let Some(ui) = self.pages.get_mut(&reference) else {
+            return;
+        };
+        let view = ui
+            .focused_view()
+            .or_else(|| ui.page.views.iter().position(|view| !view.rows.is_empty()));
+        if let Some(view) = view.and_then(|view| ui.page.views.get(view)) {
+            ui.selection.mark_all(view.objects());
+            cx.notify();
+        }
     }
 
+    /// Enter: opens the cursor's object in the pane (a row, a host's band,
+    /// a grid's host, an event); on a paging row shows all or fewer; on a
+    /// view's header or a group's band (not a host's) folds or unfolds it.
     fn open_selected(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
         let Some(reference) = self.sync(cx) else {
             return;
         };
-        let Some(list) = self.lists.get_mut(&reference) else {
+        let Some(ui) = self.pages.get_mut(&reference) else {
             return;
         };
-        if list.selection.cursor().is_none() {
-            list.selection.move_by(1);
+        if ui.selection.cursor().is_none() {
+            let page = ui.page.clone();
+            ui.selection.move_by(&page, 1);
         }
-        if let Some(key) = list.selection.cursor_key().cloned() {
-            self.open_pane(&reference, key, cx);
+        let Some((_, stop)) = ui.cursor_entry() else {
+            return;
+        };
+        let stop = stop.clone();
+        self.activate(&reference, &stop, true, cx);
+    }
+
+    /// What Enter (or a click on it) does with `stop`.
+    fn activate(
+        &mut self,
+        reference: &DashboardRef,
+        stop: &Stop,
+        keyboard: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ui) = self.pages.get(reference) else {
+            return;
+        };
+        let page = ui.page.clone();
+        match stop {
+            Stop::Header(view) => {
+                let collapsed = page.view_by_id(view).is_some_and(|view| view.collapsed);
+                self.fold_view(reference, view, !collapsed, cx);
+            }
+            Stop::More { view, group } => {
+                let expanded = page
+                    .view_by_id(view)
+                    .and_then(|view| view.group(group))
+                    .is_some_and(|group| group.expanded);
+                self.set_paging(reference, view, group, !expanded, keyboard, cx);
+            }
+            Stop::Band { view, group } => {
+                if let Some(host) = stop.object(&page) {
+                    self.open_pane(reference, host, cx);
+                } else {
+                    let collapsed = page
+                        .view_by_id(view)
+                        .and_then(|view| view.group(group))
+                        .is_some_and(|group| group.collapsed);
+                    self.fold_group(reference, view, group, !collapsed, cx);
+                }
+            }
+            Stop::Row { .. } | Stop::Cell { .. } | Stop::Event { .. } => {
+                if let Some(key) = stop.object(&page) {
+                    self.open_pane(reference, key, cx);
+                }
+            }
+        }
+    }
+
+    /// `→`: unfolds what the cursor is on (a view's header, a band, a
+    /// host's `+ N more`); on a grid, the next host.
+    fn unfold(&mut self, _: &Unfold, _: &mut Window, cx: &mut Context<Self>) {
+        self.fold_at_cursor(true, cx);
+    }
+
+    /// `←`: folds what the cursor is on; on a grid, the previous host.
+    fn fold(&mut self, _: &Fold, _: &mut Window, cx: &mut Context<Self>) {
+        self.fold_at_cursor(false, cx);
+    }
+
+    fn fold_at_cursor(&mut self, open: bool, cx: &mut Context<Self>) {
+        let Some(reference) = self.sync(cx) else {
+            return;
+        };
+        let Some((position, stop)) = self.pages.get(&reference).and_then(|ui| {
+            ui.cursor_entry()
+                .map(|(position, stop)| (position, stop.clone()))
+        }) else {
+            cx.propagate();
+            return;
+        };
+        match &stop {
+            Stop::Header(view) => self.fold_view(&reference, view, !open, cx),
+            Stop::Band { view, group } => self.fold_group(&reference, view, group, !open, cx),
+            Stop::More { view, group } => {
+                self.set_paging(&reference, view, group, open, true, cx);
+            }
+            Stop::Cell { .. } => {
+                self.change_selection(cx, |selection, page| {
+                    let target = page.grid_side_step(position, open)?;
+                    selection.place(page, target).then_some(target)
+                });
+            }
+            Stop::Row { .. } | Stop::Event { .. } => cx.propagate(),
+        }
+    }
+
+    /// Collapses (or expands) a view to its header; a cursor inside it
+    /// goes to the header.
+    fn fold_view(
+        &mut self,
+        reference: &DashboardRef,
+        view: &Id,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(config) = self
+            .state
+            .read(cx)
+            .dashboard(reference)
+            .and_then(|(_, dashboard)| {
+                dashboard
+                    .views
+                    .iter()
+                    .find(|candidate| *candidate.id == **view)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let Some(ui) = self.pages.get_mut(reference) else {
+            return;
+        };
+        let inside = ui
+            .cursor_entry()
+            .is_some_and(|(_, stop)| stop.view() == view);
+        ui.folds.set_view(&config, collapsed);
+        self.after_fold(reference, inside.then(|| Stop::Header(view.clone())), cx);
+    }
+
+    /// Collapses (or expands) a group to its band; a cursor on one of its
+    /// rows goes to the band.
+    fn fold_group(
+        &mut self,
+        reference: &DashboardRef,
+        view: &Id,
+        group: &Id,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ui) = self.pages.get_mut(reference) else {
+            return;
+        };
+        let inside = ui.cursor_entry().is_some_and(|(_, stop)| match stop {
+            Stop::Row {
+                view: row_view,
+                group: Some(row_group),
+                ..
+            }
+            | Stop::More {
+                view: row_view,
+                group: row_group,
+            } => row_view == view && row_group == group,
+            _ => false,
+        });
+        ui.folds.set_group(view, group, collapsed);
+        let band = Stop::Band {
+            view: view.clone(),
+            group: group.clone(),
+        };
+        self.after_fold(reference, inside.then_some(band), cx);
+    }
+
+    /// Shows all of a host's services (`+ N more`) or pages them again
+    /// (`− show fewer`). From the keyboard, showing all puts the cursor
+    /// on the first row that appeared, where the paging row was.
+    fn set_paging(
+        &mut self,
+        reference: &DashboardRef,
+        view: &Id,
+        group: &Id,
+        expanded: bool,
+        keyboard: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ui) = self.pages.get_mut(reference) else {
+            return;
+        };
+        let first_new = ui
+            .page
+            .view_by_id(view)
+            .and_then(|page_view| {
+                let group = page_view.group(group)?;
+                let row = *group.members.get(group.shown)?;
+                match &page_view.rows[row] {
+                    DashboardRow::Object(key) => Some(Stop::Row {
+                        view: view.clone(),
+                        group: Some(group.id.clone()),
+                        key: key.clone(),
+                    }),
+                    DashboardRow::Group { .. } => None,
+                }
+            })
+            .filter(|_| expanded && keyboard);
+        ui.folds.set_expanded(view, group, expanded);
+        self.after_fold(reference, first_new, cx);
+    }
+
+    /// Builds the page again after a fold, puts the cursor on `cursor`
+    /// (when given) and keeps it in view.
+    fn after_fold(
+        &mut self,
+        reference: &DashboardRef,
+        cursor: Option<Stop>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync(cx);
+        if let Some(ui) = self.pages.get_mut(reference) {
+            let page = ui.page.clone();
+            if let Some(position) = cursor.and_then(|stop| page.position(&stop)) {
+                ui.selection.place(&page, position);
+            }
+            if let Some(position) = ui.selection.cursor() {
+                reveal_stop(ui, &page, position, false);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Tab / shift-Tab: the cursor to the next (previous) view's first row,
+    /// or its header when it shows none (collapsed).
+    fn next_view(&mut self, _: &NextView, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_view(true, cx);
+    }
+
+    fn previous_view(&mut self, _: &PreviousView, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_view(false, cx);
+    }
+
+    fn jump_view(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(reference) = self.sync(cx) else {
+            return;
+        };
+        let Some(ui) = self.pages.get(&reference) else {
+            return;
+        };
+        let count = ui.page.views.len();
+        if count < 2 && ui.page.header_stop(0).is_none() {
+            // A single list: nothing to jump to.
+            cx.propagate();
+            return;
+        }
+        let current = ui.focused_view();
+        let candidates: Vec<usize> = match (current, forward) {
+            (Some(current), true) => (current + 1..count).collect(),
+            (Some(current), false) => (0..current).rev().collect(),
+            (None, true) => (0..count).collect(),
+            (None, false) => (0..count).rev().collect(),
+        };
+        let target = candidates.into_iter().find_map(|view| {
+            ui.page
+                .first_body_stop(view)
+                .or_else(|| ui.page.header_stop(view))
+        });
+        if let Some(target) = target {
+            self.change_selection(cx, |selection, page| {
+                selection.place(page, target).then_some(target)
+            });
         }
     }
 
@@ -441,14 +922,42 @@ impl DashboardView {
         if self.close_pane(&reference, cx) {
             return;
         }
-        let cleared = self
-            .lists
-            .get_mut(&reference)
-            .is_some_and(|list| list.selection.clear_marks());
-        if cleared {
+        let Some(ui) = self.pages.get_mut(&reference) else {
+            cx.propagate();
+            return;
+        };
+        if ui.selection.clear_marks() {
             cx.notify();
+        } else if ui.filter.take().is_some() {
+            self.after_fold(&reference, None, cx);
         } else {
             cx.propagate();
+        }
+    }
+
+    /// Filters the page to one group (a click on a grid group's name or a
+    /// tile), or clears the filter when it is that group already.
+    fn filter_to(&mut self, reference: &DashboardRef, filter: GroupFilter, cx: &mut Context<Self>) {
+        let Some(ui) = self.pages.get_mut(reference) else {
+            return;
+        };
+        ui.filter = if ui.filter.as_ref() == Some(&filter) {
+            None
+        } else {
+            Some(filter)
+        };
+        self.after_fold(reference, None, cx);
+    }
+
+    /// Clears the page's group filter (the chip's ×).
+    fn clear_filter(&mut self, cx: &mut Context<Self>) {
+        let Some(reference) = self.sync(cx) else {
+            return;
+        };
+        if let Some(ui) = self.pages.get_mut(&reference)
+            && ui.filter.take().is_some()
+        {
+            self.after_fold(&reference, None, cx);
         }
     }
 
@@ -463,17 +972,22 @@ impl DashboardView {
         });
     }
 
-    /// The objects an action from elsewhere (the command palette) applies
-    /// to: the marked rows, else the pane's or the cursor's object.
-    pub(crate) fn action_targets(&mut self, cx: &mut Context<Self>) -> Vec<ObjectKey> {
+    /// The marked objects of the selected dashboard, in page order.
+    fn marked_keys(&mut self, cx: &mut Context<Self>) -> Vec<ObjectKey> {
         let Some(reference) = self.sync(cx) else {
             return Vec::new();
         };
-        let marked = self
-            .lists
+        self.pages
             .get(&reference)
-            .map(|list| list.selection.marked_keys())
-            .unwrap_or_default();
+            .filter(|ui| ui.selection.marked_count() > 0)
+            .map(|ui| ui.selection.marked_in(ui.objects()))
+            .unwrap_or_default()
+    }
+
+    /// The objects an action from elsewhere (the command palette) applies
+    /// to: the marked rows, else the pane's or the cursor's object.
+    pub(crate) fn action_targets(&mut self, cx: &mut Context<Self>) -> Vec<ObjectKey> {
+        let marked = self.marked_keys(cx);
         if marked.is_empty() {
             self.focused_object(cx).into_iter().collect()
         } else {
@@ -491,29 +1005,17 @@ impl DashboardView {
     /// cursor's.
     fn focused_object(&mut self, cx: &mut Context<Self>) -> Option<ObjectKey> {
         let reference = self.sync(cx)?;
-        let list = self.lists.get(&reference)?;
-        match &list.pane {
+        let ui = self.pages.get(&reference)?;
+        match &ui.pane {
             Some(pane) => Some(pane.view.read(cx).object().clone()),
-            None => list.selection.cursor_key().cloned(),
+            None => ui.cursor_entry()?.1.object(&ui.page),
         }
     }
 
     /// Sends `action` for the marked rows, or else the pane's or the
     /// cursor's object.
     fn request(&mut self, action: ObjectAction, cx: &mut Context<Self>) {
-        let Some(reference) = self.sync(cx) else {
-            return;
-        };
-        let marked = self
-            .lists
-            .get(&reference)
-            .map(|list| list.selection.marked_keys())
-            .unwrap_or_default();
-        let targets = if marked.is_empty() {
-            self.focused_object(cx).into_iter().collect()
-        } else {
-            marked
-        };
+        let targets = self.action_targets(cx);
         if targets.is_empty() {
             return;
         }
@@ -544,14 +1046,15 @@ impl DashboardView {
         self.request(ObjectAction::AddComment, cx);
     }
 
-    /// A click on `key`'s row, drawn as row `index`: plain clicks select the
-    /// row and open its pane, shift extends the marks from the anchor,
-    /// ctrl/cmd toggles the row's mark. A snapshot may have moved the row
-    /// since it was drawn; the click still goes to `key`.
-    fn click_row(
+    /// A click on the thing drawn for `stop`: plain clicks put the cursor
+    /// there and open its object in the pane (a row, a host's band, a grid
+    /// host, an event) or do what Enter does (a paging row); shift extends
+    /// the marks from the anchor, ctrl/cmd toggles the row's mark. A
+    /// snapshot may have moved it since it was drawn; the click still goes
+    /// to the same thing.
+    fn click_stop(
         &mut self,
-        index: usize,
-        key: &ObjectKey,
+        stop: &Stop,
         modifiers: Modifiers,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -562,271 +1065,248 @@ impl DashboardView {
             return;
         };
         self.reveal = None;
-        let Some(index) = self
-            .lists
+        let Some(position) = self
+            .pages
             .get(&reference)
-            .and_then(|list| list.selection.rows().locate(index, key))
+            .and_then(|ui| ui.page.position(stop))
         else {
-            // The object left the list.
+            // It left the page.
             cx.notify();
             return;
         };
-        if modifiers.shift {
-            self.change_selection(cx, |selection| selection.extend_to(index).then_some(index));
-        } else if modifiers.secondary() {
-            self.change_selection(cx, |selection| {
-                selection.toggle_mark(index).then_some(index)
+        let row = matches!(stop, Stop::Row { .. });
+        if row && modifiers.shift {
+            self.change_selection(cx, |selection, page| {
+                selection.extend_to(page, position).then_some(position)
             });
-        } else {
-            let key = self.lists.get_mut(&reference).and_then(|list| {
-                list.selection
-                    .select(index)
-                    .then(|| list.selection.cursor_key().cloned())
-                    .flatten()
+            return;
+        }
+        if row && modifiers.secondary() {
+            self.change_selection(cx, |selection, page| {
+                selection.toggle_mark(page, position).then_some(position)
             });
-            if let Some(key) = key {
-                self.open_pane(&reference, key, cx);
+            return;
+        }
+        if let Some(ui) = self.pages.get_mut(&reference) {
+            let page = ui.page.clone();
+            if row {
+                ui.selection.select(&page, position);
+            } else if !matches!(stop, Stop::More { .. }) {
+                ui.selection.place(&page, position);
             }
         }
+        if !matches!(stop, Stop::Header(_)) {
+            self.activate(&reference, stop, false, cx);
+        }
+        cx.notify();
     }
 
-    /// A click on a host's group header opens the host's pane.
-    fn click_group(&mut self, host: ObjectKey, window: &mut Window, cx: &mut Context<Self>) {
+    /// The view header's or a band's chevron: folds or unfolds, nothing
+    /// else (it never opens anything).
+    fn click_chevron(&mut self, stop: &Stop, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle, cx);
-        self.reveal = None;
-        if let Some(reference) = self.sync(cx) {
-            self.open_pane(&reference, host, cx);
+        self.menus.close();
+        let Some(reference) = self.sync(cx) else {
+            return;
+        };
+        let Some(page) = self.pages.get(&reference).map(|ui| ui.page.clone()) else {
+            return;
+        };
+        match stop {
+            Stop::Header(view) => {
+                let collapsed = page.view_by_id(view).is_some_and(|view| view.collapsed);
+                self.fold_view(&reference, view, !collapsed, cx);
+            }
+            Stop::Band { view, group } => {
+                let collapsed = page
+                    .view_by_id(view)
+                    .and_then(|page_view| page_view.group(group))
+                    .is_some_and(|group| group.collapsed);
+                self.fold_group(&reference, view, group, !collapsed, cx);
+            }
+            _ => {}
         }
     }
 
-    /// Builds the rows in `range` (the ones on screen).
-    fn render_rows(
-        &mut self,
-        reference: &DashboardRef,
-        range: Range<usize>,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        self.visible = range.clone();
-        #[cfg(test)]
-        self.shown_times.clear();
-        let state = self.state.read(cx);
-        let snapshot = state.snapshot().clone();
-        let Some(view) = state
-            .dashboard(reference)
-            .map(|(_, dashboard)| primary_view(&dashboard.views).clone())
-        else {
-            return Vec::new();
-        };
-        let Some(list) = self.lists.get(reference) else {
-            return Vec::new();
-        };
-        let selection = &list.selection;
-        let cursor = selection.cursor();
-        let theme = cx.theme();
-        let now = Timestamp::now();
-        let times = state.appearance().list_times;
-        // Under a host's header, `on <host>` would repeat it on every row.
-        let show_host = view.group_by != GroupBy::Host;
-        let grouped = view.group_by != GroupBy::None;
-        let indent = if grouped {
-            theme.metrics.row_indent
-        } else {
-            px(0.)
-        };
-        // Rows are identified by their object (and group: an object can be
-        // listed under several), not their position, so a press and release
-        // with a reordering snapshot in between can't click another object.
-        let mut group = if grouped {
-            selection.rows().group_of(range.start).map(str::to_owned)
-        } else {
-            None
-        };
-        range
-            .filter_map(|index| {
-                let row = match selection.rows().get(index)? {
-                    DashboardRow::Object(key) => {
-                        let emphasis =
-                            RowEmphasis::new(cursor == Some(index), selection.is_marked(key));
-                        let id = row_id(group.as_deref(), key);
-                        let clicked = key.clone();
-                        let row = object_row(&snapshot, id, key, show_host, times, now, theme);
-                        #[cfg(test)]
-                        self.shown_times
-                            .push(row.time_text().map(ToString::to_string).unwrap_or_default());
-                        // An action on its way shows instead of the tag.
-                        let row = match self.state.read(cx).pending_label(key) {
-                            Some(pending) => row.tag(pending),
-                            None => row,
-                        };
-                        row.indent(indent).emphasis(emphasis).on_click(cx.listener(
-                            move |this, event: &ClickEvent, window, cx| {
-                                this.click_row(index, &clicked, event.modifiers(), window, cx);
-                            },
-                        ))
-                    }
-                    DashboardRow::Group { label, count } => {
-                        group = Some(label.clone());
-                        let header =
-                            group_header(&snapshot, &view, label, *count, times, now, theme);
-                        if view.group_by == GroupBy::Host {
-                            let host = ObjectKey::host(label);
-                            header.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.click_group(host.clone(), window, cx);
-                            }))
-                        } else {
-                            header
-                        }
-                    }
-                };
-                Some(row.into_any_element())
-            })
-            .collect()
-    }
-
-    /// The rows on screen in `reference`'s list, from its scroll position
-    /// and height (every row is equally tall). The list's own calls to
-    /// build rows can't say this: it also builds the first row to measure
-    /// it.
-    fn rows_on_screen(&self, reference: &DashboardRef, total: usize, cx: &App) -> Range<usize> {
-        let Some(list) = self.lists.get(reference) else {
-            return 0..0;
-        };
-        let row_height = f32::from(Metrics::with_rule(cx.theme().metrics.row_height));
-        let scroll = list.scroll.0.borrow();
-        let viewport = f32::from(scroll.base_handle.bounds().size.height);
-        let offset = -f32::from(scroll.base_handle.offset().y);
-        if row_height <= 0. || viewport <= 0. {
-            return 0..0;
-        }
-        let first = (offset.max(0.) / row_height).floor();
-        let count = (viewport / row_height).ceil() + 1.;
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "row indices from non-negative, finite pixel ratios"
-        )]
-        let (first, count) = (first as usize, count as usize);
-        let start = first.min(total);
-        start..(start + count).min(total)
-    }
-
-    /// Offers the engine the rows on screen, which fetches those it doesn't
-    /// hold current (debounced; see [`DashboardView::want_details`]).
+    /// The rows on screen and the hosts of the bands there, which the
+    /// engine fetches details for if it doesn't hold them current
+    /// (debounced; see [`DashboardView::want_details`]).
     fn hydrate_rows_on_screen(&mut self, reference: &DashboardRef, cx: &mut Context<Self>) {
         let needs: Vec<ObjectKey> = {
             let state = self.state.read(cx);
-            let Some(rows) = primary_rows(state, reference) else {
+            let Some(ui) = self.pages.get(reference) else {
                 return;
             };
-            let range = self.rows_on_screen(reference, rows.len(), cx);
+            let page = &ui.page;
             let snapshot = state.snapshot();
-            rows[range]
+            let range =
+                self.visible.start.min(page.items.len())..self.visible.end.min(page.items.len());
+            page.items[range]
                 .iter()
-                .filter_map(|row| match row {
-                    DashboardRow::Object(key) if row_worth_asking(snapshot, key) => {
-                        Some(key.clone())
-                    }
-                    _ => None,
+                .filter_map(|item| {
+                    let view = page.views.get(item.view)?;
+                    let key = match item.kind {
+                        ItemKind::Row { row, .. } => match view.rows.get(row)? {
+                            DashboardRow::Object(key) => key.clone(),
+                            DashboardRow::Group { .. } => return None,
+                        },
+                        ItemKind::Band { group } => ObjectKey::Host {
+                            name: view.groups.get(group)?.host.clone()?,
+                        },
+                        _ => return None,
+                    };
+                    row_worth_asking(snapshot, &key).then_some(key)
                 })
                 .collect()
         };
         self.want_details(needs, cx);
     }
 
-    fn render_body(&self, reference: &DashboardRef, cx: &Context<Self>) -> AnyElement {
+    fn render_body(
+        &mut self,
+        reference: &DashboardRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let state = self.state.read(cx);
         let Some((_, dashboard)) = state.dashboard(reference) else {
             return note("This dashboard no longer exists.", theme);
         };
-        let view = primary_view(&dashboard.views);
-        if let Some(denial) = state.query_denial(view.object_kind) {
-            return EmptyState::new("No permission")
-                .leading(
-                    Icon::new(IconName::Lock)
-                        .size(px(20.))
-                        .color(theme.colors.text_muted),
-                )
-                .detail(denial)
-                .max_width(px(560.))
-                .into_any_element();
-        }
-        let Some(result) = state.view_result(reference, &view.id) else {
-            if state.connection().is_starting() {
-                return banner::loading_body(state, cx);
+        if !is_multi_view(&dashboard.views) {
+            // One list, as rc1 showed it.
+            let view = primary_view(&dashboard.views);
+            if let Some(denial) = state.query_denial(view.object_kind) {
+                return EmptyState::new("No permission")
+                    .leading(
+                        Icon::new(IconName::Lock)
+                            .size(px(20.))
+                            .color(theme.colors.text_muted),
+                    )
+                    .detail(denial)
+                    .max_width(px(560.))
+                    .into_any_element();
             }
-            return note(format!("{} is being evaluated…", dashboard.name), theme);
-        };
-        if let Some(error) = &result.error {
-            return EmptyState::new("This dashboard's filter doesn't work")
-                .leading(
-                    Icon::new(IconName::TriangleAlert)
-                        .size(px(20.))
-                        .color(theme.states.fill.critical),
-                )
-                .detail(error.clone())
-                .max_width(px(560.))
-                .child(
-                    div()
-                        .w(px(520.))
-                        .text_left()
-                        .child(CodeBlock::new(view.filter.clone())),
-                )
-                .into_any_element();
+            let Some(result) = state.view_result(reference, &view.id) else {
+                if state.connection().is_starting() {
+                    return banner::loading_body(state, cx);
+                }
+                return note(format!("{} is being evaluated…", dashboard.name), theme);
+            };
+            if let Some(error) = &result.error {
+                return EmptyState::new("This dashboard's filter doesn't work")
+                    .leading(
+                        Icon::new(IconName::TriangleAlert)
+                            .size(px(20.))
+                            .color(theme.states.fill.critical),
+                    )
+                    .detail(error.clone())
+                    .max_width(px(560.))
+                    .child(
+                        div()
+                            .w(px(520.))
+                            .text_left()
+                            .child(CodeBlock::new(view.filter.clone())),
+                    )
+                    .into_any_element();
+            }
+            if result.rows().is_empty() {
+                return empty_dashboard(reference, view, result, cx);
+            }
+        } else if state.result(reference).is_none() && state.connection().is_starting() {
+            return banner::loading_body(state, cx);
         }
-        if result.rows().is_empty() {
-            return empty_dashboard(reference, view, result, cx);
-        }
-        let Some(list) = self.lists.get(reference) else {
-            return note("", theme);
-        };
-        let scroll = list.scroll.clone();
-        let list_reference = reference.clone();
-        let rows = uniform_list(
-            "dashboard-rows",
-            result.rows().len(),
-            cx.processor(move |this, range: Range<usize>, _window, cx| {
-                this.render_rows(&list_reference, range, cx)
-            }),
-        )
-        .track_scroll(&scroll)
-        .size_full();
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .child(rows)
-            .child(Scrollbar::vertical(&scroll))
-            .into_any_element()
+        self.render_page(reference, window, cx)
     }
+}
+
+/// The page's viewport height as last drawn (the window's before the first
+/// frame).
+fn viewport_height(ui: &PageUi) -> Pixels {
+    ui.scroll.bounds().size.height
+}
+
+/// Scrolls `ui`'s page so stop `position` shows: just into view, or
+/// (`center`) in the middle. A row under a band keeps clear of the band
+/// that sticks to the top while its rows scroll; an event also scrolls its
+/// stream.
+fn reveal_stop(ui: &PageUi, page: &Page, position: usize, center: bool) {
+    let Some(entry) = page.stops().get(position) else {
+        return;
+    };
+    let item = entry.item;
+    let (top, bottom) =
+        draw::cell_extent(page, entry).unwrap_or((page.top(item), page.top(item + 1)));
+    if let Stop::Event { view, .. } = &entry.stop
+        && let Some(handle) = ui.streams.get(view)
+    {
+        handle.scroll_to_item(entry.sub, gpui::ScrollStrategy::Nearest);
+    }
+    let viewport = viewport_height(ui);
+    if viewport <= px(0.) {
+        return;
+    }
+    let sticky = match page.items.get(item).map(|item| item.kind) {
+        Some(ItemKind::Row { group: Some(_), .. } | ItemKind::More { .. }) => page.band_height(),
+        _ => px(0.),
+    };
+    let offset = -ui.scroll.offset().y;
+    let target = if center {
+        (top - (viewport - (bottom - top)) / 2.).max(px(0.))
+    } else if top - sticky < offset {
+        (top - sticky).max(px(0.))
+    } else if bottom > offset + viewport {
+        bottom - viewport
+    } else {
+        return;
+    };
+    let max = (page.height() - viewport).max(px(0.));
+    ui.scroll.set_offset(point(px(0.), -target.min(max)));
 }
 
 impl Render for DashboardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let reference = self.sync(cx);
+        let main_width = SplitLayout::main_width(window, self.sidebar_open, &cx.theme().metrics);
+        let reference = self.state.read(cx).selected().cloned();
+        let multi = reference
+            .as_ref()
+            .and_then(|reference| self.state.read(cx).dashboard(reference))
+            .is_some_and(|(_, dashboard)| is_multi_view(&dashboard.views));
+        let metrics = cx.theme().metrics;
+        let split = SplitLayout::for_width_at_most(
+            main_width,
+            &metrics,
+            if multi {
+                metrics.pane_width.min(px(MULTI_VIEW_PANE))
+            } else {
+                metrics.pane_width
+            },
+        );
         let pane = reference
             .as_ref()
-            .and_then(|reference| self.lists.get(reference))
-            .and_then(|list| list.pane.as_ref())
+            .and_then(|reference| self.pages.get(reference))
+            .and_then(|ui| ui.pane.as_ref())
             .map(|pane| pane.view.clone());
+        let pane_width = match (&pane, split) {
+            (Some(_), SplitLayout::Side { pane_width }) => Some(pane_width),
+            _ => None,
+        };
+        let list_width = match pane_width {
+            Some(pane_width) => main_width - pane_width - Metrics::RULE,
+            None => main_width,
+        };
+        if pane.is_none() || split != SplitLayout::Cover {
+            self.width = list_width;
+        }
+        let reference = self.sync(cx);
         // Marked rows take the action keys (marked rows, then the pane, then
         // the cursor): the pane's buttons show no key hints meanwhile.
         if let (Some(pane), Some(reference)) = (&pane, &reference) {
             let marked = self
-                .lists
+                .pages
                 .get(reference)
-                .is_some_and(|list| list.selection.marked_count() > 0);
+                .is_some_and(|ui| ui.selection.marked_count() > 0);
             pane.update(cx, |pane, _| pane.set_keys_elsewhere(marked));
-        }
-        let main_width = SplitLayout::main_width(window, self.sidebar_open, &cx.theme().metrics);
-        let split = SplitLayout::for_width(main_width, &cx.theme().metrics);
-        // The list shows unless a pane covers it.
-        if let Some(reference) = &reference
-            && (pane.is_none() || split != SplitLayout::Cover)
-        {
-            self.hydrate_rows_on_screen(reference, cx);
         }
         let root = div()
             .id("dashboard-view")
@@ -845,6 +1325,10 @@ impl Render for DashboardView {
             .on_action(cx.listener(Self::open_selected))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::open_as_tab))
+            .on_action(cx.listener(Self::fold))
+            .on_action(cx.listener(Self::unfold))
+            .on_action(cx.listener(Self::next_view))
+            .on_action(cx.listener(Self::previous_view))
             .on_action(cx.listener(Self::acknowledge))
             .on_action(cx.listener(Self::schedule_downtime))
             .on_action(cx.listener(Self::check_now))
@@ -854,7 +1338,7 @@ impl Render for DashboardView {
             .min_w_0()
             .h_full();
         let pane_width = match (pane, split) {
-            // Too narrow for both: the pane covers the list until it's
+            // Too narrow for both: the pane covers the page until it's
             // closed, like Icinga Web's single column.
             (Some(pane), SplitLayout::Cover) => {
                 return root.child(div().flex().flex_1().min_w_0().h_full().child(pane));
@@ -862,11 +1346,10 @@ impl Render for DashboardView {
             (Some(pane), SplitLayout::Side { pane_width }) => Some((pane, pane_width)),
             (None, _) => None,
         };
-        let list_width = match pane_width {
-            Some((_, pane_width)) => main_width - pane_width - Metrics::RULE,
-            None => main_width,
-        };
         let column = self.render_list_column(reference.as_ref(), list_width, window, cx);
+        if let Some(reference) = &reference {
+            self.hydrate_rows_on_screen(reference, cx);
+        }
         let split_border = cx.theme().colors.border_split;
         root.child(column.when(pane_width.is_some(), |list| {
             list.border_r_1().border_color(split_border)
@@ -878,9 +1361,9 @@ impl Render for DashboardView {
 }
 
 impl DashboardView {
-    /// The list's column: header, load progress, banners, summary bar and
+    /// The page's column: header, load progress, banners, summary bar and
     /// body. Before anything arrived, a connection problem or the load
-    /// fills the body; afterwards they show over the (last known) list.
+    /// fills the body; afterwards they show over the (last known) page.
     fn render_list_column(
         &mut self,
         reference: Option<&DashboardRef>,
@@ -919,8 +1402,8 @@ impl DashboardView {
             .and_then(|reference| self.render_selection_bar(reference, list_width, cx));
         let body = match (placeholder, reference) {
             (Some(placeholder), _) => placeholder,
-            (None, Some(reference)) => self.render_body(reference, cx),
-            (None, None) => note("Select a dashboard in the sidebar.", theme),
+            (None, Some(reference)) => self.render_body(reference, window, cx),
+            (None, None) => note("Select a dashboard in the sidebar.", cx.theme()),
         };
         div()
             .flex()
@@ -942,28 +1425,34 @@ impl DashboardView {
         self.state
             .read(cx)
             .selected()
-            .and_then(|reference| self.lists.get(reference))
-            .is_some_and(|list| list.selection.marked_count() > 0)
+            .and_then(|reference| self.pages.get(reference))
+            .is_some_and(|ui| ui.selection.marked_count() > 0)
     }
 }
 
-/// How the list and an open pane share the main area.
+/// How the page and an open pane share the main area.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SplitLayout {
     /// Side by side, the pane `pane_width` wide: the design's 620px, less
-    /// where the list would get narrower than its minimum.
+    /// where the page would get narrower than its minimum.
     Side {
         /// The pane's width.
         pane_width: Pixels,
     },
-    /// Too narrow for both: the pane covers the list.
+    /// Too narrow for both: the pane covers the page.
     Cover,
 }
 
 impl SplitLayout {
     /// The layout for a main area `width` wide.
     pub(crate) fn for_width(width: Pixels, metrics: &Metrics) -> Self {
-        let pane_width = metrics.pane_width.min(width - metrics.list_min_width);
+        Self::for_width_at_most(width, metrics, metrics.pane_width)
+    }
+
+    /// The layout for a main area `width` wide with a pane at most `widest`
+    /// (a page of several views gives its headers more room: 4b's 560px).
+    pub(crate) fn for_width_at_most(width: Pixels, metrics: &Metrics, widest: Pixels) -> Self {
+        let pane_width = widest.min(width - metrics.list_min_width);
         if pane_width < metrics.pane_min_width {
             Self::Cover
         } else {
@@ -987,27 +1476,15 @@ impl SplitLayout {
     }
 }
 
-/// Puts `list`'s cursor on `key`'s row and scrolls it to the middle.
-/// Returns whether the list has it.
-fn put_cursor_on(list: &mut ListUi, key: &ObjectKey) -> bool {
-    let Some(index) = list
-        .selection
-        .select_key(key)
-        .then(|| list.selection.cursor())
-        .flatten()
-    else {
-        return false;
-    };
-    list.scroll.scroll_to_item(index, ScrollStrategy::Center);
-    true
-}
-
-/// The element id of `key`'s row under `group`.
-pub(crate) fn row_id(group: Option<&str>, key: &ObjectKey) -> ElementId {
-    let name = match group {
+/// The element id of `key`'s row in `view` under `group`: an object can
+/// be listed in several views and under several groups.
+pub(crate) fn row_id(view: Option<&str>, group: Option<&str>, key: &ObjectKey) -> ElementId {
+    let name = match (view, group) {
         // A control character can't occur in Icinga object or group names.
-        Some(group) => format!("row:{group}\u{1f}{key}"),
-        None => format!("row:{key}"),
+        (Some(view), Some(group)) => format!("row:{view}\u{1f}{group}\u{1f}{key}"),
+        (Some(view), None) => format!("row:{view}\u{1f}{key}"),
+        (None, Some(group)) => format!("row:{group}\u{1f}{key}"),
+        (None, None) => format!("row:{key}"),
     };
     ElementId::Name(name.into())
 }
@@ -1054,9 +1531,11 @@ pub(crate) fn object_row(
     }
 }
 
-/// A group header row: a darker band with the group's name in semibold;
-/// grouped by host, the host's state as a compact circle and its output.
-/// Compact rows have no second line: the count moves to the tag.
+/// rc1's group header row (the dashboard editor's preview still draws it
+/// until the editor shows the page): a darker band with the group's name
+/// in semibold; grouped by host, the host's state as a compact circle and
+/// its output. Compact rows have no second line: the count moves to the
+/// tag.
 pub(crate) fn group_header(
     snapshot: &ic_core::snapshot::Snapshot,
     view: &View,
@@ -1093,7 +1572,7 @@ pub(crate) fn group_header(
     }
 }
 
-/// The body of a dashboard without rows.
+/// The body of a single-list dashboard without rows.
 fn empty_dashboard(
     reference: &DashboardRef,
     view: &View,
@@ -1188,16 +1667,30 @@ fn note(text: impl Into<gpui::SharedString>, theme: &Theme) -> AnyElement {
 /// Accessors for the UI tests (`ui_tests`, Linux only).
 #[cfg(all(test, target_os = "linux"))]
 impl DashboardView {
-    /// The selected dashboard's list state.
-    fn current(&self, cx: &App) -> Option<&ListUi> {
+    /// The selected dashboard's page state.
+    fn current(&self, cx: &App) -> Option<&PageUi> {
         let reference = self.state.read(cx).selected()?;
-        self.lists.get(reference)
+        self.pages.get(reference)
     }
 
-    /// The cursor row in the selected dashboard.
+    /// The cursor's object row in the selected dashboard: its index in its
+    /// view's rows, and its object.
     pub(crate) fn cursor_in(&self, cx: &App) -> Option<(usize, ObjectKey)> {
-        let selection = &self.current(cx)?.selection;
-        Some((selection.cursor()?, selection.cursor_key()?.clone()))
+        let ui = self.current(cx)?;
+        let (position, stop) = ui.cursor_entry()?;
+        let Stop::Row { key, .. } = stop else {
+            return None;
+        };
+        let entry = &ui.page.stops()[position];
+        match ui.page.items[entry.item].kind {
+            ItemKind::Row { row, .. } => Some((row, key.clone())),
+            _ => None,
+        }
+    }
+
+    /// The stop under the cursor.
+    pub(crate) fn cursor_stop(&self, cx: &App) -> Option<Stop> {
+        Some(self.current(cx)?.cursor_entry()?.1.clone())
     }
 
     /// The object in the open pane, if any.
@@ -1211,15 +1704,15 @@ impl DashboardView {
         Some(self.current(cx)?.pane.as_ref()?.view.clone())
     }
 
-    /// The marked objects in row order.
+    /// The marked objects in page order.
     pub(crate) fn marked(&self, cx: &App) -> Vec<ObjectKey> {
         self.current(cx)
-            .map(|list| list.selection.marked_keys())
+            .map(|ui| ui.selection.marked_in(ui.objects()))
             .unwrap_or_default()
     }
 
-    /// The rows built in the last frame (the list isn't built while a pane
-    /// covers it).
+    /// The items built in the last frame (the page isn't built while a
+    /// pane covers it). On a single list, items are its rows.
     pub(crate) fn visible_rows(&self) -> Range<usize> {
         self.visible.clone()
     }
@@ -1235,10 +1728,32 @@ impl DashboardView {
         self.menus.open()
     }
 
-    /// Where the list was drawn in the last frame it was drawn in.
+    /// Where the page was drawn in the last frame it was drawn in.
     pub(crate) fn list_bounds(&self, cx: &App) -> Option<gpui::Bounds<Pixels>> {
-        let scroll = self.current(cx)?.scroll.0.borrow();
-        Some(scroll.base_handle.bounds())
+        Some(self.current(cx)?.scroll.bounds())
+    }
+
+    /// The selected dashboard's page as last built.
+    pub(crate) fn page(&self, cx: &App) -> Option<Rc<Page>> {
+        Some(self.current(cx)?.page.clone())
+    }
+
+    /// Where item `index` of the page is in the window now, as drawn
+    /// (scrolled).
+    pub(crate) fn item_bounds(&self, index: usize, cx: &App) -> Option<gpui::Bounds<Pixels>> {
+        let ui = self.current(cx)?;
+        let viewport = ui.scroll.bounds();
+        let offset = ui.scroll.offset().y;
+        let top = viewport.top() + offset + ui.page.top(index);
+        Some(gpui::Bounds::new(
+            point(viewport.left(), top),
+            gpui::size(viewport.size.width, ui.page.item_height(index)),
+        ))
+    }
+
+    /// The page's group filter.
+    pub(crate) fn group_filter(&self, cx: &App) -> Option<GroupFilter> {
+        self.current(cx)?.filter.clone()
     }
 }
 
@@ -1281,5 +1796,18 @@ mod tests {
                 pane_width: px(460.)
             }
         );
+    }
+
+    #[test]
+    fn multi_view_dashboards_are_more_than_one_list() {
+        let list = View::default();
+        let grid = View {
+            display: ic_config::ViewDisplay::HostGroupGrid,
+            ..View::default()
+        };
+        assert!(!is_multi_view(std::slice::from_ref(&list)));
+        assert!(is_multi_view(&[list.clone(), list.clone()]));
+        assert!(is_multi_view(&[grid]));
+        assert!(!is_multi_view(&[]));
     }
 }

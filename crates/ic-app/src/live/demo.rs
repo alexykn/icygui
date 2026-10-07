@@ -724,6 +724,18 @@ const GROUPS: &[(&str, &[Spec])] = &[
                 )
             },
             spec("host problems", ObjectKind::Hosts, "", true, false),
+            // Topic 10's three hosts saved as a dashboard (10i): a grouped
+            // list by host with every service, paged by count (10h).
+            Spec {
+                group_by: GroupBy::Host,
+                ..spec(
+                    "db primaries",
+                    ObjectKind::Services,
+                    "host.name in [\"db-prod-01\", \"db-prod-02\", \"db-prod-03\"]",
+                    false,
+                    true,
+                )
+            },
         ],
     ),
     (

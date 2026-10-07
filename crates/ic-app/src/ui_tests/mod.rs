@@ -60,6 +60,7 @@ mod scopes;
 mod settings;
 mod states;
 mod topology;
+mod views;
 
 /// One headless app at a time.
 static HEADLESS: Mutex<()> = Mutex::new(());

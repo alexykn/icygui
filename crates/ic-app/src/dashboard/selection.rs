@@ -1,9 +1,10 @@
-//! Selection in a dashboard list: the cursor row (keyboard focus, whose pane
+//! Selection in a list of rows: the cursor row (keyboard focus, whose pane
 //! is open), the rows marked for bulk actions, and the anchor that shift
-//! selection extends from.
+//! selection extends from. The lists of topic 07 use it; a dashboard's
+//! page has its own ([`super::cursor`]), over views.
 //!
-//! Everything is keyed by the row's key ([`ObjectKey`] in a dashboard, a
-//! downtime's or comment's name in the lists of topic 07), so a new
+//! Everything is keyed by the row's key (a downtime's or comment's name in
+//! the lists of topic 07), so a new
 //! snapshot that reorders, adds or removes rows keeps the selection on the
 //! same rows ([`ListSelection::update_rows`]). When the cursor's row leaves
 //! the list, the cursor detaches instead of jumping to a neighbour the user
@@ -17,9 +18,6 @@ use std::fmt;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use ic_core::snapshot::DashboardRow;
-use ic_model::ObjectKey;
-
 /// A row a [`ListSelection`] can select: one with a key, or a header
 /// between them that the cursor skips.
 pub(crate) trait SelectableRow {
@@ -28,32 +26,11 @@ pub(crate) trait SelectableRow {
 
     /// The row's key; `None` for headers.
     fn key(&self) -> Option<&Self::Key>;
-
-    /// A header's label; `None` for rows with a key.
-    fn header_label(&self) -> Option<&str>;
-}
-
-impl SelectableRow for DashboardRow {
-    type Key = ObjectKey;
-
-    fn key(&self) -> Option<&ObjectKey> {
-        match self {
-            Self::Object(key) => Some(key),
-            Self::Group { .. } => None,
-        }
-    }
-
-    fn header_label(&self) -> Option<&str> {
-        match self {
-            Self::Group { label, .. } => Some(label),
-            Self::Object(_) => None,
-        }
-    }
 }
 
 /// A list's rows plus an index from key to row, built on first use (only
 /// reconciling a moved cursor needs it).
-pub(crate) struct Rows<R: SelectableRow = DashboardRow> {
+pub(crate) struct Rows<R: SelectableRow> {
     rows: Arc<Vec<R>>,
     index: OnceCell<HashMap<R::Key, usize>>,
 }
@@ -149,16 +126,6 @@ impl<R: SelectableRow> Rows<R> {
         }
     }
 
-    /// The label of the group row `index` belongs to: the nearest group
-    /// header at or above it.
-    pub(crate) fn group_of(&self, index: usize) -> Option<&str> {
-        let last = index.min(self.len().checked_sub(1)?);
-        self.rows[..=last]
-            .iter()
-            .rev()
-            .find_map(SelectableRow::header_label)
-    }
-
     /// The keys in rows `from..=to` (either order).
     fn keys_between(&self, from: usize, to: usize) -> impl Iterator<Item = &R::Key> {
         let (start, end) = if from <= to { (from, to) } else { (to, from) };
@@ -198,7 +165,7 @@ impl<K: Clone + Eq + Hash + fmt::Debug> Position<K> {
 }
 
 /// The selection state of one list.
-pub(crate) struct ListSelection<R: SelectableRow = DashboardRow> {
+pub(crate) struct ListSelection<R: SelectableRow> {
     rows: Rows<R>,
     cursor: Option<Position<R::Key>>,
     /// Where a detached cursor was (its row left the list): moving
@@ -236,6 +203,7 @@ impl<R: SelectableRow> Default for ListSelection<R> {
 }
 
 impl<R: SelectableRow> ListSelection<R> {
+    #[cfg(test)]
     pub(crate) fn new(rows: Arc<Vec<R>>) -> Self {
         Self {
             rows: Rows::new(rows),
@@ -494,7 +462,21 @@ impl<R: SelectableRow> ListSelection<R> {
 
 #[cfg(test)]
 mod tests {
+    use ic_core::snapshot::DashboardRow;
+    use ic_model::ObjectKey;
+
     use super::*;
+
+    impl SelectableRow for DashboardRow {
+        type Key = ObjectKey;
+
+        fn key(&self) -> Option<&ObjectKey> {
+            match self {
+                Self::Object(key) => Some(key),
+                Self::Group { .. } => None,
+            }
+        }
+    }
 
     fn service(name: &str) -> ObjectKey {
         ObjectKey::service("host", name)
@@ -779,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_know_their_group() {
+    fn rows_locate_their_objects() {
         let rows = Rows::new(rows(vec![
             object("loose"),
             group("g1", 1),
@@ -787,11 +769,6 @@ mod tests {
             group("g2", 2),
             object("b"),
         ]));
-        assert_eq!(rows.group_of(0), None);
-        assert_eq!(rows.group_of(1), Some("g1"));
-        assert_eq!(rows.group_of(2), Some("g1"));
-        assert_eq!(rows.group_of(4), Some("g2"));
-        assert_eq!(rows.group_of(99), Some("g2"), "clamped to the last row");
         assert_eq!(rows.locate(2, &service("a")), Some(2));
         assert_eq!(
             rows.locate(4, &service("a")),

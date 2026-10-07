@@ -569,7 +569,7 @@ impl DashboardEditor {
             .filter_map(|index| {
                 let row = match rows.get(index)? {
                     DashboardRow::Object(key) => {
-                        let id = row_id(group.as_deref(), key);
+                        let id = row_id(None, group.as_deref(), key);
                         object_row(snapshot, id, key, show_host, times, now, theme).indent(
                             if grouped {
                                 theme.metrics.row_indent

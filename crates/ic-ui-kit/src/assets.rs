@@ -56,6 +56,11 @@ gpui_kit_assets::icon_assets!(
         Unplug,
         Wrench,
         X,
+        List,
+        Rows3,
+        LayoutGrid,
+        ChartBar,
+        Activity,
     ]
 );
 

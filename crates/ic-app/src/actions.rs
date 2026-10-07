@@ -13,6 +13,8 @@
 //! | | `escape` | [`Dismiss`]: close the pane, else clear the marks |
 //! | | `x`, `secondary-a` | [`ToggleMark`], [`MarkAll`] |
 //! | | `secondary-enter` | [`OpenAsTab`] |
+//! | | `right`, `left` | `Unfold`, `Fold`: on a view's header, a band or a host's `+ N more`, show or hide what's under it; on a grid, the next or previous host |
+//! | | `tab`, `shift-tab` | [`NextView`], [`PreviousView`]: the next or previous view of the page |
 //! | `DashboardView`, `ObjectPane` | `a`, `d`, `r`, `c` | [`Acknowledge`], [`ScheduleDowntime`], [`CheckNow`], [`AddComment`] |
 //! | `ObjectPane` (a tab) | `escape` | [`Dismiss`]: back to the dashboard; the tab stays open |
 //! | `ActionDialog` (and its fields) | `tab`, `shift-tab` | next / previous field |
@@ -104,12 +106,23 @@ pub(crate) struct OpenAsTab;
 #[action(namespace = icygui)]
 pub(crate) struct Dismiss;
 
+/// Moves the cursor to the next view of the page: its first row, or its
+/// header when it shows none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct NextView;
+
+/// Moves the cursor to the previous view of the page.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct PreviousView;
+
 /// Marks or unmarks the cursor's row for a bulk action.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct ToggleMark;
 
-/// Marks every row of the dashboard.
+/// Marks every row of the view holding the cursor (its folded rows too).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct MarkAll;
@@ -257,6 +270,10 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("x", ToggleMark, list),
         KeyBinding::new("secondary-a", MarkAll, list),
         KeyBinding::new("secondary-enter", OpenAsTab, list),
+        KeyBinding::new("right", crate::lists::view::Unfold, list),
+        KeyBinding::new("left", crate::lists::view::Fold, list),
+        KeyBinding::new("tab", NextView, list),
+        KeyBinding::new("shift-tab", PreviousView, list),
         KeyBinding::new("a", Acknowledge, list),
         KeyBinding::new("d", ScheduleDowntime, list),
         KeyBinding::new("r", CheckNow, list),

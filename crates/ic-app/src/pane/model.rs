@@ -13,10 +13,6 @@ use serde_json::Value;
 
 use crate::format;
 
-/// How many service rows the host pane shows before collapsing the OK ones
-/// into "+ N more ok" (screen 2c: two problems and five OK services).
-pub(crate) const HOST_SERVICES_PREVIEW: usize = 7;
-
 /// Limits for showing custom variables, so odd data can't flood the pane.
 const VARS_MAX_DEPTH: usize = 8;
 const VARS_MAX_LINES: usize = 400;
@@ -249,17 +245,21 @@ pub(crate) fn feature_rows(features: Features) -> [(&'static str, bool); 6] {
     ]
 }
 
-/// The host pane's service rows: every service that isn't OK (worst first),
-/// then OK ones in name order up to [`HOST_SERVICES_PREVIEW`] rows unless
-/// `expanded`; `hidden` OK services are left for "+ N more ok".
+/// The host pane's service rows, paged by count as every host-with-services
+/// view pages ([`crate::paging`]): every service that isn't OK (worst
+/// first), then OK ones in name order up to seven rows unless `expanded`;
+/// `hidden` services are left for `+ N more`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct HostServices {
     /// The rows to show.
     pub(crate) shown: Vec<Arc<Service>>,
-    /// OK services not shown.
+    /// Services not shown.
     pub(crate) hidden: usize,
     /// All of the host's services.
     pub(crate) total: usize,
+    /// Some services wait behind `+ N more` unless expanded: the paging
+    /// row shows (`+ N more`, or `− show fewer` in the same slot).
+    pub(crate) pages: bool,
 }
 
 /// See [`HostServices`].
@@ -267,24 +267,22 @@ pub(crate) fn host_services(snapshot: &Snapshot, host: &Host, expanded: bool) ->
     let mut services: Vec<Arc<Service>> = snapshot.services_of(&host.name).cloned().collect();
     let total = services.len();
     services.sort_by(|a, b| {
-        b.severity()
-            .cmp(&a.severity())
-            .then_with(|| a.display_name.cmp(&b.display_name))
+        crate::paging::service_order(
+            (a.severity(), &a.display_name),
+            (b.severity(), &b.display_name),
+        )
     });
     let not_ok = services
         .iter()
         .filter(|service| service.state != ServiceState::Ok)
         .count();
-    let keep = if expanded {
-        total
-    } else {
-        HOST_SERVICES_PREVIEW.max(not_ok).min(total)
-    };
+    let keep = crate::paging::shown_count(total, not_ok, expanded);
     services.truncate(keep);
     HostServices {
         shown: services,
         hidden: total - keep,
         total,
+        pages: crate::paging::pages(total, not_ok),
     }
 }
 

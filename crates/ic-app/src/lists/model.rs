@@ -426,20 +426,6 @@ impl SelectableRow for Line {
             }
         }
     }
-
-    fn header_label(&self) -> Option<&str> {
-        match self {
-            Self::Section {
-                section: Section::InEffect,
-                ..
-            } => Some("in effect"),
-            Self::Section {
-                section: Section::Upcoming,
-                ..
-            } => Some("upcoming"),
-            _ => None,
-        }
-    }
 }
 
 /// The summary bar's counts.

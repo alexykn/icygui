@@ -102,11 +102,21 @@ pub enum IconName {
     Unplug,
     /// `wrench`: advanced settings.
     Wrench,
+    /// `list`: a list view (topic 04's view header).
+    List,
+    /// `rows-3`: a grouped-list view.
+    Rows,
+    /// `layout-grid`: a host-group grid view.
+    LayoutGrid,
+    /// `chart-bar`: a summary tiles view.
+    ChartBar,
+    /// `activity`: an event stream view.
+    Activity,
 }
 
 impl IconName {
     /// Every icon, for tests and asset listings.
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 50] = [
         Self::ArrowDown,
         Self::ArrowLeft,
         Self::ArrowLeftRight,
@@ -152,6 +162,11 @@ impl IconName {
         Self::TriangleAlert,
         Self::Unplug,
         Self::Wrench,
+        Self::List,
+        Self::Rows,
+        Self::LayoutGrid,
+        Self::ChartBar,
+        Self::Activity,
     ];
 
     /// The asset path [`crate::Assets`] serves the SVG under.
@@ -209,6 +224,11 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::TriangleAlert => Self::TriangleAlert,
             IconName::Unplug => Self::Unplug,
             IconName::Wrench => Self::Wrench,
+            IconName::List => Self::List,
+            IconName::Rows => Self::Rows3,
+            IconName::LayoutGrid => Self::LayoutGrid,
+            IconName::ChartBar => Self::ChartBar,
+            IconName::Activity => Self::Activity,
         }
     }
 }

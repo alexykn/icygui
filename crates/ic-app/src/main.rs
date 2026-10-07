@@ -28,6 +28,7 @@ mod logging;
 mod menu_state;
 mod notifications;
 mod operate;
+mod paging;
 mod palette;
 mod pane;
 mod persist;

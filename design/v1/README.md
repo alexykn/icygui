@@ -608,3 +608,50 @@ host.name)`). The result is a grouped list by host, editable later.
    or unmarked so the bar only appears once you mark something?
 3. Should the combined view also work for a selection of services only
    (drawn: yes, grouped by host)?
+
+---
+
+## 11 Read-only config: command line and who Icinga notifies (to decide)
+
+**Shows** (`11-config-tab.html`): 11a the host pane's config tab; 11b the
+service pane's check section; 11c both without the extra permissions.
+
+**Decisions**
+
+- **Command line** (`objects/query/CheckCommand`): a code block with the
+  command line as Icinga would run it, with every macro resolved and the
+  resolved values tinted in the accent. A copy button sits at the right of
+  the section label, which also names the CheckCommand and where it runs.
+  Under it, a table of argument, value and `from` (`$check_address$ →
+  host.address`, `host.vars.pg_user`, `command default`). Protected
+  variables show `***` in both, and the table says `protected`.
+- **Who Icinga notifies** (`objects/query/User`, `UserGroup`, `TimePeriod`):
+  one block per Notification object (name, the apply rule, the command), its
+  user groups with their members indented, each user's email and pager, and
+  their own period at the right. A line of conditions closes each block:
+  period, states, types, delay, interval. The section label sums up *now*
+  (`now: dba-oncall by mail at once; dba-pager from 18:00`).
+- **Without the permissions (11c):** each section says which permission it
+  needs, in a dashed box with a lock and a link to the user guide's API user
+  section, and shows what rc1 already knows. The command is shown by name, and
+  the Notification objects with the users and groups they name (rc1 already
+  reads `Notification`). Nothing is greyed out without a reason.
+- **Where:** the host pane's config tab (after the check table, before
+  Icinga's switches) and the service pane's check section (after the check
+  table). A tab gets the same in its wide layout.
+
+**For the decision**
+
+- Command lines: useful to see what a check really runs (thresholds, the
+  agent's address) without opening Ansible. The risk is low because
+  passwords stay `***`, but the API user can read every command definition.
+- Notification users: answers "who got paged?" and "is anyone notified about
+  this at all?". The cost: the API user can read contact data (emails, phone
+  numbers) for every user in Icinga.
+- They can be granted separately; the UI works with either, both or neither.
+
+**Open questions**
+
+1. Worth the extra permissions: both, one, or neither?
+2. Show the `from` table always, or fold it under the command line (click to
+   show)?

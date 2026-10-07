@@ -583,3 +583,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .pal-foot .cnt { color: var(--accent); }
 .pal-foot .k { color: var(--t-muted); }
 .ptr { position: absolute; z-index: 70; width: 0; height: 0; }
+
+/* Columns of sections never squash their children (a pane cuts off at the
+ * bottom instead, as a scroll area does). */
+.pbody > *, .stack > * { flex: none; }

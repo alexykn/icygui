@@ -101,8 +101,18 @@ pub(crate) fn service_output(
                 vec![format!("time={time:.6}s;;;0.000000;10.000000")],
             )
         }
-        ("ssh", _) => result(
+        ("ssh", 1) => result(
+            "SSH WARNING - OpenSSH_8.4p1 Debian-5+deb11u3 (protocol 2.0) version mismatch, \
+             expected 'OpenSSH_9.2p1'"
+                .to_owned(),
+            Vec::new(),
+        ),
+        ("ssh", 2) => result(
             "CRITICAL - Socket timeout after 10 seconds".to_owned(),
+            Vec::new(),
+        ),
+        ("ssh", _) => result(
+            "SSH UNKNOWN - Invalid hostname/address".to_owned(),
             Vec::new(),
         ),
         ("load", 0) => {

@@ -345,6 +345,21 @@ Status markers: ✅ done · ⏳ in progress · ☐ not started.
 
 **Mock-up first:** everything visual (every item above that changes the UI) is mocked up first as HTML/CSS in `design/v1/`, in the style of the original design session (`design/project/`) and the current app, rendered to images and shown to the user; it is built only after the user approves the mock-up.
 
+**Mock-up review (2026-10-07; mock-ups in `design/v1/`, handoff notes in `design/v1/README.md`).** The user's decisions:
+
+- **01 Downtimes in the panes: variant A** (the banner with the bright accent border, fixed under the pane header; the one move when a downtime starts while the pane is open is accepted). In the host pane, *downtime* schedules it on the whole host with **"all services"** in the dialog (on by default). Downtimes in history lines use the downtime accent colour, not the unknown purple. A host downtime that doesn't cover its services: as Icinga Web does (the service is not in downtime; its host line shows the host's downtime).
+- **Hollow circle = handled**, and an object in downtime counts as handled whatever its state: every list, the host-group grid and the downtime list draw an object whose downtime is in effect as a hollow circle in its state colour.
+- **02 Settings: approved**, including the extra settings the designer added. Opens over the main window (as drawn in 02-a); changes apply at once (no save or cancel); interface size 90 / 100 / 115 %.
+- **03 Light theme: approved** with a fill shade and a text shade per state colour and a slightly grey sidebar.
+- **04 Multi-view dashboards: approved.** No dashboard-wide summary bar; every view whose objects are problems counts toward the sidebar count and notifications; ←/→ on a view header collapses or expands it.
+- **05 Host-group grid: approved.** Squares or labelled cells is an option of the view in the dashboard editor (squares by default); healthy hosts dim green.
+- **06 Cluster health: approved.** Trend lines kept (in memory, from the existing status poll); one page per environment; no extra request when a node is clicked; the IcingaDB tile only when the feature is on.
+- **07 Comment and downtime lists: revise.** Running and upcoming downtimes separated inline (section headers in the list), not only by sort order; the state circle shows the downtime (hollow while in effect); no "my downtimes" entry in the sidebar, an "only mine" toggle in the list instead; **plus an "acknowledged" list in the same style** (who, when, comment, sticky, expiry, bulk removal). Config downtimes are not removable; default sort: ends soonest.
+- **08 YAML sharing: approved** (the import preview as drawn). A clashing group defaults to merge, with "keep both" offered; notification settings are never part of a shared dashboard (not exported, not imported). Copy as YAML: ctrl-shift-c.
+- **09 Filter autocomplete: revise** the popup's size and alignment (smaller, aligned to the input box); syntax colouring and fuzzy matching approved.
+- **10 Palette multi-select: approved** with two changes: editing the query clears the selection; the combined multi-host view arrives with nothing marked and offers "mark all problems". It also works for a selection of services only (grouped by host).
+- **11 Read-only config: approved, both parts** (the resolved command line, who Icinga notifies), each shown when its permission is granted, a lock box naming the permission otherwise; the argument table folds under the command line.
+
 **After the production trial:**
 
 - **Fixes from the trial**, including the macOS desktop integration (notifications, the menu-bar item, the tray, close to tray, quiet mode's window visibility), which so far is only compiled and unit-tested in CI and has never run on a real Mac.

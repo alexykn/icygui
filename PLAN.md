@@ -332,6 +332,17 @@ Status markers: ✅ done · ⏳ in progress · ☐ not started.
 
 ### 4.2 After rc1 (v1)
 
+**Build progress (v1 stages, each: build from the approved mock-ups, behaviour and design reviews, fixes, screenshots for the user):**
+1. ✅ Settings panel (02) and appearance (03): built, reviewed (26 findings: 19 fixed, 7 answered), commits 67ea9c3, f67462a, c822f1b. Left for later stages on purpose: the notification texts of topic 12 (stage 4), the handled switches and the "N hidden · show" slot (stage 3), the pane × left of "open as tab" and an accent text shade for light (stage 2).
+2. Downtimes in the panes (01), hollow = handled, the downtime / comment / acknowledged lists (07).
+3. Multi-view dashboards (04), host-group grid (05), host-with-services views (paged by count, collapsible, two click targets), handled per kind.
+4. Notifications opt-in with default or custom times (12).
+5. Palette multi-select and the combined view (10).
+6. YAML sharing (08) and filter autocomplete (09).
+7. Cluster health (06) and the read-only config (11).
+8. Windows (13).
+9. Final v1 audit and gate.
+
 **Can start now** (independent of the trial):
 
 - **M7:** multi-view dashboards (a dashboard as several views: list, grouped list, host-group grid, summary tiles, event stream; PLAN §2.5), the host-group grid, the full cluster health view (zones, endpoints, latency, work queues), the light theme (chosen in the settings below; UI-02); own list views for comments and downtimes with bulk removal (from §2.2 and §5, not in rc1).

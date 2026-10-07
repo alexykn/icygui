@@ -3,7 +3,7 @@
 <link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="views.js"></script></head>
 <body class="canvas">
 <div class="topic-head"><span class="topic-id">09</span><span class="topic-name">Autocomplete in the filter field, in the style of Zed</span></div>
-<p class="topic-intro">The dashboard editor's filter field (and every other filter field) completes as you type. The completions come from the parser at the cursor and from the live data: attributes with their type and a description after <b>host.</b> and <b>service.</b>; after <b>vars.</b>, the custom variables that exist, ranked by how many objects have them; inside a string, the values in use; functions with their signatures. Matching is fuzzy, with the matched characters in the accent colour. <b>Tab</b> or <b>Enter</b> accepts, <b>ctrl-space</b> opens the list, <b>Esc</b> closes it. The popup is the app's menu card at the menu's text size, with 24px rows and 8 of them visible (a thin scroll thumb when there are more). It opens right under the line being typed, its left edge at the column where the word being completed starts, or at the field's inner left edge when it wouldn't fit there; it never sticks out of the field on the left. A documentation card of the same width beside it explains the selected item, and flips to the left when there is no room on the right. Hovering a name shows the same help. A parse error is underlined where it happens. Each frame has a zoomed crop.</p>
+<p class="topic-intro">The dashboard editor's filter field (and every other filter field) completes as you type. The completions come from the parser at the cursor and from the live data: attributes with their type and a description after <b>host.</b> and <b>service.</b>; after <b>vars.</b>, the custom variables that exist, ranked by how many objects have them; inside a string, the values in use; functions with their signatures. Matching is fuzzy, with the matched characters in the accent colour. <b>Tab</b> or <b>Enter</b> accepts, <b>ctrl-space</b> opens the list, <b>Esc</b> closes it. The popup is the app's menu card at the menu's text size, with 24px rows and 8 of them visible (a thin scroll thumb when there are more). It opens right under the line being typed, its left edge at the column where the word being completed starts, or at the field's inner left edge when it wouldn't fit there; it never sticks out of the field on the left. A documentation card of the same width explains the selected item; it always sits <b>to the left of the list</b>, top-aligned with it, so it never covers the field. Every info card follows that rule: the signature inside a call, hover help and an error's message sit left of the list, or left of the field when no list is open, never over or above it. Hovering a name shows the same help. A parse error is underlined where it happens. Each frame has a zoomed crop.</p>
 <div class="shots"></div>
 <script>
 // ---- the editor -----------------------------------------------------------
@@ -68,7 +68,7 @@ const doc9a = `<span class="sig">host.groups <span class="faint">· array of str
   <span>The host groups the host belongs to (its <i>groups</i> attribute).</span>
   <span><code>"databases" in host.groups</code></span>
   <span class="faint">In use: 10 groups, e.g. databases (9 hosts), edge-ams (12), k8s-workers (48).</span>`;
-shot('9a', '09-autocomplete-a-attributes', 'After <i>host.</i>: the host’s attributes, each with its type icon in the mark slot and its type at the right. The documentation card beside the list explains the selected attribute, gives an example, and says what is in use. There is no room to the right of the inspector, so the card flips to the left of the list.',
+shot('9a', '09-autocomplete-a-attributes', 'After <i>host.</i>: the host’s attributes, each with its type icon in the mark slot and its type at the right. The documentation card beside the list explains the selected attribute, gives an example, and says what is in use. The card sits to the left of the list, as every info card does.',
   editor(inspector({ filter: f9a, status: 'incomplete', tone: 'faint' }), { overlay: cmp('w9a', items9a, 3, { doc: doc9a, total: 38 }) }),
   { crops: '09-autocomplete-a-zoom:760,190,680,500' });
 
@@ -120,29 +120,29 @@ shot('9d', '09-autocomplete-d-functions', 'At the top level: functions with thei
 
 // ---- 9e: signature help while typing arguments --------------------------
 const f9e = `${line1}\n${ws('s9e')}${F('match')}(${Str('"db-prod-*"')}, ${ws('w9e')}${caret('c9e')})`;
-const sig = `<div class="sighelp" data-at="s9e" data-place="above"><span>match(pattern, <span class="cur">value</span>) <span class="faint">→ bool</span></span><span class="d">value: the text to test, usually a name or an address.</span></div>`;
+const sig = `<div class="sighelp" data-info="s9e"><span>match(pattern, <span class="cur">value</span>) <span class="faint">→ bool</span></span><span class="d">value: the text to test, usually a name or an address.</span></div>`;
 const items9e = [
   ['type', `host.name`, 'string', 'db-prod-01'], ['type', `host.display_name`, 'string', 'db-prod-01'], ['type', `service.name`, 'string', 'pg-locks'],
   ['type', `host.address`, 'string', '10.0.2.11'], ['type', `service.check_command`, 'string', 'check_postgres'],
 ];
-shot('9e', '09-autocomplete-e-signature', 'Inside a call: the signature floats above the line with the current argument underlined, and the list below suggests what fits there (strings, for a pattern’s value). Zed shows signature help and completions the same way.',
+shot('9e', '09-autocomplete-e-signature', 'Inside a call: the signature, with the current argument underlined and its description, sits <b>to the left of the completion list, top-aligned with it</b>, like every info card here, so it never covers the field; the list under the line suggests what fits there (strings, for a pattern’s value). Zed shows signature help and completions the same way.',
   editor(inspector({ filter: f9e, status: 'incomplete', tone: 'faint' }), { overlay: sig + cmp('w9e', items9e, 0) }),
   { crops: '09-autocomplete-e-zoom:760,150,680,360' });
 
 // ---- 9f: hover help -----------------------------------------------------
 const f9f = `${line1}\n${K('service.')}<span class="hov" id="h9f">${K('state')}</span> ${O('!=')} ${N('0')}`;
-const hov = `<div class="cmpd" data-at="h9f">
+const hov = `<div class="cmpd" data-info="h9f">
   <span class="sig">service.state <span class="faint">· number</span></span>
   <span>The service’s current state: <code>0</code> OK, <code>1</code> WARNING, <code>2</code> CRITICAL, <code>3</code> UNKNOWN. Whether it is soft or hard is <i>service.state_type</i>.</span>
   <span class="faint">Now, in this filter: 1 critical, 3 warning, 0 unknown.</span></div>`;
-shot('9f', '09-autocomplete-f-hover', 'Hovering a name in the filter shows the same help as the completion card, with what it means here and now. It appears after the usual tooltip delay and works the same for functions, variables and values.',
+shot('9f', '09-autocomplete-f-hover', 'Hovering a name in the filter shows the same help as the completion card, with what it means here and now. With no list open, the card sits <b>left of the field</b>, top-aligned with the hovered line, never over the field. It appears after the usual tooltip delay and works the same for functions, variables and values.',
   editor(inspector({ filter: f9f, fxCls: '', status: 'valid · 4 matches · 4 shown' }), { overlay: hov, rowsList: rowsFor.pg.slice(0, 4), sum: [['crit', 1, 'critical'], ['warn', 3, 'warning']] }),
   { crops: '09-autocomplete-f-zoom:760,190,680,320' });
 
 // ---- 9g: parse error -----------------------------------------------------
 const f9g = `${line1}\n(${K('service.state')} ${O('>=')} ${N('2')} ${O('||')}\n ${K('service.state_type')} ${O('==')}<span class="squig" id="e9g">)</span>${caret('c9g')}`;
-const errTip = `<div class="tip" data-at="e9g" style="flex-direction:column;gap:2px;white-space:normal;width:256px;box-sizing:border-box"><span class="c-crit">expected a value after “==”</span><span class="faint">e.g. 1 (hard) or 0 (soft)</span></div>`;
-shot('9g', '09-autocomplete-g-parse-error', 'A parse error is underlined where it happens (a critical wavy line under the token), the field’s border turns critical, and the status says <i>line 3, column 23</i>. Hovering the underline shows the message in full, with a hint. The preview keeps the last valid result and says so.',
+const errTip = `<div class="tip" data-info="e9g" style="flex-direction:column;gap:2px;white-space:normal;width:256px;box-sizing:border-box"><span class="c-crit">expected a value after “==”</span><span class="faint">e.g. 1 (hard) or 0 (soft)</span></div>`;
+shot('9g', '09-autocomplete-g-parse-error', 'A parse error is underlined where it happens (a critical wavy line under the token), the field’s border turns critical, and the status says <i>line 3, column 23</i>. Hovering the underline shows, left of the field and aligned with that line, the message in full, with a hint. The preview keeps the last valid result and says so.',
   editor(inspector({ filter: f9g, fxCls: 'bad', status: 'line 3, column 23 · expected a value', tone: 'c-crit' }), { overlay: errTip, sumEnd: 'last valid result' }),
   { crops: '09-autocomplete-g-zoom:760,190,680,320' });
 
@@ -169,7 +169,7 @@ document.querySelectorAll('.frame').forEach((frame) => {
     // an extra with room for fewer than four characters isn't shown at all
     list.querySelectorAll('.ex').forEach((e) => { if (e.scrollWidth > e.offsetWidth && e.offsetWidth < 4 * 7) e.style.display = 'none'; });
   });
-  frame.querySelectorAll('.sighelp, .tip[data-at]').forEach((p) => (p.style.maxWidth = (innerR - innerL) + 'px'));
+  frame.querySelectorAll('.sighelp, .tip[data-info]').forEach((p) => (p.style.maxWidth = (innerR - innerL) + 'px'));
   frame.querySelectorAll('[data-at]').forEach((pop) => {
     const a = frame.querySelector('#' + pop.dataset.at).getBoundingClientRect();
     const line = Math.max(0, Math.floor((a.top + a.height / 2 - box.top - PAD_T) / LINE));
@@ -180,14 +180,29 @@ document.querySelectorAll('.frame').forEach((frame) => {
     pop.style.left = Math.max(left, innerL) + 'px';
     pop.style.top = (pop.dataset.place === 'above' ? lineTop - pop.offsetHeight - 2 : lineTop + LINE + 2) + 'px';
   });
-  // the documentation card has the list's width and top; it sits beside
-  // the list (right if there is room, else left), as tall as its text
+  // Every info card (documentation, signature, hover help, an error's
+  // message) sits to the LEFT, never over or above the field: beside the
+  // completion list, top-aligned with it, when a list is open; otherwise left
+  // of the field, top-aligned with the line it explains.
+  const list = frame.querySelector('.cmpl');
   frame.querySelectorAll('.cmpd[data-doc]').forEach((doc) => {
-    const list = doc.previousElementSibling;
-    const l = list.offsetLeft, t = list.offsetTop, w = list.offsetWidth;
+    const w = list.offsetWidth;
     doc.style.width = w + 'px';
-    doc.style.left = (l + w + 4 + w <= fr.width - 8 ? l + w + 4 : l - 4 - w) + 'px';
-    doc.style.top = t + 'px';
+    doc.style.left = (list.offsetLeft - 4 - w) + 'px';
+    doc.style.top = list.offsetTop + 'px';
+  });
+  frame.querySelectorAll('[data-info]').forEach((info) => {
+    if (info.classList.contains('cmpd')) info.style.width = '256px';
+    const w = info.offsetWidth;
+    if (list) {
+      info.style.left = (list.offsetLeft - 4 - w) + 'px';
+      info.style.top = list.offsetTop + 'px';
+    } else {
+      const a = frame.querySelector('#' + info.dataset.info).getBoundingClientRect();
+      const line = Math.max(0, Math.floor((a.top + a.height / 2 - box.top - PAD_T) / LINE));
+      info.style.left = (box.left - fr.left - 6 - w) + 'px';
+      info.style.top = (box.top + PAD_T + line * LINE - fr.top - 6) + 'px';
+    }
   });
 });
 </script>

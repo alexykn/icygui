@@ -642,11 +642,15 @@ hover help; 9g a parse error.
   column where the word being completed starts, or at the field's inner left
   edge when it wouldn't fit there. **It never sticks out of the field on the
   left.**
-- **The documentation card** (256px, same card style) beside the list explains
-  the selected item: its signature and type, what it means, an example in a
-  code chip, and what is in use in this environment. It sits to the right of
-  the list and flips to the left when there is no room (always, from the
-  inspector).
+- **Info cards sit to the left, never over the field** (the user's rule):
+  the documentation card (as wide as the list) always sits **left of the
+  completion list, top-aligned with it**. Every other info card follows the
+  same rule: the signature help inside a call (9e) sits left of the list,
+  top-aligned with it; with no list open, hover help (9f) and an error's
+  message (9g) sit **left of the field**, top-aligned with the line they
+  explain. None of them ever sits over or above the field. The card gives
+  the selected item's signature and type, what it means, an example in a
+  code chip, and what is in use in this environment.
 - **Sources:** attributes per object type with their descriptions (a static
   table); custom variables and values from the live object store, ranked by
   how many objects have them; host group, service group, host and service
@@ -658,15 +662,17 @@ hover help; 9g a parse error.
 - **Keys:** completion opens as you type after `.`, inside a string, and on
   an identifier, or with ctrl-space. ↑↓ choose, Tab or Enter accept, Esc
   closes. Typing goes on filtering.
-- **Signature help** floats above the line inside a call, with the current
-  argument underlined and its description; completions for that argument show
-  below at the same time.
+- **Signature help** inside a call, with the current argument underlined and
+  its description, sits left of the completion list (top-aligned with it);
+  completions for that argument show under the line at the same time.
 - **Hover help** shows the documentation card for the token under the
-  pointer (the token gets the hover background), after the tooltip delay.
+  pointer (the token gets the hover background), after the tooltip delay,
+  left of the field and top-aligned with the hovered line.
 - **Parse error:** a critical wavy underline at the position, the field's
   border turns critical, and the status reads `line 3, column 23 · expected a
-  value`. Hovering the underline shows the full message and a hint. The
-  preview keeps the last valid result, and the summary bar says so.
+  value`. Hovering the underline shows the full message and a hint, left of
+  the field, aligned with that line. The preview keeps the last valid
+  result, and the summary bar says so.
 - **Syntax colours** in the field: attributes muted, strings in the OK
   colour, numbers in the unknown colour, functions in the accent, operators
   faint. They are all theme tokens, so the light theme follows.

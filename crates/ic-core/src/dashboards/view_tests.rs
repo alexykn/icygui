@@ -2,6 +2,7 @@
 //! kind, the dashboard's counts over its views, host-group grids, summary
 //! tiles and event streams.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -19,6 +20,7 @@ use super::tests::{all, host, names, reference, s, sample, some, view};
 use super::*;
 use crate::command::{LogEntry, LogKind};
 use crate::snapshot::{Grid, GridCell, Tile, ViewBody, ViewResult};
+use crate::store::Changes;
 
 /// An environment with one dashboard per entry, each with its views (ids
 /// `v0`, `v1`, … unless set).
@@ -960,4 +962,192 @@ fn unknown_view_references_are_fine() {
     };
     let dashboards = evaluate(&[("d", vec![problems()])], &sample());
     assert!(!dashboards.results().contains_key(&reference));
+}
+
+fn members_of(result: &ViewResult) -> &Arc<BTreeSet<ObjectKey>> {
+    result.members().expect("a handling or downtimes view")
+}
+
+#[test]
+fn handling_and_downtimes_views_hold_their_filters_hosts_and_services() {
+    let data = sample();
+    let handling = View {
+        display: ViewDisplay::Handling,
+        ..view("host.vars.role == \"db\"")
+    };
+    let downtimes = View {
+        display: ViewDisplay::Downtimes,
+        ..view("service.name == \"ssh\"")
+    };
+    let dashboards = evaluate(
+        &[
+            ("handling", vec![handling.clone()]),
+            ("downtimes", vec![downtimes]),
+            ("mixed", vec![view("host.vars.role == \"web\""), handling]),
+        ],
+        &data,
+    );
+    let handling = &dashboard(&dashboards, "handling").views[0];
+    // The db hosts and every one of their services.
+    let names: Vec<String> = members_of(handling)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "db-1",
+            "db-2",
+            "db-1!disk",
+            "db-1!pg",
+            "db-1!ssh",
+            "db-2!pg",
+            "db-2!ssh"
+        ],
+        "{names:?}"
+    );
+    assert_eq!((handling.hosts, handling.services), (2, 5));
+    // A host has no `service.name`: the filter picks services only.
+    let downtimes = &dashboard(&dashboards, "downtimes").views[0];
+    assert_eq!(members_of(downtimes).len(), 4);
+    assert_eq!((downtimes.hosts, downtimes.services), (0, 4));
+    // Neither counts: no sidebar number, no notifications.
+    assert_eq!(
+        dashboard(&dashboards, "handling").summary,
+        Summary::default()
+    );
+    assert!(
+        !dashboards
+            .memberships(&ObjectKey::host("db-2"))
+            .contains(&reference("handling"))
+    );
+    // Beside a list, the dashboard counts the list's objects only.
+    let mixed = dashboard(&dashboards, "mixed");
+    assert_eq!(mixed.summary.unknown, 1, "web-1!http");
+    assert_eq!(mixed.summary.critical, 0, "db-1!pg is the handling view's");
+    assert!(
+        !dashboards
+            .memberships(&s("db-1", "pg"))
+            .contains(&reference("mixed"))
+    );
+}
+
+#[test]
+fn members_keep_their_arc_until_someone_joins_or_leaves() {
+    let data = sample();
+    let handling = View {
+        display: ViewDisplay::Handling,
+        ..view("service.state != 0")
+    };
+    let mut dashboards = evaluate(&[("h", vec![handling])], &data);
+    let before = Arc::clone(members_of(&dashboard(&dashboards, "h").views[0]));
+    // pg on db-1 goes from critical to warning: still a member.
+    let mut services = (*data.services).clone();
+    let key = ServiceKey::new("db-1", "pg");
+    let mut pg = (*services[&key]).clone();
+    pg.state = ServiceState::Warning;
+    services.insert(key.clone(), Arc::new(pg));
+    let changed = Data {
+        services: Arc::new(services),
+        ..data.clone()
+    };
+    dashboards.update(
+        &changed,
+        &some(&[ObjectKey::from(key.clone())]),
+        false,
+        &AtomicBool::new(false),
+    );
+    let after = members_of(&dashboard(&dashboards, "h").views[0]);
+    assert!(Arc::ptr_eq(&before, after));
+    // It recovers: it leaves.
+    let mut services = (*changed.services).clone();
+    let mut pg = (*services[&key]).clone();
+    pg.state = ServiceState::Ok;
+    services.insert(key.clone(), Arc::new(pg));
+    let recovered = Data {
+        services: Arc::new(services),
+        ..changed
+    };
+    dashboards.update(
+        &recovered,
+        &some(&[ObjectKey::from(key.clone())]),
+        false,
+        &AtomicBool::new(false),
+    );
+    let after = members_of(&dashboard(&dashboards, "h").views[0]);
+    assert!(!after.contains(&ObjectKey::from(key)));
+    assert_eq!(after.len(), before.len() - 1);
+}
+
+#[test]
+fn drawing_choices_keep_the_result() {
+    let data = sample();
+    let list = View {
+        id: "l".to_owned(),
+        ..view("")
+    };
+    let mut environment = environment(&[("d", vec![list.clone()])]);
+    let mut dashboards = Dashboards::default();
+    dashboards.configure(&environment, HideHandled::ALL);
+    dashboards.update(&data, &all(), false, &AtomicBool::new(false));
+    let before = dashboards.results().clone();
+    // The row density and the threads' options are the app's to draw.
+    let view = &mut environment.groups[0].dashboards[0].views[0];
+    view.density = Some(ic_config::RowDensity::Compact);
+    view.threads.only_mine = true;
+    dashboards.configure(&environment, HideHandled::ALL);
+    let after = dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
+    assert!(Arc::ptr_eq(&before, &after), "nothing evaluated again");
+}
+
+#[test]
+fn a_state_chip_shows_one_state_and_keeps_the_counts() {
+    let data = sample();
+    let all_states = View {
+        problems_only: true,
+        ..view("")
+    };
+    let warnings = View {
+        state: Some(ic_config::StateChip::Warning),
+        ..all_states.clone()
+    };
+    let dashboards = evaluate(
+        &[("all", vec![all_states]), ("warnings", vec![warnings])],
+        &data,
+    );
+    let all_states = &dashboard(&dashboards, "all").views[0];
+    let warnings = &dashboard(&dashboards, "warnings").views[0];
+    assert_eq!(
+        names(warnings),
+        ["lone!ssh", "db-1!disk"],
+        "only the warnings show"
+    );
+    // The header's numbers (and the sidebar's) don't change with the chip.
+    assert_eq!(warnings.counts, all_states.counts);
+    assert_eq!(
+        dashboard(&dashboards, "warnings").summary,
+        dashboard(&dashboards, "all").summary
+    );
+    assert_eq!(warnings.shown.warning, 2);
+    assert_eq!(warnings.shown.critical, 0);
+}
+
+#[test]
+fn the_cluster_events_are_the_streams_without_a_filter() {
+    let critical = entry(
+        30.,
+        s("db-1", "pg"),
+        state(ServiceState::Critical, StateType::Hard),
+    );
+    let soft = entry(
+        20.,
+        s("db-1", "disk"),
+        state(ServiceState::Warning, StateType::Soft),
+    );
+    let ack = entry(10., s("db-1", "pg"), LogKind::AcknowledgementSet);
+    let events = vec![critical.clone(), soft, ack.clone()];
+    assert_eq!(
+        stream_events(StreamOptions::default(), &events),
+        [critical, ack]
+    );
 }

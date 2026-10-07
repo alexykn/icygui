@@ -27,6 +27,7 @@ pub(crate) mod header;
 pub(crate) mod page;
 pub(crate) mod rows;
 pub(crate) mod selection;
+pub(crate) mod view_controls;
 
 pub(crate) use self::bulk::SELECTION_BAR_HEIGHT;
 pub(crate) use self::header::{HeaderMenu, HeaderMenus};
@@ -63,6 +64,7 @@ use crate::app_state::hydration::row_worth_asking;
 use crate::app_state::{AppState, Hydrated};
 use crate::banner;
 use crate::chrome::WindowDrag;
+use crate::lists::threads::{self, ItemKey};
 use crate::lists::view::{Fold, Unfold};
 use crate::pane::{ObjectPane, PaneEvent, PaneMode};
 
@@ -91,11 +93,37 @@ pub(crate) fn primary_result<'a>(
     result.view(&primary_view(views).id)
 }
 
+/// Why `view` can't be read, if a permission is missing: a list's or
+/// tiles' objects, a grid's hosts (a stream reads the local log; handling
+/// and downtimes say so on their own page).
+fn view_denial(state: &AppState, view: &View) -> Option<String> {
+    use ic_config::ViewDisplay;
+    match view.display {
+        ViewDisplay::EventStream | ViewDisplay::Handling | ViewDisplay::Downtimes => None,
+        ViewDisplay::HostGroupGrid => state.query_denial(ObjectKind::Hosts),
+        ViewDisplay::List | ViewDisplay::GroupedList | ViewDisplay::SummaryTiles => {
+            state.query_denial(view.object_kind)
+        }
+    }
+}
+
+/// What a one-view page says when its view has nothing to show.
+fn nothing_to_show(view: &View) -> &'static str {
+    use ic_config::ViewDisplay;
+    match view.display {
+        ViewDisplay::HostGroupGrid => "No host of these groups matches this view's filter.",
+        ViewDisplay::SummaryTiles => "Nothing of these groups matches this view's filter.",
+        ViewDisplay::EventStream => "No events yet: they show here as they happen.",
+        _ => "Nothing to show.",
+    }
+}
+
 /// Whether a dashboard shows its views under headers (topic 04): several
-/// views, or one that isn't a list. A single list view shows as rc1 did,
-/// under the dashboard's header and summary bar.
+/// views. A single view's header is the page's (topic 14, round 5): its
+/// controls in the page header, a list's (a grid's, tiles') counts in the
+/// summary bar under it.
 pub(crate) fn is_multi_view(views: &[View]) -> bool {
-    views.len() > 1 || views.first().is_some_and(|view| !view.is_list())
+    views.len() > 1
 }
 
 /// The pane's width beside a page of several views (4b): narrower than
@@ -130,6 +158,11 @@ struct Built {
     filter: Option<GroupFilter>,
     width: Pixels,
     sizes: Sizes,
+    by_density: page::Densities,
+    density: ic_config::RowDensity,
+    author: String,
+    /// The minute: handling and downtimes change with the clock.
+    minute: i64,
     denied: [bool; 2],
     /// The editor's preview: its evaluation's revision (0 on a dashboard,
     /// whose evaluation comes with the snapshot).
@@ -214,6 +247,11 @@ pub(crate) enum DashboardEvent {
 pub(crate) struct ViewChange(Rc<dyn Fn(&mut View)>);
 
 impl ViewChange {
+    /// A change made by `change`.
+    pub(crate) fn new(change: impl Fn(&mut View) + 'static) -> Self {
+        Self(Rc::new(change))
+    }
+
     /// Applies the change to `view`.
     pub(crate) fn apply(&self, view: &mut View) {
         (self.0)(view);
@@ -247,6 +285,58 @@ pub(crate) struct PreviewPage {
     pub(crate) picked: Option<String>,
     /// The width the editor takes beside the preview (its inspector).
     pub(crate) reserved: Pixels,
+}
+
+/// The cluster section's events (topic 14): one event stream view without
+/// a filter, over the latest events the engine already keeps
+/// (`Snapshot::events`), so it costs no evaluation.
+struct EventsPage {
+    /// The one view (its density and stream options as chosen).
+    views: Vec<View>,
+    /// Its evaluation: the events its options let through.
+    result: DashboardResult,
+    /// What the result was built from: the events (by address) and the
+    /// view; bumped `revision` when rebuilt.
+    built: Option<(usize, View)>,
+    revision: u64,
+}
+
+impl EventsPage {
+    fn new() -> Self {
+        Self {
+            views: vec![events_view(None)],
+            result: DashboardResult::default(),
+            built: None,
+            revision: 0,
+        }
+    }
+}
+
+/// The cluster section's events view: an event stream without a filter,
+/// as many lines as it holds (the page scrolls), rows at `density`.
+fn events_view(density: Option<ic_config::RowDensity>) -> View {
+    View {
+        id: EVENTS_VIEW.to_owned(),
+        name: "events".to_owned(),
+        display: ic_config::ViewDisplay::EventStream,
+        stream: ic_config::StreamOptions {
+            lines: *ic_config::STREAM_LINES.end(),
+            ..ic_config::StreamOptions::default()
+        },
+        density,
+        ..View::default()
+    }
+}
+
+/// The id of the cluster section's events view.
+pub(crate) const EVENTS_VIEW: &str = "events";
+
+/// The key the cluster section's events page is kept under.
+pub(crate) fn events_reference() -> DashboardRef {
+    DashboardRef {
+        group_id: String::new(),
+        dashboard_id: EVENTS_VIEW.to_owned(),
+    }
 }
 
 /// The key the preview's page state is kept under: no dashboard has
@@ -288,6 +378,8 @@ pub(crate) struct DashboardView {
     /// revision of its evaluation (the page is built again when it
     /// changes).
     preview: Option<(PreviewPage, u64)>,
+    /// As the cluster section's events: the one view and its events.
+    events: Option<EventsPage>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -319,7 +411,34 @@ impl DashboardView {
             hydrate_task: None,
             reveal: None,
             preview: None,
+            events: None,
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// The cluster section's *events* page: the environment's latest
+    /// events in one event stream without a filter, with the dashboard
+    /// page's keys and pane.
+    pub(crate) fn cluster_events(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::new(state, cx);
+        view.events = Some(EventsPage::new());
+        view
+    }
+
+    /// Whether this is the cluster section's events page.
+    pub(crate) fn is_events(&self) -> bool {
+        self.events.is_some()
+    }
+
+    /// The page shown: the selected dashboard, the events page or the
+    /// editor's preview.
+    fn current_reference(&self, cx: &App) -> Option<DashboardRef> {
+        if self.preview.is_some() {
+            Some(preview_reference())
+        } else if self.events.is_some() {
+            Some(events_reference())
+        } else {
+            self.state.read(cx).selected().cloned()
         }
     }
 
@@ -389,6 +508,9 @@ impl DashboardView {
     /// The views of the page kept under `reference`: the dashboard's, or
     /// the editor's draft in its preview.
     fn shown_views<'a>(&'a self, reference: &DashboardRef, cx: &'a App) -> Option<&'a [View]> {
+        if let Some(events) = &self.events {
+            return Some(&events.views);
+        }
         match &self.preview {
             Some((page, _)) => Some(&page.views),
             None => self
@@ -406,6 +528,9 @@ impl DashboardView {
         view_id: &str,
         cx: &'a App,
     ) -> Option<&'a ViewResult> {
+        if let Some(events) = &self.events {
+            return events.result.view(view_id);
+        }
         match &self.preview {
             Some((page, _)) => page.result.view(view_id),
             None => self.state.read(cx).view_result(reference, view_id),
@@ -427,6 +552,18 @@ impl DashboardView {
                 view_id.to_owned(),
                 ViewChange(Rc::new(change)),
             ));
+            return;
+        }
+        if self.events.is_some() {
+            // The events page keeps only its rows' density.
+            let mut view = events_view(self.state.read(cx).events_density());
+            change(&mut view);
+            self.state.update(cx, |state, cx| {
+                if state.set_events_density(view.density) {
+                    cx.notify();
+                }
+            });
+            cx.notify();
             return;
         }
         self.state.update(cx, |state, cx| {
@@ -579,12 +716,50 @@ impl DashboardView {
         closed
     }
 
+    /// The cluster's events page: its view (with the density chosen for
+    /// it) over the snapshot's latest events, rebuilt when either changed.
+    fn sync_events(&mut self, cx: &App) {
+        let Some(events) = &mut self.events else {
+            return;
+        };
+        let state = self.state.read(cx);
+        let view = events_view(state.events_density());
+        let snapshot = state.snapshot();
+        let address = std::sync::Arc::as_ptr(&snapshot.events) as usize;
+        if events.built.as_ref() != Some(&(address, view.clone())) {
+            let shown = ic_core::stream_events(view.stream, &snapshot.events);
+            events.result = DashboardResult {
+                summary: ic_core::snapshot::Summary::default(),
+                views: vec![ViewResult {
+                    id: EVENTS_VIEW.to_owned(),
+                    body: ic_core::snapshot::ViewBody::Stream(std::sync::Arc::new(shown)),
+                    ..ViewResult::default()
+                }],
+            };
+            events.views = vec![view.clone()];
+            events.built = Some((address, view));
+            events.revision += 1;
+        }
+    }
+
     /// Makes sure the selected dashboard has its page state and that its
     /// page is built from the current views, results and folds. Cheap
     /// when nothing changed.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one page build: its inputs, whether they changed, the rebuild"
+    )]
     fn sync(&mut self, cx: &App) -> Option<DashboardRef> {
+        self.sync_events(cx);
         let state = self.state.read(cx);
-        let (reference, views, result, revision) = if let Some((page, revision)) = &self.preview {
+        let (reference, views, result, revision) = if let Some(events) = &self.events {
+            (
+                events_reference(),
+                events.views.as_slice(),
+                Some(&events.result),
+                events.revision,
+            )
+        } else if let Some((page, revision)) = &self.preview {
             (
                 preview_reference(),
                 page.views.as_slice(),
@@ -608,6 +783,17 @@ impl DashboardView {
             state.query_denial(ObjectKind::Hosts).is_some(),
         ];
         let sizes = Sizes::of(cx.theme());
+        let by_density = page::Densities::of(cx.theme());
+        let density = state.appearance().row_density;
+        let author = state.author().to_owned();
+        let now = Timestamp::now();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "minutes since 1970 fit in i64"
+        )]
+        let minute = (now.as_unix_seconds() / 60.).floor() as i64;
+        // Handling and downtimes follow the clock (phases, times left).
+        let clocked = views.iter().any(|view| view.display.is_threads());
         let width = self.width;
         let ui = self
             .pages
@@ -620,6 +806,10 @@ impl DashboardView {
                 && built.filter == ui.filter
                 && built.width == width
                 && built.sizes == sizes
+                && built.by_density == by_density
+                && built.density == density
+                && built.author == author
+                && (!clocked || built.minute == minute)
                 && built.denied == denied
                 && built.preview == revision
         });
@@ -634,6 +824,10 @@ impl DashboardView {
                 denied,
                 width,
                 sizes,
+                by_density,
+                density,
+                author: &author,
+                now,
             });
             if ui.selection.marked_count() > 0 {
                 let listed: HashSet<ObjectKey> = page
@@ -653,22 +847,35 @@ impl DashboardView {
                 filter: ui.filter.clone(),
                 width,
                 sizes,
+                by_density,
+                density,
+                author,
+                minute,
                 denied,
                 preview: revision,
             });
         }
-        if let Some(reveal) = &self.reveal
-            && reveal.dashboard == reference
-        {
-            let settling = state.rows_settling();
-            let key = reveal.key.clone();
-            let since = reveal.since;
-            let placed = (!fresh || !settling) && self.place_on(&reference, &key);
-            if (placed && !settling) || since.elapsed() > REVEAL_FOLLOW {
-                self.reveal = None;
-            }
-        }
+        let settling = state.rows_settling();
+        self.follow_reveal(&reference, fresh, settling);
         Some(reference)
+    }
+
+    /// An object to reveal on `reference`'s page (a notification, the
+    /// palette): placed once the page shows it, followed while its rows
+    /// settle (`settling`) and `fresh` pages don't move it again.
+    fn follow_reveal(&mut self, reference: &DashboardRef, fresh: bool, settling: bool) {
+        let Some(reveal) = &self.reveal else {
+            return;
+        };
+        if reveal.dashboard != *reference {
+            return;
+        }
+        let key = reveal.key.clone();
+        let since = reveal.since;
+        let placed = (!fresh || !settling) && self.place_on(reference, &key);
+        if (placed && !settling) || since.elapsed() > REVEAL_FOLLOW {
+            self.reveal = None;
+        }
     }
 
     /// Puts the cursor on `key`'s first stop on the page (no unfolding)
@@ -924,7 +1131,45 @@ impl DashboardView {
                     self.open_pane(reference, key, cx);
                 }
             }
+            Stop::Thread { view, key } => match key {
+                ItemKey::Fold(name) => {
+                    let name = name.clone();
+                    self.fold_thread(reference, view, None, cx, move |folds| {
+                        if !folds.open.remove(&name) {
+                            folds.open.insert(name);
+                        }
+                    });
+                }
+                ItemKey::More(more) => {
+                    let more = more.clone();
+                    self.fold_thread(reference, view, None, cx, move |folds| {
+                        toggle_more(folds, &more);
+                    });
+                }
+                ItemKey::Band(_) | ItemKey::Entry(_) | ItemKey::Service(..) => {
+                    if let Some(key) = stop.object(&page) {
+                        self.open_pane(reference, key, cx);
+                    }
+                }
+            },
         }
+    }
+
+    /// Changes the folds of handling or downtimes view `view` and builds
+    /// the page again; the cursor goes to `cursor` when given.
+    fn fold_thread(
+        &mut self,
+        reference: &DashboardRef,
+        view: &Id,
+        cursor: Option<Stop>,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut threads::Folds),
+    ) {
+        let Some(ui) = self.pages.get_mut(reference) else {
+            return;
+        };
+        change(ui.folds.threads_mut(view));
+        self.after_fold(reference, cursor, cx);
     }
 
     /// `→`: unfolds what the cursor is on (a view's header, a band, a
@@ -982,6 +1227,9 @@ impl DashboardView {
                     view: view.clone(),
                     group: group.clone(),
                 }),
+            // A thread's line with nothing to fold goes to its object's
+            // band; a band folded already, to the view's header.
+            Stop::Thread { view, key } => thread_parent(&page, view, key, position),
         }
         .filter(|_| !open)
         .and_then(|parent| page.position(&parent));
@@ -1005,6 +1253,38 @@ impl DashboardView {
             Stop::Band { view, group } => self.fold_group(&reference, view, group, !open, cx),
             Stop::More { view, group } => {
                 self.set_paging(&reference, view, group, open, true, cx);
+            }
+            Stop::Thread { view, key } => {
+                let thread = page.view_by_id(view).and_then(|view| view.thread.as_ref());
+                match key {
+                    ItemKey::Band(object) => {
+                        let object = object.clone();
+                        self.fold_thread(&reference, view, None, cx, move |folds| {
+                            if open {
+                                folds.collapsed.remove(&object);
+                            } else {
+                                folds.collapsed.insert(object);
+                            }
+                        });
+                    }
+                    ItemKey::Fold(name) => {
+                        let name = name.clone();
+                        self.fold_thread(&reference, view, None, cx, move |folds| {
+                            if open {
+                                folds.open.insert(name);
+                            } else {
+                                folds.open.remove(&name);
+                            }
+                        });
+                    }
+                    ItemKey::More(more) if thread.is_some() => {
+                        let more = more.clone();
+                        self.fold_thread(&reference, view, None, cx, move |folds| {
+                            set_more(folds, &more, open);
+                        });
+                    }
+                    _ => cx.propagate(),
+                }
             }
             Stop::Row { .. } | Stop::Event { .. } => cx.propagate(),
         }
@@ -1402,6 +1682,17 @@ impl DashboardView {
                     .is_some_and(|group| group.collapsed);
                 self.fold_group(&reference, view, group, !collapsed, cx);
             }
+            Stop::Thread {
+                view,
+                key: ItemKey::Band(object),
+            } => {
+                let object = object.clone();
+                self.fold_thread(&reference, view, None, cx, move |folds| {
+                    if !folds.collapsed.remove(&object) {
+                        folds.collapsed.insert(object);
+                    }
+                });
+            }
             _ => {}
         }
     }
@@ -1448,13 +1739,20 @@ impl DashboardView {
     ) -> AnyElement {
         let theme = cx.theme();
         let state = self.state.read(cx);
+        if let Some(events) = &self.events {
+            // The cluster section's events.
+            if events.result.views.first().is_none_or(ViewResult::is_empty) {
+                return note("No events yet: they show here as they happen.", theme);
+            }
+            return self.render_page(reference, window, cx);
+        }
         let Some((_, dashboard)) = state.dashboard(reference) else {
             return note("This dashboard no longer exists.", theme);
         };
         if !is_multi_view(&dashboard.views) {
-            // One list, as rc1 showed it.
+            // One view: its header is the page's.
             let view = primary_view(&dashboard.views);
-            if let Some(denial) = state.query_denial(view.object_kind) {
+            if let Some(denial) = view_denial(state, view) {
                 return EmptyState::new("No permission")
                     .leading(
                         Icon::new(IconName::Lock)
@@ -1488,13 +1786,99 @@ impl DashboardView {
                     )
                     .into_any_element();
             }
-            if result.rows().is_empty() {
-                return empty_dashboard(reference, view, result, cx);
+            if result.is_empty() {
+                if view.is_list() {
+                    return empty_dashboard(reference, view, result, cx);
+                }
+                return note(nothing_to_show(view), theme);
             }
         } else if state.result(reference).is_none() && state.connection().is_starting() {
             return banner::loading_body(state, cx);
         }
         self.render_page(reference, window, cx)
+    }
+}
+
+/// Where `←` takes the cursor from a thread's line `key` (at stop
+/// `position`) when there is nothing to fold there: `None` when the line
+/// folds itself (an open band or fold, a paging row showing everything);
+/// a folded band's view header; else its object's band.
+fn thread_parent(page: &Page, view: &Id, key: &ItemKey, position: usize) -> Option<Stop> {
+    let thread = page.view_by_id(view).and_then(|view| view.thread.as_ref());
+    let line = |wanted: &dyn Fn(&threads::Line) -> Option<bool>| {
+        thread.and_then(|thread| {
+            thread
+                .listing
+                .lines
+                .iter()
+                .find_map(|keyed| wanted(&keyed.line))
+        })
+    };
+    let folds_itself = match key {
+        ItemKey::Band(object) => line(&|candidate| match candidate {
+            threads::Line::Band {
+                object: band,
+                collapsed,
+                ..
+            } if band == object => Some(!collapsed),
+            _ => None,
+        }),
+        ItemKey::Fold(name) => line(&|candidate| match candidate {
+            threads::Line::Fold { downtime, open, .. } if downtime == name => Some(*open),
+            _ => None,
+        }),
+        ItemKey::More(more) => line(&|candidate| match candidate {
+            threads::Line::More { key, hidden } if key == more => Some(*hidden == 0),
+            _ => None,
+        }),
+        ItemKey::Entry(_) | ItemKey::Service(..) => Some(false),
+    }
+    .unwrap_or(false);
+    if folds_itself {
+        return None;
+    }
+    if matches!(key, ItemKey::Band(_)) {
+        return Some(Stop::Header(view.clone()));
+    }
+    // The nearest band above it in the same view, else the view's header.
+    page.stops()[..position]
+        .iter()
+        .rev()
+        .take_while(|entry| entry.stop.view() == view)
+        .find_map(|entry| match &entry.stop {
+            Stop::Thread {
+                key: ItemKey::Band(_),
+                ..
+            } => Some(entry.stop.clone()),
+            _ => None,
+        })
+        .or_else(|| Some(Stop::Header(view.clone())))
+}
+
+/// A paging row of a thread clicked: shows everything, or fewer again.
+fn toggle_more(folds: &mut threads::Folds, more: &threads::MoreKey) {
+    let open = match more {
+        threads::MoreKey::Thread(object) => !folds.all_entries.contains(object),
+        threads::MoreKey::Fold(name) => !folds.all_services.contains(name),
+    };
+    set_more(folds, more, open);
+}
+
+/// Shows everything a thread's paging row holds back (`all`), or fewer.
+fn set_more(folds: &mut threads::Folds, more: &threads::MoreKey, all: bool) {
+    match (more, all) {
+        (threads::MoreKey::Thread(object), true) => {
+            folds.all_entries.insert(object.clone());
+        }
+        (threads::MoreKey::Thread(object), false) => {
+            folds.all_entries.remove(object);
+        }
+        (threads::MoreKey::Fold(name), true) => {
+            folds.all_services.insert(name.clone());
+        }
+        (threads::MoreKey::Fold(name), false) => {
+            folds.all_services.remove(name);
+        }
     }
 }
 
@@ -1574,7 +1958,7 @@ impl Render for DashboardView {
             return self.render_preview(window, cx);
         }
         let main_width = SplitLayout::main_width(window, self.sidebar_open, &cx.theme().metrics);
-        let reference = self.state.read(cx).selected().cloned();
+        let reference = self.current_reference(cx);
         let multi = reference
             .as_ref()
             .and_then(|reference| self.state.read(cx).dashboard(reference))
@@ -1715,6 +2099,9 @@ impl DashboardView {
             let Some(result) = page.result.view(&view.id) else {
                 return note("Evaluating…", theme);
             };
+            if !view.is_list() && result.error.is_none() && result.is_empty() {
+                return note(nothing_to_show(view), theme);
+            }
             if let Some(error) = &result.error {
                 return EmptyState::new("The filter doesn't work")
                     .leading(
@@ -1726,7 +2113,7 @@ impl DashboardView {
                     .max_width(px(520.))
                     .into_any_element();
             }
-            if result.rows().is_empty() {
+            if view.is_list() && result.rows().is_empty() {
                 let text = if crate::editor::model::matches(&result.summary) == 0 {
                     "Nothing matches this filter."
                 } else {
@@ -2147,7 +2534,10 @@ mod tests {
         };
         assert!(!is_multi_view(std::slice::from_ref(&list)));
         assert!(is_multi_view(&[list.clone(), list.clone()]));
-        assert!(is_multi_view(&[grid]));
+        assert!(
+            !is_multi_view(&[grid]),
+            "one view: its header is the page's"
+        );
         assert!(!is_multi_view(&[]));
     }
 }

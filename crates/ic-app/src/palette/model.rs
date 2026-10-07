@@ -982,8 +982,17 @@ fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem>
 fn list_commands(state: &AppState, now: Timestamp) -> Vec<PaletteItem> {
     use crate::lists::model::Chip;
     let snapshot = state.snapshot();
-    let handled = crate::lists::model::count(ListKind::Handling, snapshot, now);
-    let in_effect = crate::lists::model::count(ListKind::Downtimes, snapshot, now);
+    let count = |kind| {
+        crate::lists::model::count(
+            kind,
+            snapshot,
+            crate::lists::threads::Scope::All,
+            ic_config::DowntimeKinds::default(),
+            now,
+        )
+    };
+    let handled = count(ListKind::Handling);
+    let in_effect = count(ListKind::Downtimes);
     vec![
         command(
             "Handling",

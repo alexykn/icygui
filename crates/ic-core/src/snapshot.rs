@@ -88,6 +88,12 @@ pub struct Snapshot {
     /// pane shows an "updating" hint when its object stays here for a
     /// moment (about 300 ms).
     pub updating: Arc<BTreeSet<ObjectKey>>,
+    /// The event log's latest entries, newest first (at most a thousand),
+    /// from the local log the engine already keeps: what event streams
+    /// show. The cluster section's *events*
+    /// shows them for the whole environment ([`crate::stream_events`]).
+    /// The same `Arc` while no event is added.
+    pub events: Arc<Vec<LogEntry>>,
 }
 
 impl Snapshot {
@@ -259,7 +265,8 @@ impl ViewResult {
     }
 
     /// Whether the view has nothing to show (its header says *nothing to
-    /// show*).
+    /// show*). A handling or downtimes view's body is what its filter
+    /// matches; whether any of it is being handled is the app's to say.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         match &self.body {
@@ -267,6 +274,17 @@ impl ViewResult {
             ViewBody::Grid(grid) => grid.groups.is_empty(),
             ViewBody::Tiles(tiles) => tiles.is_empty(),
             ViewBody::Stream(events) => events.is_empty(),
+            ViewBody::Members(members) => members.is_empty(),
+        }
+    }
+
+    /// A handling or downtimes view's members: the hosts and services its
+    /// filter matches (`None` for the other displays).
+    #[must_use]
+    pub fn members(&self) -> Option<&Arc<BTreeSet<ObjectKey>>> {
+        match &self.body {
+            ViewBody::Members(members) => Some(members),
+            _ => None,
         }
     }
 }
@@ -284,6 +302,11 @@ pub enum ViewBody {
     /// An event stream's events, newest first (at most
     /// [`STREAM_EVENTS`]).
     Stream(Arc<Vec<LogEntry>>),
+    /// A handling or downtimes view (topic 14): the hosts and services its
+    /// filter matches. The app builds the threads and the timeline from
+    /// the snapshot's acknowledgements, downtimes and comments of these
+    /// objects; nothing more is fetched.
+    Members(Arc<BTreeSet<ObjectKey>>),
 }
 
 impl Default for ViewBody {

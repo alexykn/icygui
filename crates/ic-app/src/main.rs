@@ -13,6 +13,8 @@ mod background;
 mod banner;
 mod chrome;
 mod cli;
+mod cluster;
+mod controls;
 mod dashboard;
 mod dev;
 mod downtimes;

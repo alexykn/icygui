@@ -1,5 +1,6 @@
 //! The event log's latest entries, kept in memory for event stream views
-//! (v1, topic 04).
+//! (v1, topic 04) and the snapshot's `events` (the cluster section's
+//! events, topic 14).
 //!
 //! At the start (and when the environment's log changes) the engine reads
 //! the newest [`RECENT_EVENTS`] entries from its local log once, on the
@@ -68,13 +69,8 @@ impl Engine {
         recent.truncate(RECENT_EVENTS);
         self.recent_events = Arc::new(recent);
         self.events_changed = true;
-        if self
-            .dashboards
-            .as_deref()
-            .is_some_and(crate::dashboards::Dashboards::has_streams)
-        {
-            self.publish_changes();
-        }
+        // The snapshot carries them (the cluster section's events).
+        self.publish_changes();
     }
 
     /// Another log: the recent entries are its.
@@ -102,12 +98,9 @@ impl Engine {
         }
     }
 
-    /// Whether new events wait for the event stream views.
+    /// Whether new events wait for a snapshot (it carries them; the event
+    /// stream views show them).
     pub(super) fn streams_wait(&self) -> bool {
         self.events_changed
-            && self
-                .dashboards
-                .as_deref()
-                .is_some_and(crate::dashboards::Dashboards::has_streams)
     }
 }

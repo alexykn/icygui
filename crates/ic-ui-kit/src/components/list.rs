@@ -180,6 +180,7 @@ pub struct ListRow {
     emphasis: RowEmphasis,
     header: bool,
     indent: Pixels,
+    density: Option<Density>,
     on_click: Option<ClickHandler>,
 }
 
@@ -200,8 +201,16 @@ impl ListRow {
             emphasis: RowEmphasis::None,
             header: false,
             indent: px(0.),
+            density: None,
             on_click: None,
         }
+    }
+
+    /// Lays the row out at `density` instead of the theme's (a view whose
+    /// rows have a density of their own, topic 14 round 5).
+    pub fn density(mut self, density: Density) -> Self {
+        self.density = Some(density);
+        self
     }
 
     /// The element in the 44px column at the left, such as an icon. For a
@@ -340,8 +349,13 @@ impl fmt::Debug for ListRow {
 }
 
 impl RenderOnce for ListRow {
+    #[expect(clippy::too_many_lines, reason = "one row, its slots in reading order")]
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme();
+        let own = self
+            .density
+            .filter(|density| *density != cx.theme().density)
+            .map(|density| cx.theme().with_density(density));
+        let theme = own.as_ref().unwrap_or_else(|| cx.theme());
         let colors = theme.colors;
         let metrics = theme.metrics;
         let compact = theme.density == Density::Compact;

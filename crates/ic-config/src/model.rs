@@ -401,6 +401,10 @@ pub struct Dashboard {
     /// through the dashboard when a view that counts problems
     /// ([`View::counts_problems`]) matches it.
     pub notifications: ScopeSetting,
+    /// What the sidebar shows in the dashboard's mark slot (topic 14,
+    /// round 5): the worst problem's dot or a chosen icon.
+    #[serde(skip_serializing_if = "SidebarMark::is_auto")]
+    pub mark: SidebarMark,
 }
 
 impl Default for Dashboard {
@@ -410,6 +414,67 @@ impl Default for Dashboard {
             name: String::new(),
             views: vec![View::default()],
             notifications: ScopeSetting::Inherit,
+            mark: SidebarMark::Auto,
         }
     }
+}
+
+impl Dashboard {
+    /// Whether some view counts problems ([`View::counts_problems`]): the
+    /// dashboard has a sidebar count and dot of its own.
+    #[must_use]
+    pub fn has_problem_view(&self) -> bool {
+        self.views.iter().any(View::counts_problems)
+    }
+
+    /// The mark in effect: [`SidebarMark::Auto`] (a file from before the
+    /// setting, or written by hand) is the state dot with a problem view
+    /// and the first view's kind icon without; a state mark without a
+    /// problem view (no dot to show) is that icon too.
+    #[must_use]
+    pub fn effective_mark(&self) -> EffectiveMark<'_> {
+        match &self.mark {
+            SidebarMark::Icon(icon) if !icon.trim().is_empty() => EffectiveMark::Icon(icon),
+            SidebarMark::State | SidebarMark::Auto if self.has_problem_view() => {
+                EffectiveMark::State
+            }
+            _ => EffectiveMark::KindIcon,
+        }
+    }
+}
+
+/// A dashboard's sidebar mark (the editor's *sidebar mark*).
+///
+/// In the settings file: `mark = "state"`, or `mark = { icon = "server" }`
+/// (the icon's Lucide name). Unset, it follows the defaults
+/// ([`Dashboard::effective_mark`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarMark {
+    /// Not set: the defaults.
+    #[default]
+    Auto,
+    /// The worst unhandled problem's dot.
+    State,
+    /// An icon, by its Lucide name (`server`, `phone`).
+    Icon(String),
+}
+
+impl SidebarMark {
+    /// Whether the mark is unset.
+    #[must_use]
+    pub fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
+/// What a dashboard's mark slot shows ([`Dashboard::effective_mark`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectiveMark<'a> {
+    /// The worst unhandled problem's dot.
+    State,
+    /// The icon with this Lucide name.
+    Icon(&'a str),
+    /// The first view's kind icon.
+    KindIcon,
 }

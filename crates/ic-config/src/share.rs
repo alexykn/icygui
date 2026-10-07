@@ -56,18 +56,20 @@ struct ImportFile {
 }
 
 /// Writes dashboard groups as TOML for sharing: everything about them
-/// (names, every dashboard's views with their displays and options,
-/// notification settings), marked with a `format` key and the settings
-/// format version.
+/// (names, sidebar marks, every dashboard's views with their displays and
+/// options, notification settings), marked with a `format` key and the
+/// settings format version. What is personal stays home: a view's *only
+/// mine* and its row density ([`crate::View::personal_cleared`]).
 ///
 /// # Errors
 ///
 /// [`ConfigError::Serialize`] when the groups can't be written as TOML.
 pub fn export_groups(groups: &[DashboardGroup]) -> Result<String, ConfigError> {
+    let groups: Vec<DashboardGroup> = groups.iter().map(shared).collect();
     let file = ExportFile {
         format: EXPORT_FORMAT,
         version: CONFIG_VERSION,
-        groups,
+        groups: &groups,
     };
     let body = toml::to_string(&file).map_err(|error| ConfigError::Serialize(error.to_string()))?;
     Ok(format!("{HEADER}{body}"))
@@ -109,6 +111,7 @@ pub fn import_groups(text: &str) -> Result<Vec<DashboardGroup>, ConfigError> {
         deserialize(upgraded, EXPORT)?
     };
     for group in &mut groups {
+        *group = shared(group);
         group.id = new_id();
         for dashboard in &mut group.dashboards {
             dashboard.id = new_id();
@@ -123,6 +126,19 @@ pub fn import_groups(text: &str) -> Result<Vec<DashboardGroup>, ConfigError> {
     } else {
         Err(ConfigError::Invalid(issues))
     }
+}
+
+/// `group` without what is personal: an exported view, and an imported
+/// one, follows the importer's own settings for its density and shows
+/// everyone's entries.
+fn shared(group: &DashboardGroup) -> DashboardGroup {
+    let mut group = group.clone();
+    for dashboard in &mut group.dashboards {
+        for view in &mut dashboard.views {
+            *view = view.personal_cleared();
+        }
+    }
+    group
 }
 
 fn check_export(table: &Table) -> Result<(), ConfigError> {
@@ -258,6 +274,92 @@ mod tests {
                 *original
             );
         }
+    }
+
+    #[test]
+    fn handling_and_downtimes_views_share_without_personal_choices() {
+        let mut groups = crate::default_groups();
+        let views = vec![
+            crate::View {
+                name: "handling".to_owned(),
+                display: crate::ViewDisplay::Handling,
+                filter: "host.vars.team == \"voip\"".to_owned(),
+                threads: crate::ThreadOptions {
+                    chip: crate::ThreadChip::Acknowledged,
+                    sort: Some(crate::ThreadSort::Author),
+                    only_mine: true,
+                    ..crate::ThreadOptions::default()
+                },
+                density: Some(crate::RowDensity::Compact),
+                ..crate::View::default()
+            },
+            crate::View {
+                name: "downtimes".to_owned(),
+                display: crate::ViewDisplay::Downtimes,
+                threads: crate::ThreadOptions {
+                    mode: crate::DowntimesMode::List,
+                    shows: crate::DowntimeKinds {
+                        from_config: false,
+                        ..crate::DowntimeKinds::default()
+                    },
+                    ..crate::ThreadOptions::default()
+                },
+                ..crate::View::default()
+            },
+        ];
+        let mut dashboard = crate::Dashboard::with_views("voip handling", views);
+        dashboard.mark = crate::SidebarMark::Icon("users".to_owned());
+        groups[0].dashboards.push(dashboard);
+        let text = export_groups(&groups).unwrap();
+        assert!(!text.contains("only_mine = true"), "{text}");
+        assert!(!text.contains("density"), "{text}");
+        let imported = import_groups(&text).unwrap();
+        let copy = &imported[0].dashboards[3];
+        assert_eq!(copy.mark, crate::SidebarMark::Icon("users".to_owned()));
+        let handling = &copy.views[0];
+        assert_eq!(handling.display, crate::ViewDisplay::Handling);
+        assert_eq!(handling.threads.chip, crate::ThreadChip::Acknowledged);
+        assert_eq!(handling.threads.sort, Some(crate::ThreadSort::Author));
+        assert!(!handling.threads.only_mine, "personal");
+        assert_eq!(handling.density, None, "personal");
+        let downtimes = &copy.views[1];
+        assert_eq!(downtimes.threads.mode, crate::DowntimesMode::List);
+        assert!(!downtimes.threads.shows.from_config);
+        // The settings file keeps everything.
+        let mut config = crate::Config::default();
+        config.environments.push(crate::Environment {
+            id: "e".to_owned(),
+            name: "e".to_owned(),
+            groups,
+            ..crate::Environment::default()
+        });
+        let saved = toml::to_string(&config).unwrap();
+        let back: crate::Config = toml::from_str(&saved).unwrap();
+        let view = &back.environments[0].groups[0].dashboards[3].views[0];
+        assert!(view.threads.only_mine);
+        assert_eq!(view.density, Some(crate::RowDensity::Compact));
+    }
+
+    #[test]
+    fn sidebar_marks_read_both_ways() {
+        let text = "[[groups]]\nname = \"g\"\n\
+                    [[groups.dashboards]]\nname = \"a\"\nmark = \"state\"\n\
+                    [[groups.dashboards]]\nname = \"b\"\nmark = { icon = \"phone\" }\n\
+                    [[groups.dashboards]]\nname = \"c\"\n";
+        let imported = import_groups(text).unwrap();
+        let marks: Vec<_> = imported[0]
+            .dashboards
+            .iter()
+            .map(|dashboard| dashboard.mark.clone())
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                crate::SidebarMark::State,
+                crate::SidebarMark::Icon("phone".to_owned()),
+                crate::SidebarMark::Auto
+            ]
+        );
     }
 
     #[test]

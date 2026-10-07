@@ -41,6 +41,16 @@ impl ListKind {
     #[cfg(test)]
     pub(crate) const ALL: [Self; 2] = [Self::Handling, Self::Downtimes];
 
+    /// The kind a dashboard view of `display` shows, if it is one of the
+    /// two (topic 14, round 5: view kinds).
+    pub(crate) fn of_display(display: ic_config::ViewDisplay) -> Option<Self> {
+        match display {
+            ic_config::ViewDisplay::Handling => Some(Self::Handling),
+            ic_config::ViewDisplay::Downtimes => Some(Self::Downtimes),
+            _ => None,
+        }
+    }
+
     /// The view's name: its header's title and the sidebar's label.
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -101,15 +111,6 @@ impl ListKind {
                 SortChoice::Object,
                 SortChoice::Author,
             ],
-        }
-    }
-
-    /// The sort slot's width in characters, sized for the longest label
-    /// (`views.js` `SORT_CH`), so a new sort moves nothing.
-    pub(crate) fn sort_slot_chars(self) -> usize {
-        match self {
-            Self::Handling => 17,
-            Self::Downtimes => 27,
         }
     }
 
@@ -284,8 +285,9 @@ impl SortChoice {
     }
 }
 
-/// What a view shows, as the user set it (kept with the environment's UI
-/// state).
+/// What a view shows, as the user set it: kept with the dashboard view
+/// ([`ic_config::ThreadOptions`]), or for the cluster section's entries
+/// with the environment's UI state.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Options {
     /// The chip picked.
@@ -296,9 +298,78 @@ pub(crate) struct Options {
     pub(crate) only_mine: bool,
     /// The downtimes view's display.
     pub(crate) mode: Mode,
+    /// Which downtimes the downtimes view shows (a dashboard view's
+    /// *shows*; the cluster's shows all).
+    pub(crate) shows: ic_config::DowntimeKinds,
 }
 
 impl Options {
+    /// A dashboard view's options ([`ic_config::View::threads`]); what
+    /// `kind` doesn't offer is its default.
+    pub(crate) fn of_view(kind: ListKind, threads: ic_config::ThreadOptions) -> Self {
+        use ic_config::{DowntimesMode, ThreadChip, ThreadSort};
+        let chip = match threads.chip {
+            ThreadChip::All => Chip::All,
+            ThreadChip::Acknowledged => Chip::Acknowledged,
+            ThreadChip::InEffect => Chip::InEffect,
+            ThreadChip::Upcoming => Chip::Upcoming,
+            ThreadChip::Comments => Chip::Comments,
+            ThreadChip::FromConfig => Chip::FromConfig,
+        };
+        let sort = threads.sort.map(|sort| match sort {
+            ThreadSort::LatestActivity => SortChoice::LatestActivity,
+            ThreadSort::Soonest => SortChoice::Soonest,
+            ThreadSort::ByTime => SortChoice::ByTime,
+            ThreadSort::Object => SortChoice::Object,
+            ThreadSort::Author => SortChoice::Author,
+        });
+        Self {
+            chip: if kind.chips().contains(&chip) {
+                chip
+            } else {
+                Chip::All
+            },
+            sort: sort.filter(|sort| kind.sorts().contains(sort)),
+            only_mine: threads.only_mine,
+            mode: match (kind, threads.mode) {
+                (ListKind::Downtimes, DowntimesMode::List) => Mode::List,
+                _ => Mode::Timeline,
+            },
+            shows: match kind {
+                ListKind::Handling => ic_config::DowntimeKinds::default(),
+                ListKind::Downtimes => threads.shows,
+            },
+        }
+    }
+
+    /// The options as a dashboard view keeps them.
+    pub(crate) fn to_view(&self) -> ic_config::ThreadOptions {
+        use ic_config::{DowntimesMode, ThreadChip, ThreadSort};
+        ic_config::ThreadOptions {
+            chip: match self.chip {
+                Chip::All => ThreadChip::All,
+                Chip::Acknowledged => ThreadChip::Acknowledged,
+                Chip::InEffect => ThreadChip::InEffect,
+                Chip::Upcoming => ThreadChip::Upcoming,
+                Chip::Comments => ThreadChip::Comments,
+                Chip::FromConfig => ThreadChip::FromConfig,
+            },
+            sort: self.sort.map(|sort| match sort {
+                SortChoice::LatestActivity => ThreadSort::LatestActivity,
+                SortChoice::Soonest => ThreadSort::Soonest,
+                SortChoice::ByTime => ThreadSort::ByTime,
+                SortChoice::Object => ThreadSort::Object,
+                SortChoice::Author => ThreadSort::Author,
+            }),
+            mode: match self.mode {
+                Mode::Timeline => DowntimesMode::Timeline,
+                Mode::List => DowntimesMode::List,
+            },
+            shows: self.shows,
+            only_mine: self.only_mine,
+        }
+    }
+
     /// A view's options as saved; what it doesn't offer is its default.
     pub(crate) fn saved(kind: ListKind, saved: &ic_config::ListOptionsState) -> Self {
         Self {
@@ -320,6 +391,7 @@ impl Options {
                     .and_then(Mode::from_id)
                     .unwrap_or_default(),
             },
+            shows: ic_config::DowntimeKinds::default(),
         }
     }
 
@@ -331,6 +403,7 @@ impl Options {
             chip: (self.chip != Chip::All).then(|| self.chip.id().to_owned()),
             mode: (kind == ListKind::Downtimes && self.mode != Mode::default())
                 .then(|| self.mode.id().to_owned()),
+            density: None,
         }
     }
 
@@ -368,13 +441,20 @@ impl Options {
     }
 }
 
-/// How many the sidebar and the palette count: handling the objects being
-/// handled, downtimes those in effect now (a host's with its services
-/// counts once).
-pub(crate) fn count(kind: ListKind, snapshot: &Snapshot, now: Timestamp) -> usize {
+/// How many the sidebar and the palette count of the objects in `scope`:
+/// handling the objects being handled, downtimes those in effect now (a
+/// host's with its services counts once) of the kinds `shows` lets
+/// through.
+pub(crate) fn count(
+    kind: ListKind,
+    snapshot: &Snapshot,
+    scope: super::threads::Scope<'_>,
+    shows: ic_config::DowntimeKinds,
+    now: Timestamp,
+) -> usize {
     match kind {
-        ListKind::Handling => super::threads::handled_objects(snapshot, now),
-        ListKind::Downtimes => super::threads::downtimes_in_effect(snapshot, now),
+        ListKind::Handling => super::threads::handled_objects(snapshot, scope, now),
+        ListKind::Downtimes => super::threads::downtimes_in_effect(snapshot, scope, shows, now),
     }
 }
 
@@ -539,16 +619,9 @@ mod tests {
             for chip in kind.chips() {
                 assert_eq!(Chip::from_id(kind, chip.id()), Some(*chip));
             }
-            // The sort slot is as wide as its longest label, whatever the
-            // chip: a new sort or chip moves nothing.
-            let mut longest = 0;
             for sort in kind.sorts() {
                 assert_eq!(SortChoice::from_key(kind, sort.key()), Some(*sort));
-                for chip in kind.chips() {
-                    longest = longest.max(sort.label(kind, *chip).chars().count());
-                }
             }
-            assert_eq!(longest, kind.sort_slot_chars(), "{kind:?}");
         }
         // Stage 2's lists open their successor.
         assert_eq!(ListKind::from_id("comments"), Some(ListKind::Handling));
@@ -602,6 +675,7 @@ mod tests {
             sort: Some(SortChoice::Object),
             only_mine: true,
             mode: Mode::List,
+            shows: ic_config::DowntimeKinds::default(),
         };
         let saved = options.to_saved(ListKind::Downtimes);
         assert_eq!(saved.chip.as_deref(), Some("upcoming"));

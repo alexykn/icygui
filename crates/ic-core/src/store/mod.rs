@@ -564,6 +564,7 @@ impl Store {
             // Set by the engine.
             quiet: false,
             updating: Arc::default(),
+            events: Arc::default(),
         }
     }
 

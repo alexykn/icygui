@@ -21,7 +21,7 @@
 
 mod centre;
 mod menus;
-mod model;
+pub(crate) mod model;
 
 use gpui::{
     AnyElement, AppContext as _, ClickEvent, Context, Div, Entity, EventEmitter, FontWeight,
@@ -48,7 +48,7 @@ pub(crate) use self::menus::new_key;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use self::menus::switcher_rows;
 pub(crate) use self::model::Dot;
-use self::model::{OpenList, OpenTab, SidebarGroup, SidebarItem};
+use self::model::{ClusterRow, Mark, OpenTab, SidebarGroup, SidebarItem};
 
 /// What the sidebar asks the workspace to do: open an editor, a dialog
 /// or a file prompt, or switch environments.
@@ -213,9 +213,10 @@ impl Sidebar {
             state.environment().and_then(|environment| {
                 model::groups(
                     environment,
-                    &state.snapshot().dashboards,
+                    state.snapshot(),
                     state.selected(),
                     &self.query,
+                    Timestamp::now(),
                 )
                 .into_iter()
                 .flat_map(|group| group.items)
@@ -375,44 +376,40 @@ impl Sidebar {
         let Some(environment) = state.environment() else {
             return empty_note("No dashboards yet", None, &theme, cx);
         };
-        // While a tab is shown, no dashboard is highlighted.
+        let now = Timestamp::now();
+        // While a tab or a cluster entry is shown, no dashboard is
+        // highlighted.
         let selected = state
             .selected()
-            .filter(|_| state.active_tab().is_none() && state.active_list().is_none());
-        let groups = model::groups(
-            environment,
-            &state.snapshot().dashboards,
-            selected,
-            &self.query,
-        );
+            .filter(|_| state.active_tab().is_none() && state.active_cluster().is_none());
+        let groups = model::groups(environment, state.snapshot(), selected, &self.query, now);
         let tabs = model::open_tabs(state.tabs(), state.active_tab(), state.snapshot());
-        let lists = model::open_lists(
-            state.lists(),
-            state.active_list(),
-            state.snapshot(),
-            Timestamp::now(),
-        );
+        let cluster_state =
+            crate::cluster::cluster_state(state.snapshot(), state.connection().is_connected());
+        let cluster =
+            model::cluster_rows(state.snapshot(), state.active_cluster(), cluster_state, now);
         let environment_name = environment.name.clone();
-        if groups.is_empty() && tabs.is_empty() && lists.is_empty() {
-            return if self.query.trim().is_empty() {
+        let mut rows: Vec<AnyElement> = vec![Self::render_cluster(
+            &cluster,
+            &environment_name,
+            &theme,
+            cx,
+        )];
+        if groups.is_empty() && tabs.is_empty() {
+            rows.push(if self.query.trim().is_empty() {
                 empty_note("No dashboards yet", Some("new dashboard"), &theme, cx)
             } else {
                 empty_note("No matching dashboards", None, &theme, cx)
-            };
+            });
         }
         let count = environment.groups.len();
-        let mut rows: Vec<AnyElement> = groups
-            .iter()
-            .map(|group| self.render_group(group, count, &theme, cx))
-            .collect();
-        if !tabs.is_empty() || !lists.is_empty() {
-            rows.push(Self::render_open_tabs(
-                &lists,
-                &tabs,
-                &environment_name,
-                &theme,
-                cx,
-            ));
+        rows.extend(
+            groups
+                .iter()
+                .map(|group| self.render_group(group, count, &theme, cx)),
+        );
+        if !tabs.is_empty() {
+            rows.push(Self::render_open_tabs(&tabs, &theme, cx));
         }
         div()
             .id("sidebar-groups")
@@ -425,18 +422,112 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// The "open" section: the lists of every downtime, comment and
-    /// acknowledged problem (topic 07), then objects opened as tabs ("↗
-    /// open as tab").
-    fn render_open_tabs(
-        lists: &[OpenList],
-        tabs: &[OpenTab],
+    /// The fixed **cluster** section at the top (topic 14): `cluster` with
+    /// the environment's name faint beside it, then handling, downtimes,
+    /// events and health, each with its mark in the dot slot and its count
+    /// in the count slot; a rule under it, above the groups.
+    fn render_cluster(
+        rows: &[ClusterRow],
         environment: &str,
         theme: &Theme,
         cx: &Context<Self>,
     ) -> AnyElement {
         let colors = theme.colors;
-        let active = tabs.iter().any(|tab| tab.active) || lists.iter().any(|list| list.active);
+        let metrics = theme.metrics;
+        let header = div()
+            .id("cluster-section")
+            .flex()
+            .flex_none()
+            .items_baseline()
+            .gap(px(8.))
+            .h(metrics.group_row_height)
+            .pt(px(9.))
+            .px(metrics.sidebar_padding)
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(theme.text.heading)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors.text_secondary)
+                    .child("cluster"),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.text.row)
+                    .text_color(colors.text_faint)
+                    .child(environment.to_owned()),
+            );
+        let entries = rows.iter().map(|row| {
+            let entry = row.entry;
+            div()
+                .id(entry.id())
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(12.))
+                .h(metrics.item_row_height)
+                .pl(px(14.))
+                .pr(metrics.sidebar_padding)
+                .cursor_pointer()
+                .when(row.active, |item| item.bg(colors.item_active))
+                .when(!row.active, |item| {
+                    item.hover(|style| style.bg(colors.item_hover))
+                })
+                .child(mark(row.mark, theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(theme.text.row)
+                        .text_color(if row.active {
+                            colors.text_emphasis
+                        } else {
+                            colors.text_secondary
+                        })
+                        .child(entry.title()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .justify_end()
+                        .min_w(px(22.))
+                        .pr(GlyphButton::reach())
+                        .text_size(theme.text.label)
+                        .text_color(colors.text_muted)
+                        .children(row.count.map(|count| count.to_string())),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.state.update(cx, |state, cx| {
+                        if state.show_cluster(entry) {
+                            cx.notify();
+                        }
+                    });
+                }))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .pb(px(6.))
+            .mb(px(6.))
+            .border_b_1()
+            .border_color(colors.border_header)
+            .child(header)
+            .children(entries)
+            .into_any_element()
+    }
+
+    /// The "open" section, shown only while there are any: objects opened
+    /// as tabs ("↗ open as tab").
+    fn render_open_tabs(tabs: &[OpenTab], theme: &Theme, cx: &Context<Self>) -> AnyElement {
+        let colors = theme.colors;
+        let active = tabs.iter().any(|tab| tab.active);
         let header = div()
             .id("open-tabs")
             .group("sidebar-open-tabs")
@@ -490,136 +581,7 @@ impl Sidebar {
             .flex_none()
             .pb(px(6.))
             .child(header)
-            .children(
-                lists
-                    .iter()
-                    .map(|list| Self::render_list(list, environment, theme, cx)),
-            )
             .children(tabs.iter().map(|tab| Self::render_tab(tab, theme, cx)))
-            .into_any_element()
-    }
-
-    /// A list open as a tab: its icon in the mark slot, its name with the
-    /// environment's, and its count; `×` in the count's place on hover.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the row as drawn, with its hover close button"
-    )]
-    fn render_list(
-        list: &OpenList,
-        environment: &str,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let colors = theme.colors;
-        let metrics = theme.metrics;
-        let kind = list.kind;
-        let id = SharedString::from(format!("list-tab-{}", kind.id()));
-        let group = SharedString::from(format!("list-row-{}", kind.id()));
-        div()
-            .id(id.clone())
-            .group(group.clone())
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(12.))
-            .h(metrics.item_row_height)
-            .pl(px(14.))
-            .pr(metrics.sidebar_padding - GlyphButton::reach())
-            .cursor_pointer()
-            .when(list.active, |row| row.bg(colors.item_active))
-            .when(!list.active, |row| {
-                row.hover(|style| style.bg(colors.item_hover))
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .justify_center()
-                    .w(metrics.sidebar_dot)
-                    .child(
-                        Icon::new(kind.icon())
-                            .size(px(11.))
-                            .color(colors.text_faint),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(6.))
-                    .text_size(theme.text.row)
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(if list.active {
-                                colors.text_emphasis
-                            } else {
-                                colors.text_secondary
-                            })
-                            .child(kind.title()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(colors.text_faint)
-                            .child(environment.to_owned()),
-                    ),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_end()
-                    .min_w(px(22.))
-                    .child(
-                        div()
-                            .group_hover(group.clone(), gpui::Styled::invisible)
-                            .pr(GlyphButton::reach())
-                            .text_size(theme.text.label)
-                            .text_color(colors.text_muted)
-                            .child(list.count.to_string()),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .right_0()
-                            .invisible()
-                            .group_hover(group, gpui::Styled::visible)
-                            .child(
-                                IconButton::new(
-                                    SharedString::from(format!("close-{id}")),
-                                    IconName::Close,
-                                )
-                                .size(px(20.))
-                                .icon_size(px(12.))
-                                .color(colors.text_muted)
-                                .tooltip(Tooltip::new("Close list"))
-                                .on_click(cx.listener(
-                                    move |this, _: &ClickEvent, _, cx| {
-                                        this.state.update(cx, |state, cx| {
-                                            if state.close_list(kind) {
-                                                cx.notify();
-                                            }
-                                        });
-                                    },
-                                )),
-                            ),
-                    ),
-            )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.state.update(cx, |state, cx| {
-                    if state.open_list(kind) {
-                        cx.notify();
-                    }
-                });
-            }))
             .into_any_element()
     }
 
@@ -891,7 +853,6 @@ impl Sidebar {
     fn render_item(&self, item: &SidebarItem<'_>, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let colors = theme.colors;
         let metrics = theme.metrics;
-        let dot = dot(item.dot, theme);
         let reference = item.reference.clone();
         let menu = SidebarMenu::Dashboard(item.reference.clone());
         let menu_open = self.menus.is_open(&menu);
@@ -936,7 +897,7 @@ impl Sidebar {
             .when(!item.selected && !menu_open, |row| {
                 row.hover(|style| style.bg(colors.item_hover))
             })
-            .child(dot.size(metrics.sidebar_dot))
+            .child(mark(item.mark, theme))
             .child(label)
             .when(item.muted && renaming.is_none(), |row| {
                 row.child(
@@ -1392,6 +1353,25 @@ impl Render for Sidebar {
             .child(header)
             .child(groups)
             .child(footer)
+    }
+}
+
+/// A row's mark in its fixed slot: a state dot, or an icon (faint and
+/// neutral, so colour keeps meaning state).
+fn mark(mark: Mark, theme: &Theme) -> AnyElement {
+    let slot = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(theme.metrics.sidebar_dot);
+    match mark {
+        Mark::Dot(state) => slot
+            .child(dot(state, theme).size(theme.metrics.sidebar_dot))
+            .into_any_element(),
+        Mark::Icon(icon) => slot
+            .child(Icon::new(icon).size(px(11.)).color(theme.colors.text_faint))
+            .into_any_element(),
     }
 }
 

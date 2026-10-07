@@ -53,6 +53,7 @@ pub(crate) use self::notifications::NotificationPlan;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use self::operations::NOT_CONNECTED;
 use crate::actions::{ActionRequest, ObjectAction};
+use crate::cluster::ClusterEntry;
 #[cfg(test)]
 use crate::fixture::{self, FixtureOptions};
 use crate::lists::ListKind;
@@ -193,12 +194,9 @@ pub(crate) struct AppState {
     tabs: Vec<ObjectKey>,
     /// The tab shown instead of the selected dashboard.
     active_tab: Option<ObjectKey>,
-    /// The lists of every downtime, comment and acknowledged problem open
-    /// as tabs (topic 07), in sidebar order (which is [`ListKind::ALL`]'s).
-    lists: Vec<ListKind>,
-    /// The list shown instead of the selected dashboard (never together
-    /// with `active_tab`).
-    active_list: Option<ListKind>,
+    /// The cluster section's entry shown instead of the selected
+    /// dashboard (never together with `active_tab`).
+    active_cluster: Option<ClusterEntry>,
     /// Each list's choices in the active environment, by list id (kept
     /// with the UI state).
     list_options: BTreeMap<String, ListOptionsState>,
@@ -266,8 +264,7 @@ impl AppState {
             selected: None,
             tabs: Vec::new(),
             active_tab: None,
-            lists: Vec::new(),
-            active_list: None,
+            active_cluster: None,
             list_options: BTreeMap::new(),
             started_at: now,
             mode,
@@ -366,8 +363,7 @@ impl AppState {
             self.selected = None;
             self.tabs.clear();
             self.active_tab = None;
-            self.lists.clear();
-            self.active_list = None;
+            self.active_cluster = None;
             self.list_options.clear();
             return;
         };
@@ -384,14 +380,7 @@ impl AppState {
             .take(MAX_TABS)
             .collect();
         self.active_tab = None;
-        self.lists = saved
-            .lists
-            .iter()
-            .filter_map(|id| ListKind::from_id(id))
-            .collect();
-        self.lists.sort();
-        self.lists.dedup();
-        self.active_list = None;
+        self.active_cluster = None;
     }
 
     /// The first dashboard in sidebar order.
@@ -733,10 +722,10 @@ impl AppState {
         }
         let changed = self.selected.as_ref() != Some(&reference)
             || self.active_tab.is_some()
-            || self.active_list.is_some();
+            || self.active_cluster.is_some();
         self.selected = Some(reference);
         self.active_tab = None;
-        self.active_list = None;
+        self.active_cluster = None;
         if changed {
             self.remember_environment_ui();
         }
@@ -876,7 +865,9 @@ impl AppState {
         };
         let state = EnvironmentUiState {
             tabs: self.tabs.iter().map(ObjectKey::full_name).collect(),
-            lists: self.lists.iter().map(|kind| kind.id().to_owned()).collect(),
+            // The cluster section's entries are always there (stage 2's
+            // list tabs aren't kept any more).
+            lists: Vec::new(),
             selected: self.selected.clone(),
             list_options: self.list_options.clone(),
         };
@@ -920,9 +911,9 @@ impl AppState {
         } else if !self.tabs.contains(&key) {
             return false;
         }
-        let shown = self.active_tab.as_ref() != Some(&key) || self.active_list.is_some();
+        let shown = self.active_tab.as_ref() != Some(&key) || self.active_cluster.is_some();
         self.active_tab = Some(key);
-        self.active_list = None;
+        self.active_cluster = None;
         added || shown
     }
 
@@ -932,13 +923,8 @@ impl AppState {
             return false;
         }
         self.active_tab = Some(key.clone());
-        self.active_list = None;
+        self.active_cluster = None;
         true
-    }
-
-    /// The lists open as tabs, in sidebar order.
-    pub(crate) fn lists(&self) -> &[ListKind] {
-        &self.lists
     }
 
     /// The choices saved for the list `kind` in the active environment
@@ -965,96 +951,98 @@ impl AppState {
         }
     }
 
-    /// The list shown instead of the dashboard, if any.
-    pub(crate) fn active_list(&self) -> Option<ListKind> {
-        self.active_list
+    /// The rows' density chosen on the cluster section's events (`None`:
+    /// as in the settings).
+    pub(crate) fn events_density(&self) -> Option<ic_config::RowDensity> {
+        self.list_options
+            .get(crate::dashboard::EVENTS_VIEW)
+            .and_then(|options| options.density)
     }
 
-    /// Opens view `kind` as a tab showing `chip` (the palette's
-    /// *acknowledged* opens handling on its acknowledged chip), with the
-    /// chip's own sort.
+    /// Chooses the rows' density of the cluster section's events (kept
+    /// with the UI state). Returns whether it changed.
+    pub(crate) fn set_events_density(&mut self, density: Option<ic_config::RowDensity>) -> bool {
+        if self.events_density() == density {
+            return false;
+        }
+        let key = crate::dashboard::EVENTS_VIEW.to_owned();
+        match density {
+            Some(density) => {
+                self.list_options.entry(key).or_default().density = Some(density);
+            }
+            None => {
+                self.list_options.remove(&key);
+            }
+        }
+        self.remember_environment_ui();
+        true
+    }
+
+    /// The cluster section's entry shown instead of the dashboard, if any.
+    pub(crate) fn active_cluster(&self) -> Option<ClusterEntry> {
+        self.active_cluster
+    }
+
+    /// Shows the cluster section's handling or downtimes on `chip` (the
+    /// palette's *acknowledged* opens handling on its acknowledged chip),
+    /// with the chip's own sort.
     pub(crate) fn open_list_on(&mut self, kind: ListKind, chip: crate::lists::model::Chip) -> bool {
         let mut options = crate::lists::model::Options::saved(kind, &self.list_options(kind));
         let changed = options.chip != chip;
         if changed {
             options.pick_chip(chip);
-            self.set_list_options(kind, options.to_saved(kind));
+            let mut saved = options.to_saved(kind);
+            saved.density = self.list_options(kind).density;
+            self.set_list_options(kind, saved);
         }
         self.open_list(kind) || changed
     }
 
-    /// Opens the list `kind` as a tab (unless it is one already) and shows
-    /// it. Returns whether anything changed.
+    /// Shows the cluster section's handling or downtimes. Returns whether
+    /// anything changed.
     pub(crate) fn open_list(&mut self, kind: ListKind) -> bool {
-        let added = !self.lists.contains(&kind);
-        if added {
-            self.lists.push(kind);
-            self.lists.sort();
-            self.remember_environment_ui();
-        }
-        let shown = self.active_list != Some(kind);
-        self.active_list = Some(kind);
-        self.active_tab = None;
-        added || shown
+        self.show_cluster(ClusterEntry::of_list(kind))
     }
 
-    /// Closes the list `kind`; closing the shown one goes back to the
-    /// dashboard. Returns whether it was open.
-    pub(crate) fn close_list(&mut self, kind: ListKind) -> bool {
-        if self.active_list == Some(kind) {
-            self.active_list = None;
-        }
-        let before = self.lists.len();
-        self.lists.retain(|open| *open != kind);
-        let closed = self.lists.len() != before;
-        if closed {
-            self.remember_environment_ui();
-        }
-        closed
+    /// Shows an entry of the cluster section. Returns whether anything
+    /// changed.
+    pub(crate) fn show_cluster(&mut self, entry: ClusterEntry) -> bool {
+        let shown = self.active_cluster != Some(entry) || self.active_tab.is_some();
+        self.active_cluster = Some(entry);
+        self.active_tab = None;
+        shown
     }
 
     /// Shows the selected dashboard instead of the active tab or list,
     /// which stays open. Returns whether a tab or list was shown.
     pub(crate) fn show_dashboard(&mut self) -> bool {
         let tab = self.active_tab.take().is_some();
-        let list = self.active_list.take().is_some();
-        tab || list
+        let cluster = self.active_cluster.take().is_some();
+        tab || cluster
     }
 
     /// Shows the next open tab (`forward`) or the previous one, cycling
-    /// through the dashboard, the lists and the tabs in sidebar order:
-    /// after the last tab comes the dashboard. Returns whether anything
-    /// changed.
+    /// through the dashboard and the tabs in sidebar order: after the last
+    /// tab comes the dashboard. Returns whether anything changed.
     pub(crate) fn cycle_tab(&mut self, forward: bool) -> bool {
-        if self.tabs.is_empty() && self.lists.is_empty() {
+        if self.tabs.is_empty() {
             return false;
         }
-        // 0 is the dashboard, then the lists, then the tabs.
-        let lists = self.lists.len();
-        let stops = lists + self.tabs.len() + 1;
-        let current = if let Some(list) = self.active_list {
-            self.lists
-                .iter()
-                .position(|open| *open == list)
-                .map_or(0, |index| index + 1)
-        } else {
-            self.active_tab
-                .as_ref()
-                .and_then(|active| self.tabs.iter().position(|tab| tab == active))
-                .map_or(0, |index| index + 1 + lists)
-        };
+        // 0 is the dashboard (or the cluster entry shown), then the tabs.
+        let stops = self.tabs.len() + 1;
+        let current = self
+            .active_tab
+            .as_ref()
+            .and_then(|active| self.tabs.iter().position(|tab| tab == active))
+            .map_or(0, |index| index + 1);
         let next = if forward {
             (current + 1) % stops
         } else {
             (current + stops - 1) % stops
         };
         match next.checked_sub(1) {
-            Some(index) if index < lists => {
-                let kind = self.lists[index];
-                self.open_list(kind)
-            }
             Some(index) => {
-                let key = self.tabs[index - lists].clone();
+                let key = self.tabs[index].clone();
                 self.activate_tab(&key)
             }
             None => self.show_dashboard(),
@@ -1079,10 +1067,8 @@ impl AppState {
     /// Closes every tab and list.
     pub(crate) fn close_all_tabs(&mut self) -> bool {
         self.active_tab = None;
-        self.active_list = None;
-        let had_tabs = !self.tabs.is_empty() || !self.lists.is_empty();
+        let had_tabs = !self.tabs.is_empty();
         self.tabs.clear();
-        self.lists.clear();
         if had_tabs {
             self.remember_environment_ui();
         }

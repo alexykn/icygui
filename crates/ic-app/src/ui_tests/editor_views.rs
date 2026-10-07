@@ -25,9 +25,10 @@ use crate::fixture::FixtureOptions;
 use crate::workspace::{Confirmed, ModalKind};
 
 /// The middle of row `index` of the views list (the inspector's rows are
-/// 34px, 2px apart, under the name, group and notifications).
+/// 34px field boxes, 4px apart, under the name and the sidebar mark and
+/// group).
 fn view_row(index: u8) -> Point<Pixels> {
-    point(px(1160.), px(229. + 36. * f32::from(index)))
+    point(px(1160.), px(229. + 38. * f32::from(index)))
 }
 
 /// The `···` of row `index` of the views list.
@@ -48,15 +49,26 @@ fn view_menu_item(index: u8, item: u8) -> Point<Pixels> {
 
 /// *add view* under a list of `count` views.
 fn add_view(count: u8) -> Point<Pixels> {
-    point(px(1137.), px(224. + 36. * f32::from(count)))
+    point(px(1137.), px(221. + 38. * f32::from(count)))
 }
 
 /// Item `index` of the *add view* menu (list, grouped list, host-group
-/// grid, summary tiles, event stream) under a list of `count` views.
+/// grid, summary tiles, event stream, handling, downtimes: in sections,
+/// each under its label) under a list of `count` views.
 fn add_view_item(count: u8, index: u8) -> Point<Pixels> {
+    const OFFSETS: [f32; 7] = [60., 88., 148., 176., 236., 264., 292.];
     point(
         px(1150.),
-        add_view(count).y + px(60. + 28. * f32::from(index)),
+        add_view(count).y + px(OFFSETS[usize::from(index)]),
+    )
+}
+
+/// The handled field's `show` (or, `hide`, its `hide`) of a list view
+/// under a list of `count` views.
+fn handled_choice(count: u8, hide: bool) -> Point<Pixels> {
+    point(
+        px(if hide { 1365. } else { 1255. }),
+        add_view(count).y + px(450.),
     )
 }
 
@@ -141,6 +153,7 @@ fn production_with(app: &Harness, cx: &mut App, views: Vec<View>) {
                     views,
                     notifications: ScopeSetting::Inherit,
                     group_id: "demo-overview".to_owned(),
+                    mark: ic_config::SidebarMark::Auto,
                 },
             )
             .unwrap();
@@ -408,7 +421,7 @@ fn a_views_settings_follow_its_display() {
         // The list's handled field: as in settings, show, or hide kinds
         // (its `hide`, under three views).
         app.click(cx, view_row(0), Modifiers::default());
-        app.click(cx, point(px(1365.), px(747.)), Modifiers::default());
+        app.click(cx, handled_choice(3, true), Modifiers::default());
         let list = selected(app, cx);
         assert_eq!(list.handled.mode, HandledMode::Hide);
         assert_eq!(
@@ -417,7 +430,7 @@ fn a_views_settings_follow_its_display() {
             "hide starts from what the settings hide"
         );
         // `show`.
-        app.click(cx, point(px(1255.), px(747.)), Modifiers::default());
+        app.click(cx, handled_choice(3, false), Modifiers::default());
         assert_eq!(selected(app, cx).handled.mode, HandledMode::Show);
 
         // The grid's: squares or labelled cells, its groups.

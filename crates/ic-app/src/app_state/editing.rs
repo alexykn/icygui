@@ -42,9 +42,26 @@ pub(crate) struct DashboardDraft {
     pub(crate) notifications: ScopeSetting,
     /// The group it goes into.
     pub(crate) group_id: String,
+    /// What its sidebar row shows in the mark slot (topic 14, round 5).
+    pub(crate) mark: ic_config::SidebarMark,
 }
 
 impl AppState {
+    /// The icons picked most recently as sidebar marks (the icon
+    /// picker's *recent* row), newest first.
+    pub(crate) fn recent_icons(&self) -> &[String] {
+        &self.ui.recent_icons
+    }
+
+    /// A saved dashboard's icon mark goes first in the recent icons.
+    fn remember_mark(&mut self, mark: &ic_config::SidebarMark) {
+        if let ic_config::SidebarMark::Icon(icon) = mark
+            && self.ui.remember_icon(icon)
+        {
+            self.save_ui();
+        }
+    }
+
     /// The active environment's groups, in sidebar order.
     pub(crate) fn groups(&self) -> &[DashboardGroup] {
         self.environment()
@@ -179,6 +196,8 @@ impl AppState {
         let name = non_blank(&draft.name).unwrap_or(NEW_DASHBOARD_NAME);
         let mut dashboard = Dashboard::with_views(name, draft.views);
         dashboard.notifications = draft.notifications;
+        self.remember_mark(&draft.mark);
+        dashboard.mark = draft.mark;
         let reference = DashboardRef {
             group_id: draft.group_id.clone(),
             dashboard_id: dashboard.id.clone(),
@@ -220,6 +239,7 @@ impl AppState {
             }
             dashboard.views = with_ids(draft.views);
             dashboard.notifications = draft.notifications;
+            dashboard.mark = draft.mark.clone();
             let unchanged =
                 group.dashboards[index] == dashboard && reference.group_id == draft.group_id;
             if unchanged {
@@ -238,6 +258,10 @@ impl AppState {
         });
         if changed.is_none() {
             return self.dashboard(reference).map(|_| reference.clone());
+        }
+        if let Some((_, dashboard)) = self.dashboard(&moved) {
+            let mark = dashboard.mark.clone();
+            self.remember_mark(&mark);
         }
         if was_selected {
             self.select(moved.clone());
@@ -300,6 +324,7 @@ impl AppState {
                 views: dashboard.views.clone(),
                 notifications: dashboard.notifications.clone(),
                 group_id: group_id.to_owned(),
+                mark: dashboard.mark.clone(),
             }
         };
         self.update_dashboard(reference, draft)
@@ -557,6 +582,7 @@ mod tests {
                 views: vec![view.clone()],
                 notifications: ScopeSetting::Off,
                 group_id: lab.clone(),
+                mark: ic_config::SidebarMark::Auto,
             })
             .unwrap();
         assert_eq!(state.selected(), Some(&added), "a new dashboard is shown");
@@ -589,6 +615,7 @@ mod tests {
                     }],
                     notifications: ScopeSetting::Inherit,
                     group_id: platform.clone(),
+                    mark: ic_config::SidebarMark::Auto,
                 },
             )
             .unwrap();
@@ -606,6 +633,7 @@ mod tests {
             views: current.views.clone(),
             notifications: current.notifications.clone(),
             group_id: platform.clone(),
+            mark: ic_config::SidebarMark::Auto,
         };
         assert_eq!(state.update_dashboard(&moved, same), Some(moved.clone()));
         assert!(recorder.sent().is_empty());
@@ -616,6 +644,7 @@ mod tests {
             views: vec![view],
             notifications: ScopeSetting::Inherit,
             group_id: "missing".to_owned(),
+            mark: ic_config::SidebarMark::Auto,
         };
         assert_eq!(state.update_dashboard(&moved, nowhere), Some(moved));
     }

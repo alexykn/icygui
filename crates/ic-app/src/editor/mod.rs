@@ -29,6 +29,7 @@
 //! edited.
 
 mod inspector;
+mod mark;
 pub(crate) mod model;
 
 use std::time::Duration;
@@ -50,6 +51,8 @@ use crate::app_state::AppState;
 use crate::app_state::editing::DashboardDraft;
 use crate::chrome::{Controls, WindowDrag};
 use crate::dashboard::{DashboardEvent, DashboardView, PreviewPage};
+use crate::lists::model::ListKind;
+use crate::lists::view::{ListSource, RecordList, RecordListEvent};
 use crate::menu_state::OpenMenu;
 use crate::workspace::sidebar_reopen;
 
@@ -60,7 +63,7 @@ pub(crate) const EDITOR_CONTEXT: &str = "DashboardEditor";
 const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// Width of the inspector column (the design's).
-const INSPECTOR_WIDTH: f32 = 372.;
+pub(crate) const INSPECTOR_WIDTH: f32 = 372.;
 
 /// Saves the dashboard being edited.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
@@ -132,6 +135,16 @@ enum EditorMenu {
     AddView,
     /// A view's `···` in the views list (4e), by id.
     ViewOptions(String),
+    /// The sidebar mark's dropdown: state or icon.
+    Mark,
+    /// The sidebar mark's icon picker (14-r5-f).
+    IconPicker,
+    /// *copy filter from…* (14-r4-e).
+    CopyFilter,
+    /// A view's *rows*.
+    Rows,
+    /// A handling or downtimes view's sort.
+    ThreadSort,
 }
 
 /// The editor's text fields: the dashboard's name, and the selected
@@ -141,6 +154,8 @@ struct Inputs {
     view_name: Entity<InputState>,
     filter: Entity<TextareaState>,
     custom_var: Entity<InputState>,
+    icon_search: Entity<InputState>,
+    copy_search: Entity<InputState>,
 }
 
 impl Inputs {
@@ -176,6 +191,9 @@ impl Inputs {
                     .placeholder("host.vars.site")
                     .default_value(first.groups.custom_var.clone())
             }),
+            icon_search: cx.new(|cx| InputState::new(window, cx).placeholder("find an icon")),
+            copy_search: cx
+                .new(|cx| InputState::new(window, cx).placeholder("find a dashboard or view")),
         }
     }
 }
@@ -213,6 +231,14 @@ pub(crate) struct DashboardEditor {
     view_name: Entity<InputState>,
     filter: Entity<TextareaState>,
     custom_var: Entity<InputState>,
+    /// The icon picker's search (the sidebar mark).
+    icon_search: Entity<InputState>,
+    /// *copy filter from…*'s search.
+    copy_search: Entity<InputState>,
+    /// The preview of a dashboard whose only view is handling or
+    /// downtimes: that view's own page, as the dashboard shows it (with
+    /// the subscription to its changes of the view).
+    threads_preview: Option<(Entity<RecordList>, Subscription)>,
     /// The latest evaluation of the draft, with the views it evaluated.
     evaluated: Option<(Vec<View>, DashboardResult)>,
     /// No engine runs (no connection yet): nothing can be checked.
@@ -278,6 +304,8 @@ impl DashboardEditor {
             view_name,
             filter,
             custom_var,
+            icon_search,
+            copy_search,
         } = inputs;
         // A new dashboard starts with its name selected for typing.
         if target == EditorTarget::New {
@@ -305,6 +333,9 @@ impl DashboardEditor {
             view_name,
             filter,
             custom_var,
+            icon_search,
+            copy_search,
+            threads_preview: None,
             evaluated: None,
             unavailable: false,
             preview,
@@ -396,6 +427,39 @@ impl DashboardEditor {
                     DashboardEvent::Edit(_) | DashboardEvent::EditView(..) => {}
                 },
             ),
+            cx.subscribe_in(
+                &inputs.icon_search,
+                window,
+                |this: &mut Self, input, event: &InputEvent, _, cx| match event {
+                    InputEvent::Change => cx.notify(),
+                    InputEvent::PressEnter { .. } => {
+                        // The first icon found.
+                        let query = input.read(cx).value().to_string();
+                        if let Some(icon) = model::pickable_icons(&query).first() {
+                            this.pick_icon(*icon, cx);
+                        }
+                    }
+                    InputEvent::Focus | InputEvent::Blur => {}
+                },
+            ),
+            cx.subscribe_in(
+                &inputs.copy_search,
+                window,
+                |this: &mut Self, input, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => cx.notify(),
+                    InputEvent::PressEnter { .. } => {
+                        // The first filter found.
+                        let query = input.read(cx).value().to_string();
+                        let first = this.copy_sources(&query, cx).into_iter().next();
+                        if let Some(source) = first {
+                            this.copy_filter(&source.filter, window, cx);
+                        }
+                    }
+                    InputEvent::Focus | InputEvent::Blur => {}
+                },
+            ),
+            // Its menus and controls show in the editor's header.
+            cx.observe(preview, |_, _, cx| cx.notify()),
             cx.observe(state, |_, _, cx| cx.notify()),
         ]
     }
@@ -574,6 +638,7 @@ impl DashboardEditor {
         if collapsed {
             self.preview.update(cx, DashboardView::reset_folds);
         }
+        self.sync_threads_preview(cx);
         self.request_preview(delay, cx);
         cx.notify();
     }
@@ -594,6 +659,7 @@ impl DashboardEditor {
         self.save_error = None;
         let id = self.draft.views[index].id.clone();
         self.select(id, cx);
+        self.sync_threads_preview(cx);
         self.request_preview(Duration::ZERO, cx);
     }
 
@@ -766,9 +832,82 @@ impl DashboardEditor {
             }
             None => self.unavailable = true,
         }
+        self.sync_threads_preview(cx);
         if save {
             self.save(cx);
         }
+        cx.notify();
+    }
+
+    /// A draft whose only view is handling or downtimes previews as that
+    /// view's own page ([`RecordList`] showing the draft's view and its
+    /// latest evaluation); any other draft drops it.
+    fn sync_threads_preview(&mut self, cx: &mut Context<Self>) {
+        let single = match self.draft.views.as_slice() {
+            [view] => ListKind::of_display(view.display).map(|kind| (kind, view.clone())),
+            _ => None,
+        };
+        let Some((kind, view)) = single else {
+            self.threads_preview = None;
+            return;
+        };
+        let members = self
+            .evaluated
+            .as_ref()
+            .and_then(|(_, result)| result.view(&view.id))
+            .and_then(|result| result.members().cloned());
+        let current = self
+            .threads_preview
+            .as_ref()
+            .filter(|(list, _)| list.read(cx).kind() == kind)
+            .map(|(list, _)| list.clone());
+        let list = if let Some(list) = current {
+            list
+        } else {
+            let state = self.state.clone();
+            let list = cx.new(|cx| RecordList::new(state, kind, ListSource::Preview, cx));
+            let events = cx.subscribe(&list, |this, _, event: &RecordListEvent, cx| {
+                if let RecordListEvent::ChangeView(change) = event {
+                    let change = change.clone();
+                    this.change_view_at(0, Duration::ZERO, cx, move |view| {
+                        change.apply(view);
+                    });
+                }
+            });
+            self.threads_preview = Some((list.clone(), events));
+            list
+        };
+        list.update(cx, |list, cx| list.set_preview(view, members, cx));
+    }
+
+    /// The sidebar mark's icon picker chose `icon`.
+    fn pick_icon(&mut self, icon: ic_ui_kit::IconName, cx: &mut Context<Self>) {
+        self.menus.close();
+        self.draft.mark = ic_config::SidebarMark::Icon(icon.lucide_name().to_owned());
+        self.save_error = None;
+        cx.notify();
+    }
+
+    /// What *copy filter from…* offers for `query`.
+    fn copy_sources(&self, query: &str, cx: &App) -> Vec<model::CopySource> {
+        let editing = match &self.target {
+            EditorTarget::Existing(reference) => Some(reference),
+            EditorTarget::New => None,
+        };
+        model::copy_sources(self.state.read(cx).groups(), editing, query)
+    }
+
+    /// *copy filter from…* chose `filter`: it fills the selected view's
+    /// filter field as an edit, so the field's undo (`ctrl-z`) brings the
+    /// old one back.
+    fn copy_filter(&mut self, filter: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.menus.close();
+        let filter = filter.to_owned();
+        self.filter.update(cx, |input, cx| {
+            input.replace_all(filter.clone(), window, cx);
+            input.focus(window, cx);
+        });
+        self.change_selected(PREVIEW_DEBOUNCE, cx, move |view| view.filter = filter);
         cx.notify();
     }
 
@@ -894,20 +1033,44 @@ impl DashboardEditor {
 
     // --- Rendering -------------------------------------------------------
 
-    fn render_header(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        // A one-view draft: the view's controls, as the dashboard's header
+        // will show them (README, *View controls*).
+        let width = self.preview_width(window, cx);
+        let controls: Vec<AnyElement> = match &self.threads_preview {
+            Some((list, _)) => list.update(cx, |list, cx| list.header_controls(width, cx)),
+            None if self.draft.views.len() == 1 && self.evaluated.is_some() => self
+                .preview
+                .update(cx, |preview, cx| preview.preview_controls(cx)),
+            None => Vec::new(),
+        };
+        let controls_row = (!controls.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .children(controls)
+        });
         let theme = cx.theme();
         let colors = theme.colors;
         let controls = Controls::of(window, cx);
         let title = self.title();
-        let group = self
-            .state
-            .read(cx)
-            .groups()
-            .iter()
-            .find(|group| group.id == self.draft.group_id)
-            .map(|group| group.name.clone())
-            .unwrap_or_default();
-        let subtitle = format!("editing · {group}");
+        // With a one-view draft's controls in the header there is no room
+        // for the group (14-r5-a, b): the inspector names it.
+        let subtitle = if controls_row.is_some() {
+            "editing".to_owned()
+        } else {
+            let group = self
+                .state
+                .read(cx)
+                .groups()
+                .iter()
+                .find(|group| group.id == self.draft.group_id)
+                .map(|group| group.name.clone())
+                .unwrap_or_default();
+            format!("editing · {group}")
+        };
         let header = div()
             .id("editor-header")
             .flex()
@@ -921,9 +1084,12 @@ impl DashboardEditor {
             .when(!self.sidebar_open, |header| {
                 header.child(sidebar_reopen(controls, theme))
             })
+            // The name keeps its room (up to a point); `editing · group`
+            // gives way first.
             .child(
                 div()
-                    .min_w_0()
+                    .flex_shrink_0()
+                    .max_w(px(360.))
                     .truncate()
                     .text_size(theme.text.heading)
                     .font_weight(FontWeight::MEDIUM)
@@ -932,12 +1098,14 @@ impl DashboardEditor {
             )
             .child(
                 div()
-                    .flex_none()
+                    .min_w_0()
+                    .truncate()
                     .text_size(theme.text.small)
                     .text_color(colors.accent_text)
                     .child(subtitle),
             )
             .child(div().flex_1())
+            .children(controls_row)
             .child(
                 Button::new("editor-discard", "discard")
                     .key_hint("esc")
@@ -952,10 +1120,23 @@ impl DashboardEditor {
         self.drag.attach(header, controls).into_any_element()
     }
 
+    /// The preview's width: the main area but the inspector.
+    fn preview_width(&self, window: &Window, cx: &App) -> gpui::Pixels {
+        let main = crate::dashboard::SplitLayout::main_width(
+            window,
+            self.sidebar_open,
+            &cx.theme().metrics,
+        );
+        (main - px(INSPECTOR_WIDTH) - Metrics::RULE).max(px(0.))
+    }
+
     /// The preview: the dashboard page showing the draft, or what stands
     /// in for it before the first evaluation.
     fn render_preview(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
+        if let Some((list, _)) = &self.threads_preview {
+            return list.clone().into_any_element();
+        }
         if self.evaluated.is_some() {
             return self.preview.clone().into_any_element();
         }
@@ -1002,6 +1183,15 @@ impl Render for DashboardEditor {
                     .child(div().flex().flex_col().flex_1().min_h_0().child(preview)),
             )
             .child(inspector)
+    }
+}
+
+/// How the filter field's undo is reached, as *copy filter from…* says it.
+fn undo_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌘Z undoes it"
+    } else {
+        "ctrl-z undoes it"
     }
 }
 
@@ -1093,6 +1283,31 @@ impl DashboardEditor {
     /// The open menu.
     pub(crate) fn open_menu(&self) -> Option<String> {
         self.menus.current().map(|menu| format!("{menu:?}"))
+    }
+
+    /// The preview of a draft whose only view is handling or downtimes.
+    pub(crate) fn threads_preview(&self) -> Option<&Entity<RecordList>> {
+        self.threads_preview.as_ref().map(|(list, _)| list)
+    }
+
+    /// The icon picker's choice.
+    pub(crate) fn pick_icon_for_test(&mut self, icon: ic_ui_kit::IconName, cx: &mut Context<Self>) {
+        self.pick_icon(icon, cx);
+    }
+
+    /// *copy filter from…*'s choice.
+    pub(crate) fn copy_filter_for_test(
+        &mut self,
+        filter: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_filter(filter, window, cx);
+    }
+
+    /// What *copy filter from…* offers for `query`.
+    pub(crate) fn copy_sources_for_test(&self, query: &str, cx: &App) -> Vec<model::CopySource> {
+        self.copy_sources(query, cx)
     }
 }
 

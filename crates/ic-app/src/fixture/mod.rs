@@ -180,6 +180,7 @@ pub(crate) fn build_with(now: Timestamp, options: FixtureOptions) -> Fixture {
                 id,
                 name: spec.name.to_owned(),
                 notifications: ScopeSetting::Inherit,
+                mark: ic_config::SidebarMark::Auto,
             };
             group.dashboards.push(dashboard);
         }

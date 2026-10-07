@@ -74,6 +74,8 @@ mod board;
 mod groups;
 mod stream;
 
+pub use self::stream::stream_events;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

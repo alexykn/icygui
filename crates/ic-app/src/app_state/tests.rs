@@ -158,52 +158,38 @@ fn tabs_cycle_through_the_dashboard() {
 }
 
 #[test]
-fn lists_are_tabs_before_the_objects_and_never_shown_with_one() {
+fn the_cluster_section_shows_instead_of_the_dashboard_or_a_tab() {
+    use crate::cluster::ClusterEntry;
     let mut state = AppState::fixture(now());
     let host = ObjectKey::host("db-prod-03");
     state.open_tab(host.clone());
     assert!(state.open_list(ListKind::Downtimes));
     assert!(state.open_list(ListKind::Handling));
-    assert!(state.open_list(ListKind::Downtimes));
-    assert!(
-        !state.open_list(ListKind::Downtimes),
-        "open and shown already"
-    );
-    assert_eq!(
-        state.lists(),
-        [ListKind::Handling, ListKind::Downtimes],
-        "in sidebar order"
-    );
-    assert_eq!(state.active_list(), Some(ListKind::Downtimes));
+    assert!(!state.open_list(ListKind::Handling), "shown already");
+    assert_eq!(state.active_cluster(), Some(ClusterEntry::Handling));
     assert_eq!(state.active_tab(), None, "one thing is shown");
-    // ctrl-tab: the dashboard, the lists, then the tabs.
+    // ctrl-tab: the tabs, then back to the dashboard.
     assert!(state.cycle_tab(true));
     assert_eq!(state.active_tab(), Some(&host));
-    assert_eq!(state.active_list(), None);
     assert!(state.cycle_tab(true));
-    assert_eq!((state.active_tab(), state.active_list()), (None, None));
-    assert!(state.cycle_tab(false));
-    assert_eq!(state.active_tab(), Some(&host));
-    // Closing the list shown goes back to the dashboard.
-    assert!(state.open_list(ListKind::Handling));
-    assert!(state.close_list(ListKind::Handling));
-    assert!(!state.close_list(ListKind::Handling));
-    assert_eq!(state.active_list(), None);
-    assert_eq!(state.lists(), [ListKind::Downtimes]);
+    assert_eq!((state.active_tab(), state.active_cluster()), (None, None));
+    // The events and health entries are views of the section too.
+    assert!(state.show_cluster(ClusterEntry::Events));
+    assert_eq!(state.active_cluster(), Some(ClusterEntry::Events));
+    assert!(state.show_dashboard());
+    assert_eq!(state.active_cluster(), None);
     // The palette's *acknowledged*: handling on its chip.
     assert!(state.open_list_on(ListKind::Handling, crate::lists::model::Chip::Acknowledged));
     assert_eq!(
         state.list_options(ListKind::Handling).chip.as_deref(),
         Some("acknowledged")
     );
-    assert!(state.close_list(ListKind::Handling));
     // Selecting a dashboard shows it instead.
-    assert!(state.open_list(ListKind::Downtimes));
     let selected = state.selected().unwrap().clone();
     assert!(state.select(selected));
-    assert_eq!(state.active_list(), None);
+    assert_eq!(state.active_cluster(), None);
     assert!(state.close_all_tabs());
-    assert!(state.lists().is_empty() && state.tabs().is_empty());
+    assert!(state.tabs().is_empty());
 }
 
 #[test]
@@ -381,11 +367,10 @@ fn a_saved_selection_that_no_longer_exists_falls_back_to_the_first_dashboard() {
     assert_eq!(state.selected(), Some(&reference("overview", "overview")));
     assert_eq!(state.tabs(), [ObjectKey::service("host", "svc")]);
     assert_eq!(
-        state.lists(),
-        [ListKind::Handling],
-        "unknown list ids are ignored; stage 2's acknowledged list opens handling"
+        state.active_cluster(),
+        None,
+        "it starts on the dashboard (stage 2's list tabs aren't kept)"
     );
-    assert_eq!(state.active_list(), None, "it starts on the dashboard");
     assert!(
         !state
             .ui_state()

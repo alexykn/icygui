@@ -172,6 +172,9 @@ impl DashboardView {
             ItemKind::Grid { line } => self.render_grid_line(reference, page, item.view, line, cx),
             ItemKind::Tiles { line } => self.render_tiles(reference, page, item.view, line, cx),
             ItemKind::Stream => self.render_stream(reference, page, item.view, cx),
+            ItemKind::Thread { line } => {
+                self.render_thread_line(reference, page, item.view, line, cx)
+            }
         };
         // A grid's ringed group (the page's filter) reaches into the space
         // around its line; everything else stays in its item.
@@ -311,6 +314,7 @@ impl DashboardView {
             None => row,
         };
         let element = row
+            .density(crate::controls::ui_density(page_view.density))
             .emphasis(emphasis)
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.click_stop(&stop, event.modifiers(), window, cx);
@@ -1229,7 +1233,6 @@ impl DashboardView {
         range: std::ops::Range<usize>,
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
-        let theme = cx.theme();
         let Some(ui) = self.pages.get(reference) else {
             return Vec::new();
         };
@@ -1237,6 +1240,8 @@ impl DashboardView {
         let Some(page_view) = page.view_by_id(view) else {
             return Vec::new();
         };
+        // The view's rows at its own density.
+        let theme = &crate::controls::theme_for(cx.theme(), page_view.density);
         let now = Timestamp::now();
         let sizes = super::page::Sizes::of(theme);
         let compact = theme.density == ic_ui_kit::Density::Compact;
@@ -1258,6 +1263,159 @@ impl DashboardView {
                 )
             })
             .collect()
+    }
+}
+
+impl DashboardView {
+    /// Line `line` of a handling or downtimes view stacked on the page
+    /// (drawn as on its own page, [`crate::lists::view::thread_line`]): a
+    /// band's chevron folds it, a click elsewhere on a line with a key puts
+    /// the cursor there (and opens its object's pane). On a timeline, the
+    /// line's piece of the *now* line.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one line, its slots in reading order"
+    )]
+    fn render_thread_line(
+        &self,
+        reference: &DashboardRef,
+        page: &Page,
+        view: usize,
+        line: usize,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        use crate::lists::model::Mode;
+        use crate::lists::threads::{ItemKey, Line};
+        use crate::lists::view::{self as lists, BandLine, ThreadLineInput};
+        let Some(page_view) = page.views.get(view) else {
+            return div().into_any_element();
+        };
+        let Some(thread) = page_view.thread.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(keyed) = thread.listing.lines.get(line) else {
+            return div().into_any_element();
+        };
+        let state = self.state.read(cx);
+        let snapshot = state.snapshot();
+        let theme = crate::controls::theme_for(cx.theme(), page_view.density);
+        let now = Timestamp::now();
+        let timeline = thread.mode == Mode::Timeline;
+        let axis = timeline.then(|| crate::lists::words::axis(now));
+        let axis_width = crate::lists::draw::axis_width(self.width, &theme);
+        let stop = keyed.key.clone().map(|key| Stop::Thread {
+            view: page_view.id.clone(),
+            key,
+        });
+        let cursor = self
+            .pages
+            .get(reference)
+            .and_then(|ui| ui.selection.cursor_stop());
+        let emphasis = match &stop {
+            Some(stop) => RowEmphasis::new(cursor == Some(stop), false),
+            None => RowEmphasis::None,
+        };
+        let element = match &keyed.line {
+            Line::Band {
+                object,
+                slot,
+                collapsed,
+                covers,
+            } => {
+                let chevron = Stop::Thread {
+                    view: page_view.id.clone(),
+                    key: ItemKey::Band(object.clone()),
+                };
+                let band = lists::thread_band(
+                    &BandLine {
+                        object,
+                        slot,
+                        collapsed: *collapsed,
+                        covers: *covers,
+                        id_suffix: "",
+                        emphasis,
+                        timeline,
+                        now,
+                    },
+                    snapshot,
+                    &theme,
+                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.click_chevron(&chevron, window, cx);
+                    }),
+                );
+                match stop.clone() {
+                    Some(stop) => band
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            this.click_stop(&stop, event.modifiers(), window, cx);
+                        }))
+                        .into_any_element(),
+                    None => band.into_any_element(),
+                }
+            }
+            line => {
+                let pending = line
+                    .entry()
+                    .and_then(|entry| lists::entry_pending(state, entry));
+                let element = lists::thread_line(
+                    &ThreadLineInput {
+                        snapshot,
+                        listing: &thread.listing,
+                        sort: thread.options.sort(thread.kind),
+                        axis: axis.as_ref(),
+                        axis_width,
+                        now,
+                        theme: &theme,
+                    },
+                    line,
+                    emphasis,
+                    pending,
+                );
+                match stop.clone() {
+                    Some(stop) => div()
+                        .id(ElementId::Name(
+                            format!(
+                                "thread:{}:{}",
+                                page_view.id,
+                                keyed.key.as_ref().map(lists::key_id).unwrap_or_default()
+                            )
+                            .into(),
+                        ))
+                        .size_full()
+                        .cursor_pointer()
+                        .child(element)
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            this.click_stop(&stop, event.modifiers(), window, cx);
+                        }))
+                        .into_any_element(),
+                    None => element,
+                }
+            }
+        };
+        // The timeline's *now*, a piece on each of its lines (but the
+        // sections' headings).
+        let now_line = axis
+            .as_ref()
+            .filter(|axis| (0. ..=1.).contains(&axis.now))
+            .filter(|_| !matches!(keyed.line, Line::Section { .. }))
+            .map(|axis| {
+                let left = crate::lists::draw::axis_left(self.width, axis_width, &theme)
+                    + axis_width * axis.now;
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(left)
+                    .w(ic_ui_kit::Metrics::RULE)
+                    .bg(theme.colors.accent)
+                    .opacity(0.6)
+            });
+        div()
+            .relative()
+            .size_full()
+            .child(element)
+            .children(now_line)
+            .into_any_element()
     }
 }
 

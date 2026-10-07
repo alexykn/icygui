@@ -4,13 +4,15 @@
 
 use std::collections::BTreeMap;
 
-use ic_config::{DashboardGroup, Environment};
+use ic_config::{Dashboard, DashboardGroup, EffectiveMark, Environment, ViewDisplay};
 use ic_core::snapshot::{DashboardResult, Snapshot, Summary};
-use ic_model::{CheckableState, ObjectKey, Timestamp};
+use ic_model::{CheckableState, ObjectKey, ServiceState, Timestamp};
 use ic_rules::DashboardRef;
-use ic_ui_kit::ObjectMark;
+use ic_ui_kit::{IconName, ObjectMark};
 
+use crate::cluster::{ClusterEntry, ClusterState};
 use crate::lists::ListKind;
+use crate::lists::threads::Scope;
 
 /// A dashboard's or an object's state dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +51,7 @@ impl Dot {
         match state {
             Some(state) if state.is_problem() => Self::State(state),
             Some(
-                CheckableState::Service(ic_model::ServiceState::Ok)
+                CheckableState::Service(ServiceState::Ok)
                 | CheckableState::Host(ic_model::HostState::Up),
             ) => Self::Ok,
             Some(_) | None => Self::Empty,
@@ -74,6 +76,16 @@ impl Dot {
     }
 }
 
+/// What a row shows in its fixed mark slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mark {
+    /// A state dot.
+    Dot(Dot),
+    /// An icon (a dashboard's chosen mark, a view kind's icon, a cluster
+    /// entry's): monochrome and neutral, so colour keeps meaning state.
+    Icon(IconName),
+}
+
 /// One dashboard row.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SidebarItem<'a> {
@@ -83,12 +95,119 @@ pub(crate) struct SidebarItem<'a> {
     pub(crate) name: &'a str,
     /// Whether it's the selected dashboard.
     pub(crate) selected: bool,
-    /// The state dot.
-    pub(crate) dot: Dot,
-    /// Unhandled problems, if any.
+    /// The mark: the worst state's dot, or an icon (the sidebar mark).
+    pub(crate) mark: Mark,
+    /// Unhandled problems, if any; a dashboard without a problem view:
+    /// its first view's count (objects being handled, downtimes in
+    /// effect).
     pub(crate) count: Option<u32>,
     /// Its notifications are off (a bell-off glyph).
     pub(crate) muted: bool,
+}
+
+/// A row of the cluster section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClusterRow {
+    /// Which entry.
+    pub(crate) entry: ClusterEntry,
+    /// Its mark: the entry's icon, or health's state dot.
+    pub(crate) mark: Mark,
+    /// Its count (handling: objects being handled; downtimes: in effect
+    /// now); events and health have none.
+    pub(crate) count: Option<usize>,
+    /// Whether it's shown.
+    pub(crate) active: bool,
+}
+
+/// The cluster section's rows (topic 14, round 5): handling and downtimes
+/// count the whole environment; health has the cluster's state dot.
+pub(crate) fn cluster_rows(
+    snapshot: &Snapshot,
+    active: Option<ClusterEntry>,
+    state: ClusterState,
+    now: Timestamp,
+) -> Vec<ClusterRow> {
+    ClusterEntry::ALL
+        .iter()
+        .map(|entry| {
+            let count = entry.list().map(|kind| {
+                crate::lists::model::count(
+                    kind,
+                    snapshot,
+                    Scope::All,
+                    ic_config::DowntimeKinds::default(),
+                    now,
+                )
+            });
+            let mark = match entry.icon() {
+                Some(icon) => Mark::Icon(icon),
+                None => Mark::Dot(match state {
+                    ClusterState::Ok => Dot::Ok,
+                    ClusterState::Critical => {
+                        Dot::State(CheckableState::Service(ServiceState::Critical))
+                    }
+                    ClusterState::Unknown => Dot::Empty,
+                }),
+            };
+            ClusterRow {
+                entry: *entry,
+                mark,
+                count: count.filter(|count| *count > 0),
+                active: active == Some(*entry),
+            }
+        })
+        .collect()
+}
+
+/// A view display's icon, as the view header's mark slot and the sidebar
+/// show it.
+pub(crate) fn display_icon(display: ViewDisplay) -> IconName {
+    crate::dashboard::header::display_icon(display)
+}
+
+/// A dashboard's mark and count (topic 14, round 5): with a problem view,
+/// the worst unhandled state's dot (or the icon chosen) and the problem
+/// count; without one, the first view's kind icon (or the icon chosen) and
+/// that view's count: objects being handled, downtimes in effect, none for
+/// events.
+pub(crate) fn mark_and_count(
+    dashboard: &Dashboard,
+    result: Option<&DashboardResult>,
+    snapshot: &Snapshot,
+    now: Timestamp,
+) -> (Mark, Option<u32>) {
+    let first = dashboard.views.first();
+    let kind_icon = || {
+        Mark::Icon(display_icon(
+            first.map_or(ViewDisplay::List, |view| view.display),
+        ))
+    };
+    let mark = match dashboard.effective_mark() {
+        EffectiveMark::State => Mark::Dot(Dot::from_summary(result.map(|result| &result.summary))),
+        EffectiveMark::Icon(name) => {
+            IconName::from_lucide_name(name).map_or_else(kind_icon, Mark::Icon)
+        }
+        EffectiveMark::KindIcon => kind_icon(),
+    };
+    let count = if dashboard.has_problem_view() {
+        result
+            .map(|result| result.summary.unhandled)
+            .filter(|unhandled| *unhandled > 0)
+    } else {
+        first.and_then(|view| {
+            let kind = ListKind::of_display(view.display)?;
+            let members = result?.view(&view.id)?.members()?;
+            let count = crate::lists::model::count(
+                kind,
+                snapshot,
+                Scope::Members(members),
+                view.threads.shows,
+                now,
+            );
+            u32::try_from(count).ok().filter(|count| *count > 0)
+        })
+    };
+    (mark, count)
 }
 
 /// One group row and the dashboard rows shown under it.
@@ -117,35 +236,6 @@ pub(crate) struct OpenTab {
     pub(crate) dot: Dot,
     /// Whether it's the tab shown.
     pub(crate) active: bool,
-}
-
-/// A list of every downtime, comment or acknowledged problem open as a
-/// tab, in the sidebar's "open" section (topic 07).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OpenList {
-    /// Which list.
-    pub(crate) kind: ListKind,
-    /// How many it lists.
-    pub(crate) count: usize,
-    /// Whether it's the tab shown.
-    pub(crate) active: bool,
-}
-
-/// The "open" section's list rows, in sidebar order.
-pub(crate) fn open_lists(
-    lists: &[ListKind],
-    active: Option<ListKind>,
-    snapshot: &Snapshot,
-    now: Timestamp,
-) -> Vec<OpenList> {
-    lists
-        .iter()
-        .map(|kind| OpenList {
-            kind: *kind,
-            count: crate::lists::model::count(*kind, snapshot, now),
-            active: active == Some(*kind),
-        })
-        .collect()
 }
 
 /// The "open" section's rows.
@@ -200,10 +290,12 @@ pub(crate) fn open_tabs(
 /// expanded, even if collapsed.
 pub(crate) fn groups<'a>(
     environment: &'a Environment,
-    results: &BTreeMap<DashboardRef, DashboardResult>,
+    snapshot: &Snapshot,
     selected: Option<&DashboardRef>,
     query: &str,
+    now: Timestamp,
 ) -> Vec<SidebarGroup<'a>> {
+    let results: &BTreeMap<DashboardRef, DashboardResult> = &snapshot.dashboards;
     let query = query.trim().to_lowercase();
     let searching = !query.is_empty();
     environment
@@ -222,15 +314,14 @@ pub(crate) fn groups<'a>(
                         group_id: group.id.clone(),
                         dashboard_id: dashboard.id.clone(),
                     };
-                    let summary = results.get(&reference).map(|result| &result.summary);
+                    let (mark, count) =
+                        mark_and_count(dashboard, results.get(&reference), snapshot, now);
                     SidebarItem {
                         selected: selected == Some(&reference),
                         reference,
                         name: &dashboard.name,
-                        dot: Dot::from_summary(summary),
-                        count: summary
-                            .map(|summary| summary.unhandled)
-                            .filter(|unhandled| *unhandled > 0),
+                        mark,
+                        count,
                         muted: dashboard.notifications == ic_rules::ScopeSetting::Off,
                     }
                 })
@@ -257,8 +348,12 @@ mod tests {
     use super::*;
     use crate::fixture;
 
+    fn now() -> Timestamp {
+        Timestamp::from_unix_seconds(1_790_000_000.)
+    }
+
     fn setup() -> fixture::Fixture {
-        fixture::build(Timestamp::from_unix_seconds(1_790_000_000.))
+        fixture::build(now())
     }
 
     fn names<'a>(groups: &[SidebarGroup<'a>]) -> Vec<(&'a str, Vec<&'a str>)> {
@@ -311,12 +406,7 @@ mod tests {
     fn lists_every_group_and_marks_the_selection() {
         let demo = setup();
         let environment = &demo.config.environments[0];
-        let groups = groups(
-            environment,
-            &demo.snapshot.dashboards,
-            Some(&demo.selected),
-            "",
-        );
+        let groups = groups(environment, &demo.snapshot, Some(&demo.selected), "", now());
         assert_eq!(
             names(&groups),
             [
@@ -343,16 +433,24 @@ mod tests {
     fn items_carry_dots_and_counts() {
         let demo = setup();
         let environment = &demo.config.environments[0];
-        let groups = groups(environment, &demo.snapshot.dashboards, None, "");
+        let groups = groups(environment, &demo.snapshot, None, "", now());
         let item = |group: usize, index: usize| &groups[group].items[index];
         assert_eq!(
-            item(1, 0).dot,
-            Dot::State(CheckableState::Host(HostState::Unreachable))
+            item(1, 0).mark,
+            Mark::Dot(Dot::State(CheckableState::Host(HostState::Unreachable)))
         );
         assert_eq!(item(1, 0).count, Some(5));
-        assert_eq!(item(1, 3).dot, Dot::Ok, "deploy-checks is all OK");
+        assert_eq!(
+            item(1, 3).mark,
+            Mark::Dot(Dot::Ok),
+            "deploy-checks is all OK"
+        );
         assert_eq!(item(1, 3).count, None);
-        assert_eq!(item(2, 0).dot, Dot::Empty, "sandbox matches nothing");
+        assert_eq!(
+            item(2, 0).mark,
+            Mark::Dot(Dot::Empty),
+            "sandbox matches nothing"
+        );
         assert_eq!(item(2, 0).count, None);
         assert!(groups.iter().all(|group| !group.active), "nothing selected");
     }
@@ -362,7 +460,7 @@ mod tests {
         let mut demo = setup();
         demo.config.environments[0].groups[1].collapsed = true;
         let environment = &demo.config.environments[0];
-        let groups = groups(environment, &demo.snapshot.dashboards, None, "");
+        let groups = groups(environment, &demo.snapshot, None, "", now());
         assert!(!groups[1].expanded);
         assert!(groups[1].items.is_empty());
         assert!(groups[0].expanded);
@@ -372,7 +470,7 @@ mod tests {
     fn search_filters_dashboards_case_insensitively() {
         let demo = setup();
         let environment = &demo.config.environments[0];
-        let groups = groups(environment, &demo.snapshot.dashboards, None, "  NETW ");
+        let groups = groups(environment, &demo.snapshot, None, "  NETW ", now());
         assert_eq!(names(&groups), [("platform", vec!["network"])]);
     }
 
@@ -381,7 +479,7 @@ mod tests {
         let mut demo = setup();
         demo.config.environments[0].groups[2].collapsed = true;
         let environment = &demo.config.environments[0];
-        let groups = groups(environment, &demo.snapshot.dashboards, None, "lab");
+        let groups = groups(environment, &demo.snapshot, None, "lab", now());
         assert_eq!(names(&groups), [("lab", vec!["sandbox"])]);
         assert!(groups[0].expanded);
     }
@@ -415,6 +513,6 @@ mod tests {
     fn search_without_matches_shows_nothing() {
         let demo = setup();
         let environment = &demo.config.environments[0];
-        assert!(groups(environment, &demo.snapshot.dashboards, None, "zzz").is_empty());
+        assert!(groups(environment, &demo.snapshot, None, "zzz", now()).is_empty());
     }
 }

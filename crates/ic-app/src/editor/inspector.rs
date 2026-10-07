@@ -143,27 +143,9 @@ impl DashboardEditor {
         let view = self.selected_view();
         let index = self.selected_index();
         let count = self.draft.views.len();
-        let title = div()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(theme.text.body)
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.text_strong)
-                    .child(model::view_name(view)),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(theme.text.label)
-                    .text_color(colors.text_faint)
-                    .child(format!("view {} of {count}", index + 1)),
-            );
+        // The inspector's layout (README §04): the name full width, then
+        // the sidebar mark beside the group, the views, and under a rule
+        // the selected view's settings, its name first.
         let body = div()
             .id("editor-inspector-body")
             .flex()
@@ -174,8 +156,9 @@ impl DashboardEditor {
             .py(px(PADDING_Y))
             .px(px(PADDING_X))
             .overflow_y_scroll()
+            .child(Field::new("name").control(TextField::new(&self.name).bordered(true)))
             .child(pair(
-                Field::new("name").control(TextField::new(&self.name).bordered(true)),
+                self.mark_field(cx),
                 Field::new("group").control(self.dropdown(
                     "editor-group",
                     &EditorMenu::Group,
@@ -185,8 +168,8 @@ impl DashboardEditor {
                     cx,
                 )),
             ))
-            .child(self.notifications_field(cx))
             .child(self.views_field(cx))
+            .child(self.notifications_field(cx))
             .child(
                 div()
                     .flex_none()
@@ -194,13 +177,17 @@ impl DashboardEditor {
                     .mx(px(-PADDING_X))
                     .bg(colors.border_header),
             )
-            .child(title)
-            .child(Field::new("view name").control(TextField::new(&self.view_name).bordered(true)));
+            .child(
+                Field::new("view name")
+                    .status(format!("view {} of {count}", index + 1), FieldTone::Neutral)
+                    .control(TextField::new(&self.view_name).bordered(true)),
+            );
         match view.display {
             ViewDisplay::List | ViewDisplay::GroupedList => self.list_settings(body, view, cx),
             ViewDisplay::HostGroupGrid => self.grid_settings(body, view, cx),
             ViewDisplay::SummaryTiles => self.tiles_settings(body, view, cx),
             ViewDisplay::EventStream => self.stream_settings(body, view, cx),
+            ViewDisplay::Handling | ViewDisplay::Downtimes => self.threads_settings(body, view, cx),
         }
     }
 
@@ -252,7 +239,7 @@ impl DashboardEditor {
                     }),
             )
             .when(open, |slot| {
-                slot.child(Popover::new(Self::add_view_menu(cx)).align_right())
+                slot.child(Popover::new(Self::add_view_menu(cx)))
             });
         Field::new("views")
             .status(reorder_hint(), FieldTone::Neutral)
@@ -265,8 +252,7 @@ impl DashboardEditor {
                             .id("editor-views")
                             .flex()
                             .flex_col()
-                            .gap(px(2.))
-                            .mx(px(-6.))
+                            .gap(px(4.))
                             .children(rows),
                     )
                     .child(add),
@@ -288,7 +274,10 @@ impl DashboardEditor {
                 .as_ref()
                 .and_then(|(_, result)| result.view(&view.id))
         });
-        let (shows, invalid) = model::shows_text(result, now);
+        let (mut shows, invalid) = model::shows_text(result, now);
+        if let Some(count) = self.threads_count(view, result, cx) {
+            shows = model::threads_text(view.display, count);
+        }
         let menu = EditorMenu::ViewOptions(view.id.clone());
         let open = self.menus.is_open(&menu);
         let name = model::view_name(view);
@@ -323,12 +312,19 @@ impl DashboardEditor {
             .items_center()
             .gap(px(10.))
             .h(px(VIEW_ROW_HEIGHT))
-            .pl(px(6.))
+            .pl(px(10.))
             .pr(px(8.))
             .rounded(theme.metrics.code_radius)
-            .when(selected, |row| row.bg(colors.row_selected))
+            .border_1()
+            // A field box, as wide as the fields (README §04).
+            .when(selected, |row| {
+                row.bg(colors.row_selected)
+                    .border_color(colors.row_selected)
+            })
             .when(!selected, |row| {
-                row.hover(|style| style.bg(colors.element_hover))
+                row.bg(colors.code_background)
+                    .border_color(colors.border_header)
+                    .hover(|style| style.bg(colors.element_hover))
             })
             .cursor_pointer()
             .whitespace_nowrap()
@@ -444,26 +440,52 @@ impl DashboardEditor {
             .on_dismiss(Self::dismiss_listener(cx))
     }
 
-    /// *add view* (4d): the display first, each with its icon and what it
-    /// shows.
+    /// *add view* (4d, 14-r5-b): every kind, in sections (lists,
+    /// overviews, activity), each its icon and name.
     fn add_view_menu(cx: &Context<Self>) -> Menu {
-        let mut menu = Menu::new("add-view-menu")
-            .width(px(380.))
-            .label("add a view that shows");
-        for display in ViewDisplay::ALL {
-            menu = menu.item(
-                MenuItem::new(
-                    ElementId::Name(format!("add-view-{display:?}").into()),
-                    model::display_name(display),
-                )
-                .icon(display_icon(display))
-                .detail(model::display_detail(display))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.add_view(display, cx);
-                })),
-            );
+        let mut menu = Menu::new("add-view-menu").min_width(px(240.));
+        for (position, (section, displays)) in model::DISPLAY_SECTIONS.iter().enumerate() {
+            if position > 0 {
+                menu = menu.separator();
+            }
+            menu = menu.label(*section);
+            for &display in *displays {
+                menu = menu.item(
+                    MenuItem::new(
+                        ElementId::Name(format!("add-view-{display:?}").into()),
+                        model::display_name(display),
+                    )
+                    .icon(display_icon(display))
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.add_view(display, cx);
+                        },
+                    )),
+                );
+            }
         }
         menu.on_dismiss(Self::dismiss_listener(cx))
+    }
+
+    /// What a handling or downtimes view counts: objects being handled,
+    /// downtimes in effect (of its evaluated members); `None` for the
+    /// other kinds or before the evaluation.
+    fn threads_count(
+        &self,
+        view: &View,
+        result: Option<&ic_core::snapshot::ViewResult>,
+        cx: &Context<Self>,
+    ) -> Option<usize> {
+        let kind = crate::lists::model::ListKind::of_display(view.display)?;
+        let members = result?.members()?;
+        let state = self.state.read(cx);
+        Some(crate::lists::model::count(
+            kind,
+            state.snapshot(),
+            crate::lists::threads::Scope::Members(members),
+            view.threads.shows,
+            Timestamp::now(),
+        ))
     }
 
     // --- A view's settings ---------------------------------------------
@@ -493,6 +515,7 @@ impl DashboardEditor {
         )
         .child(self.handled_field(view, cx))
         .child(self.sort_fields(view, cx))
+        .child(self.rows_field(view, cx))
     }
 
     /// A host-group grid's settings (5e).
@@ -690,10 +713,11 @@ impl DashboardEditor {
                         })),
                 ),
             )
+            .child(self.rows_field(view, cx))
     }
 
     /// `display`: a dropdown of the five displays, each with its icon.
-    fn display_field(&self, view: &View, cx: &Context<Self>) -> Field {
+    pub(super) fn display_field(&self, view: &View, cx: &Context<Self>) -> Field {
         Field::new("display").control(self.dropdown(
             "editor-display",
             &EditorMenu::Display,
@@ -701,23 +725,29 @@ impl DashboardEditor {
             model::display_name(view.display).to_owned(),
             || {
                 let mut menu = Menu::new("editor-display-menu").min_width(px(240.));
-                for display in ViewDisplay::ALL {
-                    menu = menu.item(
-                        MenuItem::new(
-                            ElementId::Name(format!("editor-display-{display:?}").into()),
-                            model::display_name(display),
-                        )
-                        .icon(display_icon(display))
-                        .selected(view.display == display)
-                        .on_click(cx.listener(
-                            move |this, _: &ClickEvent, _, cx| {
-                                this.menus.close();
-                                this.change_selected(std::time::Duration::ZERO, cx, |view| {
-                                    *view = model::with_display(view.clone(), display);
-                                });
-                            },
-                        )),
-                    );
+                for (position, (section, displays)) in model::DISPLAY_SECTIONS.iter().enumerate() {
+                    if position > 0 {
+                        menu = menu.separator();
+                    }
+                    menu = menu.label(*section);
+                    for &display in *displays {
+                        menu = menu.item(
+                            MenuItem::new(
+                                ElementId::Name(format!("editor-display-{display:?}").into()),
+                                model::display_name(display),
+                            )
+                            .icon(display_icon(display))
+                            .selected(view.display == display)
+                            .on_click(cx.listener(
+                                move |this, _: &ClickEvent, _, cx| {
+                                    this.menus.close();
+                                    this.change_selected(std::time::Duration::ZERO, cx, |view| {
+                                        *view = model::with_display(view.clone(), display);
+                                    });
+                                },
+                            )),
+                        );
+                    }
                 }
                 menu.on_dismiss(Self::dismiss_listener(cx))
             },
@@ -874,14 +904,21 @@ impl DashboardEditor {
     }
 
     /// The filter, with the preview's verdict and where an error points.
-    fn filter_field(&self, cx: &Context<Self>) -> Field {
+    pub(super) fn filter_field(&self, cx: &Context<Self>) -> Field {
         let theme = cx.theme();
         let view = self.selected_view();
         let error = self.filter_error();
         let (status, tone) = if let Some(_error) = &error {
             ("invalid".to_owned(), FieldTone::Bad)
         } else if let Some(result) = self.evaluated_view(&view.id) {
-            (model::status_text(view, result), FieldTone::Good)
+            let threads = self.threads_count(view, Some(result), cx);
+            // An empty filter is no verdict: what it shows, faint (14-r5-a).
+            let tone = if view.filter.trim().is_empty() {
+                FieldTone::Neutral
+            } else {
+                FieldTone::Good
+            };
+            (model::status_text(view, result, threads), tone)
         } else if self.unavailable {
             ("not checked".to_owned(), FieldTone::Neutral)
         } else {
@@ -899,9 +936,15 @@ impl DashboardEditor {
                     .flex_col()
                     .gap(px(6.))
                     .child(
-                        TextArea::new(&self.filter)
-                            .height(filter_height(view.display))
-                            .invalid(error.is_some()),
+                        // *copy filter from…* sits in the field's corner.
+                        div()
+                            .relative()
+                            .child(
+                                TextArea::new(&self.filter)
+                                    .height(filter_height(view.display))
+                                    .invalid(error.is_some()),
+                            )
+                            .child(self.copy_filter_button(cx)),
                     )
                     .when_some(marker, |field, (line, caret)| {
                         field.child(
@@ -1167,7 +1210,7 @@ impl DashboardEditor {
 
     /// A dropdown trigger showing `value` (after `icon`), with `menu` under
     /// it while open.
-    fn dropdown(
+    pub(super) fn dropdown(
         &self,
         id: &'static str,
         menu: &EditorMenu,
@@ -1240,7 +1283,7 @@ impl DashboardEditor {
         menu.on_dismiss(Self::dismiss_listener(cx))
     }
 
-    fn dismiss_listener(
+    pub(super) fn dismiss_listener(
         cx: &Context<Self>,
     ) -> impl Fn(&ic_ui_kit::Dismissal, &mut Window, &mut App) + 'static {
         cx.listener(|this, dismissal: &ic_ui_kit::Dismissal, _, cx| {
@@ -1295,9 +1338,10 @@ fn sort_key_label(key: SortKey, kind: ObjectKind) -> &'static str {
 /// empty filter means).
 pub(super) fn filter_placeholder(display: ViewDisplay) -> &'static str {
     match display {
-        ViewDisplay::List | ViewDisplay::GroupedList => {
-            "host.vars.env == \"prod\" && service.state != 0"
-        }
+        ViewDisplay::List
+        | ViewDisplay::GroupedList
+        | ViewDisplay::Handling
+        | ViewDisplay::Downtimes => "every object",
         ViewDisplay::HostGroupGrid => "empty: every host of those groups",
         ViewDisplay::SummaryTiles => "empty: every object of those groups",
         ViewDisplay::EventStream => "empty: every host and service",
@@ -1307,7 +1351,13 @@ pub(super) fn filter_placeholder(display: ViewDisplay) -> &'static str {
 /// The filter field's height for a view of `display`: three lines for a
 /// list's (4c), one for the others, whose filters are short (4e, 5e).
 fn filter_height(display: ViewDisplay) -> gpui::Pixels {
-    if matches!(display, ViewDisplay::List | ViewDisplay::GroupedList) {
+    if matches!(
+        display,
+        ViewDisplay::List
+            | ViewDisplay::GroupedList
+            | ViewDisplay::Handling
+            | ViewDisplay::Downtimes
+    ) {
         px(66.)
     } else {
         px(32.)

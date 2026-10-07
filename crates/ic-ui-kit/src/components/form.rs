@@ -292,6 +292,10 @@ impl RenderOnce for Switch {
 /// A row of mutually exclusive choices (`services | hosts`), one selected.
 #[derive(IntoElement)]
 #[must_use = "a segmented control does nothing unless rendered"]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent looks of one control"
+)]
 pub struct Segmented {
     id: ElementId,
     options: Vec<SharedString>,
@@ -299,6 +303,7 @@ pub struct Segmented {
     disabled: bool,
     hug: bool,
     by_content: bool,
+    compact: bool,
     on_select: Option<SelectHandler>,
 }
 
@@ -312,8 +317,17 @@ impl Segmented {
             disabled: false,
             hug: false,
             by_content: false,
+            compact: false,
             on_select: None,
         }
+    }
+
+    /// The small form, for a 36px view header: 24px high, 8px either side
+    /// of each label (sized to it, as [`Segmented::hug`]).
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self.hug = true;
+        self
     }
 
     /// Fills the width given, sharing it by the options' labels (each its
@@ -382,18 +396,27 @@ impl RenderOnce for Segmented {
         let id = self.id.clone();
         let count = self.options.len();
         let hug = self.hug;
+        let compact = self.compact;
         let by_content = self.by_content && !hug;
         div()
             .id(self.id)
             .role(Role::RadioGroup)
             .flex()
             .when(hug, gpui::Styled::flex_none)
-            .h(theme.metrics.field_height)
+            .h(if compact {
+                px(24.)
+            } else {
+                theme.metrics.field_height
+            })
             .rounded(theme.metrics.code_radius)
             .border_1()
             .border_color(colors.border_header)
             .overflow_hidden()
-            .text_size(theme.text.small)
+            .text_size(if compact {
+                theme.text.label
+            } else {
+                theme.text.small
+            })
             .when(self.disabled, |row| row.opacity(0.5))
             .children(self.options.into_iter().enumerate().map(|(index, label)| {
                 let selected = index == self.selected;
@@ -405,7 +428,9 @@ impl RenderOnce for Segmented {
                     ))
                     .role(Role::RadioButton)
                     .flex()
-                    .when(hug, |option| option.flex_none().px(px(14.)))
+                    .when(hug, |option| {
+                        option.flex_none().px(px(if compact { 8. } else { 14. }))
+                    })
                     .when(by_content, |option| option.flex_auto().px(px(14.)))
                     .when(!hug && !by_content, gpui::Styled::flex_1)
                     .items_center()

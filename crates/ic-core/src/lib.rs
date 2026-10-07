@@ -60,7 +60,7 @@ pub use command::{
     ActionOutcome, Command, ConnectionState, CoreEvent, LoadPhase, LogEntry, LogKind,
     NotificationRecord, UntrustedUrl,
 };
-pub use dashboards::evaluate_dashboard;
+pub use dashboards::{evaluate_dashboard, stream_events};
 pub use error::CoreError;
 pub use event_log::{delete_event_log, event_log_path, seed_event_log};
 pub use handle::{CoreHandle, start, start_with_tuning};

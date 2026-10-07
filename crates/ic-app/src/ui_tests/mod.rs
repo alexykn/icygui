@@ -61,6 +61,7 @@ mod scopes;
 mod settings;
 mod states;
 mod topology;
+mod view_kinds;
 mod views;
 
 /// One headless app at a time.
@@ -868,7 +869,11 @@ fn escape_closes_the_open_menu_before_anything_behind_it() {
         // A pane and a group's `···` menu: Escape closes the menu only.
         app.keys(cx, "j enter");
         assert!(app.pane_object(cx).is_some());
-        app.click(cx, point(px(274.), px(59.)), Modifiers::default());
+        app.click(
+            cx,
+            point(px(274.), px(59. + CLUSTER_SECTION)),
+            Modifiers::default(),
+        );
         assert_eq!(
             sidebar.read(cx).open_menu(),
             Some(&SidebarMenu::Group("demo-overview".to_owned()))
@@ -897,13 +902,22 @@ fn network() -> DashboardRef {
     }
 }
 
+/// The sidebar's cluster section above the groups (topic 14): its heading,
+/// four entries, and the space and rule under them.
+pub(crate) const CLUSTER_SECTION: f32 = 36. + 4. * 30. + 6. + 1. + 6.;
+
+/// The dashboard page as built for the last frame.
+fn views_page(app: &Harness, cx: &App) -> Rc<crate::dashboard::page::Page> {
+    app.dashboard(cx).read(cx).page(cx).expect("a page")
+}
+
 /// The middle of the sidebar's dashboard row `index` (0 = `overview` under
-/// the `overview` group): the header is 41px, group rows 36px, dashboard
-/// rows 30px.
+/// the `overview` group): the header is 41px, the cluster section
+/// [`CLUSTER_SECTION`], group rows 36px, dashboard rows 30px.
 fn sidebar_item(index: usize) -> Point<Pixels> {
     #[expect(clippy::cast_precision_loss, reason = "small row indices")]
     let row = 30. * index as f32;
-    point(px(150.), px(41. + 36. + 15.) + px(row))
+    point(px(150.), px(41. + CLUSTER_SECTION + 36. + 15.) + px(row))
 }
 
 #[test]
@@ -925,10 +939,18 @@ fn clicks_outside_the_list_keep_the_keys_working() {
         app.click(cx, point(px(150.), px(880.)), Modifiers::default());
         app.keys(cx, "k");
         assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(1));
-        app.click(cx, point(px(150.), px(59.)), Modifiers::default());
+        app.click(
+            cx,
+            point(px(150.), px(59. + CLUSTER_SECTION)),
+            Modifiers::default(),
+        );
         app.keys(cx, "k");
         assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(0));
-        app.click(cx, point(px(150.), px(59.)), Modifiers::default());
+        app.click(
+            cx,
+            point(px(150.), px(59. + CLUSTER_SECTION)),
+            Modifiers::default(),
+        );
 
         // Enter in the search field shows the first match and hands the
         // keys back to the list.

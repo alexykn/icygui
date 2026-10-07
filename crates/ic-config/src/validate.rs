@@ -382,6 +382,11 @@ fn check_groups(groups: &[DashboardGroup], path: &str, issues: &mut Issues) {
 
 fn check_dashboard(dashboard: &Dashboard, path: &str, issues: &mut Issues) {
     check_name(&dashboard.name, &join(path, "name"), issues);
+    if let crate::SidebarMark::Icon(icon) = &dashboard.mark
+        && icon.trim().is_empty()
+    {
+        issues.push(join(path, "mark.icon"), "must name an icon");
+    }
     if dashboard.views.is_empty() {
         issues.push(join(path, "views"), "must list at least one view");
     } else if dashboard.views.len() > MAX_VIEWS {

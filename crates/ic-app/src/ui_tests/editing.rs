@@ -28,24 +28,27 @@ use crate::workspace::{Confirmed, ModalKind};
 /// The `overview` group's `···` (shown: it holds the selected dashboard).
 const OVERVIEW_MENU: Point<Pixels> = Point {
     x: px(274.),
-    y: px(59.),
+    y: px(59. + super::CLUSTER_SECTION),
 };
 /// The `overview` group's `+`.
 const OVERVIEW_ADD: Point<Pixels> = Point {
     x: px(250.),
-    y: px(59.),
+    y: px(59. + super::CLUSTER_SECTION),
 };
 
 /// An item of the group menu opened from [`OVERVIEW_MENU`], `offset`
 /// pixels below the group row.
 fn group_menu_item(offset: f32) -> Point<Pixels> {
-    point(px(180.), px(59. + offset))
+    point(px(180.), px(59. + super::CLUSTER_SECTION + offset))
 }
 
 /// The middle of the `network` row (under the `platform` group, after
 /// the three `overview` dashboards).
 fn network_row() -> Point<Pixels> {
-    point(px(150.), px(41. + 36. + 3. * 30. + 6. + 36. + 15.))
+    point(
+        px(150.),
+        px(41. + super::CLUSTER_SECTION + 36. + 3. * 30. + 6. + 36. + 15.),
+    )
 }
 
 /// An item of a dashboard's menu, `offset` pixels below its row's middle.
@@ -343,14 +346,28 @@ fn dashboards_are_duplicated_moved_muted_and_deleted_from_their_menu() {
         // delete (asks first).
         let lab_row = point(
             px(150.),
-            px(41. + 36. + 3. * 30. + 6. + 36. + 4. * 30. + 6. + 36. + 30. + 15.),
+            px(super::CLUSTER_SECTION
+                + 41.
+                + 36.
+                + 3. * 30.
+                + 6.
+                + 36.
+                + 4. * 30.
+                + 6.
+                + 36.
+                + 30.
+                + 15.),
         );
         right_click(app, cx, lab_row);
         assert_eq!(
             sidebar.read(cx).open_menu(),
             Some(&SidebarMenu::Dashboard(moved.clone()))
         );
-        app.click(cx, dashboard_menu_item(lab_row, 407.), Modifiers::default());
+        // The menu is kept inside the window: low in the sidebar, it moves
+        // up, its last item 8px above the window's bottom edge.
+        let delete = dashboard_menu_item(lab_row, 407.);
+        let delete = point(delete.x, delete.y.min(px(900. - 8. - 4. - 14.)));
+        app.click(cx, delete, Modifiers::default());
         assert!(matches!(
             app.workspace.read(cx).modal(cx),
             Some(ModalKind::Confirm(confirmation)) if confirmation.action == Confirmed::Dashboard(moved.clone())

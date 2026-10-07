@@ -11,7 +11,7 @@ use gpui::{
     MouseButton, ParentElement as _, Pixels, Point, SharedString, StatefulInteractiveElement as _,
     Styled as _, Window, div, prelude::FluentBuilder as _,
 };
-use ic_config::{GroupBy, HideHandled, ObjectKind, Sort, SortKey, View};
+use ic_config::{GroupBy, ObjectKind, Sort, SortKey, View};
 use ic_core::snapshot::{Summary, ViewResult};
 use ic_model::{CheckableState, HostState, ServiceState};
 use ic_rules::DashboardRef;
@@ -140,17 +140,146 @@ impl DashboardView {
                     .child(self.dashboard_options_trigger(reference, cx))
             }
             (Some(reference), Some((_, dashboard))) => {
+                // One view: its header is the page's (topic 14, round 5).
                 let view = super::primary_view(&dashboard.views);
+                let subtitle = if view.is_list() {
+                    view_label(view).to_owned()
+                } else {
+                    filter_summary(view)
+                };
                 header
                     .title(dashboard.name.clone())
-                    .subtitle(view_label(view))
-                    .child(self.sort_trigger(reference, view, HeaderMenu::Sort, cx))
-                    .child(self.options_trigger(reference, view, cx))
+                    .subtitle(subtitle)
+                    .children(self.one_view_controls(reference, view, cx))
+            }
+            _ if self.is_events() => {
+                // The cluster section's events: every event, newest first.
+                let reference = super::events_reference();
+                let environment = state
+                    .environment()
+                    .map(|environment| environment.name.clone())
+                    .unwrap_or_default();
+                let view = self
+                    .shown_views(&reference, cx)
+                    .and_then(|views| views.first())
+                    .cloned()
+                    .unwrap_or_default();
+                header
+                    .title("events")
+                    .subtitle(format!("{environment} · the whole environment"))
+                    .children(self.one_view_controls(&reference, &view, cx))
             }
             _ => header.title("icygui"),
         };
         self.drag
             .attach(div().id("main-header-drag").child(header), controls)
+            .into_any_element()
+    }
+
+    /// A one-view dashboard's controls in the page header (README, *View
+    /// controls*): a stream's `live`, the rows toggle (list-like views),
+    /// the sort and `···`. The counts and the handled slot are the summary
+    /// bar's, its second row.
+    fn one_view_controls(
+        &self,
+        reference: &DashboardRef,
+        view: &View,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        use ic_config::ViewDisplay;
+        let theme = cx.theme();
+        let state = self.state.read(cx);
+        let mut controls = Vec::new();
+        if view.display == ViewDisplay::EventStream {
+            controls.push(self.live_marker(cx));
+        }
+        if view.display == ViewDisplay::Downtimes {
+            controls.push(Self::render_mode_switch(reference, view, false, cx));
+        }
+        if view.display.has_rows() {
+            let pick = Self::pick_density(reference, &view.id, cx);
+            controls.push(crate::controls::rows_toggle(
+                "view-rows",
+                view.density,
+                state.appearance().row_density,
+                &pick,
+                theme,
+            ));
+        }
+        let menu = HeaderMenu::Sort;
+        let open = self.menus.open() == Some(menu);
+        let sort: AnyElement = match view.display {
+            ViewDisplay::List | ViewDisplay::GroupedList => {
+                self.sort_trigger(reference, view, menu, cx)
+            }
+            ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => div()
+                .relative()
+                .flex_none()
+                .child(self.group_order_trigger(view, menu, cx))
+                .when(open, |trigger| {
+                    trigger.child(
+                        Popover::new(Self::group_order_menu(reference, view, cx)).align_right(),
+                    )
+                })
+                .into_any_element(),
+            ViewDisplay::Handling | ViewDisplay::Downtimes => {
+                let kind = crate::lists::model::ListKind::of_display(view.display)
+                    .unwrap_or(crate::lists::model::ListKind::Handling);
+                div()
+                    .relative()
+                    .flex_none()
+                    .child(self.thread_sort_trigger(view, kind, menu, cx))
+                    .when(open, |trigger| {
+                        trigger.child(
+                            Popover::new(Self::thread_sort_menu(reference, view, kind, cx))
+                                .align_right(),
+                        )
+                    })
+                    .into_any_element()
+            }
+            ViewDisplay::EventStream => div()
+                .flex_none()
+                .text_size(theme.text.small)
+                .text_color(theme.colors.text_muted)
+                .child("newest first")
+                .into_any_element(),
+        };
+        controls.push(sort);
+        if !self.is_events() {
+            controls.push(self.options_trigger(reference, view, cx));
+        }
+        controls
+    }
+
+    /// The editor's preview of a one-view draft: the view's controls, for
+    /// the editor's header (the dashboard's header will show them).
+    pub(crate) fn preview_controls(&self, cx: &Context<Self>) -> Vec<AnyElement> {
+        let reference = super::preview_reference();
+        match self.shown_views(&reference, cx) {
+            Some([view]) => {
+                let view = view.clone();
+                self.one_view_controls(&reference, &view, cx)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// A stream's `live`: the dot and the word while events come in
+    /// (hidden, keeping its place, while they can't).
+    fn live_marker(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let state = self.state.read(cx);
+        let connected = state.connection().is_connected() && !state.rows_settling();
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
+            .text_size(theme.text.small)
+            .text_color(theme.colors.text_faint)
+            .when(!connected, gpui::Styled::invisible)
+            .child(StateDot::new(CheckableState::Service(ServiceState::Ok)).size(px(6.)))
+            .child("live")
             .into_any_element()
     }
 
@@ -208,6 +337,10 @@ impl DashboardView {
             }
             ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => {
                 Some(Self::group_order_menu(reference, view, cx))
+            }
+            ViewDisplay::Handling | ViewDisplay::Downtimes => {
+                crate::lists::model::ListKind::of_display(view.display)
+                    .map(|kind| Self::thread_sort_menu(reference, view, kind, cx))
             }
             ViewDisplay::EventStream => None,
         }
@@ -289,7 +422,6 @@ impl DashboardView {
     ) -> AnyElement {
         let theme = cx.theme();
         let open = self.menus.open() == Some(HeaderMenu::Options);
-        let defaults = self.state.read(cx).handled_defaults();
         let trigger = GlyphButton::new("dashboard-options", "···")
             .text_size(px(13.))
             .bleed()
@@ -309,24 +441,31 @@ impl DashboardView {
                 trigger.tooltip(Tooltip::new("Dashboard options"))
             })
             .when(open, |trigger| {
-                trigger.child(
-                    Popover::new(Self::options_menu(reference, view, defaults, false, cx))
-                        .align_right(),
-                )
+                trigger.child(Popover::new(self.view_menu(reference, view, None, cx)).align_right())
             })
             .into_any_element()
     }
 
-    /// A list's options: the dashboard header's `···` of a one-view
-    /// dashboard (with *edit dashboard* first), or the start of a view
-    /// header's (`in_view`: its *edit view* comes last, after collapse).
-    pub(super) fn options_menu(
+    /// A view's `···` (README, *View controls*): on a one-view page
+    /// (`stacked` `None`) *edit dashboard* first; then the view's own items
+    /// (a list's grouping and handled toggle, a grid's hosts as squares or
+    /// cells, a handling or downtimes view's *only mine*), copying the
+    /// filter; stacked (`Some((index, collapsed))`), the *rows* group,
+    /// collapse and *edit view* (not in the editor's preview, which is the
+    /// editor already).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one menu for every kind, its items in order"
+    )]
+    pub(super) fn view_menu(
+        &self,
         reference: &DashboardRef,
         view: &View,
-        defaults: HideHandled,
-        in_view: bool,
+        stacked: Option<(usize, bool)>,
         cx: &Context<Self>,
     ) -> Menu {
+        use ic_config::ViewDisplay;
+        let defaults = self.state.read(cx).handled_defaults();
         let update = |change: Rc<dyn Fn(&mut View)>| {
             let reference = reference.clone();
             let view_id = view.id.clone();
@@ -337,19 +476,10 @@ impl DashboardView {
                 cx.notify();
             })
         };
-        let groupings = [
-            (GroupBy::None, "group-none", "none"),
-            (GroupBy::Host, "group-host", "host"),
-            (GroupBy::HostGroup, "group-host-group", "host group"),
-            (
-                GroupBy::ServiceGroup,
-                "group-service-group",
-                "service group",
-            ),
-        ];
-        let edit = reference.clone();
         let mut menu = Menu::new("options-menu");
-        if !in_view {
+        // The editor's preview is the editor already.
+        if stacked.is_none() && !self.is_preview() {
+            let edit = reference.clone();
             menu = menu
                 .item(
                     MenuItem::new("edit-dashboard", "edit dashboard").on_click(cx.listener(
@@ -362,43 +492,128 @@ impl DashboardView {
                 )
                 .separator();
         }
-        menu = menu.label("group by");
-        for (group_by, id, label) in groupings {
-            // Hosts have no service groups, and by host each would be its
-            // own band's only row (`editor::model::groupings`).
-            if view.object_kind == ObjectKind::Hosts
-                && matches!(group_by, GroupBy::ServiceGroup | GroupBy::Host)
-            {
-                continue;
+        let filter = view.filter.clone();
+        let copy_filter = MenuItem::new("copy-filter", "copy filter expression")
+            .disabled(filter.trim().is_empty())
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.menus.close();
+                cx.write_to_clipboard(ClipboardItem::new_string(filter.clone()));
+                cx.notify();
+            }));
+        menu = match view.display {
+            ViewDisplay::List | ViewDisplay::GroupedList => {
+                let groupings = [
+                    (GroupBy::None, "group-none", "none"),
+                    (GroupBy::Host, "group-host", "host"),
+                    (GroupBy::HostGroup, "group-host-group", "host group"),
+                    (
+                        GroupBy::ServiceGroup,
+                        "group-service-group",
+                        "service group",
+                    ),
+                ];
+                menu = menu.label("group by");
+                for (group_by, id, label) in groupings {
+                    // Hosts have no service groups, and by host each would
+                    // be its own band's only row (`editor::model::groupings`).
+                    if view.object_kind == ObjectKind::Hosts
+                        && matches!(group_by, GroupBy::ServiceGroup | GroupBy::Host)
+                    {
+                        continue;
+                    }
+                    menu = menu.item(
+                        MenuItem::new(id, label)
+                            .checked(view.list_grouping() == group_by)
+                            .on_click(update(Rc::new(move |view: &mut View| {
+                                view.set_grouping(group_by);
+                            }))),
+                    );
+                }
+                let hiding = view.hidden_handled(defaults).any();
+                menu.separator()
+                    .item(
+                        MenuItem::new("toggle-handled", "hide handled problems")
+                            .checked(hiding)
+                            .on_click(update(Rc::new(move |view: &mut View| {
+                                view.handled = view.handled.toggled(defaults);
+                            }))),
+                    )
+                    .item(copy_filter)
             }
-            menu = menu.item(
-                MenuItem::new(id, label)
-                    .checked(view.list_grouping() == group_by)
-                    .on_click(update(Rc::new(move |view: &mut View| {
-                        view.set_grouping(group_by);
-                    }))),
+            ViewDisplay::HostGroupGrid => {
+                use ic_config::GridCells;
+                let cells = |id: &'static str, label: &'static str, choice: GridCells| {
+                    MenuItem::new(id, label)
+                        .checked(view.grid.cells == choice)
+                        .on_click(update(Rc::new(move |view: &mut View| {
+                            view.grid.cells = choice;
+                        })))
+                };
+                // A grid's hosts as squares (the default) or labelled
+                // cells (5d), switched in place.
+                menu.label("hosts as")
+                    .item(cells("hosts-squares", "squares", GridCells::Squares))
+                    .item(cells(
+                        "hosts-cells",
+                        "labelled cells",
+                        GridCells::LabelledCells,
+                    ))
+                    .separator()
+                    .item(copy_filter)
+            }
+            ViewDisplay::SummaryTiles | ViewDisplay::EventStream => menu.item(copy_filter),
+            ViewDisplay::Handling | ViewDisplay::Downtimes => {
+                let kind = crate::lists::model::ListKind::of_display(view.display)
+                    .unwrap_or(crate::lists::model::ListKind::Handling);
+                menu.item(self.only_mine_item(reference, view, kind, cx))
+            }
+        };
+        let Some((index, collapsed)) = stacked else {
+            return menu.on_dismiss(Self::dismiss_listener(cx));
+        };
+        if view.display.has_rows() {
+            let pick = Self::pick_density(reference, &view.id, cx);
+            menu = crate::controls::rows_menu(
+                menu.separator(),
+                &format!("view-{index}"),
+                view.density,
+                self.state.read(cx).appearance().row_density,
+                &pick,
             );
         }
-        let hiding = view.hidden_handled(defaults).any();
-        let filter = view.filter.clone();
-        menu.separator()
-            .item(
-                MenuItem::new("toggle-handled", "hide handled problems")
-                    .checked(hiding)
-                    .on_click(update(Rc::new(move |view: &mut View| {
-                        view.handled = view.handled.toggled(defaults);
-                    }))),
+        let fold_id = super::page::Id::from(view.id.as_str());
+        let fold_reference = reference.clone();
+        menu = menu.separator().item(
+            MenuItem::new(
+                "fold-view",
+                if collapsed {
+                    "expand view"
+                } else {
+                    "collapse view"
+                },
             )
-            .item(
-                MenuItem::new("copy-filter", "copy filter expression")
-                    .disabled(filter.trim().is_empty())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            .key_hint(if collapsed { "→" } else { "←" })
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.menus.close();
+                this.fold_view(&fold_reference, &fold_id, !collapsed, cx);
+            })),
+        );
+        if !self.is_preview() {
+            let edit = (reference.clone(), view.id.clone());
+            menu = menu.item(
+                MenuItem::new("edit-view", "edit view").on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
                         this.menus.close();
-                        cx.write_to_clipboard(ClipboardItem::new_string(filter.clone()));
+                        cx.emit(super::DashboardEvent::EditView(
+                            edit.0.clone(),
+                            edit.1.clone(),
+                        ));
                         cx.notify();
-                    })),
-            )
-            .on_dismiss(Self::dismiss_listener(cx))
+                    },
+                )),
+            );
+        }
+        menu.on_dismiss(Self::dismiss_listener(cx))
     }
 
     pub(super) fn dismiss_listener(
@@ -414,6 +629,10 @@ impl DashboardView {
     /// with several views has none: each view header counts): where the
     /// labels don't fit, the items show their counts only. Its handled
     /// slot is at the right end, fixed and right-aligned.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a list's bar: its chips, the view's label and the handled slot"
+    )]
     pub(super) fn render_summary(
         &self,
         reference: &DashboardRef,
@@ -429,15 +648,32 @@ impl DashboardView {
         }
         let view = super::primary_view(views);
         let result = self.shown_result(reference, &view.id, cx)?;
+        if matches!(
+            view.display,
+            ic_config::ViewDisplay::HostGroupGrid | ic_config::ViewDisplay::SummaryTiles
+        ) {
+            return Self::counts_bar(&result.counts, list_width, cx);
+        }
+        if !view.is_list() {
+            // A stream, handling and downtimes have no second row here.
+            return None;
+        }
         // The bar counts the unhandled problems the list is about (2j:
         // showing or hiding handled ones never changes them; the sidebar
         // counts the same); a list of only OK objects counts those.
-        let items = summary_items(&result.counts, view.object_kind);
-        let items = if items.is_empty() {
-            summary_items(&result.shown, view.object_kind)
-        } else {
-            items
-        };
+        let mut items = summary_items(&result.counts, view.object_kind);
+        if items.is_empty() {
+            items = summary_items(&result.shown, view.object_kind);
+        }
+        // The state picked stays, to be picked off again, at zero too.
+        if let Some(chip) = view.state
+            && !items
+                .iter()
+                .any(|(state, _, _)| state_chip_of(*state) == Some(chip))
+        {
+            let (state, word) = chip_state(chip);
+            items.insert(0, (state, 0, word));
+        }
         if items.is_empty() {
             // Nothing is listed: the empty state says why.
             return None;
@@ -494,12 +730,96 @@ impl DashboardView {
                         cx,
                     )),
             );
+        // A list's per-state counts are its state chips (README, *View
+        // controls*): a click shows only that state, again all of them.
+        let chips = items.into_iter().map(|(state, count, label)| {
+            let chip = state_chip_of(state);
+            let picked = chip.is_some() && view.state == chip;
+            let item = SummaryItem::new(state, count, label).compact(compact);
+            let reference = reference.clone();
+            let view_id = view.id.clone();
+            div()
+                .id(SharedString::from(format!("summary-chip-{label}")))
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(px(24.))
+                .px(px(6.))
+                .mx(px(-7.))
+                .rounded(theme.metrics.small_radius)
+                .border_1()
+                .border_color(if picked {
+                    colors.accent
+                } else {
+                    gpui::transparent_black()
+                })
+                .when(picked, |chip| {
+                    chip.bg(colors.accent_tint).text_color(colors.accent_text)
+                })
+                .child(item)
+                .when_some(chip, |element, chip| {
+                    element
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.element_hover))
+                        .tooltip(Tooltip::text(if picked {
+                            format!("Showing only {label} · click to show all")
+                        } else {
+                            format!("Show only {label}")
+                        }))
+                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            let next = if picked { None } else { Some(chip) };
+                            this.change_view(
+                                &reference,
+                                &view_id,
+                                move |view| view.state = next,
+                                cx,
+                            );
+                            cx.notify();
+                        }))
+                })
+        });
+        Some(
+            SummaryBar::new()
+                .children(chips)
+                .end(end)
+                .into_any_element(),
+        )
+    }
+
+    /// The second row of a one-view grid or tiles: the problems by colour
+    /// (a grid's hosts by their worst state), nothing when there are none.
+    fn counts_bar(counts: &Summary, list_width: Pixels, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme();
+        let words = ["critical", "warning", "unknown"];
+        let items: Vec<(CheckableState, u32, &'static str)> = problem_dots(counts)
+            .into_iter()
+            .map(|(state, count)| {
+                let word = match state {
+                    CheckableState::Service(ServiceState::Critical) => words[0],
+                    CheckableState::Service(ServiceState::Warning) => words[1],
+                    _ => words[2],
+                };
+                (state, count, word)
+            })
+            .collect();
+        if items.is_empty() {
+            return None;
+        }
+        let texts: Vec<String> = items
+            .iter()
+            .map(|(state, count, label)| SummaryItem::new(*state, *count, *label).text())
+            .collect();
+        let compact = !SummaryBar::fits(texts.iter().map(String::as_str), "", list_width, theme);
         Some(
             SummaryBar::new()
                 .children(items.into_iter().map(|(state, count, label)| {
                     SummaryItem::new(state, count, label).compact(compact)
                 }))
-                .end(end)
                 .into_any_element(),
         )
     }
@@ -650,7 +970,6 @@ impl DashboardView {
         use ic_config::ViewDisplay;
         let theme = cx.theme();
         let colors = theme.colors;
-        let state = self.state.read(cx);
         let Some(page_view) = page.views.get(index) else {
             return div().into_any_element();
         };
@@ -722,145 +1041,110 @@ impl DashboardView {
                 colors.text_secondary
             })
             .child(name_text);
-        let counts: Option<AnyElement> = match page_view.state {
-            ViewState::Empty => Some(
+        // The right side, from the right (README, *the view header's right
+        // side*): `···`, the sort sized to its word, 16px, the counts in
+        // fixed slots (handling and downtimes: their chips, the downtimes
+        // view's `timeline | list` left of them; a stream: `live`), 16px,
+        // a list's handled slot (drawn only when something is handled).
+        let empty = page_view.state == ViewState::Empty;
+        let thread = page_view
+            .thread
+            .as_ref()
+            .filter(|_| view.display.is_threads());
+        let handled = if view.is_list() {
+            result.and_then(|result| {
+                let (count, verb) = handled_text(result.hidden, result.handled)?;
+                let width = small_chars(theme, count.chars().count() + 3 + verb.len());
+                let slot = Self::handled_slot(reference, &view.id, result, "view-handled", cx)?;
+                Some((slot, width))
+            })
+        } else {
+            None
+        };
+        let more_width = (px(13.) * ic_ui_kit::CHAR_WIDTH * 3.).ceil();
+        let (sort, word_chars): (AnyElement, usize) = match view.display {
+            ViewDisplay::List | ViewDisplay::GroupedList => (
+                self.sort_trigger(reference, view, HeaderMenu::ViewSort(index), cx),
+                sort_label(view.sort, view.object_kind).chars().count(),
+            ),
+            ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => (
+                self.group_order_trigger(view, HeaderMenu::ViewSort(index), cx),
+                match view.groups.order {
+                    ic_config::GroupOrder::WorstFirst => "worst first".len(),
+                    ic_config::GroupOrder::Name => "name ↑".chars().count(),
+                },
+            ),
+            ViewDisplay::Handling | ViewDisplay::Downtimes => {
+                let kind = crate::lists::model::ListKind::of_display(view.display)
+                    .unwrap_or(crate::lists::model::ListKind::Handling);
+                let options = crate::lists::model::Options::of_view(kind, view.threads);
+                (
+                    self.thread_sort_trigger(view, kind, HeaderMenu::ViewSort(index), cx),
+                    options.sort(kind).label(kind, options.chip).chars().count(),
+                )
+            }
+            ViewDisplay::EventStream => (
                 div()
                     .flex_none()
-                    .text_color(colors.text_faint)
-                    .child("nothing to show")
+                    .text_color(colors.text_muted)
+                    .child("newest first")
                     .into_any_element(),
+                "newest first".len(),
             ),
-            ViewState::Ready if view.display != ViewDisplay::EventStream => {
-                let items = header_counts(&page_view.counts, view.object_kind, view.is_list());
-                (!items.is_empty()).then(|| {
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(12.))
-                        .children(items.into_iter().map(|(state, count)| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .child(StateDot::new(state).size(px(7.)))
-                                .child(count.to_string())
-                        }))
-                        .into_any_element()
-                })
-            }
-            _ => None,
         };
-        // Lists keep a fixed, right-aligned slot for the handled button,
-        // empty when nothing is handled, so the headers line up.
-        let slot = view.is_list().then(|| {
-            div()
-                .flex()
-                .flex_none()
-                .justify_end()
-                .w(handled_slot_width(theme))
-                .children(result.and_then(|result| {
-                    Self::handled_slot(reference, &view.id, result, "view-handled", cx)
-                }))
+        // What the left side needs at least: the padding, chevron, icon and
+        // name with their gaps.
+        #[expect(clippy::cast_precision_loss, reason = "a short name")]
+        let name_width = (theme.text.row * (ic_ui_kit::CHAR_WIDTH * name_chars as f32)).ceil();
+        let left = px(14. + 12. + 10. + 13. + 10.) + name_width + px(10.);
+        // The right side without the counts or chips.
+        let mut right = theme.metrics.list_padding
+            + more_width
+            + px(10.)
+            + small_chars(theme, word_chars)
+            + px(16.);
+        if let Some((_, width)) = &handled {
+            right += *width + px(16.);
+        }
+        if view.display == ViewDisplay::Downtimes {
+            right += super::view_controls::mode_width(theme) + px(10.);
+        }
+        if view.display == ViewDisplay::EventStream {
+            right += px(6. + 6.) + small_chars(theme, "live".len());
+        }
+        // The chips drop their words where they don't fit beside the name.
+        let narrow = thread.is_some_and(|thread| {
+            left + right + super::view_controls::chips_width(thread.kind, false, theme) > self.width
         });
-        let live = (view.display == ViewDisplay::EventStream).then(|| {
-            let connected = state.connection().is_connected() && !state.rows_settling();
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(6.))
-                .text_color(colors.text_faint)
-                .when(!connected, gpui::Styled::invisible)
-                .child(StateDot::new(CheckableState::Service(ServiceState::Ok)).size(px(6.)))
-                .child("live")
-        });
-        let sort: AnyElement = match view.display {
-            ViewDisplay::List | ViewDisplay::GroupedList => {
-                self.sort_trigger(reference, view, HeaderMenu::ViewSort(index), cx)
-            }
-            ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => {
-                self.group_order_trigger(view, index, cx)
-            }
-            ViewDisplay::EventStream => div()
-                .min_w_0()
-                .truncate()
-                .text_color(colors.text_muted)
-                .child("newest first")
-                .into_any_element(),
+        let middle_width = match (view.display, thread) {
+            (ViewDisplay::EventStream, _)
+            | (ViewDisplay::Handling | ViewDisplay::Downtimes, None) => px(0.),
+            (_, Some(thread)) => super::view_controls::chips_width(thread.kind, narrow, theme),
+            _ => super::view_controls::counts_width(theme),
         };
-        // The sort sits right-aligned in a slot sized for its kind's
-        // longest label, so a new sort moves nothing; in a tight header it
-        // gives way down to its word once the filter is gone.
-        let sort_chars = sort_slot_chars(view.display);
-        let word_chars = match view.display {
-            ViewDisplay::List | ViewDisplay::GroupedList => {
-                sort_label(view.sort, view.object_kind).chars().count()
-            }
-            ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => match view.groups.order {
-                ic_config::GroupOrder::WorstFirst => "worst first".len(),
-                ic_config::GroupOrder::Name => "name ↑".chars().count(),
-            },
-            ViewDisplay::EventStream => "newest first".len(),
+        let middle: Option<AnyElement> = match (view.display, thread) {
+            (ViewDisplay::EventStream, _) => Some(self.live_marker(cx)),
+            (_, Some(thread)) => Some(Self::render_thread_chips(
+                reference, view, thread, narrow, cx,
+            )),
+            (ViewDisplay::Handling | ViewDisplay::Downtimes, None) => None,
+            _ => Some(Self::render_counts(
+                reference,
+                view,
+                &page_view.counts,
+                empty,
+                cx,
+            )),
         };
-        // An empty view keeps the slot but not the word (4a): there is
-        // nothing to sort.
-        let empty = page_view.state == ViewState::Empty;
-        let sort = div()
-            .flex()
-            // Gives way (down to its word) long before the name does.
-            .flex_shrink(1_000.)
-            .justify_end()
-            .w(small_chars(theme, sort_chars))
-            .min_w(small_chars(theme, word_chars.min(sort_chars)))
-            .when(!empty, |slot| slot.child(sort));
+        let mode_switch = (view.display == ViewDisplay::Downtimes)
+            .then(|| Self::render_mode_switch(reference, view, true, cx));
         let more = self.view_options_trigger(reference, view, index, page_view.collapsed, cx);
         // The filter summary shows only where a few of its characters fit
         // beside the rest (the header's text is monospaced); else it is
         // left out, never cut to a lone `…` (4b).
-        let rest = {
-            let mut parts = 5; // chevron, icon, name, sort, `···`
-            #[expect(clippy::cast_precision_loss, reason = "a short name")]
-            let name_width = (theme.text.row * (ic_ui_kit::CHAR_WIDTH * name_chars as f32)).ceil();
-            let mut width = px(14.)
-                + theme.metrics.list_padding
-                + px(12.)
-                + px(13.)
-                + name_width
-                + small_chars(theme, sort_chars)
-                + (px(13.) * ic_ui_kit::CHAR_WIDTH * 3.).ceil();
-            match page_view.state {
-                ViewState::Empty => {
-                    parts += 1;
-                    width += small_chars(theme, "nothing to show".len());
-                }
-                ViewState::Ready if view.display != ViewDisplay::EventStream => {
-                    let items = header_counts(&page_view.counts, view.object_kind, view.is_list());
-                    if !items.is_empty() {
-                        parts += 1;
-                        for (position, (_, count)) in items.iter().enumerate() {
-                            width += px(7. + 6.) + small_chars(theme, count.to_string().len());
-                            if position > 0 {
-                                width += px(12.);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            if view.is_list() {
-                parts += 1;
-                width += handled_slot_width(theme);
-            }
-            if view.display == ViewDisplay::EventStream {
-                parts += 1;
-                width += px(12.) + small_chars(theme, "live".len());
-            }
-            #[expect(clippy::cast_precision_loss, reason = "a handful of parts")]
-            let gaps = px(10.) * parts as f32;
-            width + gaps
-        };
-        let filter = (self.width - rest >= small_chars(theme, FILTER_MIN_CHARS)).then(|| {
+        let filter = (self.width - left - right - middle_width
+            >= small_chars(theme, FILTER_MIN_CHARS))
+        .then(|| {
             div()
                 .flex_1()
                 .min_w_0()
@@ -868,9 +1152,17 @@ impl DashboardView {
                 .text_color(colors.text_faint)
                 .child(filter_summary(view))
         });
-        // Without the filter, a spacer keeps the counts and the rest at the
-        // right.
+        // Without the filter, a spacer keeps the right side at the right.
         let spacer = filter.is_none().then(|| div().flex_1().min_w_0());
+        let right_side = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .children(handled.map(|(slot, _)| div().flex_none().mr(px(16.)).child(slot)))
+            .children(mode_switch.map(|switch| div().flex_none().mr(px(10.)).child(switch)))
+            .children(middle)
+            .child(div().flex().flex_none().ml(px(16.)).child(sort))
+            .child(div().flex_none().ml(px(10.)).child(more));
         let sort_menu = self.view_sort_menu(reference, view, index, cx);
         let click_stop = stop.clone();
         div()
@@ -920,11 +1212,7 @@ impl DashboardView {
             .child(name)
             .children(filter)
             .children(spacer)
-            .children(counts)
-            .children(slot)
-            .children(live)
-            .child(sort)
-            .child(more)
+            .child(right_side)
             // A view's sort menu hangs from the header's right edge (4b).
             .children(sort_menu.map(|menu| Popover::new(menu).align_right().gap(px(0.))))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
@@ -935,10 +1223,13 @@ impl DashboardView {
 
     /// A grid's or tiles' group order (`worst first`, `name ↑`); its menu
     /// hangs from the header ([`Self::view_sort_menu`]).
-    fn group_order_trigger(&self, view: &View, index: usize, cx: &Context<Self>) -> AnyElement {
+    fn group_order_trigger(&self, view: &View, menu: HeaderMenu, cx: &Context<Self>) -> AnyElement {
         use ic_config::GroupOrder;
-        let menu = HeaderMenu::ViewSort(index);
         let open = self.menus.open() == Some(menu);
+        let id = match menu {
+            HeaderMenu::ViewSort(index) => SharedString::from(format!("view-sort-{index}")),
+            _ => SharedString::from("sort-trigger"),
+        };
         let label = match view.groups.order {
             GroupOrder::WorstFirst => "worst first",
             GroupOrder::Name => "name ↑",
@@ -946,13 +1237,7 @@ impl DashboardView {
         div()
             .flex_none()
             .min_w_0()
-            .child(sort_word(
-                SharedString::from(format!("view-sort-{index}")),
-                label,
-                open,
-                menu,
-                cx,
-            ))
+            .child(sort_word(id, label, open, menu, cx))
             .into_any_element()
     }
 
@@ -982,13 +1267,7 @@ impl DashboardView {
             .on_dismiss(Self::dismiss_listener(cx))
     }
 
-    /// A view header's `···`: a list's grouping and handled toggle (a
-    /// grid's hosts as squares or cells), copy the filter, then collapse
-    /// and *edit view*, which opens the editor with the view selected.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one menu, its items in order (fewer in the editor's preview)"
-    )]
+    /// A view header's `···` ([`Self::view_menu`]).
     fn view_options_trigger(
         &self,
         reference: &DashboardRef,
@@ -1010,92 +1289,7 @@ impl DashboardView {
                 this.menus.toggle(menu, down_position(event));
                 cx.notify();
             }));
-        let content = open.then(|| {
-            let defaults = self.state.read(cx).handled_defaults();
-            let fold_id = super::page::Id::from(view.id.as_str());
-            let preview = self.is_preview();
-            let base = if view.is_list() {
-                Self::options_menu(reference, view, defaults, true, cx)
-            } else {
-                let filter = view.filter.clone();
-                let menu = Menu::new("options-menu");
-                // A grid's hosts as squares (the default) or labelled
-                // cells (5d), switched in place.
-                let menu = if view.display == ic_config::ViewDisplay::HostGroupGrid {
-                    use ic_config::GridCells;
-                    let cells = |id: &'static str, label: &'static str, choice: GridCells| {
-                        let reference = reference.clone();
-                        let view_id = view.id.clone();
-                        MenuItem::new(id, label)
-                            .checked(view.grid.cells == choice)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.menus.close();
-                                this.change_view(
-                                    &reference,
-                                    &view_id,
-                                    move |view| view.grid.cells = choice,
-                                    cx,
-                                );
-                                cx.notify();
-                            }))
-                    };
-                    menu.label("hosts as")
-                        .item(cells("hosts-squares", "squares", GridCells::Squares))
-                        .item(cells(
-                            "hosts-cells",
-                            "labelled cells",
-                            GridCells::LabelledCells,
-                        ))
-                        .separator()
-                } else {
-                    menu
-                };
-                menu.item(
-                    MenuItem::new("copy-filter", "copy filter expression")
-                        .disabled(filter.trim().is_empty())
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.menus.close();
-                            cx.write_to_clipboard(ClipboardItem::new_string(filter.clone()));
-                            cx.notify();
-                        })),
-                )
-                .on_dismiss(Self::dismiss_listener(cx))
-            };
-            let edit = (reference.clone(), view.id.clone());
-            let reference = reference.clone();
-            let menu = base.separator().item(
-                MenuItem::new(
-                    "fold-view",
-                    if collapsed {
-                        "expand view"
-                    } else {
-                        "collapse view"
-                    },
-                )
-                .key_hint(if collapsed { "→" } else { "←" })
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.menus.close();
-                    this.fold_view(&reference, &fold_id, !collapsed, cx);
-                })),
-            );
-            // The editor's preview is the editor already.
-            if preview {
-                menu
-            } else {
-                menu.item(
-                    MenuItem::new("edit-view", "edit view").on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.menus.close();
-                            cx.emit(super::DashboardEvent::EditView(
-                                edit.0.clone(),
-                                edit.1.clone(),
-                            ));
-                            cx.notify();
-                        },
-                    )),
-                )
-            }
-        });
+        let content = open.then(|| self.view_menu(reference, view, Some((index, collapsed)), cx));
         div()
             .relative()
             .flex_none()
@@ -1112,7 +1306,7 @@ impl DashboardView {
 /// A sort's word in a header (`severity ↓`, `worst first`): muted text,
 /// drawn pressed (the selected glyph's background, as an open `···`) while
 /// its menu is open; a click opens or closes `menu`.
-fn sort_word(
+pub(super) fn sort_word(
     id: SharedString,
     label: impl Into<SharedString>,
     open: bool,
@@ -1153,21 +1347,8 @@ fn sort_word(
         }))
 }
 
-/// The view header's sort slot, in characters: sized for the kind's
-/// longest sort label (`views.js` `SORT_CH`: a list's `last state change
-/// ↓`, a stream's `newest first`, a grid's or tiles' `worst first`), so a
-/// new sort changes only the word, right-aligned in it.
-pub(crate) fn sort_slot_chars(display: ic_config::ViewDisplay) -> usize {
-    use ic_config::ViewDisplay;
-    match display {
-        ViewDisplay::List | ViewDisplay::GroupedList => 19,
-        ViewDisplay::EventStream => 12,
-        ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => 11,
-    }
-}
-
 /// The width of `chars` characters of the header's small text.
-fn small_chars(theme: &ic_ui_kit::Theme, chars: usize) -> Pixels {
+pub(super) fn small_chars(theme: &ic_ui_kit::Theme, chars: usize) -> Pixels {
     #[expect(clippy::cast_precision_loss, reason = "a short slot")]
     let chars = chars as f32;
     (theme.text.small * (chars * ic_ui_kit::CHAR_WIDTH)).ceil()
@@ -1210,6 +1391,8 @@ pub(crate) fn display_icon(display: ic_config::ViewDisplay) -> IconName {
         ViewDisplay::HostGroupGrid => IconName::LayoutGrid,
         ViewDisplay::SummaryTiles => IconName::ChartBar,
         ViewDisplay::EventStream => IconName::Activity,
+        ViewDisplay::Handling => IconName::Users,
+        ViewDisplay::Downtimes => IconName::CalendarClock,
     }
 }
 
@@ -1244,25 +1427,14 @@ pub(crate) fn filter_summary(view: &View) -> String {
         )),
         ViewDisplay::SummaryTiles => with_filter(groups()),
         ViewDisplay::EventStream if filter.is_empty() => "every host and service".to_owned(),
+        ViewDisplay::Handling | ViewDisplay::Downtimes if filter.is_empty() => {
+            "every object".to_owned()
+        }
         ViewDisplay::List | ViewDisplay::GroupedList if filter.is_empty() => {
             view_label(view).to_owned()
         }
         _ => filter.to_owned(),
     }
-}
-
-/// A view header's counts: the unhandled problems as dots in their
-/// colours ([`problem_dots`]); a list without any counts what it lists
-/// (OK, pending), as the summary bar does.
-fn header_counts(summary: &Summary, kind: ObjectKind, list: bool) -> Vec<(CheckableState, u32)> {
-    let problems = problem_dots(summary);
-    if !problems.is_empty() || !list {
-        return problems;
-    }
-    summary_items(summary, kind)
-        .into_iter()
-        .map(|(state, count, _)| (state, count))
-        .collect()
 }
 
 /// Problem counts as dots, by colour: red (critical services and down
@@ -1287,6 +1459,31 @@ pub(crate) fn problem_dots(summary: &Summary) -> Vec<(CheckableState, u32)> {
     .into_iter()
     .filter(|(_, count)| *count > 0)
     .collect()
+}
+
+/// The state chip a summary item's state picks (problems only).
+pub(crate) fn state_chip_of(state: CheckableState) -> Option<ic_config::StateChip> {
+    use ic_config::StateChip;
+    match state {
+        CheckableState::Service(ServiceState::Critical) => Some(StateChip::Critical),
+        CheckableState::Service(ServiceState::Warning) => Some(StateChip::Warning),
+        CheckableState::Service(ServiceState::Unknown) => Some(StateChip::Unknown),
+        CheckableState::Host(HostState::Down) => Some(StateChip::Down),
+        CheckableState::Host(HostState::Unreachable) => Some(StateChip::Unreachable),
+        _ => None,
+    }
+}
+
+/// A state chip's state and word.
+pub(crate) fn chip_state(chip: ic_config::StateChip) -> (CheckableState, &'static str) {
+    use ic_config::StateChip;
+    match chip {
+        StateChip::Critical => (CheckableState::Service(ServiceState::Critical), "critical"),
+        StateChip::Warning => (CheckableState::Service(ServiceState::Warning), "warning"),
+        StateChip::Unknown => (CheckableState::Service(ServiceState::Unknown), "unknown"),
+        StateChip::Down => (CheckableState::Host(HostState::Down), "down"),
+        StateChip::Unreachable => (CheckableState::Host(HostState::Unreachable), "unreachable"),
+    }
 }
 
 /// The element id of a sort key's menu item.

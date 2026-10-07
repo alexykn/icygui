@@ -14,6 +14,13 @@
 //!   group's header and lines of labelled cells.
 //! - **Summary tiles** are lines of tiles; an **event stream** is one item
 //!   that scrolls its events past its `lines`.
+//! - **Handling** and **downtimes** (topic 14, round 5) are the lines of
+//!   their threads ([`crate::lists::threads`]) over the objects the view's
+//!   filter matches: bands, entries, folds and paging rows, drawn by the
+//!   same parts as the handling and downtimes pages.
+//!
+//! Every list-like view has its rows at its own density (the settings'
+//! unless chosen on the view).
 //!
 //! Collapsing and paging only change what shows: counts, marks and *mark
 //! all* still cover every row of the view.
@@ -29,12 +36,14 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::Pixels;
-use ic_config::{GridCells, GroupBy, GroupSource, ObjectKind, View, ViewDisplay};
+use ic_config::{GridCells, GroupBy, GroupSource, ObjectKind, RowDensity, View, ViewDisplay};
 use ic_core::LogEntry;
 use ic_core::snapshot::{DashboardResult, DashboardRow, Grid, Snapshot, Summary, Tile};
-use ic_model::{CheckableState, Host, HostName, HostState, ObjectKey, ServiceState};
+use ic_model::{CheckableState, Host, HostName, HostState, ObjectKey, ServiceState, Timestamp};
 use ic_ui_kit::{Density, Metrics, ObjectMark, Theme, px};
 
+use crate::lists::model::{ListKind, Mode, Options};
+use crate::lists::threads::{self, ItemKey, Listing};
 use crate::paging;
 
 /// A view's or a group's id on the page.
@@ -118,8 +127,9 @@ impl Sizes {
 }
 
 /// What the user folded on a page: views and groups collapsed, hosts
-/// expanded past their seven rows. Kept while the app runs; a view starts
-/// as its settings say (*collapse by default*).
+/// expanded past their seven rows, a handling or downtimes view's threads.
+/// Kept while the app runs; a view starts as its settings say (*collapse
+/// by default*).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Folds {
     /// Views collapsed (`true`) or expanded against their default.
@@ -128,9 +138,22 @@ pub(crate) struct Folds {
     groups: HashSet<(Id, Id)>,
     /// Hosts showing every service, by view and group.
     expanded: HashSet<(Id, Id)>,
+    /// A handling or downtimes view's folded objects, open folds and
+    /// paged threads, by view.
+    threads: HashMap<Id, threads::Folds>,
 }
 
 impl Folds {
+    /// The folds of handling or downtimes view `view`.
+    pub(crate) fn threads(&self, view: &str) -> threads::Folds {
+        self.threads.get(view).cloned().unwrap_or_default()
+    }
+
+    /// Changes the folds of handling or downtimes view `view`.
+    pub(crate) fn threads_mut(&mut self, view: &Id) -> &mut threads::Folds {
+        self.threads.entry(view.clone()).or_default()
+    }
+
     /// Whether `view` shows only its header.
     pub(crate) fn view_collapsed(&self, view: &View) -> bool {
         self.views
@@ -265,8 +288,66 @@ pub(crate) struct PageInput<'a> {
     pub(crate) denied: [bool; 2],
     /// The page's width (grids and tiles lay out to it).
     pub(crate) width: Pixels,
-    /// Item heights.
+    /// Item heights at the settings' row density.
     pub(crate) sizes: Sizes,
+    /// Item heights at either density (a view may choose its own).
+    pub(crate) by_density: Densities,
+    /// The settings' row density.
+    pub(crate) density: RowDensity,
+    /// What handling and downtimes views need: the environment's author
+    /// (*only mine*) and the clock.
+    pub(crate) author: &'a str,
+    pub(crate) now: Timestamp,
+}
+
+/// Item heights at each row density: the page's, and the threads' lines.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Densities {
+    /// Comfortable rows.
+    pub(crate) comfortable: Sizes,
+    /// Compact rows.
+    pub(crate) compact: Sizes,
+    /// The threads' lines, comfortable.
+    pub(crate) lines_comfortable: Option<crate::lists::draw::Sizes>,
+    /// The threads' lines, compact.
+    pub(crate) lines_compact: Option<crate::lists::draw::Sizes>,
+}
+
+impl Densities {
+    /// The sizes in `theme` at both densities.
+    pub(crate) fn of(theme: &Theme) -> Self {
+        let comfortable = theme.with_density(Density::Comfortable);
+        let compact = theme.with_density(Density::Compact);
+        Self {
+            comfortable: Sizes::of(&comfortable),
+            compact: Sizes::of(&compact),
+            lines_comfortable: Some(crate::lists::draw::Sizes::of(&comfortable)),
+            lines_compact: Some(crate::lists::draw::Sizes::of(&compact)),
+        }
+    }
+}
+
+impl PageInput<'_> {
+    /// The density `view`'s rows have: its own, else the settings'.
+    pub(crate) fn density_of(&self, view: &View) -> RowDensity {
+        view.density.unwrap_or(self.density)
+    }
+
+    /// Item heights for `view` (its rows at its density).
+    fn sizes_of(&self, view: &View) -> Sizes {
+        match self.density_of(view) {
+            RowDensity::Comfortable => self.by_density.comfortable,
+            RowDensity::Compact => self.by_density.compact,
+        }
+    }
+
+    /// A handling or downtimes view's line heights.
+    fn line_sizes_of(&self, view: &View) -> Option<crate::lists::draw::Sizes> {
+        match self.density_of(view) {
+            RowDensity::Comfortable => self.by_density.lines_comfortable,
+            RowDensity::Compact => self.by_density.lines_compact,
+        }
+    }
 }
 
 /// One item of the page.
@@ -298,6 +379,8 @@ pub(crate) enum ItemKind {
     Tiles { line: usize },
     /// An event stream's events.
     Stream,
+    /// A line of a handling or downtimes view ([`ThreadPage`]).
+    Thread { line: usize },
 }
 
 /// Where the keyboard cursor can be, by identity, so it stays on the same
@@ -321,6 +404,9 @@ pub(crate) enum Stop {
     Cell { view: Id, group: Id, host: HostName },
     /// An event of a stream.
     Event { view: Id, event: EventKey },
+    /// A line of a handling or downtimes view: a band, an entry, a fold,
+    /// a service in it, a paging row.
+    Thread { view: Id, key: ItemKey },
 }
 
 impl Stop {
@@ -332,7 +418,8 @@ impl Stop {
             | Self::Band { view, .. }
             | Self::More { view, .. }
             | Self::Cell { view, .. }
-            | Self::Event { view, .. } => view,
+            | Self::Event { view, .. }
+            | Self::Thread { view, .. } => view,
         }
     }
 
@@ -348,6 +435,15 @@ impl Stop {
                 .and_then(|group| group.host.clone())
                 .map(|name| ObjectKey::Host { name }),
             Self::Event { event, .. } => Some(event.object.clone()),
+            Self::Thread { key, .. } => match key {
+                ItemKey::Band(object) | ItemKey::Service(_, object) => Some(object.clone()),
+                ItemKey::Entry(_) => page
+                    .view_by_id(self.view())
+                    .and_then(|view| view.thread.as_ref())
+                    .and_then(|thread| thread.entry(key))
+                    .map(|entry| entry.object.clone()),
+                ItemKey::Fold(_) | ItemKey::More(_) => None,
+            },
             Self::Header(_) | Self::More { .. } => None,
         }
     }
@@ -425,6 +521,38 @@ pub(crate) struct ViewPage {
     pub(crate) counts: Summary,
     /// Its items on the page.
     pub(crate) items: Range<usize>,
+    /// The density its rows have.
+    pub(crate) density: RowDensity,
+    /// A handling or downtimes view's lines.
+    pub(crate) thread: Option<ThreadPage>,
+}
+
+/// A handling or downtimes view on the page: its threads as built for the
+/// objects its filter matches.
+#[derive(Clone, Debug)]
+pub(crate) struct ThreadPage {
+    /// Handling or downtimes.
+    pub(crate) kind: ListKind,
+    /// The choices it was built with.
+    pub(crate) options: Options,
+    /// Timeline or list (handling: list).
+    pub(crate) mode: Mode,
+    /// The lines and counts.
+    pub(crate) listing: Listing,
+}
+
+impl ThreadPage {
+    /// The entry with this key.
+    pub(crate) fn entry(&self, key: &ItemKey) -> Option<&threads::Entry> {
+        let ItemKey::Entry(wanted) = key else {
+            return None;
+        };
+        self.listing
+            .lines
+            .iter()
+            .filter_map(|keyed| keyed.line.entry())
+            .find(|entry| entry.key == *wanted)
+    }
 }
 
 impl ViewPage {
@@ -821,8 +949,10 @@ impl Page {
         let result = input.result.and_then(|result| result.view(&view.id));
         // What the view reads: a grid its hosts (a host's services only
         // colour its square), a stream the local event log.
+        // Handling and downtimes read acknowledgements, downtimes and
+        // comments (a missing permission says so in the view).
         let denied = match view.display {
-            ViewDisplay::EventStream => false,
+            ViewDisplay::EventStream | ViewDisplay::Handling | ViewDisplay::Downtimes => false,
             ViewDisplay::HostGroupGrid => input.denied[1],
             _ => match view.object_kind {
                 ObjectKind::Services => input.denied[0],
@@ -855,6 +985,8 @@ impl Page {
             lines: 0,
             counts: result.map(|result| result.counts).unwrap_or_default(),
             items: first..first,
+            density: input.density_of(view),
+            thread: None,
         };
         if input.multi {
             let item = self.push(view_index, ItemKind::Header, sizes.header);
@@ -881,6 +1013,9 @@ impl Page {
                     }
                     ViewBody::Stream(events) => {
                         self.add_stream(input, view, view_index, &mut page, events, collapsed);
+                    }
+                    ViewBody::Members(members) => {
+                        self.add_threads(input, view, view_index, &mut page, members, collapsed);
                     }
                 }
             }
@@ -914,6 +1049,7 @@ impl Page {
             grouping => grouping,
         };
         let collapsed = page.collapsed;
+        let row_height = input.sizes_of(view).row;
         if grouping == GroupBy::None {
             if collapsed {
                 return;
@@ -928,7 +1064,7 @@ impl Page {
                             row: index,
                             group: None,
                         },
-                        input.sizes.row,
+                        row_height,
                     );
                     self.stop(
                         Stop::Row {
@@ -969,7 +1105,7 @@ impl Page {
                         row,
                         group: Some(index),
                     },
-                    sizes.row,
+                    row_height,
                 );
                 self.stop(
                     Stop::Row {
@@ -1127,6 +1263,76 @@ impl Page {
         }
     }
 
+    /// A handling or downtimes view's body: its threads over the objects
+    /// its filter matches, a line per item, every keyed line a stop.
+    fn add_threads(
+        &mut self,
+        input: &PageInput<'_>,
+        view: &View,
+        view_index: usize,
+        page: &mut ViewPage,
+        members: &Arc<std::collections::BTreeSet<ObjectKey>>,
+        collapsed: bool,
+    ) {
+        let Some(kind) = ListKind::of_display(view.display) else {
+            return;
+        };
+        let Some(sizes) = input.line_sizes_of(view) else {
+            return;
+        };
+        let options = Options::of_view(kind, view.threads);
+        let mode = match kind {
+            ListKind::Handling => Mode::List,
+            ListKind::Downtimes => options.mode,
+        };
+        // The page's group filter narrows the objects too.
+        let filtered: Option<std::collections::BTreeSet<ObjectKey>> = input.filter.map(|filter| {
+            members
+                .iter()
+                .filter(|key| filter.includes_object(input.snapshot, key))
+                .cloned()
+                .collect()
+        });
+        let scope = threads::Scope::Members(filtered.as_ref().unwrap_or(members));
+        let listing = threads::build(
+            kind,
+            input.snapshot,
+            scope,
+            input.author,
+            &options,
+            &input.folds.threads(&view.id),
+            input.now,
+        );
+        if listing.lines.is_empty() {
+            // Nothing being handled here: the header says so.
+            page.state = ViewState::Empty;
+        }
+        if !collapsed {
+            for (line, keyed) in listing.lines.iter().enumerate() {
+                let item = self.push(
+                    view_index,
+                    ItemKind::Thread { line },
+                    sizes.height(&keyed.line, mode),
+                );
+                if let Some(key) = &keyed.key {
+                    self.stop(
+                        Stop::Thread {
+                            view: page.id.clone(),
+                            key: key.clone(),
+                        },
+                        item,
+                    );
+                }
+            }
+        }
+        page.thread = Some(ThreadPage {
+            kind,
+            options,
+            mode,
+            listing,
+        });
+    }
+
     fn add_stream(
         &mut self,
         input: &PageInput<'_>,
@@ -1159,7 +1365,7 @@ impl Page {
             return;
         }
         #[expect(clippy::cast_precision_loss, reason = "at most 200 lines")]
-        let height = input.sizes.event * lines as f32;
+        let height = input.sizes_of(view).event * lines as f32;
         let item = self.push(view_index, ItemKind::Stream, height);
         page.event_stops = self.stops.len();
         let mut seen: HashMap<(u64, ObjectKey, ic_core::LogKind), u32> = HashMap::new();
@@ -1597,6 +1803,10 @@ mod tests {
             denied: [false, false],
             width: px(1140.),
             sizes: sizes(),
+            by_density: Densities::of(&Theme::dark()),
+            density: RowDensity::Comfortable,
+            author: "",
+            now: Timestamp::from_unix_seconds(0.),
         })
     }
 
@@ -1609,6 +1819,7 @@ mod tests {
                 ItemKind::Row { row, .. } => format!("row {row}"),
                 ItemKind::Band { group } => format!("band {group}"),
                 ItemKind::More { group } => format!("more {group}"),
+                ItemKind::Thread { line } => format!("thread {line}"),
                 ItemKind::Grid { line } => format!("grid {line}"),
                 ItemKind::Tiles { line } => format!("tiles {line}"),
                 ItemKind::Stream => "stream".to_owned(),
@@ -1887,6 +2098,10 @@ mod tests {
             denied: [false, false],
             width: px(1140.),
             sizes: sizes(),
+            by_density: Densities::of(&Theme::dark()),
+            density: RowDensity::Comfortable,
+            author: "",
+            now: Timestamp::from_unix_seconds(0.),
         });
         assert_eq!(kinds(&page), ["header", "row 2", "row 3"]);
         assert_eq!(page.views[0].counts.critical, 1);
@@ -1919,6 +2134,10 @@ mod tests {
             denied,
             width: px(1140.),
             sizes: sizes(),
+            by_density: Densities::of(&Theme::dark()),
+            density: RowDensity::Comfortable,
+            author: "",
+            now: Timestamp::from_unix_seconds(0.),
         })
     }
 

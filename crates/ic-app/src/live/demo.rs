@@ -880,7 +880,7 @@ const GROUPS: &[(&str, &[Spec])] = &[
 ];
 
 fn groups() -> Vec<DashboardGroup> {
-    GROUPS
+    let mut groups: Vec<DashboardGroup> = GROUPS
         .iter()
         .map(|(name, dashboards)| {
             let group_id = format!("demo-{}", slug(name));
@@ -910,12 +910,98 @@ fn groups() -> Vec<DashboardGroup> {
                             id,
                             name: spec.name.to_owned(),
                             notifications: ScopeSetting::Inherit,
+                            mark: match spec.name {
+                                // A chosen icon instead of the state's dot.
+                                "network" => ic_config::SidebarMark::Icon("network".to_owned()),
+                                _ => ic_config::SidebarMark::Auto,
+                            },
                         }
                     })
                     .collect(),
             }
         })
-        .collect()
+        .collect();
+    groups.insert(1, dba_group());
+    groups
+}
+
+/// The database team's folder (topic 14, round 5): their problems,
+/// handling and downtimes stacked on one dashboard (rows compact on the
+/// problems, the downtimes as a timeline), and a full page of each. The
+/// handling page's mark is a chosen icon, the downtimes page's its kind's.
+fn dba_group() -> DashboardGroup {
+    use ic_config::{DowntimesMode, RowDensity, ThreadChip, ThreadOptions};
+    let group_id = "demo-dba".to_owned();
+    let team = format!("host.vars.role in {DB_ROLES}");
+    let view = |dashboard: &str, index: usize, view: View| View {
+        id: format!("{group_id}-{dashboard}-view-{index}"),
+        ..view
+    };
+    let dashboard = |name: &str, mark: ic_config::SidebarMark, views: Vec<View>| {
+        let id = format!("{group_id}-{}", slug(name));
+        Dashboard {
+            views: views
+                .into_iter()
+                .enumerate()
+                .map(|(index, one)| view(&slug(name), index, one))
+                .collect(),
+            id,
+            name: name.to_owned(),
+            notifications: ScopeSetting::Inherit,
+            mark,
+        }
+    };
+    let problems = View {
+        name: "problems".to_owned(),
+        filter: format!("{team} && service.problem"),
+        density: Some(RowDensity::Compact),
+        ..View::default()
+    };
+    let handling = View {
+        name: "handling".to_owned(),
+        display: ViewDisplay::Handling,
+        filter: team.clone(),
+        ..View::default()
+    };
+    let downtimes = View {
+        name: "downtimes".to_owned(),
+        display: ViewDisplay::Downtimes,
+        filter: team.clone(),
+        threads: ThreadOptions {
+            mode: DowntimesMode::Timeline,
+            ..ThreadOptions::default()
+        },
+        ..View::default()
+    };
+    DashboardGroup {
+        id: group_id.clone(),
+        name: "dba".to_owned(),
+        collapsed: false,
+        notifications: ScopeSetting::Inherit,
+        dashboards: vec![
+            dashboard(
+                "dba",
+                ic_config::SidebarMark::Auto,
+                vec![problems, handling.clone(), downtimes.clone()],
+            ),
+            dashboard(
+                "dba handling",
+                ic_config::SidebarMark::Icon("users".to_owned()),
+                vec![View {
+                    threads: ThreadOptions {
+                        chip: ThreadChip::All,
+                        ..ThreadOptions::default()
+                    },
+                    ..handling
+                }],
+            ),
+            dashboard(
+                "dba downtimes",
+                ic_config::SidebarMark::Auto,
+                vec![downtimes],
+            ),
+        ],
+    }
 }
 
 /// `host problems` → `host-problems`.
@@ -945,7 +1031,7 @@ mod tests {
             .iter()
             .map(|group| group.name.as_str())
             .collect();
-        assert_eq!(names, ["overview", "platform", "lab"]);
+        assert_eq!(names, ["overview", "dba", "platform", "lab"]);
         let mut ids = HashSet::new();
         for environment in &config.environments {
             for group in &environment.groups {

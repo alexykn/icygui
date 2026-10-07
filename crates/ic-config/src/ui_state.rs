@@ -48,7 +48,14 @@ pub struct UiState {
     pub window: Option<WindowState>,
     /// Per environment, by environment id.
     pub environments: BTreeMap<String, EnvironmentUiState>,
+    /// The icons chosen last as sidebar marks, newest first (the icon
+    /// picker's *recent* row; at most [`MAX_RECENT_ICONS`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_icons: Vec<String>,
 }
+
+/// The icon picker's *recent* row holds this many icons.
+pub const MAX_RECENT_ICONS: usize = 8;
 
 impl Default for UiState {
     fn default() -> Self {
@@ -56,6 +63,7 @@ impl Default for UiState {
             version: UI_STATE_VERSION,
             window: None,
             environments: BTreeMap::new(),
+            recent_icons: Vec::new(),
         }
     }
 }
@@ -106,6 +114,22 @@ impl UiState {
                 .retain(|list| !list.trim().is_empty() && seen.insert(list.clone()));
             state.lists.truncate(MAX_TABS);
         }
+        let mut seen = std::collections::BTreeSet::new();
+        self.recent_icons
+            .retain(|icon| !icon.trim().is_empty() && seen.insert(icon.clone()));
+        self.recent_icons.truncate(MAX_RECENT_ICONS);
+    }
+
+    /// Puts `icon` first in the *recent* row (once, keeping at most
+    /// [`MAX_RECENT_ICONS`]). Returns whether the row changed.
+    pub fn remember_icon(&mut self, icon: &str) -> bool {
+        if self.recent_icons.first().is_some_and(|first| first == icon) {
+            return false;
+        }
+        self.recent_icons.retain(|recent| recent != icon);
+        self.recent_icons.insert(0, icon.to_owned());
+        self.recent_icons.truncate(MAX_RECENT_ICONS);
+        true
     }
 }
 
@@ -147,6 +171,9 @@ pub struct ListOptionsState {
     /// The downtimes view's display, by id; none: the timeline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// The rows' density chosen on the view; none: as in the settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub density: Option<crate::RowDensity>,
 }
 
 /// The main window's size and position in logical pixels, as the window
@@ -335,6 +362,7 @@ mod tests {
                         only_mine: true,
                         chip: Some("upcoming".to_owned()),
                         mode: Some("list".to_owned()),
+                        density: Some(crate::RowDensity::Compact),
                     },
                 )]),
             },

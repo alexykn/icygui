@@ -49,12 +49,14 @@ use crate::app_state::{AppState, UserNotice};
 use crate::appearance;
 use crate::background::presence;
 use crate::chrome::{self, Controls, WindowControls, WindowDrag};
+use crate::cluster::ClusterEntry;
 use crate::dashboard::{DashboardEvent, DashboardView};
 use crate::editor::{DashboardEditor, EditorEvent, EditorTarget};
 use crate::environments::{
     CertificateEvent, CertificateReview, EditorMode, EnvironmentEditor, EnvironmentEditorEvent,
 };
 use crate::lists::dialog::RemovalDialog;
+use crate::lists::view::ListSource;
 use crate::lists::{ListKind, RecordList, RecordListEvent};
 use crate::operate::dialog::{ActionDialog, DialogEvent, DialogKind};
 use crate::operate::forms::{self, describe_objects};
@@ -143,7 +145,24 @@ pub(crate) fn bind_keys(cx: &mut App) {
 enum Shown {
     Dashboard(Option<DashboardRef>),
     Tab(ObjectKey),
-    List(ListKind),
+    /// A handling or downtimes page: the cluster section's, or a
+    /// dashboard whose only view is one.
+    List(ListKey),
+    /// The cluster section's events.
+    Events,
+    /// The cluster section's health.
+    Health,
+}
+
+/// Which handling or downtimes page.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ListKey {
+    /// The cluster section's handling or downtimes.
+    Cluster(ListKind),
+    /// A dashboard whose only view is handling or downtimes: the
+    /// dashboard, the view's kind and its id (a changed kind or a
+    /// replaced view is another page).
+    Dashboard(DashboardRef, ListKind, String),
 }
 
 /// An object open as a tab.
@@ -267,9 +286,14 @@ pub(crate) struct Workspace {
     sidebar: Entity<Sidebar>,
     dashboard: Entity<DashboardView>,
     tabs: HashMap<ObjectKey, TabPane>,
-    /// The lists open as tabs (topic 07), each with its own selection,
+    /// The handling and downtimes pages (the cluster section's, and the
+    /// dashboards whose only view is one), each with its own selection,
     /// scroll position and pane.
-    lists: HashMap<ListKind, Held<RecordList>>,
+    lists: HashMap<ListKey, Held<RecordList>>,
+    /// The cluster section's events: the event stream without a filter.
+    events: Entity<DashboardView>,
+    /// The cluster section's health.
+    health: Entity<crate::cluster::HealthPage>,
     editor: Option<OpenEditor>,
     /// Changes of an editor that closed because something else was shown:
     /// editing the same dashboard again continues with them.
@@ -323,6 +347,8 @@ impl Workspace {
         appearance::window_opened(window.appearance(), appearance, cx);
         let sidebar = cx.new(|cx| Sidebar::new(state.clone(), window, cx));
         let dashboard = cx.new(|cx| DashboardView::new(state.clone(), cx));
+        let events = cx.new(|cx| DashboardView::cluster_events(state.clone(), cx));
+        let health = cx.new(|cx| crate::cluster::HealthPage::new(state.clone(), cx));
         // Keyboard shortcuts reach the list through the focus path.
         window.focus(&dashboard.focus_handle(cx), cx);
         let subscriptions = vec![
@@ -362,20 +388,8 @@ impl Workspace {
                     this.on_sidebar(event, window, cx);
                 },
             ),
-            cx.subscribe_in(
-                &dashboard,
-                window,
-                |this, _, event: &DashboardEvent, window, cx| match event {
-                    DashboardEvent::Edit(reference) => {
-                        this.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
-                    }
-                    DashboardEvent::EditView(reference, view_id) => {
-                        this.edit_view(reference, view_id, window, cx);
-                    }
-                    // Only the editor's preview picks and changes views.
-                    DashboardEvent::Pick(_) | DashboardEvent::ChangeView(..) => {}
-                },
-            ),
+            cx.subscribe_in(&events, window, Self::on_dashboard),
+            cx.subscribe_in(&dashboard, window, Self::on_dashboard),
         ];
         let clock = cx.spawn(async move |this, cx| {
             loop {
@@ -407,6 +421,8 @@ impl Workspace {
             dashboard,
             tabs: HashMap::new(),
             lists: HashMap::new(),
+            events,
+            health,
             editor: None,
             kept_draft: None,
             drafts_elsewhere: HashMap::new(),
@@ -428,6 +444,26 @@ impl Workspace {
         };
         workspace.sync_onboarding(window, cx);
         workspace
+    }
+
+    /// The dashboard page (or the cluster's events) asked to edit.
+    fn on_dashboard(
+        &mut self,
+        _: &Entity<DashboardView>,
+        event: &DashboardEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            DashboardEvent::Edit(reference) => {
+                self.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
+            }
+            DashboardEvent::EditView(reference, view_id) => {
+                self.edit_view(reference, view_id, window, cx);
+            }
+            // Only the editor's preview picks and changes views.
+            DashboardEvent::Pick(_) | DashboardEvent::ChangeView(..) => {}
+        }
     }
 
     /// The window came to the front: the keymap and settings files are
@@ -597,7 +633,32 @@ impl Workspace {
     /// The list `kind`'s view, while it is open.
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn list(&self, kind: ListKind) -> Option<&Entity<RecordList>> {
-        self.lists.get(&kind).map(|list| &list.view)
+        self.lists
+            .get(&ListKey::Cluster(kind))
+            .map(|list| &list.view)
+    }
+
+    /// What the main area shows: `dashboard`, `tab`, `list` (handling or
+    /// downtimes), `events` or `health`.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn shown_page(&self) -> &'static str {
+        match self.shown {
+            Shown::Dashboard(_) => "dashboard",
+            Shown::Tab(_) => "tab",
+            Shown::List(_) => "list",
+            Shown::Events => "events",
+            Shown::Health => "health",
+        }
+    }
+
+    /// The page of a dashboard whose only view is handling or downtimes,
+    /// once shown.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn dashboard_list(&self, dashboard: &DashboardRef) -> Option<&Entity<RecordList>> {
+        self.lists.iter().find_map(|(key, list)| match key {
+            ListKey::Dashboard(reference, ..) if reference == dashboard => Some(&list.view),
+            _ => None,
+        })
     }
 
     /// The settings panel, while open.
@@ -657,10 +718,13 @@ impl Workspace {
         {
             tab.view.update(cx, |_, cx| cx.notify());
         }
-        if let Shown::List(kind) = &self.shown
-            && let Some(list) = self.lists.get(kind)
+        if let Shown::List(key) = &self.shown
+            && let Some(list) = self.lists.get(key)
         {
             list.view.update(cx, |_, cx| cx.notify());
+        }
+        if self.shown == Shown::Events {
+            self.events.update(cx, |_, cx| cx.notify());
         }
         cx.notify();
     }
@@ -685,38 +749,41 @@ impl Workspace {
         }
         let state = self.state.read(cx);
         let open: Vec<ObjectKey> = state.tabs().to_vec();
-        let open_lists: Vec<ListKind> = state.lists().to_vec();
-        let shown = match (state.active_tab(), state.active_list()) {
+        let shown = match (state.active_tab(), state.active_cluster()) {
             (Some(key), _) => Shown::Tab(key.clone()),
-            (None, Some(kind)) => Shown::List(kind),
-            (None, None) => Shown::Dashboard(state.selected().cloned()),
+            (None, Some(ClusterEntry::Events)) => Shown::Events,
+            (None, Some(ClusterEntry::Health)) => Shown::Health,
+            (None, Some(entry)) => match entry.list() {
+                Some(kind) => Shown::List(ListKey::Cluster(kind)),
+                None => Shown::Dashboard(state.selected().cloned()),
+            },
+            (None, None) => match state.selected() {
+                Some(reference) => match one_view_list(state, reference) {
+                    Some((kind, view)) => {
+                        Shown::List(ListKey::Dashboard(reference.clone(), kind, view))
+                    }
+                    None => Shown::Dashboard(Some(reference.clone())),
+                },
+                None => Shown::Dashboard(None),
+            },
         };
         let title = title_of(state);
         if title != self.title {
             window.set_window_title(&title);
             self.title = title;
         }
-        self.lists.retain(|kind, _| open_lists.contains(kind));
-        for kind in open_lists {
-            if !self.lists.contains_key(&kind) {
-                let state = self.state.clone();
-                let sidebar_open = self.sidebar_open;
-                let view = cx.new(|cx| {
-                    let mut list = RecordList::new(state, kind, cx);
-                    list.set_sidebar_open(sidebar_open, cx);
-                    list
-                });
-                let events = cx.subscribe_in(
-                    &view,
-                    window,
-                    |this, _, event: &RecordListEvent, window, cx| match event {
-                        RecordListEvent::Remove(removal) => {
-                            this.open_list_removal(removal.clone(), window, cx);
-                        }
-                    },
-                );
-                self.lists.insert(kind, Held::new(view, events));
+        // A dashboard's page goes with the dashboard, its one view or the
+        // view's kind.
+        self.lists.retain(|key, _| match key {
+            ListKey::Cluster(_) => true,
+            ListKey::Dashboard(reference, kind, view) => {
+                one_view_list(state, reference).is_some_and(|(now, id)| now == *kind && id == *view)
             }
+        });
+        if let Shown::List(key) = &shown
+            && !self.lists.contains_key(key)
+        {
+            self.open_list_page(key.clone(), window, cx);
         }
         self.tabs.retain(|key, _| open.contains(key));
         for key in open {
@@ -752,6 +819,43 @@ impl Workspace {
         self.sync_onboarding(window, cx);
         self.pick_up_request(window, cx);
         cx.notify();
+    }
+
+    /// Builds the handling or downtimes page `key`, with its own
+    /// selection, scroll position and pane.
+    fn open_list_page(&mut self, key: ListKey, window: &mut Window, cx: &mut Context<Self>) {
+        let (kind, source) = match &key {
+            ListKey::Cluster(kind) => (*kind, ListSource::Cluster),
+            ListKey::Dashboard(reference, kind, view) => (
+                *kind,
+                ListSource::View {
+                    dashboard: reference.clone(),
+                    view: view.clone(),
+                },
+            ),
+        };
+        let state = self.state.clone();
+        let sidebar_open = self.sidebar_open;
+        let view = cx.new(|cx| {
+            let mut list = RecordList::new(state, kind, source, cx);
+            list.set_sidebar_open(sidebar_open, cx);
+            list
+        });
+        let events = cx.subscribe_in(
+            &view,
+            window,
+            |this, _, event: &RecordListEvent, window, cx| match event {
+                RecordListEvent::Remove(removal) => {
+                    this.open_list_removal(removal.clone(), window, cx);
+                }
+                RecordListEvent::Edit(reference) => {
+                    this.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
+                }
+                // Only the editor's preview changes a draft.
+                RecordListEvent::ChangeView(_) => {}
+            },
+        );
+        self.lists.insert(key, Held::new(view, events));
     }
 
     /// Another environment is active (from the footer, the palette, the
@@ -920,10 +1024,12 @@ impl Workspace {
                     || self.dashboard.focus_handle(cx),
                     |tab| tab.view.focus_handle(cx),
                 ),
-                Shown::List(kind) => self.lists.get(kind).map_or_else(
+                Shown::List(key) => self.lists.get(key).map_or_else(
                     || self.dashboard.focus_handle(cx),
                     |list| list.view.focus_handle(cx),
                 ),
+                Shown::Events => self.events.focus_handle(cx),
+                Shown::Health => self.health.focus_handle(cx),
                 Shown::Dashboard(_) => self.dashboard.focus_handle(cx),
             };
             (handle.clone(), handle)
@@ -988,14 +1094,6 @@ impl Workspace {
     }
 
     fn close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(kind) = self.state.read(cx).active_list() {
-            self.state.update(cx, |state, cx| {
-                if state.close_list(kind) {
-                    cx.notify();
-                }
-            });
-            return;
-        }
         let Some(active) = self.state.read(cx).active_tab().cloned() else {
             cx.propagate();
             return;
@@ -1012,6 +1110,10 @@ impl Workspace {
         let open = self.sidebar_open;
         self.dashboard
             .update(cx, |dashboard, cx| dashboard.set_sidebar_open(open, cx));
+        self.events
+            .update(cx, |events, cx| events.set_sidebar_open(open, cx));
+        self.health
+            .update(cx, |health, cx| health.set_sidebar_open(open, cx));
         for tab in self.tabs.values() {
             tab.view
                 .update(cx, |pane, cx| pane.set_sidebar_open(open, cx));
@@ -1129,15 +1231,18 @@ impl Workspace {
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let targets = match &self.shown {
             Shown::Tab(key) => vec![key.clone()],
-            Shown::List(kind) => self
+            Shown::List(key) => self
                 .lists
-                .get(kind)
+                .get(key)
                 .map(|list| list.view.update(cx, RecordList::action_targets))
                 .unwrap_or_default(),
+            Shown::Events if self.editor.is_none() => {
+                self.events.update(cx, DashboardView::action_targets)
+            }
             Shown::Dashboard(_) if self.editor.is_none() => {
                 self.dashboard.update(cx, DashboardView::action_targets)
             }
-            Shown::Dashboard(_) => Vec::new(),
+            Shown::Dashboard(_) | Shown::Events | Shown::Health => Vec::new(),
         };
         let focus = Focus { targets };
         let state = self.state.clone();
@@ -1174,16 +1279,20 @@ impl Workspace {
             }),
             PaletteCommand::Act(action, targets) if targets.is_empty() => match &self.shown {
                 Shown::Tab(key) => self.request(action, vec![key.clone()], cx),
-                Shown::List(kind) => {
+                Shown::List(key) => {
                     let targets = self
                         .lists
-                        .get(kind)
+                        .get(key)
                         .map(|list| list.view.update(cx, RecordList::action_targets))
                         .unwrap_or_default();
                     if !targets.is_empty() {
                         self.request(action, targets, cx);
                     }
                 }
+                Shown::Events => self
+                    .events
+                    .update(cx, |events, cx| events.run_action(action, cx)),
+                Shown::Health => {}
                 Shown::Dashboard(_) => self
                     .dashboard
                     .update(cx, |dashboard, cx| dashboard.run_action(action, cx)),
@@ -1762,7 +1871,9 @@ impl Workspace {
                 }
             });
             self.sync(window, cx);
-        } else if self.state.read(cx).active_tab().is_some() {
+        } else if self.state.read(cx).active_tab().is_some()
+            || self.state.read(cx).active_cluster().is_some()
+        {
             self.state.update(cx, |state, cx| {
                 if state.show_dashboard() {
                     cx.notify();
@@ -2720,10 +2831,12 @@ impl Render for Workspace {
                     .tabs
                     .get(key)
                     .map(|tab| tab.view.clone().into_any_element()),
-                Shown::List(kind) => self
+                Shown::List(key) => self
                     .lists
-                    .get(kind)
+                    .get(key)
                     .map(|list| list.view.clone().into_any_element()),
+                Shown::Events => Some(self.events.clone().into_any_element()),
+                Shown::Health => Some(self.health.clone().into_any_element()),
                 Shown::Dashboard(_) => None,
             }
             .unwrap_or_else(|| self.dashboard.clone().into_any_element())
@@ -2736,11 +2849,12 @@ impl Render for Workspace {
             && self.onboarding.is_none()
             && match &self.shown {
                 Shown::Dashboard(_) => self.dashboard.read(cx).has_marks(cx),
-                Shown::List(kind) => self
+                Shown::Events => self.events.read(cx).has_marks(cx),
+                Shown::List(key) => self
                     .lists
-                    .get(kind)
+                    .get(key)
                     .is_some_and(|list| list.view.read(cx).has_marks()),
-                Shown::Tab(_) => false,
+                Shown::Tab(_) | Shown::Health => false,
             };
         let toasts = crate::operate::toasts::render(
             &self.state,
@@ -2876,6 +2990,17 @@ fn expand_home(text: &str) -> PathBuf {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => PathBuf::from(text),
     }
+}
+
+/// A dashboard whose only view is handling or downtimes (topic 14, round
+/// 5): its page is that view's ([`RecordList`]); the kind and the view's
+/// id.
+fn one_view_list(state: &AppState, reference: &DashboardRef) -> Option<(ListKind, String)> {
+    let (_, dashboard) = state.dashboard(reference)?;
+    let [view] = dashboard.views.as_slice() else {
+        return None;
+    };
+    Some((ListKind::of_display(view.display)?, view.id.clone()))
 }
 
 /// The window controls and a button to bring the sidebar back, for the main

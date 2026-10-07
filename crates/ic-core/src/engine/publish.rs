@@ -101,13 +101,17 @@ impl Engine {
         } else {
             dashboards::Scope::All
         });
-        // The stream's mode and the objects being updated are news of
-        // their own: such a snapshot goes out even if nothing else changed.
-        let news =
-            std::mem::take(&mut self.updating_changed) | std::mem::take(&mut self.mode_changed);
+        // New events: the snapshot carries them (the cluster section's
+        // events), and the event stream views show them.
+        let new_events = std::mem::take(&mut self.events_changed);
+        // The stream's mode, the objects being updated and new events are
+        // news of their own: such a snapshot goes out even if nothing else
+        // changed.
+        let news = std::mem::take(&mut self.updating_changed)
+            | std::mem::take(&mut self.mode_changed)
+            | new_events;
         let refresh_time = self.time_dependent && self.time_refreshed.elapsed() >= TIME_REFRESH;
-        // New events for the event stream views.
-        let events = std::mem::take(&mut self.events_changed) && dashboards.has_streams();
+        let events = new_events && dashboards.has_streams();
         let mut snapshot = self.store.snapshot(
             0,
             self.ports.clock.now(),
@@ -116,6 +120,7 @@ impl Engine {
         );
         snapshot.quiet = self.stream_quiet();
         snapshot.updating = Arc::clone(&self.updating);
+        snapshot.events = Arc::clone(&self.recent_events);
         let evaluate = reconfigured
             || resumed
             || events

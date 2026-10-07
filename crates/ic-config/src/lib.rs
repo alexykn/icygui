@@ -44,19 +44,21 @@ pub use keymap::{KEYMAP_TEMPLATE, Keymap, KeymapAction, KeymapBinding, parse_key
 pub use merge::merge_edit;
 pub use migrate::migrate;
 pub use model::{
-    ApiUrl, Appearance, AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup, Environment,
-    General, InterfaceSize, ListTimes, LogLevel, MAX_API_URLS, RowDensity, ThemeChoice, TlsConfig,
+    ApiUrl, Appearance, AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup,
+    EffectiveMark, Environment, General, InterfaceSize, ListTimes, LogLevel, MAX_API_URLS,
+    RowDensity, SidebarMark, ThemeChoice, TlsConfig,
 };
 pub use paths::Paths;
 pub use share::{export_groups, import_groups};
 pub use store::ConfigStore;
 pub use ui_state::{
-    EnvironmentUiState, ListOptionsState, MAX_TABS, StateStore, UI_STATE_VERSION, UiState,
-    WindowState,
+    EnvironmentUiState, ListOptionsState, MAX_RECENT_ICONS, MAX_TABS, StateStore, UI_STATE_VERSION,
+    UiState, WindowState,
 };
 pub use validate::{MIN_EVENT_LOG_RETENTION_HOURS, MIN_RECONCILE_INTERVAL_SECS, ValidationIssue};
 pub use view::{
-    GridCells, GridColour, GridOptions, GroupBy, GroupOrder, GroupSource, HandledMode,
-    HandledSetting, HideHandled, MAX_VIEWS, ObjectKind, STREAM_LINES, Sort, SortKey, StreamEvents,
-    StreamOptions, View, ViewDisplay, ViewGroups,
+    DowntimeKinds, DowntimesMode, GridCells, GridColour, GridOptions, GroupBy, GroupOrder,
+    GroupSource, HandledMode, HandledSetting, HideHandled, MAX_VIEWS, ObjectKind, STREAM_LINES,
+    Sort, SortKey, StateChip, StreamEvents, StreamOptions, ThreadChip, ThreadOptions, ThreadSort,
+    View, ViewDisplay, ViewGroups,
 };

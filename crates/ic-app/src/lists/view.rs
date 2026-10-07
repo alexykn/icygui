@@ -1,10 +1,13 @@
-//! The handling and downtimes views of topic 14, as tabs in the sidebar's
-//! *open* section. Laid out like a dashboard: the header (`handling
-//! prod-cluster · the whole environment · 20 objects … only mine  latest
-//! activity ↓  ···`; the downtimes view adds `timeline | list`), the chips
-//! that filter it, the lines (only those on screen are built, so
-//! thousands cost the same as ten), the selection bar while entries are
-//! marked, and the cursor's object in the pane beside it.
+//! The handling and downtimes views of topic 14 as a page: the cluster
+//! section's entries (the whole environment), and a dashboard whose only
+//! view is one of them (the objects its filter matches; topic 14, round
+//! 5), where the view's header is the page's ([`ListSource`]). Laid out
+//! like a dashboard: the header (`handling prod-cluster · the whole
+//! environment · 20 objects … only mine  [rows]  latest activity ↓  ···`;
+//! the downtimes view adds `timeline | list`), the chips that filter it,
+//! the lines (only those on screen are built, so thousands cost the same
+//! as ten), the selection bar while entries are marked, and the cursor's
+//! object in the pane beside it.
 //!
 //! **One grouping pattern**: each object is a slim band; its chevron only
 //! folds it, a click elsewhere on the band opens the object's pane. A
@@ -17,7 +20,7 @@
 //! an acknowledgement that expired shows at once; nothing here asks
 //! Icinga for anything.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -29,11 +32,13 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, point,
     prelude::FluentBuilder as _,
 };
+use ic_config::{RowDensity, View};
 use ic_model::{CheckableState, ObjectKey, Timestamp};
+use ic_rules::DashboardRef;
 use ic_ui_kit::{
-    ActiveTheme as _, Button, Chip as ChipButton, EmptyState, GlyphButton, Icon, IconName, KeyHint,
-    Link, Menu, MenuItem, Metrics, ObjectMark, PaneHeader, Popover, RowEmphasis, Scrollbar,
-    Segmented, StateDot, Switch, Theme, Tooltip, px,
+    ActiveTheme as _, Button, EmptyState, GlyphButton, Icon, IconName, KeyHint, Link, Menu,
+    MenuItem, Metrics, ObjectMark, PaneHeader, Popover, RowEmphasis, Scrollbar, Segmented,
+    StateDot, Switch, Theme, Tooltip, px,
 };
 
 use super::draw::{self, Look, Sizes};
@@ -52,7 +57,7 @@ use crate::app_state::AppState;
 use crate::banner;
 use crate::chrome::{Controls, WindowDrag};
 use crate::dashboard::selection::{ListSelection, SelectableRow as _};
-use crate::dashboard::{HeaderMenu, HeaderMenus, SplitLayout};
+use crate::dashboard::{HeaderMenu, HeaderMenus, SplitLayout, ViewChange};
 use crate::menu_state::down_position;
 use crate::operate::expression;
 use crate::pane::{ObjectPane, PaneEvent, PaneMode};
@@ -115,11 +120,38 @@ pub(crate) fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// What the view asks the workspace to do.
+/// What the view asks the workspace (or the editor's preview) to do.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RecordListEvent {
     /// Ask whether to remove these, listing every target.
     Remove(BulkRemoval),
+    /// Open the editor for this dashboard (its `···`).
+    Edit(DashboardRef),
+    /// The editor's preview: change the draft's view (the header's chip,
+    /// sort, mode, *only mine* or rows).
+    ChangeView(ViewChange),
+}
+
+/// Where a handling or downtimes page's objects and choices come from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ListSource {
+    /// The cluster section's entry: every object of the environment; the
+    /// choices are kept with the environment's UI state.
+    Cluster,
+    /// A dashboard whose only view is this one: the objects its filter
+    /// matches (the core's evaluation); the choices are saved with the
+    /// view.
+    View {
+        /// The dashboard.
+        dashboard: DashboardRef,
+        /// Its view, by id.
+        view: String,
+    },
+    /// The dashboard editor's preview of such a dashboard: the draft's
+    /// view and its evaluation ([`RecordList::set_preview`]); the choices
+    /// change the draft. No header (the editor's carries the controls),
+    /// pane or selection bar.
+    Preview,
 }
 
 /// The pane open beside the view.
@@ -135,6 +167,8 @@ struct OpenPane {
 struct Inputs {
     environment: Option<String>,
     revision: u64,
+    /// The view's members (`None`: every object).
+    members: Option<Arc<BTreeSet<ObjectKey>>>,
     downtimes: Arc<BTreeMap<ObjectKey, Vec<ic_model::Downtime>>>,
     comments: Arc<BTreeMap<ObjectKey, Vec<ic_model::Comment>>>,
     hosts: Arc<BTreeMap<ic_model::HostName, Arc<ic_model::Host>>>,
@@ -150,6 +184,11 @@ impl PartialEq for Inputs {
     fn eq(&self, other: &Self) -> bool {
         self.environment == other.environment
             && self.revision == other.revision
+            && match (&self.members, &other.members) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
             && Arc::ptr_eq(&self.downtimes, &other.downtimes)
             && Arc::ptr_eq(&self.comments, &other.comments)
             && Arc::ptr_eq(&self.hosts, &other.hosts)
@@ -198,6 +237,10 @@ impl Layout {
 pub(crate) struct RecordList {
     state: Entity<AppState>,
     kind: ListKind,
+    source: ListSource,
+    /// The editor's preview: the draft's view and its members, as last
+    /// evaluated (`None` members: not evaluated yet).
+    preview: Option<(View, Option<Arc<BTreeSet<ObjectKey>>>)>,
     focus_handle: FocusHandle,
     folds: Folds,
     built: Option<(Inputs, Listing)>,
@@ -225,11 +268,18 @@ impl Focusable for RecordList {
 }
 
 impl RecordList {
-    pub(crate) fn new(state: Entity<AppState>, kind: ListKind, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        state: Entity<AppState>,
+        kind: ListKind,
+        source: ListSource,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscriptions = vec![cx.observe(&state, |_, _, cx| cx.notify())];
         Self {
             state,
             kind,
+            source,
+            preview: None,
             focus_handle: cx.focus_handle(),
             folds: Folds::default(),
             built: None,
@@ -247,6 +297,11 @@ impl RecordList {
         }
     }
 
+    /// Handling or downtimes.
+    pub(crate) fn kind(&self) -> ListKind {
+        self.kind
+    }
+
     /// Tells the view whether the sidebar is shown (the header then needs
     /// no window controls).
     pub(crate) fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -260,15 +315,129 @@ impl RecordList {
         }
     }
 
-    /// The choices as kept with the environment (*only mine* off where it
-    /// can't apply).
+    /// The editor's preview: shows `view` (the draft's) with `members`,
+    /// its evaluation (`None`: not evaluated yet).
+    pub(crate) fn set_preview(
+        &mut self,
+        view: View,
+        members: Option<Arc<BTreeSet<ObjectKey>>>,
+        cx: &mut Context<Self>,
+    ) {
+        let unchanged = self.preview.as_ref().is_some_and(|(shown, shown_members)| {
+            *shown == view
+                && match (shown_members, &members) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    _ => false,
+                }
+        });
+        if !unchanged {
+            self.preview = Some((view, members));
+            cx.notify();
+        }
+    }
+
+    /// The dashboard view it shows (none for the cluster's entries).
+    fn view_config(&self, cx: &App) -> Option<View> {
+        match &self.source {
+            ListSource::Cluster => None,
+            ListSource::View { dashboard, view } => self
+                .state
+                .read(cx)
+                .dashboard(dashboard)
+                .and_then(|(_, found)| found.view(view))
+                .cloned(),
+            ListSource::Preview => self.preview.as_ref().map(|(view, _)| view.clone()),
+        }
+    }
+
+    /// The objects it covers: `Some(None)` every object (the cluster's),
+    /// `Some(Some(members))` a view's; `None` while a view isn't evaluated
+    /// yet.
+    #[expect(
+        clippy::option_option,
+        reason = "evaluated yet, then every object or a view's members"
+    )]
+    fn members(&self, cx: &App) -> Option<Option<Arc<BTreeSet<ObjectKey>>>> {
+        match &self.source {
+            ListSource::Cluster => Some(None),
+            ListSource::View { dashboard, view } => self
+                .state
+                .read(cx)
+                .view_result(dashboard, view)
+                .and_then(|result| result.members().cloned())
+                .map(Some),
+            ListSource::Preview => self
+                .preview
+                .as_ref()
+                .and_then(|(_, members)| members.clone())
+                .map(Some),
+        }
+    }
+
+    /// The choices: kept with the environment (the cluster's) or the view
+    /// (*only mine* off where it can't apply).
     fn options(&self, cx: &App) -> Options {
         let state = self.state.read(cx);
-        let mut options = Options::saved(self.kind, &state.list_options(self.kind));
+        let mut options = match self.view_config(cx) {
+            Some(view) => Options::of_view(self.kind, view.threads),
+            None => Options::saved(self.kind, &state.list_options(self.kind)),
+        };
         if state.only_mine_denial(self.kind).is_some() {
             options.only_mine = false;
         }
         options
+    }
+
+    /// The density chosen on the view (`None`: as in the settings).
+    fn chosen_density(&self, cx: &App) -> Option<RowDensity> {
+        match self.view_config(cx) {
+            Some(view) => view.density,
+            None => self.state.read(cx).list_options(self.kind).density,
+        }
+    }
+
+    /// The density the rows have.
+    fn density(&self, cx: &App) -> RowDensity {
+        crate::controls::effective(
+            self.chosen_density(cx),
+            self.state.read(cx).appearance().row_density,
+        )
+    }
+
+    /// The theme the lines are drawn with: the app's, at the view's row
+    /// density.
+    fn line_theme(&self, cx: &App) -> Theme {
+        crate::controls::theme_for(cx.theme(), self.density(cx))
+    }
+
+    /// Chooses the rows' density on the view (`None`: follow the
+    /// settings).
+    fn set_density(&mut self, density: Option<RowDensity>, cx: &mut Context<Self>) {
+        self.menus.close();
+        match self.source.clone() {
+            ListSource::Cluster => {
+                let kind = self.kind;
+                self.state.update(cx, |state, _| {
+                    let mut saved = state.list_options(kind);
+                    saved.density = density;
+                    state.set_list_options(kind, saved);
+                });
+            }
+            ListSource::View { dashboard, view } => {
+                self.state.update(cx, |state, cx| {
+                    if state.update_view(&dashboard, &view, |view| view.density = density) {
+                        cx.notify();
+                    }
+                });
+            }
+            ListSource::Preview => {
+                cx.emit(RecordListEvent::ChangeView(ViewChange::new(move |view| {
+                    view.density = density;
+                })));
+            }
+        }
+        cx.notify();
     }
 
     /// The display: the downtimes view's choice, handling's list.
@@ -282,12 +451,43 @@ impl RecordList {
     /// Changes the choices and keeps them with the environment's UI state
     /// (they come back when the view opens again, after a restart too).
     fn set_options(&mut self, change: impl FnOnce(&mut Options), cx: &mut Context<Self>) {
-        let mut options = Options::saved(self.kind, &self.state.read(cx).list_options(self.kind));
-        change(&mut options);
         self.menus.close();
-        let (kind, saved) = (self.kind, options.to_saved(self.kind));
-        self.state
-            .update(cx, |state, _| state.set_list_options(kind, saved));
+        match self.source.clone() {
+            ListSource::Cluster => {
+                let saved = self.state.read(cx).list_options(self.kind);
+                let mut options = Options::saved(self.kind, &saved);
+                change(&mut options);
+                let kind = self.kind;
+                let mut to_save = options.to_saved(kind);
+                to_save.density = saved.density;
+                self.state
+                    .update(cx, |state, _| state.set_list_options(kind, to_save));
+            }
+            ListSource::View { dashboard, view } => {
+                let Some(current) = self.view_config(cx) else {
+                    return;
+                };
+                let mut options = Options::of_view(self.kind, current.threads);
+                change(&mut options);
+                let threads = options.to_view();
+                self.state.update(cx, |state, cx| {
+                    if state.update_view(&dashboard, &view, |view| view.threads = threads) {
+                        cx.notify();
+                    }
+                });
+            }
+            ListSource::Preview => {
+                let Some(current) = self.view_config(cx) else {
+                    return;
+                };
+                let mut options = Options::of_view(self.kind, current.threads);
+                change(&mut options);
+                let threads = options.to_view();
+                cx.emit(RecordListEvent::ChangeView(ViewChange::new(move |view| {
+                    view.threads = threads;
+                })));
+            }
+        }
         cx.notify();
     }
 
@@ -303,9 +503,16 @@ impl RecordList {
             reason = "minutes since 1970 fit in i64"
         )]
         let minute = (now.as_unix_seconds() / 60.).floor() as i64;
+        let Some(members) = self.members(cx) else {
+            // A view not evaluated yet: nothing to show until it is.
+            self.built = None;
+            self.layout = None;
+            return;
+        };
         let inputs = Inputs {
             environment: state.active_environment_id().map(str::to_owned),
             revision: snapshot.revision,
+            members: members.clone(),
             downtimes: Arc::clone(&snapshot.downtimes),
             comments: Arc::clone(&snapshot.comments),
             hosts: Arc::clone(&snapshot.hosts),
@@ -320,9 +527,14 @@ impl RecordList {
             .as_ref()
             .is_none_or(|(built, _)| *built != inputs)
         {
+            let scope = match &members {
+                Some(members) => threads::Scope::Members(members),
+                None => threads::Scope::All,
+            };
             let listing = threads::build(
                 self.kind,
                 snapshot,
+                scope,
                 &inputs.author,
                 &options,
                 &self.folds,
@@ -331,8 +543,9 @@ impl RecordList {
             self.selection.update_rows(&listing.lines);
             self.built = Some((inputs, listing));
         }
-        // The heights follow the theme (density, interface size).
-        let sizes = Sizes::of(cx.theme());
+        // The heights follow the theme (interface size) and the view's
+        // row density.
+        let sizes = Sizes::of(&self.line_theme(cx));
         let mode = self.mode(&options);
         let Some((_, listing)) = &self.built else {
             return;
@@ -944,6 +1157,10 @@ impl RecordList {
 
     /// Opens `object`'s pane beside the view, or shows it in the open one.
     fn open_pane(&mut self, object: ObjectKey, cx: &mut Context<Self>) {
+        // The editor's preview has no pane.
+        if self.source == ListSource::Preview {
+            return;
+        }
         if let Some(pane) = &self.pane {
             pane.view.update(cx, |pane, cx| pane.open(object, cx));
         } else {
@@ -1032,23 +1249,23 @@ impl RecordList {
             .cloned()
             .collect()
     }
+}
 
-    /// The marker of an action on its way for `entry` (`removing
-    /// downtime…`).
-    fn pending(&self, entry: &threads::Entry, cx: &App) -> Option<&'static str> {
-        let (action, label) = self.state.read(cx).pending_action(&entry.object)?;
-        let ours = matches!(
-            (&entry.key, action),
-            (
-                EntryKey::Downtime(_),
-                ObjectAction::RemoveDowntimes
-                    | ObjectAction::RemoveDowntime(_)
-                    | ObjectAction::RemoveNamedDowntimes(_),
-            ) | (EntryKey::Comment(_), ObjectAction::RemoveComments(_))
-                | (EntryKey::Ack(_), ObjectAction::RemoveAcknowledgement)
-        );
-        ours.then_some(label)
-    }
+/// The marker of an action on its way for `entry` (`removing
+/// downtime…`), here and in a dashboard's stacked view.
+pub(crate) fn entry_pending(state: &AppState, entry: &threads::Entry) -> Option<&'static str> {
+    let (action, label) = state.pending_action(&entry.object)?;
+    let ours = matches!(
+        (&entry.key, action),
+        (
+            EntryKey::Downtime(_),
+            ObjectAction::RemoveDowntimes
+                | ObjectAction::RemoveDowntime(_)
+                | ObjectAction::RemoveNamedDowntimes(_),
+        ) | (EntryKey::Comment(_), ObjectAction::RemoveComments(_))
+            | (EntryKey::Ack(_), ObjectAction::RemoveAcknowledgement)
+    );
+    ours.then_some(label)
 }
 
 // --- Rendering ----------------------------------------------------------
@@ -1140,51 +1357,123 @@ impl RecordList {
         let denial = state.only_mine_denial(self.kind);
         let only_mine = options.only_mine && denial.is_none();
         let roomy = list_width >= px(ROOMY_HEADER);
-        let subtitle = if self.pane.is_some() || !roomy {
-            environment
-        } else {
-            let mut parts = vec![environment];
-            parts.push(
-                options
-                    .chip
-                    .scope(self.kind)
-                    .unwrap_or("the whole environment")
-                    .to_owned(),
-            );
-            if only_mine {
-                parts.push(format!("set by {}", state.author()));
+        let count = self.listing().map(|listing| {
+            let summary = &listing.summary;
+            match self.kind {
+                ListKind::Handling => plural(summary.objects, "object", "objects"),
+                ListKind::Downtimes => plural(summary.downtimes, "downtime", "downtimes"),
             }
-            if let Some(listing) = self.listing() {
-                let summary = &listing.summary;
-                parts.push(match self.kind {
-                    ListKind::Handling => plural(summary.objects, "object", "objects"),
-                    ListKind::Downtimes => plural(summary.downtimes, "downtime", "downtimes"),
-                });
+        });
+        let (title, subtitle) = match &self.source {
+            ListSource::View { dashboard, view } => {
+                // The dashboard's name; its group and the view's filter.
+                let found = state.dashboard(dashboard);
+                let title = found.map_or_else(
+                    || self.kind.title().to_owned(),
+                    |(_, found)| found.name.clone(),
+                );
+                let mut parts =
+                    vec![found.map_or_else(String::new, |(group, _)| group.name.clone())];
+                if self.pane.is_none() && roomy {
+                    let filter = found
+                        .and_then(|(_, found)| found.view(view))
+                        .map(|view| view.filter.trim().to_owned())
+                        .unwrap_or_default();
+                    parts.push(if filter.is_empty() {
+                        "every object".to_owned()
+                    } else {
+                        filter
+                    });
+                    if only_mine {
+                        parts.push(format!("set by {}", state.author()));
+                    }
+                    parts.extend(count);
+                }
+                (title, parts.join(" · "))
             }
-            parts.join(" · ")
+            ListSource::Cluster | ListSource::Preview => {
+                let subtitle = if self.pane.is_some() || !roomy {
+                    environment
+                } else {
+                    let mut parts = vec![environment];
+                    parts.push(
+                        options
+                            .chip
+                            .scope(self.kind)
+                            .unwrap_or("the whole environment")
+                            .to_owned(),
+                    );
+                    if only_mine {
+                        parts.push(format!("set by {}", state.author()));
+                    }
+                    parts.extend(count);
+                    parts.join(" · ")
+                };
+                (self.kind.title().to_owned(), subtitle)
+            }
         };
-        let mut header = header.title(self.kind.title()).subtitle(subtitle);
+        let header = header
+            .title(title)
+            .subtitle(subtitle)
+            .children(self.header_controls(list_width, cx));
+        self.drag
+            .attach(div().id("list-header-drag").child(header), controls)
+            .into_any_element()
+    }
+
+    /// The view's controls, as the header shows them (topic 14, round 5:
+    /// one set of controls, in the view's header): the downtimes view's
+    /// `timeline | list`, *only mine* where there is room (else in `···`),
+    /// the rows toggle, the sort and `···`. The editor's header shows the
+    /// same controls for its preview.
+    pub(crate) fn header_controls(
+        &self,
+        list_width: Pixels,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = cx.theme();
+        let state = self.state.read(cx);
+        let options = self.shown_options();
+        let denial = state.only_mine_denial(self.kind);
+        let only_mine = options.only_mine && denial.is_none();
+        let roomy = list_width >= px(ROOMY_HEADER)
+            && self.pane.is_none()
+            && self.source != ListSource::Preview;
+        let mut controls = Vec::new();
         if self.kind == ListKind::Downtimes {
             let selected = match options.mode {
                 Mode::Timeline => 0,
                 Mode::List => 1,
             };
-            header = header.child(
-                div().flex_none().child(
-                    Segmented::new("list-mode")
-                        .option("timeline")
-                        .option("list")
-                        .hug()
-                        .selected(selected)
-                        .on_select(cx.listener(|this, index: &usize, _, cx| {
-                            let mode = if *index == 0 {
-                                Mode::Timeline
+            controls.push(
+                div()
+                    .flex_none()
+                    .child(
+                        {
+                            let switch = Segmented::new("list-mode")
+                                .option("timeline")
+                                .option("list")
+                                .hug();
+                            // The editor's header is narrow: the small form.
+                            if self.source == ListSource::Preview {
+                                switch.compact()
                             } else {
-                                Mode::List
-                            };
-                            this.set_options(|options| options.pick_mode(mode), cx);
-                        })),
-                ),
+                                switch
+                            }
+                        }
+                        .selected(selected)
+                        .on_select(cx.listener(
+                            |this, index: &usize, _, cx| {
+                                let mode = if *index == 0 {
+                                    Mode::Timeline
+                                } else {
+                                    Mode::List
+                                };
+                                this.set_options(|options| options.pick_mode(mode), cx);
+                            },
+                        )),
+                    )
+                    .into_any_element(),
             );
         }
         if roomy {
@@ -1196,7 +1485,7 @@ impl RecordList {
                     let on = *on;
                     this.set_options(|options| options.only_mine = on, cx);
                 }));
-            header = header.child(
+            controls.push(
                 div()
                     .id("only-mine-slot")
                     .flex_none()
@@ -1204,33 +1493,42 @@ impl RecordList {
                     .child(switch)
                     .tooltip(Tooltip::text(denial.unwrap_or_else(|| {
                         format!("Only what {author} set (the environment's author) · m")
-                    }))),
+                    })))
+                    .into_any_element(),
             );
         }
-        let header = header
-            .child(self.sort_trigger(&options, cx))
-            .child(self.options_trigger(cx));
-        self.drag
-            .attach(div().id("list-header-drag").child(header), controls)
-            .into_any_element()
+        let pick: crate::controls::PickDensity = {
+            let this = cx.entity().downgrade();
+            Rc::new(move |density, _, cx| {
+                if let Some(this) = this.upgrade() {
+                    this.update(cx, |this, cx| this.set_density(density, cx));
+                }
+            })
+        };
+        controls.push(crate::controls::rows_toggle(
+            "list-rows",
+            self.chosen_density(cx),
+            state.appearance().row_density,
+            &pick,
+            theme,
+        ));
+        controls.push(self.sort_trigger(&options, cx));
+        controls.push(self.options_trigger(cx));
+        controls
     }
 
-    /// The sort, right-aligned in a slot sized for the view's longest sort
-    /// label, so a new sort changes only the word.
+    /// The sort, sized to its word (the view header's rule: a new sort is
+    /// the user's own change, so what sits left of it may move then).
     fn sort_trigger(&self, options: &Options, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let colors = theme.colors;
         let open = self.menus.open() == Some(HeaderMenu::Sort);
         let sort = options.sort(self.kind);
         let label = sort.label(self.kind, options.chip);
-        #[expect(clippy::cast_precision_loss, reason = "a short slot")]
-        let slot = draw::chars(theme.text.small, self.kind.sort_slot_chars() as f32);
         div()
             .relative()
             .flex()
             .flex_none()
-            .justify_end()
-            .w(slot)
             .child(
                 div()
                     .id("list-sort-trigger")
@@ -1298,62 +1596,62 @@ impl RecordList {
         let filter = expression::filter(&objects);
         let none = objects.is_empty();
         let only_mine = options.only_mine && denial.is_none();
-        Menu::new("list-options-menu")
-            .item(
-                MenuItem::new("list-only-mine", "only mine")
-                    .checked(only_mine)
-                    .disabled(denial.is_some())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.set_options(|options| options.only_mine = !only_mine, cx);
-                    })),
-            )
-            .separator()
-            .item(
-                MenuItem::new("list-fold-all", "fold every object").on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        this.fold_all(true, cx);
-                    },
-                )),
-            )
-            .item(
-                MenuItem::new("list-unfold-all", "unfold every object")
-                    .disabled(self.folds.collapsed.is_empty())
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.fold_all(false, cx);
-                    })),
-            )
-            .separator()
-            .item(
-                MenuItem::new("list-copy-names", "copy names")
-                    .disabled(none)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.menus.close();
-                        this.copy("the names", names.clone(), cx);
-                    })),
-            )
-            .item(
-                MenuItem::new("list-copy-filter", "copy filter expression")
-                    .disabled(none)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.menus.close();
-                        this.copy("the filter expression", filter.clone(), cx);
-                    })),
-            )
-            .separator()
-            .item(
-                MenuItem::new("list-close", format!("close {}", self.kind.title())).on_click(
-                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.menus.close();
-                        let kind = this.kind;
-                        this.state.update(cx, |state, cx| {
-                            if state.close_list(kind) {
-                                cx.notify();
-                            }
-                        });
-                    }),
-                ),
-            )
-            .on_dismiss(Self::dismiss_listener(cx))
+        let mut menu = Menu::new("list-options-menu");
+        if let ListSource::View { dashboard, .. } = &self.source {
+            let dashboard = dashboard.clone();
+            menu = menu
+                .item(
+                    MenuItem::new("edit-dashboard", "edit dashboard").on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.menus.close();
+                            cx.emit(RecordListEvent::Edit(dashboard.clone()));
+                            cx.notify();
+                        },
+                    )),
+                )
+                .separator();
+        }
+        menu.item(
+            MenuItem::new("list-only-mine", "only mine")
+                .checked(only_mine)
+                .disabled(denial.is_some())
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.set_options(|options| options.only_mine = !only_mine, cx);
+                })),
+        )
+        .separator()
+        .item(
+            MenuItem::new("list-fold-all", "fold every object").on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| {
+                    this.fold_all(true, cx);
+                },
+            )),
+        )
+        .item(
+            MenuItem::new("list-unfold-all", "unfold every object")
+                .disabled(self.folds.collapsed.is_empty())
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.fold_all(false, cx);
+                })),
+        )
+        .separator()
+        .item(
+            MenuItem::new("list-copy-names", "copy names")
+                .disabled(none)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.menus.close();
+                    this.copy("the names", names.clone(), cx);
+                })),
+        )
+        .item(
+            MenuItem::new("list-copy-filter", "copy filter expression")
+                .disabled(none)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.menus.close();
+                    this.copy("the filter expression", filter.clone(), cx);
+                })),
+        )
+        .on_dismiss(Self::dismiss_listener(cx))
     }
 
     fn dismiss_listener(
@@ -1405,28 +1703,20 @@ impl RecordList {
         let narrow = wide > list_width;
         let chips = words.into_iter().map(|(chip, text)| {
             let selected = chip == options.chip;
-            let count = summary.count(chip);
-            let label = match (narrow, count) {
-                (true, Some(count)) => count.to_string(),
-                _ => text.clone(),
-            };
-            let leading = chip_mark(chip, theme);
-            let mut button = ChipButton::new(
+            thread_chip(
                 SharedString::from(format!("list-chip-{}", chip.id())),
-                label,
+                chip,
+                self.kind,
+                summary.count(chip),
+                narrow,
+                selected,
+                theme,
             )
-            .selected(selected)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
                 this.set_options(|options| options.pick_chip(chip), cx);
-            }));
-            if let Some(leading) = leading {
-                button = button.leading(leading);
-            }
-            div()
-                .id(SharedString::from(format!("list-chip-slot-{}", chip.id())))
-                .flex_none()
-                .child(button)
-                .when(narrow, |slot| slot.tooltip(Tooltip::text(text)))
+            }))
+            .when(narrow, |slot| slot.tooltip(Tooltip::text(text)))
         });
         Some(
             div()
@@ -1505,7 +1795,15 @@ impl RecordList {
                 .into_any_element();
         }
         let Some(listing) = self.listing() else {
-            return div().into_any_element();
+            // A dashboard's view the core hasn't evaluated yet.
+            return EmptyState::new(format!("{} is being evaluated…", self.kind.title()))
+                .leading(
+                    Icon::new(self.kind.icon())
+                        .size(px(20.))
+                        .color(theme.colors.text_muted),
+                )
+                .max_width(px(560.))
+                .into_any_element();
         };
         if listing.lines.is_empty() {
             if state.has_no_objects() && state.connection().is_starting() {
@@ -1555,10 +1853,12 @@ impl RecordList {
             .filter(|axis| (0. ..=1.).contains(&axis.now))
             .map(|axis| {
                 let left = draw::axis_left(list_width, axis_width, &theme) + axis_width * axis.now;
+                // Down to the last line, not into the empty space under it.
+                let height = (layout.height() - offset).max(px(0.));
                 div()
                     .absolute()
                     .top_0()
-                    .bottom_0()
+                    .h(height)
                     .left(left)
                     .w(Metrics::RULE)
                     .bg(theme.colors.accent)
@@ -1647,7 +1947,7 @@ impl RecordList {
         let Some(keyed) = listing.lines.get(index).cloned() else {
             return div().into_any_element();
         };
-        let theme = cx.theme().clone();
+        let theme = self.line_theme(cx);
         let emphasis = keyed.key.as_ref().map_or(RowEmphasis::None, |key| {
             RowEmphasis::new(
                 self.selection.cursor() == Some(index),
@@ -1655,14 +1955,6 @@ impl RecordList {
             )
         });
         let element = match &keyed.line {
-            Line::Section { section, count } => {
-                let sort = self.shown_options().sort(self.kind);
-                draw::section(*section, *count, section.detail(sort), &theme).into_any_element()
-            }
-            Line::Axis => match axis {
-                Some(axis) => axis_line(axis, axis_width, &theme).into_any_element(),
-                None => div().into_any_element(),
-            },
             Line::Band {
                 object,
                 slot,
@@ -1680,46 +1972,24 @@ impl RecordList {
                 now,
                 cx,
             ),
-            Line::Entry {
-                entry,
-                reply,
-                single,
-            } => {
-                let snapshot = self.state.read(cx).snapshot().clone();
-                let pending = self.pending(entry, cx);
-                match axis {
-                    Some(axis) => timeline_entry(
-                        &snapshot, entry, *single, axis, axis_width, emphasis, now, &theme,
-                    ),
-                    None => list_entry(
-                        &snapshot, entry, *reply, *single, pending, emphasis, now, &theme,
-                    ),
-                }
-            }
-            Line::Fold {
-                downtime,
-                count,
-                open,
-                ..
-            } => fold_line(downtime, *count, *open, emphasis, &theme).into_any_element(),
-            Line::Service { parent, object, .. } => {
-                let snapshot = self.state.read(cx).snapshot().clone();
-                let bar = axis.and_then(|axis| {
-                    listing
-                        .downtime_at(parent)
-                        .map(|downtime| words::bar(downtime, axis, now))
-                });
-                service_line(
-                    &snapshot,
-                    object,
-                    bar.as_ref(),
-                    axis_width,
+            line => {
+                let state = self.state.read(cx);
+                let pending = line.entry().and_then(|entry| entry_pending(state, entry));
+                thread_line(
+                    &ThreadLineInput {
+                        snapshot: state.snapshot(),
+                        listing: &listing,
+                        sort: self.shown_options().sort(self.kind),
+                        axis,
+                        axis_width,
+                        now,
+                        theme: &theme,
+                    },
+                    line,
                     emphasis,
-                    &theme,
+                    pending,
                 )
-                .into_any_element()
             }
-            Line::More { hidden, .. } => more_line(*hidden, emphasis, &theme).into_any_element(),
         };
         let Some(key) = keyed.key.clone() else {
             return element;
@@ -1739,14 +2009,10 @@ impl RecordList {
             .into_any_element()
     }
 
-    /// An object's band (36px): the chevron that only folds, the state dot
-    /// (hollow = handled), `service on host`, the output faint, and what
-    /// the thread holds in a slot at the right. The name never shrinks:
-    /// the output gives way first, then the slot. A click anywhere but the
-    /// chevron opens the object's pane.
+    /// An object's band ([`thread_band`]); a click anywhere but the
+    /// chevron selects it and opens the object's pane.
     #[expect(
         clippy::too_many_arguments,
-        clippy::too_many_lines,
         reason = "the band as drawn, in both displays"
     )]
     fn render_band(
@@ -1762,130 +2028,32 @@ impl RecordList {
         now: Timestamp,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
-        let colors = theme.colors;
+        let theme = self.line_theme(cx);
         let snapshot = self.state.read(cx).snapshot().clone();
-        let facts = facts(&snapshot, object);
-        let state_word = state_caps(facts.state);
-        let detail = match (object, covers) {
-            (ObjectKey::Host { .. }, Some(covers)) if covers.in_effect => {
-                format!(
-                    "host and {} in downtime",
-                    plural(covers.services, "service", "services")
-                )
-            }
-            (ObjectKey::Host { .. }, Some(covers)) => format!(
-                "host and {}, {}",
-                plural(covers.services, "service", "services"),
-                super::model::short_when(covers.start, now, &chrono::Local)
-            ),
-            _ => facts.output.clone(),
-        };
-        let out = match object {
-            // A host's one downtime with its services says what it covers;
-            // several say how many (as drawn).
-            ObjectKey::Host { .. } if timeline => match covers {
-                Some(covers) if slot == "1 downtime" => format!(
-                    "{state_word} · host and {}",
-                    plural(covers.services, "service", "services")
-                ),
-                _ => format!("{state_word} · {slot}"),
-            },
-            ObjectKey::Host { .. } if detail.is_empty() => state_word,
-            ObjectKey::Host { .. } => format!("{state_word} · {detail}"),
-            ObjectKey::Service { .. } if timeline => slot.to_owned(),
-            ObjectKey::Service { .. } => detail,
-        };
-        let lead = match facts.mark {
-            Some(mark) => StateDot::mark(mark).size(px(9.)),
-            None => StateDot::with_color(theme.states.fill.pending).size(px(9.)),
-        };
-        let id_suffix = if sticky { ":sticky" } else { "" };
         let chevron_object = object.clone();
-        let chevron = div()
-            .id(SharedString::from(format!(
-                "band-chevron:{}{id_suffix}",
-                object.full_name()
-            )))
-            .absolute()
-            .left(px(14.))
-            .top_0()
-            .bottom_0()
-            .w(px(12.))
-            .flex()
-            .items_center()
-            .cursor_pointer()
-            .child(draw::chevron(!collapsed, theme))
-            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-            })
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+        let key = ItemKey::Band(object.clone());
+        thread_band(
+            &BandLine {
+                object,
+                slot,
+                collapsed,
+                covers,
+                id_suffix: if sticky { ":sticky" } else { "" },
+                emphasis,
+                timeline,
+                now,
+            },
+            &snapshot,
+            &theme,
+            cx.listener(move |this, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
                 this.toggle_band(&chevron_object, cx);
-            }));
-        let background = emphasis.background(theme).unwrap_or(colors.row_header);
-        let key = ItemKey::Band(object.clone());
-        div()
-            .id(SharedString::from(format!(
-                "band:{}{id_suffix}",
-                object.full_name()
-            )))
-            .relative()
-            .flex()
-            .items_center()
-            .gap(px(draw::COLUMN_GAP))
-            .size_full()
-            .px(theme.metrics.list_padding)
-            .bg(background)
-            .border_b_1()
-            .border_color(colors.border_header)
-            .whitespace_nowrap()
-            .cursor_pointer()
-            .when(emphasis == RowEmphasis::None, |band| {
-                band.hover(|style| style.bg(colors.row_hover))
-            })
-            .child(chevron)
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .justify_center()
-                    .w(px(draw::MARK_COLUMN))
-                    .child(lead),
-            )
-            .child(draw::object_label(
-                &facts.name,
-                facts.host.as_deref(),
-                theme.text.row,
-                theme,
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(theme.text.small)
-                    .text_color(colors.text_faint)
-                    .child(out),
-            )
-            .when(!timeline && !slot.is_empty(), |band| {
-                band.child(
-                    div()
-                        .flex_shrink(1.)
-                        .min_w_0()
-                        .max_w(draw::chars(theme.text.small, BAND_SLOT_CHARS))
-                        .truncate()
-                        .text_right()
-                        .text_size(theme.text.small)
-                        .text_color(colors.text_faint)
-                        .child(slot.to_owned()),
-                )
-            })
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                this.click_line(index, &key, event.modifiers(), window, cx);
-            }))
-            .into_any_element()
+            }),
+        )
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            this.click_line(index, &key, event.modifiers(), window, cx);
+        }))
+        .into_any_element()
     }
 
     /// The body of an empty view: what's not there, and what is hidden.
@@ -2092,23 +2260,33 @@ impl RecordList {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let header = self.render_header(list_width, window, cx);
+        // The editor's preview has the editor's header and no selection.
+        let preview = self.source == ListSource::Preview;
+        let header = (!preview).then(|| self.render_header(list_width, window, cx));
         let now = Timestamp::now();
-        let banners = banner::banners(&self.state, now, true, cx);
-        let progress = banner::progress(self.state.read(cx));
+        let banners = if preview {
+            Vec::new()
+        } else {
+            banner::banners(&self.state, now, true, cx)
+        };
+        let progress = (!preview)
+            .then(|| banner::progress(self.state.read(cx)))
+            .flatten();
         let denied = self.state.read(cx).list_denial(self.kind).is_some();
         let chips = (!denied)
             .then(|| self.render_chips(list_width, cx))
             .flatten();
         let body = self.render_body(list_width, window, cx);
-        let bar = self.render_selection_bar(list_width, cx);
+        let bar = (!preview)
+            .then(|| self.render_selection_bar(list_width, cx))
+            .flatten();
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(header)
+            .children(header)
             .children(progress)
             .children(banners)
             .children(chips)
@@ -2125,7 +2303,13 @@ impl Render for RecordList {
             pane.view
                 .update(cx, |pane, _| pane.set_keys_elsewhere(marked));
         }
-        let main_width = SplitLayout::main_width(window, self.sidebar_open, &cx.theme().metrics);
+        let mut main_width =
+            SplitLayout::main_width(window, self.sidebar_open, &cx.theme().metrics);
+        if self.source == ListSource::Preview {
+            // Beside the editor's inspector.
+            main_width =
+                (main_width - px(crate::editor::INSPECTOR_WIDTH) - Metrics::RULE).max(px(0.));
+        }
         let split = SplitLayout::for_width(main_width, &cx.theme().metrics);
         let pane = self.pane.as_ref().map(|pane| pane.view.clone());
         let root = div()
@@ -2182,7 +2366,7 @@ impl Render for RecordList {
 
 /// A chip's mark: handling's ✓, the accent dot of *in effect*, the faint
 /// dot of *upcoming*, the speech bubble, the lock.
-fn chip_mark(chip: Chip, theme: &Theme) -> Option<AnyElement> {
+pub(crate) fn chip_mark(chip: Chip, theme: &Theme) -> Option<AnyElement> {
     let colors = theme.colors;
     Some(match chip {
         Chip::All => return None,
@@ -2205,6 +2389,156 @@ fn chip_mark(chip: Chip, theme: &Theme) -> Option<AnyElement> {
             .color(colors.text_muted)
             .into_any_element(),
     })
+}
+
+/// What drawing a line of a handling or downtimes view needs besides the
+/// line itself (the page here, and a dashboard's stacked view).
+pub(crate) struct ThreadLineInput<'a> {
+    pub(crate) snapshot: &'a ic_core::snapshot::Snapshot,
+    pub(crate) listing: &'a Listing,
+    /// The order, which a section's faint words name.
+    pub(crate) sort: super::model::SortChoice,
+    /// The timeline's axis; `None` in a list.
+    pub(crate) axis: Option<&'a Axis>,
+    pub(crate) axis_width: Pixels,
+    pub(crate) now: Timestamp,
+    pub(crate) theme: &'a Theme,
+}
+
+/// A line of a handling or downtimes view, but a band ([`thread_band`],
+/// whose clicks the caller sets): a section's heading, the axis, an entry,
+/// a fold, a service in it, a paging row. No click of its own.
+pub(crate) fn thread_line(
+    input: &ThreadLineInput<'_>,
+    line: &Line,
+    emphasis: RowEmphasis,
+    pending: Option<&'static str>,
+) -> AnyElement {
+    let theme = input.theme;
+    match line {
+        Line::Section { section, count } => {
+            draw::section(*section, *count, section.detail(input.sort), theme).into_any_element()
+        }
+        Line::Axis => match input.axis {
+            Some(axis) => axis_line(axis, input.axis_width, theme).into_any_element(),
+            None => div().into_any_element(),
+        },
+        Line::Band { .. } => div().into_any_element(),
+        Line::Entry {
+            entry,
+            reply,
+            single,
+        } => match input.axis {
+            Some(axis) => timeline_entry(
+                input.snapshot,
+                entry,
+                *single,
+                axis,
+                input.axis_width,
+                emphasis,
+                input.now,
+                theme,
+            ),
+            None => list_entry(
+                input.snapshot,
+                entry,
+                *reply,
+                *single,
+                pending,
+                emphasis,
+                input.now,
+                theme,
+            ),
+        },
+        Line::Fold {
+            downtime,
+            count,
+            open,
+            ..
+        } => fold_line(downtime, *count, *open, emphasis, theme).into_any_element(),
+        Line::Service { parent, object, .. } => {
+            let bar = input.axis.and_then(|axis| {
+                input
+                    .listing
+                    .downtime_at(parent)
+                    .map(|downtime| words::bar(downtime, axis, input.now))
+            });
+            service_line(
+                input.snapshot,
+                object,
+                bar.as_ref(),
+                input.axis_width,
+                emphasis,
+                theme,
+            )
+            .into_any_element()
+        }
+        Line::More { hidden, .. } => more_line(*hidden, emphasis, theme).into_any_element(),
+    }
+}
+
+/// A chip of a handling or downtimes view (`all`, `✓ 7 acknowledged`, `●
+/// 5 in downtime`; `narrow`: the mark and the count): as wide as with a
+/// three-digit count (the header rule), so a count gaining a digit moves
+/// nothing. The caller adds the click and, when narrow, the tooltip
+/// naming it.
+pub(crate) fn thread_chip(
+    id: SharedString,
+    chip: Chip,
+    kind: ListKind,
+    count: Option<usize>,
+    narrow: bool,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let colors = theme.colors;
+    let word = chip.label(kind);
+    let (text, widest) = match (count, narrow) {
+        (Some(count), true) => (count.to_string(), "999".to_owned()),
+        (Some(count), false) => (format!("{count} {word}"), format!("999 {word}")),
+        (None, _) => (word.to_owned(), word.to_owned()),
+    };
+    let mark = chip_mark(chip, theme);
+    let width = ic_ui_kit::chip_width(&widest, theme.text.label)
+        + if mark.is_some() { px(11. + 6.) } else { px(0.) };
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(6.))
+        .min_w(width)
+        .h(px(ic_ui_kit::CHIP_HEIGHT))
+        .px(px(8.))
+        .rounded(theme.metrics.small_radius)
+        .border_1()
+        .border_color(if selected {
+            colors.accent
+        } else {
+            colors.border_header
+        })
+        .bg(colors.element_background)
+        .text_size(theme.text.label)
+        .text_color(if selected {
+            colors.accent_text
+        } else {
+            colors.text_muted
+        })
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .hover(move |style| {
+            style.bg(colors.element_hover).text_color(if selected {
+                colors.accent_hover
+            } else {
+                colors.text
+            })
+        })
+        .children(mark.map(|mark| div().flex().flex_none().items_center().child(mark)))
+        .child(text)
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
 }
 
 /// The look of an emphasised line: its background, and the accent bar of
@@ -2612,7 +2946,163 @@ fn more_line(hidden: usize, emphasis: RowEmphasis, theme: &Theme) -> gpui::Div {
 }
 
 /// An element id for a line's key.
-fn key_id(key: &ItemKey) -> String {
+/// What an object's band says (a line of a handling or downtimes view).
+pub(crate) struct BandLine<'a> {
+    /// The object.
+    pub(crate) object: &'a ObjectKey,
+    /// What the thread holds (`acknowledged · 1 comment`, `2 downtimes`).
+    pub(crate) slot: &'a str,
+    /// Folded to its band.
+    pub(crate) collapsed: bool,
+    /// A host's downtime that covers its services.
+    pub(crate) covers: Option<Covers>,
+    /// Appended to the band's element ids (a band stuck to the top, a
+    /// dashboard view's).
+    pub(crate) id_suffix: &'a str,
+    /// Cursor and marks.
+    pub(crate) emphasis: RowEmphasis,
+    /// The downtimes timeline (its band says less).
+    pub(crate) timeline: bool,
+    /// The clock.
+    pub(crate) now: Timestamp,
+}
+
+/// An object's band (36px; README, the one grouping pattern): the chevron
+/// that only folds (`on_chevron`), the state dot (hollow = handled),
+/// `service on host`, the output faint, and what the thread holds in a
+/// slot at the right. The name never shrinks: the output gives way first,
+/// then the slot. The caller sets the band's own click (it opens the
+/// object's pane). Shared by the handling and downtimes pages and the
+/// dashboard views of those kinds.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one band, its slots in reading order"
+)]
+pub(crate) fn thread_band(
+    band: &BandLine<'_>,
+    snapshot: &ic_core::snapshot::Snapshot,
+    theme: &Theme,
+    on_chevron: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let colors = theme.colors;
+    let object = band.object;
+    let slot = band.slot;
+    let facts = facts(snapshot, object);
+    let state_word = state_caps(facts.state);
+    let detail = match (object, band.covers) {
+        (ObjectKey::Host { .. }, Some(covers)) if covers.in_effect => {
+            format!(
+                "host and {} in downtime",
+                plural(covers.services, "service", "services")
+            )
+        }
+        (ObjectKey::Host { .. }, Some(covers)) => format!(
+            "host and {}, {}",
+            plural(covers.services, "service", "services"),
+            super::model::short_when(covers.start, band.now, &chrono::Local)
+        ),
+        _ => facts.output.clone(),
+    };
+    let out = match object {
+        // A host's one downtime with its services says what it covers;
+        // several say how many (as drawn).
+        ObjectKey::Host { .. } if band.timeline => match band.covers {
+            Some(covers) if slot == "1 downtime" => format!(
+                "{state_word} · host and {}",
+                plural(covers.services, "service", "services")
+            ),
+            _ => format!("{state_word} · {slot}"),
+        },
+        ObjectKey::Host { .. } if detail.is_empty() => state_word,
+        ObjectKey::Host { .. } => format!("{state_word} · {detail}"),
+        ObjectKey::Service { .. } if band.timeline => slot.to_owned(),
+        ObjectKey::Service { .. } => detail,
+    };
+    let lead = match facts.mark {
+        Some(mark) => StateDot::mark(mark).size(px(9.)),
+        None => StateDot::with_color(theme.states.fill.pending).size(px(9.)),
+    };
+    let id_suffix = band.id_suffix;
+    let chevron = div()
+        .id(SharedString::from(format!(
+            "band-chevron:{}{id_suffix}",
+            object.full_name()
+        )))
+        .absolute()
+        .left(px(14.))
+        .top_0()
+        .bottom_0()
+        .w(px(12.))
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .child(draw::chevron(!band.collapsed, theme))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .on_click(on_chevron);
+    let emphasis = band.emphasis;
+    let background = emphasis.background(theme).unwrap_or(colors.row_header);
+    div()
+        .id(SharedString::from(format!(
+            "band:{}{id_suffix}",
+            object.full_name()
+        )))
+        .relative()
+        .flex()
+        .items_center()
+        .gap(px(draw::COLUMN_GAP))
+        .size_full()
+        .px(theme.metrics.list_padding)
+        .bg(background)
+        .border_b_1()
+        .border_color(colors.border_header)
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .when(emphasis == RowEmphasis::None, |band| {
+            band.hover(|style| style.bg(colors.row_hover))
+        })
+        .child(chevron)
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .justify_center()
+                .w(px(draw::MARK_COLUMN))
+                .child(lead),
+        )
+        .child(draw::object_label(
+            &facts.name,
+            facts.host.as_deref(),
+            theme.text.row,
+            theme,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(theme.text.small)
+                .text_color(colors.text_faint)
+                .child(out),
+        )
+        .when(!band.timeline && !slot.is_empty(), |line| {
+            line.child(
+                div()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .max_w(draw::chars(theme.text.small, BAND_SLOT_CHARS))
+                    .truncate()
+                    .text_right()
+                    .text_size(theme.text.small)
+                    .text_color(colors.text_faint)
+                    .child(slot.to_owned()),
+            )
+        })
+}
+
+pub(crate) fn key_id(key: &ItemKey) -> String {
     match key {
         ItemKey::Band(object) => format!("band:{}", object.full_name()),
         ItemKey::Entry(EntryKey::Ack(object)) => format!("ack:{}", object.full_name()),

@@ -20,6 +20,20 @@ pub(super) fn select(board: &Board, events: &[LogEntry]) -> Vec<LogEntry> {
         .collect()
 }
 
+/// The events (newest first) an event stream with `options` and no filter
+/// shows, at most [`STREAM_EVENTS`]: the cluster section's *events*, the
+/// whole environment's (topic 14). It reads the snapshot's `events` and
+/// needs no evaluation.
+#[must_use]
+pub fn stream_events(options: StreamOptions, events: &[LogEntry]) -> Vec<LogEntry> {
+    events
+        .iter()
+        .filter(|entry| shows(options, entry.kind))
+        .take(STREAM_EVENTS)
+        .cloned()
+        .collect()
+}
+
 /// Whether an event stream with `options` shows events of `kind`.
 pub(super) fn shows(options: StreamOptions, kind: LogKind) -> bool {
     let events = options.events;

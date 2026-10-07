@@ -19,6 +19,7 @@ use ic_ui_kit::Metrics;
 use super::actions::{host_downtime_with_its_services, record, request, toasts};
 use super::{Harness, run, secondary};
 use crate::actions::ObjectAction;
+use crate::cluster::ClusterEntry;
 use crate::fixture::FixtureOptions;
 use crate::lists::dialog::RemovalDialog;
 use crate::lists::model::{Chip, Mode, SortChoice};
@@ -151,8 +152,10 @@ fn handling_and_downtimes_open_from_the_palette_as_tabs() {
         );
         app.keys(cx, "enter");
         assert_eq!(modal(app, cx), None);
-        assert_eq!(app.state.read(cx).lists(), &[ListKind::Handling]);
-        assert_eq!(app.state.read(cx).active_list(), Some(ListKind::Handling));
+        assert_eq!(
+            app.state.read(cx).active_cluster(),
+            Some(ClusterEntry::Handling)
+        );
         let handling = view(app, cx, ListKind::Handling);
         let options = handling.read(cx).current_options(cx);
         assert_eq!(options.chip, Chip::Acknowledged);
@@ -176,7 +179,11 @@ fn handling_and_downtimes_open_from_the_palette_as_tabs() {
             PaletteCommand::OpenList(ListKind::Handling, Some(Chip::Comments))
         );
         app.keys(cx, "enter");
-        assert_eq!(app.state.read(cx).lists(), &[ListKind::Handling]);
+        assert_eq!(
+            app.state.read(cx).active_cluster(),
+            Some(ClusterEntry::Handling),
+            "the same view, on its chip"
+        );
         let options = handling.read(cx).current_options(cx);
         assert_eq!(options.chip, Chip::Comments);
         assert_eq!(options.sort(ListKind::Handling), SortChoice::LatestActivity);
@@ -184,31 +191,26 @@ fn handling_and_downtimes_open_from_the_palette_as_tabs() {
         assert_eq!(entries(&shown), 1, "{shown:#?}");
         assert!(band_of(&shown, &replication()).is_some());
 
-        // A second view: tabs in a fixed order, the new one shown.
+        // The other entry of the cluster section shows instead.
         open(app, cx, ListKind::Downtimes);
         assert_eq!(
-            app.state.read(cx).lists(),
-            &[ListKind::Handling, ListKind::Downtimes]
+            app.state.read(cx).active_cluster(),
+            Some(ClusterEntry::Downtimes)
         );
-        assert_eq!(app.state.read(cx).active_list(), Some(ListKind::Downtimes));
 
-        // Opening an object's tab hides the view; the view stays open.
+        // Opening an object's tab shows it instead; the entry stays in the
+        // sidebar (the cluster section is always there).
         let object = ObjectKey::service("cache-02", "redis-memory");
         app.state.update(cx, |state, cx| {
             state.open_tab(object.clone());
             cx.notify();
         });
         app.draw(cx);
-        assert_eq!(app.state.read(cx).active_list(), None);
-        assert_eq!(app.state.read(cx).lists().len(), 2);
-
-        // Closing the shown view's tab closes it, and drops its view.
+        assert_eq!(app.state.read(cx).active_cluster(), None);
+        assert_eq!(app.state.read(cx).active_tab(), Some(&object));
         let downtimes = open(app, cx, ListKind::Downtimes);
         app.click(cx, line_position(&downtimes, cx, 1), Modifiers::default());
         assert_eq!(downtimes.read(cx).cursor(), Some(1));
-        app.keys(cx, "escape secondary-w");
-        assert_eq!(app.state.read(cx).lists(), &[ListKind::Handling]);
-        assert!(app.workspace.read(cx).list(ListKind::Downtimes).is_none());
     });
 }
 
@@ -794,7 +796,7 @@ fn a_views_choices_go_by_keyboard_and_are_kept() {
         assert!(saved.only_mine && saved.sort.is_some(), "{saved:?}");
         assert_eq!(saved.mode.as_deref(), Some("list"));
         app.state.update(cx, |state, cx| {
-            state.close_list(ListKind::Downtimes);
+            state.show_dashboard();
             cx.notify();
         });
         app.draw(cx);

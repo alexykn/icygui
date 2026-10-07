@@ -113,6 +113,20 @@ impl Theme {
         }
     }
 
+    /// The same theme with list rows at `density` (a view's own row
+    /// density, topic 14 round 5); everything else stays.
+    #[must_use]
+    pub fn with_density(&self, density: Density) -> Self {
+        if density == self.density {
+            return self.clone();
+        }
+        Self {
+            metrics: self.metrics.with_density(self.scale, density),
+            density,
+            ..self.clone()
+        }
+    }
+
     /// The colour of a perfdata value: state text colours when a threshold
     /// is crossed, body text otherwise.
     #[must_use]
@@ -778,6 +792,17 @@ impl Metrics {
         height + Self::RULE
     }
 
+    /// These (already scaled) sizes with list rows `density` tall at
+    /// `scale`.
+    #[must_use]
+    pub fn with_density(self, scale: f32, density: Density) -> Self {
+        let rows = Self::default().scaled(scale, density);
+        Self {
+            row_height: rows.row_height,
+            ..self
+        }
+    }
+
     /// These sizes times `scale`, with list rows `density` tall. Ring widths
     /// round to whole pixels, so handled circles stay crisp.
     #[must_use]
@@ -1222,6 +1247,20 @@ mod tests {
         assert_eq!(Metrics::with_rule(theme.metrics.row_height), px(33.));
         assert_eq!(theme.metrics.compact_circle, px(14.));
         assert_eq!(theme.colors, Colors::light(), "density changes no colour");
+    }
+
+    #[test]
+    fn a_view_can_have_rows_of_its_own_density() {
+        for scale in [0.9, 1., 1.15] {
+            let comfortable = Theme::new(ThemeMode::Dark, scale, Density::Comfortable);
+            let compact = Theme::new(ThemeMode::Dark, scale, Density::Compact);
+            let to_compact = comfortable.with_density(Density::Compact);
+            assert_eq!(to_compact.metrics, compact.metrics);
+            assert_eq!(to_compact.density, Density::Compact);
+            let back = compact.with_density(Density::Comfortable);
+            assert_eq!(back.metrics, comfortable.metrics);
+            assert_eq!(back.density, Density::Comfortable);
+        }
     }
 
     #[test]

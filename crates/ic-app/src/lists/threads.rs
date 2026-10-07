@@ -22,11 +22,13 @@
 //! on screen. Pure, so it's tested without a window.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use ic_core::snapshot::Snapshot;
 use ic_model::{AckKind, CheckInfo, Downtime, DowntimePhase, ObjectKey, Timestamp};
+
+use ic_config::DowntimeKinds;
 
 use super::model::{Chip, ListKind, Mode, Options, SortChoice, ack_comment, is_automatic};
 use crate::dashboard::selection::SelectableRow;
@@ -39,6 +41,27 @@ pub(crate) const PREVIEW: usize = paging::HOST_SERVICES_PREVIEW;
 /// An acknowledgement expiring within this many seconds is in the
 /// *expires within 2 hours* section, its expiry in the warning colour.
 pub(crate) const SOON: f64 = 2. * 3_600.;
+
+/// What a view covers (topic 14, round 5): the whole environment (the
+/// cluster section's entries), or the hosts and services a dashboard
+/// view's filter matches, as the core evaluated them.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Scope<'a> {
+    /// Every object.
+    All,
+    /// These objects.
+    Members(&'a BTreeSet<ObjectKey>),
+}
+
+impl Scope<'_> {
+    /// Whether the view covers `object`.
+    pub(crate) fn contains(self, object: &ObjectKey) -> bool {
+        match self {
+            Self::All => true,
+            Self::Members(members) => members.contains(object),
+        }
+    }
+}
 
 /// What an entry is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -435,9 +458,13 @@ impl<'a> Tree<'a> {
         tree
     }
 
-    /// Whether `downtime` folds under its host's.
-    fn folds(&self, downtime: &Downtime) -> bool {
-        self.parent_of.contains_key(downtime.name.as_str())
+    /// Whether `downtime` folds under its host's (which the view shows:
+    /// a service in scope whose host isn't keeps its downtime as an entry
+    /// of its own).
+    fn folds(&self, downtime: &Downtime, scope: Scope<'_>) -> bool {
+        self.parent_of
+            .get(downtime.name.as_str())
+            .is_some_and(|parent| scope.contains(&parent.object))
     }
 }
 
@@ -467,17 +494,23 @@ impl Candidate<'_> {
     }
 }
 
-/// Every entry of `kind`'s view in `snapshot`, Icinga's automatic comments
-/// and folded service downtimes left out.
+/// Every entry of `kind`'s view of the objects in `scope`, Icinga's
+/// automatic comments, folded service downtimes and the downtimes `shows`
+/// leaves out (the downtimes view's *shows*) left out.
 fn candidates<'a>(
     kind: ListKind,
     snapshot: &'a Snapshot,
     tree: &Tree<'_>,
+    scope: Scope<'_>,
+    shows: DowntimeKinds,
     now: Timestamp,
 ) -> Vec<Candidate<'a>> {
     let mut found = Vec::new();
     if kind == ListKind::Handling {
         for (object, check) in acknowledged(snapshot) {
+            if !scope.contains(&object) {
+                continue;
+            }
             let comment = ack_comment(snapshot, &object);
             found.push(Candidate {
                 key: EntryKey::Ack(object.clone()),
@@ -496,6 +529,9 @@ fn candidates<'a>(
             });
         }
         for (object, list) in snapshot.comments.iter() {
+            if !scope.contains(object) {
+                continue;
+            }
             for (index, comment) in list.iter().enumerate() {
                 if is_automatic(comment.kind) {
                     continue;
@@ -517,11 +553,27 @@ fn candidates<'a>(
         }
     }
     for (object, list) in snapshot.downtimes.iter() {
+        if !scope.contains(object) {
+            continue;
+        }
         for (index, downtime) in list.iter().enumerate() {
-            if !live(downtime, now) || tree.folds(downtime) {
+            if !live(downtime, now) || tree.folds(downtime, scope) {
                 continue;
             }
             let in_effect = downtime.phase(now) == DowntimePhase::InEffect;
+            // The downtimes view's *shows*: a kind left out isn't there,
+            // its chip counts none.
+            if kind == ListKind::Downtimes
+                && !(if downtime.config_owned {
+                    shows.from_config
+                } else if in_effect {
+                    shows.in_effect
+                } else {
+                    shows.upcoming
+                })
+            {
+                continue;
+            }
             let start = downtime
                 .effective_start()
                 .unwrap_or(downtime.start_time)
@@ -720,25 +772,46 @@ impl Thread<'_> {
 /// The objects being handled: those with an acknowledgement, a downtime
 /// still running or to come of their own, or a free-standing comment (the
 /// handling view's count in the sidebar and the palette).
-pub(crate) fn handled_objects(snapshot: &Snapshot, now: Timestamp) -> usize {
+pub(crate) fn handled_objects(snapshot: &Snapshot, scope: Scope<'_>, now: Timestamp) -> usize {
     let tree = Tree::of(snapshot, now);
-    let objects: HashSet<ObjectKey> = candidates(ListKind::Handling, snapshot, &tree, now)
-        .into_iter()
-        .map(|candidate| candidate.object)
-        .collect();
+    let objects: HashSet<ObjectKey> = candidates(
+        ListKind::Handling,
+        snapshot,
+        &tree,
+        scope,
+        DowntimeKinds::default(),
+        now,
+    )
+    .into_iter()
+    .map(|candidate| candidate.object)
+    .collect();
     objects.len()
 }
 
-/// The downtimes in effect now (a host's with its services counts once):
-/// the downtimes view's count.
-pub(crate) fn downtimes_in_effect(snapshot: &Snapshot, now: Timestamp) -> usize {
+/// The downtimes in effect now of the objects in `scope` (a host's with
+/// its services counts once) that `shows` lets through: the downtimes
+/// view's count.
+pub(crate) fn downtimes_in_effect(
+    snapshot: &Snapshot,
+    scope: Scope<'_>,
+    shows: DowntimeKinds,
+    now: Timestamp,
+) -> usize {
     let tree = Tree::of(snapshot, now);
     snapshot
         .downtimes
-        .values()
-        .flatten()
+        .iter()
+        .filter(|(object, _)| scope.contains(object))
+        .flat_map(|(_, list)| list)
         .filter(|downtime| downtime.phase(now) == DowntimePhase::InEffect)
-        .filter(|downtime| !tree.folds(downtime))
+        .filter(|downtime| {
+            if downtime.config_owned {
+                shows.from_config
+            } else {
+                shows.in_effect
+            }
+        })
+        .filter(|downtime| !tree.folds(downtime, scope))
         .count()
 }
 
@@ -751,13 +824,14 @@ pub(crate) fn downtimes_in_effect(snapshot: &Snapshot, now: Timestamp) -> usize 
 pub(crate) fn build(
     kind: ListKind,
     snapshot: &Snapshot,
+    scope: Scope<'_>,
     author: &str,
     options: &Options,
     folds: &Folds,
     now: Timestamp,
 ) -> Listing {
     let tree = Tree::of(snapshot, now);
-    let all = candidates(kind, snapshot, &tree, now);
+    let all = candidates(kind, snapshot, &tree, scope, options.shows, now);
     let mut summary = Summary::default();
 
     // What each thread holds whatever the chip (the band's slot).
@@ -919,7 +993,7 @@ pub(crate) fn build(
             .entries
             .iter()
             .map(|candidate| {
-                let entry = place(candidate, snapshot, &tree, &shown);
+                let entry = place(candidate, snapshot, &tree, &shown, scope);
                 summary.folded += entry.folded.len();
                 Arc::new(entry)
             })
@@ -1090,6 +1164,7 @@ fn place(
     snapshot: &Snapshot,
     tree: &Tree<'_>,
     shown: &HashSet<ObjectKey>,
+    scope: Scope<'_>,
 ) -> Entry {
     let mut services = None;
     let mut own = false;
@@ -1132,7 +1207,7 @@ fn place(
                 own = snapshot
                     .downtimes
                     .get(&candidate.object)
-                    .is_some_and(|list| list.iter().any(|other| tree.folds(other)));
+                    .is_some_and(|list| list.iter().any(|other| tree.folds(other, scope)));
             }
         }
     }
@@ -1492,6 +1567,7 @@ mod tests {
             build(
                 kind,
                 &self.snapshot,
+                Scope::All,
                 "m.keller",
                 options,
                 &Folds::default(),
@@ -1597,7 +1673,10 @@ mod tests {
         assert_eq!(objects.len(), bands.len());
         assert!(!lines.iter().any(|line| line.contains("!over")));
         assert_eq!(listing.summary.objects, bands.len());
-        assert_eq!(handled_objects(&world.snapshot, now()), bands.len());
+        assert_eq!(
+            handled_objects(&world.snapshot, Scope::All, now()),
+            bands.len()
+        );
     }
 
     #[test]
@@ -1649,6 +1728,7 @@ mod tests {
         let open = build(
             ListKind::Handling,
             &world.snapshot,
+            Scope::All,
             "",
             &Options::default(),
             &folds,
@@ -1673,6 +1753,7 @@ mod tests {
         let collapsed = build(
             ListKind::Handling,
             &world.snapshot,
+            Scope::All,
             "",
             &Options::default(),
             &folds,
@@ -1717,6 +1798,7 @@ mod tests {
         let listing = build(
             ListKind::Handling,
             &world.snapshot,
+            Scope::All,
             "",
             &Options::default(),
             &folds,
@@ -1732,6 +1814,7 @@ mod tests {
         let listing = build(
             ListKind::Handling,
             &world.snapshot,
+            Scope::All,
             "",
             &Options::default(),
             &folds,
@@ -1886,7 +1969,10 @@ mod tests {
         assert_eq!(listing.summary.count(Chip::Upcoming), Some(2));
         assert_eq!(listing.summary.count(Chip::FromConfig), Some(1));
         assert_eq!(listing.summary.downtimes, 7);
-        assert_eq!(downtimes_in_effect(&world.snapshot, now()), 4);
+        assert_eq!(
+            downtimes_in_effect(&world.snapshot, Scope::All, DowntimeKinds::default(), now()),
+            4
+        );
     }
 
     #[test]
@@ -1951,6 +2037,7 @@ mod tests {
         let all = build(
             ListKind::Handling,
             &world.snapshot,
+            Scope::All,
             "",
             &Options::default(),
             &folds,

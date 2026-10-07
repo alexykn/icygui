@@ -309,6 +309,7 @@ fn production_with_views(app: &Harness, cx: &mut App) -> Vec<String> {
                     views,
                     notifications: ScopeSetting::Inherit,
                     group_id: "demo-overview".to_owned(),
+                    mark: ic_config::SidebarMark::Auto,
                 },
             )
             .unwrap();
@@ -705,6 +706,7 @@ fn a_stream_lists_its_events_and_enter_opens_one() {
                         views,
                         notifications: ScopeSetting::Inherit,
                         group_id: "demo-overview".to_owned(),
+                        mark: ic_config::SidebarMark::Auto,
                     },
                 )
                 .unwrap();
@@ -740,9 +742,13 @@ fn a_stream_lists_its_events_and_enter_opens_one() {
         app.draw(cx);
         let page = page(app, cx);
         assert_eq!(page.views[0].lines, 4, "4 lines show, the rest scroll");
-        assert_eq!(page.item_height(1), page.sizes().event * 4.);
-        // Tab into the stream, down twice: the host's event.
-        app.keys(cx, "tab j j enter");
+        assert_eq!(
+            page.item_height(0),
+            page.sizes().event * 4.,
+            "one view: no view header, its header is the page's"
+        );
+        // Down twice from the first event: the host's event.
+        app.keys(cx, "j j j enter");
         assert_eq!(app.pane_object(cx), Some(ObjectKey::host("db-prod-03")));
     });
 }

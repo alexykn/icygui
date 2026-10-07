@@ -7,9 +7,14 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ic_config::{GridColour, GroupBy, HideHandled, ObjectKind, SortKey, View, ViewDisplay};
+use ic_config::{
+    GridColour, GroupBy, HideHandled, ObjectKind, SortKey, StateChip, View, ViewDisplay,
+};
 use ic_filter::{Filter, HostScope, ServiceScope};
-use ic_model::{CheckableState, Host, HostName, ObjectKey, Service, ServiceKey, Timestamp};
+use ic_model::{
+    CheckableState, Host, HostName, HostState, ObjectKey, Service, ServiceKey, ServiceState,
+    Timestamp,
+};
 
 use super::groups::{self, Picker};
 use super::{
@@ -253,12 +258,12 @@ impl MemberKey {
 }
 
 /// Which objects a view evaluates its filter on: (hosts, services). A
-/// grid shows hosts; an event stream follows hosts and services; the
-/// other displays list their object kind.
+/// grid shows hosts; an event stream, handling and downtimes follow hosts
+/// and services; the other displays list their object kind.
 fn targets(view: &View) -> (bool, bool) {
     match view.display {
         ViewDisplay::HostGroupGrid => (true, false),
-        ViewDisplay::EventStream => (true, true),
+        ViewDisplay::EventStream | ViewDisplay::Handling | ViewDisplay::Downtimes => (true, true),
         ViewDisplay::List | ViewDisplay::GroupedList | ViewDisplay::SummaryTiles => {
             match view.object_kind {
                 ObjectKind::Hosts => (true, false),
@@ -339,7 +344,10 @@ impl Board {
     /// only rebuilds its body and counts.
     pub(super) fn reconfigure(&mut self, view: &View, defaults: HideHandled) {
         let hidden = view.hidden_handled(defaults);
-        if *view == self.view && hidden == self.hidden {
+        if view.evaluated() == self.view.evaluated() && hidden == self.hidden {
+            // Only what the app draws changed (the row density, the
+            // handling and downtimes views' options): same result.
+            self.view = view.clone();
             return;
         }
         if MemberKey::of(view) != MemberKey::of(&self.view) {
@@ -371,7 +379,10 @@ impl Board {
     /// service groups' display names changes.
     pub(super) fn uses_group_labels(&self) -> bool {
         match self.view.display {
-            ViewDisplay::List | ViewDisplay::EventStream => false,
+            ViewDisplay::List
+            | ViewDisplay::EventStream
+            | ViewDisplay::Handling
+            | ViewDisplay::Downtimes => false,
             ViewDisplay::GroupedList => self.view.list_grouping() != GroupBy::Host,
             ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => true,
         }
@@ -450,7 +461,17 @@ impl Board {
     }
 
     fn visible(&self, facts: &Facts) -> bool {
-        (!self.view.problems_only || facts.problem) && facts.reasons & mask(self.hidden) == 0
+        (!self.view.problems_only || facts.problem)
+            && facts.reasons & mask(self.hidden) == 0
+            && self.in_chip(facts)
+    }
+
+    /// Whether `facts` is in the state the list's state chip picked (any
+    /// state without one).
+    fn in_chip(&self, facts: &Facts) -> bool {
+        self.view
+            .state
+            .is_none_or(|chip| chip_matches(chip, facts.state))
     }
 
     /// Forgets every member and evaluates every object the view looks at.
@@ -607,9 +628,10 @@ impl Board {
         self.summary_dirty = true;
         match self.view.display {
             ViewDisplay::List | ViewDisplay::GroupedList => self.reorder(object, old, facts),
-            // An event stream shows the members' events: only joining and
-            // leaving changes it.
-            ViewDisplay::EventStream => {
+            // An event stream shows the members' events, handling and
+            // downtimes their records: only joining and leaving changes
+            // them.
+            ViewDisplay::EventStream | ViewDisplay::Handling | ViewDisplay::Downtimes => {
                 if old.is_some() != facts.is_some() {
                     self.rows_dirty = true;
                 }
@@ -656,7 +678,7 @@ impl Board {
                 host.map(|host| self.picker.groups_of(host))
                     .hash(&mut hasher);
             }
-            ViewDisplay::EventStream => return 0,
+            ViewDisplay::EventStream | ViewDisplay::Handling | ViewDisplay::Downtimes => return 0,
         }
         hasher.finish()
     }
@@ -731,16 +753,20 @@ impl Board {
                 ViewDisplay::EventStream => {
                     self.seen_events = Some(Arc::clone(&data.events));
                     let events = super::stream::select(self, &data.events);
-                    let hosts = self
-                        .members
-                        .keys()
-                        .filter(|object| matches!(object, ObjectKey::Host { .. }))
-                        .count();
-                    let hosts = u32::try_from(hosts).unwrap_or(u32::MAX);
-                    let services = u32::try_from(self.members.len()).unwrap_or(u32::MAX) - hosts;
+                    let (hosts, services) = self.member_counts();
                     ViewResult {
                         id: self.view.id.clone(),
                         body: ViewBody::Stream(self.keep_events(events)),
+                        hosts,
+                        services,
+                        ..ViewResult::default()
+                    }
+                }
+                ViewDisplay::Handling | ViewDisplay::Downtimes => {
+                    let (hosts, services) = self.member_counts();
+                    ViewResult {
+                        id: self.view.id.clone(),
+                        body: ViewBody::Members(self.keep_members()),
                         hosts,
                         services,
                         ..ViewResult::default()
@@ -765,6 +791,7 @@ impl Board {
             ViewDisplay::HostGroupGrid => ViewBody::Grid(Arc::default()),
             ViewDisplay::SummaryTiles => ViewBody::Tiles(Arc::default()),
             ViewDisplay::EventStream => ViewBody::Stream(Arc::default()),
+            ViewDisplay::Handling | ViewDisplay::Downtimes => ViewBody::Members(Arc::default()),
         };
         ViewResult {
             id: self.view.id.clone(),
@@ -821,6 +848,31 @@ impl Board {
         }
     }
 
+    /// How many hosts and services the view's filter matches.
+    fn member_counts(&self) -> (u32, u32) {
+        let hosts = self
+            .members
+            .keys()
+            .filter(|object| matches!(object, ObjectKey::Host { .. }))
+            .count();
+        let hosts = u32::try_from(hosts).unwrap_or(u32::MAX);
+        let services = u32::try_from(self.members.len())
+            .unwrap_or(u32::MAX)
+            .saturating_sub(hosts);
+        (hosts, services)
+    }
+
+    /// The members as a set: the same `Arc` while nobody joined or left.
+    fn keep_members(&self) -> Arc<BTreeSet<ObjectKey>> {
+        if let ViewBody::Members(old) = &self.result.body
+            && old.len() == self.members.len()
+            && self.members.keys().all(|object| old.contains(object))
+        {
+            return Arc::clone(old);
+        }
+        Arc::new(self.members.keys().cloned().collect())
+    }
+
     fn keep_events(&self, events: Vec<LogEntry>) -> Arc<Vec<LogEntry>> {
         match &self.result.body {
             ViewBody::Stream(old) if **old == events => Arc::clone(old),
@@ -843,14 +895,20 @@ impl Board {
             if self.view.problems_only && !facts.problem {
                 continue;
             }
+            // The header's numbers count every state, the chip or not.
+            if !facts.handled {
+                counts.add(facts.state, false, facts.severity);
+            }
+            // What shows and hides is what the state chip lets through.
+            if !self.in_chip(facts) {
+                continue;
+            }
             if facts.handled {
                 handled += 1;
                 if facts.reasons & mask != 0 {
                     hidden += 1;
                     continue;
                 }
-            } else {
-                counts.add(facts.state, false, facts.severity);
             }
             shown.add(facts.state, facts.handled, facts.severity);
         }
@@ -1003,6 +1061,27 @@ fn group_labels(groups: &[String], labels: &Labels<'_>) -> Vec<(String, String)>
         .filter(|name| seen.insert(name.as_str()))
         .map(|name| (name.clone(), labels.label(name)))
         .collect()
+}
+
+/// Whether an object in `state` is in the state chip `chip` picked.
+fn chip_matches(chip: StateChip, state: CheckableState) -> bool {
+    matches!(
+        (chip, state),
+        (
+            StateChip::Critical,
+            CheckableState::Service(ServiceState::Critical)
+        ) | (
+            StateChip::Warning,
+            CheckableState::Service(ServiceState::Warning)
+        ) | (
+            StateChip::Unknown,
+            CheckableState::Service(ServiceState::Unknown)
+        ) | (StateChip::Down, CheckableState::Host(HostState::Down))
+            | (
+                StateChip::Unreachable,
+                CheckableState::Host(HostState::Unreachable)
+            )
+    )
 }
 
 fn evaluation_error(message: &str, object: &ObjectKey, count: usize) -> String {

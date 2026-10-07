@@ -350,6 +350,10 @@ mod tests {
             denied: [false, false],
             width: px(1000.),
             sizes: Sizes::of(&Theme::dark()),
+            by_density: crate::dashboard::page::Densities::of(&Theme::dark()),
+            density: ic_config::RowDensity::Comfortable,
+            author: "",
+            now: ic_model::Timestamp::from_unix_seconds(0.),
         })
     }
 

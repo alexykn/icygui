@@ -1,15 +1,25 @@
 //! A dashboard's views (v1, topic 04): what each one shows and how.
 //!
 //! A dashboard is a list of views stacked on one page. Each view has its
-//! own display (a list, a grouped list, a host-group grid, summary tiles or
-//! an event stream), filter and options. A dashboard from rc1 has exactly
-//! one view, a list or grouped list, and looks as it did.
+//! own display (a list, a grouped list, a host-group grid, summary tiles,
+//! an event stream, and (topic 14) handling or downtimes), filter and
+//! options. A dashboard from rc1 has exactly one view, a list or grouped
+//! list, and looks as it did.
 //!
 //! Handled problems are hidden or shown per kind ([`HideHandled`]): the
 //! defaults are in the settings (`[appearance.hide_handled]`), and every
 //! list view follows them unless it sets its own ([`HandledSetting`]).
+//!
+//! Every control of a view's header is kept with the view (topic 14,
+//! round 5): the sort, a list's state chip, the handled switch, the
+//! handling and downtimes views' chip, sort and mode
+//! ([`ThreadOptions`]), *only mine* and the row density. *Only mine* and
+//! the density are personal: an export leaves them out
+//! ([`View::personal_cleared`]).
 
 use serde::{Deserialize, Serialize};
+
+use crate::model::RowDensity;
 
 /// The most views a dashboard may have. Each view is evaluated on every
 /// change, so a dashboard with dozens of them would cost as much as dozens
@@ -64,6 +74,20 @@ pub struct View {
     /// An event stream's options.
     #[serde(skip_serializing_if = "is_default")]
     pub stream: StreamOptions,
+    /// The handling and downtimes views' options: the chip they open with,
+    /// their sort, the downtimes view's timeline or list, which downtimes
+    /// it shows, *only mine*.
+    #[serde(skip_serializing_if = "is_default")]
+    pub threads: ThreadOptions,
+    /// A list's state chip: the header's per-state count picked, so the
+    /// list shows only objects in that state (`None`: every state).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<StateChip>,
+    /// How tall the rows of a list-like view are ([`ViewDisplay::has_rows`]);
+    /// `None` follows the settings (`[appearance] row_density`). Personal:
+    /// never exported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub density: Option<RowDensity>,
 }
 
 impl Default for View {
@@ -82,6 +106,9 @@ impl Default for View {
             groups: ViewGroups::default(),
             grid: GridOptions::default(),
             stream: StreamOptions::default(),
+            threads: ThreadOptions::default(),
+            state: None,
+            density: None,
         }
     }
 }
@@ -123,12 +150,32 @@ impl View {
     }
 
     /// Whether the view's objects count toward the dashboard's sidebar
-    /// count and dot and its notifications: every display that shows
-    /// objects with their states (lists, grids, tiles), not an event
-    /// stream, whose filter only picks events.
+    /// count and dot and its notifications ([`ViewDisplay::counts_problems`]).
     #[must_use]
     pub fn counts_problems(&self) -> bool {
-        self.display != ViewDisplay::EventStream
+        self.display.counts_problems()
+    }
+
+    /// The view without what is personal (*only mine*, the row density):
+    /// what an export carries, and what an imported view starts from.
+    #[must_use]
+    pub fn personal_cleared(&self) -> Self {
+        let mut view = self.clone();
+        view.density = None;
+        view.threads.only_mine = false;
+        view
+    }
+
+    /// The view as far as its evaluation goes: without what only the
+    /// app's drawing reads (the row density, the handling and downtimes
+    /// views' options). A view that differs from another only there
+    /// evaluates to the same result.
+    #[must_use]
+    pub fn evaluated(&self) -> Self {
+        let mut view = self.clone();
+        view.density = None;
+        view.threads = ThreadOptions::default();
+        view
     }
 
     /// The handled problems the view hides, given the settings' defaults.
@@ -162,17 +209,158 @@ pub enum ViewDisplay {
     /// comments, flapping) of the objects the filter matches, from the
     /// local event log.
     EventStream,
+    /// Who is handling what (topic 14): a thread per object the filter
+    /// matches with its acknowledgement, its downtimes and its comments.
+    Handling,
+    /// The downtimes of the objects the filter matches, in effect and to
+    /// come, as a timeline or a list (topic 14).
+    Downtimes,
 }
 
 impl ViewDisplay {
-    /// Every display, in the order of the editor's *add view* menu.
-    pub const ALL: [Self; 5] = [
+    /// Every display, in the order of the editor's *add view* menu: the
+    /// lists, the overviews, then the activity (which never counts).
+    pub const ALL: [Self; 7] = [
         Self::List,
         Self::GroupedList,
         Self::HostGroupGrid,
         Self::SummaryTiles,
         Self::EventStream,
+        Self::Handling,
+        Self::Downtimes,
     ];
+
+    /// Whether a view of this display counts toward its dashboard's
+    /// sidebar count and dot and its notifications: the problem views
+    /// (lists, grids, tiles), whose objects have states. An event stream,
+    /// handling and downtimes show activity: they never count and never
+    /// notify (topic 04).
+    #[must_use]
+    pub fn counts_problems(self) -> bool {
+        matches!(
+            self,
+            Self::List | Self::GroupedList | Self::HostGroupGrid | Self::SummaryTiles
+        )
+    }
+
+    /// Whether the view has rows whose density can be chosen: lists,
+    /// grouped lists, event streams, handling and downtimes (topic 14,
+    /// round 5); grids and tiles have none.
+    #[must_use]
+    pub fn has_rows(self) -> bool {
+        !matches!(self, Self::HostGroupGrid | Self::SummaryTiles)
+    }
+
+    /// Whether the view shows topic 14's threads: handling or downtimes.
+    #[must_use]
+    pub fn is_threads(self) -> bool {
+        matches!(self, Self::Handling | Self::Downtimes)
+    }
+}
+
+/// A list's state chip: the per-state count picked in its header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateChip {
+    /// Critical services.
+    Critical,
+    /// Services in warning.
+    Warning,
+    /// Unknown services.
+    Unknown,
+    /// Hosts that are down.
+    Down,
+    /// Unreachable hosts.
+    Unreachable,
+}
+
+/// The handling and downtimes views' options (topic 14): what their
+/// headers show, kept with the view (round 5: every header control is
+/// remembered). The editor's *opens with* is [`ThreadOptions::chip`], its
+/// *opens as* [`ThreadOptions::mode`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThreadOptions {
+    /// The chip picked (*opens with*).
+    pub chip: ThreadChip,
+    /// The sort chosen; `None`: the chip's (or the mode's) own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<ThreadSort>,
+    /// The downtimes view's display (*opens as*).
+    pub mode: DowntimesMode,
+    /// Which downtimes the downtimes view shows (*shows*).
+    #[serde(skip_serializing_if = "is_default")]
+    pub shows: DowntimeKinds,
+    /// Only what the environment's author set. Personal: never exported.
+    pub only_mine: bool,
+}
+
+/// A chip of a handling or downtimes view: what it shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadChip {
+    /// Everything.
+    #[default]
+    All,
+    /// Acknowledged problems (handling).
+    Acknowledged,
+    /// Downtimes in effect.
+    InEffect,
+    /// Downtimes not in effect yet.
+    Upcoming,
+    /// Free-standing comments (handling).
+    Comments,
+    /// Downtimes from the config (downtimes).
+    FromConfig,
+}
+
+/// How a handling or downtimes view is sorted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadSort {
+    /// The newest thread first (handling).
+    LatestActivity,
+    /// What comes back or changes soonest first.
+    Soonest,
+    /// By when the downtimes start (the timeline's).
+    ByTime,
+    /// By object.
+    Object,
+    /// By who set it.
+    Author,
+}
+
+/// The downtimes view's display.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DowntimesMode {
+    /// Bars on a shared axis around now (the default).
+    #[default]
+    Timeline,
+    /// Sections and groups.
+    List,
+}
+
+/// Which downtimes a downtimes view shows (all by default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DowntimeKinds {
+    /// Downtimes in effect.
+    pub in_effect: bool,
+    /// Downtimes not in effect yet.
+    pub upcoming: bool,
+    /// Downtimes from the config (`ScheduledDowntime`).
+    pub from_config: bool,
+}
+
+impl Default for DowntimeKinds {
+    fn default() -> Self {
+        Self {
+            in_effect: true,
+            upcoming: true,
+            from_config: true,
+        }
+    }
 }
 
 /// Hosts or services.
@@ -628,17 +816,77 @@ mod tests {
     }
 
     #[test]
-    fn only_event_streams_stay_out_of_the_counts() {
+    fn only_problem_views_count() {
         for display in ViewDisplay::ALL {
             let view = View {
                 display,
                 ..View::default()
             };
+            let activity = matches!(
+                display,
+                ViewDisplay::EventStream | ViewDisplay::Handling | ViewDisplay::Downtimes
+            );
+            assert_eq!(view.counts_problems(), !activity, "{display:?}");
             assert_eq!(
-                view.counts_problems(),
-                display != ViewDisplay::EventStream,
+                display.has_rows(),
+                !matches!(
+                    display,
+                    ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles
+                ),
                 "{display:?}"
             );
         }
+    }
+
+    #[test]
+    fn personal_choices_stay_home() {
+        let view = View {
+            density: Some(RowDensity::Compact),
+            threads: ThreadOptions {
+                only_mine: true,
+                chip: ThreadChip::Upcoming,
+                ..ThreadOptions::default()
+            },
+            ..View::default()
+        };
+        let shared = view.personal_cleared();
+        assert_eq!(shared.density, None);
+        assert!(!shared.threads.only_mine);
+        // The rest is shared: the chip it opens with, say.
+        assert_eq!(shared.threads.chip, ThreadChip::Upcoming);
+        // Drawing choices don't change an evaluation.
+        assert_eq!(view.evaluated(), View::default());
+    }
+
+    #[test]
+    fn thread_options_round_trip_in_toml() {
+        let view = View {
+            display: ViewDisplay::Downtimes,
+            threads: ThreadOptions {
+                chip: ThreadChip::FromConfig,
+                sort: Some(ThreadSort::Author),
+                mode: DowntimesMode::List,
+                shows: DowntimeKinds {
+                    from_config: false,
+                    ..DowntimeKinds::default()
+                },
+                only_mine: true,
+            },
+            state: Some(StateChip::Warning),
+            density: Some(RowDensity::Compact),
+            ..View::default()
+        };
+        let text = toml::to_string(&view).unwrap();
+        assert!(text.contains("display = \"downtimes\""), "{text}");
+        assert!(text.contains("chip = \"from_config\""), "{text}");
+        assert!(text.contains("mode = \"list\""), "{text}");
+        assert!(text.contains("density = \"compact\""), "{text}");
+        let back: View = toml::from_str(&text).unwrap();
+        assert_eq!(back, view);
+        // A plain view writes none of it.
+        let plain = toml::to_string(&View::default()).unwrap();
+        assert!(!plain.contains("threads"), "{plain}");
+        assert!(!plain.contains("density"), "{plain}");
+        assert!(!plain.contains("state"), "{plain}");
     }
 }

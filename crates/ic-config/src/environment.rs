@@ -211,6 +211,7 @@ impl Dashboard {
             name: name.trim().to_owned(),
             views,
             notifications: ScopeSetting::Inherit,
+            mark: crate::SidebarMark::Auto,
         }
     }
 
@@ -605,6 +606,29 @@ mod tests {
                 },
             ],
         )
+    }
+
+    #[test]
+    fn sidebar_marks_follow_the_problem_views() {
+        use crate::{EffectiveMark, SidebarMark, ViewDisplay};
+        let handling = View {
+            display: ViewDisplay::Handling,
+            ..View::default()
+        };
+        let mut dashboard = Dashboard::with_views("voip handling", vec![handling.clone()]);
+        assert!(!dashboard.has_problem_view());
+        // Unset: the first view's kind icon without a problem view …
+        assert_eq!(dashboard.effective_mark(), EffectiveMark::KindIcon);
+        // … and the state dot with one.
+        dashboard.views.push(View::default());
+        assert_eq!(dashboard.effective_mark(), EffectiveMark::State);
+        // A chosen icon stays, whatever the views.
+        dashboard.mark = SidebarMark::Icon("phone".to_owned());
+        assert_eq!(dashboard.effective_mark(), EffectiveMark::Icon("phone"));
+        // A state mark without a problem view has no dot to show.
+        dashboard.mark = SidebarMark::State;
+        dashboard.views = vec![handling];
+        assert_eq!(dashboard.effective_mark(), EffectiveMark::KindIcon);
     }
 
     #[test]

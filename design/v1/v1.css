@@ -496,7 +496,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .vrow .vi { color: var(--t-muted); }
 .vrow .vn { color: var(--t); }
 .vrow .vm { color: var(--t-faint); font-size: 12px; margin-left: auto; }
-.preview-ring { outline: 1px solid var(--accent); outline-offset: -1px; }
+.vh.picked { background: linear-gradient(var(--accent-tint), var(--accent-tint)) var(--pane-bg); }  /* the view selected in the editor: focus bar + faint tint, no ring */
 
 /* ---- NEW v1: host-group grid (topic 05) ------------------------------ */
 .hg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 32px; padding: 14px 18px 18px; align-items: start; }

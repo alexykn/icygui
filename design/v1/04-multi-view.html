@@ -78,17 +78,17 @@ service.problem &amp;&amp; !service.handled<span class="caret" style="height:13p
 }
 const editorHeader = `<div class="hbar"><span class="title">databases</span><span class="acc" style="font-size:12px">editing · overview</span><span class="grow"></span>${btn('discard', { key: 'esc' })}${btn('save dashboard', { key: 'ctrl-s', primary: true })}</div>`;
 function preview(focusView) {
-  let h = viewHeader({ name: 'clusters', display: 'tiles', filter: 'host groups pg-*, mysql-*, redis-*', counts: [['crit', 1], ['warn', 4], ['unk', 1]], sort: 'name ↑', focus: focusView === 0 });
+  let h = viewHeader({ name: 'clusters', display: 'tiles', filter: 'host groups pg-*, mysql-*, redis-*', counts: [['crit', 1], ['warn', 4], ['unk', 1]], sort: 'name ↑', picked: focusView === 0 });
   h += tilesBody(DB_TILES, 2);
-  h += `<div class="${focusView === 1 ? 'preview-ring' : ''}" style="display:flex;flex-direction:column">` + viewHeader({ name: 'failing services', display: 'list', filter: fFilter, counts: [['crit', 1], ['warn', 4], ['unk', 1]], focus: focusView === 1 }) + `<div class="vbody">${failing.map((r) => row(r)).join('')}</div></div>`;
+  h += viewHeader({ name: 'failing services', display: 'list', filter: fFilter, counts: [['crit', 1], ['warn', 4], ['unk', 1]], picked: focusView === 1 }) + `<div class="vbody">${failing.map((r) => row(r)).join('')}</div>`;
   h += viewHeader({ name: 'replication lag', display: 'list', filter: 'service.name.contains("replication") && service.perf.lag > 60', empty: 'nothing to show', sort: '' });
-  h += `<div class="${focusView === 3 ? 'preview-ring' : ''}" style="display:flex;flex-direction:column">` + viewHeader({ name: 'db events', display: 'stream', filter: 'host.vars.role in ["postgres", "mysql"]', sort: 'newest first', live: true, focus: focusView === 3 });
-  h += `<div class="vbody">${DB_EVENTS.slice(0, 4).map((e) => eventRow(e)).join('')}</div></div>`;
+  h += viewHeader({ name: 'db events', display: 'stream', filter: 'host.vars.role in ["postgres", "mysql"]', sort: 'newest first', live: true, picked: focusView === 3 });
+  h += `<div class="vbody">${DB_EVENTS.slice(0, 4).map((e) => eventRow(e)).join('')}</div>`;
   return h;
 }
 const editorMain = (focusView, insp, overlay = '') => `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${editorHeader}<div class="col" style="min-height:0;overflow:hidden">${preview(focusView)}</div></div>${insp}${overlay}</div>`;
 
-shot('4c', '04-multi-view-c-editor', 'The dashboard editor manages the views. The inspector lists them (drag handle, display icon, name, what each matches), with <i>add view</i> under the list. The selected view’s settings follow: its name, display, object type, filter, show, sort and direction. The preview on the left is the whole dashboard; the selected view has an accent ring and its header the focus bar. Clicking a view in the preview selects it in the inspector too.',
+shot('4c', '04-multi-view-c-editor', 'The dashboard editor manages the views. The inspector lists them (drag handle, display icon, name, what each matches), with <i>add view</i> under the list. The selected view’s settings follow: its name, display, object type, filter, show, sort and direction. The preview on the left is the whole dashboard; the selected view is marked only on its header, with the same accent bar that marks the focused view on a dashboard (4b) and a faint accent tint. Nothing is drawn around the view’s body. Clicking a view in the preview selects it in the inspector too.',
   appWindow(editorMain(1, inspector({ sel: 1 })), { activeItem: 'databases', groups: dbGroups }));
 
 const addMenu = menu(['add a view that shows',

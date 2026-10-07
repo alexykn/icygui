@@ -4,10 +4,12 @@ const DISPLAY_ICON = { list: 'list', grouped: 'rows-3', grid: 'layout-grid', til
 const DISPLAY_NAME = { list: 'list', grouped: 'grouped list', grid: 'host-group grid', tiles: 'summary tiles', stream: 'event stream' };
 
 // A view's header: collapse chevron, display icon, name, filter summary,
-// counts, its own sort and ···.
-function viewHeader({ name, display = 'list', filter = '', counts = [], sort = 'severity ↓', collapsed = false, focus = false, empty = '', live = false, sortOpen = false, more = true }) {
+// counts, its own sort and ···. focus: the accent bar of the view holding the
+// cursor. picked: the view selected in the dashboard editor: the same bar plus
+// a faint accent tint on the header; nothing around the view's body.
+function viewHeader({ name, display = 'list', filter = '', counts = [], sort = 'severity ↓', collapsed = false, focus = false, picked = false, empty = '', live = false, sortOpen = false, more = true }) {
   const c = counts.map(([st, n]) => `<span>${dot(st, 'd7')}${n}</span>`).join('');
-  return `<div class="vh${focus ? ' focus' : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span>
+  return `<div class="vh${focus || picked ? ' focus' : ''}${picked ? ' picked' : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span>
     <span class="vicon">${icon(DISPLAY_ICON[display], 13)}</span><span class="vn">${name}</span>
     <span class="vf">${esc(filter)}</span>
     ${empty ? `<span class="empty">${empty}</span>` : ''}${c ? `<span class="vc">${c}</span>` : ''}

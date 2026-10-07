@@ -185,17 +185,18 @@ pub(crate) fn connection_body(
 pub(crate) fn loading_body(state: &AppState, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let progress = state.connection().progress();
-    let text = progress
-        .as_ref()
-        .map_or_else(|| "Connecting".to_owned(), |progress| progress.text.clone());
+    let text = progress.as_ref().map_or_else(
+        || "Connecting…".to_owned(),
+        |progress| progress.text.clone(),
+    );
     let fraction = progress.map_or(0., |progress| progress.fraction);
     let name = state
         .environment()
         .map_or_else(String::new, |environment| environment.name.clone());
     EmptyState::new(if name.is_empty() {
-        "Loading".to_owned()
+        "Loading…".to_owned()
     } else {
-        format!("Loading {name}")
+        format!("Loading {name}…")
     })
     .leading(
         Icon::new(IconName::Loader)

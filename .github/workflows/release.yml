@@ -33,7 +33,7 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ env.TAG }}
           persist-credentials: false
@@ -54,7 +54,7 @@ jobs:
     outputs:
       notarized: ${{ steps.secrets.outputs.notarize }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ env.TAG }}
           persist-credentials: false
@@ -161,7 +161,7 @@ jobs:
           spctl --assess --type execute --verbose=4 target/bundle/icygui.app
           xcrun stapler validate target/dist/*.dmg
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: dist-macos
           path: target/dist/icygui-*
@@ -179,7 +179,7 @@ jobs:
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ env.TAG }}
           persist-credentials: false
@@ -195,7 +195,7 @@ jobs:
         run: |
           for deb in target/dist/*.deb; do dpkg-deb --info "$deb"; dpkg-deb --contents "$deb"; done
           tar -tvzf target/dist/icygui-*.tar.gz
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: dist-linux-${{ matrix.arch }}
           path: |
@@ -212,7 +212,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: dist-*
           path: dist
@@ -240,9 +240,17 @@ jobs:
           rm -rf "$GNUPGHOME"
 
       - name: Build provenance attestations
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-path: dist/icygui*
+
+      # Only the release notes, read as text (nothing from the checkout runs).
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+          sparse-checkout: packaging/release-notes
+          path: source
 
       - name: GitHub release
         env:
@@ -255,8 +263,14 @@ jobs:
           else
             prerelease=()
             case $VERSION in *-*) prerelease=(--prerelease) ;; esac
+            # The tag's notes (packaging/release-notes/<tag>.md) if written,
+            # else GitHub's list of merged pull requests.
+            notes=(--generate-notes)
+            if [ -f "source/packaging/release-notes/$TAG.md" ]; then
+              notes=(--notes-file "source/packaging/release-notes/$TAG.md")
+            fi
             gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
-              --title "icygui $VERSION" --generate-notes --verify-tag "${prerelease[@]}"
+              --title "icygui $VERSION" "${notes[@]}" --verify-tag "${prerelease[@]}"
           fi
 
   # Optional: only runs once a tap repository and HOMEBREW_TAP_TOKEN exist.
@@ -279,7 +293,7 @@ jobs:
             echo "::warning::HOMEBREW_TAP_TOKEN is not set; the Homebrew tap was not updated."
           fi
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         if: steps.tap.outputs.enabled == 'true'
         with:
           ref: ${{ env.TAG }}
@@ -293,14 +307,14 @@ jobs:
           rustup toolchain install
           cargo build --locked -p xtask
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         if: steps.tap.outputs.enabled == 'true'
         with:
           repository: ${{ env.HOMEBREW_TAP_REPO }}
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         if: steps.tap.outputs.enabled == 'true'
         with:
           pattern: dist-*

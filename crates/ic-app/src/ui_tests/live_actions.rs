@@ -131,7 +131,7 @@ async fn acknowledge(app: &Harness, cx: &AsyncApp, control: &MockControl) {
         assert_eq!(modal(app, cx), None);
         assert_eq!(
             app.state.read(cx).pending_label(&object),
-            Some("ack pending")
+            Some("ack pending…")
         );
     });
     wait_for(

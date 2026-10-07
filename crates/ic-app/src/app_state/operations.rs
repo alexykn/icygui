@@ -226,7 +226,7 @@ impl AppState {
     }
 
     /// The marker for `object` while an action on it is in flight or
-    /// settling (`ack pending`).
+    /// settling (`ack pending…`).
     pub(crate) fn pending_label(&self, object: &ObjectKey) -> Option<&'static str> {
         self.tracker.label(object)
     }
@@ -369,7 +369,7 @@ mod tests {
                 Action::CheckNow { force: true }
             )]
         );
-        assert_eq!(state.pending_label(&replication()), Some("checking"));
+        assert_eq!(state.pending_label(&replication()), Some("checking…"));
         assert_eq!(state.toasts().count(), 1);
 
         // The answer: a per-object failure.

@@ -55,6 +55,23 @@ use crate::pane::{ObjectPane, PaneEvent, PaneMode};
 /// rested this long, so flinging through a long list costs one request.
 pub(crate) const HYDRATE_DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// How long the cursor follows an object revealed while the rows were
+/// quiet mode's ([`Reveal`]) at most: the handover to the live stream
+/// takes a few seconds at worst.
+const REVEAL_FOLLOW: Duration = Duration::from_secs(10);
+
+/// An object revealed (a notification clicked, the palette) while the
+/// selected dashboard's rows were still quiet mode's (PERF-09): they may
+/// not list it yet, or list it where it was. Until they are live again
+/// (and at most [`REVEAL_FOLLOW`]), every new evaluation puts the cursor
+/// back on it and scrolls it into view; the user moving the cursor, a
+/// click or closing the pane ends that.
+struct Reveal {
+    dashboard: DashboardRef,
+    key: ObjectKey,
+    since: Instant,
+}
+
 /// A dashboard's list state.
 struct ListUi {
     selection: ListSelection,
@@ -92,6 +109,8 @@ pub(crate) struct DashboardView {
     hydration_wanted: (Vec<ObjectKey>, u64),
     /// Asks for them once scrolling rests.
     hydrate_task: Option<Task<()>>,
+    /// The object revealed while the rows were quiet mode's.
+    reveal: Option<Reveal>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -116,6 +135,7 @@ impl DashboardView {
             visible: 0..0,
             hydration_wanted: (Vec::new(), 0),
             hydrate_task: None,
+            reveal: None,
             _subscriptions: subscriptions,
         }
     }
@@ -161,21 +181,21 @@ impl DashboardView {
     }
 
     /// Puts the cursor on `key` in the selected dashboard and opens its pane
-    /// (the notification and startup paths).
+    /// (the notification and startup paths). While the rows are quiet
+    /// mode's, the cursor follows the object until they are live ([`Reveal`]).
     pub(crate) fn open_object(&mut self, key: &ObjectKey, cx: &mut Context<Self>) {
         let Some(reference) = self.sync(cx) else {
             return;
         };
-        if let Some(list) = self.lists.get_mut(&reference)
-            && let Some(index) = list
-                .selection
-                .select_key(key)
-                .then(|| list.selection.cursor())
-                .flatten()
-        {
-            list.scroll.scroll_to_item(index, ScrollStrategy::Center);
+        if let Some(list) = self.lists.get_mut(&reference) {
+            put_cursor_on(list, key);
         }
         self.open_pane(&reference, key.clone(), cx);
+        self.reveal = self.state.read(cx).rows_settling().then(|| Reveal {
+            dashboard: reference,
+            key: key.clone(),
+            since: Instant::now(),
+        });
     }
 
     /// Puts the cursor on `cursor` and shows `pane` in the pane, as after
@@ -229,6 +249,7 @@ impl DashboardView {
     }
 
     fn close_pane(&mut self, reference: &DashboardRef, cx: &mut Context<Self>) -> bool {
+        self.reveal = None;
         let closed = self
             .lists
             .get_mut(reference)
@@ -261,7 +282,16 @@ impl DashboardView {
                 scroll: UniformListScrollHandle::new(),
                 pane: None,
             });
-        list.selection.update_rows(&rows);
+        let changed = list.selection.update_rows(&rows);
+        if let Some(reveal) = &self.reveal
+            && reveal.dashboard == reference
+        {
+            let settling = state.rows_settling();
+            let placed = (changed || !settling) && put_cursor_on(list, &reveal.key);
+            if (placed && !settling) || reveal.since.elapsed() > REVEAL_FOLLOW {
+                self.reveal = None;
+            }
+        }
         Some(reference)
     }
 
@@ -275,6 +305,7 @@ impl DashboardView {
         let Some(reference) = self.sync(cx) else {
             return;
         };
+        self.reveal = None;
         let Some(list) = self.lists.get_mut(&reference) else {
             return;
         };
@@ -494,6 +525,7 @@ impl DashboardView {
         let Some(reference) = self.sync(cx) else {
             return;
         };
+        self.reveal = None;
         let Some(index) = self
             .lists
             .get(&reference)
@@ -525,6 +557,7 @@ impl DashboardView {
     /// A click on a host's group header opens the host's pane.
     fn click_group(&mut self, host: ObjectKey, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle, cx);
+        self.reveal = None;
         if let Some(reference) = self.sync(cx) {
             self.open_pane(&reference, host, cx);
         }
@@ -679,7 +712,7 @@ impl DashboardView {
             if state.connection().is_starting() {
                 return banner::loading_body(state, cx);
             }
-            return note(format!("{} is being evaluated", dashboard.name), theme);
+            return note(format!("{} is being evaluated…", dashboard.name), theme);
         };
         if let Some(error) = &result.error {
             return EmptyState::new("This dashboard's filter doesn't work")
@@ -735,6 +768,15 @@ impl Render for DashboardView {
             .and_then(|reference| self.lists.get(reference))
             .and_then(|list| list.pane.as_ref())
             .map(|pane| pane.view.clone());
+        // Marked rows take the action keys (marked rows, then the pane, then
+        // the cursor): the pane's buttons show no key hints meanwhile.
+        if let (Some(pane), Some(reference)) = (&pane, &reference) {
+            let marked = self
+                .lists
+                .get(reference)
+                .is_some_and(|list| list.selection.marked_count() > 0);
+            pane.update(cx, |pane, _| pane.set_keys_elsewhere(marked));
+        }
         let main_width = SplitLayout::main_width(window, self.sidebar_open, &cx.theme().metrics);
         let split = SplitLayout::for_width(main_width, &cx.theme().metrics);
         // The list shows unless a pane covers it.
@@ -902,6 +944,21 @@ impl SplitLayout {
         };
         (window.viewport_size().width - sidebar).max(px(0.))
     }
+}
+
+/// Puts `list`'s cursor on `key`'s row and scrolls it to the middle.
+/// Returns whether the list has it.
+fn put_cursor_on(list: &mut ListUi, key: &ObjectKey) -> bool {
+    let Some(index) = list
+        .selection
+        .select_key(key)
+        .then(|| list.selection.cursor())
+        .flatten()
+    else {
+        return false;
+    };
+    list.scroll.scroll_to_item(index, ScrollStrategy::Center);
+    true
 }
 
 /// The element id of `key`'s row under `group`.

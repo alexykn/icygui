@@ -49,8 +49,10 @@ pub(crate) enum EditorMode {
 /// What the editor asks the workspace to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum EnvironmentEditorEvent {
-    /// Saved, or cancelled: close it.
+    /// Saved: close it.
     Close,
+    /// *cancel*: close it, asking first when something changed.
+    Cancel,
     /// Delete the edited environment (after asking).
     Delete(String),
 }
@@ -100,6 +102,9 @@ struct UrlRow {
 pub(crate) struct EnvironmentEditor {
     mode: EditorMode,
     form: EnvironmentForm,
+    /// The form as it opened: anything else is a change worth asking
+    /// about before it is dropped.
+    initial: EnvironmentForm,
     inputs: Inputs,
     /// The URL rows, in the form's order.
     urls: Vec<UrlRow>,
@@ -218,6 +223,7 @@ impl EnvironmentEditor {
         let rows = form.urls.clone();
         let mut editor = Self {
             mode,
+            initial: form.clone(),
             form,
             inputs,
             urls: Vec::new(),
@@ -236,6 +242,7 @@ impl EnvironmentEditor {
             let row = editor.new_row(row, window, cx);
             editor.urls.push(row);
         }
+        editor.initial = editor.form.clone();
         editor
     }
 
@@ -524,6 +531,21 @@ impl EnvironmentEditor {
     }
 
     /// The typed password, if any (only for password login).
+    /// Whether anything differs from how the editor opened (a field, a URL,
+    /// a trusted certificate, a typed password): leaving then asks first.
+    pub(crate) fn has_changes(&self) -> bool {
+        self.form != self.initial
+    }
+
+    /// What leaving drops, for the question: `the new environment`, or
+    /// the edited one's name as it was.
+    pub(crate) fn subject(&self) -> String {
+        match &self.form.base {
+            Some(base) => base.name.clone(),
+            None => "the new environment".to_owned(),
+        }
+    }
+
     fn typed_password(&self, cx: &App) -> Option<SecretString> {
         if self.form.auth != AuthKind::Password {
             return None;
@@ -1120,7 +1142,7 @@ impl EnvironmentEditor {
         let button = Button::new(
             "environment-test",
             if running {
-                "testing"
+                "testing…"
             } else if several {
                 "test all URLs"
             } else {
@@ -1401,11 +1423,11 @@ impl EnvironmentEditor {
                 Button::new("environment-cancel", "cancel")
                     .key_hint("esc")
                     .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                        cx.emit(EnvironmentEditorEvent::Close);
+                        cx.emit(EnvironmentEditorEvent::Cancel);
                     })),
             )
             .action(
-                Button::new("environment-save", if saving { "saving" } else { "save" })
+                Button::new("environment-save", if saving { "saving…" } else { "save" })
                     .primary()
                     .disabled(saving)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save(cx))),
@@ -1460,7 +1482,7 @@ impl EnvironmentEditor {
                             .child(
                                 Button::new(
                                     "onboarding-connect",
-                                    if saving { "connecting" } else { "connect" },
+                                    if saving { "connecting…" } else { "connect" },
                                 )
                                 .primary()
                                 .disabled(saving)
@@ -1621,7 +1643,7 @@ fn node_line(report: &ConnectionReport) -> String {
 fn url_status(test: &TestState, theme: &Theme) -> Option<(String, Hsla)> {
     Some(match test {
         TestState::Idle => return None,
-        TestState::Running => ("testing".to_owned(), theme.colors.text_faint),
+        TestState::Running => ("testing…".to_owned(), theme.colors.text_faint),
         TestState::Done(result) => match result.as_ref() {
             Ok(report) => {
                 let node = &report.node;

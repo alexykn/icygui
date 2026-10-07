@@ -535,6 +535,62 @@ fn objects_are_found_in_dashboards() {
     assert_eq!(state.dashboard_showing(&ObjectKey::host("nowhere")), None);
 }
 
+/// Quiet mode's rows (PERF-09) are stale about what changed while quiet:
+/// a service that turned critical then is found where its views will
+/// list it (the selected `production`, problems only), judged from the
+/// object as it is now, not from rows that don't have it yet (which
+/// would open it in a dashboard listing everything, or as a tab).
+#[test]
+fn objects_that_changed_while_quiet_are_found_by_the_views() {
+    let mut state = AppState::fixture(now());
+    let snapshot = state.snapshot().clone();
+    let (key, service) = snapshot
+        .services
+        .iter()
+        .find(|(key, service)| {
+            !service.is_problem()
+                && snapshot.hosts.get(&key.host).is_some_and(|host| {
+                    !host.is_problem()
+                        && host.vars.get("env").and_then(|env| env.as_str()) == Some("prod")
+                })
+        })
+        .map(|(key, service)| (key.clone(), service.clone()))
+        .expect("an OK service on a prod host");
+    let object = ObjectKey::Service { key: key.clone() };
+    let production = reference("overview", "production");
+    let listed = |state: &AppState, reference: &DashboardRef| {
+        state.result(reference).is_some_and(|result| {
+            result
+                .rows
+                .contains(&ic_core::snapshot::DashboardRow::Object(object.clone()))
+        })
+    };
+    assert!(!listed(&state, &production), "OK: not a problem yet");
+
+    // Critical in the store; the rows are still the ones from before.
+    let mut critical = (*service).clone();
+    critical.state = ic_model::ServiceState::Critical;
+    let mut services = (*snapshot.services).clone();
+    services.insert(key, Arc::new(critical));
+    let changed = |quiet: bool| {
+        Arc::new(Snapshot {
+            revision: snapshot.revision + 1,
+            services: Arc::new(services.clone()),
+            quiet,
+            ..(*snapshot).clone()
+        })
+    };
+    state.set_snapshot(changed(true));
+    assert!(state.rows_settling());
+    assert!(!listed(&state, &production), "the rows are stale");
+    assert_eq!(state.dashboard_showing(&object), Some(production.clone()));
+
+    // A live snapshot's rows are what the list shows.
+    state.set_snapshot(changed(false));
+    assert!(!state.rows_settling());
+    assert_ne!(state.dashboard_showing(&object), Some(production));
+}
+
 #[test]
 fn object_names_parse() {
     assert_eq!(

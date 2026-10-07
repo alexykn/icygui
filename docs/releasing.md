@@ -48,7 +48,7 @@ Put every secret (the Developer ID ones above, `GPG_*`, `HOMEBREW_TAP_TOKEN`) in
 - A **tag ruleset** (Settings → Rules) that lets only maintainers create `v*` tags.
 - Optionally **required reviewers**: each release then waits until one of them approves it.
 
-Each step gets only the secrets it needs, as step `env`, and no step that compiles sees one. The workflows' actions are pinned to commits; Dependabot (`.github/dependabot.yml`) proposes updates.
+Each step gets only the secrets it needs, as step `env`, and no step that compiles sees one. The workflows' actions are pinned to commits (their Node 24 releases since 2026-10: `checkout` v5.0.1, `upload-artifact` v6.0.0, `download-artifact` v7.0.0, `attest-build-provenance` v3.0.0); Dependabot (`.github/dependabot.yml`) proposes updates. The release workflow has not run yet: its first run is rc1's tag (below).
 
 ### Optional: Homebrew tap
 
@@ -66,12 +66,15 @@ Set `GPG_PRIVATE_KEY` (ASCII-armoured) and `GPG_PASSPHRASE` in the `release` env
 ## Cutting a release
 
 1. Set `version` in the root `Cargo.toml` (`[workspace.package]`; every crate inherits it), then run `cargo update -w` so `Cargo.lock` follows.
-2. Commit, then `git tag v<version>` and `git push --tags`.
-3. Watch the *Release* workflow. It fails early if the tag and the workspace version differ.
+2. Optionally write the release's notes as `packaging/release-notes/v<version>.md` (what it is, its known limitations, how to report problems); without one, GitHub lists the merged pull requests.
+3. Commit, then `git tag v<version>` and `git push --tags`.
+4. Watch the *Release* workflow. It fails early if the tag and the workspace version differ.
+
+**The first release candidate (rc1)** is cut from `main` after rc1 is merged: version `0.1.0-rc.1` (`cargo update -w`), the notes in `packaging/release-notes/v0.1.0-rc.1.md` (written), tag `v0.1.0-rc.1`. It is the release workflow's first run: check every job (above all the macOS one and the aarch64 Linux one, which nothing else builds) and the published pre-release's files before pointing anyone at it. Testers install it with `install.sh --version 0.1.0-rc.1` (docs/first-run.md); while there is no full release, `install.sh` without `--version` takes it too. v1 is then `0.1.0`.
 
 To rebuild an existing tag, for example after adding the Developer ID secrets, run the workflow by hand (*Actions → Release → Run workflow*) with that tag. If the GitHub Release already exists, its files are replaced (`gh release upload --clobber`); otherwise it is created.
 
-A version with a pre-release part (`0.2.0-rc.1`, tag `v0.2.0-rc.1`) is published as a GitHub pre-release and doesn't update the Homebrew tap. `install.sh` installs it only when asked: `--version 0.2.0-rc.1`.
+A version with a pre-release part (`0.2.0-rc.1`, tag `v0.2.0-rc.1`) is published as a GitHub pre-release and doesn't update the Homebrew tap. `install.sh` installs it when asked (`--version 0.2.0-rc.1`), or by itself while the repository has no full release at all (GitHub's *latest release* leaves pre-releases out; the script then takes the newest one and says so). Its `.deb` carries the version Debian's way, `0.2.0~rc.1`, which sorts before `0.2.0`, so installing the release over it is an upgrade (with a `-`, dpkg would read `rc.1` as a Debian revision that sorts after); the file names keep the semver form. The app's `CFBundleVersion` is the numeric part (`0.2.0`), its `CFBundleShortVersionString` the full version.
 
 ## What the pipeline checks
 
@@ -98,7 +101,7 @@ These can't be built or tested on the Linux development machine. Check them on t
 
 - The universal macOS build, ad-hoc signing with the hardened runtime, the `.dmg`, and `notarytool` and `stapler` once the Developer ID secrets exist (the steps above fail the job if anything is off).
 - The aarch64 Linux packages (built on GitHub's `ubuntu-24.04-arm` runner).
-- `install.sh` on macOS: the local signing identity (`security`, `codesign`, `/usr/bin/openssl`), quitting a running instance, `/Applications` versus `~/Applications`. If `codesign` won't use the self-signed identity, the script keeps an ad-hoc signature and says so. Check with `codesign -dv /Applications/icygui.app 2>&1 | grep Authority`.
+- `install.sh` on macOS: the local signing identity (`security`, `codesign`, `/usr/bin/openssl`), quitting a running instance, `/Applications` versus `~/Applications`. (On Linux it stops a running icygui before replacing the binary, since a second launch would only bring the old process forward, and says to start it again.) If `codesign` won't use the self-signed identity, the script keeps an ad-hoc signature and says so. Check with `codesign -dv /Applications/icygui.app 2>&1 | grep Authority`.
 - The Homebrew tap: `brew install --cask alexykn/tap/icygui` and `brew uninstall --zap --cask icygui` on a Mac, and `brew install alexykn/tap/icygui` and `brew test icygui` on Linux. The cask and formula are generated and syntax-checked here, but not run.
 - The build-provenance attestations (`gh attestation verify`) and the optional `SHA256SUMS.asc`.
 

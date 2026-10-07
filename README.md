@@ -123,7 +123,7 @@ Icinga Web is great for history, reporting and the big picture. icygui is for th
 curl -fsSL https://raw.githubusercontent.com/alexykn/icygui/main/install.sh | bash
 ```
 
-On macOS this installs `icygui.app` into `/Applications`; on Linux the binary, desktop entry and icons go into `~/.local` (no sudo). Pin a version with `… | bash -s -- --version 0.1.0`, remove the app with `… | bash -s -- --uninstall` (add `--purge` to drop the settings too).
+On macOS this installs `icygui.app` into `/Applications`; on Linux the binary, desktop entry and icons go into `~/.local` (no sudo). An update quits the running icygui first (on Linux, start it again afterwards). While there is no full release yet, the script installs the newest release candidate and says so. Pin a version with `… | bash -s -- --version 0.1.0-rc.1`, remove the app with `… | bash -s -- --uninstall` (add `--purge` to drop the settings too).
 
 **Packages.** The [releases page](https://github.com/alexykn/icygui/releases) has a universal `.dmg` for macOS and `.deb` and `.tar.gz` packages for Linux on x86_64 and arm64, with `SHA256SUMS` and build-provenance attestations. macOS builds aren't notarized yet: `install.sh` handles that for you; after a browser download, open the app once via System Settings → Privacy & Security → *Open Anyway*.
 

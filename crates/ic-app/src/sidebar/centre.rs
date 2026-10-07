@@ -25,7 +25,9 @@
 //! fixed height (440 px, less in a short window, so the card always fits
 //! above the footer), whatever the scope, the filter, the storms
 //! expanded or the notifications arriving, so the tabs and chips never
-//! move under the pointer.
+//! move under the pointer. While the pointer is over the list, arriving
+//! notifications wait (the heading counts them) until it leaves, so the
+//! entries don't move under it either.
 
 use std::collections::HashSet;
 
@@ -95,6 +97,11 @@ pub(super) struct CentreState {
     overflow_open: bool,
     /// The list's scrolling (and where it is drawn).
     list: gpui::ScrollHandle,
+    /// While the pointer is over the list: the notifications there were
+    /// when it came (by intent id). Newer ones wait until it leaves, so
+    /// the entries never move under the pointer (the heading counts them
+    /// at once).
+    held: Option<HashSet<String>>,
 }
 
 /// The colour of a notification's tone.
@@ -295,12 +302,68 @@ impl Sidebar {
                 records: state.notification_records_of(&environment.id),
             })
             .collect();
-        entry::centre_view(
-            &sources,
+        let Some(held) = &self.centre.held else {
+            return entry::centre_view(
+                &sources,
+                scope == Scope::All,
+                self.centre.filter.as_ref(),
+                now,
+            );
+        };
+        // The pointer is over the list: what arrived since waits, the
+        // heading counts it already.
+        let (total, unread) = sources
+            .iter()
+            .flat_map(|source| &source.records)
+            .fold((0, 0), |(total, unread), record| {
+                (total + 1, unread + usize::from(!record.read))
+            });
+        let shown: Vec<Source<'_>> = sources
+            .into_iter()
+            .map(|source| Source {
+                records: source
+                    .records
+                    .into_iter()
+                    .filter(|record| held.contains(&record.intent.id))
+                    .collect(),
+                ..source
+            })
+            .collect();
+        let mut view = entry::centre_view(
+            &shown,
             scope == Scope::All,
             self.centre.filter.as_ref(),
             now,
-        )
+        );
+        view.total = total;
+        view.unread = unread;
+        view
+    }
+
+    /// The pointer came over the centre's list (`hovered`) or left it:
+    /// while it is there, notifications arriving wait, so nothing moves
+    /// under it (NOTE-05); leaving lists them.
+    fn hold_centre(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if !hovered {
+            if self.centre.held.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
+        let state = self.state.read(cx);
+        let listed = state
+            .environments()
+            .iter()
+            .flat_map(|environment| state.notification_records_of(&environment.id))
+            .map(|record| record.intent.id.clone())
+            .collect();
+        self.centre.held = Some(listed);
+    }
+
+    /// Whether arrivals wait because the pointer is over the list.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn centre_holds(&self) -> bool {
+        self.centre.held.is_some()
     }
 
     /// The notification centre's card.
@@ -727,6 +790,9 @@ impl Sidebar {
             return div()
                 .id("centre-list")
                 .track_scroll(&self.centre.list)
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    this.hold_centre(*hovered, cx);
+                }))
                 .flex()
                 .flex_none()
                 .flex_col()
@@ -790,6 +856,9 @@ impl Sidebar {
         div()
             .id("centre-list")
             .track_scroll(&self.centre.list)
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.hold_centre(*hovered, cx);
+            }))
             .flex()
             .flex_none()
             .flex_col()

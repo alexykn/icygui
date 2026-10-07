@@ -140,13 +140,13 @@ fn acknowledging_by_keyboard_sends_one_action_and_reports_it() {
         // On its way: the row and the toast say so.
         assert_eq!(
             app.state.read(cx).pending_label(&replication()),
-            Some("ack pending")
+            Some("ack pending…")
         );
         assert_eq!(
             toasts(app, cx),
             [(
                 ToastTone::Pending,
-                "Acknowledging postgres-replication on db-prod-03".to_owned(),
+                "Acknowledging postgres-replication on db-prod-03…".to_owned(),
                 Vec::new()
             )]
         );
@@ -399,7 +399,7 @@ fn checks_go_at_once_and_many_ask_first() {
         );
         assert_eq!(
             app.state.read(cx).pending_label(&replication()),
-            Some("checking")
+            Some("checking…")
         );
     });
 }
@@ -446,7 +446,7 @@ fn removals_go_at_once_for_one_and_ask_for_several() {
         assert_eq!(recorder.actions()[0].2, Action::RemoveAcknowledgement);
         assert_eq!(
             app.state.read(cx).pending_label(&acknowledged),
-            Some("removing ack")
+            Some("removing ack…")
         );
 
         // One comment by name (the pane's ×).

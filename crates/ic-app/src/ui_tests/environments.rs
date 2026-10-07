@@ -715,6 +715,91 @@ fn the_environment_editor_names_what_is_missing() {
     });
 }
 
+/// Escape (or *cancel*, or a press beside the dialog) with something
+/// changed in the environment editor asks before dropping it; answering
+/// no comes back to the editor as it was. Unchanged, it closes at once.
+#[test]
+fn the_environment_editor_asks_before_dropping_changes() {
+    run(FixtureOptions::default(), |app, cx| {
+        let workspace = app.workspace.clone();
+        let id = app
+            .state
+            .read(cx)
+            .active_environment_id()
+            .unwrap()
+            .to_owned();
+        let open = |cx: &mut App| {
+            app.in_window(cx, |window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.open_environment_editor(Some(&id), window, cx);
+                });
+            });
+            app.draw(cx);
+            app.workspace.read(cx).environment_editor().unwrap().clone()
+        };
+        let modal = |cx: &App| app.workspace.read(cx).modal(cx);
+        let asks = |cx: &App| {
+            matches!(
+                modal(cx),
+                Some(ModalKind::Confirm(confirmation))
+                    if confirmation.action == Confirmed::DiscardEnvironmentEdits
+                        && confirmation.title == "Discard the changes to prod-cluster?"
+            )
+        };
+
+        // Unchanged: Escape closes at once.
+        open(cx);
+        app.keys(cx, "escape");
+        assert_eq!(modal(cx), None);
+
+        // A second URL typed: Escape asks; Escape again keeps editing.
+        let editor = open(cx);
+        app.in_window(cx, |window, cx| {
+            editor.update(cx, |editor, cx| editor.add_url_row(window, cx));
+        });
+        fill(
+            app,
+            cx,
+            &editor,
+            FormField::Url(1),
+            "https://master-02.example.com:5665",
+        );
+        app.draw(cx);
+        assert!(editor.read(cx).has_changes());
+        app.keys(cx, "escape");
+        assert!(asks(cx), "asks first: {:?}", modal(cx));
+        app.keys(cx, "escape");
+        assert_eq!(modal(cx), Some(ModalKind::Environment), "still editing");
+        let back = app.workspace.read(cx).environment_editor().unwrap().clone();
+        assert_eq!(back, editor, "the same editor");
+        assert_eq!(
+            back.read(cx).form().urls[1].url,
+            "https://master-02.example.com:5665"
+        );
+        // Closing the window would lose them too.
+        let closes = app.in_window(cx, |window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.may_close(window, cx))
+        });
+        assert!(!closes);
+        app.keys(cx, "escape");
+        assert_eq!(modal(cx), Some(ModalKind::Environment), "back again");
+        // *cancel* asks the same; discarding drops them.
+        editor.update(cx, |_, cx| cx.emit(EnvironmentEditorEvent::Cancel));
+        app.draw(cx);
+        assert!(asks(cx));
+        app.keys(cx, "enter");
+        assert_eq!(modal(cx), None, "discarded");
+        let saved = app
+            .state
+            .read(cx)
+            .environment_by_id(&id)
+            .unwrap()
+            .urls
+            .len();
+        assert_eq!(saved, 1, "nothing saved");
+    });
+}
+
 /// A keychain that refuses to store anything (locked, or no Secret
 /// Service running).
 struct LockedKeychain;
@@ -907,6 +992,103 @@ fn keychain_failures_are_named_not_swallowed() {
                     assert!(detail.contains("still in the keychain"), "{detail}");
                     assert!(detail.contains(&id), "names the entry: {detail}");
                     assert!(app.state.read(cx).environments().is_empty());
+                });
+            }
+            .boxed_local()
+        })),
+    );
+}
+
+/// Switching environments (here from the footer's switcher; a palette
+/// command, the tray or another environment's notification do the same)
+/// while the dashboard editor has changes keeps them for when that
+/// environment is back, says so, and counts them as unsaved work when the
+/// window would close; never lost without a word.
+#[test]
+fn a_switch_keeps_the_dashboard_editors_changes_for_its_environment() {
+    run_app(
+        crate::WINDOW_SIZE,
+        demo_app(None),
+        Body::Async(Box::new(|app, cx| {
+            async move {
+                wait_for(&app, &cx, "prod-cluster", CONNECT, |app, cx| {
+                    connected_to(app.state.read(cx), demo::ENDPOINT)
+                })
+                .await;
+                let switch = |cx: &mut App, id: &str| {
+                    let sidebar = app.workspace.read(cx).sidebar().clone();
+                    sidebar.update(cx, |_, cx| {
+                        cx.emit(crate::sidebar::SidebarEvent::SwitchEnvironment(id.to_owned()));
+                    });
+                    app.draw(cx);
+                };
+                let active = |id: &'static str| {
+                    move |app: &Harness, cx: &mut App| {
+                        app.state.read(cx).active_environment_id() == Some(id)
+                    }
+                };
+                cx.update(|cx| {
+                    app.keys(cx, "ctrl-n");
+                    let editor = app.workspace.read(cx).editor().cloned().unwrap();
+                    let name = editor.read(cx).name_input().clone();
+                    app.in_window(cx, |window, cx| {
+                        name.update(cx, |input, cx| input.replace_all("postgres", window, cx));
+                    });
+                    app.draw(cx);
+                    switch(cx, demo::STAGING_ID);
+                });
+                wait_for(&app, &cx, "staging", CONNECT, active(demo::STAGING_ID)).await;
+                cx.update(|cx| {
+                    let state = app.state.read(cx);
+                    assert!(app.workspace.read(cx).editor().is_none());
+                    assert!(
+                        state.toasts().any(|toast| {
+                            toast.title == "Your changes to postgres are kept"
+                                && toast.lines
+                                    == ["Switch back to prod-cluster and edit it again to continue."]
+                        }),
+                        "said so"
+                    );
+                    // Staging's own new dashboard starts afresh.
+                    app.keys(cx, "ctrl-n");
+                });
+                cx.update(|cx| {
+                    let editor = app.workspace.read(cx).editor().cloned().unwrap();
+                    assert_eq!(editor.read(cx).draft().name, "new dashboard");
+                    editor.update(cx, |_, cx| cx.emit(crate::editor::EditorEvent::Closed));
+                });
+                cx.update(|cx| {
+                    assert!(app.workspace.read(cx).editor().is_none());
+                    // Closing the window now would lose them: it asks.
+                    let closes = app.in_window(cx, |window, cx| {
+                        app.workspace
+                            .update(cx, |workspace, cx| workspace.may_close(window, cx))
+                    });
+                    assert!(!closes, "asks first");
+                });
+                cx.update(|cx| {
+                    let Some(ModalKind::Confirm(question)) = app.workspace.read(cx).modal(cx)
+                    else {
+                        panic!("the close question");
+                    };
+                    assert!(
+                        question.detail.contains("the changes kept for postgres in prod-cluster"),
+                        "{}",
+                        question.detail
+                    );
+                    app.keys(cx, "escape");
+                });
+                cx.update(|cx| {
+                    assert_eq!(app.workspace.read(cx).modal(cx), None);
+                    // Back in prod-cluster, the new dashboard continues.
+                    switch(cx, demo::ENVIRONMENT_ID);
+                });
+                wait_for(&app, &cx, "prod-cluster again", CONNECT, active(demo::ENVIRONMENT_ID))
+                    .await;
+                cx.update(|cx| app.keys(cx, "ctrl-n"));
+                cx.update(|cx| {
+                    let editor = app.workspace.read(cx).editor().cloned().unwrap();
+                    assert_eq!(editor.read(cx).draft().name, "postgres", "kept");
                 });
             }
             .boxed_local()

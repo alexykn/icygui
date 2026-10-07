@@ -1,5 +1,5 @@
 //! What became of the actions sent (ACT-07): the objects' optimistic
-//! markers (`ack pending` in their rows and panes while Icinga works on
+//! markers (`ack pending…` in their rows and panes while Icinga works on
 //! it and until a snapshot shows the change), the last failure per object
 //! (shown under the pane's buttons), and the toasts that report each
 //! action: in progress, done, done except for some objects (each named
@@ -215,15 +215,15 @@ fn verbs(kind: &ObjectAction) -> Verbs {
 /// The marker rows and panes show while `kind` is in flight.
 pub(crate) fn mark_label(kind: &ObjectAction) -> &'static str {
     match kind {
-        ObjectAction::Acknowledge => "ack pending",
-        ObjectAction::RemoveAcknowledgement => "removing ack",
-        ObjectAction::ScheduleDowntime => "downtime pending",
-        ObjectAction::RemoveDowntimes | ObjectAction::RemoveDowntime(_) => "removing downtime",
-        ObjectAction::CheckNow => "checking",
-        ObjectAction::AddComment => "comment pending",
-        ObjectAction::RemoveComment(_) => "removing comment",
-        ObjectAction::SubmitCheckResult => "result pending",
-        ObjectAction::RunCommand => "command running",
+        ObjectAction::Acknowledge => "ack pending…",
+        ObjectAction::RemoveAcknowledgement => "removing ack…",
+        ObjectAction::ScheduleDowntime => "downtime pending…",
+        ObjectAction::RemoveDowntimes | ObjectAction::RemoveDowntime(_) => "removing downtime…",
+        ObjectAction::CheckNow => "checking…",
+        ObjectAction::AddComment => "comment pending…",
+        ObjectAction::RemoveComment(_) => "removing comment…",
+        ObjectAction::SubmitCheckResult => "result pending…",
+        ObjectAction::RunCommand => "command running…",
     }
 }
 
@@ -351,7 +351,7 @@ impl Tracker {
         let toast = self.push(
             Some(id),
             ToastTone::Pending,
-            format!("{} {}", words.progressive, describe_objects(&spec.objects)),
+            format!("{} {}…", words.progressive, describe_objects(&spec.objects)),
             Vec::new(),
             None,
         );
@@ -376,7 +376,7 @@ impl Tracker {
             Some(id),
             ToastTone::Pending,
             format!(
-                "{} {} in {environment}",
+                "{} {} in {environment}…",
                 words.progressive,
                 describe_objects(&spec.objects)
             ),
@@ -516,7 +516,7 @@ impl Tracker {
         self.marks.len() != before
     }
 
-    /// The marker to show for `object` (`ack pending`), if any.
+    /// The marker to show for `object` (`ack pending…`), if any.
     pub(crate) fn label(&self, object: &ObjectKey) -> Option<&'static str> {
         self.marks.get(object).map(|mark| mark.label)
     }
@@ -683,15 +683,15 @@ mod tests {
         let t0 = Instant::now();
         let before = snapshot(false, 100.);
         tracker.start(1, &ack(vec![disk()]), &before, t0);
-        assert_eq!(tracker.label(&disk()), Some("ack pending"));
+        assert_eq!(tracker.label(&disk()), Some("ack pending…"));
         assert_eq!(tracker.label(&load()), None);
         let toast = tracker.toasts().next().unwrap().clone();
         assert_eq!(toast.tone, ToastTone::Pending);
-        assert_eq!(toast.title, "Acknowledging disk on db-01");
+        assert_eq!(toast.title, "Acknowledging disk on db-01…");
 
         // Answered, but the snapshot doesn't show it yet: still pending.
         tracker.finish(1, &ok(1), &before, t0 + Duration::from_millis(300));
-        assert_eq!(tracker.label(&disk()), Some("ack pending"));
+        assert_eq!(tracker.label(&disk()), Some("ack pending…"));
         let toast = tracker.toasts().next().unwrap().clone();
         assert_eq!(toast.tone, ToastTone::Success);
         assert_eq!(toast.title, "Acknowledged disk on db-01");
@@ -728,7 +728,7 @@ mod tests {
             vec![disk(), load()],
         );
         tracker.start(7, &check, &snapshot(false, 100.), t0);
-        assert_eq!(tracker.label(&load()), Some("checking"));
+        assert_eq!(tracker.label(&load()), Some("checking…"));
         tracker.finish(7, &ok(2), &snapshot(false, 100.), t0);
         let toast = tracker.toasts().next().unwrap();
         assert_eq!(toast.title, "Rescheduled the check of 2 services");
@@ -765,7 +765,7 @@ mod tests {
             None,
             "the failed object's marker goes"
         );
-        assert_eq!(tracker.label(&disk()), Some("ack pending"));
+        assert_eq!(tracker.label(&disk()), Some("ack pending…"));
         let failure = tracker.failure(&load()).unwrap();
         assert_eq!(failure.action, ObjectAction::Acknowledge);
         assert!(failure.reason.contains("already acknowledged"));
@@ -826,7 +826,7 @@ mod tests {
             objects: vec![disk()],
         };
         tracker.start(6, &removal, &snapshot, t0);
-        assert_eq!(tracker.label(&disk()), Some("removing comment"));
+        assert_eq!(tracker.label(&disk()), Some("removing comment…"));
         let outcome = ActionOutcome {
             ok: 0,
             failed: vec![(
@@ -912,10 +912,10 @@ mod tests {
             ..ActionOutcome::default()
         };
         tracker.finish(1, &outcome, &snapshot, t0);
-        assert_eq!(tracker.label(&disk()), Some("checking"));
+        assert_eq!(tracker.label(&disk()), Some("checking…"));
         assert_eq!(
             tracker.pending(&disk()),
-            Some((&ObjectAction::CheckNow, "checking"))
+            Some((&ObjectAction::CheckNow, "checking…"))
         );
     }
 }

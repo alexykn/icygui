@@ -132,6 +132,10 @@ impl HostTab {
 }
 
 /// The detail pane view.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent switches of one view: the OK services shown, the sidebar, a resting cursor, marked rows beside it"
+)]
 pub(crate) struct ObjectPane {
     state: Entity<AppState>,
     mode: PaneMode,
@@ -174,6 +178,9 @@ pub(crate) struct ObjectPane {
     log: Option<history::PaneHistory>,
     /// Reads them.
     log_task: Option<Task<()>>,
+    /// Rows are marked in the list beside the pane: the action keys act on
+    /// them, not on this object, so the buttons show no key hints.
+    keys_elsewhere: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -228,6 +235,7 @@ impl ObjectPane {
             menu: OpenMenu::default(),
             log: None,
             log_task: None,
+            keys_elsewhere: false,
             _subscriptions: subscriptions,
         }
     }
@@ -426,6 +434,19 @@ impl ObjectPane {
             self.sidebar_open = open;
             cx.notify();
         }
+    }
+
+    /// Tells the pane whether rows are marked in the list beside it (the
+    /// action keys then act on them: marked rows, then the pane, then the
+    /// cursor). Set by the list as it renders, before the pane does.
+    pub(crate) fn set_keys_elsewhere(&mut self, elsewhere: bool) {
+        self.keys_elsewhere = elsewhere;
+    }
+
+    /// Whether the buttons' key hints are blank because rows are marked.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn keys_elsewhere(&self) -> bool {
+        self.keys_elsewhere
     }
 
     fn switch_to(&mut self, object: ObjectKey, cx: &mut App) {
@@ -684,7 +705,7 @@ fn updating_slot(updating: bool, theme: &Theme) -> impl IntoElement {
                 div()
                     .text_size(theme.text.small)
                     .text_color(theme.colors.text_faint)
-                    .child("updating"),
+                    .child("updating…"),
             )
             .tooltip(Tooltip::text(
                 "Fetching the latest details from Icinga; shown meanwhile is what icygui has",
@@ -696,7 +717,7 @@ fn updating_slot(updating: bool, theme: &Theme) -> impl IntoElement {
 /// or gone.
 fn missing(object: &ObjectKey, loading: bool, theme: &Theme) -> AnyElement {
     if loading {
-        return EmptyState::new(format!("Loading {}", short_name(object)))
+        return EmptyState::new(format!("Loading {}…", short_name(object)))
             .leading(
                 Icon::new(IconName::Loader)
                     .size(px(20.))
@@ -757,10 +778,15 @@ fn scroll_area(
         .child(Scrollbar::vertical(scroll))
 }
 
-/// The action buttons shared by service and host panes, with the `···`
-/// menu, an action on its way (`acknowledging` on its button) and the
-/// last failure under them. Actions the API user may not run are
-/// disabled, and their tooltip says why (ENV-09).
+/// The action buttons shared by service and host panes (PANE-01), with
+/// the `···` menu, then the last failure and the watch or mute. Actions
+/// the API user may not run are disabled, and their tooltip says why
+/// (ENV-09). Nothing in the row moves with the state: the first slot has
+/// one width for *acknowledge* (a problem), *remove ack* (acknowledged)
+/// and a disabled *acknowledge* (nothing to acknowledge); an action on its
+/// way keeps its button's label and shows `…` where its key was, the
+/// marker (`ack pending…`) in its tooltip; while rows are marked in the
+/// list the keys act on them, so the hints keep their room, empty.
 fn action_buttons(
     pane: &ObjectPane,
     acknowledged: bool,
@@ -768,20 +794,24 @@ fn action_buttons(
     output: Option<String>,
     cx: &Context<ObjectPane>,
 ) -> impl IntoElement {
+    let theme = cx.theme();
     let state = pane.state.read(cx);
     let pending = state.pending_action(&pane.object);
+    let keys_elsewhere = pane.keys_elsewhere;
     let button =
         |id: &'static str, label: &'static str, key: Option<&'static str>, action: ObjectAction| {
-            // The action on its way names itself on its button.
             if let Some((kind, marker)) = pending
                 && *kind == action
             {
-                return Button::new(id, marker).disabled(true);
+                return Button::new(id, label)
+                    .key_hint(PENDING_HINT)
+                    .disabled(true)
+                    .tooltip(Tooltip::new(marker));
             }
             let denial = state.action_denial(&action);
             let mut button = Button::new(id, label);
             if let Some(key) = key {
-                button = button.key_hint(key);
+                button = button.key_hint(key).key_blank(keys_elsewhere);
             }
             match denial {
                 Some(denial) => button.disabled(true).tooltip(Tooltip::new(denial)),
@@ -792,6 +822,37 @@ fn action_buttons(
                 )),
             }
         };
+    let first = if acknowledged {
+        button(
+            "remove-ack",
+            "remove ack",
+            None,
+            ObjectAction::RemoveAcknowledgement,
+        )
+    } else if problem {
+        button(
+            "acknowledge",
+            "acknowledge",
+            Some("a"),
+            ObjectAction::Acknowledge,
+        )
+        .primary()
+    } else {
+        let what = match &pane.object {
+            ObjectKey::Host { .. } => "the host is UP",
+            ObjectKey::Service { .. } => "the service is OK",
+        };
+        Button::new("acknowledge", "acknowledge")
+            .key_hint("a")
+            .key_blank(keys_elsewhere)
+            .disabled(true)
+            .tooltip(Tooltip::new(format!("Nothing to acknowledge: {what}")))
+    };
+    let first_width = Button::width_for(theme, "acknowledge", true).max(Button::width_for(
+        theme,
+        "remove ack",
+        true,
+    ));
     let failure = failure_line(pane, cx);
     let watch = override_line(pane, cx);
     let more = more_trigger(pane, output, cx);
@@ -805,25 +866,7 @@ fn action_buttons(
                 .flex_wrap()
                 .items_center()
                 .gap(px(8.))
-                .when(problem && !acknowledged, |row| {
-                    row.child(
-                        button(
-                            "acknowledge",
-                            "acknowledge",
-                            Some("a"),
-                            ObjectAction::Acknowledge,
-                        )
-                        .primary(),
-                    )
-                })
-                .when(acknowledged, |row| {
-                    row.child(button(
-                        "remove-ack",
-                        "remove ack",
-                        None,
-                        ObjectAction::RemoveAcknowledgement,
-                    ))
-                })
+                .child(first.width(first_width))
                 .child(button(
                     "downtime",
                     "downtime",
@@ -847,6 +890,10 @@ fn action_buttons(
         .children(failure)
         .children(watch)
 }
+
+/// Where an action button's key was while the action is on its way: it
+/// keeps the button's width (a key hint is one character).
+const PENDING_HINT: &str = "\u{2026}";
 
 /// The object's watch or mute (NOTE-02), with a way to end it.
 fn override_line(pane: &ObjectPane, cx: &Context<ObjectPane>) -> Option<impl IntoElement> {

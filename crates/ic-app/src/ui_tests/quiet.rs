@@ -194,9 +194,14 @@ fn quiet_mode_follows_the_window_and_notifications_wake_it_up() {
                 })
                 .await;
                 let tag = cx.update(|cx| posted_about(session.read(cx), &object).unwrap().tag);
+                let selected = cx.update(|cx| app.state.read(cx).selected().cloned().unwrap());
 
                 // Its click: the window back, the object shown with what
-                // the state change brought, prod-cluster awake.
+                // the state change brought, prod-cluster awake. The rows
+                // are still quiet mode's (the problem began while quiet),
+                // yet the object opens in the selected dashboard, which
+                // lists it (`overview`: unhandled problems), not as a tab
+                // or in another dashboard.
                 cx.update(|cx| {
                     session.update(cx, |session, cx| {
                         session.notification_clicked(&Response { tag, action: None }, cx);
@@ -204,10 +209,26 @@ fn quiet_mode_follows_the_window_and_notifications_wake_it_up() {
                     let state = app.state.read(cx);
                     assert!(!state.window_hidden(), "shown at once");
                 });
-                wait_for(&app, &cx, "the object shown", CONNECT, |app, cx| {
+                // The footer counts it as live at once: its age slot never
+                // says `quiet` while the stream is handed over (ENV-06).
+                let footer_age = |cx: &App| {
                     let state = app.state.read(cx);
-                    app.pane_object(cx).or_else(|| state.active_tab().cloned())
-                        == Some(object.clone())
+                    state.connection().label_parts(Timestamp::now()).1
+                };
+                cx.update(|cx| assert_ne!(footer_age(cx).as_deref(), Some("quiet")));
+                wait_for(&app, &cx, "the object shown", CONNECT, |app, cx| {
+                    assert_ne!(footer_age(cx).as_deref(), Some("quiet"));
+                    app.pane_object(cx) == Some(object.clone())
+                })
+                .await;
+                cx.update(|cx| {
+                    let state = app.state.read(cx);
+                    assert_eq!(state.active_tab(), None, "no tab for a listed object");
+                    assert_eq!(state.selected(), Some(&selected), "the dashboard stays");
+                });
+                // Once the rows are evaluated again, the cursor is on its row.
+                wait_for(&app, &cx, "the cursor on the object", CONNECT, |app, cx| {
+                    app.cursor(cx).is_some_and(|(_, key)| key == object)
                 })
                 .await;
                 cx.update(|cx| {

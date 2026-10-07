@@ -1165,14 +1165,19 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
 }
 
 /// Muting each environment on its own, or unmuting it (A5), with
-/// several environments.
+/// several environments: the one on screen first (the empty query's few
+/// commands offer its mute), then the others in their order (found by
+/// typing their name).
 fn mute_commands(state: &AppState, now: Timestamp) -> Vec<PaletteItem> {
     let environments = state.environments();
     let mut items = Vec::new();
     if environments.len() < 2 {
         return items;
     }
-    for environment in environments {
+    let (on_screen, others): (Vec<_>, Vec<_>) = environments
+        .iter()
+        .partition(|environment| state.is_active(&environment.id));
+    for environment in on_screen.into_iter().chain(others) {
         let id = &environment.id;
         match state.environment_paused_until(id, now) {
             Some(until) => items.push(command(
@@ -1658,6 +1663,40 @@ mod tests {
             PaletteCommand::MuteEnvironment(staging_id, None)
         );
         assert!(items[0].detail.starts_with("muted until "));
+    }
+
+    /// The empty query's few commands offer muting the environment on
+    /// screen, not the first in the list; the others are a name away.
+    #[test]
+    fn the_empty_query_offers_muting_the_environment_on_screen() {
+        let mut state = AppState::fixture(now());
+        let prod_id = state.active_environment_id().unwrap().to_owned();
+        let staging = ic_config::Environment::new(
+            "staging",
+            "https://stg-master:5665",
+            ic_config::AuthConfig::Basic {
+                username: "icygui".to_owned(),
+            },
+        );
+        let staging_id = staging.id.clone();
+        state.save_environment(staging, false);
+        let muted = |state: &AppState, query: &str| -> Vec<String> {
+            PaletteIndex::build(state, &Focus::default(), now())
+                .search(query)
+                .into_iter()
+                .filter_map(|item| match item.command {
+                    PaletteCommand::MuteEnvironment(id, _) => Some(id),
+                    _ => None,
+                })
+                .collect()
+        };
+        for active in [&prod_id, &staging_id] {
+            state.switch_environment(active);
+            let offered = muted(&state, "");
+            assert!(!offered.is_empty(), "offered");
+            assert!(offered.iter().all(|id| id == active), "{offered:?}");
+        }
+        assert!(muted(&state, "mute prod").contains(&prod_id), "a name away");
     }
 
     #[test]

@@ -236,6 +236,17 @@ fn deb_arch() -> &'static str {
     }
 }
 
+/// `version` as Debian orders it: a pre-release part (`0.1.0-rc.1`) goes
+/// after a `~` (`0.1.0~rc.1`), which sorts before the release it leads to
+/// (`0.1.0`), so installing the release over it is an upgrade. With a `-`
+/// dpkg would read `rc.1` as a Debian revision, which sorts after.
+pub(crate) fn deb_version(version: &str) -> String {
+    match version.split_once('-') {
+        Some((release, pre)) => format!("{release}~{}", pre.replace('-', ".")),
+        None => version.to_owned(),
+    }
+}
+
 fn deb(bundle: &Path, dist: &Path, staging: &Path) -> Result<()> {
     let deb_arch = deb_arch();
     remove_dir(staging)?;
@@ -250,7 +261,7 @@ fn deb(bundle: &Path, dist: &Path, staging: &Path) -> Result<()> {
         &staging.join("DEBIAN/control"),
         format!(
             "Package: {APP_NAME}\n\
-             Version: {VERSION}\n\
+             Version: {version}\n\
              Section: net\n\
              Priority: optional\n\
              Architecture: {deb_arch}\n\
@@ -263,6 +274,7 @@ fn deb(bundle: &Path, dist: &Path, staging: &Path) -> Result<()> {
              Live problem lists, dashboards, operator actions and native\n \
              notifications for the Icinga 2 REST API.\n",
             repo = crate::DEFAULT_REPO,
+            version = deb_version(VERSION),
         ),
     )?;
     normalise_modes(staging)?;
@@ -343,6 +355,34 @@ mod tests {
 
     use super::*;
     use crate::APP_ID;
+
+    /// A release candidate's `.deb` sorts before the release it leads to,
+    /// so installing the release over it is an upgrade (dpkg's own order).
+    #[test]
+    fn pre_releases_sort_before_their_release_for_dpkg() {
+        assert_eq!(deb_version("0.1.0"), "0.1.0");
+        assert_eq!(deb_version("0.1.0-rc.1"), "0.1.0~rc.1");
+        assert_eq!(deb_version("0.2.0-beta-2"), "0.2.0~beta.2");
+        let ordered = |lower: &str, higher: &str| {
+            Command::new("dpkg")
+                .args(["--compare-versions", lower, "lt", higher])
+                .status()
+                .map(|status| status.success())
+        };
+        let Ok(rc_first) = ordered(&deb_version("0.1.0-rc.1"), &deb_version("0.1.0")) else {
+            return; // no dpkg here
+        };
+        assert!(rc_first, "0.1.0~rc.1 < 0.1.0");
+        assert_eq!(
+            ordered(&deb_version("0.1.0-rc.1"), &deb_version("0.1.0-rc.2")).ok(),
+            Some(true)
+        );
+        assert_eq!(
+            ordered("0.1.0-rc.1", "0.1.0").ok(),
+            Some(false),
+            "why not `-`"
+        );
+    }
 
     /// A scratch directory removed when the test ends.
     struct Scratch(PathBuf);
@@ -464,7 +504,7 @@ mod tests {
             fields,
             [
                 format!("Package: {APP_NAME}"),
-                format!("Version: {VERSION}"),
+                format!("Version: {}", deb_version(VERSION)),
                 format!("Architecture: {}", deb_arch()),
             ]
         );

@@ -485,7 +485,7 @@ impl DashboardEditor {
                     .max_width(px(520.))
                     .into_any_element();
             }
-            Preview::Waiting => return note("Evaluating", theme),
+            Preview::Waiting => return note("Evaluating…", theme),
             Preview::Unavailable => {
                 return note(
                     "The preview shows once the environment's engine runs.",
@@ -690,7 +690,7 @@ impl DashboardEditor {
             Preview::Ready(Err(error)) => {
                 ("invalid".to_owned(), FieldTone::Bad, Some(error.clone()))
             }
-            Preview::Waiting => ("checking".to_owned(), FieldTone::Neutral, None),
+            Preview::Waiting => ("checking…".to_owned(), FieldTone::Neutral, None),
             Preview::Unavailable => ("not checked".to_owned(), FieldTone::Neutral, None),
         };
         let marker = filter_error.as_deref().and_then(|error| {

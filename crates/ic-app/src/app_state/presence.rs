@@ -32,6 +32,11 @@ impl EngineSlot {
         }
         self.quiet = quiet;
         self.send(Command::SetQuiet(quiet));
+        if quiet {
+            self.connection.going_quiet();
+        } else {
+            self.connection.going_live(ic_model::Timestamp::now());
+        }
         true
     }
 

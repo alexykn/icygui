@@ -529,6 +529,24 @@ fn clicks_select_mark_and_act() {
     });
 }
 
+/// While rows are marked the action keys act on them (marked rows, then
+/// the pane, then the cursor): the pane's buttons keep their key hints'
+/// room but show none, and show them again once nothing is marked.
+#[test]
+fn marked_rows_take_the_pane_buttons_key_hints() {
+    run(FixtureOptions::default(), |app, cx| {
+        app.click(cx, row_position(0), Modifiers::default());
+        let pane = app.dashboard(cx).read(cx).pane(cx).unwrap();
+        assert!(!pane.read(cx).keys_elsewhere());
+        app.keys(cx, "x");
+        assert_eq!(app.marked(cx).len(), 1);
+        assert!(pane.read(cx).keys_elsewhere(), "the keys act on the mark");
+        app.keys(cx, "x");
+        assert!(app.marked(cx).is_empty());
+        assert!(!pane.read(cx).keys_elsewhere());
+    });
+}
+
 #[test]
 fn the_selection_survives_snapshot_updates() {
     run(FixtureOptions::default(), |app, cx| {

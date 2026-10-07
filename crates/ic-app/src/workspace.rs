@@ -154,6 +154,8 @@ pub(crate) enum Confirmed {
     Action(ActionSpec),
     /// Leave the dashboard editor, dropping its changes.
     DiscardEdits,
+    /// Leave the environment editor, dropping its changes.
+    DiscardEnvironmentEdits,
     /// Close the window, dropping unsaved work in it.
     CloseWindow,
 }
@@ -250,6 +252,10 @@ pub(crate) struct Workspace {
     /// Changes of an editor that closed because something else was shown:
     /// editing the same dashboard again continues with them.
     kept_draft: Option<(EditorTarget, DashboardDraft)>,
+    /// The kept changes of the environments not on screen, by id: an
+    /// environment switch keeps them for when it is back (a dashboard of
+    /// one environment never gets another's draft).
+    drafts_elsewhere: HashMap<String, (EditorTarget, DashboardDraft)>,
     onboarding: Option<(Entity<EnvironmentEditor>, Subscription)>,
     modal: Option<OpenModal>,
     /// The environment active when the open modal opened.
@@ -355,6 +361,7 @@ impl Workspace {
             tabs: HashMap::new(),
             editor: None,
             kept_draft: None,
+            drafts_elsewhere: HashMap::new(),
             onboarding: None,
             modal: None,
             modal_environment: None,
@@ -592,8 +599,8 @@ impl Workspace {
             .active_environment_id()
             .map(str::to_owned);
         if active != self.environment {
-            self.environment = active;
-            self.environment_changed(window, cx);
+            let previous = std::mem::replace(&mut self.environment, active);
+            self.environment_changed(previous, window, cx);
         }
         let state = self.state.read(cx);
         let open: Vec<ObjectKey> = state.tabs().to_vec();
@@ -625,7 +632,7 @@ impl Workspace {
             .is_some_and(|editor| editor.opened_over != shown)
             && let Some(editor) = self.editor.take()
         {
-            self.keep_changes(&editor, cx);
+            self.keep_changes(&editor, None, cx);
         }
         if shown != self.shown {
             // A tab shown: its object counts as seen (A2).
@@ -642,14 +649,32 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Another environment is active (from the footer, the palette or
-    /// the tray): what was opened for the old one goes, so nothing meant
-    /// for it reaches the new one (an acknowledgement for `staging` must
-    /// never go to production). The environment editor and the about
+    /// Another environment is active (from the footer, the palette, the
+    /// tray or a notification of another environment): what was opened
+    /// for the old one (`previous`) goes, so nothing meant for it reaches
+    /// the new one (an acknowledgement for `staging` must never go to
+    /// production). The dashboard editor's changes are kept for when the
+    /// old environment is back (`drafts_elsewhere`), and the new one's
+    /// kept changes come back. The environment editor and the about
     /// dialog stay.
-    fn environment_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.editor = None;
-        self.kept_draft = None;
+    fn environment_changed(
+        &mut self,
+        previous: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.editor.take() {
+            self.keep_changes(&editor, previous.as_deref(), cx);
+        }
+        if let Some(draft) = self.kept_draft.take()
+            && let Some(previous) = previous
+        {
+            self.drafts_elsewhere.insert(previous, draft);
+        }
+        self.kept_draft = self
+            .environment
+            .as_ref()
+            .and_then(|id| self.drafts_elsewhere.remove(id));
         self.request_waits = false;
         self.state.update(cx, |state, _| {
             if let Some(request) = state.drop_unbound_request() {
@@ -659,10 +684,16 @@ impl Workspace {
                 );
             }
         });
-        if !matches!(
+        // The environment editor stays, also behind its question.
+        let keep = matches!(
             self.modal,
             None | Some(OpenModal::Environment(_) | OpenModal::About)
-        ) {
+        ) || matches!(
+            &self.modal,
+            Some(OpenModal::Confirm(confirmation))
+                if confirmation.action == Confirmed::DiscardEnvironmentEdits
+        );
+        if !keep {
             self.close_modal(window, cx);
         }
     }
@@ -887,14 +918,18 @@ impl Workspace {
 
     /// Closes the open modal; the keyboard goes back to the main area, or
     /// to the dialog of an action that waited for this one. Closing the
-    /// question before closing the window brings back the dialog it
-    /// replaced (unless another environment is active by now).
+    /// question before closing the window, or before dropping the
+    /// environment editor's changes, brings back the dialog it replaced
+    /// (unless another environment is active by now).
     pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(closed) = self.modal.take() {
             let behind = self.behind_close.take();
-            if is_close_question(&closed)
+            // The environment editor belongs to no environment on screen;
+            // other dialogs come back only to their own.
+            if replaces_a_dialog(&closed)
                 && let Some((modal, environment)) = behind
-                && environment.as_deref() == self.state.read(cx).active_environment_id()
+                && (matches!(modal, OpenModal::Environment(_))
+                    || environment.as_deref() == self.state.read(cx).active_environment_id())
             {
                 self.modal = Some(modal);
                 self.modal_environment = environment;
@@ -910,7 +945,41 @@ impl Workspace {
     }
 
     fn on_modal_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_modal(window, cx);
+        if matches!(self.modal, Some(OpenModal::Environment(_))) {
+            self.leave_environment_editor(window, cx);
+        } else {
+            self.close_modal(window, cx);
+        }
+    }
+
+    /// Escape or *cancel* in the environment editor: it closes, unless
+    /// something changed (a field, a URL, a trusted certificate, a typed
+    /// password); then it asks first, and coming back from the question
+    /// keeps editing (like the dashboard editor, DASH-04).
+    fn leave_environment_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let subject = match &self.modal {
+            Some(OpenModal::Environment(editor)) if editor.view.read(cx).has_changes() => {
+                editor.view.read(cx).subject()
+            }
+            _ => {
+                self.close_modal(window, cx);
+                return;
+            }
+        };
+        let behind = self
+            .modal
+            .take()
+            .map(|modal| (modal, self.modal_environment.clone()));
+        let confirmation = Confirmation {
+            title: format!("Discard the changes to {subject}?"),
+            detail: "Nothing you changed is saved, and a password you typed is forgotten."
+                .to_owned(),
+            confirm: "discard changes",
+            danger: true,
+            action: Confirmed::DiscardEnvironmentEdits,
+        };
+        self.open_modal(OpenModal::Confirm(confirmation), window, cx);
+        self.behind_close = behind;
     }
 
     /// `secondary-k`: opens the command palette, or closes it.
@@ -1439,18 +1508,29 @@ impl Workspace {
 
     /// Keeps the changes of `editor`, closing because something else is
     /// shown, for the next time the same dashboard is edited, and says so.
-    fn keep_changes(&mut self, editor: &OpenEditor, cx: &mut Context<Self>) {
+    /// `environment` (its id) is the editor's when another one is about to
+    /// be shown: the message says to come back to it.
+    fn keep_changes(
+        &mut self,
+        editor: &OpenEditor,
+        environment: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let editor = editor.view.read(cx);
         let Some(draft) = editor.changes().cloned() else {
             return;
         };
         let title = editor.title();
         self.kept_draft = Some((editor.target().clone(), draft));
+        let elsewhere = environment
+            .and_then(|id| self.state.read(cx).environment_by_id(id))
+            .map(|environment| environment.name.clone());
+        let detail = match elsewhere {
+            Some(name) => format!("Switch back to {name} and edit it again to continue."),
+            None => "Edit it again to continue, or discard them there.".to_owned(),
+        };
         self.state.update(cx, |state, cx| {
-            state.inform(
-                format!("Your changes to {title} are kept"),
-                Some("Edit it again to continue, or discard them there.".to_owned()),
-            );
+            state.inform(format!("Your changes to {title} are kept"), Some(detail));
             cx.notify();
         });
     }
@@ -1575,10 +1655,14 @@ impl Workspace {
             Confirmed::DiscardEdits => {
                 self.editor = None;
             }
+            Confirmed::DiscardEnvironmentEdits => {
+                self.behind_close = None;
+            }
             Confirmed::CloseWindow => {
                 self.behind_close = None;
                 self.editor = None;
                 self.kept_draft = None;
+                self.drafts_elsewhere.clear();
                 window.remove_window();
                 return;
             }
@@ -1622,6 +1706,7 @@ impl Workspace {
                 };
                 if deleted {
                     self.editor = None;
+                    self.drafts_elsewhere.remove(&id);
                 }
             }
         }
@@ -1636,9 +1721,10 @@ impl Workspace {
 
     /// The window is about to close (its close button, the window
     /// manager). It may, unless that loses unsaved work: the dashboard
-    /// editor's changes (also those kept for the next edit) or a dialog
-    /// with something typed. Then it asks first and stays open; the
-    /// dialog comes back if the window stays.
+    /// editor's changes (also those kept for the next edit, in any
+    /// environment), the environment editor's, or a dialog with something
+    /// typed. Then it asks first and stays open; the dialog comes back if
+    /// the window stays.
     pub(crate) fn may_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.modal.as_ref().is_some_and(is_close_question) {
             return false;
@@ -1647,10 +1733,12 @@ impl Workspace {
         if lost.is_empty() {
             return true;
         }
-        let behind = self
-            .modal
-            .take()
-            .map(|modal| (modal, self.modal_environment.clone()));
+        // The question replaces the open dialog, or the question that
+        // replaced one (that dialog comes back if the window stays).
+        let behind = match self.modal.take() {
+            Some(modal) if replaces_a_dialog(&modal) => self.behind_close.take(),
+            other => other.map(|modal| (modal, self.modal_environment.clone())),
+        };
         let confirmation = Confirmation {
             title: "Close the window and lose your changes?".to_owned(),
             detail: format!("Closing it drops {}.", lost.join(" and ")),
@@ -1666,10 +1754,22 @@ impl Workspace {
     /// What closing the window would lose, in words.
     fn unsaved_work(&self, cx: &App) -> Vec<String> {
         let mut lost = Vec::new();
-        if let Some(OpenModal::Action(dialog)) = &self.modal {
-            let dialog = dialog.view.read(cx);
-            if dialog.is_dirty() {
-                lost.push(format!("what you typed in “{}”", dialog.kind().title()));
+        let behind = self.behind_close.as_ref().map(|(modal, _)| modal);
+        for modal in self.modal.iter().chain(behind) {
+            match modal {
+                OpenModal::Action(dialog) => {
+                    let dialog = dialog.view.read(cx);
+                    if dialog.is_dirty() {
+                        lost.push(format!("what you typed in “{}”", dialog.kind().title()));
+                    }
+                }
+                OpenModal::Environment(editor) => {
+                    let editor = editor.view.read(cx);
+                    if editor.has_changes() {
+                        lost.push(format!("your changes to {}", editor.subject()));
+                    }
+                }
+                _ => {}
             }
         }
         if let Some(editor) = &self.editor {
@@ -1686,14 +1786,31 @@ impl Workspace {
                 format!("the changes kept for {name}")
             });
         }
+        let state = self.state.read(cx);
+        let mut elsewhere: Vec<_> = self
+            .drafts_elsewhere
+            .iter()
+            .filter_map(|(id, (_, draft))| {
+                let environment = &state.environment_by_id(id)?.name;
+                let name = draft.name.trim();
+                Some(if name.is_empty() {
+                    format!("the changes kept in {environment}")
+                } else {
+                    format!("the changes kept for {name} in {environment}")
+                })
+            })
+            .collect();
+        elsewhere.sort();
+        lost.extend(elsewhere);
         lost
     }
 
     // --- Environments ---------------------------------------------------
 
-    /// Makes `id` the active environment (ENV-01).
+    /// Makes `id` the active environment (ENV-01). The dashboard editor
+    /// stays until the switch is seen (`Workspace::environment_changed`
+    /// keeps its changes for when this environment is back).
     fn switch_environment(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.editor = None;
         match live::session(cx) {
             Some(session) => {
                 session.update(cx, |session, cx| session.switch_environment(id, cx));
@@ -1727,6 +1844,7 @@ impl Workspace {
             window,
             |this, _, event: &EnvironmentEditorEvent, window, cx| match event {
                 EnvironmentEditorEvent::Close => this.close_modal(window, cx),
+                EnvironmentEditorEvent::Cancel => this.leave_environment_editor(window, cx),
                 EnvironmentEditorEvent::Delete(id) => {
                     this.confirm_delete_environment(id, window, cx);
                 }
@@ -2100,10 +2218,13 @@ impl Workspace {
                         .on_dismiss(cx.listener(|this, _: &MouseDownEvent, window, cx| {
                             // A dialog with something typed stays: a stray
                             // click must not lose it (Escape still closes).
-                            let dirty = matches!(
-                                &this.modal,
-                                Some(OpenModal::Action(dialog)) if dialog.view.read(cx).is_dirty()
-                            );
+                            let dirty = match &this.modal {
+                                Some(OpenModal::Action(dialog)) => dialog.view.read(cx).is_dirty(),
+                                Some(OpenModal::Environment(editor)) => {
+                                    editor.view.read(cx).has_changes()
+                                }
+                                _ => false,
+                            };
                             if !dirty {
                                 this.close_modal(window, cx);
                             }
@@ -2219,6 +2340,18 @@ fn is_close_question(modal: &OpenModal) -> bool {
         modal,
         OpenModal::Confirm(Confirmation {
             action: Confirmed::CloseWindow,
+            ..
+        })
+    )
+}
+
+/// Whether `modal` is a question that replaced a dialog with unsaved work
+/// (`Workspace::behind_close`), which comes back when it is answered no.
+fn replaces_a_dialog(modal: &OpenModal) -> bool {
+    matches!(
+        modal,
+        OpenModal::Confirm(Confirmation {
+            action: Confirmed::CloseWindow | Confirmed::DiscardEnvironmentEdits,
             ..
         })
     )

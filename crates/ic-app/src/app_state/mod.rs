@@ -597,9 +597,22 @@ impl AppState {
         self.engine.snapshot.dashboards.get(reference)
     }
 
-    /// The first dashboard (the selected one first) whose rows show `key`.
+    /// The first dashboard (the selected one first) that lists `key`. Its
+    /// rows tell, unless they are quiet mode's ([`AppState::rows_settling`]):
+    /// those are stale exactly about what changed while quiet (the problem
+    /// a notification is about), so the dashboards' views then judge the
+    /// object as the snapshot has it now (its state changes arrive in quiet
+    /// mode too): what their rows list once they are evaluated again.
     pub(crate) fn dashboard_showing(&self, key: &ObjectKey) -> Option<DashboardRef> {
+        let settling = self.rows_settling();
+        let snapshot = &self.engine.snapshot;
+        let now = Timestamp::now();
         let shows = |reference: &DashboardRef| {
+            if settling {
+                return self
+                    .dashboard(reference)
+                    .is_some_and(|(_, dashboard)| would_list(snapshot, &dashboard.view, key, now));
+            }
             self.result(reference).is_some_and(|result| {
                 result.rows.iter().any(
                     |row| matches!(row, ic_core::snapshot::DashboardRow::Object(row) if row == key),
@@ -619,6 +632,14 @@ impl AppState {
                 })
             })
             .find(|reference| shows(reference))
+    }
+
+    /// Whether the dashboards' rows on screen may be quiet mode's
+    /// (PERF-09): they keep only memberships while quiet and are evaluated
+    /// again once the stream is live, so an object revealed now may not be
+    /// listed yet, or listed where it was.
+    pub(crate) fn rows_settling(&self) -> bool {
+        self.engine.snapshot.quiet
     }
 
     /// Selects a dashboard and shows it instead of an active tab. Returns
@@ -1004,6 +1025,43 @@ fn user_of(environment: &Environment) -> Option<String> {
         }
         AuthConfig::Basic { .. } | AuthConfig::ClientCertificate { .. } => None,
     }
+}
+
+/// Whether `view` lists `key` as `snapshot` has it at `now`: the filter
+/// matches (evaluated by `ic-filter`, as the core does), then
+/// `problems_only` and `hide_handled` (Icinga's handled, as the core's
+/// rows apply it). A filter that doesn't parse or evaluate lists nothing.
+fn would_list(snapshot: &Snapshot, view: &View, key: &ObjectKey, now: Timestamp) -> bool {
+    let Ok(filter) = ic_filter::Filter::parse(&view.filter) else {
+        return false;
+    };
+    let test = |scope: &dyn ic_filter::Scope| filter.is_empty() || filter.matches_at(scope, now);
+    let (matches, problem, handled) = match (key, view.object_kind) {
+        (ObjectKey::Host { name }, ObjectKind::Hosts) => {
+            let Some(host) = snapshot.hosts.get(name) else {
+                return false;
+            };
+            (
+                test(&ic_filter::HostScope { host }),
+                host.is_problem(),
+                host.is_handled(),
+            )
+        }
+        (ObjectKey::Service { key }, ObjectKind::Services) => {
+            let Some(service) = snapshot.services.get(key) else {
+                return false;
+            };
+            let host = snapshot.host_of(key).map(Arc::as_ref);
+            let host_problem = host.is_some_and(ic_model::Host::is_problem);
+            (
+                test(&ic_filter::ServiceScope { service, host }),
+                service.is_problem(),
+                service.is_handled(host_problem),
+            )
+        }
+        _ => return false,
+    };
+    matches && (!view.problems_only || problem) && (!view.hide_handled || !handled)
 }
 
 /// An object from its full name: `host` or `host!service`.

@@ -4,7 +4,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/alexykn/icygui/main/install.sh | bash
 #
 # Options (pass after `bash -s --` when piping):
-#   --version X.Y.Z   install a specific release (default: latest)
+#   --version X.Y.Z   install a specific release (default: the latest release,
+#                     or the newest pre-release while there is no full release)
 #   --uninstall       remove icygui (keeps settings; add --purge to remove them too)
 #   --purge           with --uninstall: also remove settings, logs and caches
 #   --prefix DIR      Linux: install below DIR instead of ~/.local
@@ -92,11 +93,24 @@ verify() { # verify <file> <asset name> <SHA256SUMS>
   note "checksum verified ($actual)"
 }
 
+# The first tag_name in a GitHub API answer.
+release_tag() {
+  curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' "$1" 2>/dev/null |
+    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
+}
+
 latest_version() {
-  local api="https://api.github.com/repos/$REPO/releases/latest" tag
-  tag=$(curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' "$api" 2>/dev/null |
-    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1) || true
-  [ -n "$tag" ] || die "could not find the latest release of $REPO (pass --version X.Y.Z)"
+  local api="https://api.github.com/repos/$REPO/releases" tag
+  tag=$(release_tag "$api/latest") || true
+  if [ -z "$tag" ]; then
+    # No full release yet: GitHub's "latest" leaves pre-releases (release
+    # candidates such as 0.1.0-rc.1) out, so take the newest release.
+    tag=$(release_tag "$api?per_page=1") || true
+    if [ -n "$tag" ]; then
+      warn "$REPO has no full release yet; installing the pre-release ${tag#v}"
+    fi
+  fi
+  [ -n "$tag" ] || die "could not find a release of $REPO (pass --version X.Y.Z)"
   printf '%s\n' "${tag#v}"
 }
 
@@ -270,6 +284,23 @@ linux_check_libraries() {
   fi
 }
 
+# A running icygui would keep running the old version (a second launch only
+# brings the running one forward), so it is stopped first and started again
+# by the user. Only this user's process; it saves nothing on quit that it
+# hasn't saved already (settings and the event log are written as they
+# change).
+linux_stop_running() {
+  pgrep -x -u "$(id -u)" "$APP_NAME" >/dev/null 2>&1 || return 1
+  say "Stopping the running $APP_NAME"
+  pkill -TERM -x -u "$(id -u)" "$APP_NAME" >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -x -u "$(id -u)" "$APP_NAME" >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  pkill -KILL -x -u "$(id -u)" "$APP_NAME" >/dev/null 2>&1 || true
+  return 0
+}
+
 linux_install() {
   need curl
   need tar
@@ -288,6 +319,10 @@ linux_install() {
   mkdir -p "$PREFIX/bin" 2>/dev/null || true
   [ -w "$PREFIX/bin" ] || die "cannot write to $PREFIX/bin (choose another --prefix, or run with sudo for a system prefix)"
   share="$PREFIX/share"
+  local was_running=0
+  if linux_stop_running; then
+    was_running=1
+  fi
   say "Installing into $PREFIX"
   install -m 0755 "$dir/$APP_NAME/bin/$APP_NAME" "$PREFIX/bin/$APP_NAME"
   (cd "$dir/$APP_NAME/share" && find . -type f) | while IFS= read -r file; do
@@ -306,6 +341,9 @@ linux_install() {
   linux_refresh_desktop "$share"
   linux_check_libraries "$PREFIX/bin/$APP_NAME"
   say "${GREEN}Installed $APP_NAME $VERSION${RESET} → $PREFIX/bin/$APP_NAME"
+  if [ "$was_running" = 1 ]; then
+    note "$APP_NAME was stopped for the update; start it again from your app launcher."
+  fi
   case ":$PATH:" in
     *":$PREFIX/bin:"*) ;;
     *) note "$PREFIX/bin is not on your PATH; start icygui from your app launcher or add it to PATH." ;;

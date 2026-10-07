@@ -109,6 +109,11 @@ impl ButtonVariant {
     }
 }
 
+/// Space left and right of a [`Button`]'s content.
+const BUTTON_PADDING: f32 = 10.;
+/// Space between a [`Button`]'s icon, label and key hint.
+const BUTTON_GAP: f32 = 8.;
+
 /// A labelled action button (28px high), optionally with an icon and a key
 /// hint: `acknowledge a`.
 #[derive(IntoElement)]
@@ -119,6 +124,9 @@ pub struct Button {
     variant: ButtonVariant,
     icon: Option<IconName>,
     key: Option<SharedString>,
+    /// The key hint's room is kept, nothing shown in it.
+    key_blank: bool,
+    width: Option<Pixels>,
     tooltip: Option<Tooltip>,
     disabled: bool,
     on_click: Option<ClickHandler>,
@@ -133,10 +141,29 @@ impl Button {
             variant: ButtonVariant::default(),
             icon: None,
             key: None,
+            key_blank: false,
+            width: None,
             tooltip: None,
             disabled: false,
             on_click: None,
         }
+    }
+
+    /// The width of a button showing `label` and, with `key`, a key hint of
+    /// one character (no icon): for a [`Button::width`] that fits every
+    /// label a button shows in turn.
+    pub fn width_for(theme: &Theme, label: &str, key: bool) -> Pixels {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "labels are far shorter than 2^23 characters"
+        )]
+        let chars = label.chars().count() as f32;
+        let hint = if key {
+            px(BUTTON_GAP) + theme.text.hint * crate::theme::CHAR_WIDTH
+        } else {
+            px(0.)
+        };
+        theme.text.body * (chars * crate::theme::CHAR_WIDTH) + hint + px(2. * BUTTON_PADDING)
     }
 
     /// Uses the accent style for the pane's main action.
@@ -160,6 +187,21 @@ impl Button {
     /// Shows the key that runs this action after the label.
     pub fn key_hint(mut self, key: impl Into<SharedString>) -> Self {
         self.key = Some(key.into());
+        self
+    }
+
+    /// Keeps the key hint's room but shows nothing in it (the key acts on
+    /// something else for now), so the button keeps its width.
+    pub fn key_blank(mut self, blank: bool) -> Self {
+        self.key_blank = blank;
+        self
+    }
+
+    /// Gives the button a fixed width with its content centred: a button
+    /// whose label changes with the state keeps its size, and the buttons
+    /// after it keep their places.
+    pub fn width(mut self, width: Pixels) -> Self {
+        self.width = Some(width);
         self
     }
 
@@ -208,9 +250,10 @@ impl RenderOnce for Button {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(8.))
+            .gap(px(BUTTON_GAP))
             .h(theme.metrics.button_height)
-            .px(px(10.))
+            .px(px(BUTTON_PADDING))
+            .when_some(self.width, |button, width| button.w(width).justify_center())
             .rounded(theme.metrics.button_radius)
             .bg(colors.background)
             .text_color(colors.foreground)
@@ -221,7 +264,12 @@ impl RenderOnce for Button {
             })
             .child(self.label)
             .when_some(self.key, |button, key| {
-                button.child(KeyHint::new(key).color(colors.key))
+                let color = if self.key_blank {
+                    gpui::transparent_black()
+                } else {
+                    colors.key
+                };
+                button.child(KeyHint::new(key).color(color))
             })
             .when(self.disabled, |button| button.opacity(0.5))
             .when(enabled, |button| {

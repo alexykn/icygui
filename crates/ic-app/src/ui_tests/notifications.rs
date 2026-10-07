@@ -136,6 +136,52 @@ fn the_notification_centre_lists_opens_and_marks_read() {
     });
 }
 
+/// NOTE-05: while the pointer is over the centre's list, a notification
+/// arriving waits (the heading counts it at once), so the entry under the
+/// pointer stays the one a click opens; leaving the list shows it.
+#[test]
+fn arrivals_wait_while_the_pointer_is_over_the_centres_list() {
+    run(FixtureOptions::default(), |app, cx| {
+        let push = |cx: &mut App, id: &str, ago: f64| {
+            app.state.update(cx, |state, cx| {
+                state.apply(CoreEvent::Notification(record(
+                    id,
+                    "CRITICAL · postgres-replication on db-prod-03",
+                    Some(replication()),
+                    Tone::Critical,
+                    false,
+                    ago,
+                )));
+                cx.notify();
+            });
+            app.draw(cx);
+        };
+        push(cx, "first", 60.);
+        app.click(cx, CLOCK, Modifiers::default());
+        let sidebar = app.workspace.read(cx).sidebar().clone();
+        let listed = |cx: &App| -> Vec<String> {
+            sidebar
+                .read(cx)
+                .centre_view(cx)
+                .entries()
+                .map(|entry| entry.id.clone())
+                .collect()
+        };
+        let list = sidebar.read(cx).centre_list_bounds();
+        app.hover(cx, point(px(200.), list.origin.y + px(60.)));
+        assert!(sidebar.read(cx).centre_holds());
+
+        push(cx, "second", 1.);
+        assert_eq!(listed(cx), ["first"], "waits while the pointer is there");
+        assert_eq!(sidebar.read(cx).centre_view(cx).unread, 2, "counted");
+
+        // Away from the list (over the heading): it shows, newest first.
+        app.hover(cx, point(px(200.), list.origin.y - px(60.)));
+        assert!(!sidebar.read(cx).centre_holds());
+        assert_eq!(listed(cx), ["second", "first"]);
+    });
+}
+
 #[test]
 fn notifications_pause_and_resume_from_the_palette() {
     run(FixtureOptions::default(), |app, cx| {

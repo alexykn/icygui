@@ -236,7 +236,15 @@ pub(crate) fn is_developer_id(identity: &str) -> bool {
     identity.starts_with("Developer ID Application")
 }
 
+/// `CFBundleVersion`: the release's numbers only (`0.1.0` of `0.1.0-rc.1`),
+/// which is what macOS expects of a build version; the version string shown
+/// (`CFBundleShortVersionString`) keeps the pre-release part.
+pub(crate) fn bundle_version(version: &str) -> &str {
+    version.split(['-', '+']).next().unwrap_or(version)
+}
+
 pub(crate) fn info_plist() -> String {
+    let build = bundle_version(VERSION);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -251,7 +259,7 @@ pub(crate) fn info_plist() -> String {
   <key>CFBundleName</key><string>{APP_NAME}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>{VERSION}</string>
-  <key>CFBundleVersion</key><string>{VERSION}</string>
+  <key>CFBundleVersion</key><string>{build}</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -344,6 +352,22 @@ pub(crate) fn bundle_linux(binary: &Path, out: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// macOS gets numbers as the build version, the full version to show.
+    #[test]
+    fn the_build_version_is_numeric() {
+        assert_eq!(bundle_version("0.1.0"), "0.1.0");
+        assert_eq!(bundle_version("0.1.0-rc.1"), "0.1.0");
+        assert_eq!(bundle_version("1.2.3+build.5"), "1.2.3");
+        let plist = info_plist();
+        assert!(plist.contains(&format!(
+            "<key>CFBundleShortVersionString</key><string>{VERSION}</string>"
+        )));
+        assert!(plist.contains(&format!(
+            "<key>CFBundleVersion</key><string>{}</string>",
+            bundle_version(VERSION)
+        )));
+    }
 
     /// `package --prebuilt` takes only a finished release bundle that
     /// reports the workspace version, and builds nothing.

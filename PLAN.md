@@ -393,6 +393,8 @@ Status markers: ✅ done · ⏳ in progress · ☐ not started.
 - **Comparison with other tools (for the README later):** Nagstamon (~400–500 GitHub stars) is a notifier next to Icinga Web, like the team's Teams bot, not a dashboard; icygui's comparison is Icinga Web itself. Idea for after the trial: with icygui in use, the Teams bot could narrow to escalation and shared visibility.
 - **Process:** CI builds and tests on macOS where the Linux-only UI tests are not compiled; test-only items used only by them need `#[cfg(all(test, target_os = "linux"))]`.
 
+**Trial kit for one curious colleague (user, 2026-10-07; part of the final rc2 pass):** make it effortless for a single colleague to try icygui next to Icinga Web for a week: docs/first-run.md gets a short "try it next to Icinga Web" path (install in one command, a ready-to-paste read-only Icinga API user, --demo to look around first without connecting); the user can hand over their own dashboards with "copy as YAML" so the colleague starts with a working setup in a minute; a one-page "what to look for and how to tell me" (what to report, where the log is). No pitch, no change to anyone's workflow.
+
 **After the production trial:**
 
 - **Fixes from the trial**, including the macOS desktop integration (notifications, the menu-bar item, the tray, close to tray, quiet mode's window visibility), which so far is only compiled and unit-tested in CI and has never run on a real Mac.

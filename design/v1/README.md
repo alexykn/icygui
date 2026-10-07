@@ -639,7 +639,9 @@ settings in the editor; 5f the grid view's `···` open (an action menu, the dr
   and number: critical, warning, unknown).
 - **Interaction:** hover shows a tooltip (host, state, problem count, worst
   service and its output's first line). Arrows move a cursor (2px accent
-  outline) and Enter or a click opens the host pane. A click on a group's
+  outline) and Enter or a click on a square filters the whole page to
+  that HOST (chip `host db-prod-03 ×`, same temporary filter as a group's,
+  user 2026-10-07) and opens its host pane. A click on a group's
   name filters the whole page to that group: the group gets an accent ring,
   the others dim to 35 %, the other views show only that group, and the
   dashboard header shows a `host group edge-ams ×` chip (the filled chip

@@ -259,3 +259,47 @@ and the settings of an event stream view.
 2. Should notifications (and the sidebar's count and dot) count the
    dashboard's list views only (drawn), or also tiles, grid and stream?
 3. ←/→ on a view header to collapse: or should space toggle it?
+
+---
+
+## 05 Host-group grid
+
+**Shows** (`05-hostgroup-grid.html`): 5a the grid as a view above a list
+(variant A, squares); 5b hover, the keyboard cursor and the host pane;
+5c a click on a group filters the page; 5d variant B, labelled cells; 5e the
+view's settings in the editor.
+
+**Decisions**
+
+- **Variant A (recommended): a square per host,** 12px with 3px gaps, grouped
+  by host group in a grid of columns (three at full width, two beside the
+  pane), worst groups first. Colour = the host's worst state, its own or its
+  worst service's. **Healthy hosts are dim green** (ok at about 32 %), so 118
+  healthy hosts don't drown the 6 that matter. Problems are full colour;
+  handled problems are hollow (2px inset ring), like the list's circles;
+  pending is the pending grey.
+- **Group header:** the worst unhandled state's dot (mark slot), the name,
+  the host count (faint), and how many hosts are in each problem state (dot
+  and number, in the summary bar's order: critical, warning, unknown).
+- **Interaction:** hover shows a tooltip (host, state, problem count, worst
+  service and its output's first line). Arrows move a cursor (2px accent
+  outline) and Enter or a click opens the host pane. A click on a group's
+  name filters the whole page to that group: the group gets an accent ring,
+  the others dim to 35 %, the other views show only that group, and the
+  dashboard header shows a `host group edge-ams ×` chip (the filled chip
+  style). The filter is temporary: Esc or × clears it, and it is never saved.
+- **Variant B: labelled cells,** one per host (150px+, its state dot and name;
+  a problem cell is filled and names its worst service, cut off with an
+  ellipsis). It suits small groups and wastes space on large ones, so it is
+  an option of the same view (`hosts as: squares | labelled cells`), not a
+  separate display.
+- **Settings:** group by host group (all, or picked ones) or by a custom var
+  (`host.vars.site`), an optional filter, colour by `worst of host and
+  services` or `host only`, squares or cells, `hide groups where every host
+  is ok`, and whether a host in several groups shows in each.
+
+**Open questions**
+
+1. Dim green for healthy hosts (drawn), or full green like Icinga Web's grid?
+2. Should a host in downtime show hollow even when it is OK? (Drawn: only
+   problems are hollow, as in the list.)

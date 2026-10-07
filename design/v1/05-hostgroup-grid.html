@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 05 host-group grid</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="views.js"></script></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">05</span><span class="topic-name">The host-group grid</span></div>
+<p class="topic-intro">One of the displays a view can have (topic 04). Every host is a 12px square, grouped by host group, coloured by its worst state: the host's own, or its worst service's. Healthy hosts are a dim green, so the problems stand out; handled problems are hollow, like the list's circles. Each group's header has its worst state's dot, its name, the host count and how many hosts are in each problem state. A click on a square opens the host's pane; a click on a group filters the page to it. The grid follows the list's keyboard: arrows move a cursor over the squares, Enter opens.
+<b>Variant A (recommended)</b>: squares, dense enough for hundreds of hosts. <b>Variant B</b>: labelled cells, one per host, for small groups where the names matter. Both are a setting of the same view.</p>
+<div class="shots"></div>
+<script>
+const platGroups = [
+  { name: 'overview', items: [['overview', 'crit', 38], ['production', 'crit', 38], ['databases', 'crit', 7], ['host problems', 'crit', 7]] },
+  { name: 'platform', items: [['network', 'unk', 5], ['kubernetes', 'crit', 9], ['certificates', 'warn', 1], ['all services', 'crit', 38], ['fleet', 'crit', 14]] },
+  SIDEBAR_GROUPS[2],
+];
+const range = (p, a, b) => Array.from({ length: b - a + 1 }, (_, i) => `${p}${String(a + i).padStart(2, '0')}`);
+// [group, hosts, {host: [state, ring, note]}]
+const G = [
+  ['databases', [...range('db-prod-', 1, 6), ...range('db-mysql-', 1, 3)], { 'db-prod-03': ['crit', 0, 'postgres-replication'], 'db-prod-01': ['warn', 0, 'load'], 'db-prod-05': ['warn', 0, 'pg-bloat'], 'db-mysql-01': ['warn', 0, 'mysql-slow-queries'], 'db-mysql-03': ['unk', 0, 'mysql-replication'] }],
+  ['edge-ams', range('edge-ams-', 1, 12), { 'edge-ams-05': ['crit', 0, 'host down'], 'edge-ams-07': ['warn', 0, 'load'] }],
+  ['edge-fra', range('edge-fra-', 1, 12), { 'edge-fra-07': ['crit', 0, 'apt'], 'edge-fra-02': ['warn', 0, 'load'] }],
+  ['k8s-workers', range('k8s-node-', 1, 48), { 'k8s-node-41': ['crit', 0, 'disk /'], 'k8s-node-07': ['crit', 1, 'in downtime'], 'k8s-node-04': ['unk', 0, 'kubelet'], 'k8s-node-02': ['warn', 0, 'ntp-offset'], 'k8s-node-33': ['warn', 0, 'containerd'], 'k8s-node-35': ['unk', 0, 'ping4'] }],
+  ['messaging', [...range('mq-prod-', 1, 3), ...range('kafka-', 1, 3)], { 'mq-prod-01': ['crit', 0, 'rabbitmq-queue'], 'kafka-01': ['unk', 0, 'kafka-consumer-lag'] }],
+  ['storage', [...range('store-fra-', 1, 4), ...range('minio-', 1, 4), ...range('nfs-', 1, 2)], { 'nfs-02': ['crit', 0, 'disk /srv'], 'store-fra-01': ['unk', 0, 'smart-disks'], 'minio-02': ['unk', 0, 'minio-health'] }],
+  ['backup', range('backup-', 1, 2), { 'backup-01': ['unk', 0, 'borg-last-run'] }],
+  ['core-network', ['sw-core-ams-01', 'sw-core-ams-02', 'sw-core-fra-01', 'sw-core-fra-02', ...range('sw-acc-ams-', 11, 14)], { 'sw-core-ams-02': ['crit', 1, 'in downtime'], 'sw-core-fra-01': ['unk', 0, 'bgp-peer edge-fra'], 'sw-acc-ams-14': ['warn', 0, 'if-errors Gi1/0/12'] }],
+  ['k8s-control', range('k8s-cp-', 1, 3), { 'k8s-cp-03': ['warn', 0, 'memory'] }],
+  ['web', [...range('web-prod-', 1, 8), 'web-edge-01', 'web-edge-02', 'api-gw-01', 'api-gw-02', 'lb-prod-01', 'lb-prod-02'], { 'web-edge-02': ['crit', 1, 'acknowledged'], 'api-gw-01': ['warn', 0, 'http-latency'], 'lb-prod-02': ['warn', 0, 'haproxy-backend'] }],
+];
+const ORDER = { crit: 0, unk: 1, warn: 2, ok: 3 };
+function worst(probs) {
+  const unhandled = Object.values(probs).filter(([, r]) => !r).map(([s]) => s);
+  return unhandled.sort((a, b) => ORDER[a] - ORDER[b])[0] || 'ok';
+}
+function block([name, hosts, probs], { cur, on, dim } = {}) {
+  const counts = {};
+  Object.values(probs).filter(([, r]) => !r).forEach(([s]) => { counts[s] = (counts[s] || 0) + 1; });
+  const cs = ['crit', 'warn', 'unk'].filter((s) => counts[s]).map((s) => `<span>${dot(s, 'd6')}${counts[s]}</span>`).join('');
+  const sq = hosts.map((h) => {
+    const p = probs[h];
+    if (!p) return `<span class="sq okd${h === cur ? ' cur' : ''}"></span>`;
+    return `<span class="sq ${p[0]}${p[1] ? ' ring' : ''}${h === cur ? ' cur' : ''}"></span>`;
+  }).join('');
+  return `<div class="hgb${on ? ' on' : ''}${dim ? ' dim' : ''}"><div class="gh">${dot(worst(probs))}<span class="nm">${name}</span><span class="n">${hosts.length}</span><span class="cs">${cs}</span></div><div class="sqs">${sq}</div></div>`;
+}
+function grid(opts = {}, cols = 3) {
+  return `<div class="hg" style="grid-template-columns:repeat(${cols},minmax(0,1fr))">${G.map((g) => block(g, { cur: opts.cur, on: opts.on === g[0], dim: opts.on && opts.on !== g[0] })).join('')}</div>`;
+}
+const gridHeader = (extra = {}) => viewHeader({ name: 'hosts by group', display: 'grid', filter: 'all host groups · worst of host and services', counts: [['crit', 6], ['warn', 11], ['unk', 8]], sort: 'worst first', ...extra });
+const probRows = [
+  ['crit', 'rabbitmq-queue', 'mq-prod-01', 'CRITICAL - queue orders.retry depth 18,402', '6m'],
+  ['crit', 'ping4', 'edge-ams-05', 'PING CRITICAL - Packet loss = 100%', '11m'],
+  ['crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'],
+  ['crit', 'disk /', 'k8s-node-41', 'DISK CRITICAL - / 96% used (1.6 GiB free)', '31m'],
+  ['unk', 'kubelet', 'k8s-node-04', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m'],
+  ['unk', 'borg-last-run', 'backup-01', 'UNKNOWN - repository lock held by PID 4412', '52m'],
+  ['unk', 'kafka-consumer-lag', 'kafka-01', 'UNKNOWN - plugin timed out after 60 seconds', '54m'],
+];
+const listHeaderV = (extra = {}) => viewHeader({ name: 'service problems', display: 'list', filter: 'service.problem && !service.handled', counts: [['crit', 4], ['warn', 9], ['unk', 7]], ...extra });
+const dashHead = (extra = '') => `<div class="hbar"><span class="title">fleet</span><span class="subtitle">2 views</span><span class="grow"></span>${extra}<span class="glyph">···</span></div>`;
+
+shot('5a', '05-hostgroup-grid-a-squares', '<span class="rec">Variant A, recommended.</span> The fleet dashboard: a host-group grid view with 124 hosts in 10 groups, worst first, above a list of service problems. A healthy host is a dim square, a problem a full one, a handled problem a hollow one. The view header counts the hosts by worst state.',
+  appWindow(`<div class="col" style="min-height:0;overflow:hidden">${dashHead()}${gridHeader({ focus: true })}<div class="vbody">${grid({ cur: 'k8s-node-04' })}</div>${listHeaderV()}<div class="vbody">${rows(probRows)}</div></div>`,
+    { groups: platGroups, activeGroup: 'platform', activeItem: 'fleet' }),
+  { crops: '05-hostgroup-grid-a-squares-zoom:300,40,760,330' });
+
+// 5b: hover tooltip + host pane
+const tip = `<div class="tip" style="left:322px;top:192px;flex-direction:column;gap:3px;padding:6px 9px;white-space:nowrap"><span style="display:flex;align-items:center;gap:8px">${dot('unk', 'd6')}<span class="strong">k8s-node-04</span><span class="faint">up · 1 problem</span></span><span class="muted">kubelet: UNKNOWN - connection refused</span></div>`;
+const hostPane = `<div class="pane">${paneHeader('host')}
+  <div class="col" style="gap:20px;padding:20px 24px 0;flex:none">
+  ${paneTitle({ st: 'ok', label: 'UP', name: 'k8s-node-04', sub: '10.0.4.24 · up 12d · PING OK - Packet loss = 0%, RTA = 0.61 ms' })}
+  ${actionButtons({ firstDis: true })}
+  <div class="subtabs"><span class="on">services 21</span><span>history</span><span>vars</span><span>config</span></div></div>
+  <div class="col">${[['unk', 'kubelet', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m'], ['ok', 'containerd', 'PROCS OK: 214 processes', '12d'], ['ok', 'disk /', 'DISK OK - 38% used', '12d'], ['ok', 'disk /var', 'DISK OK - 61% used', '6d'], ['ok', 'load', 'OK - load average 2.1, 2.4, 2.2', '3d'], ['ok', 'memory', 'OK - 58% used', '12d']].map(([st, n, o, s]) => `<div class="crow">${circle(st, 14)}<div class="col" style="gap:2px;min-width:0"><span class="n">${n}</span><span class="o">${o}</span></div><span class="s">${s}</span></div>`).join('')}
+  <div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 15 more ok</div></div></div>`;
+shot('5b', '05-hostgroup-grid-b-hover-open', 'Hovering a square shows the host, its state and its worst service in a tooltip. The cursor square (keyboard) has an accent outline; Enter or a click opens the host pane beside the page, as for a list row. With the pane open, the grid reflows to two columns.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col" style="position:relative;min-height:0;overflow:hidden">${dashHead()}${gridHeader({ focus: true })}<div class="vbody">${grid({ cur: 'k8s-node-04' }, 2)}</div>${tip}</div>${hostPane}</div>`,
+    { groups: platGroups, activeGroup: 'platform', activeItem: 'fleet' }));
+
+// 5c: click a group to filter
+const filterChip = `<span class="chip filled" style="gap:6px;height:22px">host group edge-ams<span class="faint">${icon('x', 11)}</span></span>`;
+shot('5c', '05-hostgroup-grid-c-filtered', 'A click on a group’s name filters the whole page to it: the group gets an accent ring and the others dim. The list below shows only that group’s problems, and the dashboard header shows the filter as a chip (× or Esc clears it). The filter is temporary and isn’t saved with the dashboard.',
+  appWindow(`<div class="col" style="min-height:0;overflow:hidden">${dashHead(filterChip)}${gridHeader({ counts: [['crit', 1], ['warn', 1]] })}<div class="vbody">${grid({ on: 'edge-ams' })}</div>${listHeaderV({ counts: [['crit', 1], ['warn', 1]], focus: true })}<div class="vbody">${rows([['crit', 'ping4', 'edge-ams-05', 'PING CRITICAL - Packet loss = 100%', '11m'], ['warn', 'load', 'edge-ams-07', 'WARNING - load average 6.1, 5.5, 4.9', '19m']], (r, i) => ({ sel: i === 0 }))}</div></div>`,
+    { groups: platGroups, activeGroup: 'platform', activeItem: 'fleet' }));
+
+// 5d: Variant B: labelled cells
+function cellBlock([name, hosts, probs]) {
+  const counts = {};
+  Object.values(probs).filter(([, r]) => !r).forEach(([s]) => { counts[s] = (counts[s] || 0) + 1; });
+  const cs = ['crit', 'warn', 'unk'].filter((s) => counts[s]).map((s) => `<span>${dot(s, 'd6')}${counts[s]}</span>`).join('');
+  const cells = hosts.map((h) => {
+    const p = probs[h];
+    if (!p) return `<span class="cell ok">${dot('ok', 'd6')}${h}</span>`;
+    return `<span class="cell">${p[1] ? `<span class="dot ${p[0]} ring d7"></span>` : dot(p[0], 'd7')}<span class="strong">${h}</span><span class="c">${p[2]}</span></span>`;
+  }).join('');
+  return `<div class="hgb"><div class="gh">${dot(worst(probs))}<span class="nm">${name}</span><span class="n">${hosts.length}</span><span class="cs">${cs}</span></div><div class="cells" style="grid-template-columns:repeat(6,minmax(0,1fr))">${cells}</div></div>`;
+}
+shot('5d', '05-hostgroup-grid-d-cells', 'Variant B: labelled cells. Each host gets a cell with its state dot in the mark slot and its name; a problem cell is filled and names the worst service. It reads well for a few dozen hosts, but 48 workers already take a screenful.',
+  appWindow(`<div class="col" style="min-height:0;overflow:hidden">${dashHead()}${gridHeader({ focus: true })}<div class="vbody"><div class="col" style="gap:18px;padding:14px 18px">${[G[0], G[1], G[3]].map(cellBlock).join('')}</div></div></div>`,
+    { groups: platGroups, activeGroup: 'platform', activeItem: 'fleet' }));
+
+// 5e: the view's settings in the editor
+const insp = `<div class="pane" style="background:var(--win-bg)">
+  <div class="hbar pane-h" style="padding:0 18px"><span class="title">dashboard</span><span class="grow"></span><span class="right faint">2 views</span></div>
+  <div class="col" style="gap:16px;padding:16px 18px;overflow:hidden">
+    <div class="field"><div class="lab">views</div><div class="col" style="gap:2px;margin:0 -6px">
+      <div class="vrow sel"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon('layout-grid', 13)}</span><span class="vn">hosts by group</span><span class="vm">124 hosts</span><span class="glyph" style="font-size:12px">···</span></div>
+      <div class="vrow"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon('list', 13)}</span><span class="vn">service problems</span><span class="vm">20 matches</span><span class="glyph" style="font-size:12px">···</span></div></div>
+      <span style="display:flex;align-items:center;gap:8px;height:28px;font-size:12px;color:var(--t-muted)">${icon('plus', 13)}add view</span></div>
+    <div style="height:1px;background:var(--bd-header);margin:0 -18px"></div>
+    <div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('layout-grid', 13)}host-group grid</span>`)}</div>
+    <div class="field"><div class="lab">group by</div><span class="seg" style="display:flex"><span class="on" style="flex:1">host group</span><span style="flex:1">custom var</span></span></div>
+    <div class="field"><div class="lab">host groups<span class="st faint">all 10 · or pick some</span></div><div style="display:flex;gap:6px;flex-wrap:wrap">${['databases', 'edge-ams', 'edge-fra', 'k8s-workers', 'messaging', 'storage', 'backup', 'core-network', 'k8s-control', 'web'].map((g) => chip(g, { sel: true })).join('')}</div></div>
+    <div class="field"><div class="lab">filter<span class="st c-ok">valid · 124 hosts</span></div><div class="textarea" style="height:20px"><span class="faint">empty: every host of those groups</span></div></div>
+    <div class="field"><div class="lab">colour by</div><span class="seg" style="display:flex"><span class="on" style="flex:1">worst of host and services</span><span style="flex:1">host only</span></span></div>
+    <div class="field"><div class="lab">hosts as</div><span class="seg" style="display:flex"><span class="on" style="flex:1">squares</span><span style="flex:1">labelled cells</span></span></div>
+    <div class="field"><div class="lab">show</div><div class="col" style="gap:8px">${sw(false, 'hide groups where every host is ok')}${sw(true, 'a host in several groups shows in each')}</div></div>
+  </div></div>`;
+const editorHeader = `<div class="hbar"><span class="title">fleet</span><span class="acc" style="font-size:12px">editing · platform</span><span class="grow"></span>${btn('discard', { key: 'esc' })}${btn('save dashboard', { key: 'ctrl-s', primary: true })}</div>`;
+shot('5e', '05-hostgroup-grid-e-editor', 'The grid view’s settings in the editor: group by host group (all, or the chosen ones) or by a custom variable (<i>host.vars.site</i>), an optional filter, colour by the worst of host and services or the host only, squares or labelled cells, and whether all-ok groups hide.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 372px"><div class="col" style="min-height:0;overflow:hidden">${editorHeader}<div class="preview-ring" style="display:flex;flex-direction:column">${gridHeader({ focus: true })}<div class="vbody">${grid({}, 2)}</div></div>${listHeaderV()}<div class="vbody">${rows(probRows.slice(0, 5))}</div></div>${insp}</div>`,
+    { groups: platGroups, activeGroup: 'platform', activeItem: 'fleet' }));
+</script>
+</body></html>

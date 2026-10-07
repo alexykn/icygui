@@ -4,9 +4,9 @@
 <body class="canvas">
 <div class="topic-head"><span class="topic-id">01</span><span class="topic-name">Downtimes, very visible in the panes</span></div>
 <p class="topic-intro">An object in downtime says so at the top of its pane, the way Icinga Web does, instead of only through the hollow state circle.
-<b>Variant A (recommended)</b>: a banner under the pane header (the app's Banner, in the Info tone), fixed above the scrolling body. It shows what is in effect, how long is left, the window, fixed or flexible, who set it and why, and <i>remove downtime</i>. A 2px progress line on its bottom edge shows how much of the downtime has passed.
-<b>Variant B</b>: the pane header itself becomes the downtime strip (one line, the same progress line), and the details are the first section of the body.
-In the banner, accent blue means in effect (the problem is handled). Grey means scheduled but not in effect yet (flexible and waiting, or in the future), so the problem is still unhandled. Wall clock in every frame: Wed 7 Oct, 14:12.</p>
+<b>Variant A (chosen in the review)</b>: a banner under the pane header (the app's Banner, in the Info tone), fixed above the scrolling body. It shows what is in effect, how long is left, the window, fixed or flexible, who set it and why, and <i>remove downtime</i>. A 2px progress line on its bottom edge shows how much of the downtime has passed.
+<b>Variant B</b> (not chosen, kept for the record): the pane header itself becomes the downtime strip.
+In the banner, accent blue means in effect (the object is handled). Grey means scheduled but not in effect yet (flexible and waiting, or in the future), so a problem is still unhandled. <b>Hollow = handled</b> everywhere: an object whose downtime is in effect is drawn hollow in its state colour, whatever its state. In the history, downtimes take the same accent. A host downtime without <i>all services</i> leaves its services alone, as in Icinga Web (1j). Wall clock in every frame: Wed 7 Oct, 14:12.</p>
 <div class="shots"></div>
 <script>
 // dtBanner, dte, au and S live in v1.js (shared with topics 03 and 07).
@@ -51,7 +51,7 @@ const bannerA = dtBanner({
   progress: 40,
 });
 shot('1a', '01-downtimes-a-fixed-banner',
-  '<span class="rec">Variant A, recommended.</span> A service in a fixed downtime, opened from the databases dashboard (handled shown). The banner sits under the pane header and stays put while the body scrolls. The state circle stays hollow, as today.',
+  '<span class="rec">Variant A, chosen.</span> A service in a fixed downtime, opened from the databases dashboard (handled shown). The banner sits under the pane header and stays put while the body scrolls. The state circle stays hollow, as today.',
   appWindow(withPane(dbList(6), servicePane({
     banner: bannerA, title: pgTitle,
     sections: pgOutput + pgPerf + pgCheck,
@@ -66,7 +66,7 @@ const detailsB = `<div class="col" style="gap:8px">${seclabel('downtime')}
   <div class="dte">${icon('calendar-clock', 13)}<div class="col" style="min-width:0"><span class="d1">fixed · 13:00 → 16:00 today · 1h 48m left</span>
   <span class="d2"><span class="au">j.berg</span> <span class="meta">12:41</span> Failover drill on db-prod-01: the standby on db-prod-03 lags until the replica rebuild is done.</span></div>${btn('remove downtime', { sm: true })}</div></div>`;
 shot('1b', '01-downtimes-b-header-strip',
-  'Variant B: the pane header carries the downtime in one line, with the same progress line as its bottom rule, so nothing below moves when a downtime starts. The details and <i>remove</i> come first in the body. Less to read at a glance, and the comment is one scroll away on a long pane.',
+  'Variant B (not chosen): the pane header carries the downtime in one line, with the same progress line as its bottom rule, so nothing below moves when a downtime starts. The details and <i>remove</i> come first in the body. Less to read at a glance, and the comment is one scroll away on a long pane.',
   appWindow(withPane(dbList(6), servicePane({
     header: stripHeader, title: pgTitle,
     sections: detailsB + pgOutput + pgPerf + pgCheck,
@@ -185,7 +185,7 @@ const bannerSwitch = dtBanner({
   progress: 20,
 });
 const hostTop = `<div class="col" style="gap:20px;padding:20px 24px 0;flex:none">
-  ${paneTitle({ st: 'ok', label: 'UP', name: 'sw-core-ams-02', sub: '10.0.9.2 · up 213d · SNMP OK - Cisco IOS XE 17.9.4, uptime 213d' })}
+  ${paneTitle({ st: 'ok', label: 'UP', ring: true, name: 'sw-core-ams-02', sub: '10.0.9.2 · up 213d · SNMP OK - Cisco IOS XE 17.9.4, uptime 213d' })}
   ${actionButtons({ firstDis: true })}
   <div class="subtabs"><span class="on">services 18</span><span>history</span><span>vars</span><span>config</span></div></div>`;
 const otherDts = `<div class="col" style="gap:14px;padding:16px 24px;border-bottom:1px solid var(--bd-row)">
@@ -195,15 +195,15 @@ const otherDts = `<div class="col" style="gap:14px;padding:16px 24px;border-bott
 </div>`;
 const swServices = [
   ['crit', 'uplink edge-ams', 'CRITICAL - Interface Po12 (uplink edge-ams) is down', '11m', true],
-  ['ok', 'bgp-peers', 'OK - 6/6 peers established', '21d'],
-  ['ok', 'cpu', 'OK - 5min load 11%', '40d'],
-  ['ok', 'environment', 'OK - temperature 38°C, 4/4 fans, 2/2 PSUs', '213d'],
-  ['ok', 'memory', 'OK - 41% used', '40d'],
+  ['ok', 'bgp-peers', 'OK - 6/6 peers established', '21d', true],
+  ['ok', 'cpu', 'OK - 5min load 11%', '40d', true],
+  ['ok', 'environment', 'OK - temperature 38°C, 4/4 fans, 2/2 PSUs', '213d', true],
+  ['ok', 'memory', 'OK - 41% used', '40d', true],
 ];
 const swRows = swServices.map(([st, n, o, s, h]) => `<div class="crow">${circle(st, 14, h)}<div class="col" style="gap:2px;min-width:0"><span class="n">${n}</span><span class="o">${o}</span></div><span class="s">${s}</span></div>`).join('') +
   `<div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 13 more ok</div>`;
 shot('1f', '01-downtimes-f-host-several',
-  'The host pane with three downtimes: the one in effect fills the banner. Its last line says what else is scheduled, and the services tab lists the others, each with its own remove (×, shown on hover). A downtime that comes from the config (ScheduledDowntime) shows a lock: removing it would only bring it back.',
+  'The host pane with three downtimes: the one in effect fills the banner. It covers the host and its 18 services, so the host and every service are hollow (handled), the OK ones as green rings. Its last line says what else is scheduled, and the services tab lists the others, each with its own remove (×, shown on hover). A downtime that comes from the config (ScheduledDowntime) shows a lock: removing it would only bring it back.',
   appWindow(withPane(
     listHeader({ title: 'network', subtitle: 'service problems' }) + summary([['crit', 2, 'critical'], ['warn', 1, 'warning'], ['unk', 1, 'unknown']], 'handled shown') + `<div class="list">${netRows.map(([r, o], i) => row(r, { ...o, sel: i === 3 })).join('')}</div>`,
     `<div class="pane">${paneHeader('host', { back: true })}${bannerSwitch}${hostTop}<div class="col" style="min-height:0">${otherDts}${swRows}</div></div>`),
@@ -233,26 +233,116 @@ shot('1g', '01-downtimes-g-remove-confirm',
   })));
 
 // ---- 1h: the list's hint -----------------------------------------------------
+// "all services" lists every service, OK ones too: hollow = handled, and an
+// object whose downtime is in effect is handled whatever its state.
+const allGroups = [
+  dbGroups[0],
+  { name: 'platform', items: [['network', 'unk', 5], ['kubernetes', 'crit', 9], ['certificates', 'warn', 1], ['all services', 'crit', 38]] },
+  SIDEBAR_GROUPS[2],
+];
 const hintRows = [
   [['crit', 'rabbitmq-queue', 'mq-prod-01', 'CRITICAL - queue orders.retry depth 18,402', '6m'], {}],
-  [['crit', 'ping4', 'edge-ams-05', 'PING CRITICAL - Packet loss = 100%', '11m'], {}],
   [['unk', 'kubelet', 'k8s-node-04', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m'], {}],
-  [['unk', 'borg-last-run', 'backup-01', 'UNKNOWN - repository lock held by PID 4412', '52m'], {}],
   [['warn', 'haproxy-backend', 'lb-prod-02', 'WARNING - backend api: 2/6 servers down', '9m'], { tag: 'downtime at 22:00' }],
-  [['warn', 'http-latency', 'api-gw-01', 'WARNING - p95 1.84s (> 1.5s)', '21m'], {}],
   [['warn', 'pg-connections', 'db-prod-03', 'WARNING - 182 of 200 per-db limit (orders)', '22m'], { late: 'late 3m' }],
   [['crit', 'http-tls', 'web-edge-02', 'SSL CRITICAL - certificate expires in 2 days', '2h'], { handled: true, tag: 'ack m.keller' }],
   [['crit', 'uplink edge-ams', 'sw-core-ams-02', 'CRITICAL - Interface Po12 (uplink edge-ams) is down', '11m'], { handled: true, tag: 'downtime 48m' }],
   [['crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'], { handled: true, tag: 'downtime 1h 48m' }],
-  [['crit', 'kubelet', 'k8s-node-07', 'CRITICAL - connection refused (10.0.4.27:10250)', '41m'], { handled: true, tag: 'host downtime 1h 18m' }],
   [['crit', 'disk /var', 'k8s-node-07', 'DISK CRITICAL - /var 97% used (1.2 GiB free)', '38m'], { handled: true, tag: 'host downtime 1h 18m' }],
-  [['warn', 'redis-memory', 'cache-02', 'WARNING - used_memory 81% of maxmemory', '3h'], { handled: true, tag: 'downtime 2h 03m' }],
   [['warn', 'pg-bloat', 'db-prod-05', 'WARNING - check_postgres degraded', '50m'], { handled: true, tag: 'downtime, flexible 1h 12m' }],
+  [['ok', 'bgp-peers', 'sw-core-ams-02', 'OK - 6/6 peers established', '21d'], { handled: true, tag: 'downtime 48m' }],
+  [['ok', 'memory', 'k8s-node-07', 'OK - 38% used', '9d'], { handled: true, tag: 'host downtime 1h 18m' }],
+  [['ok', 'redis-memory', 'cache-02', 'OK - used_memory 61% of maxmemory', '3h'], { handled: true, tag: 'downtime 2h 03m' }],
+  [['ok', 'pg-locks', 'db-prod-05', 'POSTGRES_LOCKS OK: total locks 214 (waiting 0)', '6d'], { tag: 'downtime, flexible, not started' }],
+  [['ok', 'apt', 'db-prod-01', 'APT OK: 0 packages available for upgrade', '2d'], {}],
+  [['ok', 'cpu', 'db-prod-01', 'OK - 5min load 18%', '40d'], {}],
 ];
 shot('1h', '01-downtimes-h-list-hint',
-  'The list stays as it is: a hollow circle and the right-aligned tag in the faint text. The tag now carries the time left (<i>downtime 1h 48m</i>), says when the downtime comes from the host, and hints at a downtime scheduled for later on an unhandled problem (<i>downtime at 22:00</i>). No new colour or column, and nothing moves.',
-  appWindow(listHeader() + summary([['crit', 6, 'critical'], ['warn', 6, 'warning'], ['unk', 2, 'unknown']], 'handled shown') +
-    `<div class="list">${hintRows.map(([r, o]) => row(r, o)).join('')}</div>`, { groups: dbGroups }),
+  'Hollow = handled, in every list: an object whose downtime is in effect is a hollow circle in its state colour <b>whatever its state</b>, so an OK service in downtime is a hollow green ring (here <i>all services</i>, which lists OK services too). A downtime that is not in effect yet (scheduled for 22:00, or flexible and not started) keeps the filled circle. The tag in faint text carries the time left (<i>downtime 1h 48m</i>), says when the downtime comes from the host, and hints at a later one (<i>downtime at 22:00</i>). No new colour or column, and nothing moves.',
+  appWindow(listHeader({ title: 'all services', subtitle: 'every service · problems first' }) + summary([['crit', 5, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown'], ['ok', 1204, 'ok']], 'handled shown') +
+    `<div class="list">${hintRows.map(([r, o]) => row(r, o)).join('')}</div>`, { groups: allGroups, activeGroup: 'platform', activeItem: 'all services' }),
   { crops: '01-downtimes-h-list-hint-zoom:300,240,1140,620' });
+
+// ---- 1i: downtime from the host pane: the whole host, all services on ---------
+const k4Services = ['kubelet', 'disk /', 'disk /var', 'kube-proxy', 'containerd', 'load', 'memory', 'ntp-offset', 'cpu', 'node-exporter', 'swap', 'conntrack', 'inodes /var', 'disk /var/lib/kubelet', 'calico-node', 'fluent-bit', 'systemd-units', 'apt', 'reboot-required', 'ssh', 'ping4', 'ping6', 'kernel-version'];
+const k4Pane = `<div class="pane">${paneHeader('host', { back: true })}<div class="col" style="gap:20px;padding:20px 24px 0;flex:none">
+  ${paneTitle({ st: 'ok', label: 'UP', name: 'k8s-node-04', sub: '10.0.4.24 · up 61d · PING OK - Packet loss = 0%, RTA = 0.41 ms' })}
+  <div class="btns">${btn('acknowledge', { key: 'a', dis: true })}${btn('downtime', { key: 'd', hov: true })}${btn('check now', { key: 'r' })}${btn('comment', { key: 'c' })}<span class="glyph">···</span></div>
+  <div class="subtabs"><span class="on">services 23</span><span>history</span><span>vars</span><span>config</span></div></div>
+  <div class="col">${[['unk', 'kubelet', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m'], ['ok', 'calico-node', 'OK - BGP established with 6 peers', '12d'], ['ok', 'containerd', 'PROCS OK: 412 processes', '12d'], ['ok', 'disk /', 'DISK OK - 41% used', '61d'], ['ok', 'disk /var', 'DISK OK - 58% used', '61d'], ['ok', 'load', 'OK - load average 2.1, 2.4, 2.2', '9d']]
+    .map(([st, n, o, t]) => `<div class="crow">${circle(st, 14)}<div class="col" style="gap:2px;min-width:0"><span class="n">${n}</span><span class="o">${o}</span></div><span class="s">${t}</span></div>`).join('')}
+  <div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 17 more ok</div></div></div>`;
+const k4Targets = [`<div class="t">${dot('ok', 'd7')}<span>k8s-node-04</span><span class="faint">host</span></div>`]
+  .concat(k4Services.map((n) => `<div class="t">${dot(n === 'kubelet' ? 'unk' : 'ok', 'd7')}<span>${n} on k8s-node-04</span></div>`)).join('');
+const dtBody = `<div class="col" style="gap:8px">${sw(true, 'all services: the host and its 23 services')}
+    <div style="position:relative"><div class="targets" style="height:100px;gap:0">${k4Targets}</div>
+    <div style="position:absolute;right:4px;top:6px;width:4px;height:22px;border-radius:2px;background:var(--el-active)"></div></div></div>
+  <div class="field"><div class="lab">comment</div><div class="textarea focus" style="height:40px">Reimage after the kubelet certificate mix-up (CHG-4475); the node is cordoned.<span class="caret" style="height:13px"></span></div><div class="hint">Enter schedules it · shift-enter for a new line</div></div>
+  <div class="col" style="gap:8px"><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+    <div class="field"><div class="lab">start<span class="st c-ok">now, 14:12</span></div><span class="input">now</span></div>
+    <div class="field"><div class="lab">end<span class="st c-ok">today 16:12, in 2h</span></div><span class="input">+2h</span></div></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">${chip('30m')}${chip('1h')}${chip('2h', { sel: true })}${chip('4h')}${chip('8h')}${chip('1d')}${chip('1w')}${chip('08:00 tomorrow')}</div></div>
+  <div class="field"><div class="lab">type</div><span class="seg" style="display:flex"><span class="on" style="flex:1">fixed: the whole window</span><span style="flex:1">flexible: from the first problem</span></span></div>
+  <div class="field"><div class="lab">child hosts</div><span class="seg" style="display:flex"><span class="on" style="flex:1">none</span><span style="flex:1">triggered</span><span style="flex:1">independent</span></span>
+    <div class="hint">Downtimes for the hosts that depend on these: triggered ones start with this one, independent ones keep its window.</div></div>`;
+shot('1i', '01-downtimes-i-host-dialog',
+  '<i>downtime</i> (d) in a host pane schedules it on the whole host: today’s downtime dialog, with <b>all services</b> on by default. The switch sits at the top, right above the box that lists what it targets: the host and each of its 23 services (the box scrolls), so the operator sees every target before anything is sent. Turned off, the box lists the host alone and the button says <i>schedule downtime</i>. The rest is today’s form: comment, start and end with the quick choices, fixed or flexible, child hosts.',
+  appWindow(withPane(k8sList(0), k4Pane), { groups: k8sGroups, activeGroup: 'platform', activeItem: 'kubernetes' }) +
+  modal(580, dialog({
+    title: 'Schedule downtime', what: 'k8s-node-04 and its 23 services', body: dtBody,
+    footStart: 'as j.berg',
+    actions: btn('cancel', { key: 'esc' }) + btn('schedule 24 downtimes', { key: '↵', primary: true }),
+  })),
+  { crops: '01-downtimes-i-host-dialog-zoom:420,40,600,820' });
+
+// ---- 1j: the host is in a downtime that doesn't cover the service -----------
+const hostDtMark = `<span style="display:inline-flex;align-items:center;gap:6px;vertical-align:-2px"><span class="acc">${icon('calendar-clock', 13)}</span><span class="acc">host in downtime</span><span class="faint">until 15:00</span></span>`;
+shot('1j', '01-downtimes-j-host-only-downtime',
+  'The host k8s-node-02 is in a downtime set on the host only (without <i>all services</i>), so, as in Icinga Web, its services are <b>not</b> in downtime: no banner, the circle stays filled, the problem still notifies. The host line under the service’s name shows the host’s downtime marker (the calendar icon in the accent, <i>host in downtime until 15:00</i>); the host name opens the host pane with its banner (1k).',
+  appWindow(withPane(k8sList(3), servicePane({
+    title: paneTitle({ st: 'warn', label: 'WARN', name: 'ntp-offset', sub: `on <a>k8s-node-02</a> ${hostDtMark} · 2h · hard 3/3` }),
+    sections: codeBlock('WARNING - offset 0.82s\nserver 10.0.0.10  stratum 2  offset +0.82s  jitter 0.04s') +
+      perf([['offset', '0.82s', '0.5', '1', 'warn'], ['jitter', '0.04s', '0.2', '0.5']]) +
+      kv('check', [['command', 'ntp_time'], ['interval', '5m · retry 1m'], ['last / next', '1m ago / in 4m'], ['endpoint', 'k8s-node-02'], ['zone', 'fra'], ['attempt', 'hard 3/3'], ['notifications', 'enabled'], ['notified', 'platform-oncall · 12:14']]),
+  })), { groups: k8sGroups, activeGroup: 'platform', activeItem: 'kubernetes' }),
+  { crops: '01-downtimes-j-host-only-downtime-zoom:820,0,620,330' });
+
+// ---- 1k: history: downtimes in the accent ---------------------------------
+const histLines = [
+  ['14:00', 'accb', 'DOWNTIME', 'host', 'm.keller: BMC firmware update (CHG-4470); the host check may flap, its services stay monitored.'],
+  ['13:41', 'pend', 'COMMENT', 'host', 'm.keller: BMC update needs a cold boot, scheduled for 14:00'],
+  ['12:14', 'warn', 'WARNING', 'ntp-offset', 'hard · WARNING - offset 0.82s'],
+  ['12:11', 'warn', 'WARNING', 'ntp-offset', 'soft 1/3 · WARNING - offset 0.64s'],
+  ['11:02', 'pend', 'DOWNTIME ENDED', 'containerd', 'j.berg'],
+  ['10:58', 'ok', 'OK', 'containerd', 'hard · PROCS OK: 398 processes'],
+  ['10:31', 'crit', 'CRITICAL', 'containerd', 'soft 1/3 · PROCS CRITICAL: containerd not running'],
+  ['10:00', 'accb', 'DOWNTIME', 'containerd', 'j.berg: containerd 1.7.22 rollout, restarts expected until 11:00'],
+  ['09:12', 'ok', 'OK', 'kubelet', 'hard · OK - kubelet healthy, 41 pods'],
+  ['08:47', 'accb', 'ACK', 'kubelet', 'j.berg: cert rotation, on it'],
+  ['08:40', 'crit', 'CRITICAL', 'kubelet', 'hard · CRITICAL - x509: certificate has expired'],
+];
+const histRow = ([t, st, kind, obj, note]) => {
+  const color = st === 'pend' ? 'var(--t-faint)' : st === 'accb' ? 'var(--accent)' : `var(--${st})`;
+  return `<div class="hl"><span class="t">${t}</span><span class="d"><span class="dot d7" style="background:${color}"></span></span>
+    <div style="min-width:0"><div class="l1"><span class="k" style="color:${color}">${kind}</span><span class="o">${obj}</span></div><div class="l2">${note}</div></div></div>`;
+};
+const k2Banner = dtBanner({
+  what: 'In downtime', left: '48m left',
+  action: btn('remove downtime'),
+  l2: `fixed${S}14:00 → 15:00 today${S}the host only, not its services`,
+  l3: au('m.keller', '13:55', 'BMC firmware update (CHG-4470); the host check may flap, its services stay monitored.'),
+  progress: 20,
+});
+const k2Pane = `<div class="pane">${paneHeader('host', { back: true })}${k2Banner}<div class="col" style="gap:20px;padding:20px 24px 0;flex:none">
+  ${paneTitle({ st: 'ok', label: 'UP', ring: true, name: 'k8s-node-02', sub: '10.0.4.22 · up 3d · PING OK - Packet loss = 0%, RTA = 0.38 ms' })}
+  ${actionButtons({ firstDis: true })}
+  <div class="subtabs"><span>services 23</span><span class="on">history</span><span>vars</span><span>config</span></div></div>
+  <div class="col" style="padding:12px 0">
+  <div style="padding:0 24px 8px;font-size:11.5px;color:var(--t-faint)">recorded locally since 08:30 · kept 48 h</div>
+  ${histLines.map(histRow).join('')}</div></div>`;
+shot('1k', '01-downtimes-k-history',
+  'The history tab draws downtimes in the downtime accent (the banner’s blue), like acknowledgements, instead of the unknown purple: <i>DOWNTIME</i> lines no longer look like a state. <i>DOWNTIME ENDED</i> stays faint, like the other “ended” lines. The host pane of k8s-node-02 from 1j: the host is in its own downtime, hollow green.',
+  appWindow(withPane(k8sList(3), k2Pane), { groups: k8sGroups, activeGroup: 'platform', activeItem: 'kubernetes' }),
+  { crops: '01-downtimes-k-history-zoom:820,0,620,900' });
 </script>
 </body></html>

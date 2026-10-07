@@ -14,6 +14,8 @@ built until the user approves its mock-up.
   title, buttons, menus, dialogs, toasts), named after ic-ui-kit. Every topic
   draws its chrome through them, so the frames stay consistent.
 - `icons.js`: the Lucide icons the app uses (gpui-component's set), inline.
+- `settings.js` (the settings window, topics 02 and 03) and `views.js`
+  (dashboard views, topics 04 and 05): parts shared by two topics.
 - `NN-topic.html`: one page per topic, each a column of 1440×900 frames (the
   app's default window) with a label. Open a page in a browser to view it.
 - `00-baseline.html`: rc1's service pane redrawn with the kit, as a check
@@ -25,7 +27,22 @@ built until the user approves its mock-up.
   `CHROMIUM`).
 
 The wall clock in every frame is Wednesday 7 October 2026, 14:12. The data is
-the demo's prod-cluster.
+the demo's prod-cluster. Rendered PNGs are named `NN-topic-x-state.png`, one
+per frame, plus `-zoom` crops of the details.
+
+| # | Topic | Page | Frames |
+|---|---|---|---|
+| 01 | Downtimes in the panes | `01-downtimes.html` | 8 (+3 zooms) |
+| 02 | Settings window | `02-settings.html` | 9 |
+| 03 | Light theme | `03-light-theme.html` | 5 |
+| 04 | Multi-view dashboards | `04-multi-view.html` | 5 (+1) |
+| 05 | Host-group grid | `05-hostgroup-grid.html` | 5 (+1) |
+| 06 | Cluster health | `06-cluster-health.html` | 3 (+1) |
+| 07 | Comment and downtime lists | `07-comments-downtimes-lists.html` | 5 |
+| 08 | YAML sharing | `08-yaml-sharing.html` | 6 (+1) |
+| 09 | Filter autocomplete | `09-filter-autocomplete.html` | 7 (+7) |
+| 10 | Palette multi-select | `10-palette-multiselect.html` | 9 (+7) |
+| 11 | Config tab (to decide) | `11-config-tab.html` | 3 (+3) |
 
 ---
 

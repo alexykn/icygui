@@ -612,6 +612,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
  * starts in the rows' text column. */
 .ghb { position: relative; display: grid; grid-template-columns: 44px minmax(0,1fr) auto; gap: 14px; align-items: center; height: 36px; padding: 0 18px; background: var(--row-header); border-bottom: 1px solid var(--bd-header); flex: none; white-space: nowrap; }
 .ghb .lead { display: flex; justify-content: center; }
+.ghb .chev { position: absolute; left: 14px; top: 0; bottom: 0; width: 12px; display: flex; align-items: center; color: var(--t-faint); }  /* collapse chevron, at the x of 04's view-header chevron; the grid doesn't move */
 .ghb .t { display: flex; align-items: baseline; gap: 10px; min-width: 0; overflow: hidden; }
 .ghb .t .n { font-size: 13px; font-weight: 600; color: var(--t-emph); flex: none; }
 .ghb .t .a { font-size: 12px; color: var(--t-faint); flex: none; }

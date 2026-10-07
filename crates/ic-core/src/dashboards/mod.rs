@@ -37,7 +37,13 @@
 //!   unhandled problem of the host and (by default) its services, else the
 //!   worst handled one (hollow), else the host's state.
 //! - *Summary tiles*: a tile per group with the counts of the members in
-//!   it.
+//!   it; its numbers (`counts`) leave the handled problems out, like the
+//!   view header's.
+//!
+//! Grid groups and tiles go *worst first* by the colour of their reddest
+//! unhandled count (critical or down, then unknown or unreachable, then
+//! warning), then by how many have it, and their dot is that count's
+//! state, so the order and the dot agree with the coloured numbers.
 //! - *Event stream*: the recent events of the hosts and services its
 //!   filter matches, newest first, from the event log's latest entries
 //!   ([`Data::events`]).
@@ -472,6 +478,10 @@ impl Dashboards {
                 }
             }
             if members_only || skipped {
+                // The union misses what changed while quiet (its views'
+                // members moved on without it): build it again in full
+                // when the dashboard is next evaluated.
+                dashboard.union_of = None;
                 continue;
             }
             let union_changed = if evaluated_all {

@@ -405,6 +405,9 @@ pub(crate) struct ViewPage {
     pub(crate) state: ViewState,
     /// A list's rows, as the core evaluated them.
     pub(crate) rows: Arc<Vec<DashboardRow>>,
+    /// Under the page's group filter: which of `rows` it leaves (by
+    /// index); `None`: every row.
+    pub(crate) included: Option<Vec<bool>>,
     /// A grouped list's groups, in order.
     pub(crate) groups: Vec<ListGroup>,
     /// A grid's layout.
@@ -426,12 +429,19 @@ pub(crate) struct ViewPage {
 
 impl ViewPage {
     /// Every object row of the view, folded or paged away or not, in
-    /// order, each object once.
+    /// order, each object once; under the page's group filter only the
+    /// rows it leaves (ctrl-a never marks what the page hides).
     pub(crate) fn objects(&self) -> Vec<ObjectKey> {
         let mut seen = HashSet::new();
         self.rows
             .iter()
-            .filter_map(|row| match row {
+            .enumerate()
+            .filter(|(index, _)| {
+                self.included
+                    .as_ref()
+                    .is_none_or(|included| included.get(*index).copied().unwrap_or(false))
+            })
+            .filter_map(|(_, row)| match row {
                 DashboardRow::Object(key) if seen.insert(key.clone()) => Some(key.clone()),
                 _ => None,
             })
@@ -705,6 +715,9 @@ impl Page {
         };
         let (group, cell) = (entry.group, entry.sub);
         let column = cell % per_line;
+        // Under the page's filter only its group has stops: the step
+        // leaves the grid at the group's edge.
+        let others = layout.on.is_none();
         let target = if forward {
             if cell + per_line < groups[group].cells.len() {
                 Some((group, cell + per_line))
@@ -712,11 +725,12 @@ impl Page {
                 let below = group + columns;
                 groups
                     .get(below)
+                    .filter(|_| others)
                     .map(|next| (below, column.min(next.cells.len().saturating_sub(1))))
             }
         } else if cell >= per_line {
             Some((group, cell - per_line))
-        } else if group >= columns {
+        } else if others && group >= columns {
             let above = group - columns;
             let count = groups[above].cells.len();
             let last_line = count.saturating_sub(1) / per_line;
@@ -805,10 +819,16 @@ impl Page {
         let id: Id = Id::from(view.id.as_str());
         let first = self.items.len();
         let result = input.result.and_then(|result| result.view(&view.id));
-        let denied = match view.object_kind {
-            ObjectKind::Services => input.denied[0],
-            ObjectKind::Hosts => input.denied[1],
-        } && view.display != ViewDisplay::EventStream;
+        // What the view reads: a grid its hosts (a host's services only
+        // colour its square), a stream the local event log.
+        let denied = match view.display {
+            ViewDisplay::EventStream => false,
+            ViewDisplay::HostGroupGrid => input.denied[1],
+            _ => match view.object_kind {
+                ObjectKind::Services => input.denied[0],
+                ObjectKind::Hosts => input.denied[1],
+            },
+        };
         let state = match result {
             _ if denied => ViewState::Denied,
             None => ViewState::Waiting,
@@ -826,6 +846,7 @@ impl Page {
             rows: result
                 .and_then(|result| result.list_rows().cloned())
                 .unwrap_or_default(),
+            included: None,
             groups: Vec::new(),
             grid: None,
             tiles: None,
@@ -883,17 +904,15 @@ impl Page {
                 .filter
                 .is_none_or(|filter| filter.includes_object(snapshot, key))
         };
-        if input.filter.is_some() {
-            // The header counts what the filter leaves.
-            page.counts = tally(
-                rows.iter().filter_map(|row| match row {
-                    DashboardRow::Object(key) if included(key) => mark_of(snapshot, key),
-                    _ => None,
-                }),
-                true,
-            );
+        if input.filter.is_some() && !filter_list(input, &rows, page, &included) {
+            return;
         }
-        let grouping = view.list_grouping();
+        let grouping = match view.list_grouping() {
+            // A host is its own band's only row: a list of hosts grouped by
+            // host is a plain list (the same object never gets two rows).
+            GroupBy::Host if view.object_kind == ObjectKind::Hosts => GroupBy::None,
+            grouping => grouping,
+        };
         let collapsed = page.collapsed;
         if grouping == GroupBy::None {
             if collapsed {
@@ -1038,6 +1057,11 @@ impl Page {
                 GridLine::Cells { group, cells } => vec![(*group, cells.clone())],
             };
             for (group, cells) in groups_here {
+                if layout.on.is_some_and(|on| on != group) {
+                    // Dimmed by the page's filter: the cursor stays in
+                    // the group the page is filtered to.
+                    continue;
+                }
                 let group_id = Id::from(groups[group].name.as_str());
                 for cell in cells {
                     self.stops.push(StopEntry {
@@ -1071,8 +1095,10 @@ impl Page {
             .filter(|filter| filter.same_groups(view))
             .and_then(|filter| tiles.iter().position(|tile| tile.name == filter.name));
         if let Some(on) = on {
-            let mut counts = tiles[on].summary;
+            // The tile's unhandled counts, as its numbers show them.
+            let mut counts = tiles[on].counts;
             counts.ok = 0;
+            counts.pending = 0;
             page.counts = counts;
         }
         let inner = (input.width - sizes.padding * 2.).max(px(0.));
@@ -1124,6 +1150,10 @@ impl Page {
             .clamp(1, ic_core::snapshot::STREAM_EVENTS)
             .min(events.len());
         page.lines = lines;
+        if events.is_empty() {
+            // Filtered to nothing: the header says so.
+            page.state = ViewState::Empty;
+        }
         if collapsed || events.is_empty() {
             page.events = events;
             return;
@@ -1231,6 +1261,38 @@ fn fit(width: Pixels, size: Pixels, gap: Pixels) -> usize {
     )]
     let count = ((f32::from(width + gap) / step).floor().max(1.)) as usize;
     count
+}
+
+/// Applies the page's group filter to a list's `rows`: the header counts
+/// what it leaves, `page.included` marks those rows (ctrl-a, marks), and a
+/// list it leaves nothing becomes [`ViewState::Empty`] (`nothing to
+/// show`). Returns whether any row is left.
+fn filter_list(
+    input: &PageInput<'_>,
+    rows: &[DashboardRow],
+    page: &mut ViewPage,
+    included: &dyn Fn(&ObjectKey) -> bool,
+) -> bool {
+    let flags: Vec<bool> = rows
+        .iter()
+        .map(|row| matches!(row, DashboardRow::Object(key) if included(key)))
+        .collect();
+    page.counts = tally(
+        rows.iter()
+            .zip(&flags)
+            .filter(|(_, included)| **included)
+            .filter_map(|(row, _)| match row {
+                DashboardRow::Object(key) => mark_of(input.snapshot, key),
+                DashboardRow::Group { .. } => None,
+            }),
+        true,
+    );
+    let any = flags.contains(&true);
+    page.included = Some(flags);
+    if !any {
+        page.state = ViewState::Empty;
+    }
+    any
 }
 
 /// A grouped list's groups from the core's rows: a header row, then its
@@ -1829,6 +1891,236 @@ mod tests {
         assert_eq!(kinds(&page), ["header", "row 2", "row 3"]);
         assert_eq!(page.views[0].counts.critical, 1);
         assert_eq!(filter.chip(), "host group edge");
+    }
+
+    fn edge_filter() -> GroupFilter {
+        GroupFilter {
+            by: GroupSource::HostGroup,
+            var: String::new(),
+            name: "edge".to_owned(),
+            label: "edge".to_owned(),
+        }
+    }
+
+    fn build_filtered(
+        views: &[View],
+        result: &DashboardResult,
+        snapshot: &Snapshot,
+        filter: Option<&GroupFilter>,
+        denied: [bool; 2],
+    ) -> Page {
+        Page::build(&PageInput {
+            views,
+            result: Some(result),
+            snapshot,
+            folds: &Folds::default(),
+            filter,
+            multi: true,
+            denied,
+            width: px(1140.),
+            sizes: sizes(),
+        })
+    }
+
+    #[test]
+    fn a_group_filter_limits_marks_and_says_when_it_leaves_nothing() {
+        // h1 (group all) and h2 (group edge), two services each.
+        let mut snapshot = snapshot(&[("h1", 2, 2), ("h2", 2, 1)]);
+        let mut hosts = (*snapshot.hosts).clone();
+        let mut h2 = (*hosts[&HostName::new("h2")]).clone();
+        h2.groups = vec!["edge".to_owned()];
+        hosts.insert(h2.name.clone(), Arc::new(h2));
+        snapshot.hosts = Arc::new(hosts);
+        let all: Vec<DashboardRow> = snapshot
+            .services
+            .values()
+            .map(|service| DashboardRow::Object(service.object_key()))
+            .collect();
+        let h1_only: Vec<DashboardRow> = all[..2].to_vec();
+        let views = [list_view("all", false), list_view("h1", false)];
+        let result = result(vec![
+            ("all", ViewBody::List(Arc::new(all))),
+            ("h1", ViewBody::List(Arc::new(h1_only))),
+        ]);
+        let filter = edge_filter();
+        let page = build_filtered(&views, &result, &snapshot, Some(&filter), [false; 2]);
+        // ctrl-a marks only what the filter leaves.
+        let marked: Vec<String> = page.views[0]
+            .objects()
+            .iter()
+            .map(ObjectKey::full_name)
+            .collect();
+        assert_eq!(marked, ["h2!s00", "h2!s01"]);
+        // A view the filter leaves nothing: its header says so, no body.
+        assert_eq!(page.views[1].state, ViewState::Empty);
+        assert!(page.views[1].objects().is_empty());
+        assert_eq!(
+            kinds(&page),
+            ["header", "row 2", "row 3", "header"],
+            "the emptied view is its header"
+        );
+        // Without the filter every row counts again.
+        let page = build_filtered(&views, &result, &snapshot, None, [false; 2]);
+        assert_eq!(page.views[0].objects().len(), 4);
+        assert_eq!(page.views[1].state, ViewState::Ready);
+    }
+
+    #[test]
+    fn hosts_grouped_by_host_are_a_plain_list() {
+        let snapshot = snapshot(&[("h1", 0, 0), ("h2", 0, 0)]);
+        let rows: Vec<DashboardRow> = snapshot
+            .hosts
+            .keys()
+            .flat_map(|host| {
+                [
+                    DashboardRow::Group {
+                        label: host.to_string(),
+                        count: 1,
+                    },
+                    DashboardRow::Object(ObjectKey::Host { name: host.clone() }),
+                ]
+            })
+            .collect();
+        let mut view = list_view("v", true);
+        view.object_kind = ObjectKind::Hosts;
+        let views = [view];
+        let result = result(vec![("v", ViewBody::List(Arc::new(rows)))]);
+        let page = build(&views, &result, &snapshot, &Folds::default(), true);
+        // No band repeats each host: one row per host.
+        assert_eq!(kinds(&page), ["header", "row 1", "row 3"]);
+        assert!(page.views[0].groups.is_empty());
+    }
+
+    #[test]
+    fn views_are_denied_by_what_they_read() {
+        let snapshot = Snapshot::default();
+        let grid = View {
+            id: "g".to_owned(),
+            display: ViewDisplay::HostGroupGrid,
+            // What a grid made by an earlier editor kept.
+            object_kind: ObjectKind::Services,
+            ..View::default()
+        };
+        let stream = View {
+            id: "s".to_owned(),
+            display: ViewDisplay::EventStream,
+            ..View::default()
+        };
+        let views = [grid, stream, list_view("l", false)];
+        let result = result(vec![
+            ("g", ViewBody::Grid(Arc::default())),
+            ("s", ViewBody::Stream(Arc::default())),
+            ("l", ViewBody::List(Arc::default())),
+        ]);
+        // No service permission: the grid still reads its hosts.
+        let page = build_filtered(&views, &result, &snapshot, None, [true, false]);
+        let states: Vec<ViewState> = page.views.iter().map(|view| view.state).collect();
+        assert_eq!(
+            states,
+            [ViewState::Empty, ViewState::Empty, ViewState::Denied]
+        );
+        // No host permission: the grid can't show anything; the stream
+        // reads the local log.
+        let page = build_filtered(&views, &result, &snapshot, None, [false, true]);
+        let states: Vec<ViewState> = page.views.iter().map(|view| view.state).collect();
+        assert_eq!(
+            states,
+            [ViewState::Denied, ViewState::Empty, ViewState::Empty]
+        );
+    }
+
+    #[test]
+    fn a_filtered_grid_keeps_the_cursor_in_its_group() {
+        let snapshot = Snapshot::default();
+        let cell = |name: &str| GridCell {
+            host: HostName::new(name),
+            state: CheckableState::Host(HostState::Up),
+            handled: false,
+            problems: 0,
+            worst_service: None,
+        };
+        let group = |name: &str| GridGroup {
+            name: name.to_owned(),
+            label: name.to_owned(),
+            cells: (0..3)
+                .map(|index| cell(&format!("{name}-{index}")))
+                .collect(),
+            counts: Summary::default(),
+        };
+        let grid = Grid {
+            groups: vec![group("core"), group("edge"), group("web")],
+            hosts: 9,
+        };
+        let views = [
+            View {
+                id: "g".to_owned(),
+                display: ViewDisplay::HostGroupGrid,
+                ..View::default()
+            },
+            list_view("l", false),
+        ];
+        let result = result(vec![
+            ("g", ViewBody::Grid(Arc::new(grid))),
+            ("l", ViewBody::List(Arc::default())),
+        ]);
+        let filter = edge_filter();
+        let page = build_filtered(&views, &result, &snapshot, Some(&filter), [false; 2]);
+        let cells: Vec<&str> = page
+            .stops()
+            .iter()
+            .filter_map(|entry| match &entry.stop {
+                Stop::Cell { host, .. } => Some(host.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            cells,
+            ["edge-0", "edge-1", "edge-2"],
+            "the dimmed groups have none"
+        );
+        // Tab's target is the filtered group's first host.
+        let first = page.first_body_stop(0).unwrap();
+        assert!(
+            matches!(&page.stops()[first].stop, Stop::Cell { host, .. } if host.as_str() == "edge-0")
+        );
+    }
+
+    #[test]
+    fn a_tile_filter_counts_the_tile_unhandled() {
+        let snapshot = Snapshot::default();
+        let tile = |name: &str, critical: u32, handled: u32| Tile {
+            name: name.to_owned(),
+            label: name.to_owned(),
+            hosts: 1,
+            summary: Summary {
+                critical: critical + handled,
+                handled,
+                ok: 5,
+                ..Summary::default()
+            },
+            counts: Summary {
+                critical,
+                ok: 5,
+                ..Summary::default()
+            },
+        };
+        let views = [View {
+            id: "t".to_owned(),
+            display: ViewDisplay::SummaryTiles,
+            ..View::default()
+        }];
+        let result = result(vec![(
+            "t",
+            ViewBody::Tiles(Arc::new(vec![tile("edge", 1, 1), tile("web", 0, 0)])),
+        )]);
+        let filter = edge_filter();
+        let page = build_filtered(&views, &result, &snapshot, Some(&filter), [false; 2]);
+        let counts = page.views[0].counts;
+        assert_eq!(
+            (counts.critical, counts.ok),
+            (1, 0),
+            "the handled one is left out"
+        );
     }
 
     #[test]

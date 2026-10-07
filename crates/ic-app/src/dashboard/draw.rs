@@ -840,7 +840,6 @@ impl DashboardView {
         cell: &GridCell,
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let _ = index;
         let theme = cx.theme();
         let colors = theme.colors;
         let stop = Stop::Cell {
@@ -851,12 +850,12 @@ impl DashboardView {
         let cursor = ui.selection.cursor_stop() == Some(&stop);
         let fill = theme.states.fill.checkable(cell.state);
         let healthy = is_ok(cell.state) && !cell.handled;
-        let tooltip = HostTooltip::of(self.state.read(cx).snapshot(), cell);
+        // Built on hover only: a grid draws thousands of squares.
+        let state = self.state.clone();
+        let hovered = cell.clone();
         div()
-            .id(SharedString::from(format!(
-                "square:{}\u{1f}{}\u{1f}{}",
-                page_view.id, entry.name, cell.host
-            )))
+            // Unique inside its group's block, which has the group's id.
+            .id(ElementId::NamedInteger("square".into(), index as u64))
             .relative()
             .flex_none()
             .size(px(12.))
@@ -883,7 +882,10 @@ impl DashboardView {
                         .border_color(colors.accent),
                 )
             })
-            .tooltip(move |_, cx| tooltip.clone().view(cx))
+            .tooltip(move |_, cx| {
+                let tooltip = HostTooltip::of(state.read(cx).snapshot(), &hovered);
+                tooltip.view(cx)
+            })
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.click_stop(&stop, event.modifiers(), window, cx);
             }))
@@ -911,7 +913,8 @@ impl DashboardView {
         let state = self.state.read(cx);
         let note = cell_note(state.snapshot(), cell);
         let problem = !is_ok(cell.state);
-        let tooltip = HostTooltip::of(state.snapshot(), cell);
+        let app_state = self.state.clone();
+        let hovered = cell.clone();
         div()
             .id(SharedString::from(format!(
                 "cell:{}\u{1f}{}\u{1f}{}",
@@ -929,13 +932,21 @@ impl DashboardView {
             .overflow_hidden()
             .text_size(theme.text.small)
             .cursor_pointer()
+            // Every cell has the same 1px border (transparent but on OK
+            // cells), so cells share their line's width equally and a
+            // change of state never moves a column edge.
+            .border_1()
             .map(|cell_box| {
                 if cursor {
-                    cell_box.bg(colors.row_selected)
+                    cell_box
+                        .bg(colors.row_selected)
+                        .border_color(gpui::transparent_black())
                 } else if problem {
-                    cell_box.bg(colors.element_background)
+                    cell_box
+                        .bg(colors.element_background)
+                        .border_color(gpui::transparent_black())
                 } else {
-                    cell_box.border_1().border_color(colors.border_row)
+                    cell_box.border_color(colors.border_row)
                 }
             })
             .child(
@@ -965,7 +976,10 @@ impl DashboardView {
                         .child(note),
                 )
             })
-            .tooltip(move |_, cx| tooltip.clone().view(cx))
+            .tooltip(move |_, cx| {
+                let tooltip = HostTooltip::of(app_state.read(cx).snapshot(), &hovered);
+                tooltip.view(cx)
+            })
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.click_stop(&stop, event.modifiers(), window, cx);
             }))
@@ -1038,9 +1052,10 @@ impl DashboardView {
         let colors = theme.colors;
         let sizes = super::page::Sizes::of(theme);
         let kind = view.object_kind;
-        let parts = tile_parts(&tile.summary, kind);
+        // Unhandled counts: the tiles add up to the view header's.
+        let parts = tile_parts(&tile.counts, kind);
         let total: u32 = parts.iter().map(|(_, count, _)| *count).sum();
-        let worst = tile.summary.worst_unhandled.unwrap_or(if total == 0 {
+        let worst = tile.counts.worst_unhandled.unwrap_or(if total == 0 {
             CheckableState::Service(ServiceState::Pending)
         } else {
             CheckableState::Service(ServiceState::Ok)
@@ -1052,28 +1067,34 @@ impl DashboardView {
             label: tile.label.clone(),
         };
         let reference = reference.clone();
-        let bar =
-            div()
-                .flex()
-                .gap(px(2.))
-                .h(px(6.))
-                .w_full()
-                .rounded(px(3.))
-                .overflow_hidden()
-                .bg(colors.border_header)
-                .children(parts.iter().filter(|(_, count, _)| *count > 0).map(
-                    |(state, count, _)| {
-                        #[expect(
-                            clippy::cast_precision_loss,
-                            reason = "counts far below f32's exact range"
-                        )]
-                        let share = *count as f32 / total.max(1) as f32;
-                        div()
-                            .h_full()
-                            .flex_basis(gpui::relative(share))
-                            .bg(theme.states.fill.checkable(*state))
-                    },
-                ));
+        let segments: Vec<(CheckableState, u32)> = parts
+            .iter()
+            .filter(|(_, count, _)| *count > 0)
+            .map(|(state, count, _)| (*state, *count))
+            .collect();
+        let last = segments.len().saturating_sub(1);
+        // GPUI doesn't clip children to a radius: the outer segments round
+        // their own ends.
+        let bar = div()
+            .flex()
+            .gap(px(2.))
+            .h(px(6.))
+            .w_full()
+            .rounded(px(3.))
+            .bg(colors.border_header)
+            .children(segments.iter().enumerate().map(|(index, (state, count))| {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "counts far below f32's exact range"
+                )]
+                let share = *count as f32 / total.max(1) as f32;
+                div()
+                    .h_full()
+                    .flex_basis(gpui::relative(share))
+                    .bg(theme.states.fill.checkable(*state))
+                    .when(index == 0, |segment| segment.rounded_l(px(3.)))
+                    .when(index == last, |segment| segment.rounded_r(px(3.)))
+            }));
         let numbers =
             parts
                 .iter()
@@ -1367,25 +1388,40 @@ fn dim_green(theme: &Theme) -> f32 {
     }
 }
 
-/// What a labelled cell names at its right: the worst service; `host
-/// down`; `downtime` or `acknowledged` for a handled host.
+/// What a labelled cell names at its right, as its mark says it: a filled
+/// (unhandled) cell what gives it its state (`host down`, else its worst
+/// service); a hollow (handled) one why (`downtime` or `acknowledged`,
+/// of the problem it shows, else of the host); an OK cell nothing.
 fn cell_note(snapshot: &Snapshot, cell: &GridCell) -> Option<String> {
     let host = snapshot.hosts.get(&cell.host);
-    if let Some(host) = host {
-        if host.check.in_downtime() {
-            return Some("downtime".to_owned());
-        }
-        if host.is_problem() {
-            return Some(format!(
-                "host {}",
-                format::state_word(CheckableState::Host(host.state))
-            ));
-        }
+    let host_problem = host.filter(|host| cell.state == CheckableState::Host(host.state));
+    let service = cell.worst_service.as_ref().and_then(|name| {
+        snapshot
+            .services
+            .get(&ic_model::ServiceKey::new(cell.host.as_str(), name))
+    });
+    if cell.handled {
+        let in_downtime = match (host_problem, service) {
+            (None, Some(service)) if service.check.in_downtime() => true,
+            (None, Some(service)) if service.check.acknowledgement.is_acknowledged() => false,
+            _ => host.is_some_and(|host| host.check.in_downtime()),
+        };
+        return Some(
+            if in_downtime {
+                "downtime"
+            } else {
+                "acknowledged"
+            }
+            .to_owned(),
+        );
     }
-    if let Some(service) = &cell.worst_service {
-        return Some(service.to_string());
+    if let Some(host) = host_problem.filter(|host| host.is_problem()) {
+        return Some(format!(
+            "host {}",
+            format::state_word(CheckableState::Host(host.state))
+        ));
     }
-    cell.handled.then(|| "acknowledged".to_owned())
+    cell.worst_service.as_ref().map(ToString::to_string)
 }
 
 /// A stream line.

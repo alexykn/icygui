@@ -640,6 +640,18 @@ impl Session {
     fn start_demo_core(&mut self, id: &str, cx: &mut Context<Self>) {
         match self.demo_data_dir() {
             Ok(data_dir) => {
+                // `prod-cluster`'s database hosts get a recent history
+                // (4a's event stream), once per demo.
+                if id == demo::ENVIRONMENT_ID && !ic_core::event_log_path(&data_dir, id).exists() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0., |since| since.as_secs_f64());
+                    if let Err(error) =
+                        ic_core::seed_event_log(&data_dir, id, &demo::recent_events(now))
+                    {
+                        tracing::warn!(%error, "couldn't seed the demo's event log");
+                    }
+                }
                 let secrets = self.secrets.clone();
                 self.start_core(id, data_dir, secrets, cx);
             }

@@ -503,6 +503,7 @@ impl DashboardEditor {
             .child(
                 Field::new("colour by").control(
                     Segmented::new("editor-grid-colour")
+                        .by_content()
                         .option("worst of host and services")
                         .option("host only")
                         .selected(usize::from(view.grid.colour == GridColour::HostOnly))
@@ -745,14 +746,10 @@ impl DashboardEditor {
     }
 
     /// A grouped list's `group by`: host, host group or service group
-    /// (services only).
+    /// (services); host group (hosts: by host, each host would be its own
+    /// band's only row).
     fn grouping_field(view: &View, cx: &Context<Self>) -> Field {
-        let hosts = view.object_kind == ObjectKind::Hosts;
-        let choices: &[GroupBy] = if hosts {
-            &[GroupBy::Host, GroupBy::HostGroup]
-        } else {
-            &[GroupBy::Host, GroupBy::HostGroup, GroupBy::ServiceGroup]
-        };
+        let choices = model::groupings(view.object_kind);
         let grouping = view.list_grouping();
         let selected = choices
             .iter()
@@ -769,10 +766,8 @@ impl DashboardEditor {
             })
             .selected(selected)
             .on_select(cx.listener(move |this, index: &usize, _, cx| {
-                let group_by = match *index {
-                    1 => GroupBy::HostGroup,
-                    2 => GroupBy::ServiceGroup,
-                    _ => GroupBy::Host,
+                let Some(&group_by) = choices.get(*index) else {
+                    return;
                 };
                 this.change_selected(std::time::Duration::ZERO, cx, |view| {
                     view.group_by = group_by;

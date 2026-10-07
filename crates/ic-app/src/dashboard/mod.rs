@@ -198,6 +198,9 @@ struct OpenPane {
 pub(crate) enum DashboardEvent {
     /// Open the editor for this dashboard (the header's `···`).
     Edit(DashboardRef),
+    /// Open the editor for this dashboard with one of its views selected
+    /// (by id; a view header's `···`).
+    EditView(DashboardRef, String),
     /// The editor's preview: a view was clicked; select it (by id).
     Pick(String),
     /// The editor's preview: change a view of the draft (its header's
@@ -929,6 +932,10 @@ impl DashboardView {
     }
 
     /// `←`: folds what the cursor is on; on a grid, the previous host.
+    /// With nothing to fold there (a row, an event, a folded band, the
+    /// grid's first host), the cursor goes to what holds it: a row's band,
+    /// else its view's header, where `←` folds the view. So every view
+    /// folds from the keyboard.
     fn fold(&mut self, _: &Fold, _: &mut Window, cx: &mut Context<Self>) {
         self.fold_at_cursor(false, cx);
     }
@@ -937,24 +944,65 @@ impl DashboardView {
         let Some(reference) = self.sync(cx) else {
             return;
         };
-        let Some((position, stop)) = self.pages.get(&reference).and_then(|ui| {
+        let Some((position, stop, page)) = self.pages.get(&reference).and_then(|ui| {
             ui.cursor_entry()
-                .map(|(position, stop)| (position, stop.clone()))
+                .map(|(position, stop)| (position, stop.clone(), ui.page.clone()))
         }) else {
             cx.propagate();
             return;
         };
+        let header = |view: &Id| Stop::Header(view.clone());
+        let parent = match &stop {
+            Stop::Header(_) => None,
+            Stop::Row {
+                view,
+                group: Some(group),
+                ..
+            } => Some(Stop::Band {
+                view: view.clone(),
+                group: group.clone(),
+            }),
+            Stop::Row {
+                view, group: None, ..
+            }
+            | Stop::Event { view, .. }
+            | Stop::Cell { view, .. } => Some(header(view)),
+            Stop::Band { view, group } => page
+                .view_by_id(view)
+                .and_then(|page_view| page_view.group(group))
+                .filter(|band| band.collapsed)
+                .map(|_| header(view)),
+            Stop::More { view, group } => page
+                .view_by_id(view)
+                .and_then(|page_view| page_view.group(group))
+                .filter(|host| !host.expanded)
+                .map(|_| Stop::Band {
+                    view: view.clone(),
+                    group: group.clone(),
+                }),
+        }
+        .filter(|_| !open)
+        .and_then(|parent| page.position(&parent));
         match &stop {
+            Stop::Cell { .. } => {
+                let side = page.grid_side_step(position, open);
+                let target = side.filter(|&target| target != position).or(parent);
+                if let Some(target) = target {
+                    self.change_selection(cx, |selection, page| {
+                        selection.place(page, target).then_some(target)
+                    });
+                }
+            }
+            _ if parent.is_some() => {
+                self.change_selection(cx, |selection, page| {
+                    let target = parent?;
+                    selection.place(page, target).then_some(target)
+                });
+            }
             Stop::Header(view) => self.fold_view(&reference, view, !open, cx),
             Stop::Band { view, group } => self.fold_group(&reference, view, group, !open, cx),
             Stop::More { view, group } => {
                 self.set_paging(&reference, view, group, open, true, cx);
-            }
-            Stop::Cell { .. } => {
-                self.change_selection(cx, |selection, page| {
-                    let target = page.grid_side_step(position, open)?;
-                    selection.place(page, target).then_some(target)
-                });
             }
             Stop::Row { .. } | Stop::Event { .. } => cx.propagate(),
         }

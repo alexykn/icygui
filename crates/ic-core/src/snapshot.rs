@@ -226,6 +226,13 @@ pub struct ViewResult {
     pub handled: u32,
     /// What the view shows.
     pub body: ViewBody,
+    /// An event stream: how many hosts its filter matches, whose events it
+    /// shows (the editor's `valid · 9 hosts and their services`); 0 for the
+    /// other displays.
+    pub hosts: u32,
+    /// An event stream: how many services its filter matches; 0 for the
+    /// other displays.
+    pub services: u32,
     /// The filter didn't parse or evaluate: the body is empty, the error
     /// names the object.
     pub error: Option<String>,
@@ -310,7 +317,8 @@ pub struct GridGroup {
     /// One per host, by host name.
     pub cells: Vec<GridCell>,
     /// The cells that don't count as handled, by their state: the group
-    /// header's `● 1 ● 3` and its dot (`worst_unhandled`).
+    /// header's `● 1 ● 3` and its dot (`worst_unhandled`, the reddest
+    /// count).
     pub counts: Summary,
 }
 
@@ -346,9 +354,13 @@ pub struct Tile {
     pub label: String,
     /// How many hosts the tile's objects are on (`3 hosts`).
     pub hosts: u32,
-    /// Counts over the tile's objects: its stacked bar and numbers, its
-    /// dot (`worst_unhandled`).
+    /// Counts over every one of the tile's objects.
     pub summary: Summary,
+    /// The tile's objects that aren't handled problems, by their state
+    /// (OK and pending included): its stacked bar and numbers, which add up
+    /// to the view header's unhandled counts, and its dot
+    /// (`worst_unhandled`, the reddest count).
+    pub counts: Summary,
 }
 
 /// One row of a dashboard list.

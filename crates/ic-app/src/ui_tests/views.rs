@@ -452,6 +452,129 @@ fn view_headers_collapse_with_the_chevron_and_the_arrows() {
 }
 
 #[test]
+fn every_view_folds_from_the_keyboard_alone() {
+    run(FixtureOptions::default(), |app, cx| {
+        production_with_views(app, cx);
+        let cursor = |app: &Harness, cx: &App| app.dashboard(cx).read(cx).cursor_stop(cx).unwrap();
+        // j: the grid's first host; Tab: the problems list's first row.
+        app.keys(cx, "j tab");
+        let stop = cursor(app, cx);
+        assert!(
+            matches!(&stop, Stop::Row { view, .. } if &**view == "problems"),
+            "{stop:?}"
+        );
+        // ← on a row: its view's header; ← again folds the view, → unfolds.
+        app.keys(cx, "left");
+        let stop = cursor(app, cx);
+        assert!(
+            matches!(&stop, Stop::Header(view) if &**view == "problems"),
+            "{stop:?}"
+        );
+        app.keys(cx, "left");
+        assert!(page_now(app, cx).views[1].collapsed);
+        app.keys(cx, "right");
+        assert!(!page_now(app, cx).views[1].collapsed);
+
+        // A grid's first host: ← goes to the grid's header.
+        app.keys(cx, "shift-tab");
+        assert!(matches!(cursor(app, cx), Stop::Cell { .. }));
+        app.keys(cx, "left left");
+        assert!(page_now(app, cx).views[0].collapsed, "the grid folds");
+        app.keys(cx, "right");
+
+        // A grouped list: a row → its band (← folds it) → the header.
+        app.keys(cx, "tab tab tab j");
+        let stop = cursor(app, cx);
+        assert!(
+            matches!(&stop, Stop::Row { view, group: Some(_), .. } if &**view == "grouped"),
+            "{stop:?}"
+        );
+        app.keys(cx, "left");
+        assert!(matches!(cursor(app, cx), Stop::Band { .. }));
+        app.keys(cx, "left");
+        let page = page_now(app, cx);
+        assert!(page.views[3].groups[0].collapsed, "the band folds");
+        app.keys(cx, "left");
+        let stop = cursor(app, cx);
+        assert!(
+            matches!(&stop, Stop::Header(view) if &**view == "grouped"),
+            "{stop:?}"
+        );
+        app.keys(cx, "left");
+        assert!(page_now(app, cx).views[3].collapsed);
+    });
+}
+
+#[test]
+fn under_a_group_filter_ctrl_a_marks_only_what_shows() {
+    run(FixtureOptions::default(), |app, cx| {
+        production_with_views(app, cx);
+        let page = page(app, cx);
+        let layout = page.views[0].grid.clone().unwrap();
+        let group = layout.grid.groups[0].clone();
+        let line = item(&page, |page, index| {
+            matches!(page.items[index].kind, ItemKind::Grid { line: 0 })
+        });
+        let line_bounds = bounds(app, cx, line);
+        // A click on the first group's name filters the page.
+        app.click(
+            cx,
+            point(
+                line_bounds.left() + px(18. + 8. + 9. + 10.),
+                line_bounds.top() + px(14. + 9.),
+            ),
+            Modifiers::default(),
+        );
+        let filter = app
+            .dashboard(cx)
+            .read(cx)
+            .group_filter(cx)
+            .expect("filtered");
+        assert_eq!(filter.name, group.name);
+        // Tab: the cursor stays in the filtered group, then the list.
+        app.keys(cx, "tab");
+        let stop = app.dashboard(cx).read(cx).cursor_stop(cx).unwrap();
+        assert!(
+            matches!(&stop, Stop::Cell { group: in_group, .. } if **in_group == *group.name),
+            "{stop:?}"
+        );
+        app.keys(cx, "tab ctrl-a");
+        let snapshot: Arc<Snapshot> = app.state.read(cx).snapshot().clone();
+        let marked = app.marked(cx);
+        assert!(!marked.is_empty());
+        assert!(
+            marked
+                .iter()
+                .all(|key| filter.includes_object(&snapshot, key)),
+            "nothing the filter hides is marked"
+        );
+        let rows = &page_now(app, cx).views[1];
+        let shown = rows
+            .rows
+            .iter()
+            .filter(|row| matches!(row, ic_core::snapshot::DashboardRow::Object(key) if filter.includes_object(&snapshot, key)))
+            .count();
+        assert_eq!(marked.len(), shown);
+    });
+}
+
+#[test]
+fn edit_view_opens_the_editor_on_that_view() {
+    run(FixtureOptions::default(), |app, cx| {
+        production_with_views(app, cx);
+        app.dashboard(cx).update(cx, |_, cx| {
+            cx.emit(crate::dashboard::DashboardEvent::EditView(
+                production(),
+                "grouped".to_owned(),
+            ));
+        });
+        app.draw(cx);
+        let editor = app.workspace.read(cx).editor().expect("the editor").clone();
+        assert_eq!(editor.read(cx).selected(), "grouped");
+    });
+}
+
+#[test]
 fn a_grid_host_opens_its_pane_and_a_group_filters_the_page() {
     run(FixtureOptions::default(), |app, cx| {
         production_with_views(app, cx);

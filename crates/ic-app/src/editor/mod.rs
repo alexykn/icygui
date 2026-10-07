@@ -393,7 +393,7 @@ impl DashboardEditor {
                             });
                         }
                     }
-                    DashboardEvent::Edit(_) => {}
+                    DashboardEvent::Edit(_) | DashboardEvent::EditView(..) => {}
                 },
             ),
             cx.observe(state, |_, _, cx| cx.notify()),
@@ -461,6 +461,14 @@ impl DashboardEditor {
     /// marks it on its header and scrolls its header into view.
     fn select(&mut self, id: String, cx: &mut Context<Self>) {
         self.select_and(id, true, cx);
+    }
+
+    /// Selects the draft's view `id` (a view header's *edit view*); an
+    /// unknown one leaves the selection.
+    pub(crate) fn select_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.index_of(id).is_some() {
+            self.select(id.to_owned(), cx);
+        }
     }
 
     /// [`Self::select`]; `reveal`: scroll the preview to the view (not

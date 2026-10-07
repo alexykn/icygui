@@ -811,3 +811,20 @@ fn would_list_follows_the_handled_kinds() {
     };
     assert!(!would_list(&snapshot, &grid, all, &key, at));
 }
+
+#[test]
+fn the_handled_button_hides_even_when_the_settings_hide_nothing() {
+    use ic_config::{HandledMode, HandledSetting};
+    let none = HideHandled::NONE;
+    // `2 handled · hide` on a view that follows settings hiding nothing.
+    let hidden = handled_after_click(HandledSetting::SETTINGS, none, 0);
+    assert_eq!(hidden.mode, HandledMode::Hide);
+    assert_eq!(hidden.hidden(none), HideHandled::ALL);
+    // `2 hidden · show` shows them again.
+    let shown = handled_after_click(hidden, none, 2);
+    assert_eq!(shown.hidden(none), none);
+    assert_eq!(
+        handled_after_click(shown, none, 0).hidden(none),
+        HideHandled::ALL
+    );
+}

@@ -369,6 +369,9 @@ impl Workspace {
                     DashboardEvent::Edit(reference) => {
                         this.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
                     }
+                    DashboardEvent::EditView(reference, view_id) => {
+                        this.edit_view(reference, view_id, window, cx);
+                    }
                     // Only the editor's preview picks and changes views.
                     DashboardEvent::Pick(_) | DashboardEvent::ChangeView(..) => {}
                 },
@@ -1718,6 +1721,23 @@ impl Workspace {
     fn on_new_dashboard(&mut self, _: &NewDashboard, window: &mut Window, cx: &mut Context<Self>) {
         if self.modal.is_none() {
             self.new_dashboard(None, window, cx);
+        }
+    }
+
+    /// Opens the editor for `reference` with its view `view_id` selected
+    /// (a view header's *edit view*).
+    fn edit_view(
+        &mut self,
+        reference: &DashboardRef,
+        view_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
+        if let Some(editor) = &self.editor {
+            editor
+                .view
+                .update(cx, |editor, cx| editor.select_view(view_id, cx));
         }
     }
 

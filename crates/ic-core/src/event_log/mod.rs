@@ -82,6 +82,24 @@ pub fn delete_event_log(data_dir: &Path, environment_id: &str) -> std::io::Resul
     Ok(())
 }
 
+/// Appends `entries` to environment `environment_id`'s event log in
+/// `data_dir`, creating it if needed, before its engine opens it: the
+/// demo's recent history (an engine already running keeps its own copy of
+/// the latest entries, so seed first).
+///
+/// # Errors
+///
+/// The log can't be opened or written (the reason, as text).
+pub fn seed_event_log(
+    data_dir: &Path,
+    environment_id: &str,
+    entries: &[LogEntry],
+) -> Result<(), String> {
+    let path = event_log_path(data_dir, environment_id);
+    let mut database = Database::open(&path).map_err(|error| error.to_string())?;
+    database.record(entries).map_err(|error| error.to_string())
+}
+
 /// Called on the log's thread with the intents that were new (an id
 /// already in the log, from an earlier run, is dropped), in order.
 pub(crate) type Logged = Box<dyn FnOnce(Vec<NotificationIntent>) + Send>;

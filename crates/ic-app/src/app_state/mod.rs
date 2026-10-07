@@ -1332,7 +1332,8 @@ fn would_list(
 /// - *show*: every handled problem shows (the kinds the view chose are
 ///   kept for later);
 /// - *hide*, after *show*: back to what hid them before
-///   ([`ic_config::HandledSetting::toggled`]);
+///   ([`ic_config::HandledSetting::toggled`]), and every kind when that
+///   would hide nothing (the settings hide no kind);
 /// - *hide* while the settings hide only some kinds and nothing is hidden
 ///   (say only `host down`, and acknowledged problems show): every kind is
 ///   hidden, on this view.

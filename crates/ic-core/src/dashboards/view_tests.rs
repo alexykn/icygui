@@ -362,7 +362,8 @@ fn grids_colour_hosts_by_their_worst_problem() {
     let dashboards = evaluate(&[("worst", vec![grid()]), ("host", vec![host_only])], &data);
     let worst = &dashboard(&dashboards, "worst").views[0];
     let cells = grid_of(worst);
-    // Worst first: web's unknown outweighs db's warning and down host.
+    // Worst first: both have a down host (red), and web's worst problem
+    // (the unknown) outweighs db's.
     assert_eq!(
         grid_names(cells),
         ["web: db-2 down web-1 unknown", "db: db-1 warning db-2 down",]
@@ -559,6 +560,17 @@ fn tiles_count_their_groups() {
         summary.worst_unhandled,
         Some(CheckableState::Service(ServiceState::Warning))
     );
+    // The numbers leave the handled problems out (the acknowledged pg, and
+    // db-2's pg, handled by its down host), as the view header does.
+    let counts = databases.counts;
+    assert_eq!(
+        (counts.critical, counts.warning, counts.ok, counts.handled),
+        (0, 1, 2, 0)
+    );
+    assert_eq!(
+        counts.worst_unhandled,
+        Some(CheckableState::Service(ServiceState::Warning))
+    );
     // The view counts each service once (db-2's are in both tiles).
     assert_eq!(result.summary.critical, 2);
     assert_eq!(result.summary.unhandled + result.summary.handled, 4);
@@ -569,6 +581,47 @@ fn tiles_count_their_groups() {
     let hosts = tiles_of(&dashboard(&dashboards, "hosts").views[0]);
     assert_eq!(hosts[1].summary.down, 1);
     assert_eq!(hosts[1].hosts, 2);
+}
+
+#[test]
+fn groups_follow_their_reddest_count() {
+    // x: a host with a critical service that is unreachable (Icinga's
+    // severity puts it below any unhandled warning) and a host with an
+    // unknown; y: one warning; z: two hosts with a warning each.
+    let mut unreachable = tests::service("a", "crit", ServiceState::Critical, 1.0);
+    unreachable.check.reachable = false;
+    let data = tests::data(
+        vec![
+            host("a", HostState::Up, &["x"], "r"),
+            host("e", HostState::Up, &["x"], "r"),
+            host("b", HostState::Up, &["y"], "r"),
+            host("c", HostState::Up, &["z"], "r"),
+            host("d", HostState::Up, &["z"], "r"),
+        ],
+        vec![
+            unreachable,
+            tests::service("e", "unknown", ServiceState::Unknown, 1.0),
+            tests::service("b", "warning", ServiceState::Warning, 1.0),
+            tests::service("c", "warning", ServiceState::Warning, 1.0),
+            tests::service("d", "warning", ServiceState::Warning, 1.0),
+        ],
+    );
+    let dashboards = evaluate(&[("grid", vec![grid()]), ("tiles", vec![tiles()])], &data);
+    let critical = Some(CheckableState::Service(ServiceState::Critical));
+    // Red before yellow, then more of the same colour first.
+    let grid = grid_of(&dashboard(&dashboards, "grid").views[0]);
+    let names: Vec<&str> = grid
+        .groups
+        .iter()
+        .map(|group| group.name.as_str())
+        .collect();
+    assert_eq!(names, ["x", "z", "y"]);
+    assert_eq!(grid.groups[0].counts.worst_unhandled, critical);
+    let tiles = tiles_of(&dashboard(&dashboards, "tiles").views[0]);
+    let names: Vec<&str> = tiles.iter().map(|tile| tile.name.as_str()).collect();
+    assert_eq!(names, ["x", "z", "y"]);
+    assert_eq!(tiles[0].counts.worst_unhandled, critical);
+    assert_eq!((tiles[0].counts.critical, tiles[0].counts.unknown), (1, 1));
 }
 
 fn entry(seconds: f64, object: ObjectKey, kind: LogKind) -> LogEntry {
@@ -830,6 +883,44 @@ fn quiet_mode_leaves_streams_for_later() {
     dashboards.set_scope(Scope::All);
     let results = dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
     assert_eq!(results[&reference("d")].views.len(), 2);
+}
+
+#[test]
+fn quiet_mode_leaves_the_sidebar_union_to_be_rebuilt() {
+    // Two counting views and no stream: nothing else forces a full
+    // evaluation when quiet mode ends.
+    let views = vec![problems(), view("host.name == \"db-1\"")];
+    for only in [
+        None,
+        Some([reference("d")].into_iter().collect::<BTreeSet<_>>()),
+    ] {
+        let mut data = sample();
+        let mut dashboards = evaluate(&[("d", views.clone())], &data);
+        dashboards.set_scope(Scope::Quiet(only));
+
+        // ssh on db-1 goes critical while quiet.
+        let key = ServiceKey::new("db-1", "ssh");
+        let services = Arc::make_mut(&mut data.services);
+        let mut ssh = (*services[&key]).clone();
+        ssh.state = ServiceState::Critical;
+        services.insert(key.clone(), Arc::new(ssh));
+        dashboards.update(
+            &data,
+            &some(&[ObjectKey::from(key)]),
+            false,
+            &AtomicBool::new(false),
+        );
+
+        // Awake, with nothing new: the sidebar's counts take the change.
+        dashboards.set_scope(Scope::All);
+        dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
+        let fresh = evaluate(&[("d", views.clone())], &data);
+        assert_eq!(
+            dashboard(&dashboards, "d").summary,
+            dashboard(&fresh, "d").summary
+        );
+        assert_eq!(dashboard(&dashboards, "d"), dashboard(&fresh, "d"));
+    }
 }
 
 #[test]

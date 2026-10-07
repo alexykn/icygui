@@ -708,6 +708,8 @@ impl Board {
                         hidden: 0,
                         handled: built.handled,
                         body: ViewBody::Grid(self.keep_grid(built.grid)),
+                        hosts: 0,
+                        services: 0,
                         error: None,
                     }
                 }
@@ -721,15 +723,26 @@ impl Board {
                         hidden: 0,
                         handled: built.handled,
                         body: ViewBody::Tiles(self.keep_tiles(built.tiles)),
+                        hosts: 0,
+                        services: 0,
                         error: None,
                     }
                 }
                 ViewDisplay::EventStream => {
                     self.seen_events = Some(Arc::clone(&data.events));
                     let events = super::stream::select(self, &data.events);
+                    let hosts = self
+                        .members
+                        .keys()
+                        .filter(|object| matches!(object, ObjectKey::Host { .. }))
+                        .count();
+                    let hosts = u32::try_from(hosts).unwrap_or(u32::MAX);
+                    let services = u32::try_from(self.members.len()).unwrap_or(u32::MAX) - hosts;
                     ViewResult {
                         id: self.view.id.clone(),
                         body: ViewBody::Stream(self.keep_events(events)),
+                        hosts,
+                        services,
                         ..ViewResult::default()
                     }
                 }
@@ -787,6 +800,8 @@ impl Board {
             hidden: counts.hidden,
             handled: counts.handled,
             body: ViewBody::List(rows),
+            hosts: 0,
+            services: 0,
             error: None,
         }
     }

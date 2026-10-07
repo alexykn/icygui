@@ -298,6 +298,7 @@ pub struct Segmented {
     selected: usize,
     disabled: bool,
     hug: bool,
+    by_content: bool,
     on_select: Option<SelectHandler>,
 }
 
@@ -310,8 +311,18 @@ impl Segmented {
             selected: 0,
             disabled: false,
             hug: false,
+            by_content: false,
             on_select: None,
         }
+    }
+
+    /// Fills the width given, sharing it by the options' labels (each its
+    /// label and 14px either side, then an equal share of what is left)
+    /// rather than equally: for options of very different lengths, so the
+    /// long one keeps its padding.
+    pub fn by_content(mut self) -> Self {
+        self.by_content = true;
+        self
     }
 
     /// Sizes each option to its label (14px either side) instead of
@@ -371,6 +382,7 @@ impl RenderOnce for Segmented {
         let id = self.id.clone();
         let count = self.options.len();
         let hug = self.hug;
+        let by_content = self.by_content && !hug;
         div()
             .id(self.id)
             .role(Role::RadioGroup)
@@ -394,7 +406,8 @@ impl RenderOnce for Segmented {
                     .role(Role::RadioButton)
                     .flex()
                     .when(hug, |option| option.flex_none().px(px(14.)))
-                    .when(!hug, gpui::Styled::flex_1)
+                    .when(by_content, |option| option.flex_auto().px(px(14.)))
+                    .when(!hug && !by_content, gpui::Styled::flex_1)
                     .items_center()
                     .justify_center()
                     .when(index + 1 < count, |option| {

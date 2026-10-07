@@ -258,11 +258,12 @@ pub(super) fn grid(board: &Board, picker: &Picker, data: &Data) -> BuiltGrid {
             entry.cells.push(cell.clone());
         }
     }
-    let mut groups: Vec<(GridGroup, Rank)> = groups
+    let mut groups: Vec<(GridGroup, GroupRank)> = groups
         .into_values()
         .map(|(mut group, tally, worst)| {
-            group.counts = tally.finish();
-            (group, worst)
+            group.counts = by_colour(tally.finish());
+            let rank = group_rank(&group.counts, worst);
+            (group, rank)
         })
         .filter(|(group, _)| {
             !board.view.grid.hide_healthy_groups || group.cells.iter().any(|cell| !is_ok(cell))
@@ -280,8 +281,61 @@ pub(super) fn grid(board: &Board, picker: &Picker, data: &Data) -> BuiltGrid {
     }
 }
 
-/// Orders groups worst first (then by label) or by label.
-fn sort_groups<G>(groups: &mut [(G, Rank)], order: GroupOrder, label: impl Fn(&G) -> &str) {
+/// How a group compares for *worst first*: the colour of its worst
+/// unhandled problem as its counts show it (red: critical or down, then
+/// purple: unknown or unreachable, then yellow: warning), then how many
+/// unhandled problems have that colour, then its worst problem's [`Rank`]
+/// (handled ones too, so a group with only handled problems still comes
+/// before an all-OK one).
+type GroupRank = (u8, u32, Rank);
+
+/// The [`GroupRank`] of a group with these unhandled `counts` and worst
+/// problem `worst`.
+fn group_rank(counts: &Summary, worst: Rank) -> GroupRank {
+    let (colour, count) = [
+        (3, counts.critical + counts.down),
+        (2, counts.unknown + counts.unreachable),
+        (1, counts.warning),
+    ]
+    .into_iter()
+    .find(|&(_, count)| count > 0)
+    .unwrap_or((0, 0));
+    (colour, count, worst)
+}
+
+/// A group's unhandled `counts` with the dot of its reddest count (down,
+/// critical, unreachable, unknown, warning), so the dot always matches the
+/// coloured numbers beside it. Icinga's severity ranks a problem on an
+/// unreachable host below an unhandled warning, which the sidebar keeps,
+/// but a group header shows its counts in state colours.
+fn by_colour(mut counts: Summary) -> Summary {
+    counts.worst_unhandled = [
+        (counts.down, CheckableState::Host(HostState::Down)),
+        (
+            counts.critical,
+            CheckableState::Service(ServiceState::Critical),
+        ),
+        (
+            counts.unreachable,
+            CheckableState::Host(HostState::Unreachable),
+        ),
+        (
+            counts.unknown,
+            CheckableState::Service(ServiceState::Unknown),
+        ),
+        (
+            counts.warning,
+            CheckableState::Service(ServiceState::Warning),
+        ),
+    ]
+    .into_iter()
+    .find(|&(count, _)| count > 0)
+    .map(|(_, state)| state);
+    counts
+}
+
+/// Orders groups worst first ([`GroupRank`], then by label) or by label.
+fn sort_groups<G>(groups: &mut [(G, GroupRank)], order: GroupOrder, label: impl Fn(&G) -> &str) {
     groups.sort_by(|(a, a_rank), (b, b_rank)| {
         let by_label = label(a).cmp(label(b));
         match order {
@@ -380,6 +434,8 @@ pub(super) fn tiles(board: &Board, picker: &Picker, data: &Data) -> BuiltTiles {
     struct Building {
         tile: Tile,
         tally: Tally,
+        /// The objects that don't count as handled problems.
+        unhandled: Tally,
         worst: Rank,
     }
     let labels = labels(data, board.view.groups.by);
@@ -412,6 +468,7 @@ pub(super) fn tiles(board: &Board, picker: &Picker, data: &Data) -> BuiltTiles {
                                 ..Tile::default()
                             },
                             tally: Tally::default(),
+                            unhandled: Tally::default(),
                             worst: (false, 0),
                         });
                         tiles.len() - 1
@@ -434,14 +491,19 @@ pub(super) fn tiles(board: &Board, picker: &Picker, data: &Data) -> BuiltTiles {
             building
                 .tally
                 .add(facts.state, facts.handled, facts.severity);
+            if !(facts.problem && facts.handled) {
+                building.unhandled.add(facts.state, false, facts.severity);
+            }
             building.worst = building.worst.max(rank);
         }
     }
-    let mut tiles: Vec<(Tile, Rank)> = tiles
+    let mut tiles: Vec<(Tile, GroupRank)> = tiles
         .into_iter()
         .map(|mut building| {
             building.tile.summary = building.tally.finish();
-            (building.tile, building.worst)
+            building.tile.counts = by_colour(building.unhandled.finish());
+            let rank = group_rank(&building.tile.counts, building.worst);
+            (building.tile, rank)
         })
         .collect();
     sort_groups(&mut tiles, board.view.groups.order, |tile| &tile.label);

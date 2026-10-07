@@ -51,24 +51,74 @@ pub(crate) fn initial_draft(
 }
 
 /// `view` with a new object kind: hosts have no service groups, so a
-/// grouping by service group goes back to none (a plain list).
+/// grouping by service group goes back to none (a plain list); a host is
+/// its own band's only row, so hosts grouped by host go by host group
+/// (the same object never gets two rows).
 pub(crate) fn with_kind(mut view: View, kind: ObjectKind) -> View {
     view.object_kind = kind;
-    if kind == ObjectKind::Hosts && view.group_by == GroupBy::ServiceGroup {
-        view.set_grouping(GroupBy::None);
+    if kind == ObjectKind::Hosts {
+        match view.group_by {
+            GroupBy::ServiceGroup => view.set_grouping(GroupBy::None),
+            GroupBy::Host => view.group_by = GroupBy::HostGroup,
+            GroupBy::None | GroupBy::HostGroup => {}
+        }
     }
     view
 }
 
+/// The groupings a list of `kind` offers: services by host, host group or
+/// service group; hosts by host group only (by host, each host would be
+/// its own band's only row).
+pub(crate) fn groupings(kind: ObjectKind) -> &'static [GroupBy] {
+    match kind {
+        ObjectKind::Services => &[GroupBy::Host, GroupBy::HostGroup, GroupBy::ServiceGroup],
+        ObjectKind::Hosts => &[GroupBy::HostGroup],
+    }
+}
+
 /// `view` shown as `display`: a list and a grouped list switch into each
-/// other keeping the rest (a grouped list groups by host unless it chose
-/// a grouping); the other options stay for when it switches back.
+/// other keeping the rest (a grouped list groups by host, hosts by host
+/// group, unless it chose a grouping); the other options stay for when it
+/// switches back.
 pub(crate) fn with_display(mut view: View, display: ViewDisplay) -> View {
     view.display = display;
     if display == ViewDisplay::GroupedList && view.group_by == GroupBy::None {
-        view.group_by = GroupBy::Host;
+        view.group_by = groupings(view.object_kind)[0];
     }
     view
+}
+
+/// Whether `filter` reads a service's attributes (`service.…`, outside
+/// strings): on a host such an attribute is null, so a view that matches
+/// hosts only (a grid) matches nothing with it.
+pub(crate) fn reads_services(filter: &str) -> bool {
+    let mut quote: Option<char> = None;
+    let mut previous: Option<char> = None;
+    let mut chars = filter.char_indices();
+    while let Some((index, char)) = chars.next() {
+        match quote {
+            Some(open) => {
+                if char == '\\' {
+                    chars.next();
+                } else if char == open {
+                    quote = None;
+                }
+            }
+            None if char == '"' || char == '\'' => quote = Some(char),
+            None => {
+                // `service` itself, not a member (`vars.service`) or part of
+                // a longer name.
+                let starts_word = previous.is_none_or(|previous| {
+                    !(previous.is_alphanumeric() || previous == '_' || previous == '.')
+                });
+                if starts_word && filter[index..].starts_with("service.") {
+                    return true;
+                }
+            }
+        }
+        previous = Some(char);
+    }
+    false
 }
 
 /// A display's name, as the editor's menus and new views give it.
@@ -94,13 +144,26 @@ pub(crate) fn display_detail(display: ViewDisplay) -> &'static str {
 }
 
 /// A new view of `display` (*add view*), named after its display and
-/// starting from `filter` (the selected view's).
+/// starting from `filter` (the selected view's). A grid matches hosts
+/// only: it starts from an empty filter when `filter` reads services'
+/// attributes, which would leave it silently empty.
 pub(crate) fn new_view(display: ViewDisplay, filter: &str) -> View {
+    let grid = display == ViewDisplay::HostGroupGrid;
+    let filter = if grid && reads_services(filter) {
+        ""
+    } else {
+        filter
+    };
     with_display(
         View {
             id: ic_config::new_id(),
             name: display_name(display).to_owned(),
             filter: filter.to_owned(),
+            object_kind: if grid {
+                ObjectKind::Hosts
+            } else {
+                ObjectKind::default()
+            },
             ..View::default()
         },
         display,
@@ -231,10 +294,16 @@ fn same_day(at: Timestamp, now: Timestamp) -> bool {
 /// The filter field's status for an evaluated view (4c, 4e, 5e): `valid ·
 /// 8 matches, 2 handled` (a list: what the filter matches, and how many
 /// of them count as handled), `valid · 124 hosts` (a grid), `valid · 38
-/// services` (tiles), `valid · 12 events` (a stream).
+/// services` (tiles), `valid · 9 hosts and their services` (a stream: the
+/// objects whose events it shows). A grid whose filter reads services'
+/// attributes says that it matches hosts only.
 pub(crate) fn status_text(view: &View, result: &ViewResult) -> String {
     let matched = matches(&result.summary) as usize;
     match &result.body {
+        ViewBody::Grid(grid) if reads_services(&view.filter) => format!(
+            "valid · {} · a grid's filter sees hosts, not service.*",
+            counted(grid.hosts as usize, "host", "hosts")
+        ),
         ViewBody::List(_) => {
             let text = format!("valid · {}", counted(matched, "match", "matches"));
             if result.handled > 0 {
@@ -253,7 +322,19 @@ pub(crate) fn status_text(view: &View, result: &ViewResult) -> String {
         ViewBody::Stream(_) if view.filter.trim().is_empty() => {
             "valid · every host and service".to_owned()
         }
-        ViewBody::Stream(events) => format!("valid · {}", counted(events.len(), "event", "events")),
+        ViewBody::Stream(_) => {
+            let hosts = counted(result.hosts as usize, "host", "hosts");
+            let services = counted(result.services as usize, "service", "services");
+            if result.hosts == 0 {
+                format!("valid · {services}")
+            } else if reads_services(&view.filter) {
+                format!("valid · {hosts}, {services}")
+            } else {
+                // A filter on hosts matches their services too (theirs
+                // read `host.*`).
+                format!("valid · {hosts} and their services")
+            }
+        }
     }
 }
 
@@ -571,6 +652,8 @@ mod tests {
         };
         let stream = ViewResult {
             body: ViewBody::Stream(Arc::new(vec![event(1.), event(2.), event(3. * 86_400.)])),
+            hosts: 9,
+            services: 120,
             ..ViewResult::default()
         };
         let mut stream_view = new_view(ViewDisplay::EventStream, "");
@@ -579,8 +662,52 @@ mod tests {
             status_text(&stream_view, &stream),
             "valid · every host and service"
         );
-        stream_view.filter = "host.name == \"a\"".to_owned();
-        assert_eq!(status_text(&stream_view, &stream), "valid · 3 events");
+        stream_view.filter = "host.vars.role == \"db\"".to_owned();
+        assert_eq!(
+            status_text(&stream_view, &stream),
+            "valid · 9 hosts and their services"
+        );
+        stream_view.filter = "service.name == \"ssh\" || host.name == \"a\"".to_owned();
+        assert_eq!(
+            status_text(&stream_view, &stream),
+            "valid · 9 hosts, 120 services"
+        );
+        let services_only = ViewResult { hosts: 0, ..stream };
+        assert_eq!(
+            status_text(&stream_view, &services_only),
+            "valid · 120 services"
+        );
+    }
+
+    #[test]
+    fn grids_start_without_a_filter_on_services() {
+        assert!(reads_services("service.state != 0"));
+        assert!(reads_services(
+            "host.vars.role == \"db\" && service.problem"
+        ));
+        assert!(!reads_services("host.vars.role == \"db\""));
+        assert!(!reads_services("host.vars.note == \"service.x\""));
+        assert!(!reads_services("myservice.x == 1"));
+        assert!(!reads_services("host.vars.service.tier == 1"));
+        let filter = "host.vars.role in [\"pg\"] && service.problem";
+        let grid = new_view(ViewDisplay::HostGroupGrid, filter);
+        assert_eq!(grid.filter, "");
+        assert_eq!(grid.object_kind, ObjectKind::Hosts);
+        assert_eq!(new_view(ViewDisplay::List, filter).filter, filter);
+        assert_eq!(
+            new_view(ViewDisplay::HostGroupGrid, "host.vars.role == \"db\"").filter,
+            "host.vars.role == \"db\""
+        );
+        let result = ViewResult {
+            body: ViewBody::Grid(Arc::new(ic_core::snapshot::Grid::default())),
+            ..ViewResult::default()
+        };
+        let mut grid = grid;
+        grid.filter = filter.to_owned();
+        assert_eq!(
+            status_text(&grid, &result),
+            "valid · 0 hosts · a grid's filter sees hosts, not service.*"
+        );
     }
 
     #[test]
@@ -705,6 +832,19 @@ mod tests {
             with_kind(view.clone(), ObjectKind::Hosts).list_grouping(),
             GroupBy::None
         );
+        // Nor are they grouped by host (each its own band's only row).
+        let by_host = with_display(View::default(), ViewDisplay::GroupedList);
+        assert_eq!(by_host.list_grouping(), GroupBy::Host);
+        assert_eq!(
+            with_kind(by_host, ObjectKind::Hosts).list_grouping(),
+            GroupBy::HostGroup
+        );
+        let hosts = with_kind(View::default(), ObjectKind::Hosts);
+        assert_eq!(
+            with_display(hosts, ViewDisplay::GroupedList).list_grouping(),
+            GroupBy::HostGroup
+        );
+        assert!(!groupings(ObjectKind::Hosts).contains(&GroupBy::Host));
         assert_eq!(
             with_kind(view, ObjectKind::Services).list_grouping(),
             GroupBy::ServiceGroup

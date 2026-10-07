@@ -323,7 +323,9 @@ impl HandledSetting {
     /// The setting after a click on the view's handled button: `show`
     /// shows every handled problem; `hide` goes back to what hid them
     /// before (the view's own kinds when it had chosen some, else the
-    /// settings).
+    /// settings), and when that would hide nothing (the settings hide no
+    /// kind), hides the view's own kinds, else every kind: `hide` always
+    /// hides.
     #[must_use]
     pub fn toggled(self, defaults: HideHandled) -> Self {
         if self.hidden(defaults).any() {
@@ -331,15 +333,25 @@ impl HandledSetting {
                 mode: HandledMode::Show,
                 hide: self.hide,
             }
-        } else if self.mode == HandledMode::Show && self.hide != HideHandled::ALL {
+        } else if self.mode == HandledMode::Show && self.hide.any() && self.hide != HideHandled::ALL
+        {
             Self {
                 mode: HandledMode::Hide,
                 hide: self.hide,
             }
-        } else {
+        } else if defaults.any() {
             Self {
                 mode: HandledMode::Settings,
                 hide: self.hide,
+            }
+        } else {
+            Self {
+                mode: HandledMode::Hide,
+                hide: if self.hide.any() {
+                    self.hide
+                } else {
+                    HideHandled::ALL
+                },
             }
         }
     }
@@ -583,12 +595,20 @@ mod tests {
         };
         assert_eq!(own.toggled(all).mode, HandledMode::Show);
         assert_eq!(own.toggled(all).toggled(all), own);
-        // Settings that hide nothing: the button shows nothing to hide, a
-        // click makes the view follow them.
-        assert_eq!(
-            HandledSetting::SETTINGS.toggled(HideHandled::NONE),
-            HandledSetting::SETTINGS
-        );
+        // Settings that hide nothing: `N handled · hide` still hides, every
+        // kind (the view's own kinds when it has some), and show comes back.
+        let none = HideHandled::NONE;
+        let hidden = HandledSetting::SETTINGS.toggled(none);
+        assert_eq!(hidden.mode, HandledMode::Hide);
+        assert_eq!(hidden.hidden(none), HideHandled::ALL);
+        assert_eq!(hidden.toggled(none).mode, HandledMode::Show);
+        assert_eq!(hidden.toggled(none).toggled(none).hidden(none), all);
+        let shown = HandledSetting {
+            mode: HandledMode::Show,
+            hide: HideHandled::NONE,
+        };
+        assert_eq!(shown.toggled(all).mode, HandledMode::Settings);
+        assert_eq!(shown.toggled(none).hidden(none), all);
     }
 
     #[test]

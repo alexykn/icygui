@@ -163,39 +163,54 @@ impl DashboardView {
         menu: HeaderMenu,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
-        let colors = theme.colors;
         let open = self.menus.open() == Some(menu);
-        let id = match menu {
-            HeaderMenu::ViewSort(index) => SharedString::from(format!("view-sort-{index}")),
-            _ => SharedString::from("sort-trigger"),
+        let (id, in_view) = match menu {
+            HeaderMenu::ViewSort(index) => (SharedString::from(format!("view-sort-{index}")), true),
+            _ => (SharedString::from("sort-trigger"), false),
         };
         div()
             .relative()
             .flex_none()
-            .child(
-                div()
-                    .id(id)
-                    .text_size(theme.text.small)
-                    .text_color(if open { colors.text } else { colors.text_muted })
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(colors.text))
-                    .child(sort_label(view.sort, view.object_kind))
-                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.menus.toggle(menu, down_position(event));
-                        cx.notify();
-                    })),
-            )
-            .when(open, |trigger| {
+            .min_w_0()
+            .child(sort_word(
+                id,
+                sort_label(view.sort, view.object_kind),
+                open,
+                menu,
+                cx,
+            ))
+            // A view's sort menu hangs from its header's right edge
+            // ([`Self::view_sort_menu`]).
+            .when(open && !in_view, |trigger| {
                 trigger
                     .child(Popover::new(Self::sort_menu(reference, view, menu, cx)).align_right())
             })
             .into_any_element()
+    }
+
+    /// The open sort (or group order) menu of view `index`, hung from its
+    /// header's right edge (4b).
+    fn view_sort_menu(
+        &self,
+        reference: &DashboardRef,
+        view: &View,
+        index: usize,
+        cx: &Context<Self>,
+    ) -> Option<Menu> {
+        use ic_config::ViewDisplay;
+        let menu = HeaderMenu::ViewSort(index);
+        if self.menus.open() != Some(menu) {
+            return None;
+        }
+        match view.display {
+            ViewDisplay::List | ViewDisplay::GroupedList => {
+                Some(Self::sort_menu(reference, view, menu, cx))
+            }
+            ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => {
+                Some(Self::group_order_menu(reference, view, cx))
+            }
+            ViewDisplay::EventStream => None,
+        }
     }
 
     fn sort_menu(
@@ -247,7 +262,7 @@ impl DashboardView {
             .separator()
             .item(set_sort(
                 "sort-descending",
-                "descending ↓",
+                "descending",
                 view.sort.descending,
                 Sort {
                     descending: true,
@@ -256,7 +271,7 @@ impl DashboardView {
             ))
             .item(set_sort(
                 "sort-ascending",
-                "ascending ↑",
+                "ascending",
                 !view.sort.descending,
                 Sort {
                     descending: false,
@@ -302,11 +317,14 @@ impl DashboardView {
             .into_any_element()
     }
 
+    /// A list's options: the dashboard header's `···` of a one-view
+    /// dashboard (with *edit dashboard* first), or the start of a view
+    /// header's (`in_view`: its *edit view* comes last, after collapse).
     pub(super) fn options_menu(
         reference: &DashboardRef,
         view: &View,
         defaults: HideHandled,
-        preview: bool,
+        in_view: bool,
         cx: &Context<Self>,
     ) -> Menu {
         let update = |change: Rc<dyn Fn(&mut View)>| {
@@ -331,7 +349,7 @@ impl DashboardView {
         ];
         let edit = reference.clone();
         let mut menu = Menu::new("options-menu");
-        if !preview {
+        if !in_view {
             menu = menu
                 .item(
                     MenuItem::new("edit-dashboard", "edit dashboard").on_click(cx.listener(
@@ -346,7 +364,11 @@ impl DashboardView {
         }
         menu = menu.label("group by");
         for (group_by, id, label) in groupings {
-            if group_by == GroupBy::ServiceGroup && view.object_kind == ObjectKind::Hosts {
+            // Hosts have no service groups, and by host each would be its
+            // own band's only row (`editor::model::groupings`).
+            if view.object_kind == ObjectKind::Hosts
+                && matches!(group_by, GroupBy::ServiceGroup | GroupBy::Host)
+            {
                 continue;
             }
             menu = menu.item(
@@ -683,6 +705,12 @@ impl DashboardView {
             .color(colors.text_muted);
         // The filter is cut off first; the name only when even that isn't
         // enough.
+        let name_text = if view.name.trim().is_empty() {
+            view_label(view).to_owned()
+        } else {
+            view.name.clone()
+        };
+        let name_chars = name_text.chars().count();
         let name = div()
             .min_w_0()
             .truncate()
@@ -693,17 +721,7 @@ impl DashboardView {
             } else {
                 colors.text_secondary
             })
-            .child(if view.name.trim().is_empty() {
-                view_label(view).to_owned()
-            } else {
-                view.name.clone()
-            });
-        let filter = div()
-            .flex_1()
-            .min_w_0()
-            .truncate()
-            .text_color(colors.text_faint)
-            .child(filter_summary(view));
+            .child(name_text);
         let counts: Option<AnyElement> = match page_view.state {
             ViewState::Empty => Some(
                 div()
@@ -762,15 +780,98 @@ impl DashboardView {
                 self.sort_trigger(reference, view, HeaderMenu::ViewSort(index), cx)
             }
             ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => {
-                self.group_order_trigger(reference, view, index, cx)
+                self.group_order_trigger(view, index, cx)
             }
             ViewDisplay::EventStream => div()
-                .flex_none()
+                .min_w_0()
+                .truncate()
                 .text_color(colors.text_muted)
                 .child("newest first")
                 .into_any_element(),
         };
+        // The sort sits right-aligned in a slot sized for its kind's
+        // longest label, so a new sort moves nothing; in a tight header it
+        // gives way down to its word once the filter is gone.
+        let sort_chars = sort_slot_chars(view.display);
+        let word_chars = match view.display {
+            ViewDisplay::List | ViewDisplay::GroupedList => {
+                sort_label(view.sort, view.object_kind).chars().count()
+            }
+            ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => match view.groups.order {
+                ic_config::GroupOrder::WorstFirst => "worst first".len(),
+                ic_config::GroupOrder::Name => "name ↑".chars().count(),
+            },
+            ViewDisplay::EventStream => "newest first".len(),
+        };
+        // An empty view keeps the slot but not the word (4a): there is
+        // nothing to sort.
+        let empty = page_view.state == ViewState::Empty;
+        let sort = div()
+            .flex()
+            // Gives way (down to its word) long before the name does.
+            .flex_shrink(1_000.)
+            .justify_end()
+            .w(small_chars(theme, sort_chars))
+            .min_w(small_chars(theme, word_chars.min(sort_chars)))
+            .when(!empty, |slot| slot.child(sort));
         let more = self.view_options_trigger(reference, view, index, page_view.collapsed, cx);
+        // The filter summary shows only where a few of its characters fit
+        // beside the rest (the header's text is monospaced); else it is
+        // left out, never cut to a lone `…` (4b).
+        let rest = {
+            let mut parts = 5; // chevron, icon, name, sort, `···`
+            #[expect(clippy::cast_precision_loss, reason = "a short name")]
+            let name_width = (theme.text.row * (ic_ui_kit::CHAR_WIDTH * name_chars as f32)).ceil();
+            let mut width = px(14.)
+                + theme.metrics.list_padding
+                + px(12.)
+                + px(13.)
+                + name_width
+                + small_chars(theme, sort_chars)
+                + (px(13.) * ic_ui_kit::CHAR_WIDTH * 3.).ceil();
+            match page_view.state {
+                ViewState::Empty => {
+                    parts += 1;
+                    width += small_chars(theme, "nothing to show".len());
+                }
+                ViewState::Ready if view.display != ViewDisplay::EventStream => {
+                    let items = header_counts(&page_view.counts, view.object_kind, view.is_list());
+                    if !items.is_empty() {
+                        parts += 1;
+                        for (position, (_, count)) in items.iter().enumerate() {
+                            width += px(7. + 6.) + small_chars(theme, count.to_string().len());
+                            if position > 0 {
+                                width += px(12.);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if view.is_list() {
+                parts += 1;
+                width += handled_slot_width(theme);
+            }
+            if view.display == ViewDisplay::EventStream {
+                parts += 1;
+                width += px(12.) + small_chars(theme, "live".len());
+            }
+            #[expect(clippy::cast_precision_loss, reason = "a handful of parts")]
+            let gaps = px(10.) * parts as f32;
+            width + gaps
+        };
+        let filter = (self.width - rest >= small_chars(theme, FILTER_MIN_CHARS)).then(|| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(colors.text_faint)
+                .child(filter_summary(view))
+        });
+        // Without the filter, a spacer keeps the counts and the rest at the
+        // right.
+        let spacer = filter.is_none().then(|| div().flex_1().min_w_0());
+        let sort_menu = self.view_sort_menu(reference, view, index, cx);
         let click_stop = stop.clone();
         div()
             .id(SharedString::from(format!("view-header:{}", view.id)))
@@ -817,36 +918,47 @@ impl DashboardView {
             .child(chevron)
             .child(icon)
             .child(name)
-            .child(filter)
+            .children(filter)
+            .children(spacer)
             .children(counts)
             .children(slot)
             .children(live)
             .child(sort)
             .child(more)
+            // A view's sort menu hangs from the header's right edge (4b).
+            .children(sort_menu.map(|menu| Popover::new(menu).align_right().gap(px(0.))))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.click_stop(&click_stop, event.modifiers(), window, cx);
             }))
             .into_any_element()
     }
 
-    /// A grid's or tiles' group order (`worst first`, `name ↑`) and its
-    /// menu.
-    fn group_order_trigger(
-        &self,
-        reference: &DashboardRef,
-        view: &View,
-        index: usize,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    /// A grid's or tiles' group order (`worst first`, `name ↑`); its menu
+    /// hangs from the header ([`Self::view_sort_menu`]).
+    fn group_order_trigger(&self, view: &View, index: usize, cx: &Context<Self>) -> AnyElement {
         use ic_config::GroupOrder;
-        let theme = cx.theme();
-        let colors = theme.colors;
         let menu = HeaderMenu::ViewSort(index);
         let open = self.menus.open() == Some(menu);
         let label = match view.groups.order {
             GroupOrder::WorstFirst => "worst first",
             GroupOrder::Name => "name ↑",
         };
+        div()
+            .flex_none()
+            .min_w_0()
+            .child(sort_word(
+                SharedString::from(format!("view-sort-{index}")),
+                label,
+                open,
+                menu,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// A grid's or tiles' group order menu: worst first, by name.
+    fn group_order_menu(reference: &DashboardRef, view: &View, cx: &Context<Self>) -> Menu {
+        use ic_config::GroupOrder;
         let item = |id: &'static str, text: &'static str, order: GroupOrder| {
             let reference = reference.clone();
             let view_id = view.id.clone();
@@ -863,43 +975,16 @@ impl DashboardView {
                     cx.notify();
                 }))
         };
-        div()
-            .relative()
-            .flex_none()
-            .child(
-                div()
-                    .id(SharedString::from(format!("view-sort-{index}")))
-                    .text_color(if open { colors.text } else { colors.text_muted })
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(colors.text))
-                    .child(label)
-                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.menus.toggle(menu, down_position(event));
-                        cx.notify();
-                    })),
-            )
-            .when(open, |trigger| {
-                trigger.child(
-                    Popover::new(
-                        Menu::new("group-order-menu")
-                            .label("order the groups")
-                            .item(item("order-worst", "worst first", GroupOrder::WorstFirst))
-                            .item(item("order-name", "by name", GroupOrder::Name))
-                            .on_dismiss(Self::dismiss_listener(cx)),
-                    )
-                    .align_right(),
-                )
-            })
-            .into_any_element()
+        Menu::new("group-order-menu")
+            .label("order the groups")
+            .item(item("order-worst", "worst first", GroupOrder::WorstFirst))
+            .item(item("order-name", "by name", GroupOrder::Name))
+            .on_dismiss(Self::dismiss_listener(cx))
     }
 
-    /// A view header's `···`: edit the dashboard, a list's grouping and
-    /// handled toggle, collapse, copy the filter.
+    /// A view header's `···`: a list's grouping and handled toggle (a
+    /// grid's hosts as squares or cells), copy the filter, then collapse
+    /// and *edit view*, which opens the editor with the view selected.
     #[expect(
         clippy::too_many_lines,
         reason = "one menu, its items in order (fewer in the editor's preview)"
@@ -930,22 +1015,10 @@ impl DashboardView {
             let fold_id = super::page::Id::from(view.id.as_str());
             let preview = self.is_preview();
             let base = if view.is_list() {
-                Self::options_menu(reference, view, defaults, preview, cx)
+                Self::options_menu(reference, view, defaults, true, cx)
             } else {
                 let filter = view.filter.clone();
-                let edit = reference.clone();
                 let menu = Menu::new("options-menu");
-                let menu = if preview {
-                    menu
-                } else {
-                    menu.item(MenuItem::new("edit-dashboard", "edit dashboard").on_click(
-                        cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.menus.close();
-                            cx.emit(super::DashboardEvent::Edit(edit.clone()));
-                            cx.notify();
-                        }),
-                    ))
-                };
                 // A grid's hosts as squares (the default) or labelled
                 // cells (5d), switched in place.
                 let menu = if view.display == ic_config::ViewDisplay::HostGroupGrid {
@@ -966,7 +1039,6 @@ impl DashboardView {
                                 cx.notify();
                             }))
                     };
-                    let menu = if preview { menu } else { menu.separator() };
                     menu.label("hosts as")
                         .item(cells("hosts-squares", "squares", GridCells::Squares))
                         .item(cells(
@@ -989,8 +1061,9 @@ impl DashboardView {
                 )
                 .on_dismiss(Self::dismiss_listener(cx))
             };
+            let edit = (reference.clone(), view.id.clone());
             let reference = reference.clone();
-            base.separator().item(
+            let menu = base.separator().item(
                 MenuItem::new(
                     "fold-view",
                     if collapsed {
@@ -1004,7 +1077,24 @@ impl DashboardView {
                     this.menus.close();
                     this.fold_view(&reference, &fold_id, !collapsed, cx);
                 })),
-            )
+            );
+            // The editor's preview is the editor already.
+            if preview {
+                menu
+            } else {
+                menu.item(
+                    MenuItem::new("edit-view", "edit view").on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.menus.close();
+                            cx.emit(super::DashboardEvent::EditView(
+                                edit.0.clone(),
+                                edit.1.clone(),
+                            ));
+                            cx.notify();
+                        },
+                    )),
+                )
+            }
         });
         div()
             .relative()
@@ -1018,6 +1108,74 @@ impl DashboardView {
             .into_any_element()
     }
 }
+
+/// A sort's word in a header (`severity ↓`, `worst first`): muted text,
+/// drawn pressed (the selected glyph's background, as an open `···`) while
+/// its menu is open; a click opens or closes `menu`.
+fn sort_word(
+    id: SharedString,
+    label: impl Into<SharedString>,
+    open: bool,
+    menu: HeaderMenu,
+    cx: &Context<DashboardView>,
+) -> gpui::Stateful<gpui::Div> {
+    let theme = cx.theme();
+    let colors = theme.colors;
+    let reach = GlyphButton::reach();
+    div()
+        .id(id)
+        .min_w_0()
+        .truncate()
+        // The pressed background reaches past the word; the negative
+        // margins keep the word where it is.
+        .px(reach)
+        .mx(-reach)
+        .py(px(2.))
+        .rounded(theme.metrics.small_radius)
+        .text_size(theme.text.small)
+        .text_color(if open {
+            colors.text_strong
+        } else {
+            colors.text_muted
+        })
+        .when(open, |word| word.bg(colors.element_hover))
+        .cursor_pointer()
+        .hover(|style| style.text_color(colors.text_strong))
+        .child(label.into())
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            this.menus.toggle(menu, down_position(event));
+            cx.notify();
+        }))
+}
+
+/// The view header's sort slot, in characters: sized for the kind's
+/// longest sort label (`views.js` `SORT_CH`: a list's `last state change
+/// ↓`, a stream's `newest first`, a grid's or tiles' `worst first`), so a
+/// new sort changes only the word, right-aligned in it.
+pub(crate) fn sort_slot_chars(display: ic_config::ViewDisplay) -> usize {
+    use ic_config::ViewDisplay;
+    match display {
+        ViewDisplay::List | ViewDisplay::GroupedList => 19,
+        ViewDisplay::EventStream => 12,
+        ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => 11,
+    }
+}
+
+/// The width of `chars` characters of the header's small text.
+fn small_chars(theme: &ic_ui_kit::Theme, chars: usize) -> Pixels {
+    #[expect(clippy::cast_precision_loss, reason = "a short slot")]
+    let chars = chars as f32;
+    (theme.text.small * (chars * ic_ui_kit::CHAR_WIDTH)).ceil()
+}
+
+/// The narrowest a view header's filter summary shows: below this many
+/// characters it is left out rather than cut to a lone `…` (4b).
+const FILTER_MIN_CHARS: usize = 6;
 
 /// The handled slot's width, in characters: `999 handled · hide` fits.
 const HANDLED_SLOT_CHARS: usize = 18;

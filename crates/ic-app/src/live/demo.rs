@@ -24,10 +24,12 @@ use ic_config::{
     AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, GroupOrder, GroupSource,
     HandledSetting, ObjectKind, Sort, StreamOptions, TlsConfig, View, ViewDisplay, ViewGroups,
 };
+use ic_core::LogEntry;
 use ic_core::ports::{SecretError, SecretStore};
 use ic_mock::{
     MockConfig, MockControl, MockServer, MockUser, SimulationConfig, StormConfig, scenarios,
 };
+use ic_model::{ObjectKey, ServiceState, Timestamp};
 use ic_rules::{NotificationSettings, ScopeSetting};
 use secrecy::SecretString;
 
@@ -624,13 +626,16 @@ const DB_ROLES: &str = "[\"postgres\", \"mysql\"]";
 
 /// `overview / databases` as topic 04 draws it: summary tiles per
 /// database role, the failing database services, a view with nothing to
-/// show, and the database hosts' events.
+/// show, and the database hosts' events (the stream's defaults: hard
+/// states, no recoveries; [`recent_events`] gives it a history).
 fn databases_views() -> Vec<View> {
     vec![
         View {
             name: "clusters".to_owned(),
             display: ViewDisplay::SummaryTiles,
-            filter: "\"databases\" in host.groups".to_owned(),
+            // Four roles, a tile each (4a).
+            filter: "host.vars.role in [\"postgres\", \"mysql\", \"mongodb\", \"redis\"]"
+                .to_owned(),
             problems_only: false,
             groups: ViewGroups {
                 by: GroupSource::CustomVar,
@@ -645,22 +650,118 @@ fn databases_views() -> Vec<View> {
             filter: format!("host.vars.role in {DB_ROLES} && service.problem"),
             ..View::default()
         },
+        // Nothing to show (4a's empty view): the replication slots are
+        // healthy.
         View {
             name: "replication lag".to_owned(),
-            filter: "match(\"*replication*\", service.name) && service.state == 3".to_owned(),
+            filter: "service.name == \"pg-replication-slots\" && service.problem".to_owned(),
             ..View::default()
         },
         View {
             name: "db events".to_owned(),
             display: ViewDisplay::EventStream,
             filter: format!("host.vars.role in {DB_ROLES}"),
-            stream: StreamOptions {
-                hard_states_only: false,
-                recoveries: true,
-                ..StreamOptions::default()
-            },
+            stream: StreamOptions::default(),
             ..View::default()
         },
+    ]
+}
+
+/// The database hosts' last hour, as 4a's event stream shows it: written
+/// to `prod-cluster`'s event log before its engine starts, so the stream
+/// (and the panes' history) isn't empty until something happens. `now`:
+/// Unix seconds.
+pub(crate) fn recent_events(now: f64) -> Vec<LogEntry> {
+    use ic_core::LogKind;
+    use ic_model::{CheckableState, StateType};
+    let state =
+        |minutes: f64, host: &str, service: &str, state: ServiceState, text: &str| LogEntry {
+            at: Timestamp::from_unix_seconds(now - minutes * 60.),
+            object: ObjectKey::service(host, service),
+            kind: LogKind::State {
+                state: CheckableState::Service(state),
+                state_type: StateType::Hard,
+            },
+            text: text.to_owned(),
+            author: None,
+        };
+    let by = |minutes: f64, host: &str, service: &str, kind: LogKind, author: &str, text: &str| {
+        LogEntry {
+            at: Timestamp::from_unix_seconds(now - minutes * 60.),
+            object: ObjectKey::service(host, service),
+            kind,
+            text: text.to_owned(),
+            author: Some(author.to_owned()),
+        }
+    };
+    // Oldest first, as the engine records them.
+    vec![
+        state(
+            70.,
+            "db-mysql-03",
+            "mysql-replication",
+            ServiceState::Unknown,
+            "UNKNOWN - connection refused",
+        ),
+        state(
+            58.,
+            "db-prod-05",
+            "pg-bloat",
+            ServiceState::Warning,
+            "WARNING - check_postgres degraded",
+        ),
+        by(
+            46.,
+            "db-prod-03",
+            "postgres-replication",
+            LogKind::CommentAdded,
+            "j.berg",
+            "failover drill on db-prod-01 at 15:00",
+        ),
+        by(
+            33.,
+            "db-prod-05",
+            "pg-bloat",
+            LogKind::DowntimeStarted,
+            "dba-oncall",
+            "VACUUM FULL on orders_archive, flexible 2h",
+        ),
+        state(
+            30.,
+            "db-mysql-02",
+            "mysql-replication",
+            ServiceState::Ok,
+            "OK - replica in sync, lag 0s",
+        ),
+        by(
+            26.,
+            "db-prod-01",
+            "pg-autovacuum",
+            LogKind::AcknowledgementSet,
+            "dba-oncall",
+            "vacuum running on orders, about 30 minutes",
+        ),
+        state(
+            19.,
+            "db-prod-03",
+            "pg-connections",
+            ServiceState::Warning,
+            "WARNING - 182 of 200 per-db limit (orders)",
+        ),
+        state(
+            14.,
+            "db-prod-03",
+            "postgres-replication",
+            ServiceState::Critical,
+            "CRITICAL - standby lag 412s (> 300s)",
+        ),
+        state(
+            8.,
+            "db-prod-01",
+            "load",
+            ServiceState::Warning,
+            "WARNING - load average 14.2, 12.8, 11.1",
+        ),
     ]
 }
 

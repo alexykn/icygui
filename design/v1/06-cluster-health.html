@@ -4,15 +4,9 @@
 <body class="canvas">
 <div class="topic-head"><span class="topic-id">06</span><span class="topic-name">Cluster health: is the monitoring itself healthy?</span></div>
 <p class="topic-intro">A page per environment, like Icinga Web's monitoring health. It has the zones with their endpoints (connected, last message, version, traffic), the node icygui is connected to (marked with the selected-row background), Icinga's numbers from <b>/v1/status</b> (checks per minute, latency, execution time, pending checks, work queues, connections, uptime), and Icinga's global switches, read-only.
-It opens from a new <i>cluster health</i> item under the nodes in the footer switcher, and from the palette, as a tab in the sidebar's <i>open</i> section, so it stays one click away. Its data comes from the 30-second status poll icygui already makes, plus the endpoints and zones it already loads, so it adds no requests while the page is closed. The small trend lines are the last 30 minutes of those polls, kept in memory.</p>
+It opens from <i>health</i> in the sidebar's fixed <i>cluster</i> section (topic 14), from a <i>cluster health</i> item under the nodes in the footer switcher, and from the palette, so it stays one click away. Its data comes from the 30-second status poll icygui already makes, plus the endpoints and zones it already loads, so it adds no requests while the page is closed. The small trend lines are the last 30 minutes of those polls, kept in memory.</p>
 <div class="shots"></div>
 <script>
-const openSection = (active, dotSt = 'ok') => `<div class="sb-group"><div class="sb-gh${active ? ' active' : ''}"><span class="name">open</span></div>
-  <div class="sb-item${active ? ' active' : ''}">${dot(dotSt)}<span class="label">cluster health<span class="faint" style="margin-left:6px">prod-cluster</span></span><span class="faint" style="font-size:13px">×</span></div></div>`;
-const groupsNoActive = [
-  { name: 'overview', items: SIDEBAR_GROUPS[0].items }, SIDEBAR_GROUPS[1], SIDEBAR_GROUPS[2],
-];
-
 function spark(points, w = 132, h = 22, color = 'var(--t-faint)', last = 'var(--accent)') {
   const max = Math.max(...points), min = Math.min(...points);
   const xs = points.map((_, i) => (i / (points.length - 1)) * (w - 4) + 2);
@@ -93,14 +87,14 @@ const swInner = `<div class="menu" style="left:54px;top:300px;width:340px;bottom
   <div class="mi">${dot('ok', 'd6')}<span>staging</span><span class="det grow">stg-master-01 · 2s</span><span class="faint">${icon('settings', 12)}</span></div>
   <div class="mi">${dot('ok', 'd6')}<span>lab</span><span class="det grow">lab-icinga · 19s</span><span class="faint">${icon('settings', 12)}</span></div>
   <div class="msep"></div><div class="mi">add environment</div></div>`;
-shot('6a', '06-cluster-health-a-entry', 'Where it lives: the footer switcher’s nodes section gets a <i>cluster health</i> row under the nodes. Its icon sits in the mark slot, like the palette’s commands without a target, and a faint hint says what is inside. The palette has <i>cluster health</i> too. Either opens the page as a tab.',
-  appWindow(listHeader() + summary() + `<div class="list">${rows()}</div>`, { foot: { open: true } }) + swInner,
-  { crops: '06-cluster-health-a-entry-zoom:0,280,560,620' });
+shot('6a', '06-cluster-health-a-entry', 'Where it lives: <i>health</i>, the third entry of the sidebar’s fixed <b>cluster</b> section at the top (topic 14: handling, downtimes, health), with the cluster’s state dot in the mark slot and no count. The footer switcher’s nodes section also has a <i>cluster health</i> row under the nodes (open here: its icon in the mark slot, a faint hint says what is inside), and the palette has <i>cluster health</i>. All three open the same page; it is not a tab in the <i>open</i> section.',
+  clusterWindow(listHeader() + summary() + `<div class="list">${rows()}</div>`, { activeGroup: 'overview', activeItem: 'overview', foot: { open: true } }) + swInner,
+  { crops: '06-cluster-health-a-entry-zoom:0,280,560,620;06-cluster-health-a-sidebar-zoom:0,40,300,140' });
 
-shot('6b', '06-cluster-health-b-healthy', 'The page in the healthy case, as a tab in the sidebar’s <i>open</i> section, with the environment’s worst health as its dot. The zones are group-header bands, with each zone’s endpoints under it; the node icygui is connected to has the selected-row background. Then the checks and the queues as stat tiles (value, what it counts, 30 minutes of trend in the faint colour with the latest point in the accent), and Icinga’s global switches, read-only.',
-  appWindow(`<div class="col" style="min-height:0;overflow:hidden">${healthPage()}</div>`, { groups: groupsNoActive, activeGroup: '', after: openSection(true) }));
+shot('6b', '06-cluster-health-b-healthy', 'The page in the healthy case, opened from <i>health</i> in the sidebar’s <b>cluster</b> section (selected), whose dot is the cluster’s health: green. The zones are group-header bands, with each zone’s endpoints under it; the node icygui is connected to has the selected-row background. Then the checks and the queues as stat tiles (value, what it counts, 30 minutes of trend in the faint colour with the latest point in the accent), and Icinga’s global switches, read-only.',
+  clusterWindow(`<div class="col" style="min-height:0;overflow:hidden">${healthPage()}</div>`, { cluster: 'health' }));
 
-shot('6c', '06-cluster-health-c-degraded', 'A satellite has dropped out. sat-fra-01 turns critical in its zone (and in the footer switcher’s nodes), and a critical banner says what it means: zone fra’s results are stale, and 1,204 checks are late. The affected numbers turn warning or critical in their own colour, with their trend showing when it started. Performance data has been switched off globally, so its switch shows <i>off</i> in the warning colour. The tab’s dot follows.',
-  appWindow(`<div class="col" style="min-height:0;overflow:hidden">${healthPage({ broken: true })}</div>`, { groups: groupsNoActive, activeGroup: '', after: openSection(true, 'crit') }));
+shot('6c', '06-cluster-health-c-degraded', 'A satellite has dropped out. sat-fra-01 turns critical in its zone (and in the footer switcher’s nodes), and a critical banner says what it means: zone fra’s results are stale, and 1,204 checks are late. The affected numbers turn warning or critical in their own colour, with their trend showing when it started. Performance data has been switched off globally, so its switch shows <i>off</i> in the warning colour. The <i>health</i> entry’s dot in the cluster section turns critical (an endpoint is down, by this page’s rules).',
+  clusterWindow(`<div class="col" style="min-height:0;overflow:hidden">${healthPage({ broken: true })}</div>`, { cluster: 'health', health: 'crit' }));
 </script>
 </body></html>

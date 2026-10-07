@@ -51,7 +51,7 @@ per frame, plus `-zoom` crops of the details.
 | 03 | Light theme | `03-light-theme.html` | 5 | approved with revisions |
 | 04 | Multi-view dashboards | `04-multi-view.html` | 5 (+1) | approved; editor selection revised |
 | 05 | Host-group grid | `05-hostgroup-grid.html` | 5 (+1) | approved; editor selection revised |
-| 06 | Cluster health | `06-cluster-health.html` | 3 (+1) | approved |
+| 06 | Cluster health | `06-cluster-health.html` | 3 (+2) | approved; reached from the cluster section (topic 14) |
 | 07 | Comment, downtime and acknowledged lists | `07-comments-downtimes-lists.html` | 7 | revised and approved |
 | 08 | YAML sharing | `08-yaml-sharing.html` | 7 (+1) | approved with revisions |
 | 09 | Filter autocomplete | `09-filter-autocomplete.html` | 7 (+7) | revised and approved |
@@ -458,8 +458,9 @@ settings in the editor.
 
 **Status: approved.**
 
-**Shows** (`06-cluster-health.html`): 6a the entry in the footer switcher;
-6b the page, healthy, as a tab; 6c the page with a satellite gone.
+**Shows** (`06-cluster-health.html`): 6a the entries (the sidebar's
+cluster section and the footer switcher); 6b the page, healthy; 6c the page
+with a satellite gone.
 
 **Decisions**
 
@@ -469,9 +470,10 @@ settings in the editor.
   mark slot and no count; also from a `cluster health` row under the nodes in
   the footer switcher (a heart-pulse icon in the mark slot, a faint `zones,
   queues, checks/min` hint) and *cluster health* in the palette. All open
-  the same page, `cluster health · prod-cluster`; it is no longer a tab in
-  the `open` section (frames 6a–6c still draw it there, from before topic
-  14). It is a page, not a modal, so it can stay open on a second screen.
+  the same page, `cluster health · prod-cluster`; it is not a tab in the
+  `open` section (6a shows the switcher's row and the sidebar entry, 6b and
+  6c the page with *health* selected; its dot turns critical in 6c). It is a
+  page, not a modal, so it can stay open on a second screen.
 - **Header:** `cluster health · prod-cluster · seen from master-01`, then
   `updated 12s ago · every 30s`. The summary bar counts connected and
   disconnected endpoints and ends with Icinga's version and uptime.

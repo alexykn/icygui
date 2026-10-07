@@ -7,22 +7,8 @@
 <div class="shots"></div>
 <script>
 const L = { theme: 'light' };
-// ---- the sidebar: the environment's section on top, platform with its own entries
-const icSlot = (ic) => `<span class="faint" style="width:8px;display:flex;justify-content:center">${icon(ic, 11)}</span>`;
-// the cluster section: fixed, at the top, above the groups: the environment's
-// handling and downtimes, and its cluster health page (topic 06)
-const envTop = (active = '') => `<div class="sb-group" style="padding:0 0 6px;margin-bottom:6px;border-bottom:1px solid var(--bd-header)">
-  <div class="sb-gh"><span class="name">cluster</span><span class="faint" style="font-size:12px">prod-cluster</span></div>
-  <div class="sb-item${active === 'handling' ? ' active' : ''}">${icSlot('users')}<span class="label">handling</span><span class="count">20</span></div>
-  <div class="sb-item${active === 'downtimes' ? ' active' : ''}">${icSlot('calendar-clock')}<span class="label">downtimes</span><span class="count">5</span></div>
-  <div class="sb-item${active === 'health' ? ' active' : ''}">${dot('ok')}<span class="label">health</span><span class="count"></span></div></div>`;
-// on: which of the group's own entries are turned on (its settings, h)
-const PLATFORM = (on = 'both') => ({ name: 'platform', items: [...(on === 'both' || on === 'handling' ? [['handling', 'ic-users', 6]] : []), ...(on === 'both' ? [['downtimes', 'ic-calendar-clock', 3]] : []), ['network', 'unk', 5], ['kubernetes', 'crit', 9], ['certificates', 'warn', 1], ['all services', 'crit', 38]] });
-const groups = (on = 'both') => [SIDEBAR_GROUPS[0], PLATFORM(on), SIDEBAR_GROUPS[2]];
-// group entries carry an icon in the mark slot instead of a state dot
-const withIcons = (html) => html.replace(/<span class="dot ic-([a-z-]+) *"><\/span>/g, (m, n) => icSlot(n));
-const win = (main, { top = '', activeGroup = '', activeItem = '', on = 'both', menuOn = false } = {}) => withIcons(appWindow(main, {
-  groups: groups(on).map((g) => (menuOn && g.name === 'platform' ? { ...g, menu: true } : g)), activeGroup, activeItem, before: envTop(top) }));
+// ---- the sidebar: the cluster section and the groups (shared, v1.js) ------------
+const win = (main, { top = '', ...o } = {}) => clusterWindow(main, { cluster: top, ...o });
 
 // ---- threads (the same data as round 2) ---------------------------------------
 const SW_TEXT = 'Line card swap in slot 3 (CHG-4468): Po12 to edge-ams is down during the swap.';

@@ -681,7 +681,14 @@ impl Render for ObjectPane {
         // Fixed under the header, so it stays in view while the body
         // scrolls.
         let downtime = if body_object_known(&snapshot, &self.object) {
-            downtime::banner(self, &snapshot, now, cx)
+            let width = match (self.mode, &self.object, layout) {
+                (PaneMode::Split, _, _) => None,
+                (_, ObjectKey::Service { .. }, BodyLayout::WideTab) => {
+                    Some(TAB_CONTENT_WIDTH + TAB_COLUMN_GAP + TAB_SIDE_WIDTH)
+                }
+                _ => Some(TAB_CONTENT_WIDTH),
+            };
+            downtime::banner(self, &snapshot, now, width, cx)
         } else {
             None
         };
@@ -1033,6 +1040,31 @@ fn more_trigger(
 }
 
 /// The pane's `···`: the actions without a key, and copying (PANE-05).
+/// What the pane's `···` can offer to remove.
+enum Removable {
+    /// This many downtimes Icinga would remove.
+    Some(usize),
+    /// Only downtimes from the config (Icinga refuses), with the schedule.
+    OnlyConfig(Option<String>),
+    /// No downtime.
+    None,
+}
+
+/// Counts only what Icinga would remove: a downtime from the config can't
+/// be removed (it comes back with the config).
+fn removable_downtimes(state: &AppState, object: &ObjectKey) -> Removable {
+    let own = state
+        .snapshot()
+        .downtimes
+        .get(object)
+        .map_or(&[][..], Vec::as_slice);
+    match own.iter().filter(|downtime| !downtime.config_owned).count() {
+        0 if own.is_empty() => Removable::None,
+        0 => Removable::OnlyConfig(own.iter().find_map(|downtime| downtime.schedule.clone())),
+        count => Removable::Some(count),
+    }
+}
+
 fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>) -> Menu {
     let state = pane.state.read(cx);
     let item = |id: &'static str, label: &'static str, action: ObjectAction| {
@@ -1058,11 +1090,6 @@ fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>
         ))
     };
     let objects = std::slice::from_ref(&pane.object);
-    let downtimes = state
-        .snapshot()
-        .downtimes
-        .get(&pane.object)
-        .map_or(0, Vec::len);
     let mut menu = Menu::new("pane-menu")
         .item(item(
             "pane-result",
@@ -1074,16 +1101,27 @@ fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>
             "run command",
             ObjectAction::RunCommand,
         ));
-    if downtimes > 0 {
-        menu = menu.item(item(
-            "pane-remove-downtimes",
-            if downtimes == 1 {
-                "remove its downtime"
-            } else {
-                "remove all its downtimes"
-            },
-            ObjectAction::RemoveDowntimes,
-        ));
+    match removable_downtimes(state, &pane.object) {
+        Removable::Some(count) => {
+            menu = menu.item(item(
+                "pane-remove-downtimes",
+                if count == 1 {
+                    "remove its downtime"
+                } else {
+                    "remove all its downtimes"
+                },
+                ObjectAction::RemoveDowntimes,
+            ));
+        }
+        // As the banner's button: shown, disabled, with the reason.
+        Removable::OnlyConfig(schedule) => {
+            menu = menu.item(
+                MenuItem::new("pane-remove-downtimes", "remove its downtime")
+                    .disabled(true)
+                    .tooltip(Tooltip::new(downtime::config_reason(schedule.as_deref()))),
+            );
+        }
+        Removable::None => {}
     }
     menu = override_items(menu, pane, cx);
     menu = menu

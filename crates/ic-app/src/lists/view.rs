@@ -14,6 +14,7 @@
 //! event stream (another operator's downtime, an acknowledgement that
 //! expired) show at once.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -83,10 +84,28 @@ pub(crate) struct Unfold;
 #[action(namespace = icygui)]
 pub(crate) struct Fold;
 
+/// Turns *only mine* on or off (`m`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct ToggleOnlyMine;
+
+/// Sorts by the next order the list offers (`s`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct NextSort;
+
+/// Shows or hides downtime and flapping comments in the comment list (`h`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct ToggleSystemComments;
+
 /// Registers the lists' own keys; the dashboard list's keys apply too.
 pub(crate) fn bind_keys(cx: &mut App) {
     let list = Some(LIST_CONTEXT);
     cx.bind_keys([
+        KeyBinding::new("m", ToggleOnlyMine, list),
+        KeyBinding::new("s", NextSort, list),
+        KeyBinding::new("h", ToggleSystemComments, list),
         KeyBinding::new("backspace", RemoveSelected, list),
         KeyBinding::new("delete", RemoveSelected, list),
         KeyBinding::new("right", Unfold, list),
@@ -108,17 +127,34 @@ struct OpenPane {
 }
 
 /// What a listing was built from: it's built again when any of it changes.
-#[derive(Clone, Debug, PartialEq)]
+/// The snapshot's revision, plus the maps it read, held (not their
+/// addresses: a freed map's address can come back with other contents).
+#[derive(Clone, Debug)]
 struct Inputs {
     environment: Option<String>,
-    downtimes: usize,
-    comments: usize,
-    hosts: usize,
-    services: usize,
+    revision: u64,
+    downtimes: Arc<BTreeMap<ObjectKey, Vec<ic_model::Downtime>>>,
+    comments: Arc<BTreeMap<ObjectKey, Vec<ic_model::Comment>>>,
+    hosts: Arc<BTreeMap<ic_model::HostName, Arc<ic_model::Host>>>,
+    services: Arc<BTreeMap<ic_model::ServiceKey, Arc<ic_model::Service>>>,
     options: Options,
     author: String,
     /// The minute: phases and times left change with the clock.
     minute: i64,
+}
+
+impl PartialEq for Inputs {
+    fn eq(&self, other: &Self) -> bool {
+        self.environment == other.environment
+            && self.revision == other.revision
+            && Arc::ptr_eq(&self.downtimes, &other.downtimes)
+            && Arc::ptr_eq(&self.comments, &other.comments)
+            && Arc::ptr_eq(&self.hosts, &other.hosts)
+            && Arc::ptr_eq(&self.services, &other.services)
+            && self.options == other.options
+            && self.author == other.author
+            && self.minute == other.minute
+    }
 }
 
 /// A list of every downtime, comment or acknowledged problem.
@@ -153,11 +189,12 @@ impl Focusable for RecordList {
 impl RecordList {
     pub(crate) fn new(state: Entity<AppState>, kind: ListKind, cx: &mut Context<Self>) -> Self {
         let subscriptions = vec![cx.observe(&state, |_, _, cx| cx.notify())];
+        let options = Options::saved(kind, &state.read(cx).list_options(kind));
         Self {
             state,
             kind,
             focus_handle: cx.focus_handle(),
-            options: Options::new(kind),
+            options,
             built: None,
             selection: ListSelection::default(),
             scroll: UniformListScrollHandle::new(),
@@ -191,19 +228,24 @@ impl RecordList {
         let state = self.state.read(cx);
         let snapshot = state.snapshot();
         let now = Timestamp::now();
-        let address = |pointer: *const ()| pointer as usize;
         #[expect(
             clippy::cast_possible_truncation,
             reason = "minutes since 1970 fit in i64"
         )]
         let minute = (now.as_unix_seconds() / 60.).floor() as i64;
+        // *only mine* can't apply where it can't tell whose a record is.
+        let mut options = self.options.clone();
+        if state.only_mine_denial(self.kind).is_some() {
+            options.only_mine = false;
+        }
         let inputs = Inputs {
             environment: state.active_environment_id().map(str::to_owned),
-            downtimes: address(Arc::as_ptr(&snapshot.downtimes).cast()),
-            comments: address(Arc::as_ptr(&snapshot.comments).cast()),
-            hosts: address(Arc::as_ptr(&snapshot.hosts).cast()),
-            services: address(Arc::as_ptr(&snapshot.services).cast()),
-            options: self.options.clone(),
+            revision: snapshot.revision,
+            downtimes: Arc::clone(&snapshot.downtimes),
+            comments: Arc::clone(&snapshot.comments),
+            hosts: Arc::clone(&snapshot.hosts),
+            services: Arc::clone(&snapshot.services),
+            options: options.clone(),
             author: state.author().to_owned(),
             minute,
         };
@@ -214,9 +256,17 @@ impl RecordList {
         {
             return;
         }
-        let listing = model::build(self.kind, snapshot, &inputs.author, &self.options, now);
+        let listing = model::build(self.kind, snapshot, &inputs.author, &options, now);
         self.selection.update_rows(&listing.rows);
         self.built = Some((inputs, listing));
+    }
+
+    /// The options the listing was built with: *only mine* is off where
+    /// it can't apply (see [`AppState::only_mine_denial`]).
+    fn shown_options(&self) -> &Options {
+        self.built
+            .as_ref()
+            .map_or(&self.options, |(inputs, _)| &inputs.options)
     }
 
     /// The listing, built for the current snapshot.
@@ -584,10 +634,45 @@ impl RecordList {
         self.selection.marked_count() > 0
     }
 
+    /// Changes the options and keeps them with the environment's UI state
+    /// (they come back when the list opens again, after a restart too).
     fn set_options(&mut self, change: impl FnOnce(&mut Options), cx: &mut Context<Self>) {
         change(&mut self.options);
         self.menus.close();
+        self.save_options(cx);
         cx.notify();
+    }
+
+    fn save_options(&self, cx: &mut Context<Self>) {
+        let (kind, saved) = (self.kind, self.options.to_saved(self.kind));
+        self.state
+            .update(cx, |state, _| state.set_list_options(kind, saved));
+    }
+
+    fn toggle_only_mine(&mut self, _: &ToggleOnlyMine, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).only_mine_denial(self.kind).is_some() {
+            return;
+        }
+        self.set_options(|options| options.only_mine = !options.only_mine, cx);
+    }
+
+    fn next_sort(&mut self, _: &NextSort, _: &mut Window, cx: &mut Context<Self>) {
+        let kind = self.kind;
+        self.set_options(|options| options.sort = options.next_sort(kind), cx);
+    }
+
+    fn toggle_system_comments(
+        &mut self,
+        _: &ToggleSystemComments,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.kind == ListKind::Comments {
+            self.set_options(
+                |options| options.system_comments = !options.system_comments,
+                cx,
+            );
+        }
     }
 
     fn copy(&self, what: &str, text: String, cx: &mut Context<Self>) {
@@ -640,9 +725,13 @@ impl RecordList {
             .environment()
             .map(|environment| environment.name.clone())
             .unwrap_or_default();
+        let denial = state.only_mine_denial(self.kind);
+        let only_mine = self.options.only_mine && denial.is_none();
         let subtitle = if self.pane.is_some() {
             environment
-        } else if self.options.only_mine {
+        } else if self.kind == ListKind::Acknowledged && state.ack_detail_denial().is_some() {
+            format!("{environment} · who and why need objects/query/Comment")
+        } else if only_mine {
             let by = match self.kind {
                 ListKind::Acknowledged => "acknowledged by",
                 ListKind::Downtimes | ListKind::Comments => "set by",
@@ -651,11 +740,10 @@ impl RecordList {
         } else {
             format!("{environment} · {}", self.kind.every())
         };
-        let only_mine = self.options.only_mine;
         let author = state.author().to_owned();
         let switch = Switch::new("only-mine", only_mine)
             .label("only mine")
-            .disabled(author.is_empty())
+            .disabled(denial.is_some())
             .on_change(cx.listener(|this, on: &bool, _, cx| {
                 let on = *on;
                 this.set_options(|options| options.only_mine = on, cx);
@@ -665,11 +753,9 @@ impl RecordList {
             .flex_none()
             .mr(px(6.))
             .child(switch)
-            .tooltip(Tooltip::text(if author.is_empty() {
-                "No author is set for this environment".to_owned()
-            } else {
-                format!("Only what {author} set (the environment's author)")
-            }));
+            .tooltip(Tooltip::text(denial.unwrap_or_else(|| {
+                format!("Only what {author} set (the environment's author) · m")
+            })));
         let header = header
             .title(self.kind.title())
             .subtitle(subtitle)
@@ -823,7 +909,7 @@ impl RecordList {
         let listing = self.listing()?;
         let summary = &listing.summary;
         let texts = summary_texts(self.kind, summary);
-        let end_text = summary_end(self.kind, summary, &self.options);
+        let end_text = summary_end(self.kind, summary, self.shown_options());
         let fits = |width: Pixels| {
             SummaryBar::fits(texts.iter().map(String::as_str), &end_text, width, theme)
         };
@@ -855,7 +941,7 @@ impl RecordList {
                 .child(text)
                 .into_any_element()
         };
-        let by_others = (self.options.only_mine && summary.by_others > 0)
+        let by_others = (self.shown_options().only_mine && summary.by_others > 0)
             .then(|| format!("{} by others hidden", summary.by_others));
         let mut items: Vec<AnyElement> = Vec::new();
         let end: Option<AnyElement> = match self.kind {
@@ -1139,7 +1225,7 @@ impl RecordList {
         let leading = Icon::new(self.kind.icon())
             .size(px(20.))
             .color(theme.colors.text_muted);
-        if self.options.only_mine && summary.by_others > 0 {
+        if self.shown_options().only_mine && summary.by_others > 0 {
             let author = self.state.read(cx).author().to_owned();
             return EmptyState::new(format!("None set by {author}"))
                 .leading(leading)
@@ -1393,6 +1479,9 @@ impl Render for RecordList {
             .on_action(cx.listener(Self::remove_selected))
             .on_action(cx.listener(Self::unfold))
             .on_action(cx.listener(Self::fold))
+            .on_action(cx.listener(Self::toggle_only_mine))
+            .on_action(cx.listener(Self::next_sort))
+            .on_action(cx.listener(Self::toggle_system_comments))
             .on_action(cx.listener(Self::acknowledge))
             .on_action(cx.listener(Self::schedule_downtime))
             .on_action(cx.listener(Self::check_now))
@@ -1440,7 +1529,7 @@ fn record_row(
         .state(circle, text.caption.clone())
         .title(text.name.clone())
         .detail(text.line.clone())
-        .trailing(tag_element(&text.tag, pending, theme));
+        .trailing(tag_element(&text.tag, pending, text.child, theme));
     match &text.host {
         Some(host) => row.context("on", host.clone()),
         None => row,
@@ -1453,7 +1542,7 @@ fn record_row(
     clippy::too_many_lines,
     reason = "one arm per list, each its fixed slots"
 )]
-fn tag_element(tag: &Tag, pending: Option<&'static str>, theme: &Theme) -> AnyElement {
+fn tag_element(tag: &Tag, pending: Option<&'static str>, child: bool, theme: &Theme) -> AnyElement {
     let colors = theme.colors;
     let label = theme.text.label;
     let chars = |count: f32| label * (count * CHAR_WIDTH);
@@ -1475,7 +1564,12 @@ fn tag_element(tag: &Tag, pending: Option<&'static str>, theme: &Theme) -> AnyEl
                         div()
                             .h_full()
                             .w(relative(fraction.clamp(0., 1.)))
-                            .bg(colors.accent),
+                            // A child's line is its parent's: faint.
+                            .bg(if child {
+                                colors.text_faint
+                            } else {
+                                colors.accent
+                            }),
                     )
                     .into_any_element(),
                 None => div()
@@ -1642,6 +1736,11 @@ impl RecordList {
             .unwrap_or_default()
     }
 
+    /// The list's choices.
+    pub(crate) fn options(&self) -> &Options {
+        &self.options
+    }
+
     /// The summary's counts.
     pub(crate) fn summary(&self) -> Option<model::ListSummary> {
         self.listing().map(|listing| listing.summary.clone())
@@ -1670,6 +1769,7 @@ impl RecordList {
     /// Sets the options (a test flips *only mine* or the sort).
     pub(crate) fn edit_options(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Options)) {
         edit(&mut self.options);
+        self.save_options(cx);
         cx.notify();
     }
 }

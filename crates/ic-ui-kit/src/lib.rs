@@ -48,6 +48,9 @@ pub use gpui_component::Root;
 /// `Scrollbar::vertical(&scroll_handle)` works with GPUI's `ScrollHandle`
 /// and `UniformListScrollHandle`.
 pub use gpui_component::scroll::Scrollbar;
+/// When a [`Scrollbar`] shows: `Always` for a box whose hidden rows must
+/// be obvious (a dialog's target list), else while scrolling.
+pub use gpui_component::scroll::ScrollbarMode;
 
 /// Text input state and events, for [`TextField`].
 pub mod input {

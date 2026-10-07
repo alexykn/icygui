@@ -314,6 +314,7 @@ pub struct PaneBanner {
     note: Option<(SharedString, SharedString, SharedString)>,
     more: Option<SharedString>,
     progress: f32,
+    content_width: Option<Pixels>,
 }
 
 impl PaneBanner {
@@ -334,6 +335,7 @@ impl PaneBanner {
             note: None,
             more: None,
             progress: 0.,
+            content_width: None,
         }
     }
 
@@ -378,6 +380,15 @@ impl PaneBanner {
     /// The last line, faint: what else there is.
     pub fn more(mut self, more: impl Into<SharedString>) -> Self {
         self.more = Some(more.into());
+        self
+    }
+
+    /// Keeps the lines and the action within `width` from the left (a pane
+    /// open as a wide tab, whose body is kept to a readable width): the
+    /// action then ends where the body ends. The tint, the tone bar and the
+    /// progress line still span the whole width.
+    pub fn content_width(mut self, width: Pixels) -> Self {
+        self.content_width = Some(width);
         self
     }
 
@@ -457,30 +468,21 @@ impl RenderOnce for PaneBanner {
         };
         let indent = px(ICON_SLOT + TITLE_GAP);
         let note_id = ElementId::Name(format!("{}-note", self.id).into());
-        div()
-            .id(self.id)
-            .relative()
+        let content = div()
             .flex()
             .flex_col()
-            .flex_none()
             .gap(px(5.))
             .w_full()
             .pt(px(12.))
             .pb(px(13.))
             .pl(theme.metrics.pane_inset)
-            .pr(theme.metrics.pane_padding)
-            .bg(tint)
-            .border_b_1()
-            .border_color(colors.border_header)
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top_0()
-                    .bottom_0()
-                    .w(px(TONE_BAR))
-                    .bg(bar),
-            )
+            // Capped, the right edge matches the body's own inset.
+            .pr(if self.content_width.is_some() {
+                theme.metrics.pane_inset
+            } else {
+                theme.metrics.pane_padding
+            })
+            .when_some(self.content_width, gpui::Styled::max_w)
             .child(title_line(
                 Icon::new(self.icon).size(px(ICON_SLOT)).color(icon),
                 self.title,
@@ -510,7 +512,27 @@ impl RenderOnce for PaneBanner {
                         .text_color(colors.text_faint)
                         .child(more),
                 )
-            })
+            });
+        div()
+            .id(self.id)
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w_full()
+            .bg(tint)
+            .border_b_1()
+            .border_color(colors.border_header)
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(TONE_BAR))
+                    .bg(bar),
+            )
+            .child(content)
             .child(
                 div()
                     .absolute()

@@ -14,7 +14,8 @@ use gpui::{
     Styled as _, UniformListScrollHandle, Window, div, uniform_list,
 };
 use ic_ui_kit::{
-    ActiveTheme as _, Button, ButtonVariant, DialogBody, Scrollbar, StateDot, Theme, px,
+    ActiveTheme as _, Button, ButtonVariant, DialogBody, Scrollbar, ScrollbarMode, StateDot, Theme,
+    px,
 };
 
 use super::ListKind;
@@ -31,22 +32,30 @@ const ROW: f32 = 20.;
 /// The box's padding, top and bottom.
 const PADDING: f32 = 10.;
 /// The box's height at most (it scrolls beyond), as drawn: the downtimes'
-/// taller box, the others'.
-const DOWNTIME_BOX: f32 = 240.;
-const OTHER_BOX: f32 = 200.;
+/// taller box (11.5 rows), the others' (9.5 rows). Half a row shows at the
+/// bottom of a full box, so the cut-off row says there is more.
+const DOWNTIME_BOX: f32 = 250.;
+const OTHER_BOX: f32 = 210.;
 
 /// Enter: removes what the dialog lists.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct ConfirmRemoval;
 
+/// Tab and Shift-Tab: the confirmation has no fields, and keeps the
+/// keyboard (nothing behind it takes the keys that follow).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct KeepFocus;
+
 /// Registers the confirmation's keys.
 pub(crate) fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
-        "enter",
-        ConfirmRemoval,
-        Some(REMOVAL_CONTEXT),
-    )]);
+    let context = Some(REMOVAL_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("enter", ConfirmRemoval, context),
+        KeyBinding::new("tab", KeepFocus, context),
+        KeyBinding::new("shift-tab", KeepFocus, context),
+    ]);
 }
 
 /// The confirmation's view.
@@ -239,7 +248,8 @@ impl RemovalDialog {
                         .track_scroll(&scroll)
                         .size_full(),
                     )
-                    .child(Scrollbar::vertical(&scroll)),
+                    // Always shown while rows are out of view, as drawn.
+                    .child(Scrollbar::vertical(&scroll).mode(ScrollbarMode::Always)),
             );
         }
         // The comments' skipped line sits in the box, under the list.
@@ -372,6 +382,9 @@ impl Render for RemovalDialog {
             .key_context(REMOVAL_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_confirm))
+            .on_action(cx.listener(|this, _: &KeepFocus, window, cx| {
+                this.focus_handle.focus(window, cx);
+            }))
             .flex()
             .flex_col()
             .min_h_0()

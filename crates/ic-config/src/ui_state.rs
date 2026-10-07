@@ -122,6 +122,24 @@ pub struct EnvironmentUiState {
     pub lists: Vec<String>,
     /// The dashboard shown last.
     pub selected: Option<DashboardRef>,
+    /// Each list's choices (sort, *only mine*, system comments), by list
+    /// id, kept when the list is closed or the app restarts.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub list_options: BTreeMap<String, ListOptionsState>,
+}
+
+/// A list's choices (v1, topic 07): its sort (by id, `ends-soonest`; the
+/// app ignores ids it doesn't know), *only mine*, and whether the comment
+/// list shows downtime and flapping comments.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ListOptionsState {
+    /// The sort, by id; none: the list's default.
+    pub sort: Option<String>,
+    /// Only what the environment's author set.
+    pub only_mine: bool,
+    /// The comment list shows downtime and flapping comments too.
+    pub system_comments: bool,
 }
 
 /// The main window's size and position in logical pixels, as the window
@@ -284,6 +302,14 @@ mod tests {
                 ],
                 lists: vec!["downtimes".to_owned(), "acknowledged".to_owned()],
                 selected: Some(reference("g", "d")),
+                list_options: BTreeMap::from([(
+                    "downtimes".to_owned(),
+                    ListOptionsState {
+                        sort: Some("name".to_owned()),
+                        only_mine: true,
+                        system_comments: false,
+                    },
+                )]),
             },
         ));
         store.save(&state).unwrap();
@@ -334,6 +360,7 @@ mod tests {
                 tabs: (0..200).map(|index| format!("host-{index}")).collect(),
                 selected: None,
                 lists: Vec::new(),
+                list_options: BTreeMap::new(),
             },
         );
         store.save(&huge).unwrap();
@@ -393,6 +420,7 @@ mod tests {
             tabs: vec!["h".to_owned()],
             selected: None,
             lists: Vec::new(),
+            list_options: BTreeMap::new(),
         };
         assert!(state.set_environment("a", tabs.clone()));
         assert!(!state.set_environment("a", tabs.clone()), "unchanged");

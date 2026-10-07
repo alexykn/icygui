@@ -280,6 +280,15 @@ fn removing_comments_skips_acknowledgements_and_says_so() {
             "{:?}",
             removal.skipped
         );
+        // Tab keeps the keyboard in the confirmation: the keys that follow
+        // don't reach the list or the sidebar behind it.
+        app.keys(cx, "tab shift-tab j j");
+        assert_eq!(modal(app, cx), Some(ModalKind::Removal(ListKind::Comments)));
+        let dialog = removal_dialog(app, cx);
+        assert!(app.in_window(cx, |window, cx| {
+            gpui::Focusable::focus_handle(dialog.read(cx), cx).is_focused(window)
+        }));
+        assert_eq!(list.read(cx).marked().len(), 3);
         app.keys(cx, "enter");
         let actions = recorder.actions();
         assert_eq!(actions.len(), 1);
@@ -390,6 +399,25 @@ fn permissions_disable_removal_and_hide_what_cant_be_read() {
         );
         assert!(state.list_denial(ListKind::Downtimes).is_some());
         assert_eq!(state.list_denial(ListKind::Acknowledged), None);
+        // The acknowledged list still shows the problems, but can't say
+        // who acknowledged them: *only mine* is off, with the reason, and
+        // hides nothing.
+        let denial = state.only_mine_denial(ListKind::Acknowledged);
+        assert!(
+            denial
+                .as_deref()
+                .is_some_and(|denial| denial.contains("objects/query/Comment")),
+            "{denial:?}"
+        );
+        let acknowledged = open(app, cx, ListKind::Acknowledged);
+        let all = acknowledged.read(cx).rows().len();
+        assert!(all > 0);
+        acknowledged.update(cx, |list, cx| {
+            list.edit_options(cx, |options| options.only_mine = true);
+        });
+        app.draw(cx);
+        assert_eq!(acknowledged.read(cx).rows().len(), all, "nothing hidden");
+        assert_eq!(acknowledged.read(cx).summary().unwrap().by_others, 0);
     });
 }
 
@@ -480,5 +508,49 @@ fn thousands_of_downtimes_build_only_the_rows_on_screen() {
         assert_eq!(buttons_x(cx), one, "the buttons didn't move");
         app.keys(cx, "secondary-a");
         assert_eq!(list.read(cx).marked().len(), 3_002);
+    });
+}
+
+#[test]
+fn a_lists_choices_go_by_keyboard_and_are_kept() {
+    run(FixtureOptions::default(), |app, cx| {
+        let list = open(app, cx, ListKind::Downtimes);
+        app.click(cx, row_position(1), Modifiers::default());
+        app.keys(cx, "escape");
+        let sort = |list: &Entity<RecordList>, cx: &App| list.read(cx).options().sort;
+        assert_eq!(sort(&list, cx), ListKind::Downtimes.default_sort());
+        // `m` only mine, `s` the next sort.
+        app.keys(cx, "m s");
+        assert!(list.read(cx).options().only_mine);
+        assert_eq!(sort(&list, cx), ListKind::Downtimes.sorts()[1]);
+        // Kept with the environment's UI state: closed and opened again,
+        // the list comes back as it was.
+        let saved = app.state.read(cx).list_options(ListKind::Downtimes);
+        assert!(saved.only_mine && saved.sort.is_some(), "{saved:?}");
+        app.state.update(cx, |state, cx| {
+            state.close_list(ListKind::Downtimes);
+            cx.notify();
+        });
+        app.draw(cx);
+        let list = open(app, cx, ListKind::Downtimes);
+        assert!(list.read(cx).options().only_mine);
+        assert_eq!(sort(&list, cx), ListKind::Downtimes.sorts()[1]);
+        let ui = app.state.read(cx).ui_state().clone();
+        let environment = app
+            .state
+            .read(cx)
+            .active_environment_id()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            ui.environment(&environment).list_options["downtimes"],
+            saved
+        );
+
+        // `h` shows the comment list's downtime and flapping comments.
+        let comments = open(app, cx, ListKind::Comments);
+        app.click(cx, row_position(0), Modifiers::default());
+        app.keys(cx, "escape h");
+        assert!(comments.read(cx).options().system_comments);
     });
 }

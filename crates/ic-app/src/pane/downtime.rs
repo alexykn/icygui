@@ -34,6 +34,7 @@ pub(super) fn banner(
     pane: &ObjectPane,
     snapshot: &Snapshot,
     now: Timestamp,
+    content_width: Option<f32>,
     cx: &Context<ObjectPane>,
 ) -> Option<AnyElement> {
     let banner = downtimes::banner(snapshot, &pane.object, now)?;
@@ -82,6 +83,11 @@ pub(super) fn banner(
             banner.comment.clone(),
         )
         .progress(banner.progress);
+    // A tab keeps its body to a readable width: so do the banner's lines,
+    // and *remove downtime* ends where the body ends.
+    if let Some(width) = content_width {
+        element = element.content_width(px(width));
+    }
     if !banner.more.is_empty() {
         element = element.more(banner.more.join(" · "));
     }
@@ -120,7 +126,7 @@ fn remove_button(
 }
 
 /// Why a downtime from the config can't be removed.
-fn config_reason(schedule: Option<&str>) -> String {
+pub(super) fn config_reason(schedule: Option<&str>) -> String {
     let from = schedule.map_or_else(
         || "a ScheduledDowntime".to_owned(),
         |schedule| format!("the ScheduledDowntime {schedule}"),
@@ -159,30 +165,42 @@ pub(super) fn others(
         .size(px(20.))
         .icon_size(px(12.))
         .color(theme.colors.text_faint);
-        let remove = if other.config {
-            remove
-                .disabled(true)
-                .tooltip(Tooltip::new(config_reason(None)))
+        let (remove, enabled) = if other.config {
+            (
+                remove
+                    .disabled(true)
+                    .tooltip(Tooltip::new(config_reason(None))),
+                false,
+            )
         } else {
             match state.action_denial(&action) {
-                Some(denial) => remove.disabled(true).tooltip(Tooltip::new(denial)),
-                None => remove
-                    .tooltip(Tooltip::new("Remove downtime"))
-                    .on_click(
-                        cx.listener(move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
-                            pane.request(action.clone(), cx);
-                        }),
-                    ),
+                Some(denial) => (remove.disabled(true).tooltip(Tooltip::new(denial)), false),
+                None => (
+                    remove
+                        .tooltip(Tooltip::new("Remove downtime"))
+                        .on_click(cx.listener(
+                            move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                                pane.request(action.clone(), cx);
+                            },
+                        )),
+                    true,
+                ),
             }
         };
-        column = column.child(other_entry(&other, remove, theme));
+        column = column.child(other_entry(&other, remove, enabled, theme));
     }
     Some(column.into_any_element())
 }
 
 /// One other downtime: icon, the facts line, `author time comment`, the
-/// remove slot.
-fn other_entry(other: &downtimes::Other, remove: IconButton, theme: &Theme) -> impl IntoElement {
+/// remove slot. Hovering the entry shows its `×` as a small filled button
+/// (as drawn); a config downtime's stays plain and faint.
+fn other_entry(
+    other: &downtimes::Other,
+    remove: IconButton,
+    enabled: bool,
+    theme: &Theme,
+) -> impl IntoElement {
     let colors = theme.colors;
     div()
         .id(SharedString::from(format!("other-downtime-{}", other.name)))
@@ -228,8 +246,16 @@ fn other_entry(other: &downtimes::Other, remove: IconButton, theme: &Theme) -> i
         .child(
             div()
                 .flex_none()
+                .rounded(theme.metrics.small_radius)
                 .invisible()
-                .group_hover(OTHER_GROUP, gpui::Styled::visible)
+                .group_hover(OTHER_GROUP, |style| {
+                    let style = style.visible();
+                    if enabled {
+                        style.bg(colors.element_hover)
+                    } else {
+                        style
+                    }
+                })
                 .child(remove),
         )
 }

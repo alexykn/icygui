@@ -171,6 +171,22 @@ impl SortChoice {
         }
     }
 
+    /// The sort's id in the UI state (`ends-soonest`).
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::EndsSoonest => "ends-soonest",
+            Self::StartsSoonest => "starts-soonest",
+            Self::Newest => "newest",
+            Self::Oldest => "oldest",
+            Self::Name => "name",
+        }
+    }
+
+    /// The sort a saved id names, if `kind` offers it.
+    pub(crate) fn from_key(kind: ListKind, key: &str) -> Option<Self> {
+        kind.sorts().iter().copied().find(|sort| sort.key() == key)
+    }
+
     /// The sort menu item's element id.
     pub(crate) fn id(self) -> &'static str {
         match self {
@@ -206,6 +222,41 @@ impl Options {
             system_comments: false,
             unfolded: BTreeSet::new(),
         }
+    }
+
+    /// A list's options as saved (a sort it doesn't offer: its default).
+    pub(crate) fn saved(kind: ListKind, saved: &ic_config::ListOptionsState) -> Self {
+        let mut options = Self::new(kind);
+        if let Some(sort) = saved
+            .sort
+            .as_deref()
+            .and_then(|key| SortChoice::from_key(kind, key))
+        {
+            options.sort = sort;
+        }
+        options.only_mine = saved.only_mine;
+        options.system_comments = saved.system_comments && kind == ListKind::Comments;
+        options
+    }
+
+    /// What is kept between runs (not which hosts are unfolded); the
+    /// default sort is kept as none.
+    pub(crate) fn to_saved(&self, kind: ListKind) -> ic_config::ListOptionsState {
+        ic_config::ListOptionsState {
+            sort: (self.sort != kind.default_sort()).then(|| self.sort.key().to_owned()),
+            only_mine: self.only_mine,
+            system_comments: self.system_comments,
+        }
+    }
+
+    /// The next sort `kind` offers, after the last the first (`s`).
+    pub(crate) fn next_sort(&self, kind: ListKind) -> SortChoice {
+        let sorts = kind.sorts();
+        let index = sorts
+            .iter()
+            .position(|sort| *sort == self.sort)
+            .unwrap_or(0);
+        sorts[(index + 1) % sorts.len()]
     }
 }
 
@@ -910,6 +961,10 @@ pub(crate) struct RowText {
     pub(crate) tag: Tag,
     /// From the config: can't be removed.
     pub(crate) config: bool,
+    /// An unfolded child of a host's downtime: its line says only that it
+    /// goes with its host, and its tag is faint (the parent's row above
+    /// carries the comment and the time left).
+    pub(crate) child: bool,
 }
 
 /// The words of `line`, in the local time zone.
@@ -940,9 +995,23 @@ where
     let (state, mark, caption, name, host) = object_facts(snapshot, object, times, now);
     match line {
         Line::Section { .. } => None,
-        Line::Downtime { children, .. } => {
+        Line::Downtime {
+            children, child, ..
+        } => {
             let downtime = listing.downtime(line)?;
             let phase = downtime.phase(now);
+            let mut tag = downtime_tag(downtime, phase, now, zone);
+            let detail = if *child {
+                if let Tag::Downtime { accent, .. } = &mut tag {
+                    *accent = false;
+                }
+                format!(
+                    "with its host · {}",
+                    compact_window(downtime.start_time, downtime.end_time, now, zone)
+                )
+            } else {
+                downtime_detail(snapshot, downtime, now, zone)
+            };
             Some(RowText {
                 state,
                 // Hollow while this downtime is in effect, whatever the
@@ -952,9 +1021,10 @@ where
                 name,
                 host,
                 more: children.label(),
-                line: downtime_detail(snapshot, downtime, now, zone),
-                tag: downtime_tag(downtime, phase, now, zone),
+                line: detail,
+                tag,
                 config: downtime.config_owned,
+                child: *child,
             })
         }
         Line::Comment { .. } => {
@@ -974,6 +1044,7 @@ where
                 ),
                 tag: comment_tag(snapshot, comment, now, zone),
                 config: false,
+                child: false,
             })
         }
         Line::Problem { .. } => {
@@ -1008,6 +1079,7 @@ where
                     ),
                 },
                 config: false,
+                child: false,
             })
         }
     }
@@ -1647,6 +1719,30 @@ mod tests {
             listing.summary.in_effect, 2,
             "sections count their own rows"
         );
+        // A child says it goes with its host; the comment and the time left
+        // are on the host's row above it.
+        let child = row_text_in(
+            &listing,
+            &listing.rows[2],
+            &world.snapshot,
+            ListTimes::Relative,
+            now(),
+            &Utc,
+        )
+        .unwrap();
+        assert!(child.child);
+        assert!(child.line.starts_with("with its host · "), "{}", child.line);
+        assert!(matches!(child.tag, Tag::Downtime { accent: false, .. }));
+        let parent = row_text_in(
+            &listing,
+            &listing.rows[1],
+            &world.snapshot,
+            ListTimes::Relative,
+            now(),
+            &Utc,
+        )
+        .unwrap();
+        assert!(!parent.child && !parent.line.starts_with("with its host"));
     }
 
     #[test]

@@ -521,7 +521,11 @@ where
     let coming = primary(own, now)?;
     match coming.phase(now) {
         DowntimePhase::Waiting => Some("downtime, flexible, not started".to_owned()),
-        DowntimePhase::Upcoming => Some(format!("downtime {}", at(coming.start_time, now, zone))),
+        // One pattern whatever the day: `downtime at 22:00`, `downtime at
+        // tomorrow 08:00`, `downtime at Sat 02:21`.
+        DowntimePhase::Upcoming => {
+            Some(format!("downtime at {}", at(coming.start_time, now, zone)))
+        }
         DowntimePhase::InEffect | DowntimePhase::Over => None,
     }
 }
@@ -614,7 +618,7 @@ where
         .signed_duration_since(today.date_naive())
         .num_days()
     {
-        0 => format!("at {}", when.format("%H:%M")),
+        0 => when.format("%H:%M").to_string(),
         1 => when.format("tomorrow %H:%M").to_string(),
         2..=6 => when.format("%a %H:%M").to_string(),
         _ => when.format("%-d %b %H:%M").to_string(),
@@ -646,9 +650,7 @@ where
             {
                 format!("tonight {}", start.format("%H:%M"))
             }
-            _ => at(downtime.start_time, now, zone)
-                .trim_start_matches("at ")
-                .to_owned(),
+            _ => at(downtime.start_time, now, zone),
         }
     };
     if downtime.config_owned {
@@ -776,8 +778,6 @@ pub(crate) enum Send {
         /// The objects whose downtimes go.
         objects: Vec<ObjectKey>,
     },
-    /// `remove-downtime` for every downtime of these objects.
-    AllOf(Vec<ObjectKey>),
 }
 
 /// One way to remove: what goes, what is sent, what stays.
@@ -856,19 +856,22 @@ impl Removal {
     }
 
     /// Removing every downtime of `objects` (the pane's `···`, the
-    /// selection bar, the palette).
+    /// selection bar, the palette). Only the downtimes listed go, by name:
+    /// one scheduled by someone else after the dialog opened stays (it was
+    /// never shown). A child goes with its parent, so it is sent only when
+    /// its parent isn't.
     pub(crate) fn all_of(snapshot: &Snapshot, objects: &[ObjectKey]) -> Self {
         let mut removed: Vec<Removed> = Vec::new();
         let mut skipped: Vec<Removed> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        let mut whole: Vec<ObjectKey> = Vec::new();
         let mut send: Vec<Send> = Vec::new();
+        let mut names_sent: HashSet<String> = HashSet::new();
         for object in objects {
-            let own = of(snapshot, object);
-            let has_config = own.iter().any(|downtime| downtime.config_owned);
-            for downtime in own {
+            for downtime in of(snapshot, object) {
                 if downtime.config_owned {
-                    skipped.push(removed_of(downtime));
+                    if seen.insert(downtime.name.clone()) {
+                        skipped.push(removed_of(downtime));
+                    }
                     continue;
                 }
                 let scope = scope_of(snapshot, downtime);
@@ -878,22 +881,20 @@ impl Removal {
                     }
                 }
                 for item in scope.send {
-                    match item {
-                        // Icinga removes the object's downtimes with their
-                        // children in one go, unless one is from the config
-                        // (it stops at that one): then each goes by name.
-                        Send::One { name, .. } if !has_config && name == downtime.name => {}
-                        other => send.push(other),
+                    let Send::One { name, .. } = &item;
+                    if names_sent.insert(name.clone()) {
+                        send.push(item);
                     }
                 }
             }
-            if !has_config && own.iter().any(|downtime| !downtime.config_owned) {
-                whole.push(object.clone());
-            }
         }
-        if !whole.is_empty() {
-            send.insert(0, Send::AllOf(whole));
-        }
+        // Icinga removes a downtime's children with it: a child whose
+        // parent goes too isn't sent again (it would come back as gone).
+        send.retain(|Send::One { name, .. }| {
+            find(snapshot, None, name)
+                .and_then(|downtime| downtime.parent.as_ref())
+                .is_none_or(|parent| !names_sent.contains(parent))
+        });
         Self {
             objects: objects.to_vec(),
             host: None,
@@ -1354,6 +1355,16 @@ mod tests {
             tag_in(&snapshot, &haproxy, &check(&haproxy), now(), &Utc).as_deref(),
             Some("downtime at 22:00")
         );
+        // Another day reads the same way.
+        let saturday = downtime(haproxy.clone(), "s", day_at(10, 2, 21), day_at(10, 6, 0));
+        let checked = check(&haproxy);
+        let later = Snapshot {
+            downtimes: Arc::new(BTreeMap::from([(haproxy.clone(), vec![saturday])])),
+            ..snapshot.clone()
+        };
+        let tag = tag_in(&later, &haproxy, &checked, now(), &Utc).unwrap();
+        assert!(tag.starts_with("downtime at "), "{tag}");
+        assert!(tag.ends_with(" 02:21"), "{tag}");
     }
 
     #[test]
@@ -1530,6 +1541,29 @@ mod tests {
     }
 
     #[test]
+    fn removing_every_downtime_of_a_host_and_its_services_sends_the_parent_once() {
+        let snapshot = host_with_services(true);
+        let mut objects = vec![ObjectKey::host("k8s-node-07")];
+        objects.extend(
+            ["disk /var", "kubelet", "memory"]
+                .into_iter()
+                .map(|service| ObjectKey::service("k8s-node-07", service)),
+        );
+        let removal = Removal::all_of(&snapshot, &objects);
+        let scope = removal.scope();
+        assert_eq!(scope.removed.len(), 4, "every downtime is listed once");
+        let names: Vec<&str> = scope
+            .send
+            .iter()
+            .map(|Send::One { name, .. }| name.as_str())
+            .collect();
+        assert_eq!(names, ["k8s-node-07!h"], "the children go with it");
+        // Only the services: each child goes by its own name.
+        let removal = Removal::all_of(&snapshot, &objects[1..]);
+        assert_eq!(removal.scope().send.len(), 3);
+    }
+
+    #[test]
     fn removing_every_downtime_skips_the_configs() {
         let switch = ObjectKey::host("sw-core-ams-02");
         let swap = downtime(switch.clone(), "a", at(14, 0), at(15, 0));
@@ -1543,7 +1577,7 @@ mod tests {
                 host("db-prod-05", HostState::Up, 1),
             ],
             Vec::new(),
-            vec![swap.clone(), patching, plain],
+            vec![swap.clone(), patching, plain.clone()],
         );
         let removal = Removal::all_of(&snapshot, &[switch.clone(), other.clone()]);
         let scope = removal.scope();
@@ -1552,13 +1586,16 @@ mod tests {
         assert_eq!(
             scope.send,
             [
-                Send::AllOf(vec![other]),
                 Send::One {
                     name: swap.name.clone(),
                     objects: vec![switch]
-                }
+                },
+                Send::One {
+                    name: plain.name.clone(),
+                    objects: vec![other]
+                },
             ],
-            "Icinga stops at a config downtime: that object's go by name"
+            "only the listed downtimes go, by name"
         );
         assert_eq!(
             removal.consequence(&snapshot, now()),

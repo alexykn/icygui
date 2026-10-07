@@ -1031,11 +1031,12 @@ fn action_commands(state: &AppState, focus: &Focus) -> (Vec<PaletteItem>, Vec<Pa
     if acknowledged {
         actions.push(ObjectAction::RemoveAcknowledgement);
     }
+    // Only downtimes Icinga would remove: not those from the config.
     if focus.targets.iter().any(|target| {
         snapshot
             .downtimes
             .get(target)
-            .is_some_and(|list| !list.is_empty())
+            .is_some_and(|list| list.iter().any(|downtime| !downtime.config_owned))
     }) {
         actions.push(ObjectAction::RemoveDowntimes);
     }

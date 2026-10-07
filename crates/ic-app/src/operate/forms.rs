@@ -613,6 +613,14 @@ fn skip_reason(
         {
             Some("has no downtime")
         }
+        ObjectAction::RemoveDowntimes
+            if snapshot
+                .downtimes
+                .get(object)
+                .is_some_and(|list| list.iter().all(|downtime| downtime.config_owned)) =>
+        {
+            Some("has only downtimes from the config, which Icinga won't remove")
+        }
         _ => None,
     }
 }

@@ -135,11 +135,7 @@ impl ObjectPane {
             .filter(|history| history.object == self.object)
         {
             Some(history) => (
-                history
-                    .entries
-                    .iter()
-                    .map(|entry| history::line(entry, &self.object, now))
-                    .collect(),
+                history::lines(&history.entries, &self.object, now),
                 history::since_text(history.oldest, started, retention, now),
                 history.loading && history.entries.is_empty(),
             ),

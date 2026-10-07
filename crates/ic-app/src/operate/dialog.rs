@@ -38,7 +38,8 @@ use ic_model::{ActionTarget, CheckableState, ChildOptions, CommandType, ObjectKe
 use ic_ui_kit::input::{InputEvent, InputState, TextareaState};
 use ic_ui_kit::{
     ActiveTheme as _, Button, ButtonVariant, Chip, DialogBody, Field, FieldTone, KvTable,
-    ObjectMark, Scrollbar, Segmented, StateDot, Switch, TextArea, TextField, Theme, px,
+    ObjectMark, Scrollbar, ScrollbarMode, Segmented, StateDot, Switch, TextArea, TextField, Theme,
+    px,
 };
 
 use super::ActionSpec;
@@ -58,13 +59,18 @@ const CONFIRM_CONTEXT: &str = "ActionConfirm";
 /// Key context of a dialog without text fields (checking objects named
 /// by a palette query): Enter sends it.
 const FIELDLESS_CONTEXT: &str = "ActionFieldless";
+/// Key context of the remove-downtime dialog: Enter removes, ← and → choose
+/// the scope.
+const REMOVAL_CONTEXT: &str = "ActionRemoval";
 
 /// A row of the target box.
 const TARGET_ROW: f32 = 20.;
 /// The target box's height at most (it scrolls beyond), as drawn: the
-/// action dialogs' box, and the removal's taller one.
-const TARGET_BOX: f32 = 100.;
-const REMOVAL_BOX: f32 = 200.;
+/// action dialogs' box (5.5 rows), and the removal's taller one (10.5
+/// rows). Half a row shows at the bottom of a full box, so the cut-off row
+/// says there is more.
+const TARGET_BOX: f32 = 130.;
+const REMOVAL_BOX: f32 = 230.;
 /// The target box's padding, top and bottom.
 const TARGET_PADDING: f32 = 10.;
 
@@ -94,14 +100,39 @@ pub(crate) struct SendDialog;
 #[action(namespace = icygui)]
 pub(crate) struct SendDialogNow;
 
+/// → in the remove-downtime dialog: the next (wider) scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct NextScope;
+
+/// ← in the remove-downtime dialog: the previous (narrower) scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct PreviousScope;
+
 /// Registers the dialogs' keys. Tab and Enter are bound over the text
 /// fields (`ActionDialog > Input`), registered after gpui-component's own
 /// bindings, so Tab moves between fields instead of indenting and Enter
-/// sends instead of typing a new line (Shift-Enter still does).
+/// sends instead of typing a new line (Shift-Enter still does). A dialog
+/// without fields keeps Tab and Shift-Tab to itself: the keyboard never
+/// leaves an open dialog for the views behind it.
 pub(crate) fn bind_keys(cx: &mut App) {
     let field = Some("ActionDialog > Input");
     let dialog = Some(DIALOG_CONTEXT);
+    let fieldless = Some(FIELDLESS_CONTEXT);
+    let confirm = Some(CONFIRM_CONTEXT);
+    let removal = Some(REMOVAL_CONTEXT);
     cx.bind_keys([
+        KeyBinding::new("tab", NextField, fieldless),
+        KeyBinding::new("shift-tab", PreviousField, fieldless),
+        KeyBinding::new("tab", NextField, confirm),
+        KeyBinding::new("shift-tab", PreviousField, confirm),
+        KeyBinding::new("tab", NextField, removal),
+        KeyBinding::new("shift-tab", PreviousField, removal),
+        KeyBinding::new("enter", SendDialog, removal),
+        KeyBinding::new("secondary-enter", SendDialogNow, removal),
+        KeyBinding::new("left", PreviousScope, removal),
+        KeyBinding::new("right", NextScope, removal),
         KeyBinding::new("tab", NextField, field),
         KeyBinding::new("shift-tab", PreviousField, field),
         KeyBinding::new("enter", SendDialog, field),
@@ -421,6 +452,14 @@ pub(crate) struct ActionDialog {
     /// What the target box lists: every object (with all services, each
     /// service of the hosts), or every downtime a removal removes.
     listed: Rc<Vec<Listed>>,
+    /// The rows the target box is sized for: the most any choice of the
+    /// dialog lists (`all services` on or off, either removal scope), so
+    /// the box, and the dialog with it, keeps its size and place when the
+    /// choice changes.
+    box_rows: usize,
+    /// The main button's width when its label changes with a choice: the
+    /// longest label, so `cancel` never moves.
+    submit_width: Option<gpui::Pixels>,
     /// Scrolls the target box.
     target_scroll: UniformListScrollHandle,
     focus_handle: FocusHandle,
@@ -528,7 +567,7 @@ impl ActionDialog {
         if let Some((_, first)) = inputs.first() {
             first.focus(window, cx);
         }
-        Self {
+        let mut dialog = Self {
             state,
             environment_id,
             kind,
@@ -542,11 +581,15 @@ impl ActionDialog {
             endpoints,
             endpoint_default,
             triggers,
+            box_rows: listed.len(),
+            submit_width: None,
             listed,
             target_scroll: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
-        }
+        };
+        dialog.size_for_every_choice(cx);
+        dialog
     }
 
     /// The removal dialog for `removal` (a pane's *remove downtime*, an
@@ -572,7 +615,60 @@ impl ActionDialog {
         );
         dialog.form = Form::Removal(removal);
         dialog.refresh_listed(cx);
+        dialog.size_for_every_choice(cx);
         dialog
+    }
+
+    /// The forms a choice in the dialog can lead to: either `all services`
+    /// for a host's downtime, every scope of a removal; else the form alone.
+    fn choices(&self) -> Vec<Form> {
+        match &self.form {
+            Form::Removal(removal) => (0..removal.scopes.len().max(1))
+                .map(|chosen| {
+                    let mut removal = removal.clone();
+                    removal.chosen = chosen;
+                    Form::Removal(removal)
+                })
+                .collect(),
+            Form::Downtime(form) => [true, false]
+                .into_iter()
+                .map(|all_services| {
+                    let mut form = form.clone();
+                    form.all_services = all_services;
+                    Form::Downtime(form)
+                })
+                .collect(),
+            form => vec![form.clone()],
+        }
+    }
+
+    /// Sizes the target box for the choice that lists the most, and the
+    /// main button for its longest label: changing a choice then moves
+    /// nothing (PLAN 4.3).
+    fn size_for_every_choice(&mut self, cx: &App) {
+        let state = self.state.read(cx);
+        let snapshot = self
+            .environment_id
+            .as_deref()
+            .and_then(|id| state.snapshot_of(id))
+            .unwrap_or_else(|| state.snapshot());
+        let counts: Vec<usize> = self
+            .choices()
+            .iter()
+            .map(|form| listed_targets(&self.eligible, form, snapshot).len())
+            .collect();
+        self.box_rows = counts.iter().copied().max().unwrap_or(0);
+        let labels: std::collections::BTreeSet<String> = counts
+            .iter()
+            .map(|count| submit_label(self.kind, &self.form, *count))
+            .collect();
+        self.submit_width = (labels.len() > 1).then(|| {
+            let theme = cx.theme();
+            labels
+                .iter()
+                .map(|label| Button::width_for(theme, label, true))
+                .fold(px(0.), gpui::Pixels::max)
+        });
     }
 
     /// Lists the targets again (after `all services` or the removal's
@@ -593,6 +689,13 @@ impl ActionDialog {
         self.listed.iter().map(|row| row.object.clone()).collect()
     }
 
+    /// The rows the target box is sized for, and the main button's fixed
+    /// width (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn box_geometry(&self) -> (usize, Option<gpui::Pixels>) {
+        (self.box_rows, self.submit_width)
+    }
+
     /// The main button's label (tests).
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn submit_text(&self) -> String {
@@ -602,14 +705,7 @@ impl ActionDialog {
     /// The main button: `schedule 24 downtimes`, `remove downtime`; the
     /// others say what they do.
     fn submit_label(&self) -> String {
-        let count = self.listed.len();
-        match (&self.form, count) {
-            (Form::Downtime(_), 0 | 1) => "schedule downtime".to_owned(),
-            (Form::Downtime(_), count) => format!("schedule {count} downtimes"),
-            (Form::Removal(_), 0 | 1) => "remove downtime".to_owned(),
-            (Form::Removal(_), count) => format!("remove {count} downtimes"),
-            _ => self.kind.submit_label().to_owned(),
-        }
+        submit_label(self.kind, &self.form, self.listed.len())
     }
 
     /// Where the keyboard goes when the dialog opens: its first field.
@@ -770,9 +866,12 @@ impl ActionDialog {
     }
 
     /// Tab: the next shown field (wrapping), Shift-Tab the previous.
+    /// A dialog without fields (or asking for confirmation) keeps the
+    /// keyboard where it is.
     fn move_focus(&self, forward: bool, window: &mut Window, cx: &mut App) {
         let inputs = self.visible_inputs();
-        if inputs.is_empty() {
+        if inputs.is_empty() || self.confirming {
+            self.focus_handle.focus(window, cx);
             return;
         }
         let current = inputs
@@ -799,6 +898,36 @@ impl ActionDialog {
         cx: &mut Context<Self>,
     ) {
         self.move_focus(false, window, cx);
+    }
+
+    /// ← / →: the removal's previous or next scope (the box keeps its
+    /// size; only the rows and the count change).
+    fn step_scope(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Form::Removal(removal) = &mut self.form else {
+            return;
+        };
+        let count = removal.scopes.len();
+        if count < 2 {
+            return;
+        }
+        let chosen = if forward {
+            (removal.chosen + 1).min(count - 1)
+        } else {
+            removal.chosen.saturating_sub(1)
+        };
+        if chosen != removal.chosen {
+            removal.chosen = chosen;
+            self.refresh_listed(cx);
+            cx.notify();
+        }
+    }
+
+    fn on_next_scope(&mut self, _: &NextScope, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_scope(true, cx);
+    }
+
+    fn on_previous_scope(&mut self, _: &PreviousScope, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_scope(false, cx);
     }
 
     fn on_confirm(&mut self, _: &ConfirmCommand, window: &mut Window, cx: &mut Context<Self>) {
@@ -1015,7 +1144,7 @@ impl ActionDialog {
             clippy::cast_precision_loss,
             reason = "a row count, far below f32's exact range"
         )]
-        let rows = self.listed.len() as f32;
+        let rows = self.box_rows.max(self.listed.len()) as f32;
         let height = (rows * TARGET_ROW).min(most).max(TARGET_ROW);
         let mut column = div()
             .flex()
@@ -1045,7 +1174,8 @@ impl ActionDialog {
                         .track_scroll(&scroll)
                         .size_full(),
                     )
-                    .child(Scrollbar::vertical(&scroll)),
+                    // Always shown while rows are out of view, as drawn.
+                    .child(Scrollbar::vertical(&scroll).mode(ScrollbarMode::Always)),
             );
         }
         let box_element = div()
@@ -1410,6 +1540,69 @@ impl ActionDialog {
         )
     }
 
+    /// For a service's downtime that belongs to its host's: what it is,
+    /// and the choice of scope (← / → choose it, as the hint says).
+    fn scope_choice(removal: &Removal, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
+        let colors = theme.colors;
+        let mut blocks = Vec::new();
+        let host = removal.host.clone().unwrap_or_default();
+        let text = format!(
+            "This downtime was scheduled on the host {host} for the host and all its \
+             services. Remove it for:"
+        );
+        let start = "This downtime was scheduled on the host ".len();
+        blocks.push(
+            div()
+                .flex()
+                .items_end()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(theme.text.body)
+                        .line_height(gpui::relative(1.5))
+                        .text_color(colors.text_secondary)
+                        .child(
+                            gpui::StyledText::new(SharedString::from(text)).with_highlights([(
+                                start..start + host.len(),
+                                gpui::HighlightStyle {
+                                    color: Some(colors.text_strong),
+                                    ..gpui::HighlightStyle::default()
+                                },
+                            )]),
+                        ),
+                )
+                // The keys that choose the scope, as the buttons show
+                // theirs.
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(theme.text.hint)
+                        .text_color(colors.text_faint)
+                        .child("← →"),
+                )
+                .into_any_element(),
+        );
+        let mut choice = Segmented::new("removal-scope");
+        for scope in &removal.scopes {
+            choice = choice.option(scope.label.clone());
+        }
+        blocks.push(
+            choice
+                .selected(removal.chosen)
+                .on_select(cx.listener(|this, index: &usize, _, cx| {
+                    if let Form::Removal(removal) = &mut this.form {
+                        removal.chosen = *index;
+                    }
+                    this.refresh_listed(cx);
+                    cx.notify();
+                }))
+                .into_any_element(),
+        );
+        blocks
+    }
+
     /// The removal's body: the choice of scope for a service's downtime
     /// that belongs to its host's, the list of every downtime it removes
     /// with what they share, what it skips, and what follows.
@@ -1422,47 +1615,11 @@ impl ActionDialog {
     ) -> Vec<AnyElement> {
         let colors = theme.colors;
         let now = Timestamp::now();
-        let mut blocks = Vec::new();
-        if removal.scopes.len() > 1 {
-            let host = removal.host.clone().unwrap_or_default();
-            let text = format!(
-                "This downtime was scheduled on the host {host} for the host and all its \
-                 services. Remove it for:"
-            );
-            let start = "This downtime was scheduled on the host ".len();
-            blocks.push(
-                div()
-                    .text_size(theme.text.body)
-                    .line_height(gpui::relative(1.5))
-                    .text_color(colors.text_secondary)
-                    .child(
-                        gpui::StyledText::new(SharedString::from(text)).with_highlights([(
-                            start..start + host.len(),
-                            gpui::HighlightStyle {
-                                color: Some(colors.text_strong),
-                                ..gpui::HighlightStyle::default()
-                            },
-                        )]),
-                    )
-                    .into_any_element(),
-            );
-            let mut choice = Segmented::new("removal-scope");
-            for scope in &removal.scopes {
-                choice = choice.option(scope.label.clone());
-            }
-            blocks.push(
-                choice
-                    .selected(removal.chosen)
-                    .on_select(cx.listener(|this, index: &usize, _, cx| {
-                        if let Form::Removal(removal) = &mut this.form {
-                            removal.chosen = *index;
-                        }
-                        this.refresh_listed(cx);
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
+        let mut blocks = if removal.scopes.len() > 1 {
+            Self::scope_choice(removal, theme, cx)
+        } else {
+            Vec::new()
+        };
         let scope = removal.scope();
         let count = scope.removed.len();
         let mut list = Field::new(format!(
@@ -1488,7 +1645,6 @@ impl ActionDialog {
                         scope
                             .skipped
                             .iter()
-                            .take(3)
                             .map(|skipped| describe_objects(std::slice::from_ref(&skipped.object)))
                             .collect::<Vec<_>>()
                             .join(", "),
@@ -1498,10 +1654,16 @@ impl ActionDialog {
                     .into_any_element(),
             );
         }
+        // With a choice of scope, what follows keeps two lines' room, so a
+        // shorter text for the other scope doesn't move the buttons.
+        let reserve = removal.scopes.len() > 1;
         blocks.push(
             div()
                 .text_size(theme.text.label)
                 .line_height(gpui::relative(1.45))
+                .when(reserve, |text| {
+                    text.min_h((theme.text.label * 1.45).ceil() * 2. + px(1.))
+                })
                 .text_color(colors.text_faint)
                 .child(removal.consequence(snapshot, now))
                 .into_any_element(),
@@ -1754,8 +1916,11 @@ impl ActionDialog {
         )
         .action({
             let removal = matches!(self.form, Form::Removal(_));
-            let button = Button::new("action-submit", self.submit_label())
-                .key_hint("↵")
+            let mut button = Button::new("action-submit", self.submit_label()).key_hint("↵");
+            if let Some(width) = self.submit_width {
+                button = button.width(width);
+            }
+            let button = button
                 .disabled(self.eligible.targets.is_empty() || (removal && self.listed.is_empty()))
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.submit(window, cx);
@@ -1766,6 +1931,18 @@ impl ActionDialog {
                 button.primary()
             }
         })
+    }
+}
+
+/// The main button's label for `count` listed targets: `schedule 24
+/// downtimes`, `remove downtime`; the others say what they do.
+fn submit_label(kind: DialogKind, form: &Form, count: usize) -> String {
+    match (form, count) {
+        (Form::Downtime(_), 0 | 1) => "schedule downtime".to_owned(),
+        (Form::Downtime(_), count) => format!("schedule {count} downtimes"),
+        (Form::Removal(_), 0 | 1) => "remove downtime".to_owned(),
+        (Form::Removal(_), count) => format!("remove {count} downtimes"),
+        _ => kind.submit_label().to_owned(),
     }
 }
 
@@ -1891,43 +2068,34 @@ fn listed_targets(eligible: &Eligible, form: &Form, snapshot: &Snapshot) -> Vec<
     }
 }
 
-/// What a removal sends: `remove-downtime` for every downtime of objects,
-/// and one `remove-downtime` for the downtimes it names (their children go
-/// with them; Icinga takes the names in batches).
+/// What a removal sends: one `remove-downtime` for the downtimes it lists,
+/// by their full names (their children go with them; Icinga takes the
+/// names in batches). Nothing is removed that the dialog didn't list.
 pub(crate) fn removal_specs(removal: &Removal) -> Vec<ActionSpec> {
-    let mut specs = Vec::new();
     let mut names = Vec::new();
     let mut objects = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for send in &removal.scope().send {
-        match send {
-            Send::One {
-                name,
-                objects: changed,
-            } => {
-                names.push(name.clone());
-                for object in changed {
-                    if seen.insert(object.clone()) {
-                        objects.push(object.clone());
-                    }
-                }
+    for Send::One {
+        name,
+        objects: changed,
+    } in &removal.scope().send
+    {
+        names.push(name.clone());
+        for object in changed {
+            if seen.insert(object.clone()) {
+                objects.push(object.clone());
             }
-            Send::AllOf(changed) => specs.push(ActionSpec::for_objects(
-                ObjectAction::RemoveDowntimes,
-                ic_model::Action::RemoveAllDowntimes,
-                changed.clone(),
-            )),
         }
     }
-    if !names.is_empty() {
-        specs.push(ActionSpec {
-            kind: ObjectAction::RemoveNamedDowntimes(names.clone()),
-            action: ic_model::Action::RemoveAllDowntimes,
-            target: ActionTarget::Downtimes(names),
-            objects,
-        });
+    if names.is_empty() {
+        return Vec::new();
     }
-    specs
+    vec![ActionSpec {
+        kind: ObjectAction::RemoveNamedDowntimes(names.clone()),
+        action: ic_model::Action::RemoveAllDowntimes,
+        target: ActionTarget::Downtimes(names),
+        objects,
+    }]
 }
 
 /// An object's state for its dot.
@@ -1982,6 +2150,22 @@ impl ActionDialog {
             ],
             // Drawn with its list (`render_removal`).
             Form::Removal(_) => Vec::new(),
+        }
+    }
+}
+
+impl ActionDialog {
+    /// The keys that apply: the confirmation step's, the removal's (← / →
+    /// choose the scope), a dialog without fields', or the fields'.
+    fn key_context(&self) -> &'static str {
+        if self.confirming {
+            CONFIRM_CONTEXT
+        } else if matches!(self.form, Form::Removal(_)) {
+            REMOVAL_CONTEXT
+        } else if self.inputs.is_empty() {
+            FIELDLESS_CONTEXT
+        } else {
+            DIALOG_CONTEXT
         }
     }
 }
@@ -2071,19 +2255,15 @@ impl Render for ActionDialog {
         let body = self.footer(body, confirming.is_some(), cx);
         div()
             .id("action-dialog")
-            .key_context(if self.confirming {
-                CONFIRM_CONTEXT
-            } else if self.inputs.is_empty() {
-                FIELDLESS_CONTEXT
-            } else {
-                DIALOG_CONTEXT
-            })
+            .key_context(self.key_context())
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_next_field))
             .on_action(cx.listener(Self::on_previous_field))
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_send))
             .on_action(cx.listener(Self::on_send_now))
+            .on_action(cx.listener(Self::on_next_scope))
+            .on_action(cx.listener(Self::on_previous_scope))
             .flex()
             .flex_col()
             .min_h_0()

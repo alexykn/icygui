@@ -50,6 +50,7 @@ pub use paths::Paths;
 pub use share::{export_groups, import_groups};
 pub use store::ConfigStore;
 pub use ui_state::{
-    EnvironmentUiState, MAX_TABS, StateStore, UI_STATE_VERSION, UiState, WindowState,
+    EnvironmentUiState, ListOptionsState, MAX_TABS, StateStore, UI_STATE_VERSION, UiState,
+    WindowState,
 };
 pub use validate::{MIN_EVENT_LOG_RETENTION_HOURS, MIN_RECONCILE_INTERVAL_SECS, ValidationIssue};

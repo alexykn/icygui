@@ -117,6 +117,17 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-n", NewDashboard, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new("escape", CloseModal, Some(MODAL_CONTEXT)),
         KeyBinding::new("enter", ConfirmModal, Some(CONFIRM_CONTEXT)),
+        // A confirmation has no fields: Tab keeps the keyboard in it.
+        KeyBinding::new(
+            "tab",
+            crate::lists::dialog::KeepFocus,
+            Some(CONFIRM_CONTEXT),
+        ),
+        KeyBinding::new(
+            "shift-tab",
+            crate::lists::dialog::KeepFocus,
+            Some(CONFIRM_CONTEXT),
+        ),
     ]);
     actions::bind_keys(cx);
     crate::editor::bind_keys(cx);
@@ -2528,6 +2539,11 @@ impl Workspace {
             .key_context(CONFIRM_CONTEXT)
             .track_focus(&self.modal_focus)
             .on_action(cx.listener(Self::on_confirm))
+            .on_action(
+                cx.listener(|this, _: &crate::lists::dialog::KeepFocus, window, cx| {
+                    this.modal_focus.focus(window, cx);
+                }),
+            )
             .child(
                 DialogBody::new(confirmation.title.clone())
                     .child(

@@ -91,6 +91,21 @@ pub(crate) fn list_denial(info: Option<&ApiInfo>, kind: ListKind) -> Option<Stri
     })
 }
 
+/// Why the acknowledged list can't say who acknowledged a problem and why
+/// (that is the acknowledgement's comment), or `None` if it can: without
+/// `objects/query/Comment` there are no comments, so *only mine* can't tell
+/// whose an acknowledgement is either.
+pub(crate) fn ack_detail_denial(info: Option<&ApiInfo>) -> Option<String> {
+    let info = info?;
+    (!info.allows("objects/query/Comment")).then(|| {
+        format!(
+            "The API user {} may not read comments (needs objects/query/Comment): who \
+             acknowledged and why aren't known, so only mine can't tell whose they are.",
+            info.user
+        )
+    })
+}
+
 /// Whether the panes can say who Icinga notified (PANE-06): `Some(false)`
 /// when the user may not read Icinga's `Notification` objects.
 pub(crate) fn can_read_notifications(info: Option<&ApiInfo>) -> Option<bool> {

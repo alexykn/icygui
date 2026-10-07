@@ -35,8 +35,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ic_config::{
-    AuthConfig, Config, Dashboard, DashboardGroup, Environment, EnvironmentUiState, MAX_TABS,
-    ObjectKind, UiState, View, WindowState,
+    AuthConfig, Config, Dashboard, DashboardGroup, Environment, EnvironmentUiState,
+    ListOptionsState, MAX_TABS, ObjectKind, UiState, View, WindowState,
 };
 use ic_core::snapshot::{DashboardResult, Snapshot};
 use ic_core::{ApiInfo, Command, ConnectionState, CoreEvent, CoreHandle};
@@ -199,6 +199,9 @@ pub(crate) struct AppState {
     /// The list shown instead of the selected dashboard (never together
     /// with `active_tab`).
     active_list: Option<ListKind>,
+    /// Each list's choices in the active environment, by list id (kept
+    /// with the UI state).
+    list_options: BTreeMap<String, ListOptionsState>,
     /// When this client started recording events (the history tab's
     /// "recorded locally since …").
     started_at: Timestamp,
@@ -265,6 +268,7 @@ impl AppState {
             active_tab: None,
             lists: Vec::new(),
             active_list: None,
+            list_options: BTreeMap::new(),
             started_at: now,
             mode,
             persistence: None,
@@ -364,9 +368,11 @@ impl AppState {
             self.active_tab = None;
             self.lists.clear();
             self.active_list = None;
+            self.list_options.clear();
             return;
         };
         let saved = self.ui.environment(&id);
+        self.list_options = saved.list_options.clone();
         self.selected = saved
             .selected
             .filter(|reference| self.dashboard(reference).is_some())
@@ -556,6 +562,26 @@ impl AppState {
     /// Why the user may not read what list `kind` shows, if it may not.
     pub(crate) fn list_denial(&self, kind: ListKind) -> Option<String> {
         permissions::list_denial(self.engine.permissions.as_ref(), kind)
+    }
+
+    /// Why *only mine* can't be used in the list `kind`: no author, or
+    /// (the acknowledged list) no comments to read who acknowledged.
+    pub(crate) fn only_mine_denial(&self, kind: ListKind) -> Option<String> {
+        if self.author().is_empty() {
+            return Some("No author is set for this environment".to_owned());
+        }
+        match kind {
+            ListKind::Acknowledged => {
+                permissions::ack_detail_denial(self.engine.permissions.as_ref())
+            }
+            ListKind::Downtimes | ListKind::Comments => None,
+        }
+    }
+
+    /// Why the acknowledged list can't say who acknowledged and why, if it
+    /// can't.
+    pub(crate) fn ack_detail_denial(&self) -> Option<String> {
+        permissions::ack_detail_denial(self.engine.permissions.as_ref())
     }
 
     /// The active environment's author (*only mine*): its `author`, else
@@ -801,6 +827,7 @@ impl AppState {
             tabs: self.tabs.iter().map(ObjectKey::full_name).collect(),
             lists: self.lists.iter().map(|kind| kind.id().to_owned()).collect(),
             selected: self.selected.clone(),
+            list_options: self.list_options.clone(),
         };
         if self.ui.set_environment(&id, state) {
             self.save_ui();
@@ -861,6 +888,30 @@ impl AppState {
     /// The lists open as tabs, in sidebar order.
     pub(crate) fn lists(&self) -> &[ListKind] {
         &self.lists
+    }
+
+    /// The choices saved for the list `kind` in the active environment
+    /// (the defaults when none are).
+    pub(crate) fn list_options(&self, kind: ListKind) -> ListOptionsState {
+        self.list_options
+            .get(kind.id())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Keeps the list `kind`'s choices with the UI state (saved if they
+    /// changed).
+    pub(crate) fn set_list_options(&mut self, kind: ListKind, options: ListOptionsState) {
+        let changed = if options == ListOptionsState::default() {
+            self.list_options.remove(kind.id()).is_some()
+        } else {
+            self.list_options
+                .insert(kind.id().to_owned(), options.clone())
+                != Some(options)
+        };
+        if changed {
+            self.remember_environment_ui();
+        }
     }
 
     /// The list shown instead of the dashboard, if any.

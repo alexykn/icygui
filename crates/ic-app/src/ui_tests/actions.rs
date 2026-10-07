@@ -247,12 +247,19 @@ fn downtimes_take_presets_and_check_their_window() {
             });
             app.draw(cx);
         };
+        let geometry = dialog(app, cx).read(cx).box_geometry();
+        assert_eq!(geometry.0, services + 1);
         flip(app, cx, false);
         assert_eq!(
             dialog(app, cx).read(cx).listed_objects(),
             vec![ObjectKey::host("db-prod-03")]
         );
         assert_eq!(dialog(app, cx).read(cx).submit_text(), "schedule downtime");
+        assert_eq!(
+            dialog(app, cx).read(cx).box_geometry(),
+            geometry,
+            "switching all services off moves nothing"
+        );
         flip(app, cx, true);
         type_into(app, cx, FormField::Comment, "kernel update");
         type_into(app, cx, FormField::End, "yesterday");
@@ -462,6 +469,10 @@ fn checking_many_objects_asks_first() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one story: each removal asked for, listed and sent"
+)]
 fn acks_and_comments_go_at_once_downtimes_list_what_goes() {
     run(FixtureOptions::default(), |app, cx| {
         let recorder = record(app, cx);
@@ -543,10 +554,13 @@ fn acks_and_comments_go_at_once_downtimes_list_what_goes() {
         assert_eq!(modal(app, cx), None);
         let actions = recorder.actions();
         assert_eq!(actions.len(), 3);
-        assert_eq!(
-            actions[2].1,
-            ActionTarget::Objects(vec![with_downtime.clone()])
-        );
+        // By the names listed, never by object: a downtime scheduled after
+        // the dialog opened was never shown, and stays.
+        let listed: Vec<String> = app.state.read(cx).snapshot().downtimes[&with_downtime]
+            .iter()
+            .map(|downtime| downtime.name.clone())
+            .collect();
+        assert_eq!(actions[2].1, ActionTarget::Downtimes(listed));
         assert_eq!(actions[2].2, Action::RemoveAllDowntimes);
 
         // ... and one by name (the banner's *remove downtime*).
@@ -781,6 +795,112 @@ fn a_services_downtime_from_its_host_is_removed_whole_or_alone() {
         assert_eq!(actions.len(), 2, "{actions:?}");
         assert_eq!(actions[1].1, ActionTarget::Downtimes(vec![parent]));
         assert_eq!(actions[1].2, Action::RemoveAllDowntimes);
+    });
+}
+
+/// Whether the keyboard is still inside the open action dialog.
+fn dialog_has_focus(app: &Harness, cx: &mut App) -> bool {
+    let dialog = dialog(app, cx);
+    app.in_window(cx, |window, cx| {
+        gpui::Focusable::focus_handle(dialog.read(cx), cx).contains_focused(window, cx)
+    })
+}
+
+#[test]
+fn the_removal_scope_goes_by_keyboard_and_tab_stays_in_the_dialog() {
+    run(FixtureOptions::default(), |app, cx| {
+        let recorder = record(app, cx);
+        let parent = host_downtime_with_its_services(app, cx);
+        let load = ObjectKey::service("edge-fra-04", "load");
+        let child = format!("{}!child", load.full_name());
+        let before = app
+            .state
+            .read(cx)
+            .selected_dashboard()
+            .map(|(_, dashboard)| dashboard.name.clone());
+        request(
+            app,
+            cx,
+            ObjectAction::RemoveDowntime(child.clone()),
+            vec![load.clone()],
+        );
+        assert!(dialog_has_focus(app, cx));
+        // Tab and Shift-Tab keep the keyboard in the dialog: nothing behind
+        // it takes the keys that follow.
+        app.keys(cx, "tab");
+        assert!(dialog_has_focus(app, cx), "Tab stays in the dialog");
+        app.keys(cx, "shift-tab j j j");
+        assert!(dialog_has_focus(app, cx), "Shift-Tab stays in the dialog");
+        assert_eq!(
+            app.state
+                .read(cx)
+                .selected_dashboard()
+                .map(|(_, dashboard)| dashboard.name.clone()),
+            before
+        );
+        assert!(recorder.actions().is_empty());
+        // ← / → choose the scope: this service only, then the whole again.
+        let geometry = dialog(app, cx).read(cx).box_geometry();
+        let whole = dialog(app, cx).read(cx).listed_objects().len();
+        assert_eq!(geometry.0, whole, "sized for the widest scope");
+        assert!(geometry.1.is_some(), "the button fits its longest label");
+        app.keys(cx, "left");
+        assert_eq!(
+            dialog(app, cx).read(cx).listed_objects(),
+            vec![load.clone()]
+        );
+        assert_eq!(
+            dialog(app, cx).read(cx).box_geometry(),
+            geometry,
+            "the box and the button keep their size"
+        );
+        app.keys(cx, "right");
+        assert!(dialog(app, cx).read(cx).listed_objects().len() > 1);
+        app.keys(cx, "left enter");
+        let actions = recorder.actions();
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].1, ActionTarget::Downtimes(vec![child.clone()]));
+        // → past the last scope stays on it: the host and its services.
+        request(
+            app,
+            cx,
+            ObjectAction::RemoveDowntime(child.clone()),
+            vec![load.clone()],
+        );
+        app.keys(cx, "left right right enter");
+        let actions = recorder.actions();
+        assert_eq!(actions.len(), 2, "{actions:?}");
+        assert_eq!(actions[1].1, ActionTarget::Downtimes(vec![parent]));
+    });
+}
+
+#[test]
+fn tab_in_a_dialog_without_fields_stays_in_it() {
+    run(FixtureOptions::default(), |app, cx| {
+        let recorder = record(app, cx);
+        let host = ObjectKey::host("edge-fra-04");
+        let before = app
+            .state
+            .read(cx)
+            .selected_dashboard()
+            .map(|(_, dashboard)| dashboard.name.clone());
+        request(app, cx, ObjectAction::RemoveDowntimes, vec![host]);
+        assert_eq!(
+            modal(app, cx),
+            Some(ModalKind::Action(DialogKind::RemoveDowntime))
+        );
+        app.keys(cx, "tab");
+        assert!(dialog_has_focus(app, cx));
+        app.keys(cx, "tab enter");
+        assert_eq!(
+            app.state
+                .read(cx)
+                .selected_dashboard()
+                .map(|(_, dashboard)| dashboard.name.clone()),
+            before
+        );
+        assert_eq!(modal(app, cx), None, "Enter removed, as asked");
+        assert_eq!(recorder.actions().len(), 1);
     });
 }
 

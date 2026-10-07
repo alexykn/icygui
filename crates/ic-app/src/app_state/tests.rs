@@ -358,6 +358,7 @@ fn a_saved_selection_that_no_longer_exists_falls_back_to_the_first_dashboard() {
             tabs: vec!["host!svc".to_owned(), "bad!".to_owned()],
             lists: vec!["acknowledged".to_owned(), "nonsense".to_owned()],
             selected: Some(reference("gone", "gone")),
+            ..EnvironmentUiState::default()
         },
     );
     ui.set_environment(
@@ -366,6 +367,7 @@ fn a_saved_selection_that_no_longer_exists_falls_back_to_the_first_dashboard() {
             tabs: vec!["x".to_owned()],
             lists: Vec::new(),
             selected: None,
+            ..EnvironmentUiState::default()
         },
     );
     let state = AppState::live(fixture::build(now()).config, ui, now());

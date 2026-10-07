@@ -539,3 +539,32 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .trd { padding: 2px 8px 10px 58px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--t-muted); }
 .chk-line { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.45; color: var(--t-muted); }
 .chk-line .ic { margin-top: 1px; }
+
+/* ---- NEW v1: filter autocomplete (topic 09) --------------------------- */
+.fx { position: relative; padding: 10px 14px; border-radius: 6px; border: 1px solid var(--bd-header); background: var(--code-bg); font-size: 12px; line-height: 20px; color: var(--t-code); white-space: pre; }
+.fx.focus { border-color: var(--accent); }
+.fx.bad { border-color: var(--crit); }
+.fx .tk-k { color: var(--t-muted); }           /* host., service. */
+.fx .tk-s { color: var(--ok); }                /* strings */
+.fx .tk-n { color: var(--unk); }               /* numbers, durations */
+.fx .tk-f { color: var(--accent); }            /* functions */
+.fx .tk-o { color: var(--t-faint); }           /* operators */
+.fx .squig { text-decoration: underline wavy var(--crit); text-decoration-skip-ink: none; text-underline-offset: 4px; }
+.fx .hov { background: var(--el-hover); border-radius: 2px; }
+.fx .ghost { color: var(--t-faint); }
+.cmp { position: absolute; z-index: 30; display: flex; align-items: flex-start; gap: 6px; }
+.cmp.flip { flex-direction: row-reverse; }
+.cmp .lst { width: 330px; padding: 4px; border-radius: 6px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 6px 18px var(--shadow-strong); display: flex; flex-direction: column; }
+.cmp .it { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; border-radius: 4px; font-size: 12.5px; color: var(--t); white-space: nowrap; }
+.cmp .it.sel { background: var(--row-sel); }
+.cmp .it .ic { color: var(--t-muted); }
+.cmp .it .m { color: var(--accent); }
+.cmp .it .ty { margin-left: auto; font-size: 11.5px; color: var(--t-faint); }
+.cmp .it .ex { font-size: 11.5px; color: var(--t-faint); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.cmp .ft { display: flex; gap: 14px; padding: 6px 8px 2px; margin-top: 4px; border-top: 1px solid var(--bd-window); font-size: 11px; color: var(--t-faint); white-space: nowrap; }
+.cmp .doc { width: 300px; padding: 10px 12px; border-radius: 6px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 6px 18px var(--shadow-strong); display: flex; flex-direction: column; gap: 8px; font-size: 12px; line-height: 1.5; color: var(--t-sec); }
+.cmp .doc .sig { font-size: 12.5px; color: var(--t-strong); }
+.cmp .doc code, .sighelp code { font-family: inherit; color: var(--t-code); background: var(--code-bg); border-radius: 3px; padding: 0 4px; }
+.sighelp { position: absolute; z-index: 30; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 6px 18px var(--shadow-strong); font-size: 12.5px; color: var(--t-sec); white-space: nowrap; display: flex; flex-direction: column; gap: 4px; }
+.sighelp .cur { color: var(--t-strong); text-decoration: underline; text-underline-offset: 3px; }
+.sighelp .d { font-size: 11.5px; color: var(--t-faint); white-space: normal; max-width: 360px; line-height: 1.45; }

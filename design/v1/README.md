@@ -470,3 +470,55 @@ preview with clashes; 8f a broken paste.
 2. Should notification settings come along by default (drawn: on), given
    that a colleague's notification habits may differ?
 3. ctrl-shift-c for copy-as-YAML: or only menus and the palette?
+
+---
+
+## 09 Filter autocomplete, in the style of Zed
+
+**Shows** (`09-filter-autocomplete.html`, each frame with a zoomed crop):
+9a attributes after `host.`; 9b custom variables after `host.vars.`; 9c
+values inside a string; 9d functions; 9e signature help inside a call; 9f
+hover help; 9g a parse error.
+
+**Decisions**
+
+- **The popup** is the app's menu card (element background, window border,
+  the menus' shadow), 330px, rows 26px: a kind icon in the mark slot (`T`
+  string, `#` number, `[]` array, `{}` dictionary, a toggle for bool, a
+  square-function for functions, a quote for values, `(x)` for custom
+  variables), the label with the fuzzy-matched characters in the accent
+  colour, faint extras (values in use), and the type or count right-aligned.
+  The selected row has the selected-row background. A footer row gives the
+  keys and how many there are (`7 of 41 variables`).
+- **The documentation card** beside it explains the selected item: its
+  signature and type, what it means, an example in a code chip, and what is
+  in use in this environment. It sits to the right of the list, and flips to
+  the left when the window has no room (always, from the inspector).
+- **Sources:** attributes per object type with their descriptions (a static
+  table); custom variables and values from the live object store, ranked by
+  how many objects have them; host group, service group, host and service
+  names and check commands for strings in those positions; functions and
+  methods with signatures; the state constants. Protected variables
+  (passwords, tokens) are listed by name, never with values.
+- **Keys:** completion opens as you type after `.`, inside a string, and on
+  an identifier, or with ctrl-space. ↑↓ choose, Tab or Enter accept, Esc
+  closes. Typing goes on filtering.
+- **Signature help** floats above the line inside a call, with the current
+  argument underlined and its description; completions for that argument show
+  below at the same time.
+- **Hover help** shows the documentation card for the token under the
+  pointer (the token gets the hover background), after the tooltip delay.
+- **Parse error:** a critical wavy underline at the position, the field's
+  border turns critical, and the status reads `line 3, column 23 · expected a
+  value`. Hovering the underline shows the full message and a hint (here the
+  values `service.state_type` takes). The preview keeps the last valid
+  result, and the summary bar says so.
+- **Syntax colours** in the field (new, small): attributes muted, strings in
+  the OK colour, numbers in the unknown colour, functions in the accent,
+  operators faint. They are all theme tokens, so the light theme follows.
+
+**Open questions**
+
+1. Syntax colouring in the filter field: wanted, or keep it monochrome like
+   the plugin output?
+2. Fuzzy (drawn: `r` matches `backup_retention`) or prefix-only matching?

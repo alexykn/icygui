@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 09 filter autocomplete</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">09</span><span class="topic-name">Autocomplete in the filter field, in the style of Zed</span></div>
+<p class="topic-intro">The dashboard editor's filter field (and every other filter field) completes as you type. The completions come from the parser at the cursor and from the live data: attributes with their type and a description after <b>host.</b> and <b>service.</b>; after <b>vars.</b>, the custom variables that exist, ranked by how many objects have them; inside a string, the values in use; functions with their signatures. Matching is fuzzy, with the matched characters in the accent colour. <b>Tab</b> or <b>Enter</b> accepts, <b>ctrl-space</b> opens the list, <b>Esc</b> closes it. The popup is the app's menu card; a documentation card beside it explains the selected item, and flips to the left when there is no room on the right. Hovering a name shows the same help. A parse error is underlined where it happens. Each frame has a zoomed crop.</p>
+<div class="shots"></div>
+<script>
+// ---- the editor -----------------------------------------------------------
+const rowsFor = {
+  pg: [
+    ['crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'],
+    ['warn', 'pg-connections', 'db-prod-03', 'WARNING - 182 of 200 per-db limit (orders)', '22m'],
+    ['warn', 'pg-bloat', 'db-prod-05', 'WARNING - check_postgres degraded', '50m'],
+    ['warn', 'load', 'db-prod-01', 'WARNING - load average 14.2, 12.8, 11.1', '1h'],
+    ['ok', 'pg-locks', 'db-prod-05', 'POSTGRES_LOCKS OK: total locks 214 (waiting 0)', '6d'],
+    ['ok', 'disk /var/lib/postgresql', 'db-prod-03', 'DISK OK - 63% used', '6d'],
+    ['ok', 'pg-wal-archive', 'db-prod-01', 'OK - last archived 00000001000004A9 12s ago', '9d'],
+  ],
+};
+function inspector({ filter, status = 'valid · 7 matches · 7 shown', tone = 'c-ok', fxCls = 'focus', below = '' }) {
+  return `<div class="pane" style="background:var(--win-bg)">
+    <div class="hbar pane-h" style="padding:0 18px"><span class="title">dashboard</span><span class="grow"></span></div>
+    <div class="col" style="gap:16px;padding:16px 18px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">name</div><span class="input">postgres</span></div><div class="field"><div class="lab">group</div>${select('overview')}</div></div>
+      <div class="field"><div class="lab">lists</div><span class="seg" style="display:flex"><span class="on" style="flex:1">services</span><span style="flex:1">hosts</span></span></div>
+      <div class="field"><div class="lab">filter<span class="st ${tone}">${status}</span></div><div class="fx ${fxCls}" style="min-height:60px">${filter}</div>${below}</div>
+      <div class="field"><div class="lab">show</div><div class="col" style="gap:8px">${sw(false, 'problems only')}${sw(false, 'hide handled problems')}</div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">sort</div>${select('severity')}</div><div class="field"><div class="lab">direction</div><span class="seg" style="display:flex"><span class="on" style="flex:1">↓ desc</span><span style="flex:1">↑ asc</span></span></div></div>
+      <div class="field"><div class="lab">group by</div>${select('none')}</div>
+      <div class="field"><div class="lab">notifications</div><span class="seg" style="display:flex">${['inherit', 'on', 'off', 'custom'].map((o, i) => `<span class="${i === 0 ? 'on' : ''}" style="flex:1">${o}</span>`).join('')}</span></div>
+    </div></div>`;
+}
+const editorHeader = `<div class="hbar"><span class="title">postgres</span><span class="acc" style="font-size:12px">editing · overview</span><span class="grow"></span>${btn('discard', { key: 'esc' })}${btn('save dashboard', { key: 'ctrl-s', primary: true })}</div>`;
+function editor(insp, { rowsList = rowsFor.pg, sumEnd = 'preview', overlay = '', sum } = {}) {
+  const s = sum || [['crit', 1, 'critical'], ['warn', 3, 'warning'], ['ok', 3, 'ok']];
+  return appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${editorHeader}${summary(s, sumEnd)}<div class="list">${rows(rowsList)}</div></div>${insp}</div>`, { activeItem: 'databases' }) + overlay;
+}
+// tokens
+const K = (t) => `<span class="tk-k">${t}</span>`;
+const Str = (t) => `<span class="tk-s">${t}</span>`;
+const N = (t) => `<span class="tk-n">${t}</span>`;
+const F = (t) => `<span class="tk-f">${t}</span>`;
+const O = (t) => `<span class="tk-o">${t}</span>`;
+const caret = (id) => `<span class="caret" id="${id}" style="height:14px"></span>`;
+const line1 = `${K('host.vars.role')} ${O('==')} ${Str('"postgres"')} ${O('&amp;&amp;')}`;
+
+// completion popup: items [icon, label html, type, extra], docs html
+function cmp(at, items, sel, { doc = '', foot = '', shift = 37 } = {}) {
+  const lst = `<div class="lst">${items.map(([ic, label, ty, ex], i) => `<div class="it${i === sel ? ' sel' : ''}">${icon(ic, 13)}<span>${label}</span>${ex ? `<span class="ex">${ex}</span>` : ''}<span class="ty">${ty}</span></div>`).join('')}${foot ? `<div class="ft">${foot}</div>` : ''}</div>`;
+  return `<div class="cmp" data-at="${at}" data-shift="${shift}">${lst}${doc ? `<div class="doc">${doc}</div>` : ''}</div>`;
+}
+const m = (s) => `<span class="m">${s}</span>`;
+const footStd = (n) => `<span>↑↓ choose</span><span>tab ↵ accept</span><span>esc</span><span style="margin-left:auto">${n}</span>`;
+
+// ---- 9a: host. ----------------------------------------------------------
+const f9a = `${line1}\n${K('host.')}${caret('c9a')}`;
+const items9a = [
+  ['type', 'name', 'string'], ['type', 'display_name', 'string'], ['type', 'address', 'string'], ['brackets', 'groups', 'array'],
+  ['braces', 'vars', 'dictionary'], ['hash', 'state', 'number'], ['hash', 'state_type', 'number'], ['toggle-left', 'problem', 'bool'],
+  ['toggle-left', 'handled', 'bool'], ['hash', 'downtime_depth', 'number'], ['type', 'check_command', 'string'], ['type', 'zone', 'string'],
+];
+const doc9a = `<span class="sig">host.groups <span class="faint">· array of strings</span></span>
+  <span>The host groups the host belongs to (its <i>groups</i> attribute).</span>
+  <span><code>"databases" in host.groups</code></span>
+  <span class="faint">In use: 10 groups, e.g. databases (9 hosts), edge-ams (12), k8s-workers (48).</span>`;
+shot('9a', '09-autocomplete-a-attributes', 'After <i>host.</i>: the host’s attributes, each with its type icon in the mark slot and its type at the right. The documentation card beside the list explains the selected attribute, gives an example, and says what is in use. There is no room to the right of the inspector, so the card flips to the left of the list.',
+  editor(inspector({ filter: f9a, status: 'incomplete', tone: 'faint' }), { overlay: cmp('c9a', items9a, 3, { doc: doc9a, foot: footStd('38 attributes') }) }),
+  { crops: '09-autocomplete-a-zoom:760,190,680,500' });
+
+// ---- 9b: host.vars.r (fuzzy, by frequency) ------------------------------
+const f9b = `${K('host.vars.')}r${caret('c9b')}`;
+const items9b = [
+  ['variable', `${m('r')}ole`, '412 hosts', 'postgres, mysql, k8s-worker'],
+  ['variable', `${m('r')}ack`, '188 hosts', 'ams-r12, ams-r14'],
+  ['variable', `${m('r')}egion`, '402 hosts', 'eu-west, eu-central'],
+  ['variable', `backup_${m('r')}etention`, '12 hosts', '14d, 30d'],
+  ['variable', `${m('r')}abbitmq_vhost`, '6 hosts', '/orders, /billing'],
+  ['variable', `snmp_${m('r')}etries`, '8 hosts', '3'],
+  ['variable', `disk_wa${m('r')}n`, '214 hosts', '85%, 90%'],
+];
+const doc9b = `<span class="sig">host.vars.role <span class="faint">· string · 412 hosts</span></span>
+  <span>A custom variable set in your Icinga config.</span>
+  <span class="faint">Values: k8s-worker 48, edge 24, web 14, postgres 9, mysql 3, and 11 more.</span>
+  <span><code>host.vars.role == "postgres"</code></span>`;
+shot('9b', '09-autocomplete-b-custom-vars', 'After <i>host.vars.</i>: the custom variables that really exist on your hosts, fuzzy-matched on “r” and ranked by match, then by how many hosts have them. Each shows how many hosts have it and a few of its values, faintly. Protected variables (passwords, tokens) are listed by name only; their values never show.',
+  editor(inspector({ filter: f9b, status: 'incomplete', tone: 'faint' }), { overlay: cmp('c9b', items9b, 0, { doc: doc9b, foot: footStd('7 of 41 variables') }), rowsList: rowsFor.pg.slice(0, 4) }),
+  { crops: '09-autocomplete-b-zoom:760,190,680,420' });
+
+// ---- 9c: values inside a string -----------------------------------------
+const f9c = `${K('host.vars.role')} ${O('==')} ${Str('"p')}${caret('c9c')}${Str('"')}`;
+const items9c = [
+  ['quote', `${m('p')}ostgres`, '9 hosts'], ['quote', `${m('p')}roxy`, '4 hosts'], ['quote', `${m('p')}gbouncer`, '3 hosts'],
+  ['quote', `${m('p')}rometheus`, '2 hosts'], ['quote', `${m('p')}uppet`, '1 host'], ['quote', `k8s-${m('p')}od-net`, '2 hosts'],
+];
+const doc9c = `<span class="sig">"postgres" <span class="faint">· 9 hosts</span></span>
+  <span class="faint">db-prod-01 to db-prod-06<br>db-stg-01, db-stg-02, db-lab-01</span>`;
+shot('9c', '09-autocomplete-c-values', 'Inside a string after <i>host.vars.role ==</i>: the values in use for that variable, with how many hosts have each. The same works for host groups after <i>in host.groups</i>, for service and host names, and for check commands.',
+  editor(inspector({ filter: f9c, status: 'valid · 0 matches', tone: 'faint' }), { overlay: cmp('c9c', items9c, 0, { doc: doc9c, foot: footStd('6 of 17 values') }), rowsList: [], sum: [['ok', 0, 'objects']], sumEnd: 'preview' }),
+  { crops: '09-autocomplete-c-zoom:760,190,680,360' });
+
+// ---- 9d: functions -------------------------------------------------------
+const f9d = `${line1}\nma${caret('c9d')}`;
+const items9d = [
+  ['square-function', `${m('ma')}tch(pattern, value)`, 'bool'],
+  ['square-function', `cidr_${m('ma')}tch(network, address)`, 'bool'],
+  ['hash', `service.${m('ma')}x_check_attempts`, 'number'],
+];
+const doc9d = `<span class="sig">match(pattern, value) <span class="faint">→ bool</span></span>
+  <span>Whether <i>value</i> matches the wildcard <i>pattern</i>: <code>*</code> any text, <code>?</code> one character.</span>
+  <span><code>match("db-prod-*", host.name)</code></span>
+  <span class="faint">Icinga’s own function, the one of <i>assign where</i>.</span>`;
+shot('9d', '09-autocomplete-d-functions', 'At the top level: functions with their signatures and return type (the square-function icon), then attributes of the dashboard’s objects that match. The card shows the signature, what it does and an example.',
+  editor(inspector({ filter: f9d, status: 'incomplete', tone: 'faint' }), { overlay: cmp('c9d', items9d, 0, { doc: doc9d, foot: footStd('3 matches') }) }),
+  { crops: '09-autocomplete-d-zoom:760,190,680,320' });
+
+// ---- 9e: signature help while typing arguments --------------------------
+const f9e = `${line1}\n${F('match')}(${Str('"db-prod-*"')}, ${caret('c9e')})`;
+const sig = `<div class="sighelp" data-at="c9e" data-place="above" data-shift="210"><span>match(pattern, <span class="cur">value</span>) <span class="faint">→ bool</span></span><span class="d">value: the text to test, usually a name or an address.</span></div>`;
+const items9e = [
+  ['type', `host.name`, 'string', 'db-prod-01'], ['type', `host.display_name`, 'string', 'db-prod-01'], ['type', `service.name`, 'string', 'pg-locks'],
+  ['type', `host.address`, 'string', '10.0.2.11'], ['type', `service.check_command`, 'string', 'check_postgres'],
+];
+shot('9e', '09-autocomplete-e-signature', 'Inside a call: the signature floats above the line with the current argument underlined, and the list below suggests what fits there (strings, for a pattern’s value). Zed shows signature help and completions the same way.',
+  editor(inspector({ filter: f9e, status: 'incomplete', tone: 'faint' }), { overlay: sig + cmp('c9e', items9e, 0, { foot: footStd('strings') }) }),
+  { crops: '09-autocomplete-e-zoom:760,150,680,360' });
+
+// ---- 9f: hover help -----------------------------------------------------
+const f9f = `${line1}\n${K('service.')}<span class="hov" id="h9f">${K('state')}</span> ${O('!=')} ${N('0')}`;
+const hov = `<div class="cmp" data-at="h9f" data-shift="0"><div class="doc" style="width:320px">
+  <span class="sig">service.state <span class="faint">· number</span></span>
+  <span>The service’s current state: <code>0</code> OK, <code>1</code> WARNING, <code>2</code> CRITICAL, <code>3</code> UNKNOWN. Whether it is soft or hard is <i>service.state_type</i>.</span>
+  <span class="faint">Now, in this filter: 1 critical, 3 warning, 0 unknown.</span></div></div>`;
+shot('9f', '09-autocomplete-f-hover', 'Hovering a name in the filter shows the same help as the completion card, with what it means here and now. It appears after the usual tooltip delay and works the same for functions, variables and values.',
+  editor(inspector({ filter: f9f, fxCls: '', status: 'valid · 4 matches · 4 shown' }), { overlay: hov, rowsList: rowsFor.pg.slice(0, 4), sum: [['crit', 1, 'critical'], ['warn', 3, 'warning']] }),
+  { crops: '09-autocomplete-f-zoom:760,190,680,320' });
+
+// ---- 9g: parse error -----------------------------------------------------
+const f9g = `${line1}\n(${K('service.state')} ${O('>=')} ${N('2')} ${O('||')}\n ${K('service.state_type')} ${O('==')}<span class="squig" id="e9g">)</span>${caret('c9g')}`;
+const errTip = `<div class="tip" data-at="e9g" data-place="below" data-shift="0" style="flex-direction:column;gap:2px;white-space:normal;width:260px"><span class="c-crit">expected a value after “==”</span><span class="faint">e.g. 1 (hard) or 0 (soft)</span></div>`;
+shot('9g', '09-autocomplete-g-parse-error', 'A parse error is underlined where it happens (a critical wavy line under the token), the field’s border turns critical, and the status says <i>line 3, column 23</i>. Hovering the underline shows the message in full, with a hint. The preview keeps the last valid result and says so.',
+  editor(inspector({ filter: f9g, fxCls: 'bad', status: 'line 3, column 23 · expected a value', tone: 'c-crit' }), { overlay: errTip, sumEnd: 'last valid result' }),
+  { crops: '09-autocomplete-g-zoom:760,190,680,320' });
+
+// ---- place the popups at their anchors ----------------------------------
+document.querySelectorAll('.frame').forEach((frame) => {
+  const fr = frame.getBoundingClientRect();
+  frame.querySelectorAll('[data-at]').forEach((pop) => {
+    const a = frame.querySelector('#' + pop.dataset.at);
+    if (!a) return;
+    const r = a.getBoundingClientRect();
+    const shift = Number(pop.dataset.shift || 0);
+    const above = pop.dataset.place === 'above';
+    let left = r.left - fr.left - shift;
+    const w = pop.offsetWidth;
+    if (left + w > fr.width - 8) {
+      if (pop.classList.contains('cmp') && pop.children.length > 1) pop.classList.add('flip');
+      left = fr.width - 8 - w;
+    }
+    pop.style.left = left + 'px';
+    pop.style.top = (above ? r.top - fr.top - pop.offsetHeight - 6 : r.bottom - fr.top + 6) + 'px';
+  });
+});
+</script>
+</body></html>

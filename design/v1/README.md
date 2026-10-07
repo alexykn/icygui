@@ -303,3 +303,59 @@ view's settings in the editor.
 1. Dim green for healthy hosts (drawn), or full green like Icinga Web's grid?
 2. Should a host in downtime show hollow even when it is OK? (Drawn: only
    problems are hollow, as in the list.)
+
+---
+
+## 06 Cluster health
+
+**Shows** (`06-cluster-health.html`): 6a the entry in the footer switcher;
+6b the page, healthy, as a tab; 6c the page with a satellite gone.
+
+**Decisions**
+
+- **Where it lives:** a `cluster health` row under the nodes in the footer
+  switcher (a heart-pulse icon in the mark slot, a faint `zones, queues,
+  checks/min` hint), and *cluster health* in the palette. Either opens the
+  page as a tab in the sidebar's `open` section, named `cluster health ·
+  prod-cluster`, with the environment's worst health as its dot. It is a
+  page, not a modal, so it can stay open on a second screen.
+- **Header:** `cluster health · prod-cluster · seen from master-01`, then
+  `updated 12s ago · every 30s`. The summary bar counts connected and
+  disconnected endpoints and ends with Icinga's version and uptime.
+- **Zones and endpoints:** a table with zones as group-header bands (the
+  worst endpoint's dot, the name in semibold, its parent, endpoint and host
+  counts) and their endpoints under them. Columns: state dot, endpoint, zone,
+  version, last message, messages in and out per second, status. The node
+  icygui is connected to has the selected-row background and `this node`.
+  Global zones are a faint line at the end (config only, no endpoints). A
+  version older than the masters' says so (`older version`).
+- **Numbers from /v1/status** as stat tiles (label, value, what it counts, a
+  12-point trend in the faint colour with the latest point in the accent).
+  Checks: active and passive checks per minute, average latency, average
+  execution time, pending, late (from icygui's own late-check tracking). Queues
+  and connections: API work queue, relay queue, cluster connections, HTTP
+  clients, IcingaDB, uptime. A value turns warning or critical only when it
+  is wrong, always next to its label.
+- **Icinga's global switches** (`enable_notifications`, active checks, event
+  handlers, flap detection, performance data) are read-only (D6): green
+  `on`, or warning `off`. A globally disabled switch is one of the first
+  things to check when monitoring seems quiet.
+- **Degraded (6c):** the endpoint and its zone turn critical. A critical
+  banner (today's Banner) says what it means for monitoring (`zone fra's
+  results are stale · 1,204 checks late · relay queue growing`), with a link
+  to the late checks, and the affected tiles colour themselves. The tab's dot
+  and the switcher's node dot follow.
+- **Cost:** none while the page is closed. It reads the 30-second status poll
+  and the endpoints and zones icygui already loads; the trends are 30 minutes
+  of those polls, kept in memory only (lost on restart). In quiet mode the
+  poll runs every 5 minutes, and the page says `quiet: every 5 min`.
+
+**Open questions**
+
+1. Should the trend lines exist at all (in-memory history, lost on restart),
+   or should the tiles show values only?
+2. Messages per second and last message come from the endpoint objects on the
+   connected node. Is that enough, or should a node's own view (its
+   `/v1/status`) be fetched on demand when its row is clicked?
+3. Should it be per environment only, or also have an `all environments`
+   overview?

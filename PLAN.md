@@ -341,13 +341,14 @@ Status markers: ✅ done · ⏳ in progress · ☐ not started.
 
 - **Downtimes very visible in the panes**, as in Icinga Web (not in the state dot): a service or host in downtime shows it prominently at the top of its pane: since when and until when, how long is left (a flexible downtime: its duration and whether it has started), who set it and why, and *remove downtime*; also when the downtime comes from the host (a service whose host is in downtime) and for a downtime scheduled in the future.
 
+- **Palette multi-select** (in v1 once its mock-up is approved; the user wants it designed with particular care): Shift+arrows extend the selection, Cmd/Ctrl+A selects all matches, Cmd/Ctrl+click toggles rows; the selection is drawn as one rounded outline per block, with a counter in the palette footer ("3 selected · ↵ acknowledge all"); the "all N matches" row lists every object it counts; Enter with a verb opens one bulk dialog for the selection, Enter without a verb opens a combined view of the selected hosts like Icinga Web's (a summary row per host, their services grouped by host, the bulk action bar; pinnable as a tab or savable as a dashboard).
+
 **Mock-up first:** everything visual (every item above that changes the UI) is mocked up first as HTML/CSS in `design/v1/`, in the style of the original design session (`design/project/`) and the current app, rendered to images and shown to the user; it is built only after the user approves the mock-up.
 
 **After the production trial:**
 
 - **Fixes from the trial**, including the macOS desktop integration (notifications, the menu-bar item, the tray, close to tray, quiet mode's window visibility), which so far is only compiled and unit-tested in CI and has never run on a real Mac.
 - **To confirm with the user in the trial:** on macOS (and X11 without a compositor) a window that other windows cover completely for half a minute counts as hidden and goes quiet (GPUI can't tell it from minimised there; §4.1 step 2, docs/spikes.md's Mac checklist).
-- **Palette multi-select** (decided after the user has tried the current palette at work; mock-up first): Shift+arrows extend the selection, Cmd/Ctrl+A selects all matches, Cmd/Ctrl+click toggles rows; the selection is drawn as one rounded outline per block, with a counter in the palette footer ("3 selected · ↵ acknowledge all"); the "all N matches" row lists every object it counts; Enter with a verb opens one bulk dialog for the selection, Enter without a verb opens a combined view of the selected hosts like Icinga Web's (a summary row per host, their services grouped by host, the bulk action bar; pinnable as a tab or savable as a dashboard).
 
 **To decide:** read-only users, user groups and check commands in the host pane's config tab and the service pane's check section (who Icinga would notify, with addresses and periods; the command line a check runs); needs `objects/query/{User,UserGroup,CheckCommand}` beyond today's least-privilege list.
 

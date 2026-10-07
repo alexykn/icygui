@@ -1,15 +1,19 @@
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>icygui v1 · 07 comment and downtime lists</title>
+<html><head><meta charset="utf-8"><title>icygui v1 · 07 comment, downtime and acknowledgement lists</title>
 <link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script></head>
 <body class="canvas">
-<div class="topic-head"><span class="topic-id">07</span><span class="topic-name">Lists of every comment and downtime</span></div>
-<p class="topic-intro">Two lists across all objects, from <b>/v1/objects/comments</b> and <b>/v1/objects/downtimes</b>, which icygui already loads. They open from the palette (<i>downtimes</i>, <i>comments</i>) as tabs in the sidebar's <i>open</i> section, and a dashboard view can list them too (frame 7e). The rows are today's list rows: the object's state circle in the mark slot, <i>service on host</i>, a second line with the window or the comment, and the tag. Selection, the selection bar and the keys work as in every list. Bulk removal always confirms and lists every downtime or comment it removes; acknowledgement comments and downtimes from the config are skipped, with the reason.</p>
+<div class="topic-head"><span class="topic-id">07</span><span class="topic-name">Lists of every downtime, comment and acknowledgement</span><span class="topic-id" style="background:#f2d974">revised</span></div>
+<p class="topic-intro">Three lists across all objects: <b>downtimes</b>, <b>comments</b> and <b>acknowledged</b> problems, from data icygui already loads. They open from the palette as tabs in the sidebar's <i>open</i> section only (there are no sidebar dashboards for them). Each list header has an <i>only mine</i> switch for what the environment's author set. The rows are today's list rows: the object's state circle in the mark slot (hollow = handled, so an object whose downtime is in effect is a hollow ring in its state colour, an OK host too), <i>service on host</i>, a second line with the details, and the tag. The downtime list separates <i>in effect</i> and <i>upcoming</i> with section headers, styled like the grouped list's group headers. Selection, the selection bar and the keys work as in every list. Bulk removal always confirms and lists every target. Config downtimes are locked and can't be removed.</p>
 <div class="shots"></div>
 <script>
 const groupsNoActive = [{ name: 'overview', items: SIDEBAR_GROUPS[0].items }, SIDEBAR_GROUPS[1], SIDEBAR_GROUPS[2]];
-const openSec = (which) => `<div class="sb-group"><div class="sb-gh active"><span class="name">open</span></div>
-  <div class="sb-item${which === 'downtimes' ? ' active' : ''}"><span class="faint" style="width:8px;display:flex;justify-content:center">${icon('calendar-clock', 11)}</span><span class="label">downtimes<span class="faint" style="margin-left:6px">prod-cluster</span></span><span class="count">10</span></div>
-  <div class="sb-item${which === 'comments' ? ' active' : ''}"><span class="faint" style="width:8px;display:flex;justify-content:center">${icon('message-square', 11)}</span><span class="label">comments<span class="faint" style="margin-left:6px">prod-cluster</span></span><span class="count">7</span></div></div>`;
+const openSec = (which) => {
+  const e = (key, ic, label, n) => `<div class="sb-item${which === key ? ' active' : ''}"><span class="faint" style="width:8px;display:flex;justify-content:center">${icon(ic, 11)}</span><span class="label">${label}<span class="faint" style="margin-left:6px">prod-cluster</span></span><span class="count">${n}</span></div>`;
+  return `<div class="sb-group"><div class="sb-gh active"><span class="name">open</span></div>${e('downtimes', 'calendar-clock', 'downtimes', 10)}${e('comments', 'message-square', 'comments', 7)}${e('acked', 'check', 'acknowledged', 7)}</div>`;
+};
+// a section header inside a list: the grouped list's group-header row
+const secRow = (ic, title, detail) => `<div class="row ghdr"><div class="lead"><span class="muted">${icon(ic, 14)}</span></div><div class="text"><span class="t1"><span class="n" style="font-weight:600">${title}</span></span><span class="t2">${detail}</span></div><span class="tag"></span></div>`;
+const onlyMine = (on) => `<span style="margin-right:6px">${sw(on, 'only mine')}</span>`;
 
 // downtime rows: [state, ring, name, host|null, since(caption), line2, progress|null, tagText, extra]
 function dtRow(d, { sel, marked } = {}) {
@@ -20,8 +24,8 @@ function dtRow(d, { sel, marked } = {}) {
   return row([st, title, host, l2, cap], { sel, marked, handled: ring, hostRow: !host, tag });
 }
 const DTS = [
-  ['ok', false, 'sw-core-ams-02', null, 'host', 'fixed · 14:00 → 15:00 · m.keller: line card swap in slot 3 (CHG-4468)', 20, '48m left', '+ 18 services'],
-  ['ok', false, 'k8s-node-07', null, 'host', 'fixed · 13:30 → 15:30 · m.keller: drained for the kernel 6.8 rollout', 35, '1h 18m left', '+ 23 services'],
+  ['ok', true, 'sw-core-ams-02', null, 'host', 'fixed · 14:00 → 15:00 · m.keller: line card swap in slot 3 (CHG-4468)', 20, '48m left', '+ 18 services'],
+  ['ok', true, 'k8s-node-07', null, 'host', 'fixed · 13:30 → 15:30 · m.keller: drained for the kernel 6.8 rollout', 35, '1h 18m left', '+ 23 services'],
   ['crit', true, 'postgres-replication', 'db-prod-03', '14m', 'fixed · 13:00 → 16:00 · j.berg: failover drill on db-prod-01, replica rebuild', 40, '1h 48m left'],
   ['warn', true, 'redis-memory', 'cache-02', '3h', 'fixed · 12:15 → 16:15 · j.berg: maxmemory raised, restart at 16:00', 49, '2h 03m left'],
   ['ok', false, 'pg-locks', 'db-prod-05', '6d', 'flexible 2h · window 14:00 → 18:00 · dba-oncall: VACUUM FULL on orders_archive', 0, 'not started'],
@@ -31,11 +35,17 @@ const DTS = [
   ['ok', false, 'sw-core-ams-01', null, 'host', 'fixed · Sat 06:00 → 10:00 · from config: weekly-patching', null, 'from config'],
   ['ok', false, 'sw-core-ams-02', null, 'host', 'fixed · Sat 06:00 → 10:00 · from config: weekly-patching', null, 'from config'],
 ];
-const dtHeader = () => listHeader({ title: 'downtimes', subtitle: 'prod-cluster · every object', sort: 'ends soonest ↑' });
-const dtSummary = () => `<div class="sum"><span class="it">${dot('accb', 'd9')}4 in effect</span><span class="it">${dot('pend', 'd9')}4 scheduled</span><span class="it"><span class="faint">${icon('lock', 11)}</span>2 from config</span><span class="end">47 folded into hosts</span></div>`;
+const dtHeader = (mine = false, narrow = false) => listHeader({ title: 'downtimes', subtitle: narrow ? 'prod-cluster' : mine ? 'prod-cluster · set by j.berg' : 'prod-cluster · every object', sort: 'ends soonest ↑', extra: onlyMine(mine) });
+const dtSummary = () => `<div class="sum"><span class="it">${dot('accb', 'd9')}4 in effect</span><span class="it">${dot('pend', 'd9')}6 upcoming</span><span class="it"><span class="faint">${icon('lock', 11)}</span>2 from config</span><span class="end">47 folded into hosts</span></div>`;
+// the list with its two sections; o(index) gives a row's options
+function dtList(o = () => ({}), list = DTS, split = 4) {
+  const eff = list.slice(0, split), up = list.slice(split);
+  return secRow('calendar-clock', `in effect · ${eff.length}`, 'handled now · ending soonest first') + eff.map((d, i) => dtRow(d, o(i))).join('') +
+    secRow('clock', `upcoming · ${up.length}`, 'not in effect yet · starting soonest first') + up.map((d, i) => dtRow(d, o(i + split))).join('');
+}
 
-shot('7a', '07-lists-a-downtimes', 'Every downtime, ending soonest first: in effect (progress and time left in the accent), then waiting and scheduled ones. A downtime set on a host with all its services is one row, <i>+ 18 services</i> (→ or a click unfolds them, indented), instead of 19 near-identical rows. Downtimes from the config show a lock. The circle is the object’s state, hollow while the downtime handles a problem.',
-  appWindow(dtHeader() + dtSummary() + `<div class="list">${DTS.map((d) => dtRow(d)).join('')}</div>`, { groups: groupsNoActive, activeGroup: '', after: openSec('downtimes') }));
+shot('7a', '07-lists-a-downtimes', 'Every downtime, in two sections with group-header rows: <i>in effect · 4</i> (progress and time left in the accent) and <i>upcoming · 6</i> (flexible ones not started yet, and scheduled ones). An object whose downtime is in effect has a hollow circle in its state colour, an OK host too (the two hollow green rings); upcoming ones keep the object’s normal circle. A host downtime with all its services is one row, <i>+ 18 services</i> (→ or a click unfolds them). Config downtimes show a lock. <i>only mine</i> (off) sits in the header.',
+  appWindow(dtHeader() + dtSummary() + `<div class="list">${dtList()}</div>`, { groups: groupsNoActive, activeGroup: '', after: openSec('downtimes') }));
 
 // 7b: marked rows + selection bar + pane
 const bannerA = dtBanner({
@@ -53,7 +63,7 @@ const pane = `<div class="pane">${paneHeader('service')}${bannerA}<div class="pb
 const marks = { 1: 1, 2: 1, 3: 1 };
 const selbar = (n, what) => `<div class="selbar"><span class="n">${n} selected</span>${btn(what, { key: '⌫', primary: true })}${btn('copy names')}<span class="glyph">···</span><span class="grow"></span><span class="faint">clear</span>${kh('esc')}</div>`;
 shot('7b', '07-lists-b-selected', 'Three downtimes marked (x, shift-click, ctrl-a). The selection bar replaces the action buttons of the problem lists with what fits this list: <i>remove downtimes</i> (⌫), <i>copy names</i>, and <i>···</i> for copying a filter expression. The cursor row’s object is open in the pane, with topic 01’s banner.',
-  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${dtHeader()}${dtSummary()}<div class="list">${DTS.map((d, i) => dtRow(d, { marked: !!marks[i], sel: i === 2 })).join('')}</div>${selbar(3, 'remove downtimes')}</div>${pane}</div>`,
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${dtHeader(false, true)}${dtSummary()}<div class="list">${dtList((i) => ({ marked: !!marks[i], sel: i === 2 }))}</div>${selbar(3, 'remove downtimes')}</div>${pane}</div>`,
     { groups: groupsNoActive, activeGroup: '', after: openSec('downtimes') }));
 
 // 7c: bulk removal confirm
@@ -68,7 +78,7 @@ const confirmBody = `<div class="col" style="gap:6px"><div class="field"><div cl
   <div class="col" style="gap:4px;font-size:11.5px;line-height:1.45"><span class="muted">Their problems notify again once the downtimes are gone: disk /var and kubelet on k8s-node-07, postgres-replication on db-prod-03, redis-memory on cache-02.</span>
   <span class="faint">The host downtime’s 23 service downtimes go with it: Icinga removes the children of a downtime it removes.</span></div>`;
 shot('7c', '07-lists-c-remove-confirm', 'Remove downtimes for the three marked rows: one dialog that lists every downtime it removes, grouped by the downtime they belong to (the box scrolls through all 26). It names the problems that will notify again, and the button counts what it removes. Nothing is sent before the confirmation.',
-  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${dtHeader()}${dtSummary()}<div class="list">${DTS.map((d, i) => dtRow(d, { marked: !!marks[i], sel: i === 2 })).join('')}</div>${selbar(3, 'remove downtimes')}</div>${pane}</div>`,
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${dtHeader(false, true)}${dtSummary()}<div class="list">${dtList((i) => ({ marked: !!marks[i], sel: i === 2 }))}</div>${selbar(3, 'remove downtimes')}</div>${pane}</div>`,
     { groups: groupsNoActive, activeGroup: '', after: openSec('downtimes') }) +
   modal(560, dialog({ title: 'Remove downtimes', what: '3 selected · 26 downtimes', body: confirmBody, footStart: 'as j.berg', actions: btn('cancel', { key: 'esc' }) + btn('remove 26 downtimes', { key: '↵', danger: true }) })));
 
@@ -86,7 +96,7 @@ const cmRow = ([st, ring, name, host, cap, kind, au2, at, text, tag], o = {}) =>
   row([st, name, host, `${au2} ${at} · ${text}`, cap], { ...o, handled: ring, hostRow: !host, tag: `<span style="display:flex;align-items:center;gap:6px">${kind === 'ack' ? `<span class="acc">${icon('check', 11)}</span>` : `<span class="faint">${icon('message-square', 11)}</span>`}${tag}</span>` });
 const cmMarks = { 0: 1, 2: 1, 3: 1, 5: 1 };
 shot('7d', '07-lists-d-comments', 'Every comment: user comments and the comments of acknowledgements (✓, with sticky or the expiry), newest problem first. Downtime and flapping comments are left out because the downtime list covers them (the summary bar’s end says so and shows them on a click). Four marked: the bar offers <i>remove comments</i>. One of the four is an acknowledgement, which removing a comment can’t undo, so the dialog lists it as skipped (<i>remove the acknowledgement instead</i>).',
-  appWindow(listHeader({ title: 'comments', subtitle: 'prod-cluster · every object', sort: 'newest ↓' }) +
+  appWindow(listHeader({ title: 'comments', subtitle: 'prod-cluster · every object', sort: 'newest ↓', extra: onlyMine(false) }) +
     `<div class="sum"><span class="it"><span class="faint">${icon('message-square', 11)}</span>5 comments</span><span class="it"><span class="acc">${icon('check', 11)}</span>2 acknowledgements</span><span class="end">downtime and flapping comments hidden</span></div>` +
     `<div class="list">${CMS.map((c, i) => cmRow(c, { marked: !!cmMarks[i], sel: i === 3 })).join('')}</div>${selbar(4, 'remove comments')}`,
     { groups: groupsNoActive, activeGroup: '', after: openSec('comments') }) +
@@ -95,22 +105,41 @@ shot('7d', '07-lists-d-comments', 'Every comment: user comments and the comments
       <div style="padding-top:6px;line-height:1.45" class="faint">skipped: http-tls on web-edge-02, an acknowledgement. Remove the acknowledgement instead.</div></div>`,
     footStart: 'as j.berg', actions: btn('cancel', { key: 'esc' }) + btn('remove 3 comments', { key: '↵', danger: true }) }), { top: 260 }));
 
-// 7e: the editor can list downtimes
-const insp = `<div class="pane" style="background:var(--win-bg)">
-  <div class="hbar pane-h" style="padding:0 18px"><span class="title">dashboard</span><span class="grow"></span><span class="right faint">1 view</span></div>
-  <div class="col" style="gap:16px;padding:16px 18px">
-    <div class="field"><div class="lab">name</div><span class="input">my downtimes</span></div>
-    <div class="field"><div class="lab">group</div>${select('overview')}</div>
-    <div class="field"><div class="lab">lists</div><span class="seg" style="display:flex">${['services', 'hosts', 'downtimes', 'comments'].map((o, i) => `<span class="${i === 2 ? 'on' : ''}" style="flex:1">${o}</span>`).join('')}</span></div>
-    <div class="field"><div class="lab">filter<span class="st c-ok">valid · 5 matches</span></div><div class="textarea focus" style="height:44px">downtime.author == "j.berg" ||
-downtime.author == "m.keller"<span class="caret" style="height:13px"></span></div></div>
-    <div class="field"><div class="hint">In a downtime list: downtime.* (author, comment, fixed, start_time, end_time, duration, …) and the object’s host.* and service.*.</div></div>
-    <div class="field"><div class="lab">show</div><div class="col" style="gap:8px">${sw(true, 'in effect and scheduled')}${sw(false, 'downtimes from the config')}${sw(true, 'fold service downtimes into their host')}</div></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">sort</div>${select('ends soonest')}</div><div class="field"><div class="lab">direction</div><span class="seg" style="display:flex"><span style="flex:1">↓ desc</span><span class="on" style="flex:1">↑ asc</span></span></div></div>
-  </div></div>`;
-const editorHeader = `<div class="hbar"><span class="title">my downtimes</span><span class="acc" style="font-size:12px">editing · overview</span><span class="grow"></span>${btn('discard', { key: 'esc' })}${btn('save dashboard', { key: 'ctrl-s', primary: true })}</div>`;
-shot('7e', '07-lists-e-editor', 'Downtimes and comments as what a dashboard view lists: <i>lists</i> gains <i>downtimes</i> and <i>comments</i>, and the filter knows <i>downtime.*</i> and <i>comment.*</i> beside the object’s host and service. This is how a team builds “my downtimes” or “comments today” dashboards.',
-  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 372px"><div class="col">${editorHeader}<div class="sum"><span class="it">${dot('accb', 'd9')}3 in effect</span><span class="it">${dot('pend', 'd9')}2 scheduled</span><span class="end">preview</span></div><div class="list">${[DTS[0], DTS[1], DTS[2], DTS[3], DTS[5]].map((d) => dtRow(d)).join('')}</div></div>${insp}</div>`,
-    { activeItem: 'my downtimes', groups: [{ name: 'overview', items: [...SIDEBAR_GROUPS[0].items, ['my downtimes', 'pend', '']] }, SIDEBAR_GROUPS[1], SIDEBAR_GROUPS[2]] }));
+// 7e: only mine
+const MINE = [DTS[2], DTS[3], DTS[7]];
+shot('7e', '07-lists-e-only-mine', '<i>only mine</i> on: the list keeps what the environment’s author (j.berg) set, in the same two sections. The subtitle says so, and the switch keeps its place. The comment and acknowledged lists have the same switch.',
+  appWindow(dtHeader(true) + `<div class="sum"><span class="it">${dot('accb', 'd9')}2 in effect</span><span class="it">${dot('pend', 'd9')}1 upcoming</span><span class="end">7 by others hidden</span></div>` + `<div class="list">${dtList(() => ({}), MINE, 2)}</div>`,
+    { groups: groupsNoActive, activeGroup: '', after: openSec('downtimes') }));
+
+// 7f: acknowledged
+// [state, name, host, caption, author, at, ago, comment, sticky, expiry]
+const ACKS = [
+  ['unk', 'borg-last-run', 'backup-01', '52m', 'dba-oncall', '13:30', '42m ago', 'lock from the migration test, clears after Thursday', true, 'expires Thu 08:00'],
+  ['unk', 'kafka-consumer-lag', 'kafka-01', '54m', 'm.keller', '13:25', '47m ago', 'consumer group rebalancing after the deploy', false, 'no expiry'],
+  ['crit', 'pg-autovacuum', 'db-prod-01', '1h', 'dba-oncall', '13:12', '1h ago', 'vacuum running on orders, about 30 minutes', false, 'expires 15:00'],
+  ['warn', 'ntp-offset', 'k8s-node-02', '2h', 'j.berg', '12:30', '1h 42m ago', 'chrony re-sync with the node reboot tonight', true, 'expires 23:00'],
+  ['crit', 'http-tls', 'web-edge-02', '2h', 'm.keller', '12:02', '2h 10m ago', 'renewal ordered, new cert expected tomorrow (CHG-4459)', true, 'expires Thu 12:00'],
+  ['crit', 'disk /srv', 'nfs-02', '3h', 'j.berg', '11:20', '2h 52m ago', 'cleanup job running, 30 GiB to go', false, 'no expiry'],
+  ['warn', 'cert-expiry', 'vpn-gw-01', '1d', 'm.keller', 'Tue 16:40', '1d ago', 'new certificate arrives Friday; leave this until then', true, 'expires Fri 12:00'],
+];
+const ackRow = ([st, n, h, cap, who, at, ago, text, sticky, exp], o = {}) =>
+  row([st, n, h, `${who} ${at}, ${ago} · ${text}`, cap], { ...o, handled: true, tag: `<span style="width:48px;text-align:right">${sticky ? 'sticky' : ''}</span><span style="width:136px;text-align:right">${exp}</span>` });
+const ackMarks = { 0: 1, 1: 1, 5: 1 };
+const ackMain = listHeader({ title: 'acknowledged', subtitle: 'prod-cluster · every problem', sort: 'newest ↓', extra: onlyMine(false) }) +
+  summary([['crit', 3, 'critical'], ['warn', 2, 'warning'], ['unk', 2, 'unknown']], '4 sticky · 5 expire') +
+  `<div class="list">${ACKS.map((a, i) => ackRow(a, { marked: !!ackMarks[i], sel: i === 1 })).join('')}</div>` + selbar(3, 'remove acknowledgements');
+shot('7f', '07-lists-f-acknowledged', 'The third list: every acknowledged problem, newest acknowledgement first. Every circle is hollow, because acknowledged means handled. The second line says who acknowledged it, when, how long ago, and the comment; the tag has <i>sticky</i> (or nothing) and the expiry in fixed slots. Three are marked; the bar offers <i>remove acknowledgements</i> (⌫) and <i>copy names</i>.',
+  appWindow(ackMain, { groups: groupsNoActive, activeGroup: '', after: openSec('acked') }));
+
+// 7g: remove acknowledgements: confirm
+const ackTargets = `<div class="targets" style="gap:0">
+  ${T('unk', 'borg-last-run on backup-01', '  dba-oncall 13:30 · sticky · until Thu 08:00')}
+  ${T('unk', 'kafka-consumer-lag on kafka-01', '  m.keller 13:25 · no expiry')}
+  ${T('crit', 'disk /srv on nfs-02', '  j.berg 11:20 · no expiry')}</div>
+  <div class="col" style="gap:4px;font-size:11.5px;line-height:1.45"><span class="muted">All three are still problems: they become unhandled again, notify by your rules, and count in the dashboards again.</span>
+  <span class="faint">Their acknowledgement comments go too, unless they were set as persistent.</span></div>`;
+shot('7g', '07-lists-g-remove-acks-confirm', 'Remove acknowledgements for the three marked rows: one dialog that lists every acknowledgement it removes, with who set it and its sticky and expiry settings. It says what follows (the problems become unhandled and notify again), and the danger button counts them. Nothing is sent before the confirmation.',
+  appWindow(ackMain, { groups: groupsNoActive, activeGroup: '', after: openSec('acked') }) +
+  modal(600, dialog({ title: 'Remove acknowledgements', what: '3 selected', body: ackTargets, footStart: 'as j.berg', actions: btn('cancel', { key: 'esc' }) + btn('remove 3 acknowledgements', { key: '↵', danger: true }) })));
 </script>
 </body></html>

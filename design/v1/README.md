@@ -382,55 +382,54 @@ view's settings in the editor.
 
 ---
 
-## 07 Lists of every comment and downtime
+## 07 Lists of every downtime, comment and acknowledgement (revised)
 
-**Shows** (`07-comments-downtimes-lists.html`): 7a every downtime; 7b three
-marked, with the selection bar and the pane; 7c the bulk removal
-confirmation; 7d every comment, four marked, with the removal dialog
-(an acknowledgement skipped); 7e a dashboard view that lists downtimes.
+**Shows** (`07-comments-downtimes-lists.html`): 7a every downtime, in two
+sections; 7b three marked, with the selection bar and the pane; 7c the bulk
+removal confirmation; 7d every comment, four marked, with the removal dialog
+(an acknowledgement skipped); 7e the downtime list with *only mine* on; 7f
+the acknowledged list, three marked; 7g the remove-acknowledgements
+confirmation.
 
-**Decisions**
+**Decisions (review of 2026-10-07)**
 
-- **Two lists across all objects,** opened from the palette (`downtimes`,
-  `comments`) as tabs in the sidebar's `open` section, with an icon in the
-  mark slot and a count. The data is already loaded (comments and downtimes
-  are part of rc1's object store), so they cost nothing extra.
-- **Rows are today's list rows.** The leading circle is the *object's*
-  state (hollow while the downtime handles a problem), its caption the time in
-  state or `host`. The title reads `service on host`, or the host name. The
-  second line holds the window and the author's comment (`fixed · 13:00 → 16:00
-  · j.berg: …`) or, for comments, `author time · text`. The tag holds a 56px
-  progress line (accent) and the time left (`48m left` in the accent), or
-  `not started`, `in 7h 48m`, `by 22:00`, `from config` with a lock.
-- **No duplicate rows:** a host downtime with `all_services` is one row
-  (`sw-core-ams-02 + 18 services`); → or a click unfolds its service
-  downtimes, indented. The summary bar says how many are folded.
-- **Summary bars:** downtimes count `in effect` (accent dot), `scheduled`
-  (pending dot) and `from config` (lock). Comments count comments and
-  acknowledgements. Downtime and flapping comments are hidden from the
-  comment list, because they repeat the downtime list (the end of the
-  summary bar says so; a click shows them).
-- **Selection** works as in every list (x, shift-click, ctrl-click, ctrl-a,
-  shift-j/k). The selection bar keeps its place and look, with this list's
-  actions: `remove downtimes ⌫` or `remove comments ⌫` (primary), `copy
-  names`, and `···` (copy filter expression).
-- **Bulk removal always confirms,** listing every downtime it removes,
-  grouped by downtime (a scrolling box; for a host downtime, the host and each
-  service). It names the problems that will notify again, and counts what it
-  removes on the danger button. What it can't remove is listed as skipped,
-  with the reason: acknowledgement comments (remove the acknowledgement) and
-  config downtimes (they return on the next reload; they are skipped unless
-  the user ticks them explicitly).
-- **As a view:** a dashboard view's `lists` gains `downtimes` and
-  `comments`, and the filter knows `downtime.*` and `comment.*` beside the
-  object's `host.*` and `service.*` ("my downtimes", "comments today").
-
-**Open questions**
-
-1. Should config downtimes (`ScheduledDowntime`) be removable at all from
-   the list? Icinga recreates them, so the drawn choice is to skip them.
-2. Is sorting by `ends soonest` (in effect, then scheduled by start) the right
-   default, or newest first?
+- **Three lists across all objects:** downtimes, comments and **acknowledged**
+  problems. They open from the palette as tabs in the sidebar's `open` section
+  only (icon in the mark slot, a count). There are no sidebar dashboards or
+  dashboard views for them, and no "my downtimes" entry.
+- **"only mine"** is a `Switch` in each list header, before the sort. It keeps
+  what the environment's author (by default the API user) set, and the
+  subtitle says so (`prod-cluster · set by j.berg`). The summary bar's end
+  counts what it hides.
+- **Hollow = handled:** an object whose downtime is in effect is drawn as a
+  hollow circle in its state colour, whatever the state, so an OK host in
+  downtime is a hollow green ring. Upcoming and not-started downtimes keep the
+  object's normal circle. Acknowledged problems are always hollow.
+- **Downtime sections:** `in effect · 4` (detail: `handled now · ending
+  soonest first`) and `upcoming · 6` (`not in effect yet · starting soonest
+  first`), as rows in the style of the grouped list's group headers (the
+  darker `row_header` band, an icon in the mark slot, semibold name, full row
+  height). Flexible downtimes that haven't started belong to *upcoming*. The
+  default sort is ends soonest.
+- **Rows** are today's list rows. Downtimes: the window and the comment on the
+  second line; in the tag, a 56px progress line and the time left (accent), or
+  `not started`, `in 7h 48m`, `by 22:00`. Config downtimes have a lock in the
+  progress slot and `from config`, and can't be removed. A host downtime with
+  `all_services` is one row (`+ 18 services`, unfolds on → or a click).
+  Comments: `author time · text` with an icon in the tag (✓ for
+  acknowledgement comments). Acknowledged: `who time, how long ago · comment`,
+  and in the tag fixed slots for `sticky` (or empty) and the expiry
+  (`expires Thu 08:00`, `no expiry`).
+- **Selection** works as in every list; the selection bar has this list's
+  actions: `remove downtimes ⌫`, `remove comments ⌫` or `remove
+  acknowledgements ⌫` (primary), `copy names`, and `···`.
+- **Every removal confirms,** listing every target: downtimes grouped by the
+  downtime they belong to (a host downtime lists the host and each service),
+  comments with author and time, acknowledgements with who, sticky and expiry.
+  The dialog says what follows (the problems notify again and count as
+  unhandled; acknowledgement comments go unless persistent), lists what it
+  skips with the reason (acknowledgement comments: remove the acknowledgement;
+  config downtimes), and the danger button counts.
 
 ---
 

@@ -451,7 +451,7 @@ impl DashboardEditor {
                 div()
                     .flex_none()
                     .text_size(theme.text.small)
-                    .text_color(colors.accent)
+                    .text_color(colors.accent_text)
                     .child(subtitle),
             )
             .child(div().flex_1())

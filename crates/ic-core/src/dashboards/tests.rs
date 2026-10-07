@@ -251,6 +251,42 @@ fn shown_counts_follow_the_display_flags() {
 }
 
 #[test]
+fn a_downtime_in_effect_counts_as_handled_whatever_the_state() {
+    // Topic 01, hollow = handled: Icinga's handled is acknowledged or in
+    // downtime; `hide_handled` and the counts follow it, OK objects too.
+    let mut critical = service("db-1", "pg", ServiceState::Critical, 100.0);
+    critical.check.downtime_depth = 1;
+    let mut ok = service("db-1", "ssh", ServiceState::Ok, 50.0);
+    ok.check.downtime_depth = 1;
+    let warning = service("db-1", "disk", ServiceState::Warning, 300.0);
+    let data = data(
+        vec![host("db-1", HostState::Up, &["db"], "db")],
+        vec![critical, ok, warning],
+    );
+    let mut hidden = view("host.name == \"db-1\"");
+    hidden.hide_handled = true;
+    let mut problems = hidden.clone();
+    problems.problems_only = true;
+    let dashboards = evaluate(&[("hidden", hidden), ("problems", problems)], &data);
+
+    let hidden = result(&dashboards, "hidden");
+    assert_eq!(names(hidden), ["db-1!disk"]);
+    assert_eq!(hidden.handled, 2, "the critical and the OK one in downtime");
+    assert_eq!(hidden.summary.handled, 1, "the summary counts problems");
+    assert_eq!(hidden.summary.unhandled, 1);
+    assert_eq!(
+        hidden.summary.worst_unhandled,
+        Some(CheckableState::Service(ServiceState::Warning))
+    );
+    let problems = result(&dashboards, "problems");
+    assert_eq!(names(problems), ["db-1!disk"]);
+    assert_eq!(
+        problems.handled, 1,
+        "problems only: the OK one isn't listed anyway"
+    );
+}
+
+#[test]
 fn a_zero_last_state_change_sorts_by_the_last_hard_change() {
     // Icinga 2 reports last_state_change = 0 for objects in their state
     // since their first check; last_hard_state_change has the time.

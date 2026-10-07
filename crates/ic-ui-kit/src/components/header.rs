@@ -17,11 +17,15 @@ use crate::theme::{ActiveTheme as _, Metrics};
 type CloseHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// A 40px header bar with a rule underneath: the detail pane's header
-/// (`service … ↗ open as tab ×`) and the list header
+/// (`service … × ↗ open as tab`) and the list header
 /// (`production service problems … severity ↓ ···`).
 ///
 /// The left side shows a title, a subtitle and/or a muted label; children
-/// added with [`ParentElement`] go on the right.
+/// added with [`ParentElement`] go on the right. The `×` of
+/// [`PaneHeader::on_close`] sits left of them, in a fixed place on every
+/// platform, so it never sits next to a window's own close button (topic
+/// 13); a header that keeps a child's place empty keeps the `×` where it
+/// is.
 #[derive(IntoElement)]
 #[must_use = "a header does nothing unless rendered"]
 pub struct PaneHeader {
@@ -91,7 +95,8 @@ impl PaneHeader {
         self
     }
 
-    /// Adds a `×` button at the right end that runs `handler`.
+    /// Adds a `×` button that runs `handler`, left of the children at the
+    /// right end.
     pub fn on_close(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -168,7 +173,6 @@ impl RenderOnce for PaneHeader {
             })
             .children(self.status)
             .child(div().flex_1())
-            .children(self.trailing)
             .when_some(self.on_close, |header, handler| {
                 header.child(
                     GlyphButton::new(close_id, "×")
@@ -178,6 +182,7 @@ impl RenderOnce for PaneHeader {
                         .on_click(handler),
                 )
             })
+            .children(self.trailing)
     }
 }
 
@@ -324,7 +329,7 @@ impl RenderOnce for SubTabs {
                     .text_color(if selected {
                         colors.text_strong
                     } else if marked {
-                        colors.accent
+                        colors.accent_text
                     } else {
                         colors.text_muted
                     })

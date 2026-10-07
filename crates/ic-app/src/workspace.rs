@@ -30,6 +30,7 @@ use gpui::{
     ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task,
     Window, div, prelude::FluentBuilder as _,
 };
+use ic_core::snapshot::Snapshot;
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
@@ -1261,6 +1262,13 @@ impl Workspace {
             });
             return;
         }
+        // Removing downtimes always asks first, listing every downtime it
+        // removes (topic 01).
+        if elsewhere.is_none()
+            && self.ask_removal(&action, &snapshot, &eligible.targets, window, cx)
+        {
+            return;
+        }
         // Objects a palette query named loosely are always listed first.
         let dialog = if review {
             DialogKind::for_review(&action)
@@ -1296,12 +1304,63 @@ impl Workspace {
             });
             return;
         }
-        match confirmation_for(&spec, &snapshot, &eligible) {
+        match confirmation_for(&spec, &eligible) {
             Some(confirmation) => {
                 self.open_modal(OpenModal::Confirm(confirmation), window, cx);
             }
             None => self.submit(spec, cx),
         }
+    }
+
+    /// For a removal of downtimes: opens the dialog listing what goes, or
+    /// says the downtime is gone already. Whether it was one.
+    fn ask_removal(
+        &mut self,
+        action: &actions::ObjectAction,
+        snapshot: &Snapshot,
+        targets: &[ObjectKey],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let removal = match action {
+            actions::ObjectAction::RemoveDowntime(name) => targets
+                .first()
+                .and_then(|object| crate::downtimes::Removal::downtime(snapshot, object, name)),
+            actions::ObjectAction::RemoveDowntimes => {
+                Some(crate::downtimes::Removal::all_of(snapshot, targets))
+            }
+            _ => return false,
+        };
+        match removal {
+            Some(removal) => self.open_removal(removal, window, cx),
+            None => self.state.update(cx, |state, cx| {
+                state.inform(
+                    "Nothing to remove",
+                    Some("The downtime is gone already.".to_owned()),
+                );
+                cx.notify();
+            }),
+        }
+        true
+    }
+
+    /// Opens the dialog that lists every downtime `removal` removes.
+    fn open_removal(
+        &mut self,
+        removal: crate::downtimes::Removal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.state.clone();
+        let dialog = cx.new(|cx| ActionDialog::removal(state, removal, window, cx));
+        let events = cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, event: &DialogEvent, window, cx| match event {
+                DialogEvent::Close => this.close_modal(window, cx),
+            },
+        );
+        self.open_modal(OpenModal::Action(Held::new(dialog, events)), window, cx);
     }
 
     /// Sends `spec`; a refusal shows as a toast.
@@ -2271,7 +2330,12 @@ impl Workspace {
                 review.view.clone().into_any_element(),
             ),
             OpenModal::Action(dialog) => (
-                580.,
+                // The removal's list is narrower, as drawn (topic 01).
+                if dialog.view.read(cx).kind() == DialogKind::RemoveDowntime {
+                    520.
+                } else {
+                    580.
+                },
                 ModalPlacement::Center,
                 dialog.view.clone().into_any_element(),
             ),
@@ -2546,10 +2610,10 @@ impl Render for Workspace {
 
 /// The question to ask before sending `spec`, if it needs one: checking
 /// many objects at once (a burst of work for the satellites), removing
-/// several acknowledgements, removing downtimes.
+/// several acknowledgements. (Removing downtimes has its own dialog, which
+/// lists every downtime it removes.)
 pub(crate) fn confirmation_for(
     spec: &ActionSpec,
-    snapshot: &ic_core::snapshot::Snapshot,
     eligible: &forms::Eligible,
 ) -> Option<Confirmation> {
     let what = describe_objects(&spec.objects);
@@ -2576,29 +2640,6 @@ pub(crate) fn confirmation_for(
             "remove acknowledgements",
             true,
         ),
-        actions::ObjectAction::RemoveDowntimes => {
-            let count: usize = spec
-                .objects
-                .iter()
-                .map(|object| snapshot.downtimes.get(object).map_or(0, Vec::len))
-                .sum();
-            let downtimes = if count == 1 {
-                "its downtime".to_owned()
-            } else {
-                format!("{count} downtimes")
-            };
-            (
-                format!("Remove the downtimes of {what}?"),
-                format!(
-                    "{} end{} at once, with any downtimes they triggered; the objects notify as \
-                     configured again.{skipped}",
-                    capitalize(&downtimes),
-                    if count == 1 { "s" } else { "" },
-                ),
-                "remove downtimes",
-                true,
-            )
-        }
         _ => return None,
     };
     Some(Confirmation {
@@ -2607,13 +2648,6 @@ pub(crate) fn confirmation_for(
         confirm,
         danger,
         action: Confirmed::Action(spec.clone()),
-    })
-}
-
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
     })
 }
 

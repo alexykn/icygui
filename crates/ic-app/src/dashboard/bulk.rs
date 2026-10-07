@@ -110,7 +110,7 @@ impl DashboardView {
                         .flex_none()
                         .mr(px(4.))
                         .min_w(theme.text.small * (COUNT_SLOT_CHARS * ic_ui_kit::CHAR_WIDTH))
-                        .text_color(colors.accent)
+                        .text_color(colors.accent_text)
                         .child(format!("{} selected", marked.len()))
                         .map(|count| {
                             // Where the slot ends (the buttons follow), for

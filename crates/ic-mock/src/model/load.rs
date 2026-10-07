@@ -484,7 +484,10 @@ impl World {
             let entry_time = shift.at(downtime.entry_time);
             let legacy_id = world.next_downtime_legacy_id();
             let config_owner = if downtime.config_owned {
-                format!("{object}!maintenance-window")
+                format!(
+                    "{object}!{}",
+                    downtime.schedule.as_deref().unwrap_or("maintenance-window")
+                )
             } else {
                 String::new()
             };

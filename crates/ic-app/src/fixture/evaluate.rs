@@ -96,7 +96,7 @@ impl Match {
             service_name: None,
             state: CheckableState::Host(host.state),
             problem: host.is_problem(),
-            handled: host.is_handled(),
+            handled: host.counts_as_handled(),
             severity: host.severity(),
             last_state_change: ic_core::snapshot::state_since(&host.check),
             host_groups: host.groups.clone(),
@@ -112,7 +112,7 @@ impl Match {
             service_name: Some(service.key.name.clone()),
             state: CheckableState::Service(service.state),
             problem: service.is_problem(),
-            handled: service.is_handled(host_problem),
+            handled: service.counts_as_handled(host_problem),
             severity: service.severity(),
             last_state_change: ic_core::snapshot::state_since(&service.check),
             host_groups: host.map(|host| host.groups.clone()).unwrap_or_default(),
@@ -181,9 +181,14 @@ fn evaluate_with(
             .collect(),
     };
     let summary = summarize(&matches);
-    let mut visible: Vec<Match> = matches
+    let candidates: Vec<Match> = matches
         .into_iter()
         .filter(|object| !view.problems_only || object.problem)
+        .collect();
+    let handled = u32::try_from(candidates.iter().filter(|object| object.handled).count())
+        .unwrap_or(u32::MAX);
+    let mut visible: Vec<Match> = candidates
+        .into_iter()
         .filter(|object| !view.hide_handled || !object.handled)
         .collect();
     let shown = summarize(&visible);
@@ -222,6 +227,7 @@ fn evaluate_with(
         rows: Arc::new(rows),
         summary,
         shown,
+        handled,
         error: None,
     }
 }

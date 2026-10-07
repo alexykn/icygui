@@ -21,7 +21,8 @@ pub(crate) enum HistoryTone {
     State(CheckableState),
     /// The accent: acknowledgements.
     Accent,
-    /// Downtimes (the unknown purple, as in the design's event stream).
+    /// A downtime taking effect: the downtime accent (the pane banner's
+    /// blue), as acknowledgements, never a state's colour (topic 01).
     Downtime,
     /// Flapping (warning yellow).
     Flapping,

@@ -35,7 +35,7 @@ use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
 };
-use gpui::{BoxShadow, point};
+use gpui::{App, BoxShadow, point};
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::Tone;
 use ic_ui_kit::{
@@ -244,13 +244,13 @@ impl Sidebar {
 
     /// The centre's scope.
     #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn centre_scope(&self, cx: &gpui::App) -> Option<Scope> {
+    pub(crate) fn centre_scope(&self, cx: &App) -> Option<Scope> {
         self.scope(self.state.read(cx))
     }
 
     /// The centre's list as shown now.
     #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn centre_view(&self, cx: &gpui::App) -> CentreView {
+    pub(crate) fn centre_view(&self, cx: &App) -> CentreView {
         self.view(self.state.read(cx), Timestamp::now())
     }
 
@@ -872,9 +872,24 @@ impl Sidebar {
             .into_any_element()
     }
 
+    /// Whether the entry's object counts as handled now (acknowledged, or
+    /// a downtime in effect), in the entry's environment: its dot is hollow.
+    fn counts_as_handled(&self, entry: &CentreEntry, cx: &App) -> bool {
+        entry.object.as_ref().is_some_and(|object| {
+            let state = self.state.read(cx);
+            let snapshot = state
+                .snapshot_of(&entry.environment)
+                .unwrap_or_else(|| state.snapshot());
+            crate::operate::dialog::object_mark(snapshot, object).is_some_and(|mark| mark.hollow)
+        })
+    }
+
     /// One entry: time, tone dot, title, first line, where and whether
-    /// silent. A storm's summary (`storm`) shows how many it held back and
-    /// expands; a storm's notification (`member`) is indented under it.
+    /// silent. The dot is hollow when its object counts as handled now
+    /// (acknowledged, or a downtime in effect: hollow = handled, as in
+    /// every list). A storm's summary (`storm`) shows how many it held
+    /// back and expands; a storm's notification (`member`) is indented
+    /// under it.
     fn centre_row(
         &self,
         index: usize,
@@ -889,9 +904,9 @@ impl Sidebar {
         let compact = theme.density == ic_ui_kit::Density::Compact;
         let tone = tone_color(entry.tone, theme);
         let unread = storm.map_or(entry.unread, StormGroup::unread);
-        let silent = entry.is_silent();
+        let handled = storm.is_none() && self.counts_as_handled(entry, cx);
         // Unread is a brighter title; silent ones are a step dimmer.
-        let title_color = match (unread, silent) {
+        let title_color = match (unread, entry.is_silent()) {
             (true, false) => colors.text_strong,
             (true, true) => colors.text_secondary,
             (false, false) => colors.text_muted,
@@ -940,7 +955,7 @@ impl Sidebar {
                 div()
                     .pt(px(5.))
                     .flex_none()
-                    .child(StateDot::with_color(tone).size(px(7.)).hollow(silent)),
+                    .child(StateDot::with_color(tone).size(px(7.)).hollow(handled)),
             )
             .child(
                 div()

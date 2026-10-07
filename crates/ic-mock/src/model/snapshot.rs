@@ -168,6 +168,12 @@ impl World {
             parent: (!downtime.parent.is_empty()).then(|| downtime.parent.clone()),
             in_effect: downtime.is_in_effect(self.now()),
             config_owned: !downtime.config_owner.is_empty() || !downtime.scheduled_by.is_empty(),
+            schedule: [&downtime.scheduled_by, &downtime.config_owner]
+                .into_iter()
+                .find(|name| !name.is_empty())
+                .and_then(|name| name.rsplit('!').next())
+                .filter(|short| !short.is_empty())
+                .map(str::to_owned),
         }
     }
 

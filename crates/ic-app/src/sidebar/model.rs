@@ -8,8 +8,9 @@ use ic_config::{DashboardGroup, Environment};
 use ic_core::snapshot::{DashboardResult, Snapshot, Summary};
 use ic_model::{CheckableState, ObjectKey};
 use ic_rules::DashboardRef;
+use ic_ui_kit::ObjectMark;
 
-/// A dashboard's state dot.
+/// A dashboard's or an object's state dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Dot {
     /// The worst unhandled problem's state.
@@ -18,9 +19,28 @@ pub(crate) enum Dot {
     Ok,
     /// Nothing matches, or everything is still pending (grey).
     Empty,
+    /// An object that counts as handled: a hollow ring in its state's
+    /// colour (hollow = handled; an OK service in downtime is a hollow
+    /// green ring).
+    Handled(CheckableState),
 }
 
 impl Dot {
+    /// The dot for an object's mark ([`ObjectMark`]): hollow when it counts
+    /// as handled, else as [`Dot::for_object`].
+    pub(crate) fn for_mark(mark: ObjectMark) -> Self {
+        if mark.hollow {
+            Self::Handled(mark.state)
+        } else {
+            Self::for_object(Some(mark.state))
+        }
+    }
+
+    /// Whether it's drawn as a ring.
+    pub(crate) fn is_hollow(self) -> bool {
+        matches!(self, Self::Handled(_))
+    }
+
     /// The dot for one object: its state if it has a problem, green when OK,
     /// grey while pending or when it's gone.
     pub(crate) fn for_object(state: Option<CheckableState>) -> Self {
@@ -105,13 +125,13 @@ pub(crate) fn open_tabs(
 ) -> Vec<OpenTab> {
     tabs.iter()
         .map(|key| {
-            let (name, host, state) = match key {
+            let (name, host, mark) = match key {
                 ObjectKey::Host { name } => {
                     let host = snapshot.hosts.get(name);
                     (
                         host.map_or_else(|| name.to_string(), |host| host.display_name.clone()),
                         None,
-                        host.map(|host| CheckableState::Host(host.state)),
+                        host.map(|host| ObjectMark::host(host)),
                     )
                 }
                 ObjectKey::Service { key: service_key } => {
@@ -122,7 +142,12 @@ pub(crate) fn open_tabs(
                             |service| service.display_name.clone(),
                         ),
                         Some(service_key.host.to_string()),
-                        service.map(|service| CheckableState::Service(service.state)),
+                        service.map(|service| {
+                            ObjectMark::service(
+                                service,
+                                snapshot.host_of(service_key).map(AsRef::as_ref),
+                            )
+                        }),
                     )
                 }
             };
@@ -130,7 +155,7 @@ pub(crate) fn open_tabs(
                 key: key.clone(),
                 name,
                 host,
-                dot: Dot::for_object(state),
+                dot: mark.map_or(Dot::Empty, Dot::for_mark),
                 active: active == Some(key),
             }
         })

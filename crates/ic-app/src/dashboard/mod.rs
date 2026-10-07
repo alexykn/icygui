@@ -749,7 +749,7 @@ impl DashboardView {
                 .into_any_element();
         }
         if result.rows.is_empty() {
-            return empty_dashboard(reference, view, &result.summary, cx);
+            return empty_dashboard(reference, view, result, cx);
         }
         let Some(list) = self.lists.get(reference) else {
             return note("", theme);
@@ -1071,10 +1071,11 @@ pub(crate) fn group_header(
 fn empty_dashboard(
     reference: &DashboardRef,
     view: &View,
-    summary: &ic_core::snapshot::Summary,
+    result: &ic_core::snapshot::DashboardResult,
     cx: &Context<DashboardView>,
 ) -> AnyElement {
     let theme = cx.theme();
+    let summary = &result.summary;
     let checked = summary.ok
         + summary.critical
         + summary.warning
@@ -1083,18 +1084,17 @@ fn empty_dashboard(
         + summary.unreachable;
     let title = format!("No {}", header::view_label(view));
     let ok = StateCircle::with_color(theme.states.fill.ok).size(CircleSize::Pane);
-    if view.hide_handled && summary.handled > 0 {
+    if view.hide_handled && result.handled > 0 {
         let reference = reference.clone();
-        let handled = summary.handled;
+        let handled = result.handled as usize;
+        // `3 handled problems are hidden.`, `1 handled service is hidden.`
+        let what = rows::count_label(handled, view);
+        let (number, noun) = what.split_once(' ').unwrap_or((what.as_str(), ""));
         return EmptyState::new(title)
             .leading(ok.handled(true))
             .detail(format!(
-                "{handled} handled {} hidden.",
-                if handled == 1 {
-                    "problem is"
-                } else {
-                    "problems are"
-                }
+                "{number} handled {noun} {} hidden.",
+                if handled == 1 { "is" } else { "are" }
             ))
             .child(
                 Link::new("show-handled", "show handled").on_click(cx.listener(

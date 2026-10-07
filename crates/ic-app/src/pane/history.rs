@@ -275,8 +275,9 @@ fn render_line(index: usize, line: &HistoryLine, time_width: f32, theme: &Theme)
             theme.states.fill.checkable(state),
             theme.states.text.checkable(state),
         ),
-        HistoryTone::Accent => (colors.accent, colors.accent),
-        HistoryTone::Downtime => (theme.states.fill.unknown, theme.states.text.unknown),
+        // Acknowledgements and downtimes take the accent (the downtime
+        // banner's blue), never a state's colour (topic 01).
+        HistoryTone::Accent | HistoryTone::Downtime => (colors.accent, colors.accent_text),
         HistoryTone::Flapping => (theme.states.fill.warning, theme.states.text.warning),
         HistoryTone::Quiet => (colors.text_faint, colors.text_faint),
     };

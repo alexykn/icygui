@@ -549,6 +549,50 @@ impl Builder {
             parent,
             in_effect,
             config_owned,
+            schedule: config_owned.then(|| "maintenance-window".to_owned()),
+        });
+        name
+    }
+
+    /// A downtime described in full ([`ScenarioDowntime`]): a flexible one
+    /// that a problem already started, when it was set and by which
+    /// `ScheduledDowntime`. Returns its full name.
+    pub(crate) fn downtime_with(&mut self, spec: ScenarioDowntime) -> String {
+        let id = self.rng.uuid();
+        let name = format!("{}!{id}", spec.object.full_name());
+        let start = spec.start.as_unix_seconds();
+        let entry_time = spec
+            .entry
+            .unwrap_or_else(|| Timestamp::from_unix_seconds(start.min(self.now) - 600.0));
+        let trigger_time = if spec.fixed {
+            (start <= self.now && self.now < spec.end.as_unix_seconds()).then_some(spec.start)
+        } else {
+            spec.trigger
+        };
+        let in_effect = trigger_time.is_some_and(|trigger| {
+            let until = if spec.fixed {
+                spec.end.as_unix_seconds()
+            } else {
+                trigger.as_unix_seconds() + spec.duration
+            };
+            trigger.as_unix_seconds() <= self.now && self.now < until
+        });
+        self.scenario.downtimes.push(Downtime {
+            name: name.clone(),
+            object: spec.object,
+            author: spec.author.to_owned(),
+            comment: spec.comment.to_owned(),
+            start_time: spec.start,
+            end_time: spec.end,
+            fixed: spec.fixed,
+            duration: spec.duration,
+            entry_time,
+            trigger_time,
+            triggered_by: None,
+            parent: spec.parent,
+            in_effect,
+            config_owned: spec.schedule.is_some(),
+            schedule: spec.schedule.map(str::to_owned),
         });
         name
     }
@@ -569,6 +613,58 @@ impl Builder {
             zone: zone.to_owned(),
             connected,
         });
+    }
+}
+
+/// A downtime for [`Builder::downtime_with`].
+#[derive(Clone, Debug)]
+pub(crate) struct ScenarioDowntime {
+    /// The host or service.
+    pub(crate) object: ObjectKey,
+    /// Who set it.
+    pub(crate) author: &'static str,
+    /// Why.
+    pub(crate) comment: &'static str,
+    /// The window.
+    pub(crate) start: Timestamp,
+    /// The window's end.
+    pub(crate) end: Timestamp,
+    /// Fixed, or flexible for `duration` seconds once a problem starts it.
+    pub(crate) fixed: bool,
+    /// A flexible downtime's length, in seconds.
+    pub(crate) duration: f64,
+    /// When a problem started a flexible downtime (`None`: not yet).
+    pub(crate) trigger: Option<Timestamp>,
+    /// When it was set (default: ten minutes before its start).
+    pub(crate) entry: Option<Timestamp>,
+    /// The host downtime it belongs to (`all_services`).
+    pub(crate) parent: Option<String>,
+    /// The `ScheduledDowntime` that made it (a config downtime).
+    pub(crate) schedule: Option<&'static str>,
+}
+
+impl ScenarioDowntime {
+    /// A fixed downtime on `object` for the window `start..end`.
+    pub(crate) fn fixed(
+        object: ObjectKey,
+        author: &'static str,
+        comment: &'static str,
+        start: Timestamp,
+        end: Timestamp,
+    ) -> Self {
+        Self {
+            object,
+            author,
+            comment,
+            start,
+            end,
+            fixed: true,
+            duration: 0.0,
+            trigger: None,
+            entry: None,
+            parent: None,
+            schedule: None,
+        }
     }
 }
 

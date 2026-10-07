@@ -20,7 +20,7 @@ mod text_field;
 mod toast;
 mod tooltip;
 
-pub use banner::{Banner, BannerTone, ProgressBar};
+pub use banner::{Banner, BannerTone, PaneBanner, PaneBannerTone, ProgressBar};
 pub use button::{Button, ButtonColors, ButtonVariant, GlyphButton, IconButton, KeyHint};
 pub use divider::{Divider, DividerColor};
 pub use form::{CHIP_HEIGHT, Chip, Field, FieldTone, Segmented, Switch, TextArea, chip_width};
@@ -30,7 +30,7 @@ pub use list::{CompactRow, ListRow, RowEmphasis};
 pub use menu::{Dismissable, Dismissal, ItemAction, Menu, MenuItem, Popover};
 pub use modal::{DialogBody, Modal, ModalPlacement};
 pub use notice::{EmptyState, NoteEntry, TreeLine, TreeTable};
-pub use state::{CircleSize, Paint, StateCircle, StateDot};
+pub use state::{CircleSize, ObjectMark, Paint, StateCircle, StateDot};
 pub use summary::{SummaryBar, SummaryItem};
 pub use table::{KvTable, PerfdataRow, PerfdataTable};
 pub use text::{CodeBlock, SectionLabel};

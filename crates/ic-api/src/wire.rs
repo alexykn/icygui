@@ -537,6 +537,7 @@ impl DowntimeAttrs {
             parent: non_empty(self.parent.0),
             in_effect,
             config_owned: !self.config_owner.0.is_empty() || !self.scheduled_by.0.is_empty(),
+            schedule: schedule_name(&self.scheduled_by.0, &self.config_owner.0),
         })
     }
 }
@@ -947,6 +948,18 @@ pub(crate) fn state_type(code: Option<f64>) -> Option<StateType> {
 
 pub(crate) fn ack_kind(code: f64) -> AckKind {
     AckKind::from_code(clamp_u8(code))
+}
+
+/// The short name of the `ScheduledDowntime` behind a downtime
+/// (`weekly-patching` from `db-01!weekly-patching`): from `scheduled_by`,
+/// else `config_owner` (Icinga 2.14+).
+fn schedule_name(scheduled_by: &str, config_owner: &str) -> Option<String> {
+    [scheduled_by, config_owner]
+        .into_iter()
+        .find(|name| !name.is_empty())
+        .and_then(|name| name.rsplit('!').next())
+        .filter(|short| !short.is_empty())
+        .map(str::to_owned)
 }
 
 fn non_empty(text: String) -> Option<String> {

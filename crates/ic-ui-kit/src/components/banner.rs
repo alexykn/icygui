@@ -1,14 +1,16 @@
 //! Status strips for the main area: the connection banner (reconnecting,
-//! login refused, certificate not trusted, …) and the thin load progress
-//! bar under a header.
+//! login refused, certificate not trusted, …), the thin load progress bar
+//! under a header, and the pane banner fixed under a pane's header (a
+//! downtime, topic 01).
 
 use std::fmt;
 
 use crate::px;
 use gpui::{
-    AnyElement, App, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, relative,
+    AnyElement, App, Div, ElementId, FontWeight, HighlightStyle, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Window, div,
+    prelude::FluentBuilder as _, relative,
 };
 
 use crate::components::Tooltip;
@@ -273,6 +275,326 @@ impl RenderOnce for ProgressBar {
     }
 }
 
+/// How a [`PaneBanner`] looks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PaneBannerTone {
+    /// In effect: the accent (the Info tone) with its progress.
+    #[default]
+    Active,
+    /// Not in effect yet: grey, its progress line empty.
+    Quiet,
+}
+
+/// A banner fixed under a pane's header, between the header and the
+/// scrolling body, so it stays in view (topic 01, variant A: an object in
+/// downtime). It is the [`Banner`] in the Info tone (the tint at 8 %, a 2px
+/// tone bar) with more lines and a 2px [`ProgressBar`] on its bottom edge:
+///
+/// ```text
+/// ▌ ◷ In downtime 1h 48m left                       [remove downtime]
+///     fixed · 13:00 → 16:00 today · started 1h 12m ago
+///     j.berg 12:41 Failover drill on db-prod-01: the standby on
+///     db-prod-03 lags until the replica rebuild is done.
+///     + 2 more below · tonight 22:00, flexible
+/// ━━━━━━━━━━━━━━━━━━━━━━━━━──────────────────────────────────────────
+/// ```
+///
+/// [`PaneBannerTone::Quiet`] is grey: scheduled but not in effect yet.
+/// The note is two lines at most; the full text is in its tooltip.
+#[derive(IntoElement)]
+#[must_use = "a banner does nothing unless rendered"]
+pub struct PaneBanner {
+    id: ElementId,
+    tone: PaneBannerTone,
+    icon: IconName,
+    title: SharedString,
+    status: Option<SharedString>,
+    action: Option<AnyElement>,
+    facts: Option<AnyElement>,
+    note: Option<(SharedString, SharedString, SharedString)>,
+    more: Option<SharedString>,
+    progress: f32,
+}
+
+impl PaneBanner {
+    /// A banner saying `title` in `tone`, with a calendar.
+    pub fn new(
+        id: impl Into<ElementId>,
+        tone: PaneBannerTone,
+        title: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            tone,
+            icon: IconName::CalendarClock,
+            title: title.into(),
+            status: None,
+            action: None,
+            facts: None,
+            note: None,
+            more: None,
+            progress: 0.,
+        }
+    }
+
+    /// Replaces the icon (a lock for a downtime from the config).
+    pub fn icon(mut self, icon: IconName) -> Self {
+        self.icon = icon;
+        self
+    }
+
+    /// Text after the title: how long is left (in the accent while in
+    /// effect), or when it starts.
+    pub fn status(mut self, status: impl Into<SharedString>) -> Self {
+        self.status = Some(status.into());
+        self
+    }
+
+    /// The element at the right of the first line (a button).
+    pub fn action(mut self, action: impl IntoElement) -> Self {
+        self.action = Some(action.into_any_element());
+        self
+    }
+
+    /// The second line, the facts: one line, muted, cut where it doesn't
+    /// fit. Build it with [`PaneBanner::facts_line`].
+    pub fn facts(mut self, facts: impl IntoElement) -> Self {
+        self.facts = Some(facts.into_any_element());
+        self
+    }
+
+    /// The third line: who, when, why; two lines at most, the whole text
+    /// in its tooltip.
+    pub fn note(
+        mut self,
+        author: impl Into<SharedString>,
+        at: impl Into<SharedString>,
+        text: impl Into<SharedString>,
+    ) -> Self {
+        self.note = Some((author.into(), at.into(), text.into()));
+        self
+    }
+
+    /// The last line, faint: what else there is.
+    pub fn more(mut self, more: impl Into<SharedString>) -> Self {
+        self.more = Some(more.into());
+        self
+    }
+
+    /// How much has passed, 0 to 1 (the bottom edge's line).
+    pub fn progress(mut self, fraction: f32) -> Self {
+        self.progress = ProgressBar::new(fraction).fraction();
+        self
+    }
+
+    /// The tone.
+    #[must_use]
+    pub fn tone(&self) -> PaneBannerTone {
+        self.tone
+    }
+
+    /// The title.
+    #[must_use]
+    pub fn title(&self) -> &SharedString {
+        &self.title
+    }
+
+    /// A facts line from its parts, with faint ` · ` between them: muted
+    /// text, or elements such as links.
+    pub fn facts_line(parts: Vec<AnyElement>, theme: &Theme) -> AnyElement {
+        let mut line = div()
+            .flex()
+            .items_center()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap();
+        for (index, part) in parts.into_iter().enumerate() {
+            if index > 0 {
+                line = line.child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.colors.text_faint)
+                        .child("\u{a0}·\u{a0}"),
+                );
+            }
+            line = line.child(part);
+        }
+        line.into_any_element()
+    }
+}
+
+impl fmt::Debug for PaneBanner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaneBanner")
+            .field("id", &self.id)
+            .field("tone", &self.tone)
+            .field("title", &self.title)
+            .field("status", &self.status)
+            .field("more", &self.more)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RenderOnce for PaneBanner {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let active = self.tone == PaneBannerTone::Active;
+        let (bar, icon, status, tint) = if active {
+            (
+                colors.accent,
+                colors.accent,
+                colors.accent_text,
+                BannerTone::Info.tint(theme),
+            )
+        } else {
+            (
+                colors.text_faint,
+                colors.text_muted,
+                colors.text_secondary,
+                colors.text_muted.opacity(0.07),
+            )
+        };
+        let indent = px(ICON_SLOT + TITLE_GAP);
+        let note_id = ElementId::Name(format!("{}-note", self.id).into());
+        div()
+            .id(self.id)
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(px(5.))
+            .w_full()
+            .pt(px(12.))
+            .pb(px(13.))
+            .pl(theme.metrics.pane_inset)
+            .pr(theme.metrics.pane_padding)
+            .bg(tint)
+            .border_b_1()
+            .border_color(colors.border_header)
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(TONE_BAR))
+                    .bg(bar),
+            )
+            .child(title_line(
+                Icon::new(self.icon).size(px(ICON_SLOT)).color(icon),
+                self.title,
+                self.status.map(|text| div().text_color(status).child(text)),
+                self.action,
+                theme,
+            ))
+            .when_some(self.facts, |banner, facts| {
+                banner.child(
+                    div()
+                        .pl(indent)
+                        .min_w_0()
+                        .text_size(theme.text.small)
+                        .text_color(colors.text_muted)
+                        .child(facts),
+                )
+            })
+            .when_some(self.note, |banner, (author, at, text)| {
+                banner.child(note_line(note_id, &author, &at, &text, theme).pl(indent))
+            })
+            .when_some(self.more, |banner, more| {
+                banner.child(
+                    div()
+                        .pl(indent)
+                        .truncate()
+                        .text_size(theme.text.small)
+                        .text_color(colors.text_faint)
+                        .child(more),
+                )
+            })
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(-1.))
+                    .h(px(2.))
+                    .bg(colors.border_header)
+                    .when(active, |track| {
+                        track.child(div().h_full().w(relative(self.progress)).bg(colors.accent))
+                    }),
+            )
+    }
+}
+
+/// The pane banner's first line: icon, title, status, then the action at
+/// the right.
+fn title_line(
+    icon: Icon,
+    title: SharedString,
+    status: Option<Div>,
+    action: Option<AnyElement>,
+    theme: &Theme,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(TITLE_GAP))
+        .min_h(px(28.))
+        .whitespace_nowrap()
+        .child(div().flex().flex_none().w(px(ICON_SLOT)).child(icon))
+        .child(
+            div()
+                .flex_none()
+                .text_size(theme.text.row)
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.colors.text_strong)
+                .child(title),
+        )
+        .when_some(status, |line, status| {
+            line.child(status.flex_none().text_size(theme.text.row))
+        })
+        .child(div().flex_1())
+        .children(action)
+}
+
+/// `author time comment`: the author in the text colour, the time faint,
+/// at most two lines, the whole text in the tooltip.
+fn note_line(id: ElementId, author: &str, at: &str, text: &str, theme: &Theme) -> Stateful<Div> {
+    let colors = theme.colors;
+    let full = format!("{author} {at} {text}");
+    let author_end = author.len();
+    let at_end = author_end + 1 + at.len();
+    let styled = StyledText::new(SharedString::from(full.clone())).with_highlights([
+        (
+            0..author_end,
+            HighlightStyle {
+                color: Some(colors.text),
+                ..HighlightStyle::default()
+            },
+        ),
+        (
+            author_end..at_end,
+            HighlightStyle {
+                color: Some(colors.text_faint),
+                ..HighlightStyle::default()
+            },
+        ),
+    ]);
+    div()
+        .id(id)
+        .text_size(theme.text.body)
+        .line_height(relative(1.45))
+        .text_color(colors.text_secondary)
+        .line_clamp(2)
+        .child(styled)
+        .tooltip(Tooltip::text(full))
+}
+
+/// The pane banner's icon slot: the icon's size.
+const ICON_SLOT: f32 = 14.;
+/// Space between the pane banner's icon, title and status.
+const TITLE_GAP: f32 = 10.;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +617,17 @@ mod tests {
         assert_eq!(BannerTone::Warning.color(&theme), theme.states.fill.warning);
         assert_eq!(BannerTone::Warning.tint(&theme), theme.colors.warning_tint);
         assert_eq!(BannerTone::Info.color(&theme), theme.colors.accent);
+    }
+
+    #[test]
+    fn pane_banners_record_their_parts() {
+        let banner = PaneBanner::new("downtime", PaneBannerTone::Quiet, "Flexible downtime")
+            .status("not started")
+            .progress(3.);
+        assert_eq!(banner.tone(), PaneBannerTone::Quiet);
+        assert_eq!(banner.title(), "Flexible downtime");
+        assert!((banner.progress - 1.).abs() < f32::EPSILON, "clamped");
+        assert!(format!("{banner:?}").contains("not started"));
     }
 
     #[test]

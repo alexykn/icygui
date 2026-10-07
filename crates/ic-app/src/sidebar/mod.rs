@@ -1247,6 +1247,7 @@ impl Render for Sidebar {
 fn dot(dot: Dot, theme: &Theme) -> StateDot {
     match dot {
         Dot::State(state) => StateDot::new(state),
+        Dot::Handled(state) => StateDot::new(state).hollow(true),
         Dot::Ok => StateDot::with_color(theme.states.fill.ok),
         Dot::Empty => StateDot::with_color(theme.states.fill.pending),
     }

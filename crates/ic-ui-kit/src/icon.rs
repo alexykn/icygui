@@ -25,6 +25,9 @@ pub enum IconName {
     Bell,
     /// `bell-off`: notifications muted.
     BellOff,
+    /// `calendar-clock`: a downtime (the pane's banner, the host line's
+    /// marker).
+    CalendarClock,
     /// `check`: confirmations and checked menu items.
     Check,
     /// `check-check`: mark notifications read.
@@ -101,7 +104,7 @@ pub enum IconName {
 
 impl IconName {
     /// Every icon, for tests and asset listings.
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 44] = [
         Self::ArrowDown,
         Self::ArrowLeft,
         Self::ArrowLeftRight,
@@ -109,6 +112,7 @@ impl IconName {
         Self::ArrowUpRight,
         Self::Bell,
         Self::BellOff,
+        Self::CalendarClock,
         Self::Check,
         Self::CheckCheck,
         Self::ChevronDown,
@@ -164,6 +168,7 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::ArrowUpRight => Self::ArrowUpRight,
             IconName::Bell => Self::Bell,
             IconName::BellOff => Self::BellOff,
+            IconName::CalendarClock => Self::CalendarClock,
             IconName::Check => Self::Check,
             IconName::CheckCheck => Self::CheckCheck,
             IconName::ChevronDown => Self::ChevronDown,

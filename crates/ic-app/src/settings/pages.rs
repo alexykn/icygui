@@ -1790,7 +1790,7 @@ impl SettingsPanel {
                         .flex_none()
                         .text_size(theme.text.small)
                         .text_color(if entry.watched {
-                            colors.accent
+                            colors.accent_text
                         } else {
                             colors.text_muted
                         })

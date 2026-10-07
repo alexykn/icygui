@@ -18,6 +18,7 @@ gpui_kit_assets::icon_assets!(
         ArrowUpRight,
         Bell,
         BellOff,
+        CalendarClock,
         Check,
         CheckCheck,
         ChevronDown,

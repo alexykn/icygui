@@ -169,6 +169,11 @@ pub struct DashboardResult {
     /// Counts over the objects `rows` lists (after `problems_only` and
     /// `hide_handled`): the summary bar, which reads as the list's size.
     pub shown: Summary,
+    /// The objects `hide_handled` hides or shows: those `problems_only`
+    /// lets through that count as handled (acknowledged, behind a host
+    /// problem, or in a downtime in effect whatever their state; the
+    /// hollow marks). The summary bar's `N handled hidden`.
+    pub handled: u32,
     /// The filter didn't parse or evaluate; `rows` is empty.
     pub error: Option<String>,
 }

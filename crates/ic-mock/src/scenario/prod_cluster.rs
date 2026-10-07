@@ -7,7 +7,7 @@ use std::time::Duration;
 use ic_model::{ObjectKey, ServiceState};
 use serde_json::json;
 
-use super::build::{Builder, vars};
+use super::build::{Builder, ScenarioDowntime, vars};
 use super::{Scenario, User, Zone};
 
 fn mins(minutes: u64) -> Duration {
@@ -551,6 +551,15 @@ pub fn prod_cluster() -> Scenario {
         None,
     );
     b.problem(
+        "k8s-node-07",
+        "kubelet",
+        ServiceState::Critical,
+        "CRITICAL - connection refused (10.0.4.27:10250)",
+        &[],
+        mins(41),
+        None,
+    );
+    b.problem(
         "web-edge-02",
         "http-tls",
         ServiceState::Critical,
@@ -887,6 +896,8 @@ pub fn prod_cluster() -> Scenario {
         false,
     );
 
+    downtimes_in_the_panes(&mut b);
+
     // Objects the demo should keep showing.
     let mut pinned: Vec<ObjectKey> = [
         "db-prod-03",
@@ -906,6 +917,10 @@ pub fn prod_cluster() -> Scenario {
     .iter()
     .map(|h| ObjectKey::host(h))
     .collect();
+    // The downtimes' objects that are OK (topic 01): kept OK, so they stay
+    // in the frames they were set up for.
+    pinned.push(ObjectKey::service("db-prod-05", "pg-locks"));
+    pinned.push(ObjectKey::service("db-prod-05", "pg-bloat"));
     for (host, _) in &failed {
         pinned.push(ObjectKey::host(host));
     }
@@ -949,4 +964,135 @@ pub fn prod_cluster() -> Scenario {
         names.iter().map(|name| (*name).to_owned()).collect()
     });
     b.finish()
+}
+
+/// The downtimes of topic 01 (`design/v1/01-downtimes.html`), one of each
+/// case the pane draws:
+///
+/// - a service in a fixed downtime: redis-memory on cache-02, scheduled
+///   with the rest of the scenario above;
+/// - a host in downtime with all its services (k8s-node-07, whose disk
+///   /var and kubelet are critical);
+/// - a flexible downtime waiting for a problem (pg-locks on db-prod-05,
+///   OK) and one a problem started (pg-bloat on db-prod-05);
+/// - a downtime scheduled for tonight on an unhandled problem
+///   (haproxy-backend on lb-prod-02);
+/// - a host with three downtimes: in effect with its services, flexible
+///   tonight, and a weekly one from the config (sw-core-ams-02);
+/// - a downtime on the host only, not its services (k8s-node-02, whose
+///   ntp-offset still warns and notifies).
+fn downtimes_in_the_panes(b: &mut Builder) {
+    let reimage = ScenarioDowntime {
+        entry: Some(b.ago(mins(48))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("k8s-node-07"),
+            "m.keller",
+            "Node drained and cordoned for the kernel 6.8 rollout; reimage starts 14:30.",
+            b.ago(mins(42)),
+            b.later(mins(78)),
+        )
+    };
+    host_with_services(b, "k8s-node-07", &reimage);
+
+    b.downtime_with(ScenarioDowntime {
+        fixed: false,
+        duration: 7_200.0,
+        entry: Some(b.ago(mins(17))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::service("db-prod-05", "pg-locks"),
+            "dba-oncall",
+            "VACUUM FULL on orders_archive; lock waits are expected while it runs.",
+            b.ago(mins(12)),
+            b.later(mins(228)),
+        )
+    });
+    b.downtime_with(ScenarioDowntime {
+        fixed: false,
+        duration: 7_200.0,
+        trigger: Some(b.ago(mins(48))),
+        entry: Some(b.ago(mins(75))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::service("db-prod-05", "pg-bloat"),
+            "dba-oncall",
+            "pg_repack on orders; bloat warnings are expected until it finishes.",
+            b.ago(mins(60)),
+            b.later(mins(180)),
+        )
+    });
+
+    b.downtime_with(ScenarioDowntime {
+        entry: Some(b.ago(mins(190))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::service("lb-prod-02", "haproxy-backend"),
+            "m.keller",
+            "HAProxy 2.8 rollout on lb-prod-01/02 (CHG-4471); backends flap while the pool \
+             reloads.",
+            b.later(mins(468)),
+            b.later(mins(528)),
+        )
+    });
+
+    let swap = ScenarioDowntime {
+        entry: Some(b.ago(mins(20))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("sw-core-ams-02"),
+            "m.keller",
+            "Line card swap in slot 3 (CHG-4468): Po12 to edge-ams is down during the swap.",
+            b.ago(mins(12)),
+            b.later(mins(48)),
+        )
+    };
+    host_with_services(b, "sw-core-ams-02", &swap);
+    b.downtime_with(ScenarioDowntime {
+        fixed: false,
+        duration: 3_600.0,
+        entry: Some(b.ago(mins(15))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("sw-core-ams-02"),
+            "m.keller",
+            "IOS XE 17.9.5 upgrade if the vendor build passes the lab tonight.",
+            b.later(mins(468)),
+            b.later(mins(948)),
+        )
+    });
+    b.downtime_with(ScenarioDowntime {
+        schedule: Some("weekly-patching"),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("sw-core-ams-02"),
+            "icingaadmin",
+            "Weekly patch window for the core switches.",
+            b.later(hours(63) + mins(48)),
+            b.later(hours(67) + mins(48)),
+        )
+    });
+
+    let mut bmc = ScenarioDowntime::fixed(
+        ObjectKey::host("k8s-node-02"),
+        "m.keller",
+        "BMC firmware update (CHG-4470); the host check may flap, its services stay monitored.",
+        b.ago(mins(12)),
+        b.later(mins(48)),
+    );
+    bmc.entry = Some(b.ago(mins(17)));
+    b.downtime_with(bmc);
+}
+
+/// A downtime on `host` with `all_services`: the host's, and one per
+/// service with the host's as its parent, as Icinga schedules them.
+fn host_with_services(b: &mut Builder, host: &str, spec: &ScenarioDowntime) {
+    let parent = b.downtime_with(spec.clone());
+    let services: Vec<String> = b
+        .scenario
+        .services
+        .iter()
+        .filter(|service| service.key.host.as_str() == host)
+        .map(|service| service.key.name.to_string())
+        .collect();
+    for service in services {
+        b.downtime_with(ScenarioDowntime {
+            object: ObjectKey::service(host, &service),
+            parent: Some(parent.clone()),
+            ..spec.clone()
+        });
+    }
 }

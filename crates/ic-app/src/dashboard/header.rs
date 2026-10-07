@@ -354,7 +354,7 @@ impl DashboardView {
         }
         let toggle_reference = reference.clone();
         let hide = !view.hide_handled;
-        let toggle_text = handled_label(view.hide_handled, result.summary.handled);
+        let toggle_text = handled_label(view.hide_handled, result.handled);
         // Counts from a node that sees part of the cluster never look
         // complete (ENV-12): the view's label before the toggle.
         let marker = state
@@ -541,7 +541,7 @@ fn demo_chip(theme: &ic_ui_kit::Theme) -> AnyElement {
         .border_1()
         .border_color(theme.colors.accent.opacity(0.5))
         .text_size(theme.text.hint)
-        .text_color(theme.colors.accent)
+        .text_color(theme.colors.accent_text)
         .child("demo")
         .tooltip(Tooltip::text(
             "A demo environment: simulated by icygui, no real Icinga is involved",

@@ -15,6 +15,7 @@ mod chrome;
 mod cli;
 mod dashboard;
 mod dev;
+mod downtimes;
 mod editor;
 mod environments;
 #[cfg(test)]

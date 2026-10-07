@@ -78,7 +78,7 @@ pub(crate) fn section_label(
 /// colour, as the palette marks its matches.
 pub(crate) fn marked(text: &str, query: &str, theme: &Theme) -> StyledText {
     let accent = HighlightStyle {
-        color: Some(theme.colors.accent),
+        color: Some(theme.colors.accent_text),
         ..HighlightStyle::default()
     };
     StyledText::new(SharedString::from(text.to_owned())).with_highlights(

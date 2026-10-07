@@ -17,16 +17,19 @@
 //! and, every [`TIME_REFRESH`], a filter calling `get_time()` are
 //! evaluated in full. The engine runs it on a blocking thread.
 //!
-//! Rows: `problems_only`, then `hide_handled` (Icinga's handled: a problem
-//! that is acknowledged, in downtime, or a service whose host has a
-//! problem), sorted by the view's key with the ties going to severity
+//! Rows: `problems_only`, then `hide_handled` (what icygui counts as
+//! handled, [`ic_model::Service::counts_as_handled`]: Icinga's handled, a
+//! problem that is acknowledged, in downtime, or a service whose host has
+//! a problem, and any object whose downtime is in effect whatever its
+//! state, as the hollow marks show it), sorted by the view's key with the ties going to severity
 //! (descending), when the state began ([`state_since`]: `last_state_change`,
 //! else `last_hard_state_change`; newest first), host name and service
 //! name. `GroupBy` puts a header before each group's rows; groups are
 //! ordered by their worst severity (descending), then label, and objects
 //! without a group come last under "ungrouped". The summary counts every
 //! member, before `problems_only` and `hide_handled`; `shown` counts the
-//! rows.
+//! rows; `handled` counts the members `hide_handled` hides or shows (those
+//! `problems_only` lets through that count as handled).
 //!
 //! In quiet mode (PERF-09, [`Scope::Quiet`]) only the dashboards that
 //! take part in notification decisions are evaluated, and only their
@@ -343,8 +346,9 @@ struct Facts {
     /// When the state began ([`state_since`]), Unix seconds.
     since: f64,
     problem: bool,
-    /// Icinga's handled (a problem acknowledged, in downtime, or a service
-    /// whose host has a problem).
+    /// Counts as handled: Icinga's handled (a problem acknowledged, in
+    /// downtime, or a service whose host has a problem), or a downtime in
+    /// effect whatever the state.
     handled: bool,
     /// A hash of what `group_by` files the object under (0 without
     /// grouping), so a changed group membership rebuilds the rows.
@@ -569,7 +573,7 @@ impl Board {
             severity: host.severity(),
             since: state_since(&host.check).as_unix_seconds(),
             problem: host.is_problem(),
-            handled: host.is_handled(),
+            handled: host.counts_as_handled(),
             groups: self.groups_hash(Some(host), None),
         };
         self.apply(object, outcome, facts);
@@ -593,7 +597,7 @@ impl Board {
             severity: service.severity(),
             since: state_since(&service.check).as_unix_seconds(),
             problem: service.is_problem(),
-            handled: service.is_handled(host_problem),
+            handled: service.counts_as_handled(host_problem),
             groups: self.groups_hash(host, Some(service)),
         };
         self.apply(object, outcome, facts);
@@ -714,15 +718,16 @@ impl Board {
             } else {
                 Arc::clone(&self.result.rows)
             };
-            let (summary, shown) = if self.summary_dirty || self.result.error.is_some() {
+            let (summary, shown, handled) = if self.summary_dirty || self.result.error.is_some() {
                 self.summaries()
             } else {
-                (self.result.summary, self.result.shown)
+                (self.result.summary, self.result.shown, self.result.handled)
             };
             DashboardResult {
                 rows,
                 summary,
                 shown,
+                handled,
                 error: None,
             }
         };
@@ -736,17 +741,22 @@ impl Board {
         true
     }
 
-    /// The counts over every member, and over the members the rows show.
-    fn summaries(&self) -> (Summary, Summary) {
+    /// The counts over every member and over the members the rows show,
+    /// and how many members `hide_handled` hides or shows.
+    fn summaries(&self) -> (Summary, Summary, u32) {
         let mut all = Tally::default();
         let mut shown = Tally::default();
+        let mut handled = 0_u32;
         for facts in self.members.values() {
             all.add(facts.state, facts.handled, facts.severity);
             if self.visible(facts) {
                 shown.add(facts.state, facts.handled, facts.severity);
             }
+            if facts.handled && (!self.view.problems_only || facts.problem) {
+                handled += 1;
+            }
         }
-        (all.finish(), shown.finish())
+        (all.finish(), shown.finish(), handled)
     }
 
     fn rows(&self, data: &Data) -> Vec<DashboardRow> {

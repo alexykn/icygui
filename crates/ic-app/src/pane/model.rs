@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use ic_core::snapshot::Snapshot;
 use ic_model::{
-    CheckInfo, CheckableState, Comment, CommentKind, Downtime, Features, Host, Notified, ObjectKey,
-    Service, ServiceState, Timestamp, Vars,
+    CheckInfo, CheckableState, Comment, CommentKind, Features, Host, Notified, ObjectKey, Service,
+    ServiceState, Timestamp, Vars,
 };
 use ic_ui_kit::TreeLine;
 use serde_json::Value;
@@ -369,7 +369,8 @@ pub(crate) fn group_names(
         .join(", ")
 }
 
-/// A comment or acknowledgement as the pane lists it.
+/// A comment or acknowledgement as the pane lists it (downtimes have
+/// their banner and section, `crate::downtimes`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Note {
     /// `#` for comments, `✓` for acknowledgements, `~` for flapping notes.
@@ -405,42 +406,6 @@ pub(crate) fn comment_note(comment: &Comment, now: Timestamp) -> Note {
         meta,
         body: comment.text.clone(),
         name: comment.name.clone(),
-    }
-}
-
-/// The pane's view of a downtime: `a.ivanova downtime 14:21 → 16:00 · 50m
-/// left`.
-pub(crate) fn downtime_note(downtime: &Downtime, now: Timestamp) -> Note {
-    let window = format!(
-        "{} → {}",
-        format::clock(downtime.start_time, now),
-        format::clock(downtime.end_time, now)
-    );
-    let status = if downtime.in_effect {
-        format!(
-            "{} left",
-            ic_model::format_compact(downtime.end_time.remaining_from(now))
-        )
-    } else if downtime.start_time > now {
-        format!(
-            "starts in {}",
-            ic_model::format_compact(downtime.start_time.remaining_from(now))
-        )
-    } else if !downtime.fixed {
-        "flexible, not triggered".to_owned()
-    } else {
-        "ended".to_owned()
-    };
-    let mut meta = vec!["downtime".to_owned(), window, status];
-    if downtime.config_owned {
-        meta.push("from config".to_owned());
-    }
-    Note {
-        marker: "↓",
-        author: downtime.author.clone(),
-        meta,
-        body: downtime.comment.clone(),
-        name: downtime.name.clone(),
     }
 }
 
@@ -868,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_for_comments_acks_and_downtimes() {
+    fn notes_for_comments_and_acks() {
         let comment = Comment {
             name: "h!s!1".to_owned(),
             object: ObjectKey::service("h", "s"),
@@ -883,34 +848,6 @@ mod tests {
         assert_eq!(note.marker, "✓");
         assert_eq!(note.meta[0], "acknowledged");
         assert_eq!(note.body, "renewal in progress");
-
-        let demo = fixture::build(now());
-        let downtime = &demo.snapshot.downtimes[&ObjectKey::host("edge-fra-04")][0];
-        let note = downtime_note(downtime, now());
-        assert_eq!(note.marker, "↓");
-        assert_eq!(note.meta[0], "downtime");
-        assert_eq!(note.meta[2], "50m left");
-        assert_eq!(note.body, "rack maintenance");
-    }
-
-    #[test]
-    fn future_and_untriggered_downtimes() {
-        let demo = fixture::build(now());
-        let mut downtime = demo.snapshot.downtimes[&ObjectKey::host("edge-fra-04")][0].clone();
-        downtime.in_effect = false;
-        downtime.start_time = Timestamp::from_unix_seconds(NOW + 600.);
-        assert_eq!(downtime_note(&downtime, now()).meta[2], "starts in 10m");
-        downtime.start_time = ago(60.);
-        downtime.fixed = false;
-        assert_eq!(
-            downtime_note(&downtime, now()).meta[2],
-            "flexible, not triggered"
-        );
-        downtime.config_owned = true;
-        assert_eq!(
-            downtime_note(&downtime, now()).meta.last().unwrap(),
-            "from config"
-        );
     }
 
     #[test]

@@ -559,7 +559,7 @@ impl RenderOnce for Chip {
             })
             .text_size(theme.text.label)
             .text_color(if self.selected || self.marked {
-                colors.accent
+                colors.accent_text
             } else if self.filled {
                 colors.text_strong
             } else {

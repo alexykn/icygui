@@ -7,15 +7,17 @@ use ic_model::{
     CheckInfo, CheckableState, Comment, CommentKind, Host, HostState, ObjectKey, ServiceState,
     Timestamp,
 };
+use ic_ui_kit::ObjectMark;
 
-use crate::format;
+use crate::{downtimes, format};
 
 /// A host or service row: `● postgres-replication on db-prod-03`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ObjectRow {
     /// The state circle's colour.
     pub(crate) state: CheckableState,
-    /// Acknowledged, in downtime or behind a host problem: a hollow ring.
+    /// Counts as handled (acknowledged, behind a host problem, or in a
+    /// downtime in effect whatever the state): a hollow ring.
     pub(crate) handled: bool,
     /// Time in state under the circle (`14m`).
     pub(crate) since: String,
@@ -69,26 +71,27 @@ pub(crate) fn object_row(
     match key {
         ObjectKey::Host { name } => {
             let host = snapshot.hosts.get(name)?;
+            let mark = ObjectMark::host(host);
             Some(ObjectRow {
-                state: CheckableState::Host(host.state),
-                handled: host.is_handled(),
+                state: mark.state,
+                handled: mark.hollow,
                 since: format::time_in_state(&host.check, now),
                 clock: format::state_clock(&host.check, now),
                 name: host.display_name.clone(),
                 host: None,
                 output: output(&host.check, CheckableState::Host(host.state)),
-                tag: tag(&host.check, comments, None),
+                tag: tag(snapshot, key, &host.check, comments, None, now),
                 late,
             })
         }
         ObjectKey::Service { key: service_key } => {
             let service = snapshot.services.get(service_key)?;
             let host = snapshot.host_of(service_key);
-            let host_problem = host.is_some_and(|host| host.is_problem());
-            let state = CheckableState::Service(service.state);
+            let mark = ObjectMark::service(service, host.map(AsRef::as_ref));
+            let state = mark.state;
             Some(ObjectRow {
                 state,
-                handled: service.is_handled(host_problem),
+                handled: mark.hollow,
                 since: format::time_in_state(&service.check, now),
                 clock: format::state_clock(&service.check, now),
                 name: service.display_name.clone(),
@@ -98,9 +101,12 @@ pub(crate) fn object_row(
                 )),
                 output: output(&service.check, state),
                 tag: tag(
+                    snapshot,
+                    key,
                     &service.check,
                     comments,
                     host.map(AsRef::as_ref).filter(|_| service.is_problem()),
+                    now,
                 ),
                 late,
             })
@@ -161,13 +167,20 @@ fn output(check: &CheckInfo, state: CheckableState) -> String {
     }
 }
 
-/// Why a problem is handled, or that it's flapping: `ack m.keller`,
-/// `downtime`, `host down`, `flapping`. `problem_host` is the host of a
-/// service in a problem state.
+/// Why the object is handled, or what's coming: `ack m.keller`, a
+/// downtime in effect with how long is left (`downtime 1h 48m`, `host
+/// downtime 1h 18m`, `downtime, flexible 1h 12m`), `host down`,
+/// `flapping`, a downtime still to come (`downtime at 22:00`, `downtime,
+/// flexible, not started`). `problem_host` is the host of a service in a
+/// problem state. One tag, in the slot where `ack m.keller` was, so
+/// nothing moves.
 fn tag(
+    snapshot: &Snapshot,
+    key: &ObjectKey,
     check: &CheckInfo,
     comments: Option<&[Comment]>,
     problem_host: Option<&Host>,
+    now: Timestamp,
 ) -> Option<String> {
     if check.acknowledgement.is_acknowledged() {
         let author = comments
@@ -179,8 +192,8 @@ fn tag(
             .filter(|author| !author.is_empty());
         return Some(author.map_or_else(|| "ack".to_owned(), |author| format!("ack {author}")));
     }
-    if check.downtime_depth > 0 {
-        return Some("downtime".to_owned());
+    if check.in_downtime() {
+        return downtimes::tag(snapshot, key, check, now);
     }
     if let Some(host) = problem_host.filter(|host| host.is_problem()) {
         return Some(format!(
@@ -188,7 +201,10 @@ fn tag(
             format::state_word(CheckableState::Host(host.state))
         ));
     }
-    check.flapping.then(|| "flapping".to_owned())
+    if check.flapping {
+        return Some("flapping".to_owned());
+    }
+    downtimes::tag(snapshot, key, check, now)
 }
 
 #[cfg(test)]

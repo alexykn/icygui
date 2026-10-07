@@ -19,9 +19,9 @@
 use std::cmp::Reverse;
 
 use ic_core::snapshot::Snapshot;
-use ic_model::{CheckableState, Host, ObjectKey, Service, Timestamp};
+use ic_model::{Host, ObjectKey, Service, Timestamp};
 use ic_rules::DashboardRef;
-use ic_ui_kit::IconName;
+use ic_ui_kit::{IconName, ObjectMark};
 
 use super::fuzzy::{Match, Query};
 use crate::actions::ObjectAction;
@@ -701,7 +701,8 @@ fn host_candidates(state: &AppState) -> Vec<Candidate> {
 /// A host's row: its display name, then its name and address (when they
 /// differ) and its state.
 fn host_item(host: &Host) -> PaletteItem {
-    let state = CheckableState::Host(host.state);
+    let mark = ObjectMark::host(host);
+    let state = mark.state;
     let address = if host.display_name == host.name.as_str() {
         host.address.clone()
     } else {
@@ -711,7 +712,7 @@ fn host_item(host: &Host) -> PaletteItem {
         section: Section::Hosts,
         label: host.display_name.clone(),
         detail: join_detail(&address, crate::format::state_word(state)),
-        dot: Some(Dot::for_object(Some(state))),
+        dot: Some(Dot::for_mark(mark)),
         several: false,
         icon: None,
         key_hint: None,
@@ -739,8 +740,10 @@ fn service_candidates(state: &AppState) -> Vec<Candidate> {
 
 /// A service's row: its display name, then `on <host> · <state>`.
 fn service_item(snapshot: &Snapshot, service: &Service) -> PaletteItem {
-    let state = CheckableState::Service(service.state);
-    let host = snapshot.host_of(&service.key).map_or_else(
+    let host_object = snapshot.host_of(&service.key).map(AsRef::as_ref);
+    let mark = ObjectMark::service(service, host_object);
+    let state = mark.state;
+    let host = host_object.map_or_else(
         || service.key.host.to_string(),
         |host| host.display_name.clone(),
     );
@@ -748,7 +751,7 @@ fn service_item(snapshot: &Snapshot, service: &Service) -> PaletteItem {
         section: Section::Services,
         label: service.display_name.clone(),
         detail: join_detail(&format!("on {host}"), crate::format::state_word(state)),
-        dot: Some(Dot::for_object(Some(state))),
+        dot: Some(Dot::for_mark(mark)),
         several: false,
         icon: None,
         key_hint: None,

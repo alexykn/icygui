@@ -184,7 +184,9 @@ pub(crate) fn expiry(not_after: Timestamp, now: Timestamp) -> (String, bool) {
     }
 }
 
-fn date_time<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<DateTime<Tz>> {
+/// `at` in time zone `zone`; `None` for timestamps far outside any
+/// real date.
+pub(crate) fn date_time<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<DateTime<Tz>> {
     let seconds = at.as_unix_seconds().floor();
     // Icinga's timestamps are well inside i64's range; anything else is
     // garbage and shows as unknown.

@@ -19,8 +19,8 @@ pub use event::{CheckableState, Event, EventKind, ObjectChange, StateAfter};
 pub use name::{HostName, ObjectKey, ServiceKey};
 pub use notification::{Notification, Notified};
 pub use object::{
-    AckKind, CheckInfo, CheckResult, Comment, CommentKind, Dependency, Downtime, Endpoint,
-    Features, Host, HostGroup, Links, Service, ServiceGroup, Vars, Zone,
+    AckKind, CheckInfo, CheckResult, Comment, CommentKind, Dependency, Downtime, DowntimePhase,
+    Endpoint, Features, Host, HostGroup, Links, Service, ServiceGroup, Vars, Zone,
 };
 pub use perfdata::{
     Perfdata, PerfdataStatus, Threshold, format_number, parse_perfdata, parse_perfdata_entry,

@@ -9,6 +9,9 @@
 //! without a key and copies the name, the output and a filter expression
 //! (PANE-05).
 //!
+//! A downtime in effect (or still to come) shows in a banner fixed under
+//! the header, above the scrolling body (topic 01, [`downtime`]).
+//!
 //! The object the pane shows is the one the user opens: it is asked for in
 //! full at once, ahead of everything else (`Command::Focus`; once the
 //! cursor rests when it moves through the list), and again when the
@@ -17,6 +20,7 @@
 //! hint in a fixed slot of its header when fresher details take longer
 //! than [`UPDATING_HINT_AFTER`].
 
+mod downtime;
 mod history;
 mod host;
 pub(crate) mod model;
@@ -74,6 +78,9 @@ const TAB_TWO_COLUMNS_FROM: f32 = 1000.;
 const FOCUS_DEBOUNCE: Duration = Duration::from_millis(150);
 /// The `updating` hint shows when fresher details take longer than this.
 pub(crate) const UPDATING_HINT_AFTER: Duration = Duration::from_millis(300);
+/// The header's link that opens the pane as a tab; a tab keeps its place,
+/// empty.
+const OPEN_AS_TAB: &str = "↗ open as tab";
 /// The width of the hint's slot in the header, kept whether it shows or
 /// not, so nothing beside it moves.
 const UPDATING_SLOT_WIDTH: f32 = 84.;
@@ -601,27 +608,36 @@ impl ObjectPane {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.back(cx))),
             );
         }
-        header = header.label(label).status(updating_slot(updating, theme));
+        header = header
+            .label(label)
+            .status(updating_slot(updating, theme))
+            .on_close(cx.listener(|this, _: &ClickEvent, _, cx| this.close(cx)));
+        // The × sits left of `↗ open as tab` on every platform, never next
+        // to a window's close button; a tab keeps the link's place, empty,
+        // so the × stays where it is (topic 13).
         let header = match self.mode {
-            PaneMode::Split => header
-                .child(
-                    Link::new("open-as-tab", "↗ open as tab")
-                        .quiet()
-                        .text_size(theme.text.small)
-                        .tooltip(Tooltip::new("Open as tab").key(open_as_tab_key()))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            let object = this.object.clone();
-                            this.state.update(cx, |state, cx| {
-                                if state.open_tab(object) {
-                                    cx.notify();
-                                }
-                            });
-                        })),
-                )
-                .on_close(cx.listener(|this, _: &ClickEvent, _, cx| this.close(cx))),
-            PaneMode::Tab => {
-                header.on_close(cx.listener(|this, _: &ClickEvent, _, cx| this.close(cx)))
-            }
+            PaneMode::Split => header.child(
+                Link::new("open-as-tab", OPEN_AS_TAB)
+                    .quiet()
+                    .text_size(theme.text.small)
+                    .tooltip(Tooltip::new("Open as tab").key(open_as_tab_key()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        let object = this.object.clone();
+                        this.state.update(cx, |state, cx| {
+                            if state.open_tab(object) {
+                                cx.notify();
+                            }
+                        });
+                    })),
+            ),
+            PaneMode::Tab => header.child(
+                div()
+                    .flex_none()
+                    .invisible()
+                    .whitespace_nowrap()
+                    .text_size(theme.text.small)
+                    .child(OPEN_AS_TAB),
+            ),
         };
         // The pane's header is part of the window's top edge, beside the list
         // or as a tab.
@@ -662,6 +678,13 @@ impl Render for ObjectPane {
         } else {
             Vec::new()
         };
+        // Fixed under the header, so it stays in view while the body
+        // scrolls.
+        let downtime = if body_object_known(&snapshot, &self.object) {
+            downtime::banner(self, &snapshot, now, cx)
+        } else {
+            None
+        };
         div()
             .id("object-pane")
             .flex()
@@ -680,6 +703,7 @@ impl Render for ObjectPane {
             })
             .child(header)
             .children(banners)
+            .children(downtime)
             .child(body)
     }
 }
@@ -711,6 +735,14 @@ fn updating_slot(updating: bool, theme: &Theme) -> impl IntoElement {
                 "Fetching the latest details from Icinga; shown meanwhile is what icygui has",
             ))
         })
+}
+
+/// Whether the snapshot has `object` (the pane shows its body).
+fn body_object_known(snapshot: &ic_core::snapshot::Snapshot, object: &ObjectKey) -> bool {
+    match object {
+        ObjectKey::Service { key } => snapshot.services.contains_key(key),
+        ObjectKey::Host { name } => snapshot.hosts.contains_key(name),
+    }
 }
 
 /// The pane body for an object the snapshot doesn't have: still loading,
@@ -1076,31 +1108,48 @@ fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>
             output,
         ));
     }
-    // The notes and action URLs, macros resolved (PANE-05).
-    let links = object_links(state.snapshot(), &pane.object);
-    if !links.is_empty() {
-        menu = menu.separator();
-        for (index, (label, url)) in links.into_iter().enumerate() {
-            let target = url.clone();
-            menu = menu.item(
-                MenuItem::new(SharedString::from(format!("pane-open-{index}")), label)
-                    .tooltip(Tooltip::new(format!("Open {url} in the browser")))
-                    .on_click(
-                        cx.listener(move |this: &mut ObjectPane, _: &ClickEvent, _, cx| {
-                            this.menu.close();
-                            cx.open_url(&target);
-                            cx.notify();
-                        }),
-                    ),
-            );
-        }
+    // The banner's downtime by its full name, for another downtime's
+    // *triggered by*.
+    if let Some(banner) = crate::downtimes::banner(state.snapshot(), &pane.object, Timestamp::now())
+    {
+        menu = menu.item(copy(
+            "pane-copy-downtime",
+            "copy downtime name",
+            "the downtime's name",
+            banner.name,
+        ));
     }
+    menu = link_items(menu, object_links(state.snapshot(), &pane.object), cx);
     menu.on_dismiss(
         cx.listener(|this: &mut ObjectPane, dismissal: &Dismissal, _, cx| {
             this.menu.dismissed(*dismissal);
             cx.notify();
         }),
     )
+}
+
+/// The notes and action URLs, macros resolved (PANE-05), after a
+/// separator; nothing without links.
+fn link_items(mut menu: Menu, links: Vec<(String, String)>, cx: &Context<ObjectPane>) -> Menu {
+    if links.is_empty() {
+        return menu;
+    }
+    menu = menu.separator();
+    for (index, (label, url)) in links.into_iter().enumerate() {
+        let target = url.clone();
+        menu = menu.item(
+            MenuItem::new(SharedString::from(format!("pane-open-{index}")), label)
+                .tooltip(Tooltip::new(format!("Open {url} in the browser")))
+                .on_click(
+                    cx.listener(move |this: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                        this.menu.close();
+                        cx.open_url(&target);
+                        cx.notify();
+                    }),
+                ),
+        );
+    }
+    menu
 }
 
 /// The pane menu's watch and mute items (NOTE-02): local to this computer.

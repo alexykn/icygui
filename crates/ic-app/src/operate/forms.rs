@@ -1054,6 +1054,7 @@ mod tests {
                 parent: None,
                 in_effect: true,
                 config_owned: false,
+                schedule: None,
             }],
         );
         Snapshot {
@@ -1122,6 +1123,7 @@ mod tests {
             parent: None,
             in_effect: start <= 0. && end > 0.,
             config_owned: false,
+            schedule: None,
         }
     }
 

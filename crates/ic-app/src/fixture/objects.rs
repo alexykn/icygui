@@ -809,6 +809,7 @@ fn downtime(
         parent: None,
         in_effect: true,
         config_owned: false,
+        schedule: None,
     }
 }
 

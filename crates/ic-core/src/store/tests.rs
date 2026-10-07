@@ -579,6 +579,7 @@ fn downtime(name: &str, object: ObjectKey, in_effect: bool) -> Downtime {
         parent: None,
         in_effect,
         config_owned: false,
+        schedule: None,
     }
 }
 

@@ -13,10 +13,10 @@ use gpui::{
 };
 use ic_config::ListTimes;
 use ic_core::snapshot::Snapshot;
-use ic_model::{CheckableState, Host, ObjectKey, Timestamp};
+use ic_model::{Host, ObjectKey, Timestamp};
 use ic_ui_kit::{
-    ActiveTheme as _, CircleSize, CompactRow, KvTable, Link, StateCircle, SubTabs, Theme, Tooltip,
-    TreeTable, px,
+    ActiveTheme as _, CircleSize, CompactRow, KvTable, Link, ObjectMark, StateCircle, SubTabs,
+    Theme, Tooltip, TreeTable, px,
 };
 
 use super::service::{full_output, links_table, notes};
@@ -70,19 +70,25 @@ pub(super) fn render(
         .child(tabs);
     let content = match pane.host_tab {
         HostTab::Services => {
-            let notes = notes(pane, snapshot, &key, now, cx).map(|notes| {
+            // Comments, then the downtimes the banner doesn't show, above
+            // the services (topic 01).
+            let block = |content: AnyElement| {
                 div()
                     .px(theme.metrics.pane_inset)
                     .py(px(16.))
                     .border_b_1()
                     .border_color(theme.colors.border_row)
-                    .child(notes)
-            });
+                    .child(content)
+            };
+            let notes = notes(pane, snapshot, &key, now, cx)
+                .into_iter()
+                .chain(super::downtime::others(pane, snapshot, &key, now, cx))
+                .map(block);
             div()
                 .flex()
                 .flex_col()
                 .children(notes)
-                .child(services_tab(pane, &services, host.is_problem(), now, cx))
+                .child(services_tab(pane, &services, host, now, cx))
                 .into_any_element()
         }
         HostTab::History => super::history::host_tab(pane, &host.display_name, now, cx),
@@ -110,9 +116,8 @@ fn title(host: &Host, late: Option<String>, now: Timestamp, theme: &Theme) -> im
         .items_center()
         .gap(px(16.))
         .child(
-            StateCircle::new(CheckableState::Host(host.state))
+            StateCircle::mark(ObjectMark::host(host))
                 .size(CircleSize::Pane)
-                .handled(host.is_handled())
                 .state_label(),
         )
         .child(
@@ -171,7 +176,7 @@ fn title(host: &Host, late: Option<String>, now: Timestamp, theme: &Theme) -> im
 fn services_tab(
     pane: &ObjectPane,
     services: &model::HostServices,
-    host_problem: bool,
+    host: &Host,
     now: Timestamp,
     cx: &Context<ObjectPane>,
 ) -> AnyElement {
@@ -184,9 +189,7 @@ fn services_tab(
             service.key.name
         )))
         .leading(
-            StateCircle::new(CheckableState::Service(service.state))
-                .size(CircleSize::Compact)
-                .handled(service.is_handled(host_problem)),
+            StateCircle::mark(ObjectMark::service(service, Some(host))).size(CircleSize::Compact),
         )
         .title(service.display_name.clone())
         .detail(service.check.output().to_owned())

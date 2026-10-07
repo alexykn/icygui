@@ -340,7 +340,7 @@ impl RenderOnce for MenuItem {
             .text_color(if !enabled {
                 colors.text_faint
             } else if self.highlighted {
-                colors.accent
+                colors.accent_text
             } else {
                 colors.text
             })

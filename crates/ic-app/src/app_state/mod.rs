@@ -1063,8 +1063,8 @@ fn user_of(environment: &Environment) -> Option<String> {
 
 /// Whether `view` lists `key` as `snapshot` has it at `now`: the filter
 /// matches (evaluated by `ic-filter`, as the core does), then
-/// `problems_only` and `hide_handled` (Icinga's handled, as the core's
-/// rows apply it). A filter that doesn't parse or evaluate lists nothing.
+/// `problems_only` and `hide_handled` (what counts as handled, as the
+/// core's rows apply it: Icinga's handled, or a downtime in effect). A filter that doesn't parse or evaluate lists nothing.
 fn would_list(snapshot: &Snapshot, view: &View, key: &ObjectKey, now: Timestamp) -> bool {
     let Ok(filter) = ic_filter::Filter::parse(&view.filter) else {
         return false;
@@ -1078,7 +1078,7 @@ fn would_list(snapshot: &Snapshot, view: &View, key: &ObjectKey, now: Timestamp)
             (
                 test(&ic_filter::HostScope { host }),
                 host.is_problem(),
-                host.is_handled(),
+                host.counts_as_handled(),
             )
         }
         (ObjectKey::Service { key }, ObjectKind::Services) => {
@@ -1090,7 +1090,7 @@ fn would_list(snapshot: &Snapshot, view: &View, key: &ObjectKey, now: Timestamp)
             (
                 test(&ic_filter::ServiceScope { service, host }),
                 service.is_problem(),
-                service.is_handled(host_problem),
+                service.counts_as_handled(host_problem),
             )
         }
         _ => return false,

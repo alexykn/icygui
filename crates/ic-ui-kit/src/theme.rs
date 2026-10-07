@@ -186,8 +186,13 @@ pub struct Colors {
     /// Text inside code blocks (`#c4c7ca`).
     pub text_code: Hsla,
 
-    /// Links, focus and the primary button (`#74ade8`).
+    /// Links, focus and the primary button (`#74ade8`): the accent's fill
+    /// shade, for bars, borders, tracks and icons.
     pub accent: Hsla,
+    /// The accent's text shade, for words in the accent colour (links,
+    /// highlights, `1h 48m left`): the accent in dark, a darker blue in
+    /// light that keeps 4.5:1 on the selected and marked rows.
+    pub accent_text: Hsla,
     /// Hovered links (`#a3c8f0`).
     pub accent_hover: Hsla,
     /// Hovered primary button (`#86b9ec`).
@@ -245,7 +250,11 @@ impl Colors {
     /// fails to compile when a field is added and not listed), so checks
     /// over the whole palette cover new tokens too.
     #[must_use]
-    pub fn tokens(&self) -> [(&'static str, Hsla); 48] {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one line per token, twice: the destructuring and the list"
+    )]
+    pub fn tokens(&self) -> [(&'static str, Hsla); 49] {
         let Self {
             window_background,
             sidebar_background,
@@ -274,6 +283,7 @@ impl Colors {
             text_faint,
             text_code,
             accent,
+            accent_text,
             accent_hover,
             accent_button_hover,
             on_accent,
@@ -324,6 +334,7 @@ impl Colors {
             ("text_faint", text_faint),
             ("text_code", text_code),
             ("accent", accent),
+            ("accent_text", accent_text),
             ("accent_hover", accent_hover),
             ("accent_button_hover", accent_button_hover),
             ("on_accent", on_accent),
@@ -382,6 +393,7 @@ impl Colors {
             text_code: hex(0xc4_c7ca),
 
             accent: hex(0x74_ade8),
+            accent_text: hex(0x74_ade8),
             accent_hover: hex(0xa3_c8f0),
             accent_button_hover: hex(0x86_b9ec),
             on_accent: hex(0x10_161d),
@@ -446,6 +458,9 @@ impl Colors {
             text_code: hex(0x30_353a),
 
             accent: hex(0x2f_74c0),
+            // 4.5:1 or more on the selected and marked rows (the fill
+            // shade measures 3.99:1 on the selected row).
+            accent_text: hex(0x27_67ad),
             accent_hover: hex(0x1f_5c9e),
             accent_button_hover: hex(0x3d_82cf),
             on_accent: hex(0xff_ffff),
@@ -1048,6 +1063,39 @@ mod tests {
             }
             assert!(contrast_ratio(colors.on_accent, colors.accent) >= 4.5);
         }
+    }
+
+    #[test]
+    fn accent_words_read_on_selected_and_marked_rows() {
+        for theme in both() {
+            let colors = theme.colors;
+            for surface in [
+                colors.window_background,
+                colors.pane_background,
+                colors.sidebar_background,
+                colors.code_background,
+                colors.element_background,
+                colors.row_selected,
+                colors.row_marked,
+                colors.row_hover,
+                colors.group_active,
+                colors.item_active,
+            ] {
+                assert!(
+                    contrast_ratio(colors.accent_text, surface) >= 4.5,
+                    "{:?} on {surface:?}",
+                    colors.accent_text
+                );
+            }
+        }
+        // Dark keeps one shade; light's text shade is the darker one.
+        let dark = Colors::dark();
+        assert_eq!(dark.accent_text, dark.accent);
+        let light = Colors::light();
+        assert!(
+            contrast_ratio(light.accent, light.row_selected) < 4.5,
+            "the fill shade alone is too light for words on the selected row"
+        );
     }
 
     #[test]

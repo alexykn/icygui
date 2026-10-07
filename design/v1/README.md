@@ -59,7 +59,7 @@ per frame, plus `-zoom` crops of the details.
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
-| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r2-handling-downtimes.html` (round 2), `14-comments-acks.html` (round 1 drafts) | 6 (+6 light) | round 2 for review; round 1 decided |
+| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r3-scopes.html` (round 3), `14-r2-handling-downtimes.html` (round 2), `14-comments-acks.html` (round 1) | 6 (+6 light) | model approved; round 3 (scopes, fixes) for review |
 
 ---
 
@@ -463,12 +463,15 @@ settings in the editor.
 
 **Decisions**
 
-- **One page per environment.** A `cluster health` row under the nodes in the
-  footer switcher (a heart-pulse icon in the mark slot, a faint `zones,
-  queues, checks/min` hint), and *cluster health* in the palette. Either
-  opens the page as a tab in the sidebar's `open` section, named `cluster
-  health · prod-cluster`, with the environment's worst health as its dot. It
-  is a page, not a modal, so it can stay open on a second screen.
+- **One page per environment.** It is reached from *health*, the third
+  entry of the sidebar's fixed **cluster** section at the top (topic 14,
+  round 3: handling, downtimes, health), with the cluster's state dot in the
+  mark slot and no count; also from a `cluster health` row under the nodes in
+  the footer switcher (a heart-pulse icon in the mark slot, a faint `zones,
+  queues, checks/min` hint) and *cluster health* in the palette. All open
+  the same page, `cluster health · prod-cluster`; it is no longer a tab in
+  the `open` section (frames 6a–6c still draw it there, from before topic
+  14). It is a page, not a modal, so it can stay open on a second screen.
 - **Header:** `cluster health · prod-cluster · seen from master-01`, then
   `updated 12s ago · every 30s`. The summary bar counts connected and
   disconnected endpoints and ends with Icinga's version and uptime.
@@ -1071,9 +1074,77 @@ notification centre; 13n the tray menu and a toast in light mode.
 
 ## 14 Comments, acknowledgements and downtimes
 
-### Round 2 (current): handling and downtimes
+### Round 3 (final): scopes, the cluster section, three fixes
 
-**Status: round 2, for the user's review.** Built from the user's verdict on
+**Status: the model is approved; round 3 is for the user's review.**
+
+**Shows** (`14-r3-scopes.html`, each dark and `-light`): 14-r3-a the
+sidebar's cluster section with handling open; 14-r3-d platform's own
+handling; 14-r3-e the timeline with one line per downtime; 14-r3-f a narrow
+list beside the pane; 14-r3-g the downtimes list with single-downtime rows;
+14-r3-h the group's settings with the two switches.
+
+**The final model**
+
+- Two views, **handling** (chips: all, acknowledged, in downtime, upcoming,
+  comments) and **downtimes** (timeline | list), plus the thread in the
+  object's pane. No separate acknowledged or comments view: the palette's
+  *acknowledged* opens handling with that chip selected.
+- **Two scopes, the same parts and look** (`threads.js`); only the scope
+  line in the page header differs:
+  1. **The environment** (14-r3-a): a fixed sidebar section **cluster** at
+     the very top, above the groups, its header `cluster` with the
+     environment's name faint beside it. Three entries, each with its mark in
+     the fixed dot slot and its count in the fixed count slot: **handling**
+     (its icon; the objects being handled), **downtimes** (its icon; in
+     effect now) and **health**, topic 06's cluster health page (the
+     cluster's state dot by 06's rules: ok, warning when a node lags or a
+     queue grows, critical when an endpoint is down; no count). Order:
+     handling and downtimes first, the pages people work through; health
+     last, looked at when something seems off. Scope line:
+     `prod-cluster · the whole environment · 20 objects`.
+  2. **A group** (14-r3-d, 14-r3-h): **optional, off by default**. The
+     group's settings (from its `···` → *group settings*, and the same rows
+     in *new group*) have two switches in fixed rows: *handling for this
+     group* ("One view of every acknowledgement, downtime and comment across
+     its dashboards.") and *downtimes for this group* ("One view of every
+     downtime across its dashboards, as a timeline or a list."). Turned on,
+     each is an entry at the top of the group in the sidebar, before its
+     dashboards, with its icon and count. The page covers the union of the
+     objects of the group's dashboards; scope line `platform · 4 dashboards ·
+     64 objects`. A team with one dashboard makes a group for it.
+  - **Not a dashboard view kind:** handling and downtimes are not views on
+    a single dashboard (dropped in round 3).
+- **The `open` section** stays below the groups for ad-hoc tabs only
+  (objects opened as tabs, pinned combined views) and appears only when
+  there are any.
+- **Data:** no new requests. Everything comes from the snapshot icygui
+  already holds (acknowledgements, downtimes and comments are loaded today);
+  a group's scope is the union of its dashboards' existing filters,
+  evaluated on that snapshot.
+
+**Fixes from round 2**
+
+- **(a) Timeline (14-r3-e):** an object with several downtimes is a group,
+  and each downtime gets its own line inside it: the kind's icon in the mark
+  slot, the kind and the author on the first line, the text on the second
+  (the window is the bar), its own bar and its own time at the right. A host
+  downtime with services keeps its fold under its line. An object with a
+  single downtime stays one row.
+- **(b) Narrow lists (14-r3-f):** the band is a flex row in which `service
+  on host` never shrinks; the faint output gives way first, then the right
+  slot (shortened with an ellipsis), so names stay whole as long as there is
+  room for them.
+- **(c) Downtimes list (14-r3-g):** an object with a single downtime and no
+  services fold takes one row of an entry's height: the object's state dot
+  in the mark slot, the chevron slot empty, the first line names the object
+  and then the kind, author and window, the second line is the text, the
+  same two tag slots. The band with entries under it appears only for an
+  object with several downtimes or a services fold.
+
+### Round 2: handling and downtimes
+
+**Status: approved as the model** (round 3 adds the scopes and fixes). Built from the user's verdict on
 round 1 (below) and the coordinator's decisions. Consistency across the views
 is the main goal: every part comes from one component, `threads.js` (styles:
 *threads* in `v1.css`).

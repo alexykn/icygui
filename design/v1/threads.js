@@ -21,9 +21,12 @@ const T_KIND = { ack: 'acknowledged', on: 'in downtime', up: 'downtime, upcoming
 const T_ACC = { ack: true, on: true };
 
 // a group band. o: { st, ring, name, host, out, slot, collapsed, sel, tl }
+// The band is a flex row (.tb): the name and host never shrink, the faint
+// output goes first, then the right slot; so a narrow list next to a pane
+// keeps "service on host" whole as long as possible.
 function tBand({ st, ring = false, name, host = '', out = '', slot = '', collapsed = false, sel = false, cls = '', after = '' }) {
   const label = host ? `${name}<span class="h"> on </span><span class="hh">${host}</span>` : name;
-  return `<div class="ghb${sel ? ' sel' : ''}${cls ? ' ' + cls : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span><div class="lead"><span class="dot ${st}${ring ? ' ring' : ''} d9"></span></div>
+  return `<div class="ghb${after ? '' : ' tb'}${sel ? ' sel' : ''}${cls ? ' ' + cls : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span><div class="lead"><span class="dot ${st}${ring ? ' ring' : ''} d9"></span></div>
     <div class="t"><span class="n">${label}</span><span class="o">${out}</span></div>${after || `<span class="cs"><span class="bslot">${slot}</span></span>`}</div>`;
 }
 
@@ -49,11 +52,50 @@ function tFold({ n, host, open = false, services = [], total = 0, tl = '' }) {
   return h;
 }
 
+// A single downtime (or single entry) of an object without a fold: band and
+// entry merged into one row of an entry's height; the chevron slot is empty,
+// the mark slot has the object's state dot, the header line names the object.
+function tRow({ st, ring = false, name, host = '', kind, au, at = '', meta = '', text, sel = false, a = '', b = '', bTone = '' }) {
+  const k = T_KIND[kind];
+  const slotA = typeof a === 'object' ? `<span class="mini"><span style="width:${a.progress}%"></span></span>` : a;
+  const label = host ? `${name}<span class="h"> on </span><span class="hh">${host}</span>` : name;
+  return `<div class="te tr1${sel ? ' sel' : ''}"><span class="mk"><span class="dot ${st}${ring ? ' ring' : ''} d9"></span></span>
+    <div style="min-width:0"><div class="hd"><span class="on">${label}</span>${k ? `<span class="k${T_ACC[kind] ? ' acc' : ''}">${kind === 'cfg' ? `${icon('lock', 11)} ` : ''}${k}</span>` : ''}<span class="au">${au}</span><span>${at}</span>${meta ? `<span class="m">${meta}</span>` : ''}</div>
+      <div class="tx">${text}</div></div>
+    <span class="tg"><span class="tsa">${slotA}</span><span class="tsb${bTone ? ' t' + bTone : ''}">${b}</span></span></div>`;
+}
+
+// ---- the timeline: a shared axis, one row per single downtime, a group
+// (band, one line per downtime, the services fold) for an object with several
+// downtimes or a host downtime with services ----------------------------------
+const TL = { a0: 12, a1: 24, w: 640, now: 14.2 };
+const tlX = (t) => Math.round((Math.min(Math.max(t, TL.a0), TL.a1) - TL.a0) / (TL.a1 - TL.a0) * TL.w);
+// bars: [from, to, kind, label] kind: on | up | flex; off: text at the right edge
+function tlAxis(bars = [], off = '') {
+  let h = '';
+  bars.forEach(([a, b, k, lab]) => {
+    const l = tlX(a), w = Math.max(6, tlX(b) - tlX(a));
+    if (k === 'flex') h += `<span class="bar flex" style="left:${l}px;width:${w}px"></span><span class="lab" style="left:${l}px">${lab}</span>`;
+    else if (k === 'on') h += `<span class="bar" style="left:${l}px;width:${w}px"><span style="width:${Math.round((TL.now - a) / (b - a) * 100)}%"></span></span>`;
+    else h += `<span class="bar up" style="left:${l}px;width:${w}px"></span>`;
+  });
+  if (off) h += `<span class="off">${off}</span>`;
+  return `<span class="ax">${h}</span>`;
+}
+const tlHead = (label) => `<div class="tlax"><span></span><span>${label}</span><span class="ax">${[12, 14, 16, 18, 20, 22, 24].map((t) => `<span style="left:${tlX(t)}px">${String(t % 24).padStart(2, '0')}:00</span>`).join('')}</span><span style="text-align:right">left</span></div>`;
+// an object with a single downtime: one row
+const tlRow = ({ st, ring = false, name, host = '', text, bars, off = '', right, acc = false, sel = false }) => `<div class="tml${sel ? ' sel' : ''}"><span class="c"><span class="dot ${st}${ring ? ' ring' : ''} d9"></span></span><span class="s"><span><span class="n">${name}</span>${host ? `<span class="o"> on </span>${host}` : ''}</span><span class="t2">${text}</span></span>${tlAxis(bars, off)}<span class="r${acc ? ' acc' : ''}">${right}</span></div>`;
+// the group band of an object with several downtimes or a services fold
+const tlBand = (o) => tBand({ ...o, cls: 'tlb', after: `<span class="ax"></span><span class="r faint">${o.slot || ''}</span>` });
+// one downtime inside a group: the kind's icon in the mark slot
+const tlLine = ({ kind, au, meta = '', text, bars, off = '', right, acc = false }) => `<div class="tml tline"><span class="c mk${T_ACC[kind] ? ' acc' : ''}">${T_ICON[kind]()}</span><span class="s"><span><span class="k${T_ACC[kind] ? ' acc' : ''}">${T_KIND[kind]}</span>  <span class="n">${au}</span>${meta ? `<span class="o">  ${meta}</span>` : ''}</span><span class="t2">${text}</span></span>${tlAxis(bars, off)}<span class="r${acc ? ' acc' : ''}">${right}</span></div>`;
+
 const tSec = ({ ic, title, detail = '', right = '' }) => `<div class="tsec"><span class="mk">${icon(ic, 12)}</span><span><b>${title}</b>${detail ? `<span class="faint">  ·  ${detail}</span>` : ''}</span><span class="r">${right}</span></div>`;
 
 // the filter chips in the summary bar: [key, label, count, mark]; sel: the key shown
+const tChipRow = (chips, sel) => `<span class="fchips">${chips.map(([key, label, n, mark]) => `<span class="chip${key === sel ? ' sel' : ''}">${mark || ''}${n !== undefined ? `${n} ` : ''}${label}</span>`).join('')}</span>`;
 function tChips(chips, sel, end = '') {
-  return `<div class="sum"><span class="fchips">${chips.map(([key, label, n, mark]) => `<span class="chip${key === sel ? ' sel' : ''}">${mark || ''}${n !== undefined ? `${n} ` : ''}${label}</span>`).join('')}</span><span class="end">${end}</span></div>`;
+  return `<div class="sum">${tChipRow(chips, sel)}<span class="end">${end}</span></div>`;
 }
 const HANDLING_CHIPS = [
   ['all', 'all', undefined],

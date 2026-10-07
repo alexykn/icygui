@@ -704,3 +704,24 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .tlax { display: grid; gap: 14px; height: 28px; padding: 0 18px; align-items: center; background: var(--row-header); border-bottom: 1px solid var(--bd-header); font-size: 11px; color: var(--t-faint); flex: none; }
 .tlax .ax span { position: absolute; top: 8px; transform: translateX(-50%); }
 .nowl { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent); opacity: .6; z-index: 2; pointer-events: none; }
+
+/* round 3: the band as a flex row: name and host never shrink; the output,
+ * then the right slot give way first (narrow lists beside a pane) */
+.ghb.tb { display: flex; gap: 14px; }
+.ghb.tb .lead { width: 44px; flex: none; }
+.ghb.tb .t { display: contents; }
+.ghb.tb .t .n { flex: none; }
+.ghb.tb .t .o { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ghb.tb .cs { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.ghb.tb .cs .bslot { display: block; width: auto; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+/* a single downtime: band and entry merged into one entry-height row */
+.te.tr1 .mk { padding-top: 4px; }
+.te .hd .on { color: var(--t-emph); font-weight: 600; font-size: 13px; flex: none; }
+.te .hd .on .h { font-weight: 400; color: var(--t-faint); }
+.te .hd .on .hh { font-weight: 500; color: var(--t-sec); }
+.te .hd .k { display: inline-flex; align-items: center; gap: 4px; }
+/* timeline lines inside a group */
+.tml .mk { display: flex; justify-content: center; color: var(--t-faint); }
+.tml .mk.acc { color: var(--accent); }
+.tml .s .k { color: var(--t-muted); } .tml .s .k.acc { color: var(--accent); }
+.ghb.tlb .r { text-align: right; font-size: 11.5px; }

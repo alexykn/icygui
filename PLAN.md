@@ -340,7 +340,7 @@ Status markers: ✅ done · ⏳ in progress · ☐ not started.
 3. ✅ Multi-view dashboards (04), host-group grid (05), host-with-services views (paged by count, collapsible, two click targets), handled per kind: built (commits e868403, e441f22, bcced73), reviewed (28 findings: 25 fixed, 3 answered) and fixed in the stage-3 fixer commit. Left for later stages on purpose: the round-5 view controls drawn in the re-rendered 04/05 frames (row density per view with its editor field, the rows group in a stacked view's `···` and the one-view rows toggle, *only mine*, clickable count chips) go with stage 4, which brings handling and downtimes as view kinds and the controls rule with them; the sidebar mark setting and *copy filter from…* go with stage 4 too; the palette's combined multi-host view (10h as a palette result) with stage 6; the topic-12 notification row replaces the editor's rc1 notifications control in stage 5. Host-group grid CPU (review finding, partly fixed): the hover card is built on hover only and squares use index ids (debug, large demo: 560 UI ticks per 30 s, was ~950; a plain list is 168); the final audit measures it in a release build and, if still well above a list, draws one canvas per group with hit-testing.
 4. Handling and downtimes (14), the sidebar "cluster" section, and cluster health (06); replaces stage 2's three lists.
 5. Notifications opt-in with default or custom times (12).
-6. Palette multi-select and the combined view (10).
+6. Groupings both ways with named layouts and the shared band component (15, built first), then palette multi-select and the combined view (10).
 7. YAML sharing (08) and filter autocomplete (09).
 8. Read-only config (11).
 9. Windows (13).

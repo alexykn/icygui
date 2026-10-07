@@ -97,3 +97,64 @@ downtime* for a downtime set on the host; 1h the list's hint.
 4. New theme values: `accent-tint` (accent at 8 %) for the banner. The
    Banner component already derives it from its tone, so it may not need a
    token.
+
+---
+
+## 02 Settings window, in the style of Zed's
+
+**Shows** (`02-settings.html`, `settings.js`): 2a the window in context, over
+the main window; 2b general; 2c appearance; 2d notifications (top); 2e
+notifications (scrolled); 2f icinga; 2g keymap; 2h advanced; 2i a search for
+"quiet".
+
+**Decisions**
+
+- **A window of its own**, 1080×760, opened with ctrl-, (⌘, on macOS), the app
+  menu or the palette; the main window stays usable beside it. It replaces the
+  700px modal dialog.
+- **Left: navigation.** The window's top bar holds the traffic lights and a
+  search field (the main window's sidebar top, repeated). Below it come the
+  categories as sidebar-style rows (30px, an icon in the fixed mark slot, the
+  selected one with the sidebar's active background). Under the open category
+  are its sections on a guide line; the section in view is marked in the
+  accent colour. At the bottom: `focus navbar ctrl-shift-e`.
+- **Right: the page.** A 40px header bar (the page name like a dashboard
+  title, a faint scope such as `for prod-cluster · on this computer only`, the
+  `✓ saved` status and *edit in settings file*). Below it, section labels and
+  one row per setting: name (13px), a one-line description (12px muted,
+  truncated rather than wrapped), and the control right-aligned. Rows are
+  split by the list's row rules. Controls are today's `Switch` (without its
+  label), `Segmented`, `Chip`, the bordered `TextField`, and a dropdown in the
+  editor's style. Rows that depend on a switch above them are indented by
+  20px.
+- **Apply at once, Zed's model:** each change is written to settings.toml
+  straight away. Text fields apply on Enter or blur; a bad value shows its
+  problem under the row (critical text) and isn't applied. So the window has
+  no save or cancel. The header's `✓ saved` confirms the write. (The demo
+  shows `the demo saves nothing` there instead.)
+- **Categories and contents** are the ones the user confirmed. Notifications
+  starts with an `environment` dropdown, because rules are per environment
+  (today's dialog uses the active one). The new switch *show plugin output*
+  sits with the master switch. Icinga lists the environments with their health
+  dot, a connection summary and a gear that opens today's environment editor.
+  Keymap is a read-only, filterable table with *edit keymap file* in the
+  header. Advanced holds the log level, *open folder* for logs and config, and
+  about.
+- **Appearance** has a live preview of the databases dashboard in the chosen
+  density and time format. Compact rows are 32px plus the rule, with a 14px
+  circle and the time at the right, and no output line.
+- **Search** filters across categories: the nav dims the categories without a
+  match and counts the matches of the others. The page lists the matching
+  rows under `category · section` headings, with the match in the accent
+  colour (as in the palette). The rows work in place. A section name that
+  matches brings its whole section (`quiet hours`).
+
+**Open questions**
+
+1. Apply at once (drawn) or keep today's draft with save and cancel?
+2. Key hints are drawn in Linux notation, like the docs screenshots (ctrl-,);
+   macOS shows ⌘, and ⌘⇧E.
+3. Interface size steps: 90 / 100 / 115 %?
+4. New icons for the nav: `sun-moon`, `server`, `keyboard`, `wrench`,
+   `file-code`, `folder-open` (all Lucide, from the set gpui-component
+   ships).

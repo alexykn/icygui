@@ -94,9 +94,10 @@ function sidebarFoot({ badge, open, env = 'prod-cluster', node = 'master-01', ag
     <span class="grow"></span><span class="ibtn">${icon('plus', 16)}</span></div>`;
 }
 
-function listHeader({ title = 'overview', subtitle = 'service problems', demo = false, sort = 'severity ↓', extra = '', more = true } = {}) {
+// sortCh: the sort's fixed slot (its kind's longest label, VIEW CONTROLS, topic 14)
+function listHeader({ title = 'overview', subtitle = 'service problems', demo = false, sort = 'severity ↓', extra = '', more = true, sortCh = 0 } = {}) {
   return `<div class="hbar"><span class="title">${title}</span><span class="subtitle">${subtitle}</span><span class="grow"></span>
-    ${extra}${demo ? '<span class="demo-badge">demo</span>' : ''}${sort ? `<span class="right">${sort}</span>` : ''}${more ? '<span class="glyph">···</span>' : ''}</div>`;
+    ${extra}${demo ? '<span class="demo-badge">demo</span>' : ''}${sort ? `<span class="right${sortCh ? ' vsort' : ''}"${sortCh ? ` style="width:${sortCh}ch"` : ''}>${sort}</span>` : ''}${more ? '<span class="glyph">···</span>' : ''}</div>`;
 }
 
 // The summary bar's handled slot (rc1's "N handled hidden" toggle, now a
@@ -110,10 +111,16 @@ function summary(items = [['crit', 4, 'critical'], ['warn', 28, 'warning'], ['un
 }
 
 // A dashboard list row. r: [state, name, host, output, since] plus opts.
-function row(r, { sel, marked, hover, handled, tag = '', late, cls = '', hostRow } = {}) {
+function row(r, { sel, marked, hover, handled, tag = '', late, cls = '', hostRow, compact = false } = {}) {
   const [st, name, host, output, since] = r;
   const title = hostRow ? `<span class="n">${name}</span>` : `<span class="n">${esc(name)}</span><span class="on"> on </span><span class="h">${host}</span>`;
   const tagHtml = (late ? `<span class="late">${late}</span>` : '') + (tag ? `<span style="display:flex;align-items:center;gap:10px">${tag}</span>` : '');
+  // compact (row density, Settings → appearance or the view's own): one line,
+  // the 14px circle, the time at the right
+  if (compact) return `<div class="row cmp${sel ? ' sel' : ''}${marked ? ' marked' : ''}${hover ? ' hover' : ''} ${cls}">
+    <div class="lead">${circle(st, 14, handled)}</div>
+    <div class="text"><span class="t1">${title}</span></div>
+    <span class="tag">${tagHtml}<span class="since">${since}</span></span></div>`;
   return `<div class="row${sel ? ' sel' : ''}${marked ? ' marked' : ''}${hover ? ' hover' : ''} ${cls}">
     <div class="lead">${circle(st, 22, handled)}<span class="since">${since}</span></div>
     <div class="text"><span class="t1">${title}</span><span class="t2">${esc(output)}</span></div>

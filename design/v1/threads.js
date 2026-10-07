@@ -93,7 +93,10 @@ const tlLine = ({ kind, au, meta = '', text, bars, off = '', right, acc = false 
 const tSec = ({ ic, title, detail = '', right = '' }) => `<div class="tsec"><span class="mk">${icon(ic, 12)}</span><span><b>${title}</b>${detail ? `<span class="faint">  ·  ${detail}</span>` : ''}</span><span class="r">${right}</span></div>`;
 
 // the filter chips in the summary bar: [key, label, count, mark]; sel: the key shown
-const tChipRow = (chips, sel) => `<span class="fchips">${chips.map(([key, label, n, mark]) => `<span class="chip${key === sel ? ' sel' : ''}">${mark || ''}${n !== undefined ? `${n} ` : ''}${label}</span>`).join('')}</span>`;
+// narrow: a stacked header with little room (the editor's preview, beside a
+// pane) keeps each chip's mark and count and drops the word (its tooltip
+// names it); the filter summary is cut before that
+const tChipRow = (chips, sel, { narrow = false } = {}) => `<span class="fchips">${chips.map(([key, label, n, mark]) => `<span class="chip${key === sel ? ' sel' : ''}">${mark || ''}${n !== undefined ? (narrow ? `${n}` : `${n} `) : ''}${narrow && n !== undefined ? '' : label}</span>`).join('')}</span>`;
 function tChips(chips, sel, end = '') {
   return `<div class="sum">${tChipRow(chips, sel)}<span class="end">${end}</span></div>`;
 }
@@ -112,7 +115,19 @@ const DOWNTIME_CHIPS = [
 ];
 
 // the view header; mode: the downtimes view's display (timeline or list)
-function tHeader({ title, subtitle, sort, mode = '', mine = false }) {
-  const seg = mode ? `<span class="seg" style="height:26px;margin-right:6px">${['timeline', 'list'].map((m) => `<span class="${m === mode ? 'on' : ''}" style="padding:0 12px">${m}</span>`).join('')}</span>` : '';
-  return listHeader({ title, subtitle, sort, extra: `${seg}<span style="margin-right:6px">${sw(mine, 'only mine')}</span>` });
+// Every view has ONE set of controls, always in its view header: the
+// downtimes view's mode switch, the kind chips (they filter), the sort and
+// "only mine". On a one-view dashboard the view header is the page header
+// (with the summary bar as its second row): roomy. Stacked in a multi-view
+// dashboard, the same controls sit compactly in the 36px view header, and
+// "only mine" moves into the view's ··· menu.
+const tModeSeg = (mode, { compact = false } = {}) => `<span class="seg${compact ? ' cmp' : ''}" style="${compact ? '' : 'height:26px;'}margin-right:6px">${['timeline', 'list'].map((m) => `<span class="${m === mode ? 'on' : ''}"${compact ? '' : ' style="padding:0 12px"'}>${m}</span>`).join('')}</span>`;
+// kind ('handling' or 'downtimes', round 5): the one-view form of VIEW
+// CONTROLS: mode switch, only mine, the row-density toggle (rows: as
+// densityToggle's v; dim in timeline mode), the sort in its fixed slot, ···
+function tHeader({ title, subtitle, sort, mode = '', mine = false, kind = '', rows = null, eff = 'comfortable' }) {
+  const dens = rows ? `<span style="margin-right:2px">${densityToggle({ v: rows, eff, dim: mode === 'timeline' })}</span>` : '';
+  return listHeader({ title, subtitle, sort, sortCh: kind ? SORT_CH[kind] : 0, extra: `${mode ? tModeSeg(mode) : ''}<span style="margin-right:6px">${sw(mine, 'only mine')}</span>${dens}` });
 }
+// the controls of a stacked view (in its view header): chips, then the mode switch
+const tStackedControls = (chips, sel, mode = '', { narrow = false } = {}) => `<span class="vctl">${tChipRow(chips, sel, { narrow })}${mode ? tModeSeg(mode, { compact: true }) : ''}</span>`;

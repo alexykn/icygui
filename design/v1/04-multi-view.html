@@ -70,10 +70,11 @@ function inspector({ sel = 1, extra = '', viewSettings = true }) {
 service.problem<span class="caret" style="height:13px"></span></div></div>
     <div class="field"><div class="lab">show</div>${sw(true, 'problems only')}</div>
     ${handledField(0)}
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">sort</div>${select('severity')}</div><div class="field"><div class="lab">direction</div><span class="seg" style="display:flex"><span class="on" style="flex:1">↓ desc</span><span style="flex:1">↑ asc</span></span></div></div>` : '';
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">sort</div>${select('severity')}</div><div class="field"><div class="lab">direction</div><span class="seg" style="display:flex"><span class="on" style="flex:1">↓ desc</span><span style="flex:1">↑ asc</span></span></div></div>
+    ${rowsField('default', 'comfortable')}` : '';
   return `<div class="pane" style="background:var(--win-bg)">
     <div class="hbar pane-h" style="padding:0 18px"><span class="title" style="font-size:13.5px">dashboard</span><span class="grow"></span><span class="right faint">4 views</span></div>
-    <div class="col" style="gap:16px;padding:16px 18px;overflow:hidden">
+    <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">name</div><span class="input">databases</span></div><div class="field"><div class="lab">group</div>${select('overview')}</div></div>
       <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px;margin:0 -6px">${viewsList(sel, extra)}</div>
         <span style="display:flex;align-items:center;gap:8px;height:28px;font-size:12px;color:var(--t-muted)">${icon('plus', 13)}add view</span></div>
@@ -121,6 +122,7 @@ const streamSettings = `<div class="pane" style="background:var(--win-bg)">
     <div class="field"><div class="lab">events</div><div style="display:flex;gap:6px;flex-wrap:wrap">${chip('state changes', { sel: true })}${chip('acknowledgements', { sel: true })}${chip('downtimes', { sel: true })}${chip('comments', { sel: true })}${chip('flapping')}</div></div>
     <div class="field"><div class="lab">show</div><div class="col" style="gap:8px">${sw(true, 'hard states only')}${sw(false, 'include recoveries to OK')}</div></div>
     <div class="field"><div class="lab">lines</div><span class="seg" style="display:flex">${['8', '15', '30'].map((o, i) => `<span class="${i === 0 ? 'on' : ''}" style="flex:1">${o}</span>`).join('')}</span></div>
+    ${rowsField('default', 'comfortable')}
   </div></div>`;
 shot('4e', '04-multi-view-e-reorder-remove', 'A view’s <i>···</i>: move up and down (or drag the handle, or alt-↑↓), duplicate, collapse by default, remove. Removing needs no confirmation in the editor; <i>discard</i> brings it back. Here the event stream view is selected, showing its own settings: which events, hard states only, and how many lines it shows before it scrolls.',
   appWindow(editorMain(3, streamSettings, moreMenu), { activeItem: 'databases', groups: dbGroups }));

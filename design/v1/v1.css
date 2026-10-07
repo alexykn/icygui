@@ -731,3 +731,51 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .fx.cp { padding-right: 36px; }
 .fx .fxcp { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: var(--t-faint); }
 .fx .fxcp.on { background: var(--el-hover); color: var(--t); }
+
+/* a stacked view's controls in its 36px header (topic 14): compact chips and
+ * a compact segmented switch, the same controls as on a one-view page */
+.vh .vctl { display: flex; align-items: center; gap: 10px; flex: none; }
+.vh .vctl .fchips { gap: 4px; }
+.vh .vctl .chip { height: 20px; font-size: 11px; padding: 0 7px; }
+.seg.cmp { height: 22px; font-size: 11.5px; border-radius: 5px; }
+.seg.cmp span { padding: 0 9px; }
+/* the sidebar mark setting (topic 14): a swatch the size of a field, previewing
+ * the mark; clickable (hover highlight) only when the mark is an icon */
+.mswatch { width: 30px; height: 30px; border-radius: 6px; border: 1px solid var(--bd-header); background: var(--code-bg); display: flex; align-items: center; justify-content: center; flex: none; color: var(--t); }
+.mswatch.hov { background: var(--el-hover); }
+.mswatch.open { background: var(--el-hover); border-color: var(--accent); }
+.mpick { position: absolute; z-index: 30; width: 318px; padding: 6px; border-radius: 6px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 6px 18px var(--shadow-strong); display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; }
+.mpick .q { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: 4px; background: var(--code-bg); border: 1px solid var(--accent); font-size: 12.5px; color: var(--t); box-sizing: border-box; }
+.mpick .sl { font-size: 10.5px; color: var(--t-faint); padding: 2px 2px 0; }
+.mpick .g { display: grid; grid-template-columns: repeat(8, 32px); gap: 4px; position: relative; }
+.mpick .c { width: 32px; height: 32px; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: var(--t-sec); box-sizing: border-box; }
+.mpick .c.hov { background: var(--row-sel); color: var(--t-strong); }
+.mpick .c.cur { box-shadow: inset 0 0 0 1px var(--accent); }
+.mpick .ft { display: flex; gap: 12px; align-items: center; padding: 6px 4px 2px; border-top: 1px solid var(--bd-header); font-size: 11px; color: var(--t-faint); }
+.mpick .ft .nm { color: var(--t); }
+/* VIEW CONTROLS (topic 14, round 5, every view kind): the sort in a fixed
+ * slot sized for its kind's longest label (min-width set inline in ch) */
+.vsort { display: inline-block; text-align: right; flex: 0 1 auto; min-width: max-content; font-size: 12px; }
+.hbar .vsort { color: var(--t-muted); }
+/* ROW DENSITY PER VIEW: the one-view header's two-icon toggle, in a fixed
+ * slot left of the sort; .on = chosen on this view, .dflt = following the
+ * settings (dashed inset outline on the global value's icon), .dim = the slot
+ * stays but does nothing (downtimes in timeline mode) */
+.dens { display: inline-flex; height: 24px; border: 1px solid var(--bd-header); border-radius: 5px; overflow: hidden; flex: none; }
+.dens > span { width: 28px; display: flex; align-items: center; justify-content: center; color: var(--t-faint); position: relative; }
+.dens > span + span { border-left: 1px solid var(--bd-header); }
+.dens > span.on { background: var(--el-bg); color: var(--t); }
+.dens > span.dflt { color: var(--t-sec); }
+.dens > span.dflt::after { content: ''; position: absolute; inset: 3px; border: 1px dashed var(--t-faint); border-radius: 3px; }
+.dens.dim { opacity: .4; }
+/* compact rows (a view's density, or the settings' default): one line per
+ * object, the 14px circle, the time at the right; 32px with the rule */
+.row.cmp { height: 20px; padding: 6px 18px; }
+.row.cmp .lead { flex-direction: row; justify-content: center; }
+.row.cmp .tag .since { font-size: 11.5px; color: var(--t-faint); }
+/* the sidebar mark field (topic 14): the swatch, then a fixed-width select */
+.mfield { display: flex; align-items: center; gap: 8px; }
+.mswatch.dis { cursor: default; }
+.mpick .g.res { align-content: start; }
+.mpick .empty { font-size: 11.5px; color: var(--t-faint); padding: 4px 2px; }
+.selopen .select { border-color: var(--accent); }

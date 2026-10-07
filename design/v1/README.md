@@ -20,9 +20,12 @@ answer.
 - `v1.js`: the app's building blocks as HTML helpers (sidebar, list rows, pane
   title, buttons, menus, dialogs, toasts), named after ic-ui-kit. Every topic
   draws its chrome through them, so the frames stay consistent.
-- `icons.js`: the Lucide icons the app uses (gpui-component's set), inline.
+- `icons.js`: the Lucide icons the app uses (gpui-component's set), inline;
+  `rows-2` and `rows-4` (the row-density toggle, topic 14) are NEW.
 - `settings.js` (the settings panel, topics 02, 03 and 12) and `views.js`
-  (dashboard views, topics 04, 05 and 12): parts shared by several topics.
+  (dashboard views, topics 04, 05 and 12; the sort slot, the rows toggle,
+  the view's `···` and the editor's rows field, topic 14): parts shared by
+  several topics.
 - `threads.js` (topic 14, round 2): the group band, the entry, the fold of a
   host's services, the section label, the filter chips and the view header
   shared by the handling view, the downtimes view and the object's pane.
@@ -49,7 +52,7 @@ per frame, plus `-zoom` crops of the details.
 | 01 | Downtimes in the panes | `01-downtimes.html` | 11 (+6 zooms) | approved: variant A, with revisions |
 | 02 | Settings panel | `02-settings.html` | 10 | approved; handled defaults added |
 | 03 | Light theme | `03-light-theme.html` | 5 | approved with revisions |
-| 04 | Multi-view dashboards | `04-multi-view.html` | 5 (+1) | approved; editor selection revised |
+| 04 | Multi-view dashboards | `04-multi-view.html` | 5 (+1) | approved; editor selection revised; view controls, sort slot and rows per view added (topic 14, round 5) |
 | 05 | Host-group grid | `05-hostgroup-grid.html` | 5 (+1) | approved; editor selection revised |
 | 06 | Cluster health | `06-cluster-health.html` | 3 (+2) | approved; reached from the cluster section (topic 14) |
 | 07 | Comment, downtime and acknowledged lists | `07-comments-downtimes-lists.html` | 7 | revised and approved |
@@ -59,7 +62,7 @@ per frame, plus `-zoom` crops of the details.
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
-| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 4 (+1 zoom, +4 light) | model approved; round 5 (view kinds) for review |
+| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+7 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
 
 ---
 
@@ -145,6 +148,71 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
 - **The operator sees every target** before anything is sent: bulk dialogs
   and removal confirmations list every object (the box scrolls) and the
   button counts them.
+- **View controls (every view kind: list, grouped list, host-group grid,
+  summary tiles, event stream, handling, downtimes; topic 14, round 5).**
+  Every view has **one set of controls, and they always live in its view
+  header**. On a one-view dashboard the view header **is** the page header
+  (title and subtitle, then the controls; the summary bar is its second
+  row), so the controls are full and roomy (14-r5-d, 14-r5-f). Stacked on a
+  multi-view dashboard, the **same controls** sit compactly in each view's
+  36px header (14-r5-c, 04). Both forms are the same control with the same
+  value:
+  - **Count chips are the same clickable filters** in both forms (a click
+    filters the view, *all* clears it): handling's *acknowledged, in
+    downtime, upcoming, comments*; downtimes' *in effect, upcoming, from
+    config*. A list's per-state counts and its handled slot are the same in
+    both forms too (summary bar, or after the counts in the view header).
+  - **Sort is the same in both forms**: the view's own sort menu (4b), in a
+    **fixed slot sized for its kind's longest sort label**, right-aligned,
+    so a new sort changes only the word. In a tight stacked header the slot
+    gives way down to its word, after the filter summary is cut.
+  - **The downtimes view's timeline | list switch** is a segmented control
+    in both forms (compact when stacked, never the plain word). **The mode
+    is saved with the view, like the sort, and it is the same setting as
+    the editor's *opens as*.**
+  - **only mine** (handling and downtimes) is a switch in a one-view header;
+    when space is tight (every stacked header, the editor's narrow preview,
+    beside a pane) it goes into the view's `···`.
+  - **Rows** (list-like views, below) are a two-icon toggle in a one-view
+    header and a group in the view's `···` when stacked.
+  - When a stacked header is narrow, the filter summary is cut first, then
+    the chips drop their words (mark and count stay; the tooltip names
+    them), then the sort slot shrinks to its word (14-r5-e).
+
+  | Kind | One-view dashboard: page header (and second row) | Stacked: 36px view header | In the view's `···` (stacked) | Editor (the view's settings) |
+  |---|---|---|---|---|
+  | list, grouped list | rows toggle, sort, `···`; second row: per-state counts, handled slot | counts, handled slot, sort, `···` | rows | handled, sort, direction, rows |
+  | host-group grid | sort, `···`; second row: hosts per worst state | counts, sort, `···` | none | its settings (5e); no rows |
+  | summary tiles | sort, `···`; second row: per-state counts | counts, sort, `···` | none | its settings (04); no rows |
+  | event stream | `live`, rows toggle, sort, `···` | `live`, sort, `···` | rows | events, show, lines, rows |
+  | handling | only mine, rows toggle, sort, `···`; second row: chips all, acknowledged, in downtime, upcoming, comments | chips, sort, `···` | only mine, rows | opens with, sort, rows |
+  | downtimes | timeline \| list, only mine, rows toggle (dim in timeline mode), sort, `···`; second row: chips all, in effect, upcoming, from config | chips, timeline \| list (compact), sort, `···` | only mine, rows (list mode) | opens as (= the switch), shows, sort, rows |
+
+  Saved with the view: sort, mode, rows, the handled show or hide, and
+  *only mine*. A chip click is not saved: the view opens with its *opens
+  with* chip.
+- **Row density per view** (topic 14, round 5; decided with the user).
+  Settings → appearance → *row density* is the **default** for every list.
+  Every list-like view (list, grouped list, handling, downtimes in list
+  mode, event stream) has **rows: as in settings / comfortable / compact**.
+  New views start at *as in settings* and follow the global value until a
+  density is chosen on that view; *follow the default* in the view's `···`
+  removes the choice. **Shared or imported dashboards never carry a
+  density** (topic 08): an imported view is *as in settings*.
+  - **One-view header:** a small two-icon toggle (spacious rows `rows-2`,
+    compact rows `rows-4`, Lucide, NEW in the icon set) in a fixed slot
+    left of the sort. Chosen on the view: that icon is filled, as a
+    segmented control's *on*. Following the settings: the global value's
+    icon has a dashed inset outline (dashed = not set here, as topic 10's
+    preview outline). In a downtimes view's timeline mode the toggle is dim
+    and does nothing, and keeps its slot, so switching to *list* moves
+    nothing (14-r5-d, with its tooltip).
+  - **Stacked:** the view's `···` has *rows*: *comfortable*, *compact*,
+    *follow the default* (`settings: comfortable`), with a check on the
+    current one (14-r5-c).
+  - **Editor:** a *rows* field in the view's settings, a dropdown reading
+    **as in settings (comfortable)**, naming the current global value, or
+    *comfortable* or *compact* (14-r5-b, 14-r5-e, 4c, 4e).
 
 ---
 
@@ -265,7 +333,8 @@ bar's handled slot, hiding and after a click on *show*.
     hidden; the longer explanations sit in one note under the rows.
   - **Appearance:** theme (follow system, dark, light), **interface size
     90 / 100 / 115 %** (small, default, large), row density (comfortable or
-    compact), times in lists (relative or clock), **handled problems** (three
+    compact; **the default for every list**, which a view can set for itself,
+    topic 14 round 5: the *lists* section label says so), times in lists (relative or clock), **handled problems** (three
     switches, all on: hide acknowledged, hide in downtime, hide services of
     hosts that are down; the defaults for every view, which a view can
     override in the editor), and a live preview of the databases dashboard. Compact rows are 32px plus the rule, with a 14px
@@ -334,6 +403,14 @@ appearance with *light* chosen; 3e a component sheet, dark beside light.
   colours.
 - *follow system* (the default) switches live with the desktop's appearance.
   The tray icon follows the desktop, not this setting.
+- **Row density** (appearance, built with this topic in stage 1) becomes the
+  **default** for every list (topic 14, round 5, decided with the user): a
+  list-like view follows it until a density is chosen on that view (its
+  header's toggle, its `···` or the editor's *rows*); *follow the default*
+  removes the choice; the editor names the global value (*as in settings
+  (comfortable)*); shared or imported dashboards never carry a density. The
+  appearance page's *lists* label says it (2c, 3d). See *Row density per
+  view* in the rules above.
 
 ---
 
@@ -346,7 +423,10 @@ revised on 2026-10-07 at the user's request (no more accent ring).
 with four views (summary tiles, a list, an empty view, an event stream);
 4b a collapsed view, the cursor in the stream, the pane open and a view's own
 sort menu; 4c the editor managing views; 4d *add view*; 4e a view's `···`
-and the settings of an event stream view.
+and the settings of an event stream view. Topic 14 round 5 adds, here: the
+sort in a fixed slot in every view header (4a, 4b) and the *rows* field in
+the list and stream settings (4c, 4e); and in 14-r5-c a view header's `···`
+open (*only mine*, *rows*).
 
 **Decisions**
 
@@ -369,13 +449,29 @@ and the settings of an event stream view.
 - **Sidebar rule:** a dashboard with a problem view shows its worst state's
   dot and its problem count; a dashboard with only handling, downtimes or
   event views shows its first view's kind icon and that view's count
-  (objects being handled, downtimes in effect, none for events).
+  (objects being handled, downtimes in effect, none for events). The mark is
+  a **setting of the dashboard** (*sidebar mark*: state or icon, topic 14
+  round 5, 14-r5-e to g); the above are its defaults, and the count slot
+  never changes with it.
+- **View controls and row density** follow the rules at the top of this
+  file: one set of controls per view, in its view header (roomy on a
+  one-view dashboard, compact when stacked); *only mine* and *rows* in the
+  view's `···` when stacked; the sort in a fixed slot sized for its kind's
+  longest label (`list` 19ch, `handling` 17ch, `downtimes` 16ch, `stream`
+  12ch, `grid` and `tiles` 11ch; `SORT_CH` in `views.js`).
+- **A view header's `···`** (on the dashboard, 14-r5-c): *only mine*
+  (handling, downtimes), then *rows* (comfortable, compact, follow the
+  default), then *collapse* (←) and *edit view* (opens the editor with the
+  view selected). The editor's views list has its own `···` (4e).
 - **The view header** is 36px (the summary bar's height) on the pane surface
   (`pane_background`), so it reads as a band between views and differs from
   a grouped list's group-header bands (`row_header`, darker). In order: a
   collapse chevron, the display's icon (in the mark slot), the name (13px
   medium), the filter (faint, cut off first when narrow), the counts (state
-  dot and number), `live` for a stream, the view's own sort, and `···`.
+  dot and number; handling and downtimes: their filter chips, then the
+  downtimes view's compact *timeline | list* switch), the handled slot
+  (lists), `live` for a stream, the view's own sort (in its fixed slot), and
+  `···`.
 - **Empty view:** only the header, with `nothing to show` in place of the
   counts. There is no body and no empty box.
 - **Keyboard:** one cursor for the whole page. j/k move through the rows and
@@ -407,6 +503,10 @@ and the settings of an event stream view.
   line: every handled problem shows, hollow) or *hide* (the kinds to hide as
   chips: acknowledged, in downtime, host down); the kinds row is always
   there, so nothing below it moves (4c; 9a–g show *show*).
+  Every list-like view (list, grouped list, event stream, handling,
+  downtimes) also has a **rows** field: *as in settings (comfortable)*,
+  naming the current global value (new views start there), *comfortable*
+  or *compact* (4c, 4e; topic 14 round 5).
 - **The handled button in the view header** (4a, 4b): a multi-view dashboard
   has no summary bar, so each list or grouped-list view header has a fixed,
   right-aligned slot after its counts, with the summary bar's wording and
@@ -635,6 +735,10 @@ preview with clashes; 8f a broken paste; 8g a clashing group selected.
   It imports nothing. A newer format version says *update icygui to import
   this*; unknown fields are listed and ignored. Text that isn't icygui YAML
   at all only gets a toast.
+- **Row density is never shared** (topic 14 round 5, decided with the
+  user): copied or exported YAML leaves out each view's *rows*, and an
+  imported view follows the importer's settings (*as in settings*). The
+  rest of a view's saved controls (sort, mode, handled) travel with it.
 
 ---
 
@@ -1102,12 +1206,23 @@ notification centre; 13n the tray menu and a toast in light mode.
 ### Round 5 (current): handling and downtimes as view kinds
 
 **Status: for the user's review.** Makes round 4 coherent with topic 04.
+Since then (user, 2026-10-07): the project-wide **view controls** rule, **row
+density per view** and the **sidebar mark** per dashboard (PLAN.md §4.2,
+topic 14), drawn in 14-r5-b to g.
 
 **Shows** (`14-r5-view-kinds.html`, each dark and `-light`): 14-r5-a *new
 dashboard* with starting points; 14-r5-b 04's editor for *voip handling*,
-its handling view selected and *add view* open; 14-r5-c the *voip* dashboard
-with a problems list, a handling view and a downtimes timeline; 14-r5-d the
-sidebar rule (with a zoom of the sidebar), *voip downtimes* open.
+its handling view selected and *add view* open, the one-view header's
+controls kept in the editor (zoom `-b-header-zoom`); 14-r5-c the *voip*
+dashboard with a problems list (rows set to compact on the view), a handling
+view and a downtimes timeline, each view's controls compact in its header,
+the handling view's `···` open (zoom `-c-zoom`); 14-r5-d the sidebar rule
+(zoom of the sidebar) and *voip downtimes*, a one-view page with the same
+controls roomy, the rows toggle dim in timeline mode with its tooltip (zoom
+`-d-header-zoom`); **sidebar mark:** 14-r5-e the *voip* editor, mark
+*state* (zoom); 14-r5-f the new-dashboard flow (*sbc*), mark *icon*, the
+icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
+*voip handling*, the dropdown open with *state* greyed out (zoom).
 
 **Decisions**
 
@@ -1127,21 +1242,76 @@ sidebar rule (with a zoom of the sidebar), *voip downtimes* open.
   *downtimes*, *events*, each with its icon and one line. Each creates a
   dashboard with that one view and opens the editor; more views can be added
   there. Nothing about the start is fixed.
-- **The editor is 04's (14-r5-b)** for every dashboard: the views list, *add
-  view* with the full list of kinds, the selected view's settings. A
-  handling view: display, filter (09's autocomplete, *copy filter from* at
-  its top right, live status `matches 214 objects · 4 being handled`),
-  *opens with* (the chip) and sort. A downtimes view: the same with *opens
+- **The editor is 04's (14-r5-b)** for every dashboard: the dashboard's
+  name, group and **sidebar mark**, the views list, *add view* with the
+  full list of kinds, the selected view's settings. A handling view:
+  display, filter (09's autocomplete, *copy filter from* at its top right,
+  live status `matches 214 objects · 4 being handled`), *opens with* (the
+  chip), sort and **rows**. A downtimes view: the same with *opens
   as* `timeline | list` and *shows* (in effect, upcoming, from config).
   There is no "kind" field and no notifications row for these views.
-- **In a multi-view dashboard (14-r5-c)** each view has 04's 36px header: a
-  handling view's header counts its kinds (✓ acknowledged, ● in downtime,
-  ● upcoming, comments; a click filters, like the chips of a one-view page)
-  and shows its sort; a downtimes view's header counts in effect and upcoming
-  and shows its mode.
-- **The sidebar rule (14-r5-d):** a dashboard with at least one problem view
-  shows its worst state's dot and its problem count, as today (*voip*, red,
-  3). A dashboard with **only** handling, downtimes or event views shows its
+- **View controls (14-r5-b, c, d; the project-wide rule at the top of this
+  file, with its table).** A view has one set of controls, always in its
+  view header. On a one-view page (14-r5-d, *voip downtimes*) the view
+  header is the page header: *timeline | list*, *only mine*, the rows
+  toggle, the sort, `···`, and the chips as its second row. Stacked
+  (14-r5-c), the same controls sit compactly in the 36px header: the
+  handling view's chips (all, acknowledged, in downtime, upcoming,
+  comments) and sort; the downtimes view's chips (all, in effect, upcoming,
+  from config), a compact *timeline | list* switch (not the plain word) and
+  sort; *only mine* and *rows* in each view's `···`. The chips filter in
+  both forms; the sort is the same; the mode is saved with the view and is
+  the editor's *opens as*. In the editor (14-r5-b) a one-view dashboard's
+  header keeps its controls before *discard* and *save*; the preview is
+  narrow, so *only mine* sits in `···` there. In the editor's narrow preview
+  of a stacked dashboard (14-r5-e) the chips drop their words (mark and
+  count stay).
+- **Row density per view (14-r5-b, c, d, e; the rule at the top of this
+  file).** The problems list in 14-r5-c is set to *compact* on the view
+  (its rows are one line; the editor shows `rows: compact`, 14-r5-e); the
+  handling view follows the settings (its `···`: *follow the default*,
+  `settings: comfortable`). In a one-view header the toggle sits left of the
+  sort (14-r5-b: following the settings, dashed outline; 14-r5-d: dim in
+  timeline mode). Not drawn: compact rows of handling, the downtimes list
+  and the event stream, which put each entry on one line (the header line
+  with the text after it, cut off), as compact list rows drop the output.
+- **Sidebar mark (14-r5-e, f, g).** Each dashboard has a *sidebar mark*
+  setting, in the editor's dashboard fields under name and group (above
+  *notifications*, topic 12), so it is also set in the new-dashboard flow,
+  which opens the same editor (14-r5-f).
+  - A small dropdown (132px), **state** (the coloured dot of the worst
+    problem) or **icon**. With no problem view on the dashboard, *state* is
+    greyed out with its reason on a second line, *no problem view on this
+    dashboard* (14-r5-g).
+  - Left of it, a **rounded square the height of a field** (30px, like a
+    colour swatch) **previews the mark**. With *state* it shows the dot and
+    is **not clickable: no hover highlight** (14-r5-e: the pointer over it
+    changes nothing). With *icon* it is a button with the normal hover
+    highlight, and open it keeps the highlight with the accent border.
+  - The label's right side says what the mark shows (*the worst problem's
+    colour* / *the square picks the icon*). The square and the dropdown
+    keep their size and place, so switching moves nothing.
+  - **The icon picker** (like an emoji picker, 14-r5-f): a search field, a
+    **recent** row (the last 8 chosen), and a grid of **the app's own
+    icons** (its Lucide set, `icons.js` and `IconName`: 76 of the 102, the
+    pure controls such as chevrons, arrows, close, add and handles left out),
+    8 columns, 5 rows visible, scrolling. The picker has a fixed size: while
+    searching, the recent row stays and the matches fill the same grid
+    (`ser`: 6 matches). The cell under the cursor is highlighted and named
+    in the footer; the current icon has an accent ring. Arrows move, ↵
+    chooses, esc closes. Icons are **monochrome and neutral** (the sidebar's
+    faint icon colour), so colour keeps meaning state.
+  - **Default:** *state* when the dashboard has a problem view, else **the
+    first view kind's icon** (14-r5-g: handling). Switching a problem
+    dashboard to *icon* starts from its first view's kind icon (14-r5-f:
+    list). Adding a problem view does not switch the mark by itself;
+    removing the last problem view switches a *state* mark to the first
+    view's kind icon.
+  - The **count slot never changes** with the mark: a problem dashboard with
+    an icon still counts its problems (14-r5-f: *sbc*, 2).
+- **The sidebar rule (14-r5-d), now the sidebar mark's defaults:** a
+  dashboard with at least one problem view shows its worst state's dot and
+  its problem count, as today (*voip*, red, 3). A dashboard with **only** handling, downtimes or event views shows its
   **first view's kind icon** in the mark slot and that view's count: handling
   = objects being handled (*voip handling*, 4), downtimes = in effect now
   (*voip downtimes*, 1), events = no count.

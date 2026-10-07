@@ -13,7 +13,7 @@ const DISPLAY_NAME = { list: 'list', grouped: 'grouped list', grid: 'host-group 
 // behaviour: [n, shown] gives "2 hidden · show" or "2 handled · hide"; with
 // nothing handled the slot stays empty, so nothing moves. The counts are
 // unhandled counts; show and hide never change them.
-function viewHeader({ name, display = 'list', filter = '', counts = [], sort = 'severity ↓', collapsed = false, focus = false, picked = false, empty = '', live = false, sortOpen = false, more = true, handled = null }) {
+function viewHeader({ name, display = 'list', filter = '', counts = [], sort = 'severity ↓', collapsed = false, focus = false, picked = false, empty = '', live = false, sortOpen = false, more = true, moreOpen = false, handled = null, controls = '' }) {
   // a count is [state, n], or ready HTML for kinds that count other things (handling: ✓ 2)
   const c = counts.map((x) => (typeof x === 'string' ? `<span>${x}</span>` : `<span>${dot(x[0], 'd7')}${x[1]}</span>`)).join('');
   const hasSlot = display === 'list' || display === 'grouped';
@@ -21,9 +21,57 @@ function viewHeader({ name, display = 'list', filter = '', counts = [], sort = '
   return `<div class="vh${focus || picked ? ' focus' : ''}${picked ? ' picked' : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span>
     <span class="vicon">${icon(DISPLAY_ICON[display], 13)}</span><span class="vn">${name}</span>
     <span class="vf">${esc(filter)}</span>
-    ${empty ? `<span class="empty">${empty}</span>` : ''}${c ? `<span class="vc">${c}</span>` : ''}${hs}
+    ${empty ? `<span class="empty">${empty}</span>` : ''}${c ? `<span class="vc">${c}</span>` : ''}${hs}${controls}
     ${live ? `<span style="display:flex;align-items:center;gap:6px;color:var(--t-faint)">${dot('ok', 'd6')}live</span>` : ''}
-    ${sort ? `<span class="${sortOpen ? 'glyph sel' : ''}" style="font-size:12px">${sort}</span>` : ''}${more ? '<span class="glyph">···</span>' : ''}</div>`;
+    ${sort ? sortSlot(display, sort, { open: sortOpen }) : ''}${more ? `<span class="glyph${moreOpen ? ' sel' : ''}">···</span>` : ''}</div>`;
+}
+
+// VIEW CONTROLS (topic 14, round 5; a rule for every view kind): a view has
+// ONE set of controls and they live in its view header. On a one-view
+// dashboard the view header is the page header (roomy: the summary bar is its
+// second row); stacked, the same controls sit compactly in the 36px header,
+// and "only mine" and the row density move into the view's ···.
+//
+// The sort sits in a fixed slot sized for its kind's longest sort label,
+// right-aligned, so choosing another sort changes only the word (nothing left
+// of it moves).
+const SORT_CH = { list: 19, grouped: 19, grid: 11, tiles: 11, stream: 12, handling: 17, downtimes: 16 };
+// When a stacked header is tight (beside a pane), the slot gives way down to
+// its word after the filter summary is gone (the filter is cut first).
+const sortSlot = (kind, sort, { open = false } = {}) => `<span class="vsort" style="width:${SORT_CH[kind] || 12}ch"><span${open ? ' class="glyph sel" style="font-size:12px"' : ''}>${sort}</span></span>`;
+
+// ROW DENSITY PER VIEW: Settings → appearance → row density is the default;
+// every list-like view (list, grouped list, handling, downtimes in list mode,
+// event stream) follows it until a density is chosen on that view.
+//   v: 'default' (as in settings), 'comfortable' or 'compact'
+//   eff: the global value, shown while the view follows it
+// One-view header: two icons in a fixed slot (left of the sort). Chosen on
+// the view: the icon is filled, as a segmented control's "on". Following the
+// settings: the icon of the global value has a dashed inset outline (dashed =
+// not set here, as topic 10's preview outline). dim: the slot stays but does
+// nothing (a downtimes view in timeline mode), so nothing moves on switching.
+function densityToggle({ v = 'default', eff = 'comfortable', dim = false } = {}) {
+  const cur = v === 'default' ? eff : v;
+  const cell = (d, ic) => `<span class="${d === cur ? (v === 'default' ? 'dflt' : 'on') : ''}">${icon(ic, 13)}</span>`;
+  return `<span class="dens${dim ? ' dim' : ''}">${cell('comfortable', 'rows-2')}${cell('compact', 'rows-4')}</span>`;
+}
+// the editor's rows field of a list-like view: as in settings (naming the
+// global value; new views start here), comfortable or compact
+const rowsField = (v = 'default', eff = 'comfortable', note = '') => `<div class="field"><div class="lab">rows<span class="st faint">${note || (v === 'default' ? 'follows the settings' : 'set on this view')}</span></div>${select(v === 'default' ? `as in settings (${eff})` : v)}</div>`;
+// the view's ··· (stacked): only mine (handling and downtimes), the rows, then
+// the view's own items. rows: as densityToggle's v; rowsDim: timeline mode
+function viewMoreMenu({ x, y, w = 268, mine = null, rows = 'default', eff = 'comfortable', rowsDim = false, hov = '' }) {
+  const it = (label, o = {}) => ({ label, ...o, hov: hov === label });
+  return menu([
+    ...(mine === null ? [] : [it('only mine', { chk: mine, det: 'what I set' }), '-']),
+    rowsDim ? 'rows · in list mode' : 'rows',
+    it('comfortable', { chk: rows === 'comfortable', ic: 'rows-2', dis: rowsDim }),
+    it('compact', { chk: rows === 'compact', ic: 'rows-4', dis: rowsDim }),
+    it('follow the default', { chk: rows === 'default', det: `settings: ${eff}`, dis: rowsDim }),
+    '-',
+    it('collapse', { key: '←' }),
+    it('edit view'),
+  ], { x, y, w });
 }
 
 const DB_TILES = [

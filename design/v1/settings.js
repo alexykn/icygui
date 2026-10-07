@@ -70,7 +70,7 @@ function pageAppearance({ density = 1, times = 1, theme = 0 } = {}) {
   return ssec('theme and size') +
     srow('theme', 'Follow system switches with your desktop’s light or dark mode.', seg(['follow system', 'dark', 'light'], theme)) +
     srow('interface size', 'Scales text and spacing in every window: 90 %, 100 % or 115 %.', seg(['small', 'default', 'large'], 1)) +
-    ssec('lists') +
+    ssec('lists', 'row density is the default for every list; a view can set its own') +
     srow('row density', 'Compact drops the output line: one line per object, about twice the rows.', seg(['comfortable', 'compact'], density)) +
     srow('times in lists', `Under the state circle: how long in this state (14m), or since when (13:58).`, seg(['relative', 'clock'], times)) +
     ssec('handled problems', 'the defaults for every view; a view can set its own in the editor') +

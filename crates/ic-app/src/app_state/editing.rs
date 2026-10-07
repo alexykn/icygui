@@ -44,32 +44,6 @@ pub(crate) struct DashboardDraft {
     pub(crate) group_id: String,
 }
 
-impl DashboardDraft {
-    /// The view the dashboard page shows (`crate::dashboard::primary_view`):
-    /// the whole of a single-view dashboard, which is what the dashboard
-    /// editor edits until it manages views (topic 04).
-    pub(crate) fn view(&self) -> &View {
-        crate::dashboard::primary_view(&self.views)
-    }
-
-    /// That view, for changing it (added if there is none).
-    pub(crate) fn view_mut(&mut self) -> &mut View {
-        if self.views.is_empty() {
-            self.views.push(View {
-                id: ic_config::new_id(),
-                ..View::default()
-            });
-        }
-        let id = self.view().id.clone();
-        let index = self
-            .views
-            .iter()
-            .position(|view| view.id == id)
-            .unwrap_or(0);
-        &mut self.views[index]
-    }
-}
-
 impl AppState {
     /// The active environment's groups, in sidebar order.
     pub(crate) fn groups(&self) -> &[DashboardGroup] {

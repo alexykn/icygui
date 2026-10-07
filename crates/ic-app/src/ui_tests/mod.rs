@@ -49,6 +49,7 @@ mod actions;
 mod appearance;
 mod background;
 mod editing;
+mod editor_views;
 mod environments;
 mod every_environment;
 mod lists;

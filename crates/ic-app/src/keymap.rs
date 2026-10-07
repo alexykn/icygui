@@ -363,6 +363,12 @@ const CATALOGUE: &[(&str, &[&str])] = &[
     ("open as a tab", &["PaletteOpenTab"]),
     ("save, discard", &["SaveDashboard", "DiscardDashboard"]),
     (
+        "the view above, the view below",
+        &["SelectPreviousView", "SelectNextView"],
+    ),
+    ("move the view up, down", &["MoveViewUp", "MoveViewDown"]),
+    ("remove the view", &["RemoveView"]),
+    (
         "next field, previous field",
         &["NextField", "PreviousField"],
     ),

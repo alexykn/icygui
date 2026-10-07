@@ -112,11 +112,13 @@ pub enum IconName {
     ChartBar,
     /// `activity`: an event stream view.
     Activity,
+    /// `grip-vertical`: a drag handle (the dashboard editor's views).
+    GripVertical,
 }
 
 impl IconName {
     /// Every icon, for tests and asset listings.
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::ArrowDown,
         Self::ArrowLeft,
         Self::ArrowLeftRight,
@@ -167,6 +169,7 @@ impl IconName {
         Self::LayoutGrid,
         Self::ChartBar,
         Self::Activity,
+        Self::GripVertical,
     ];
 
     /// The asset path [`crate::Assets`] serves the SVG under.
@@ -229,6 +232,7 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::LayoutGrid => Self::LayoutGrid,
             IconName::ChartBar => Self::ChartBar,
             IconName::Activity => Self::Activity,
+            IconName::GripVertical => Self::GripVertical,
         }
     }
 }

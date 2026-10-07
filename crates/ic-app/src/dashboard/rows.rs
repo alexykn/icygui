@@ -1,7 +1,7 @@
 //! What a dashboard row shows, computed from the snapshot for the rows on
 //! screen only. Pure, so it's tested without a window.
 
-use ic_config::{GroupBy, ListTimes, ObjectKind, View};
+use ic_config::{ListTimes, ObjectKind, View};
 use ic_core::snapshot::Snapshot;
 use ic_model::{
     CheckInfo, CheckableState, Comment, CommentKind, Host, HostState, ObjectKey, ServiceState,
@@ -34,18 +34,6 @@ pub(crate) struct ObjectRow {
     /// `late 12m`: Icinga still reported the check overdue when asked
     /// (PERF-08).
     pub(crate) late: Option<String>,
-}
-
-/// A group header (`group_by`).
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct GroupRow {
-    /// Host name or group display name.
-    pub(crate) label: String,
-    /// `2 problems`, `5 services`.
-    pub(crate) count: String,
-    /// When grouping by host: the host itself, so the header shows its
-    /// state and output.
-    pub(crate) host: Option<ObjectRow>,
 }
 
 impl ObjectRow {
@@ -125,24 +113,6 @@ pub(crate) fn late_label(snapshot: &Snapshot, key: &ObjectKey, now: Timestamp) -
     } else {
         format!("late {}", ic_model::format_compact(overdue))
     })
-}
-
-/// The header row for a group of `count` rows labelled `label`.
-pub(crate) fn group_row(
-    snapshot: &Snapshot,
-    view: &View,
-    label: &str,
-    count: usize,
-    now: Timestamp,
-) -> GroupRow {
-    let host = (view.group_by == GroupBy::Host)
-        .then(|| object_row(snapshot, &ObjectKey::host(label), now))
-        .flatten();
-    GroupRow {
-        label: label.to_owned(),
-        count: count_label(count, view),
-        host,
-    }
 }
 
 /// `1 problem`, `3 services`, `2 hosts`.
@@ -455,33 +425,6 @@ mod tests {
         let row = object_row(&snapshot, &key, now()).unwrap();
         assert_eq!(row.host.as_deref(), Some("vanished"));
         assert!(!row.handled);
-    }
-
-    #[test]
-    fn host_group_headers_carry_the_host() {
-        let snapshot = snapshot(
-            vec![host("db-prod-03", HostState::Up)],
-            Vec::new(),
-            Vec::new(),
-        );
-        let view = View {
-            group_by: GroupBy::Host,
-            ..View::default()
-        };
-        let header = group_row(&snapshot, &view, "db-prod-03", 2, now());
-        assert_eq!(header.count, "2 problems");
-        let host = header.host.unwrap();
-        assert_eq!(host.state, CheckableState::Host(HostState::Up));
-        assert_eq!(host.since, "41d");
-
-        let by_group = View {
-            group_by: GroupBy::HostGroup,
-            problems_only: false,
-            ..View::default()
-        };
-        let header = group_row(&snapshot, &by_group, "Production databases", 1, now());
-        assert_eq!(header.count, "1 service");
-        assert_eq!(header.host, None);
     }
 
     #[test]

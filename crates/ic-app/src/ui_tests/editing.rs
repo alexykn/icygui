@@ -396,7 +396,7 @@ fn a_new_dashboard_is_made_in_the_editor_with_a_live_preview() {
                         editor(app, cx)
                             .read(cx)
                             .preview_result()
-                            .is_some_and(Result::is_err)
+                            .is_some_and(|result| result.is_err())
                     },
                 )
                 .await;

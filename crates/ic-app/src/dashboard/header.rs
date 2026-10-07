@@ -4,6 +4,8 @@
 //! their own sort and `···`. Lists show their handled problems' button in
 //! a fixed slot: `28 hidden · show`, `28 handled · hide` (2j, 4a).
 
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, Pixels, Point, SharedString, StatefulInteractiveElement as _,
@@ -222,11 +224,7 @@ impl DashboardView {
                 .checked(checked)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.menus.close();
-                    this.state.update(cx, |state, cx| {
-                        if state.update_view(&reference, &view_id, |view| view.sort = sort) {
-                            cx.notify();
-                        }
-                    });
+                    this.change_view(&reference, &view_id, move |view| view.sort = sort, cx);
                     cx.notify();
                 }))
         };
@@ -297,7 +295,8 @@ impl DashboardView {
             })
             .when(open, |trigger| {
                 trigger.child(
-                    Popover::new(Self::options_menu(reference, view, defaults, cx)).align_right(),
+                    Popover::new(Self::options_menu(reference, view, defaults, false, cx))
+                        .align_right(),
                 )
             })
             .into_any_element()
@@ -307,18 +306,16 @@ impl DashboardView {
         reference: &DashboardRef,
         view: &View,
         defaults: HideHandled,
+        preview: bool,
         cx: &Context<Self>,
     ) -> Menu {
-        let update = |change: Box<dyn Fn(&mut View)>| {
+        let update = |change: Rc<dyn Fn(&mut View)>| {
             let reference = reference.clone();
             let view_id = view.id.clone();
             cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
                 this.menus.close();
-                this.state.update(cx, |state, cx| {
-                    if state.update_view(&reference, &view_id, |view| change(view)) {
-                        cx.notify();
-                    }
-                });
+                let change = change.clone();
+                this.change_view(&reference, &view_id, move |view| change(view), cx);
                 cx.notify();
             })
         };
@@ -333,18 +330,21 @@ impl DashboardView {
             ),
         ];
         let edit = reference.clone();
-        let mut menu = Menu::new("options-menu")
-            .item(
-                MenuItem::new("edit-dashboard", "edit dashboard").on_click(cx.listener(
-                    move |this, _: &ClickEvent, _, cx| {
-                        this.menus.close();
-                        cx.emit(super::DashboardEvent::Edit(edit.clone()));
-                        cx.notify();
-                    },
-                )),
-            )
-            .separator()
-            .label("group by");
+        let mut menu = Menu::new("options-menu");
+        if !preview {
+            menu = menu
+                .item(
+                    MenuItem::new("edit-dashboard", "edit dashboard").on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.menus.close();
+                            cx.emit(super::DashboardEvent::Edit(edit.clone()));
+                            cx.notify();
+                        },
+                    )),
+                )
+                .separator();
+        }
+        menu = menu.label("group by");
         for (group_by, id, label) in groupings {
             if group_by == GroupBy::ServiceGroup && view.object_kind == ObjectKind::Hosts {
                 continue;
@@ -352,7 +352,7 @@ impl DashboardView {
             menu = menu.item(
                 MenuItem::new(id, label)
                     .checked(view.list_grouping() == group_by)
-                    .on_click(update(Box::new(move |view: &mut View| {
+                    .on_click(update(Rc::new(move |view: &mut View| {
                         view.set_grouping(group_by);
                     }))),
             );
@@ -363,7 +363,7 @@ impl DashboardView {
             .item(
                 MenuItem::new("toggle-handled", "hide handled problems")
                     .checked(hiding)
-                    .on_click(update(Box::new(move |view: &mut View| {
+                    .on_click(update(Rc::new(move |view: &mut View| {
                         view.handled = view.handled.toggled(defaults);
                     }))),
             )
@@ -401,12 +401,12 @@ impl DashboardView {
         let theme = cx.theme();
         let colors = theme.colors;
         let state = self.state.read(cx);
-        let (_, dashboard) = state.dashboard(reference)?;
-        if super::is_multi_view(&dashboard.views) {
+        let views = self.shown_views(reference, cx)?;
+        if super::is_multi_view(views) {
             return None;
         }
-        let view = super::primary_view(&dashboard.views);
-        let result = state.view_result(reference, &view.id)?;
+        let view = super::primary_view(views);
+        let result = self.shown_result(reference, &view.id, cx)?;
         // The bar counts the unhandled problems the list is about (2j:
         // showing or hiding handled ones never changes them; the sidebar
         // counts the same); a list of only OK objects counts those.
@@ -523,12 +523,7 @@ impl DashboardView {
                 })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    let reference = reference.clone();
-                    this.state.update(cx, |state, cx| {
-                        if state.toggle_handled(&reference, &view_id) {
-                            cx.notify();
-                        }
-                    });
+                    this.toggle_handled(&reference, &view_id, cx);
                 }))
                 .into_any_element(),
         )
@@ -637,17 +632,25 @@ impl DashboardView {
         let Some(page_view) = page.views.get(index) else {
             return div().into_any_element();
         };
-        let Some(view) = state
-            .dashboard(reference)
-            .and_then(|(_, dashboard)| dashboard.views.get(page_view.index))
+        let Some(view) = self
+            .shown_views(reference, cx)
+            .and_then(|views| views.get(page_view.index))
         else {
             return div().into_any_element();
         };
         let ui = self.pages.get(reference);
         let stop = Stop::Header(page_view.id.clone());
-        let focused = ui.and_then(super::PageUi::focused_view) == Some(index);
+        // In the editor's preview, the view picked in the inspector is
+        // marked on its header only: the focus bar and a faint accent tint
+        // (4c), nothing around its body.
+        let picked = self.picked() == Some(view.id.as_str());
+        let focused = if self.is_preview() {
+            picked
+        } else {
+            ui.and_then(super::PageUi::focused_view) == Some(index)
+        };
         let on_header = ui.and_then(|ui| ui.selection.cursor_stop()) == Some(&stop);
-        let result = state.view_result(reference, &view.id);
+        let result = self.shown_result(reference, &view.id, cx);
         let chevron_stop = stop.clone();
         let chevron = div()
             .id(SharedString::from(format!("view-chevron:{}", view.id)))
@@ -789,6 +792,17 @@ impl DashboardView {
             .whitespace_nowrap()
             .text_size(theme.text.small)
             .text_color(colors.text_muted)
+            .when(picked, |header| {
+                header.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .bg(colors.accent_tint),
+                )
+            })
             .when(focused, |header| {
                 header.child(
                     div()
@@ -840,12 +854,12 @@ impl DashboardView {
                 .checked(view.groups.order == order)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.menus.close();
-                    this.state.update(cx, |state, cx| {
-                        if state.update_view(&reference, &view_id, |view| view.groups.order = order)
-                        {
-                            cx.notify();
-                        }
-                    });
+                    this.change_view(
+                        &reference,
+                        &view_id,
+                        move |view| view.groups.order = order,
+                        cx,
+                    );
                     cx.notify();
                 }))
         };
@@ -886,6 +900,10 @@ impl DashboardView {
 
     /// A view header's `···`: edit the dashboard, a list's grouping and
     /// handled toggle, collapse, copy the filter.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one menu, its items in order (fewer in the editor's preview)"
+    )]
     fn view_options_trigger(
         &self,
         reference: &DashboardRef,
@@ -910,20 +928,24 @@ impl DashboardView {
         let content = open.then(|| {
             let defaults = self.state.read(cx).handled_defaults();
             let fold_id = super::page::Id::from(view.id.as_str());
+            let preview = self.is_preview();
             let base = if view.is_list() {
-                Self::options_menu(reference, view, defaults, cx)
+                Self::options_menu(reference, view, defaults, preview, cx)
             } else {
                 let filter = view.filter.clone();
                 let edit = reference.clone();
-                let menu = Menu::new("options-menu").item(
-                    MenuItem::new("edit-dashboard", "edit dashboard").on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
+                let menu = Menu::new("options-menu");
+                let menu = if preview {
+                    menu
+                } else {
+                    menu.item(MenuItem::new("edit-dashboard", "edit dashboard").on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.menus.close();
                             cx.emit(super::DashboardEvent::Edit(edit.clone()));
                             cx.notify();
-                        },
-                    )),
-                );
+                        }),
+                    ))
+                };
                 // A grid's hosts as squares (the default) or labelled
                 // cells (5d), switched in place.
                 let menu = if view.display == ic_config::ViewDisplay::HostGroupGrid {
@@ -935,18 +957,17 @@ impl DashboardView {
                             .checked(view.grid.cells == choice)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.menus.close();
-                                this.state.update(cx, |state, cx| {
-                                    if state.update_view(&reference, &view_id, |view| {
-                                        view.grid.cells = choice;
-                                    }) {
-                                        cx.notify();
-                                    }
-                                });
+                                this.change_view(
+                                    &reference,
+                                    &view_id,
+                                    move |view| view.grid.cells = choice,
+                                    cx,
+                                );
                                 cx.notify();
                             }))
                     };
-                    menu.separator()
-                        .label("hosts as")
+                    let menu = if preview { menu } else { menu.separator() };
+                    menu.label("hosts as")
                         .item(cells("hosts-squares", "squares", GridCells::Squares))
                         .item(cells(
                             "hosts-cells",

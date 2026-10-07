@@ -61,6 +61,7 @@ gpui_kit_assets::icon_assets!(
         LayoutGrid,
         ChartBar,
         Activity,
+        GripVertical,
     ]
 );
 

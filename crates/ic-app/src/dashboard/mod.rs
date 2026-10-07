@@ -47,8 +47,8 @@ use ic_core::snapshot::{DashboardResult, DashboardRow, ViewResult};
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::{
-    ActiveTheme as _, CircleSize, CodeBlock, Density, EmptyState, Icon, IconName, Link, ListRow,
-    Metrics, StateCircle, Theme, px,
+    ActiveTheme as _, CircleSize, CodeBlock, EmptyState, Icon, IconName, Link, ListRow, Metrics,
+    StateCircle, Theme, px,
 };
 
 use self::cursor::PageSelection;
@@ -70,7 +70,7 @@ use crate::pane::{ObjectPane, PaneEvent, PaneMode};
 /// rested this long, so flinging through a long list costs one request.
 pub(crate) const HYDRATE_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// The view an rc1-style page shows and the editor edits: a dashboard's
+/// The view an rc1-style page shows (a single list, under the summary bar): a dashboard's
 /// first list view, else its first view. A single-view dashboard (every
 /// dashboard from rc1) shows as rc1 did. A dashboard without views (a
 /// settings file edited by hand) reads as the default view.
@@ -131,6 +131,9 @@ struct Built {
     width: Pixels,
     sizes: Sizes,
     denied: [bool; 2],
+    /// The editor's preview: its evaluation's revision (0 on a dashboard,
+    /// whose evaluation comes with the snapshot).
+    preview: u64,
 }
 
 /// A dashboard's page state.
@@ -189,11 +192,67 @@ struct OpenPane {
     _events: Subscription,
 }
 
-/// What the dashboard view asks the workspace to do.
+/// What the dashboard view asks the workspace (or, as the editor's
+/// preview, the editor) to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DashboardEvent {
     /// Open the editor for this dashboard (the header's `···`).
     Edit(DashboardRef),
+    /// The editor's preview: a view was clicked; select it (by id).
+    Pick(String),
+    /// The editor's preview: change a view of the draft (its header's
+    /// sort, handled button and `···`), by id.
+    ChangeView(String, ViewChange),
+}
+
+/// A change to a view of the editor's draft, from its header in the
+/// preview.
+#[derive(Clone)]
+pub(crate) struct ViewChange(Rc<dyn Fn(&mut View)>);
+
+impl ViewChange {
+    /// Applies the change to `view`.
+    pub(crate) fn apply(&self, view: &mut View) {
+        (self.0)(view);
+    }
+}
+
+impl std::fmt::Debug for ViewChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ViewChange")
+    }
+}
+
+impl PartialEq for ViewChange {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ViewChange {}
+
+/// What the dashboard editor's preview shows (topic 04, 4c): the draft's
+/// views as last evaluated, the core's evaluation of them, and the view
+/// selected in the inspector, which is marked on its header only.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PreviewPage {
+    /// The views evaluated (the draft as it was when asked).
+    pub(crate) views: Vec<View>,
+    /// Their evaluation.
+    pub(crate) result: DashboardResult,
+    /// The view selected in the inspector (by id).
+    pub(crate) picked: Option<String>,
+    /// The width the editor takes beside the preview (its inspector).
+    pub(crate) reserved: Pixels,
+}
+
+/// The key the preview's page state is kept under: no dashboard has
+/// empty ids.
+fn preview_reference() -> DashboardRef {
+    DashboardRef {
+        group_id: String::new(),
+        dashboard_id: String::new(),
+    }
 }
 
 /// The dashboard page with its header, summary bar and detail pane.
@@ -222,6 +281,10 @@ pub(crate) struct DashboardView {
     hydrate_task: Option<Task<()>>,
     /// The object revealed while the rows were quiet mode's.
     reveal: Option<Reveal>,
+    /// As the dashboard editor's preview: the draft it shows, and the
+    /// revision of its evaluation (the page is built again when it
+    /// changes).
+    preview: Option<(PreviewPage, u64)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -252,8 +315,148 @@ impl DashboardView {
             hydration_wanted: (Vec::new(), 0),
             hydrate_task: None,
             reveal: None,
+            preview: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// A page for the dashboard editor's preview: it shows `page` instead
+    /// of the selected dashboard, has no pane, cursor or keys of its own,
+    /// and a click in a view picks it ([`DashboardEvent::Pick`]).
+    pub(crate) fn preview(
+        state: Entity<AppState>,
+        page: PreviewPage,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::new(state, cx);
+        view.preview = Some((page, 1));
+        view
+    }
+
+    /// Shows the draft's views as evaluated now (the editor's preview).
+    pub(crate) fn set_preview(&mut self, page: PreviewPage, cx: &mut Context<Self>) {
+        if let Some((shown, revision)) = &mut self.preview {
+            let evaluated = shown.views != page.views || shown.result != page.result;
+            *shown = page;
+            if evaluated {
+                *revision += 1;
+            }
+            cx.notify();
+        }
+    }
+
+    /// The editor's preview: marks view `picked` on its header and
+    /// (`reveal`) scrolls its header into view.
+    pub(crate) fn pick(&mut self, picked: Option<String>, reveal: bool, cx: &mut Context<Self>) {
+        let Some((shown, _)) = &mut self.preview else {
+            return;
+        };
+        if shown.picked == picked {
+            return;
+        }
+        shown.picked.clone_from(&picked);
+        let reference = preview_reference();
+        if reveal && let (Some(picked), Some(ui)) = (picked, self.pages.get(&reference)) {
+            reveal_view(ui, &picked);
+        }
+        cx.notify();
+    }
+
+    /// The editor's preview: forgets the views folded by a click, so each
+    /// shows as its settings say (*collapse by default* changed).
+    pub(crate) fn reset_folds(&mut self, cx: &mut Context<Self>) {
+        if let Some(ui) = self.pages.get_mut(&preview_reference()) {
+            ui.folds = Folds::default();
+            cx.notify();
+        }
+    }
+
+    /// Whether this is the editor's preview.
+    fn is_preview(&self) -> bool {
+        self.preview.is_some()
+    }
+
+    /// The view picked in the editor's preview.
+    fn picked(&self) -> Option<&str> {
+        self.preview
+            .as_ref()
+            .and_then(|(page, _)| page.picked.as_deref())
+    }
+
+    /// The views of the page kept under `reference`: the dashboard's, or
+    /// the editor's draft in its preview.
+    fn shown_views<'a>(&'a self, reference: &DashboardRef, cx: &'a App) -> Option<&'a [View]> {
+        match &self.preview {
+            Some((page, _)) => Some(&page.views),
+            None => self
+                .state
+                .read(cx)
+                .dashboard(reference)
+                .map(|(_, dashboard)| dashboard.views.as_slice()),
+        }
+    }
+
+    /// The evaluation of view `view_id` of the page kept under `reference`.
+    fn shown_result<'a>(
+        &'a self,
+        reference: &DashboardRef,
+        view_id: &str,
+        cx: &'a App,
+    ) -> Option<&'a ViewResult> {
+        match &self.preview {
+            Some((page, _)) => page.result.view(view_id),
+            None => self.state.read(cx).view_result(reference, view_id),
+        }
+    }
+
+    /// Changes view `view_id` of the page kept under `reference`: the saved
+    /// dashboard's, or (the editor's preview) the draft's, which the editor
+    /// does.
+    fn change_view(
+        &mut self,
+        reference: &DashboardRef,
+        view_id: &str,
+        change: impl Fn(&mut View) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_preview() {
+            cx.emit(DashboardEvent::ChangeView(
+                view_id.to_owned(),
+                ViewChange(Rc::new(change)),
+            ));
+            return;
+        }
+        self.state.update(cx, |state, cx| {
+            if state.update_view(reference, view_id, change) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// The handled button of a list view was clicked: show or hide its
+    /// handled problems.
+    fn toggle_handled(&mut self, reference: &DashboardRef, view_id: &str, cx: &mut Context<Self>) {
+        if self.is_preview() {
+            let defaults = self.state.read(cx).handled_defaults();
+            let hidden = self
+                .shown_result(reference, view_id, cx)
+                .map_or(0, |result| result.hidden);
+            self.change_view(
+                reference,
+                view_id,
+                move |view| {
+                    view.handled =
+                        crate::app_state::handled_after_click(view.handled, defaults, hidden);
+                },
+                cx,
+            );
+            return;
+        }
+        self.state.update(cx, |state, cx| {
+            if state.toggle_handled(reference, view_id) {
+                cx.notify();
+            }
+        });
     }
 
     /// Remembers the rows on screen and, if they changed, offers them to
@@ -376,14 +579,25 @@ impl DashboardView {
     /// when nothing changed.
     fn sync(&mut self, cx: &App) -> Option<DashboardRef> {
         let state = self.state.read(cx);
-        if self.pages.len() > 1 {
-            self.pages
-                .retain(|reference, _| state.dashboard(reference).is_some());
-        }
-        let reference = state.selected()?.clone();
-        let (_, dashboard) = state.dashboard(&reference)?;
+        let (reference, views, result, revision) = if let Some((page, revision)) = &self.preview {
+            (
+                preview_reference(),
+                page.views.as_slice(),
+                Some(&page.result),
+                *revision,
+            )
+        } else {
+            if self.pages.len() > 1 {
+                self.pages
+                    .retain(|reference, _| state.dashboard(reference).is_some());
+            }
+            let reference = state.selected()?.clone();
+            let (_, dashboard) = state.dashboard(&reference)?;
+            let result = state.result(&reference);
+            (reference, dashboard.views.as_slice(), result, 0)
+        };
         let snapshot = state.snapshot();
-        let multi = is_multi_view(&dashboard.views);
+        let multi = is_multi_view(views);
         let denied = [
             state.query_denial(ObjectKind::Services).is_some(),
             state.query_denial(ObjectKind::Hosts).is_some(),
@@ -396,17 +610,18 @@ impl DashboardView {
             .or_insert_with(PageUi::new);
         let fresh = ui.built.as_ref().is_some_and(|built| {
             built.snapshot == std::sync::Arc::as_ptr(snapshot) as usize
-                && built.views == dashboard.views
+                && built.views == views
                 && built.folds == ui.folds
                 && built.filter == ui.filter
                 && built.width == width
                 && built.sizes == sizes
                 && built.denied == denied
+                && built.preview == revision
         });
         if !fresh {
             let page = Page::build(&PageInput {
-                views: &dashboard.views,
-                result: state.result(&reference),
+                views,
+                result,
                 snapshot,
                 folds: &ui.folds,
                 filter: ui.filter.as_ref(),
@@ -428,12 +643,13 @@ impl DashboardView {
             ui.page = Rc::new(page);
             ui.built = Some(Built {
                 snapshot: std::sync::Arc::as_ptr(snapshot) as usize,
-                views: dashboard.views.clone(),
+                views: views.to_vec(),
                 folds: ui.folds.clone(),
                 filter: ui.filter.clone(),
                 width,
                 sizes,
                 denied,
+                preview: revision,
             });
         }
         if let Some(reveal) = &self.reveal
@@ -480,16 +696,14 @@ impl DashboardView {
         if self.place_on(reference, key) {
             return;
         }
+        let views = self
+            .shown_views(reference, cx)
+            .map(<[View]>::to_vec)
+            .unwrap_or_default();
         let Some(ui) = self.pages.get_mut(reference) else {
             return;
         };
         let page = ui.page.clone();
-        let views = self
-            .state
-            .read(cx)
-            .dashboard(reference)
-            .map(|(_, dashboard)| dashboard.views.clone())
-            .unwrap_or_default();
         let mut unfolded = false;
         for view in &page.views {
             let has = view
@@ -756,15 +970,8 @@ impl DashboardView {
         cx: &mut Context<Self>,
     ) {
         let Some(config) = self
-            .state
-            .read(cx)
-            .dashboard(reference)
-            .and_then(|(_, dashboard)| {
-                dashboard
-                    .views
-                    .iter()
-                    .find(|candidate| *candidate.id == **view)
-            })
+            .shown_views(reference, cx)
+            .and_then(|views| views.iter().find(|candidate| *candidate.id == **view))
             .cloned()
         else {
             return;
@@ -938,6 +1145,10 @@ impl DashboardView {
     /// Filters the page to one group (a click on a grid group's name or a
     /// tile), or clears the filter when it is that group already.
     fn filter_to(&mut self, reference: &DashboardRef, filter: GroupFilter, cx: &mut Context<Self>) {
+        if self.is_preview() {
+            // The editor's preview isn't filtered: the click picked the view.
+            return;
+        }
         let Some(ui) = self.pages.get_mut(reference) else {
             return;
         };
@@ -1059,6 +1270,21 @@ impl DashboardView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_preview() {
+            // The editor's preview: the click picked the view (the item's
+            // own listener); a host's paging still shows all or fewer.
+            self.menus.close();
+            if let (Stop::More { view, group }, Some(reference)) = (stop, self.sync(cx)) {
+                let expanded = self
+                    .pages
+                    .get(&reference)
+                    .and_then(|ui| ui.page.view_by_id(view)?.group(group).map(|g| g.expanded))
+                    .unwrap_or(false);
+                self.set_paging(&reference, view, group, !expanded, false, cx);
+            }
+            cx.notify();
+            return;
+        }
         window.focus(&self.focus_handle, cx);
         self.menus.close();
         let Some(reference) = self.sync(cx) else {
@@ -1104,7 +1330,9 @@ impl DashboardView {
     /// The view header's or a band's chevron: folds or unfolds, nothing
     /// else (it never opens anything).
     fn click_chevron(&mut self, stop: &Stop, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus_handle, cx);
+        if !self.is_preview() {
+            window.focus(&self.focus_handle, cx);
+        }
         self.menus.close();
         let Some(reference) = self.sync(cx) else {
             return;
@@ -1264,8 +1492,37 @@ fn reveal_stop(ui: &PageUi, page: &Page, position: usize, center: bool) {
     ui.scroll.set_offset(point(px(0.), -target.min(max)));
 }
 
+/// Scrolls `ui`'s page so the header of view `view_id` shows (the view
+/// picked in the editor's inspector): at the top when it is out of view,
+/// not at all when it shows.
+fn reveal_view(ui: &PageUi, view_id: &str) {
+    let page = &ui.page;
+    let Some(view) = page.view_index(view_id) else {
+        return;
+    };
+    let items = page.views[view].items.clone();
+    if items.is_empty() {
+        return;
+    }
+    let viewport = viewport_height(ui);
+    if viewport <= px(0.) {
+        return;
+    }
+    let top = page.top(items.start);
+    let bottom = page.top(items.start + 1);
+    let offset = -ui.scroll.offset().y;
+    if top >= offset && bottom <= offset + viewport {
+        return;
+    }
+    let max = (page.height() - viewport).max(px(0.));
+    ui.scroll.set_offset(point(px(0.), -top.clamp(px(0.), max)));
+}
+
 impl Render for DashboardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.is_preview() {
+            return self.render_preview(window, cx);
+        }
         let main_width = SplitLayout::main_width(window, self.sidebar_open, &cx.theme().metrics);
         let reference = self.state.read(cx).selected().cloned();
         let multi = reference
@@ -1361,6 +1618,76 @@ impl Render for DashboardView {
 }
 
 impl DashboardView {
+    /// The editor's preview: a single list's summary bar and rows as the
+    /// dashboard will show them, or every view under its header; the
+    /// view picked in the inspector is marked on its header.
+    fn render_preview(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let reserved = self
+            .preview
+            .as_ref()
+            .map_or(px(0.), |(page, _)| page.reserved);
+        let main_width = SplitLayout::main_width(window, self.sidebar_open, &cx.theme().metrics);
+        let width = (main_width - reserved).max(px(0.));
+        self.width = width;
+        let root = div()
+            .id("editor-preview")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .h_full();
+        let Some(reference) = self.sync(cx) else {
+            return root;
+        };
+        let summary = self.render_summary(&reference, width, cx);
+        let body = self.render_preview_body(&reference, window, cx);
+        self.hydrate_rows_on_screen(&reference, cx);
+        root.children(summary).child(body)
+    }
+
+    /// The preview's body: the page, or why a single list shows no rows.
+    fn render_preview_body(
+        &mut self,
+        reference: &DashboardRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let Some((page, _)) = &self.preview else {
+            return div().into_any_element();
+        };
+        if !is_multi_view(&page.views) {
+            let view = primary_view(&page.views);
+            let Some(result) = page.result.view(&view.id) else {
+                return note("Evaluating…", theme);
+            };
+            if let Some(error) = &result.error {
+                return EmptyState::new("The filter doesn't work")
+                    .leading(
+                        Icon::new(IconName::TriangleAlert)
+                            .size(px(20.))
+                            .color(theme.states.fill.critical),
+                    )
+                    .detail(error.clone())
+                    .max_width(px(520.))
+                    .into_any_element();
+            }
+            if result.rows().is_empty() {
+                let text = if crate::editor::model::matches(&result.summary) == 0 {
+                    "Nothing matches this filter."
+                } else {
+                    "Everything this dashboard would show is OK or handled."
+                };
+                return note(text, theme);
+            }
+        }
+        self.render_page(reference, window, cx)
+    }
+
     /// The page's column: header, load progress, banners, summary bar and
     /// body. Before anything arrived, a connection problem or the load
     /// fills the body; afterwards they show over the (last known) page.
@@ -1531,47 +1858,6 @@ pub(crate) fn object_row(
     }
 }
 
-/// rc1's group header row (the dashboard editor's preview still draws it
-/// until the editor shows the page): a darker band with the group's name
-/// in semibold; grouped by host, the host's state as a compact circle and
-/// its output. Compact rows have no second line: the count moves to the
-/// tag.
-pub(crate) fn group_header(
-    snapshot: &ic_core::snapshot::Snapshot,
-    view: &View,
-    label: &str,
-    count: usize,
-    times: ListTimes,
-    now: Timestamp,
-    theme: &Theme,
-) -> ListRow {
-    let group = rows::group_row(snapshot, view, label, count, now);
-    let row = ListRow::new(ElementId::Name(format!("group:{label}").into()))
-        .header(true)
-        .title(group.label);
-    if let Some(host) = group.host {
-        return row
-            .state(
-                StateCircle::new(host.state)
-                    .size(CircleSize::Compact)
-                    .handled(host.handled),
-                host.time(times).to_owned(),
-            )
-            .detail(host.output)
-            .tag(group.count);
-    }
-    let row = row.leading(
-        Icon::new(IconName::Folder)
-            .size(px(14.))
-            .color(theme.colors.text_muted),
-    );
-    if theme.density == Density::Compact {
-        row.tag(group.count)
-    } else {
-        row.detail(group.count)
-    }
-}
-
 /// The body of a single-list dashboard without rows.
 fn empty_dashboard(
     reference: &DashboardRef,
@@ -1605,12 +1891,7 @@ fn empty_dashboard(
             .child(
                 Link::new("show-handled", "show handled").on_click(cx.listener(
                     move |this, _: &ClickEvent, _, cx| {
-                        let reference = reference.clone();
-                        this.state.update(cx, |state, cx| {
-                            if state.toggle_handled(&reference, &view_id) {
-                                cx.notify();
-                            }
-                        });
+                        this.toggle_handled(&reference, &view_id, cx);
                     },
                 )),
             )
@@ -1667,10 +1948,19 @@ fn note(text: impl Into<gpui::SharedString>, theme: &Theme) -> AnyElement {
 /// Accessors for the UI tests (`ui_tests`, Linux only).
 #[cfg(all(test, target_os = "linux"))]
 impl DashboardView {
-    /// The selected dashboard's page state.
+    /// The selected dashboard's page state (the draft's in the editor's
+    /// preview).
     fn current(&self, cx: &App) -> Option<&PageUi> {
+        if self.is_preview() {
+            return self.pages.get(&preview_reference());
+        }
         let reference = self.state.read(cx).selected()?;
         self.pages.get(reference)
+    }
+
+    /// The view picked in the editor's preview (marked on its header).
+    pub(crate) fn picked_view(&self) -> Option<&str> {
+        self.picked()
     }
 
     /// The cursor's object row in the selected dashboard: its index in its

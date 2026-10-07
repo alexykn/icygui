@@ -369,6 +369,8 @@ impl Workspace {
                     DashboardEvent::Edit(reference) => {
                         this.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
                     }
+                    // Only the editor's preview picks and changes views.
+                    DashboardEvent::Pick(_) | DashboardEvent::ChangeView(..) => {}
                 },
             ),
         ];

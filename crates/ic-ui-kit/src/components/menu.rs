@@ -167,6 +167,7 @@ pub struct MenuItem {
     checked: Option<bool>,
     key: Option<SharedString>,
     dot: Option<Hsla>,
+    icon: Option<IconName>,
     detail: Option<(SharedString, Option<Hsla>)>,
     actions: Vec<ItemAction>,
     selected: bool,
@@ -186,6 +187,7 @@ impl MenuItem {
             checked: None,
             key: None,
             dot: None,
+            icon: None,
             detail: None,
             actions: Vec::new(),
             selected: false,
@@ -201,6 +203,13 @@ impl MenuItem {
     /// dot: a connection's health).
     pub fn dot(mut self, color: Hsla) -> Self {
         self.dot = Some(color);
+        self
+    }
+
+    /// Shows `icon` (muted) before the label, in the slot a row's mark
+    /// takes: the kinds of view in the dashboard editor's *add view*.
+    pub fn icon(mut self, icon: IconName) -> Self {
+        self.icon = Some(icon);
         self
     }
 
@@ -361,15 +370,7 @@ impl RenderOnce for MenuItem {
                         }),
                 )
             })
-            .when_some(self.dot, |item, color| {
-                item.child(
-                    div()
-                        .flex_none()
-                        .size(theme.metrics.status_dot)
-                        .rounded_full()
-                        .bg(color),
-                )
-            })
+            .children(leading_mark(self.dot, self.icon, enabled, theme))
             .map(|item| match self.detail {
                 // The label keeps its width (cut short only when it alone
                 // is too wide); the detail takes what is left.
@@ -413,6 +414,36 @@ impl RenderOnce for MenuItem {
                 })
             })
     }
+}
+
+/// What a [`MenuItem`] shows before its label: a status dot, or a muted
+/// icon in the slot a row's mark takes.
+fn leading_mark(
+    dot: Option<Hsla>,
+    icon: Option<IconName>,
+    enabled: bool,
+    theme: &crate::Theme,
+) -> Vec<AnyElement> {
+    let dot = dot.map(|color| {
+        div()
+            .flex_none()
+            .size(theme.metrics.status_dot)
+            .rounded_full()
+            .bg(color)
+            .into_any_element()
+    });
+    let icon = icon.map(|icon| {
+        let color = if enabled {
+            theme.colors.text_muted
+        } else {
+            theme.colors.text_faint
+        };
+        Icon::new(icon)
+            .size(px(13.))
+            .color(color)
+            .into_any_element()
+    });
+    dot.into_iter().chain(icon).collect()
 }
 
 enum Entry {

@@ -36,6 +36,14 @@ use crate::notifications::history::{self, HistoryTone};
 const MARK_WIDTH: f32 = 2.;
 
 impl DashboardView {
+    /// The settings of a page view.
+    fn config_view(&self, reference: &DashboardRef, page_view: &ViewPage, cx: &App) -> View {
+        self.shown_views(reference, cx)
+            .and_then(|views| views.get(page_view.index))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// The page: the items on screen between two spacers, in one scrolling
     /// column, with the sticky band and the scroll bar over it.
     pub(super) fn render_page(
@@ -123,6 +131,7 @@ impl DashboardView {
             return None;
         }
         let element = self.render_band(reference, page, band, true, cx);
+        let element = self.picks_view(div().size_full().child(element), page, item.view, cx);
         Some(
             div()
                 .absolute()
@@ -167,13 +176,37 @@ impl DashboardView {
         // A grid's ringed group (the page's filter) reaches into the space
         // around its line; everything else stays in its item.
         let clip = !matches!(item.kind, ItemKind::Grid { .. });
-        div()
+        let wrapper = div()
             .flex_none()
             .w_full()
             .h(height)
             .when(clip, gpui::Styled::overflow_hidden)
-            .child(element)
-            .into_any_element()
+            .child(element);
+        self.picks_view(wrapper, page, item.view, cx)
+    }
+
+    /// In the editor's preview, a press anywhere in a view picks it (before
+    /// the item's own listeners, which may stop it): `element` belongs to
+    /// view `view` of `page`.
+    fn picks_view(
+        &self,
+        element: gpui::Div,
+        page: &Page,
+        view: usize,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let picked = self
+            .is_preview()
+            .then(|| page.views.get(view).map(|view| view.id.to_string()))
+            .flatten();
+        match picked {
+            Some(id) => element
+                .capture_any_mouse_down(cx.listener(move |_, _: &gpui::MouseDownEvent, _, cx| {
+                    cx.emit(super::DashboardEvent::Pick(id.clone()));
+                }))
+                .into_any_element(),
+            None => element.into_any_element(),
+        }
     }
 
     /// A view's note in place of its body.
@@ -189,15 +222,14 @@ impl DashboardView {
         let Some(page_view) = page.views.get(view) else {
             return div().into_any_element();
         };
-        let config = state
-            .dashboard(reference)
-            .and_then(|(_, dashboard)| dashboard.views.get(page_view.index));
+        let config = self
+            .shown_views(reference, cx)
+            .and_then(|views| views.get(page_view.index));
         let (text, color) = match page_view.state {
             ViewState::Error => (
                 format!(
                     "This view's filter doesn't work: {}",
-                    state
-                        .view_result(reference, &page_view.id)
+                    self.shown_result(reference, &page_view.id, cx)
                         .and_then(|result| result.error.clone())
                         .unwrap_or_default()
                 ),
@@ -357,7 +389,7 @@ impl DashboardView {
                 group.label.clone(),
                 super::rows::count_label(
                     group.members.len(),
-                    &config_view(state, reference, page_view),
+                    &self.config_view(reference, page_view, cx),
                 ),
                 String::new(),
             ),
@@ -727,8 +759,7 @@ impl DashboardView {
     ) -> AnyElement {
         let theme = cx.theme();
         let colors = theme.colors;
-        let state = self.state.read(cx);
-        let view = config_view(state, reference, page_view);
+        let view = self.config_view(reference, page_view, cx);
         let filter = GroupFilter {
             by: view.groups.by,
             var: view.groups.custom_var_name().to_owned(),
@@ -959,8 +990,7 @@ impl DashboardView {
         let sizes = super::page::Sizes::of(theme);
         let start = line * layout.columns;
         let end = (start + layout.columns).min(layout.tiles.len());
-        let state = self.state.read(cx);
-        let config = config_view(state, reference, page_view);
+        let config = self.config_view(reference, page_view, cx);
         let tiles = (start..end).map(|index| {
             let dim = layout.on.is_some_and(|on| on != index);
             Self::tile(
@@ -1208,19 +1238,6 @@ impl DashboardView {
             })
             .collect()
     }
-}
-
-/// The view's settings for a page view.
-fn config_view(
-    state: &crate::app_state::AppState,
-    reference: &DashboardRef,
-    page_view: &ViewPage,
-) -> View {
-    state
-        .dashboard(reference)
-        .and_then(|(_, dashboard)| dashboard.views.get(page_view.index))
-        .cloned()
-        .unwrap_or_default()
 }
 
 /// The keys of a group's rows.

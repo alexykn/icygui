@@ -1,51 +1,56 @@
-//! The dashboard editor (DASH-04), in the main area like turn 1's screen
-//! 1c, in the v2 look: the header says what is edited, with *Discard* and
-//! *Save dashboard*; the live preview of the edited view fills the left
-//! (summary bar and rows, as the dashboard will show them), the inspector
-//! the right: name, group, hosts or services, the filter in Icinga's
-//! language, problems only, hide handled, sort, group by and the
-//! notification setting.
+//! The dashboard editor (DASH-04; topic 04, 4c–4e; topic 05, 5e), in the
+//! main area: the header says what is edited, with *discard* and *save
+//! dashboard*; the live preview of the whole dashboard fills the left, as
+//! the dashboard will show it; the inspector (372px) the right, full
+//! height: the dashboard's name, group and notifications, its **views**
+//! (each with a drag handle, its display's icon, its name, what it shows
+//! and `···`; *add view* under them), and below a rule the settings of the
+//! view selected in the list, which depend on its display.
 //!
-//! Every change asks the core for a preview (`Command::PreviewDashboard`)
-//! once typing rests: the filter is validated there (a parse error names
-//! its line and column, marked under the field), and the match count and
-//! rows come back with it. A filter that doesn't work can't be saved: a
-//! save parses it at once and waits for a pending preview's verdict.
+//! The view selected in the inspector is marked in the preview on its
+//! header only (the focus bar and a faint accent tint, nothing around its
+//! body); a click in a view of the preview selects it in the inspector.
+//! Views are reordered by dragging their handle, with alt-↑/↓ or from
+//! their `···` (move up, move down), duplicated, collapsed by default, and
+//! removed without a question: *discard* brings everything back.
+//!
+//! Every change asks the core for a preview of every view
+//! (`Command::PreviewDashboard`), at once for changes to the views list
+//! and once typing rests otherwise: the filters are validated there (a
+//! parse error names its line and column, marked under the field), and the
+//! counts and rows come back with it. A draft whose filters don't work
+//! can't be saved: a save parses every filter at once and waits for a
+//! pending preview's verdict.
 //!
 //! Keys: `secondary-s` saves, Escape discards (asking first when something
-//! was changed). Showing another dashboard or tab keeps a changed draft
-//! for the next time the same dashboard is edited.
+//! was changed); with the views list focused, ↑/↓ select a view, alt-↑/↓
+//! move it, `secondary-backspace` removes it. Showing another dashboard or
+//! tab keeps a changed draft for the next time the same dashboard is
+//! edited.
 
+mod inspector;
 pub(crate) mod model;
 
-use std::ops::Range;
 use std::time::Duration;
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, EventEmitter,
+    Action, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, ParentElement as _, Render, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle,
-    Window, div, prelude::FluentBuilder as _, uniform_list,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
+    prelude::FluentBuilder as _,
 };
-use ic_config::{GroupBy, ObjectKind, Sort, SortKey, View};
-use ic_core::snapshot::{DashboardResult, DashboardRow};
-use ic_model::Timestamp;
-use ic_rules::{DashboardRef, ScopeSetting};
+use ic_config::{View, ViewDisplay};
+use ic_core::snapshot::DashboardResult;
+use ic_rules::DashboardRef;
 use ic_ui_kit::input::{Escape, InputEvent, InputState, TextareaState};
-use ic_ui_kit::{
-    ActiveTheme as _, Button, Dismissal, EmptyState, Field, FieldTone, Icon, IconName, Link, Menu,
-    MenuItem, Metrics, Popover, Scrollbar, Segmented, SummaryBar, SummaryItem, Switch, TextArea,
-    TextField, Theme, px,
-};
+use ic_ui_kit::{ActiveTheme as _, Button, Metrics, Theme, px};
 
 pub(crate) use self::model::EditorTarget;
 use crate::app_state::AppState;
 use crate::app_state::editing::DashboardDraft;
 use crate::chrome::{Controls, WindowDrag};
-use crate::dashboard::header::{natural_descending, summary_items, view_label};
-use crate::dashboard::{group_header, object_row, row_id};
-use crate::menu_state::{OpenMenu, down_position};
+use crate::dashboard::{DashboardEvent, DashboardView, PreviewPage};
+use crate::menu_state::OpenMenu;
 use crate::workspace::sidebar_reopen;
 
 /// Key context of the dashboard editor.
@@ -67,12 +72,42 @@ pub(crate) struct SaveDashboard;
 #[action(namespace = icygui)]
 pub(crate) struct DiscardDashboard;
 
+/// Moves the selected view up the list (and the page).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct MoveViewUp;
+
+/// Moves the selected view down the list (and the page).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct MoveViewDown;
+
+/// Removes the selected view (*discard* brings it back).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct RemoveView;
+
+/// Selects the next view of the list.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct SelectNextView;
+
+/// Selects the previous view of the list.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct SelectPreviousView;
+
 /// Registers the editor's key bindings. Escape in a field reaches the
 /// editor as the field's own `Escape` once it has nothing to dismiss.
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-s", SaveDashboard, Some(EDITOR_CONTEXT)),
         KeyBinding::new("escape", DiscardDashboard, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("alt-up", MoveViewUp, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("alt-down", MoveViewDown, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("secondary-backspace", RemoveView, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("up", SelectPreviousView, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("down", SelectNextView, Some(EDITOR_CONTEXT)),
     ]);
 }
 
@@ -88,22 +123,73 @@ pub(crate) enum EditorEvent {
 }
 
 /// The editor's dropdown menus.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum EditorMenu {
     Group,
     Sort,
-    GroupBy,
+    Display,
+    /// *add view*: the display first (4d).
+    AddView,
+    /// A view's `···` in the views list (4e), by id.
+    ViewOptions(String),
 }
 
-/// The preview of the edited view.
-#[derive(Clone, Debug, PartialEq)]
-enum Preview {
-    /// Asked for; the answer is pending.
-    Waiting,
-    /// No engine runs (no connection yet): nothing can be checked.
-    Unavailable,
-    /// The core's answer.
-    Ready(Result<DashboardResult, String>),
+/// The editor's text fields: the dashboard's name, and the selected
+/// view's name, filter and custom variable.
+struct Inputs {
+    name: Entity<InputState>,
+    view_name: Entity<InputState>,
+    filter: Entity<TextareaState>,
+    custom_var: Entity<InputState>,
+}
+
+impl Inputs {
+    /// The fields for `draft`, showing `first` view's values.
+    fn new(
+        draft: &DashboardDraft,
+        first: &View,
+        window: &mut Window,
+        cx: &mut Context<DashboardEditor>,
+    ) -> Self {
+        let unnamed = View {
+            name: String::new(),
+            ..first.clone()
+        };
+        Self {
+            name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("dashboard name")
+                    .default_value(draft.name.clone())
+            }),
+            view_name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(model::view_name(&unnamed))
+                    .default_value(first.name.clone())
+            }),
+            filter: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .placeholder(inspector::filter_placeholder(first.display))
+                    .default_value(first.filter.clone())
+            }),
+            custom_var: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("host.vars.site")
+                    .default_value(first.groups.custom_var.clone())
+            }),
+        }
+    }
+}
+
+/// Where the check of the draft stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Check {
+    /// The last evaluation is of the draft as it is.
+    Done,
+    /// A preview was asked for and hasn't answered yet (the one shown may
+    /// be of an older draft).
+    Pending,
+    /// Pending, and a save waits for its verdict on the filters.
+    PendingSave,
 }
 
 /// The dashboard editor view.
@@ -114,21 +200,37 @@ pub(crate) struct DashboardEditor {
     /// are against it).
     saved: DashboardDraft,
     draft: DashboardDraft,
+    /// The view selected in the views list (by id): the settings under
+    /// the list are its, and the preview marks it.
+    selected: String,
+    /// The fields of the selected view show another view's values until
+    /// the next frame fills them in (it has the window they need).
+    refill: bool,
+    /// The placeholders the view name and filter fields show (their
+    /// display's).
+    placeholders: (SharedString, &'static str),
     name: Entity<InputState>,
+    view_name: Entity<InputState>,
     filter: Entity<TextareaState>,
-    preview: Preview,
+    custom_var: Entity<InputState>,
+    /// The latest evaluation of the draft, with the views it evaluated.
+    evaluated: Option<(Vec<View>, DashboardResult)>,
+    /// No engine runs (no connection yet): nothing can be checked.
+    unavailable: bool,
+    /// The preview: the dashboard page, showing the draft.
+    preview: Entity<DashboardView>,
     preview_task: Option<Task<()>>,
     menus: OpenMenu<EditorMenu>,
-    scroll: UniformListScrollHandle,
     focus_handle: FocusHandle,
     drag: WindowDrag,
     sidebar_open: bool,
     save_error: Option<String>,
-    /// A preview was asked for and hasn't answered yet (the one shown may
-    /// be of an older draft).
-    checking: bool,
-    /// A save waits for the pending preview's verdict on the filter.
-    save_when_checked: bool,
+    /// A filter that doesn't parse, found by a save: the view (by id) and
+    /// the error, until the view changes.
+    checked_error: Option<(String, String)>,
+    /// Whether the last evaluation is of the draft as it is, and whether a
+    /// save waits for the next one.
+    check: Check,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -152,39 +254,31 @@ impl DashboardEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("dashboard name")
-                .default_value(draft.name.clone())
-        });
-        let filter = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder("host.vars.env == \"prod\" && service.state != 0")
-                .default_value(draft.view().filter.clone())
-        });
-        let subscriptions = vec![
-            cx.subscribe_in(
-                &name,
-                window,
-                |this: &mut Self, input, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.draft.name = input.read(cx).value().to_string();
-                        cx.notify();
-                    }
+        let selected = draft
+            .views
+            .first()
+            .map(|view| view.id.clone())
+            .unwrap_or_default();
+        let first = draft.views.first().cloned().unwrap_or_default();
+        let inputs = Inputs::new(&draft, &first, window, cx);
+        let preview = cx.new(|cx| {
+            DashboardView::preview(
+                state.clone(),
+                PreviewPage {
+                    picked: Some(selected.clone()),
+                    reserved: px(INSPECTOR_WIDTH) + Metrics::RULE,
+                    ..PreviewPage::default()
                 },
-            ),
-            cx.subscribe_in(
-                &filter,
-                window,
-                |this: &mut Self, input, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        let filter = input.read(cx).value().to_string();
-                        this.change_view(cx, |view| view.filter = filter);
-                    }
-                },
-            ),
-            cx.observe(&state, |_, _, cx| cx.notify()),
-        ];
+                cx,
+            )
+        });
+        let subscriptions = Self::subscribe(&inputs, &preview, &state, window, cx);
+        let Inputs {
+            name,
+            view_name,
+            filter,
+            custom_var,
+        } = inputs;
         // A new dashboard starts with its name selected for typing.
         if target == EditorTarget::New {
             name.update(cx, |input, cx| {
@@ -197,22 +291,113 @@ impl DashboardEditor {
             target,
             saved,
             draft,
+            placeholders: (
+                model::view_name(&View {
+                    name: String::new(),
+                    ..first.clone()
+                })
+                .into(),
+                inspector::filter_placeholder(first.display),
+            ),
+            selected,
+            refill: false,
             name,
+            view_name,
             filter,
-            preview: Preview::Waiting,
+            custom_var,
+            evaluated: None,
+            unavailable: false,
+            preview,
             preview_task: None,
             menus: OpenMenu::default(),
-            scroll: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             drag: WindowDrag::default(),
             sidebar_open: true,
             save_error: None,
-            checking: false,
-            save_when_checked: false,
+            checked_error: None,
+            check: Check::Done,
             _subscriptions: subscriptions,
         };
         editor.request_preview(Duration::ZERO, cx);
         editor
+    }
+
+    /// What the editor follows: its fields, the preview's picks and
+    /// changes, and the state.
+    fn subscribe(
+        inputs: &Inputs,
+        preview: &Entity<DashboardView>,
+        state: &Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        vec![
+            cx.subscribe_in(
+                &inputs.name,
+                window,
+                |this: &mut Self, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.draft.name = input.read(cx).value().to_string();
+                        this.save_error = None;
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &inputs.view_name,
+                window,
+                |this: &mut Self, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let name = input.read(cx).value().to_string();
+                        this.change_selected(PREVIEW_DEBOUNCE, cx, |view| view.name = name);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &inputs.filter,
+                window,
+                |this: &mut Self, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let filter = input.read(cx).value().to_string();
+                        this.change_selected(PREVIEW_DEBOUNCE, cx, |view| view.filter = filter);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &inputs.custom_var,
+                window,
+                |this: &mut Self, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let var = input.read(cx).value().to_string();
+                        this.change_selected(PREVIEW_DEBOUNCE, cx, |view| {
+                            view.groups.custom_var = var;
+                        });
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                preview,
+                window,
+                |this: &mut Self, _, event: &DashboardEvent, window, cx| match event {
+                    DashboardEvent::Pick(id) => {
+                        if this.selected != *id {
+                            this.select_and(id.clone(), false, cx);
+                        }
+                        window.focus(&this.focus_handle, cx);
+                    }
+                    DashboardEvent::ChangeView(id, change) => {
+                        let change = change.clone();
+                        if let Some(index) = this.index_of(id) {
+                            this.change_view_at(index, Duration::ZERO, cx, move |view| {
+                                change.apply(view);
+                            });
+                        }
+                    }
+                    DashboardEvent::Edit(_) => {}
+                },
+            ),
+            cx.observe(state, |_, _, cx| cx.notify()),
+        ]
     }
 
     /// Where the keyboard goes when the editor opens: the name of a new
@@ -245,115 +430,403 @@ impl DashboardEditor {
         }
     }
 
-    /// The draft as edited so far.
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn draft(&self) -> &DashboardDraft {
-        &self.draft
-    }
-
-    /// The filter field's state.
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn filter_input(&self) -> &Entity<TextareaState> {
-        &self.filter
-    }
-
-    /// The name field's state.
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn name_input(&self) -> &Entity<InputState> {
-        &self.name
-    }
-
-    /// The latest preview: the result, or why there is none.
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn preview_result(&self) -> Option<&Result<DashboardResult, String>> {
-        match &self.preview {
-            Preview::Ready(result) => Some(result),
-            Preview::Waiting | Preview::Unavailable => None,
-        }
-    }
-
-    /// Why the last save was refused.
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn save_error(&self) -> Option<&str> {
-        self.save_error.as_deref()
-    }
-
     /// Tells the editor whether the sidebar is shown (the header then
     /// needs no window controls).
     pub(crate) fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
         self.sidebar_open = open;
+        self.preview
+            .update(cx, |preview, cx| preview.set_sidebar_open(open, cx));
         cx.notify();
     }
 
-    /// Changes the draft's view and asks for a new preview.
-    fn change_view(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut View)) {
-        let before = self.draft.view().clone();
-        change(self.draft.view_mut());
-        if *self.draft.view() != before {
-            self.save_error = None;
-            self.request_preview(PREVIEW_DEBOUNCE, cx);
-        }
+    // --- The views -------------------------------------------------------
+
+    /// The index of view `id` in the draft.
+    fn index_of(&self, id: &str) -> Option<usize> {
+        self.draft.views.iter().position(|view| view.id == id)
+    }
+
+    /// The index of the selected view (the first when it is gone).
+    fn selected_index(&self) -> usize {
+        self.index_of(&self.selected).unwrap_or(0)
+    }
+
+    /// The selected view.
+    fn selected_view(&self) -> &View {
+        static NONE: std::sync::LazyLock<View> = std::sync::LazyLock::new(View::default);
+        self.draft.views.get(self.selected_index()).unwrap_or(&NONE)
+    }
+
+    /// Selects view `id`: its settings show under the list, the preview
+    /// marks it on its header and scrolls its header into view.
+    fn select(&mut self, id: String, cx: &mut Context<Self>) {
+        self.select_and(id, true, cx);
+    }
+
+    /// [`Self::select`]; `reveal`: scroll the preview to the view (not
+    /// when it was clicked there).
+    fn select_and(&mut self, id: String, reveal: bool, cx: &mut Context<Self>) {
+        self.menus.close();
+        self.selected.clone_from(&id);
+        self.refill = true;
+        self.preview
+            .update(cx, |preview, cx| preview.pick(Some(id), reveal, cx));
         cx.notify();
     }
 
-    /// Asks the core to evaluate the draft after `delay` (a newer request
-    /// replaces a waiting one; the core drops superseded ones itself).
-    fn request_preview(&mut self, delay: Duration, cx: &mut Context<Self>) {
-        if !matches!(self.preview, Preview::Ready(Err(_))) {
-            self.preview = Preview::Waiting;
+    /// Selects the view `delta` places down (negative: up) the list.
+    fn select_by(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.draft.views.len();
+        let Some(index) = self.selected_index().checked_add_signed(delta) else {
+            return;
+        };
+        if index < count {
+            let id = self.draft.views[index].id.clone();
+            self.select(id, cx);
         }
-        self.checking = true;
-        let views = self.draft.views.clone();
-        let view_id = self.draft.view().id.clone();
-        self.preview_task = Some(cx.spawn(async move |this, cx| {
-            if !delay.is_zero() {
-                cx.background_executor().timer(delay).await;
+    }
+
+    /// Fills the selected view's fields with its values after the
+    /// selection changed, and gives them the placeholders of its display
+    /// (the window is needed for both).
+    fn fill_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = self.selected_view().clone();
+        let refill = std::mem::take(&mut self.refill);
+        let name_placeholder: SharedString = model::view_name(&View {
+            name: String::new(),
+            ..view.clone()
+        })
+        .into();
+        let filter_placeholder = inspector::filter_placeholder(view.display);
+        let placeholders = (name_placeholder, filter_placeholder);
+        let new_placeholders = self.placeholders != placeholders;
+        self.view_name.update(cx, |input, cx| {
+            if refill && input.value() != view.name.as_str() {
+                input.set_value(view.name.clone(), window, cx);
             }
-            let Ok(receiver) = this.update(cx, |this, cx| this.state.read(cx).preview(views))
+            if new_placeholders {
+                input.set_placeholder(placeholders.0.clone(), window, cx);
+            }
+        });
+        self.filter.update(cx, |input, cx| {
+            if refill && input.value() != view.filter.as_str() {
+                input.set_value(view.filter.clone(), window, cx);
+            }
+            if new_placeholders {
+                input.set_placeholder(filter_placeholder, window, cx);
+            }
+        });
+        self.placeholders = placeholders;
+        if refill {
+            self.custom_var.update(cx, |input, cx| {
+                if input.value() != view.groups.custom_var.as_str() {
+                    input.set_value(view.groups.custom_var.clone(), window, cx);
+                }
+            });
+        }
+    }
+
+    /// Changes the selected view; asks for a new preview after `delay`.
+    fn change_selected(
+        &mut self,
+        delay: Duration,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut View),
+    ) {
+        let index = self.selected_index();
+        self.change_view_at(index, delay, cx, change);
+    }
+
+    /// Changes the view at `index`; asks for a new preview after `delay`
+    /// when it changed.
+    fn change_view_at(
+        &mut self,
+        index: usize,
+        delay: Duration,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut View),
+    ) {
+        let Some(view) = self.draft.views.get_mut(index) else {
+            return;
+        };
+        let before = view.clone();
+        change(view);
+        if *view == before {
+            return;
+        }
+        let collapsed = view.collapsed != before.collapsed;
+        if self
+            .checked_error
+            .as_ref()
+            .is_some_and(|(id, _)| *id == before.id)
+        {
+            self.checked_error = None;
+        }
+        self.save_error = None;
+        if collapsed {
+            self.preview.update(cx, DashboardView::reset_folds);
+        }
+        self.request_preview(delay, cx);
+        cx.notify();
+    }
+
+    /// Changes the views list (add, duplicate, move, remove): `change`
+    /// returns the index of the view to select afterwards, or `None` when
+    /// nothing changed.
+    fn change_views(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut Vec<View>) -> Option<usize>,
+    ) {
+        self.menus.close();
+        let Some(index) = change(&mut self.draft.views) else {
+            cx.notify();
+            return;
+        };
+        self.save_error = None;
+        let id = self.draft.views[index].id.clone();
+        self.select(id, cx);
+        self.request_preview(Duration::ZERO, cx);
+    }
+
+    /// *add view*: a view of `display` under the selected one, starting
+    /// from its filter.
+    fn add_view(&mut self, display: ViewDisplay, cx: &mut Context<Self>) {
+        let after = self.selected_index();
+        let filter = self.selected_view().filter.clone();
+        self.change_views(cx, |views| {
+            model::insert_view(views, Some(after), model::new_view(display, &filter))
+        });
+    }
+
+    fn duplicate_view(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.change_views(cx, |views| model::duplicate_view(views, index));
+    }
+
+    fn move_view(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        self.change_views(cx, |views| model::move_view(views, from, to));
+    }
+
+    fn remove_view(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self
+            .checked_error
+            .as_ref()
+            .is_some_and(|(id, _)| self.draft.views.get(index).is_some_and(|v| v.id == *id))
+        {
+            self.checked_error = None;
+        }
+        self.change_views(cx, |views| model::remove_view(views, index));
+    }
+
+    /// Whether the views list's keys apply: the editor itself has the
+    /// keyboard (not one of its fields).
+    fn list_keys(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
+    }
+
+    fn on_move_up(&mut self, _: &MoveViewUp, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.list_keys(window) {
+            cx.propagate();
+            return;
+        }
+        let index = self.selected_index();
+        if let Some(to) = index.checked_sub(1) {
+            self.move_view(index, to, cx);
+        }
+    }
+
+    fn on_move_down(&mut self, _: &MoveViewDown, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.list_keys(window) {
+            cx.propagate();
+            return;
+        }
+        let index = self.selected_index();
+        self.move_view(index, index + 1, cx);
+    }
+
+    fn on_remove(&mut self, _: &RemoveView, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.list_keys(window) {
+            cx.propagate();
+            return;
+        }
+        let index = self.selected_index();
+        self.remove_view(index, cx);
+    }
+
+    fn on_next(&mut self, _: &SelectNextView, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.list_keys(window) {
+            cx.propagate();
+            return;
+        }
+        self.select_by(1, cx);
+    }
+
+    fn on_previous(&mut self, _: &SelectPreviousView, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.list_keys(window) {
+            cx.propagate();
+            return;
+        }
+        self.select_by(-1, cx);
+    }
+
+    // --- Preview and save ------------------------------------------------
+
+    /// Asks the core to evaluate the draft's views after `delay` (a newer
+    /// request replaces a waiting one; the core drops superseded ones
+    /// itself). The preview keeps showing the last evaluation meanwhile.
+    fn request_preview(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        self.ask_for_preview(delay, true, cx);
+    }
+
+    /// [`Self::request_preview`]; `at_once`: an answer that is there at
+    /// once applies before this returns (a save waiting for the check
+    /// goes on when the answer arrives instead).
+    fn ask_for_preview(&mut self, delay: Duration, at_once: bool, cx: &mut Context<Self>) {
+        if self.check == Check::Done {
+            self.check = Check::Pending;
+        }
+        let views = self.draft.views.clone();
+        if delay.is_zero() {
+            // An answer that is there at once (the views list changed, and
+            // an evaluator without a core) shows without a frame between.
+            match self.state.read(cx).preview(views.clone()) {
+                None => {
+                    self.preview_task = None;
+                    self.apply_preview(views, None, cx);
+                    return;
+                }
+                Some(mut receiver) => {
+                    if at_once && let Ok(Some(result)) = receiver.try_recv() {
+                        self.preview_task = None;
+                        self.apply_preview(views, Some(result), cx);
+                        return;
+                    }
+                    self.preview_task = Some(cx.spawn(async move |this, cx| {
+                        let Ok(result) = receiver.await else {
+                            // Replaced by a newer request in the core.
+                            return;
+                        };
+                        let _ = this.update(cx, |this, cx| {
+                            this.apply_preview(views, Some(result), cx);
+                        });
+                    }));
+                    return;
+                }
+            }
+        }
+        self.preview_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let Ok(receiver) =
+                this.update(cx, |this, cx| this.state.read(cx).preview(views.clone()))
             else {
                 return;
             };
-            let preview = match receiver {
+            let result = match receiver {
                 Some(receiver) => match receiver.await {
-                    Ok(result) => Preview::Ready(model::preview_outcome(result, &view_id)),
+                    Ok(result) => Some(result),
                     // Replaced by a newer request in the core.
                     Err(_) => return,
                 },
-                None => Preview::Unavailable,
+                None => None,
             };
-            let _ = this.update(cx, |this, cx| {
-                this.preview = preview;
-                this.checking = false;
-                if std::mem::take(&mut this.save_when_checked) {
-                    this.save(cx);
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.apply_preview(views, result, cx));
         }));
     }
 
+    /// The core evaluated `views` (`None`: no engine runs): the preview
+    /// shows them, and a save waiting for the verdict goes on.
+    fn apply_preview(
+        &mut self,
+        views: Vec<View>,
+        result: Option<DashboardResult>,
+        cx: &mut Context<Self>,
+    ) {
+        let save = self.check == Check::PendingSave;
+        self.check = Check::Done;
+        match result {
+            Some(result) => {
+                self.unavailable = false;
+                let page = PreviewPage {
+                    views: views.clone(),
+                    result: result.clone(),
+                    picked: Some(self.selected.clone()),
+                    reserved: px(INSPECTOR_WIDTH) + Metrics::RULE,
+                };
+                self.evaluated = Some((views, result));
+                self.preview
+                    .update(cx, |preview, cx| preview.set_preview(page, cx));
+            }
+            None => self.unavailable = true,
+        }
+        if save {
+            self.save(cx);
+        }
+        cx.notify();
+    }
+
+    /// The latest evaluation of view `id`, when it is of the view as it
+    /// is now (not of an older draft).
+    fn evaluated_view(&self, id: &str) -> Option<&ic_core::snapshot::ViewResult> {
+        let (views, result) = self.evaluated.as_ref()?;
+        let index = self.index_of(id)?;
+        let evaluated = views.iter().find(|view| view.id == id)?;
+        (*evaluated == self.draft.views[index]).then(|| result.view(id))?
+    }
+
+    /// Why the selected view's filter doesn't work, if it doesn't: a save
+    /// found it doesn't parse, or the core's preview says so.
+    fn filter_error(&self) -> Option<String> {
+        if let Some((id, error)) = &self.checked_error
+            && *id == self.selected
+        {
+            return Some(error.clone());
+        }
+        let (_, result) = self.evaluated.as_ref()?;
+        model::view_error(result, &self.selected).map(ToOwned::to_owned)
+    }
+
     /// Saves the draft: a new dashboard, or the edited one. Refused while
-    /// the filter doesn't work: one that doesn't parse at once, one the
-    /// core can't evaluate once its preview says so (a save waits for a
-    /// pending preview).
+    /// a view's settings don't work: a filter that doesn't parse at once,
+    /// one the core can't evaluate once its preview says so (a save waits
+    /// for a pending preview); the view in question is selected.
     fn save(&mut self, cx: &mut Context<Self>) {
-        if let Err(error) = model::check_filter(&self.draft.view().filter) {
-            self.save_error = Some(format!("Fix the filter first: {error}"));
-            self.preview = Preview::Ready(Err(error));
+        let several = self.draft.views.len() > 1;
+        if let Err((index, problem)) = model::check_views(&self.draft.views) {
+            let view = &self.draft.views[index];
+            let id = view.id.clone();
+            let name = model::view_name(view);
+            if let model::Problem::Filter(error) = &problem {
+                self.checked_error = Some((id.clone(), error.clone()));
+            }
+            self.save_error = Some(problem.message(several.then_some(name.as_str())));
+            self.stop_waiting_to_save();
+            if self.selected != id {
+                self.select(id, cx);
+            }
             cx.notify();
             return;
         }
-        if self.checking {
+        if self.check != Check::Done {
             // The last change hasn't been checked yet: check it now and
             // save when the answer comes.
-            self.save_when_checked = true;
-            self.request_preview(Duration::ZERO, cx);
+            self.check = Check::PendingSave;
+            self.ask_for_preview(Duration::ZERO, false, cx);
             return;
         }
-        if let Preview::Ready(Err(error)) = &self.preview {
-            self.save_error = Some(format!("Fix the filter first: {error}"));
-            cx.notify();
-            return;
+        if let Some((_, result)) = &self.evaluated {
+            let failed = self.draft.views.iter().find_map(|view| {
+                model::view_error(result, &view.id).map(|error| (view.clone(), error.to_owned()))
+            });
+            if let Some((view, error)) = failed {
+                let name = model::view_name(&view);
+                self.save_error =
+                    Some(model::Problem::Filter(error).message(several.then_some(name.as_str())));
+                if self.selected != view.id {
+                    self.select(view.id, cx);
+                }
+                cx.notify();
+                return;
+            }
         }
         let draft = self.draft.clone();
         // Saving selects the dashboard, and the workspace closes an editor
@@ -377,6 +850,13 @@ impl DashboardEditor {
         }
     }
 
+    /// A save that waited for the check doesn't any more.
+    fn stop_waiting_to_save(&mut self) {
+        if self.check == Check::PendingSave {
+            self.check = Check::Pending;
+        }
+    }
+
     fn on_save(&mut self, _: &SaveDashboard, _: &mut Window, cx: &mut Context<Self>) {
         self.save(cx);
     }
@@ -396,7 +876,7 @@ impl DashboardEditor {
             cx.notify();
             return;
         }
-        self.save_when_checked = false;
+        self.stop_waiting_to_save();
         if self.changes().is_some() {
             cx.emit(EditorEvent::DiscardChanges);
         } else {
@@ -404,14 +884,7 @@ impl DashboardEditor {
         }
     }
 
-    fn dismiss_listener(
-        cx: &Context<Self>,
-    ) -> impl Fn(&Dismissal, &mut Window, &mut App) + 'static {
-        cx.listener(|this, dismissal: &Dismissal, _, cx| {
-            this.menus.dismissed(*dismissal);
-            cx.notify();
-        })
-    }
+    // --- Rendering -------------------------------------------------------
 
     fn render_header(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
@@ -471,550 +944,29 @@ impl DashboardEditor {
         self.drag.attach(header, controls).into_any_element()
     }
 
-    /// The preview's summary bar and rows, or what the preview says.
+    /// The preview: the dashboard page showing the draft, or what stands
+    /// in for it before the first evaluation.
     fn render_preview(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let result = match &self.preview {
-            Preview::Ready(Ok(result)) => result,
-            Preview::Ready(Err(error)) => {
-                return EmptyState::new("The filter doesn't work")
-                    .leading(
-                        Icon::new(IconName::TriangleAlert)
-                            .size(px(20.))
-                            .color(theme.states.fill.critical),
-                    )
-                    .detail(error.clone())
-                    .max_width(px(520.))
-                    .into_any_element();
-            }
-            Preview::Waiting => return note("Evaluating…", theme),
-            Preview::Unavailable => {
-                return note(
-                    "The preview shows once the environment's engine runs.",
-                    theme,
-                );
-            }
-        };
-        let items = summary_items(&result.summary, self.draft.view().object_kind);
-        let summary = (!items.is_empty()).then(|| {
-            SummaryBar::new()
-                .children(
-                    items
-                        .into_iter()
-                        .map(|(state, count, label)| SummaryItem::new(state, count, label)),
-                )
-                .end(div().text_color(theme.colors.text_faint).child("preview"))
-        });
-        let Some(first) = result.view(&self.draft.view().id) else {
-            return note("Nothing matches this filter.", theme);
-        };
-        let body = if first.rows().is_empty() {
-            let text = if model::matches(&first.summary) == 0 {
-                "Nothing matches this filter."
-            } else {
-                "Everything this dashboard would show is OK or handled."
-            };
-            note(text, theme)
-        } else {
-            let rows = first.list_rows().cloned().unwrap_or_default();
-            let view = self.draft.view().clone();
-            let scroll = self.scroll.clone();
-            div()
-                .relative()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .child(
-                    uniform_list(
-                        "editor-preview-rows",
-                        rows.len(),
-                        cx.processor(move |this, range: Range<usize>, _window, cx| {
-                            this.render_rows(&rows, &view, range, cx)
-                        }),
-                    )
-                    .track_scroll(&scroll)
-                    .size_full(),
-                )
-                .child(Scrollbar::vertical(&scroll))
-                .into_any_element()
-        };
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .children(summary)
-            .child(body)
-            .into_any_element()
-    }
-
-    /// The preview rows in `range` (the ones on screen).
-    fn render_rows(
-        &self,
-        rows: &[DashboardRow],
-        view: &View,
-        range: Range<usize>,
-        cx: &Context<Self>,
-    ) -> Vec<AnyElement> {
-        let state = self.state.read(cx);
-        let snapshot = state.snapshot();
-        let theme = cx.theme();
-        let now = Timestamp::now();
-        let times = state.appearance().list_times;
-        let show_host = view.group_by != GroupBy::Host;
-        let grouped = view.group_by != GroupBy::None;
-        let mut group: Option<String> = None;
-        range
-            .filter_map(|index| {
-                let row = match rows.get(index)? {
-                    DashboardRow::Object(key) => {
-                        let id = row_id(None, group.as_deref(), key);
-                        object_row(snapshot, id, key, show_host, times, now, theme).indent(
-                            if grouped {
-                                theme.metrics.row_indent
-                            } else {
-                                px(0.)
-                            },
-                        )
-                    }
-                    DashboardRow::Group { label, count } => {
-                        group = Some(label.clone());
-                        group_header(snapshot, view, label, *count, times, now, theme)
-                    }
-                };
-                Some(row.into_any_element())
-            })
-            .collect()
-    }
-
-    /// The inspector: the draft's fields.
-    fn render_inspector(&self, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let colors = theme.colors;
-        let view = self.draft.view();
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(px(INSPECTOR_WIDTH))
-            .h_full()
-            .border_l_1()
-            .border_color(colors.border_split)
-            .bg(colors.pane_background)
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .h(Metrics::with_rule(theme.metrics.summary_bar_height))
-                    .px(px(18.))
-                    .border_b_1()
-                    .border_color(colors.border_header)
-                    .text_size(theme.text.heading)
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.text_strong)
-                    .child("dashboard")
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(theme.text.label)
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(colors.text_faint)
-                            .child(sort_summary(view.sort, view.object_kind)),
-                    ),
-            )
-            .child(self.render_inspector_body(cx))
-            .child(self.render_inspector_footer(cx))
-            .into_any_element()
-    }
-
-    /// The inspector's fields, scrolling.
-    fn render_inspector_body(&self, cx: &Context<Self>) -> Stateful<Div> {
-        let view = self.draft.view();
-        let group_name = self
-            .state
-            .read(cx)
-            .groups()
-            .iter()
-            .find(|group| group.id == self.draft.group_id)
-            .map_or_else(|| "—".to_owned(), |group| group.name.clone());
-        div()
-            .id("editor-inspector-body")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .gap(px(18.))
-            .p(px(18.))
-            .overflow_y_scroll()
-            .child(Field::new("name").control(TextField::new(&self.name).bordered(true)))
-            .child(Field::new("group").control(self.dropdown(
-                "editor-group",
-                EditorMenu::Group,
-                group_name,
-                || self.group_menu(cx),
-                cx,
-            )))
-            .child(Self::kind_field(view, cx))
-            .child(self.filter_field(cx))
-            .child(Self::show_field(
-                view,
-                self.state.read(cx).handled_defaults(),
-                cx,
-            ))
-            .child(self.sort_fields(cx))
-            .child(Field::new("group by").control(self.dropdown(
-                "editor-group-by",
-                EditorMenu::GroupBy,
-                group_by_label(view.group_by).to_owned(),
-                || self.group_by_menu(cx),
-                cx,
-            )))
-            .child(self.notifications_field(cx))
-    }
-
-    /// Services or hosts.
-    fn kind_field(view: &View, cx: &Context<Self>) -> Field {
-        Field::new("lists").control(
-            Segmented::new("editor-kind")
-                .option("services")
-                .option("hosts")
-                .selected(usize::from(view.object_kind == ObjectKind::Hosts))
-                .on_select(cx.listener(|this, index: &usize, _, cx| {
-                    let kind = if *index == 1 {
-                        ObjectKind::Hosts
-                    } else {
-                        ObjectKind::Services
-                    };
-                    this.change_view(cx, |view| {
-                        *view = model::with_kind(view.clone(), kind);
-                    });
-                })),
-        )
-    }
-
-    /// The filter, with the preview's verdict and where an error points.
-    fn filter_field(&self, cx: &Context<Self>) -> Field {
-        let theme = cx.theme();
-        let (filter_status, filter_tone, filter_error) = match &self.preview {
-            Preview::Ready(Ok(result)) => (
-                model::status_text(result, &self.draft.view().id),
-                FieldTone::Good,
-                None,
-            ),
-            Preview::Ready(Err(error)) => {
-                ("invalid".to_owned(), FieldTone::Bad, Some(error.clone()))
-            }
-            Preview::Waiting => ("checking…".to_owned(), FieldTone::Neutral, None),
-            Preview::Unavailable => ("not checked".to_owned(), FieldTone::Neutral, None),
-        };
-        let marker = filter_error.as_deref().and_then(|error| {
-            let (line, column) = model::error_position(error)?;
-            model::error_marker(&self.draft.view().filter, line, column, model::MARKER_CHARS)
-        });
-        Field::new("filter")
-            .status(filter_status, filter_tone)
-            .control(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(
-                        TextArea::new(&self.filter)
-                            .height(px(92.))
-                            .invalid(filter_error.is_some()),
-                    )
-                    .when_some(marker, |field, (line, caret)| {
-                        field.child(
-                            div()
-                                .px(px(13.))
-                                .text_size(theme.text.small)
-                                .text_color(theme.states.text.critical)
-                                .child(div().whitespace_nowrap().child(line))
-                                .child(div().whitespace_nowrap().child(caret)),
-                        )
-                    }),
-            )
-            .error(filter_error)
-            .hint(
-                "Icinga's filter language: host.vars.role == \"db\", match(\"web-*\", host.name) …",
-            )
-    }
-
-    /// Problems only, hide handled.
-    fn show_field(view: &View, defaults: ic_config::HideHandled, cx: &Context<Self>) -> Field {
-        Field::new("show").control(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(10.))
-                .child(
-                    Switch::new("editor-problems-only", view.problems_only)
-                        .label("problems only")
-                        .on_change(cx.listener(|this, on: &bool, _, cx| {
-                            let on = *on;
-                            this.change_view(cx, |view| view.problems_only = on);
-                        })),
-                )
-                .child(
-                    Switch::new("editor-hide-handled", view.hidden_handled(defaults).any())
-                        .label("hide handled problems")
-                        .on_change(cx.listener(|this, on: &bool, _, cx| {
-                            let on = *on;
-                            this.change_view(cx, |view| {
-                                view.handled = if on {
-                                    ic_config::HandledSetting::SETTINGS
-                                } else {
-                                    ic_config::HandledSetting::SHOW
-                                };
-                            });
-                        })),
-                ),
-        )
-    }
-
-    /// The sort key and direction, side by side.
-    fn sort_fields(&self, cx: &Context<Self>) -> Div {
-        let view = self.draft.view();
-        div()
-            .flex()
-            .gap(px(10.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(Field::new("sort").control(self.dropdown(
-                        "editor-sort",
-                        EditorMenu::Sort,
-                        sort_key_label(view.sort.key, view.object_kind).to_owned(),
-                        || self.sort_menu(cx),
-                        cx,
-                    ))),
-            )
-            .child(
-                div().flex_1().min_w_0().child(
-                    Field::new("direction").control(
-                        Segmented::new("editor-direction")
-                            .option("↓ desc")
-                            .option("↑ asc")
-                            .selected(usize::from(!view.sort.descending))
-                            .on_select(cx.listener(|this, index: &usize, _, cx| {
-                                let descending = *index == 0;
-                                this.change_view(cx, |view| {
-                                    view.sort.descending = descending;
-                                });
-                            })),
-                    ),
-                ),
-            )
-    }
-
-    /// Notifications for the dashboard: inherit, on, off.
-    fn notifications_field(&self, cx: &Context<Self>) -> Field {
-        let notify_index = match self.draft.notifications {
-            ScopeSetting::Inherit | ScopeSetting::Custom(_) => 0,
-            ScopeSetting::On => 1,
-            ScopeSetting::Off => 2,
-        };
-        Field::new("notifications").control(
-            Segmented::new("editor-notifications")
-                .option("inherit")
-                .option("on")
-                .option("off")
-                .selected(notify_index)
-                .on_select(cx.listener(|this, index: &usize, _, cx| {
-                    this.draft.notifications = match index {
-                        1 => ScopeSetting::On,
-                        2 => ScopeSetting::Off,
-                        _ => ScopeSetting::Inherit,
-                    };
-                    cx.notify();
-                })),
-        )
-    }
-
-    /// What the dashboard shows as, a save error, and "delete dashboard".
-    fn render_inspector_footer(&self, cx: &Context<Self>) -> Div {
-        let theme = cx.theme();
-        let colors = theme.colors;
-        div()
-            .flex()
-            .flex_none()
-            .flex_col()
-            .gap(px(8.))
-            .px(px(18.))
-            .py(px(12.))
-            .border_t_1()
-            .border_color(colors.border_header)
-            .when_some(self.save_error.clone(), |footer, error| {
-                footer.child(
-                    div()
-                        .text_size(theme.text.label)
-                        .text_color(theme.states.text.critical)
-                        .child(error),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .text_size(theme.text.label)
-                    .text_color(colors.text_faint)
-                    .child(format!("shows as: {}", view_label(self.draft.view())))
-                    .child(div().flex_1())
-                    .when_some(
-                        match &self.target {
-                            EditorTarget::Existing(reference) => Some(reference.clone()),
-                            EditorTarget::New => None,
-                        },
-                        |row, reference| {
-                            row.child(
-                                Link::new("editor-delete", "delete dashboard")
-                                    .quiet()
-                                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                                        cx.emit(EditorEvent::Delete(reference.clone()));
-                                    })),
-                            )
-                        },
-                    ),
-            )
-    }
-
-    /// A dropdown trigger showing `value`, with `menu` under it while open.
-    fn dropdown(
-        &self,
-        id: &'static str,
-        menu: EditorMenu,
-        value: String,
-        build: impl FnOnce() -> Menu,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme();
-        let colors = theme.colors;
-        let open = self.menus.is_open(&menu);
-        div()
-            .relative()
-            .child(
-                div()
-                    .id(id)
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(theme.metrics.field_height)
-                    .px(px(10.))
-                    .rounded(theme.metrics.code_radius)
-                    .border_1()
-                    .border_color(if open {
-                        colors.accent
-                    } else {
-                        colors.border_header
-                    })
-                    .bg(colors.code_background)
-                    .text_size(theme.text.body)
-                    .cursor_pointer()
-                    .child(div().flex_1().min_w_0().truncate().child(value))
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .size(px(12.))
-                            .color(colors.text_faint),
-                    )
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        this.menus.toggle(menu, down_position(event));
-                        cx.notify();
-                    })),
-            )
-            .when(open, |slot| slot.child(Popover::new(build())))
-            .into_any_element()
-    }
-
-    fn group_menu(&self, cx: &Context<Self>) -> Menu {
-        let state = self.state.read(cx);
-        let mut menu = Menu::new("editor-group-menu").min_width(px(240.));
-        for group in state.groups() {
-            let id = group.id.clone();
-            menu = menu.item(
-                MenuItem::new(
-                    gpui::ElementId::Name(format!("editor-group-{}", group.id).into()),
-                    group.name.clone(),
-                )
-                .checked(group.id == self.draft.group_id)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.menus.close();
-                    this.draft.group_id.clone_from(&id);
-                    cx.notify();
-                })),
+        if self.evaluated.is_some() {
+            return self.preview.clone().into_any_element();
+        }
+        if self.unavailable {
+            return note(
+                "The preview shows once the environment's engine runs.",
+                theme,
             );
         }
-        menu.on_dismiss(Self::dismiss_listener(cx))
-    }
-
-    fn sort_menu(&self, cx: &Context<Self>) -> Menu {
-        let view = self.draft.view();
-        let mut menu = Menu::new("editor-sort-menu").min_width(px(200.));
-        for key in [
-            SortKey::Severity,
-            SortKey::LastStateChange,
-            SortKey::Host,
-            SortKey::Service,
-        ] {
-            menu = menu.item(
-                MenuItem::new(
-                    gpui::ElementId::Name(format!("editor-sort-{key:?}").into()),
-                    sort_key_label(key, view.object_kind),
-                )
-                .checked(view.sort.key == key)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.menus.close();
-                    this.change_view(cx, |view| {
-                        if view.sort.key != key {
-                            view.sort = Sort {
-                                key,
-                                descending: natural_descending(key),
-                            };
-                        }
-                    });
-                })),
-            );
-        }
-        menu.on_dismiss(Self::dismiss_listener(cx))
-    }
-
-    fn group_by_menu(&self, cx: &Context<Self>) -> Menu {
-        let view = self.draft.view();
-        let mut menu = Menu::new("editor-group-by-menu").min_width(px(200.));
-        for group_by in [
-            GroupBy::None,
-            GroupBy::Host,
-            GroupBy::HostGroup,
-            GroupBy::ServiceGroup,
-        ] {
-            if group_by == GroupBy::ServiceGroup && view.object_kind == ObjectKind::Hosts {
-                continue;
-            }
-            menu = menu.item(
-                MenuItem::new(
-                    gpui::ElementId::Name(format!("editor-group-by-{group_by:?}").into()),
-                    group_by_label(group_by),
-                )
-                .checked(view.group_by == group_by)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.menus.close();
-                    this.change_view(cx, |view| view.group_by = group_by);
-                })),
-            );
-        }
-        menu.on_dismiss(Self::dismiss_listener(cx))
+        note("Evaluating…", theme)
     }
 }
 
 impl Render for DashboardEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.fill_fields(window, cx);
         let header = self.render_header(window, cx);
         let preview = self.render_preview(cx);
-        let inspector = self.render_inspector(cx);
+        let inspector = self.render_inspector(window, cx);
         div()
             .id("dashboard-editor")
             .key_context(EDITOR_CONTEXT)
@@ -1022,56 +974,26 @@ impl Render for DashboardEditor {
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_discard))
+            .on_action(cx.listener(Self::on_move_up))
+            .on_action(cx.listener(Self::on_move_down))
+            .on_action(cx.listener(Self::on_remove))
+            .on_action(cx.listener(Self::on_next))
+            .on_action(cx.listener(Self::on_previous))
             .flex()
-            .flex_col()
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(header)
             .child(
                 div()
                     .flex()
+                    .flex_col()
                     .flex_1()
-                    .min_h_0()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(preview),
-                    )
-                    .child(inspector),
+                    .min_w_0()
+                    .h_full()
+                    .child(header)
+                    .child(div().flex().flex_col().flex_1().min_h_0().child(preview)),
             )
-    }
-}
-
-/// A sort key's label (`service` reads `name` for host views).
-fn sort_key_label(key: SortKey, kind: ObjectKind) -> &'static str {
-    match key {
-        SortKey::Severity => "severity",
-        SortKey::LastStateChange => "last state change",
-        SortKey::Host => "host",
-        SortKey::Service => match kind {
-            ObjectKind::Services => "service",
-            ObjectKind::Hosts => "name",
-        },
-    }
-}
-
-/// The inspector header's note: `severity ↓`.
-fn sort_summary(sort: Sort, kind: ObjectKind) -> SharedString {
-    crate::dashboard::header::sort_label(sort, kind)
-}
-
-/// A grouping's label.
-fn group_by_label(group_by: GroupBy) -> &'static str {
-    match group_by {
-        GroupBy::None => "none",
-        GroupBy::Host => "host",
-        GroupBy::HostGroup => "host group",
-        GroupBy::ServiceGroup => "service group",
+            .child(inspector)
     }
 }
 
@@ -1098,18 +1020,80 @@ fn note(text: impl Into<SharedString>, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// Accessors for the UI tests (`ui_tests`, Linux only).
+#[cfg(all(test, target_os = "linux"))]
+impl DashboardEditor {
+    /// The draft as edited so far.
+    pub(crate) fn draft(&self) -> &DashboardDraft {
+        &self.draft
+    }
+
+    /// The selected view's id.
+    pub(crate) fn selected(&self) -> &str {
+        &self.selected
+    }
+
+    /// The filter field's state.
+    pub(crate) fn filter_input(&self) -> &Entity<TextareaState> {
+        &self.filter
+    }
+
+    /// The name field's state.
+    pub(crate) fn name_input(&self) -> &Entity<InputState> {
+        &self.name
+    }
+
+    /// The selected view's name field.
+    pub(crate) fn view_name_input(&self) -> &Entity<InputState> {
+        &self.view_name
+    }
+
+    /// The selected view's custom variable field.
+    pub(crate) fn custom_var_input(&self) -> &Entity<InputState> {
+        &self.custom_var
+    }
+
+    /// The preview's page.
+    pub(crate) fn preview_view(&self) -> &Entity<DashboardView> {
+        &self.preview
+    }
+
+    /// The latest preview of the selected view: its evaluation, or why its
+    /// filter doesn't work.
+    pub(crate) fn preview_result(&self) -> Option<Result<DashboardResult, String>> {
+        let (_, result) = self.evaluated.as_ref()?;
+        Some(match model::view_error(result, &self.selected) {
+            Some(error) => Err(error.to_owned()),
+            None => Ok(result.clone()),
+        })
+    }
+
+    /// Why the last save was refused.
+    pub(crate) fn save_error(&self) -> Option<&str> {
+        self.save_error.as_deref()
+    }
+
+    /// Changes the selected view as its settings' controls do.
+    pub(crate) fn change_selected_for_test(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut View),
+    ) {
+        self.change_selected(Duration::ZERO, cx, change);
+    }
+
+    /// The open menu.
+    pub(crate) fn open_menu(&self) -> Option<String> {
+        self.menus.current().map(|menu| format!("{menu:?}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn labels_follow_the_view() {
-        assert_eq!(sort_key_label(SortKey::Service, ObjectKind::Hosts), "name");
-        assert_eq!(
-            sort_key_label(SortKey::Service, ObjectKind::Services),
-            "service"
-        );
-        assert_eq!(group_by_label(GroupBy::HostGroup), "host group");
+    fn the_save_key_is_the_platforms() {
         assert!(!save_key().is_empty());
     }
 }

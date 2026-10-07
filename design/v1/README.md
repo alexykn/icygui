@@ -56,6 +56,7 @@ per frame, plus `-zoom` crops of the details.
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
+| 14 | Comments, acknowledgements, downtimes: drafts | `14-comments-acks.html` | 13 drafts, each dark + light | drafts for the user to choose from |
 
 ---
 
@@ -1062,4 +1063,93 @@ notification centre; 13n the tray menu and a toast in light mode.
 5. The tall wizard image: the mark, the name, `Icinga 2 on your desktop` and
    the grid corner.
 6. `Browse` without Inno's trailing dots.
+
+---
+
+## 14 Comments, acknowledgements and downtimes: drafts
+
+**Status: drafts for the user to choose from** (feedback on stage 2's 07a,
+07d, 07f). Not decided; nothing here is built yet.
+
+**The model behind every draft** (the user's notes): a comment is the text
+someone typed into the acknowledge or downtime dialog, so it is shown as part
+of its acknowledgement or downtime (`m.keller: BMC firmware update`), never
+as a separate row. Icinga's automatic acknowledgement and downtime comments
+are never listed. Only the rare free-standing comments (added with
+*comment*) are entries of their own. Every draft keeps the cross-topic rules:
+hollow = handled, `service on host`, marks in fixed slots, selection = row
+background, config downtimes visibly not removable (lock, `from config`).
+
+**Shows** (`14-comments-acks.html`; every draft dark, then `-light`):
+`14-comments-A..D`, `14-acks-A..D`, `14-downtimes-A..D`, `14-handling-A`.
+
+**Drafts that merge kinds:** *comments D* and *acknowledged D* merge
+acknowledgements and free-standing comments into one view
+(*acknowledged and comments*); *handling A* merges all three
+(acknowledgements, downtimes, comments). The others keep separate views.
+
+**Comments**
+
+- **A, a thread per object:** each object a slim band (as 10h), its
+  comments oldest first, `author · time` then the text, later ones with a
+  left rule as replies. + reads like a mailing-list thread, the whole
+  conversation at once; − a whole view for something rare.
+- **B, a flat mailing-list index:** one line per object (subject, from,
+  count, last), the selected one opens in place as its thread. + very
+  compact, scales; − one more step to read.
+- **C, no comments view:** the thread lives in the object's pane (with a
+  field to add one), list rows show a count in a fixed tag slot, the palette
+  finds comments and acknowledgement texts by their words. + no rarely used
+  view; comments where they are read; − no overview of all comments.
+- **D (merged), "acknowledged and comments", a thread per object:** the
+  acknowledgement as one entry (✓, who, when, its text, sticky and expiry as
+  small tags), then the free-standing comments. + one place for "who said
+  what about this problem", no duplicate text; − longer than a list.
+
+**Acknowledged**
+
+- **A, grouped by expiry:** *expires within 2 hours* on top (warning text,
+  time left), *expires later*, *no expiry*. + puts what comes back soon
+  first; − sections take room with few acknowledgements.
+- **B, grouped by author:** a section per person (you named). + hand-over
+  ("what is m.keller holding?"); − expiry is no longer the order.
+- **C, compact single line:** a 32px table (problem and text, by, since,
+  sticky, expires). + twice the density; − the text is cut, read in the
+  pane.
+- **D (merged), one row per object, thread in the pane:** acknowledged
+  objects and objects with comments once each; the second line is the
+  acknowledgement (✓ who when text) or the latest comment; tag slots for
+  sticky, expiry and the comment count; the pane shows the thread. + the
+  list stays a normal list; − the conversation needs the pane.
+
+**Downtimes**
+
+- **A, the two sections, tighter:** stage 2's *in effect* / *upcoming* at
+  one 34px line each (text faint and cut, window, progress line, time left).
+  + almost twice as many on screen, familiar; − the text is cut.
+- **B, a thread per object** (as comments A/D): an object's downtimes
+  together, each with its state (in effect, upcoming, from config), window
+  and text. + several downtimes on one host read as one story; − longer.
+- **C, grouped by change ticket** (read from the text, e.g. `CHG-4468`;
+  *by author* works the same): + a change's downtimes together (today's swap
+  and tonight's upgrade); − depends on people writing tickets in the text.
+- **D, a timeline:** bars on a shared axis for the next hours in the list's
+  progress-line style (in effect: elapsed in the accent; upcoming: faint;
+  flexible: dashed over its window), a thin line at now, later ones say when
+  they start. + overlaps at a glance; − needs width, poor beyond a day.
+
+**Handling A (merges all three), "who is handling what":** a thread per
+object with every entry kind: *acknowledged* (✓, sticky, expiry),
+*in downtime* (accent, window, time left), *downtime, upcoming* (faint,
+when it starts; the object stays filled because it is still unhandled), and
+free-standing comments. + one answer to "is anyone on this?"; − a bigger
+change, and the downtime list's time view gets lost unless it stays beside
+it.
+
+**Recommendation:** *handling A* as the one view for acknowledgements and
+comments (it subsumes comments D), with the comment thread also in the pane
+(comments C) and the palette's text search; keep a dedicated downtime list
+as *downtimes A* (tighter sections), with *downtimes D* (timeline) as a
+display option of it if the user likes it. Drop the separate comments view.
+Acknowledgements keep sticky and expiry, as small tags.
 

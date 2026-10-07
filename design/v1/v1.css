@@ -506,3 +506,13 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .etab .zr .zn { color: var(--t-strong); font-weight: 600; font-size: 12.5px; }
 .flags { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 12px 18px 16px; font-size: 12.5px; color: var(--t-sec); }
 .flags span { display: flex; align-items: center; gap: 7px; }
+
+/* ---- NEW v1: comment and downtime lists (topic 07) ------------------- */
+.mini { display: inline-block; width: 56px; height: 3px; border-radius: 2px; background: var(--track); overflow: hidden; flex: none; }
+.mini > span { display: block; height: 100%; background: var(--accent); }
+.row .tag .left { color: var(--accent); }
+.row .tag .more { color: var(--t-muted); display: flex; align-items: center; gap: 4px; }
+.selbar { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 18px; border-top: 1px solid var(--bd-header); background: var(--pane-bg); font-size: 12px; flex: none; }
+.selbar .n { color: var(--accent); margin-right: 4px; }
+.tgrp { display: flex; align-items: center; gap: 8px; height: 20px; padding-top: 6px; color: var(--t-muted); font-size: 11.5px; flex: none; }
+.tgrp:first-child { padding-top: 0; }

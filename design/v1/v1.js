@@ -104,7 +104,7 @@ function summary(items = [['crit', 4, 'critical'], ['warn', 28, 'warning'], ['un
 function row(r, { sel, marked, hover, handled, tag = '', late, cls = '', hostRow } = {}) {
   const [st, name, host, output, since] = r;
   const title = hostRow ? `<span class="n">${name}</span>` : `<span class="n">${esc(name)}</span><span class="on"> on </span><span class="h">${host}</span>`;
-  const tagHtml = (late ? `<span class="late">${late}</span>` : '') + (tag ? `<span>${tag}</span>` : '');
+  const tagHtml = (late ? `<span class="late">${late}</span>` : '') + (tag ? `<span style="display:flex;align-items:center;gap:10px">${tag}</span>` : '');
   return `<div class="row${sel ? ' sel' : ''}${marked ? ' marked' : ''}${hover ? ' hover' : ''} ${cls}">
     <div class="lead">${circle(st, 22, handled)}<span class="since">${since}</span></div>
     <div class="text"><span class="t1">${title}</span><span class="t2">${esc(output)}</span></div>

@@ -359,3 +359,55 @@ view's settings in the editor.
    `/v1/status`) be fetched on demand when its row is clicked?
 3. Should it be per environment only, or also have an `all environments`
    overview?
+
+---
+
+## 07 Lists of every comment and downtime
+
+**Shows** (`07-comments-downtimes-lists.html`): 7a every downtime; 7b three
+marked, with the selection bar and the pane; 7c the bulk removal
+confirmation; 7d every comment, four marked, with the removal dialog
+(an acknowledgement skipped); 7e a dashboard view that lists downtimes.
+
+**Decisions**
+
+- **Two lists across all objects,** opened from the palette (`downtimes`,
+  `comments`) as tabs in the sidebar's `open` section, with an icon in the
+  mark slot and a count. The data is already loaded (comments and downtimes
+  are part of rc1's object store), so they cost nothing extra.
+- **Rows are today's list rows.** The leading circle is the *object's*
+  state (hollow while the downtime handles a problem), its caption the time in
+  state or `host`. The title reads `service on host`, or the host name. The
+  second line holds the window and the author's comment (`fixed · 13:00 → 16:00
+  · j.berg: …`) or, for comments, `author time · text`. The tag holds a 56px
+  progress line (accent) and the time left (`48m left` in the accent), or
+  `not started`, `in 7h 48m`, `by 22:00`, `from config` with a lock.
+- **No duplicate rows:** a host downtime with `all_services` is one row
+  (`sw-core-ams-02 + 18 services`); → or a click unfolds its service
+  downtimes, indented. The summary bar says how many are folded.
+- **Summary bars:** downtimes count `in effect` (accent dot), `scheduled`
+  (pending dot) and `from config` (lock). Comments count comments and
+  acknowledgements. Downtime and flapping comments are hidden from the
+  comment list, because they repeat the downtime list (the end of the
+  summary bar says so; a click shows them).
+- **Selection** works as in every list (x, shift-click, ctrl-click, ctrl-a,
+  shift-j/k). The selection bar keeps its place and look, with this list's
+  actions: `remove downtimes ⌫` or `remove comments ⌫` (primary), `copy
+  names`, and `···` (copy filter expression).
+- **Bulk removal always confirms,** listing every downtime it removes,
+  grouped by downtime (a scrolling box; for a host downtime, the host and each
+  service). It names the problems that will notify again, and counts what it
+  removes on the danger button. What it can't remove is listed as skipped,
+  with the reason: acknowledgement comments (remove the acknowledgement) and
+  config downtimes (they return on the next reload; they are skipped unless
+  the user ticks them explicitly).
+- **As a view:** a dashboard view's `lists` gains `downtimes` and
+  `comments`, and the filter knows `downtime.*` and `comment.*` beside the
+  object's `host.*` and `service.*` ("my downtimes", "comments today").
+
+**Open questions**
+
+1. Should config downtimes (`ScheduledDowntime`) be removable at all from
+   the list? Icinga recreates them, so the drawn choice is to skip them.
+2. Is sorting by `ends soonest` (in effect, then scheduled by start) the right
+   default, or newest first?

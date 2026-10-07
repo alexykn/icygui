@@ -70,7 +70,7 @@ function sidebar({ activeGroup = 'overview', activeItem = 'overview', groups = S
   for (const g of groups) {
     const on = g.name === activeGroup;
     html += `<div class="sb-group"><div class="sb-gh${on ? ' active' : ''}"><span class="name">${g.name}</span>
-      ${on ? `<span class="chev">${icon('chevron-down', 12)}</span><span class="grow"></span><span class="gicons">${icon('plus', 14)}<span style="letter-spacing:1px;font-size:13px">···</span></span>` : ''}</div>`;
+      ${on ? `<span class="chev">${icon('chevron-down', 12)}</span><span class="grow"></span><span class="gicons">${icon('plus', 14)}<span class="${g.menu ? 'glyph sel' : ''}" style="letter-spacing:1px;font-size:13px">···</span></span>` : ''}</div>`;
     for (const it of g.items) {
       const [label, st, count, extra] = it;
       const act = on && label === activeItem;

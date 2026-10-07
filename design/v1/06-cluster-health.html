@@ -21,8 +21,8 @@ function spark(points, w = 132, h = 22, color = 'var(--t-faint)', last = 'var(--
   const n = xs.length - 1;
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><path d="${path}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><path d="M${xs[n - 1].toFixed(1)},${ys[n - 1].toFixed(1)} L${xs[n].toFixed(1)},${ys[n].toFixed(1)}" stroke="${last}" stroke-width="2" stroke-linecap="round"/><circle cx="${xs[n].toFixed(1)}" cy="${ys[n].toFixed(1)}" r="2.5" fill="${last}"/></svg>`;
 }
-function kpi(label, value, sub, points, { cls = '', last } = {}) {
-  return `<div class="kpi"><span class="lb">${label}</span><span class="v ${cls}">${value}</span><span class="ks">${sub}</span>${points ? spark(points, 132, 22, 'var(--t-faint)', last) : '<svg width="132" height="22"></svg>'}</div>`;
+function kpi(label, value, sub, points, { cls = '', last, span = 1 } = {}) {
+  return `<div class="kpi"${span > 1 ? ` style="grid-column:span ${span}"` : ''}><span class="lb">${label}</span><span class="v ${cls}">${value}</span><span class="ks">${sub}</span>${points ? spark(points, 132, 22, 'var(--t-faint)', last) : '<svg width="132" height="22"></svg>'}</div>`;
 }
 const er = (st, name, zoneTxt, ver, last, traffic, status, { sel, mine } = {}) =>
   `<div class="er${sel ? ' sel' : ''}">${dot(st, 'd7')}<span><span class="strong">${name}</span></span><span class="muted">${zoneTxt}</span><span class="sec">${ver}</span><span class="sec">${last}</span><span class="muted">${traffic}</span><span class="${st === 'crit' ? 'c-crit' : 'muted'}">${status}</span></div>`;
@@ -59,14 +59,13 @@ function healthPage({ broken = false } = {}) {
     ${kpi('pending', '3', '3 services', null)}
     ${kpi(broken ? 'late' : 'late', broken ? '1,204' : '0', broken ? 'all in zone fra' : 'overdue checks', broken ? [0, 0, 0, 0, 0, 0, 0, 0, 0, 160, 720, 1204] : null, broken ? { cls: 'v-bad', last: 'var(--crit)' } : {})}
   </div>`;
-  const qHdr = viewHeader({ name: 'queues and connections', display: 'tiles', filter: 'ApiListener, JsonRpc, IcingaDB', sort: '', more: false });
+  const qHdr = viewHeader({ name: 'queues and connections', display: 'tiles', filter: 'ApiListener, JsonRpc', sort: '', more: false });
   const kpisQ = `<div class="kpis">
     ${kpi('API work queue', '0', '412 items/s', [0, 1, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0])}
     ${kpi('relay queue', broken ? '18,402' : '0', broken ? 'for fra, growing' : 'for other zones', broken ? [0, 0, 0, 0, 0, 0, 0, 0, 0, 2100, 9800, 18402] : [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0], broken ? { cls: 'v-bad', last: 'var(--crit)' } : {})}
     ${kpi('cluster connections', broken ? '3 of 4' : '4 of 4', 'JSON-RPC endpoints', null, broken ? { cls: 'v-bad' } : {})}
     ${kpi('HTTP clients', '4', 'API sessions', null)}
-    ${kpi('IcingaDB', 'connected', '0 pending', null)}
-    ${kpi('uptime', '41d 6h', 'since 26 Aug 08:14', null)}
+        ${kpi('uptime', '41d 6h', 'since Wed 26 Aug 08:14, the r2.14.3 upgrade', null, { span: 2 })}
   </div>`;
   const flagsHdr = viewHeader({ name: 'Icinga’s global switches', display: 'list', filter: 'read-only: icygui never changes them', sort: '', more: false });
   const fl = (on, t) => `<span>${dot(on ? 'ok' : 'warn', 'd6')}${t} <span class="${on ? 'faint' : 'c-warn'}">${on ? 'on' : 'off'}</span></span>`;

@@ -516,3 +516,26 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .selbar .n { color: var(--accent); margin-right: 4px; }
 .tgrp { display: flex; align-items: center; gap: 8px; height: 20px; padding-top: 6px; color: var(--t-muted); font-size: 11.5px; flex: none; }
 .tgrp:first-child { padding-top: 0; }
+
+/* ---- NEW v1: YAML sharing (topic 08) ---------------------------------- */
+.yaml { background: var(--code-bg); border: 1px solid var(--bd-header); border-radius: 6px; padding: 10px 0; font-size: 12px; line-height: 19px; color: var(--t-code); white-space: pre; overflow: hidden; }
+.yaml .ln { display: block; padding: 0 12px 0 0; }
+.yaml .ln.hl { background: var(--accent-tint-strong); box-shadow: inset 2px 0 0 var(--accent); }
+.yaml .ln.err { background: var(--crit-tint); box-shadow: inset 2px 0 0 var(--crit); }
+.yaml .no { display: inline-block; width: 30px; padding-right: 10px; text-align: right; color: var(--t-faint); }
+.yaml .k { color: var(--t-muted); }
+.yaml .c { color: var(--t-faint); }
+.yaml .squig { text-decoration: underline wavy var(--crit); text-decoration-skip-ink: none; text-underline-offset: 3px; }
+.tree { display: flex; flex-direction: column; }
+.tr { display: flex; align-items: center; gap: 10px; min-height: 30px; padding: 0 8px; border-radius: 6px; font-size: 12.5px; white-space: nowrap; }
+.tr.sel { background: var(--row-sel); }
+.tr.sub { padding-left: 32px; }
+.tr .ic { color: var(--t-muted); }
+.tr .nm { color: var(--t-strong); }
+.tr .meta { color: var(--t-faint); font-size: 12px; }
+.tr .st { margin-left: auto; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+.tr .new { color: var(--ok); }
+.tr .cf { color: var(--warn); }
+.trd { padding: 2px 8px 10px 58px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--t-muted); }
+.chk-line { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.45; color: var(--t-muted); }
+.chk-line .ic { margin-top: 1px; }

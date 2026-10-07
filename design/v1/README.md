@@ -334,8 +334,11 @@ view's settings in the editor.
   Checks: active and passive checks per minute, average latency, average
   execution time, pending, late (from icygui's own late-check tracking). Queues
   and connections: API work queue, relay queue, cluster connections, HTTP
-  clients, IcingaDB, uptime. A value turns warning or critical only when it
-  is wrong, always next to its label.
+  clients, uptime. A value turns warning or critical only when it is wrong,
+  always next to its label. **IcingaDB** gets a tile (connected, pending
+  items) only when Icinga reports the IcingaDB feature as enabled. icygui
+  never uses IcingaDB, and without it uptime takes the slot (drawn: the
+  user's cluster doesn't run it).
 - **Icinga's global switches** (`enable_notifications`, active checks, event
   handlers, flap detection, performance data) are read-only (D6): green
   `on`, or warning `off`. A globally disabled switch is one of the first
@@ -411,3 +414,59 @@ confirmation; 7d every comment, four marked, with the removal dialog
    the list? Icinga recreates them, so the drawn choice is to skip them.
 2. Is sorting by `ends soonest` (in effect, then scheduled by start) the right
    default, or newest first?
+
+---
+
+## 08 Sharing dashboards as YAML through the clipboard
+
+**Shows** (`08-yaml-sharing.html`): 8a *copy as YAML* in the dashboard's
+`···`; 8b *copy group as YAML* in the group's `···` and the toast; 8c the
+palette; 8d *paste dashboards* in another icygui (staging); 8e the import
+preview with clashes; 8f a broken paste.
+
+**Decisions**
+
+- **Copy:** `copy as YAML` (ctrl-shift-c on the selected dashboard) after
+  `duplicate` in the dashboard menu, with `export to file` under it. In the
+  group menu, `copy group as YAML` above `export group to file` (today's
+  `export group`). The palette has `Copy as YAML · <dashboard>` (state dot),
+  `Copy group as YAML · <group>` (folder icon), `Paste dashboards` and
+  `Export all dashboards`, found by "yaml", "copy" or "share".
+- **Toast** (OK tone, check): `Copied overview as YAML`, `4 dashboards · 7
+  views · 112 lines`, `Paste with ctrl-v on a sidebar.` The clipboard is the
+  only place the text goes.
+- **Format:** `format: icygui-dashboards`, `version: 2`, a comment saying
+  where and when it was copied, then `groups → dashboards → views`. Each view
+  carries its display, lists, filter (folded `>-` when long), sort and the
+  display's own settings; dashboards carry their notification setting.
+  Environment names, ids and secrets are never in it. The exported file uses
+  the same YAML; rc1's TOML exports still import.
+- **Paste:** ctrl-v while the sidebar has the keyboard, `paste dashboards` in
+  the footer's + menu, or the palette. It **always opens the preview**, never
+  imports straight away.
+- **Import preview** (a 1040px dialog): on the left, what the YAML holds as a
+  tree (groups with a folder icon, dashboards with a dot and view count),
+  each with its status on the right: `new` (OK colour), `exists here ·
+  merge`, `name taken · keep both` (warning colour, with the chosen action
+  faint). The selected row opens a detail with the choice (segmented: replace
+  the one here, keep both, skip; for a group: merge, new group), what it
+  leads to (`imported as databases 2`), and what doesn't fit this
+  environment (host groups that don't exist here). Below: the format check
+  (`version 2 · all 7 filters parse`) and a switch for whether notification
+  settings come along. On the right, the YAML read-only, with the selected
+  dashboard's lines marked in the accent. The button counts what will be
+  imported (`import 3 dashboards`); undo with ctrl-z.
+- **Broken paste (8f):** the dialog shows the YAML around the problem, with
+  the line marked critical and the character underlined (the filter field's
+  error style from topic 09), plus `line 10, column 42: …` and where it is
+  (`platform / certificates, the view's filter`). It imports nothing. A
+  newer format version says *update icygui to import this*. Text that isn't
+  icygui YAML at all only gets a toast.
+
+**Open questions**
+
+1. Defaults for clashes: `keep both` for dashboards and `merge` for groups
+   (drawn), or ask with nothing preselected?
+2. Should notification settings come along by default (drawn: on), given
+   that a colleague's notification habits may differ?
+3. ctrl-shift-c for copy-as-YAML: or only menus and the palette?

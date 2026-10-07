@@ -134,7 +134,7 @@ function kv(title, pairs, keyWidth = 140) {
 }
 
 function perf(rowsData) {
-  return `<div class="perf"><div class="r h"><span>performance data</span><span>value</span><span>warn</span><span>crit</span></div>${rowsData.map(([k, v, w, c, st]) => `<div class="r"><span class="sec">${k}</span><span style="color:${st ? `var(--${st})` : 'var(--t)'}">${v}</span><span class="faint">${w}</span><span class="faint">${c}</span></div>`).join('')}</div>`;
+  return `<div class="perf"><div class="r h"><span>performance data</span><span>value</span><span>warn</span><span>crit</span></div>${rowsData.map(([k, v, w, c, st]) => `<div class="r"><span class="sec">${k}</span><span style="color:${st ? `var(--${st}-text)` : 'var(--t)'}">${v}</span><span class="faint">${w}</span><span class="faint">${c}</span></div>`).join('')}</div>`;
 }
 
 function codeBlock(text, label = 'plugin output') {

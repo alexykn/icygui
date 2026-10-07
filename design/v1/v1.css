@@ -46,6 +46,15 @@
   --crit: #e06c6c;
   --unk: #a97fdb;
   --pend: #3a3f43;
+  /* NEW in v1: a text shade per state colour (labels, perfdata, KIND in
+   * the history). Circles, dots and bars use the fill above. In dark the
+   * two are the same value; light needs a darker text shade. */
+  --ok-text: #56b870;
+  --warn-text: #e5b04a;
+  --crit-text: #e06c6c;
+  --unk-text: #a97fdb;
+  /* NEW in v1: the sidebar's surface; in dark it is the window's */
+  --sb-bg: #1d2125;
   --tl-close: #ff5f57; --tl-min: #febc2e; --tl-zoom: #28c840;
   --shadow: rgba(0,0,0,.35);
   --shadow-strong: rgba(0,0,0,.45);
@@ -62,9 +71,11 @@
 
 /* ---- tokens: light (Theme::light, NEW in v1; topic 03) --------------
  * Same structure as dark: the window and sidebar share one surface, the
- * pane is a band off it, code blocks a band further. Text levels keep the
- * dark theme's contrast steps (muted about 5:1, faint about 3.2:1); the
- * state colours are darkened to about 4.3:1 or more on white. */
+ * pane is a band off it, code blocks a band further; the sidebar is
+ * slightly grey (review 2026-10-07). Text levels keep the dark theme's
+ * contrast steps (muted about 5:1, faint about 3.2:1). Each state colour
+ * has a fill shade (circles, dots, bars, squares: friendly, 2.3-4:1) and a
+ * darker text shade (labels, perfdata values, KIND: 5:1 or more). */
 .light {
   --win-bg: #ffffff;
   --pane-bg: #f7f8f9;
@@ -76,10 +87,10 @@
   --row-hover: #f4f6f8;
   --row-marked: #dbe8f7;
   --row-header: #f2f4f6;
-  --group-active: #e7eaed;
-  --group-hover: #eff1f3;
-  --item-active: #eceff2;
-  --item-hover: #f4f5f7;
+  --group-active: #e1e5e9;
+  --group-hover: #e9ecef;
+  --item-active: #e6e9ed;
+  --item-hover: #eceef1;
   --bd-window: #d5d9dd;
   --bd-split: #dfe2e6;
   --bd-header: #e3e6e9;
@@ -97,11 +108,16 @@
   --on-accent: #ffffff;
   --on-accent-muted: #c9dcf1;
   --selection: rgba(47, 116, 192, .22);
-  --ok: #2a8a4a;
-  --warn: #b07408;
-  --crit: #cf4646;
-  --unk: #8a5cc8;
+  --ok: #34a058;          /* fill, 3.3:1 */
+  --warn: #e0a020;        /* fill, 2.3:1 (an amber circle, as Icinga Web) */
+  --crit: #e04848;        /* fill, 4.1:1 */
+  --unk: #9a68dc;         /* fill, 3.9:1 */
   --pend: #c5cacf;
+  --ok-text: #237a3f;     /* 5.4:1 on white */
+  --warn-text: #9a6200;   /* 5.1:1 */
+  --crit-text: #c03535;   /* 5.5:1 */
+  --unk-text: #7a4cbc;    /* 5.9:1 */
+  --sb-bg: #f4f5f7;
   --shadow: rgba(16,22,29,.10);
   --shadow-strong: rgba(16,22,29,.14);
   --shadow-modal: rgba(16,22,29,.20);
@@ -149,11 +165,11 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .nowrap { white-space: nowrap; }
 .trunc { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .faint { color: var(--t-faint); } .muted { color: var(--t-muted); } .sec { color: var(--t-sec); } .strong { color: var(--t-strong); }
-.acc { color: var(--accent); } .c-crit { color: var(--crit); } .c-warn { color: var(--warn); } .c-ok { color: var(--ok); } .c-unk { color: var(--unk); }
+.acc { color: var(--accent); } .c-crit { color: var(--crit-text); } .c-warn { color: var(--warn-text); } .c-ok { color: var(--ok-text); } .c-unk { color: var(--unk-text); }
 .med { font-weight: 500; } .semi { font-weight: 600; }
 
 /* ---- sidebar -------------------------------------------------------- */
-.sb { display: flex; flex-direction: column; border-right: 1px solid var(--bd-split); min-height: 0; overflow: hidden; }
+.sb { display: flex; flex-direction: column; border-right: 1px solid var(--bd-split); min-height: 0; overflow: hidden; background: var(--sb-bg); }
 .sb-top { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--bd-header); flex: none; }
 .tl { width: 12px; height: 12px; border-radius: 50%; flex: none; }
 .tl.c { background: var(--tl-close); } .tl.m { background: var(--tl-min); } .tl.z { background: var(--tl-zoom); }
@@ -180,7 +196,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .sb-foot .status .env { color: var(--t-sec); font-weight: 500; }
 .ibtn { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; color: var(--t-sec); flex: none; position: relative; }
 .ibtn.sel { background: var(--el-hover); }
-.badge { position: absolute; top: 2px; right: -4px; min-width: 12px; height: 12px; padding: 0 3px; border-radius: 7px; border: 1px solid var(--win-bg); background: var(--accent); color: var(--on-accent); font-size: 8.5px; line-height: 12px; text-align: center; font-weight: 600; box-sizing: border-box; }
+.badge { position: absolute; top: 2px; right: -4px; min-width: 12px; height: 12px; padding: 0 3px; border-radius: 7px; border: 1px solid var(--sb-bg); background: var(--accent); color: var(--on-accent); font-size: 8.5px; line-height: 12px; text-align: center; font-weight: 600; box-sizing: border-box; }
 
 /* ---- dots and circles ---------------------------------------------- */
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--pend); box-sizing: border-box; }
@@ -226,7 +242,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .row .t1 .h { color: var(--t-sec); }
 .row .t2 { font-size: 12px; color: var(--t-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row .tag { font-size: 11.5px; color: var(--t-faint); text-align: right; white-space: nowrap; display: flex; gap: 10px; align-items: center; }
-.row .late { color: var(--warn); }
+.row .late { color: var(--warn-text); }
 .row.ghdr { background: var(--row-header); border-bottom-color: var(--bd-header); }
 .row.ghdr.marked { background: var(--row-marked); }
 .row.indent { padding-left: 30px; }
@@ -405,7 +421,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 
 /* ---- NEW v1: the settings window (topic 02) ------------------------- */
 .swin { display: grid; grid-template-columns: 248px minmax(0, 1fr); height: 100%; background: var(--win-bg); }
-.snav { display: flex; flex-direction: column; border-right: 1px solid var(--bd-split); min-height: 0; }
+.snav { display: flex; flex-direction: column; border-right: 1px solid var(--bd-split); min-height: 0; background: var(--sb-bg); }
 .snav .top { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--bd-header); flex: none; }
 .snav .top .q { font-size: 13px; color: var(--t-muted); white-space: nowrap; }
 .snav .top .q.typed { color: var(--t); }
@@ -433,7 +449,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .srow .ctl { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 .srow .ctl .sw .trk { margin: 0; }
 .srow.sub { padding-left: 20px; }
-.srow .err { font-size: 11.5px; color: var(--crit); margin-top: 4px; }
+.srow .err { font-size: 11.5px; color: var(--crit-text); margin-top: 4px; }
 .srow .hl, .sres .hl { color: var(--accent); }
 .kbd { display: inline-flex; align-items: center; height: 20px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--bd-header); background: var(--el-bg); font-size: 11.5px; color: var(--t); white-space: nowrap; }
 .osd { position: absolute; border-radius: 10px; overflow: hidden; border: 1px solid var(--bd-window); box-shadow: 0 24px 70px var(--shadow-modal); }
@@ -504,7 +520,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .kpi { display: flex; flex-direction: column; gap: 6px; padding: 11px 14px 12px; border: 1px solid var(--bd-header); border-radius: 6px; min-width: 0; }
 .kpi .lb { font-size: 11.5px; color: var(--t-faint); white-space: nowrap; }
 .kpi .v { font-size: 18px; font-weight: 500; color: var(--t-strong); white-space: nowrap; }
-.kpi .v.v-bad { color: var(--crit); } .kpi .v.v-warn { color: var(--warn); }
+.kpi .v.v-bad { color: var(--crit-text); } .kpi .v.v-warn { color: var(--warn-text); }
 .kpi .ks { font-size: 11.5px; color: var(--t-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kpi svg { display: block; }
 .etab { display: flex; flex-direction: column; }
@@ -544,8 +560,8 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .tr .nm { color: var(--t-strong); }
 .tr .meta { color: var(--t-faint); font-size: 12px; }
 .tr .st { margin-left: auto; font-size: 12px; display: flex; align-items: center; gap: 8px; }
-.tr .new { color: var(--ok); }
-.tr .cf { color: var(--warn); }
+.tr .new { color: var(--ok-text); }
+.tr .cf { color: var(--warn-text); }
 .trd { padding: 2px 8px 10px 58px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--t-muted); }
 .chk-line { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.45; color: var(--t-muted); }
 .chk-line .ic { margin-top: 1px; }
@@ -555,8 +571,8 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .fx.focus { border-color: var(--accent); }
 .fx.bad { border-color: var(--crit); }
 .fx .tk-k { color: var(--t-muted); }           /* host., service. */
-.fx .tk-s { color: var(--ok); }                /* strings */
-.fx .tk-n { color: var(--unk); }               /* numbers, durations */
+.fx .tk-s { color: var(--ok-text); }                /* strings */
+.fx .tk-n { color: var(--unk-text); }               /* numbers, durations */
 .fx .tk-f { color: var(--accent); }            /* functions */
 .fx .tk-o { color: var(--t-faint); }           /* operators */
 .fx .squig { text-decoration: underline wavy var(--crit); text-decoration-skip-ink: none; text-underline-offset: 4px; }

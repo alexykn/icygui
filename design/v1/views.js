@@ -24,7 +24,7 @@ const DB_TILES = [
 function tile([st, name, meta, parts], { on } = {}) {
   const total = parts.reduce((a, [, n]) => a + n, 0);
   const bar = parts.map(([s, n]) => `<span style="flex:${n};background:var(--${s})"></span>`).join('');
-  const nums = parts.map(([s, n]) => `<span><b style="color:var(--${s})">${n}</b> ${STATE_WORD[s]}</span>`).join('');
+  const nums = parts.map(([s, n]) => `<span><b style="color:var(--${s}-text)">${n}</b> ${STATE_WORD[s]}</span>`).join('');
   return `<div class="tile${on ? ' on' : ''}"><div class="th">${dot(st)}<span class="nm">${name}</span><span class="meta">${meta}</span></div>
     <div class="bar">${bar}</div><div class="nums">${nums}</div></div>`;
 }
@@ -43,7 +43,7 @@ const DB_EVENTS = [
   ['13:10', 'unk', 'UNKNOWN', 'mysql-replication', 'db-mysql-03', 'hard · UNKNOWN - connection refused'],
 ];
 function eventRow([t, st, kind, name, host, note], { sel } = {}) {
-  const color = st === 'pend' ? 'var(--t-faint)' : st === 'accb' ? 'var(--accent)' : `var(--${st})`;
+  const color = st === 'pend' ? 'var(--t-faint)' : st === 'accb' ? 'var(--accent)' : `var(--${st}-text)`;
   return `<div class="ev${sel ? ' sel' : ''}"><span class="t">${t}</span><span class="d">${dot(st, 'd7')}</span>
     <div style="min-width:0"><div class="l1"><span class="k" style="color:${color}">${kind}</span> <span class="n">${name}</span><span class="faint"> on </span>${host}</div><div class="l2">${note}</div></div></div>`;
 }

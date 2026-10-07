@@ -114,7 +114,7 @@ const H = [
 function hostHeaderRow(h, { marked, sel } = {}) {
   const c = h.counts.map(([st, n]) => `<span style="display:flex;align-items:center;gap:5px">${dot(st, 'd7')}${n}</span>`).join('');
   return `<div class="row ghdr${marked ? ' marked' : ''}${sel ? ' sel' : ''}">
-    <div class="lead">${circle('ok', 14)}<span class="since" style="color:var(--ok);font-weight:600">UP</span></div>
+    <div class="lead">${circle('ok', 14)}<span class="since" style="color:var(--ok-text);font-weight:600">UP</span></div>
     <div class="text"><span class="t1"><span class="n" style="font-weight:600">${h.name}</span><span class="on">  ${h.addr}</span></span><span class="t2">${h.out}</span></div>
     <span class="tag" style="gap:12px;color:var(--t-muted)">${c}</span></div>`;
 }

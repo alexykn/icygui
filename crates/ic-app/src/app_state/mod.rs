@@ -209,6 +209,9 @@ pub(crate) struct AppState {
     config_problem: Option<ConfigProblem>,
     save_error: Option<String>,
     dismissed_save_error: Option<String>,
+    /// Why the settings file, edited by hand, can't be read: icygui
+    /// writes nothing over it until it reads again.
+    file_error: Option<String>,
     notice: Option<UserNotice>,
     /// An action the user asked for, until the workspace picks it up (and
     /// opens its dialog, asks, or sends it), and the environment it is for
@@ -262,6 +265,7 @@ impl AppState {
             config_problem: None,
             save_error: None,
             dismissed_save_error: None,
+            file_error: None,
             notice: None,
             requested: None,
             last_request: None,
@@ -731,6 +735,12 @@ impl AppState {
         }
     }
 
+    /// Saves the settings again (a save the writer refused because the
+    /// file was being edited, once that edit is taken over).
+    pub(crate) fn save_settings(&self) {
+        self.save_config();
+    }
+
     fn save_config(&self) {
         if self.mode == Mode::Live
             && let Some(persistence) = &self.persistence
@@ -972,14 +982,30 @@ impl AppState {
         Some(receiver)
     }
 
-    /// A save finished (from the writer thread).
+    /// A save finished (from the writer thread). An edited or unreadable
+    /// settings file is the session's to handle (`Session::on_saved`).
     pub(crate) fn on_saved(&mut self, report: SaveReport) {
         match report {
-            SaveReport::Config(Ok(())) => self.save_error = None,
+            SaveReport::Config(Ok(())) => {
+                self.save_error = None;
+                self.file_error = None;
+            }
             SaveReport::Config(Err(error)) => self.save_error = Some(error),
+            SaveReport::FileUnreadable(error) => self.file_error = Some(error),
             // The UI state is only the layout: logged by the writer.
-            SaveReport::Ui(_) => {}
+            SaveReport::FileEdited { .. } | SaveReport::Ui(_) => {}
         }
+    }
+
+    /// Why the settings file can't be read, while it can't: nothing is
+    /// written over it meanwhile.
+    pub(crate) fn file_error(&self) -> Option<&str> {
+        self.file_error.as_deref()
+    }
+
+    /// The settings file reads (`None`) or doesn't (why).
+    pub(crate) fn set_file_error(&mut self, error: Option<String>) {
+        self.file_error = error;
     }
 
     /// Why the settings couldn't be saved, unless dismissed.

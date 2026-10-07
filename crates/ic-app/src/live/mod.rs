@@ -306,18 +306,38 @@ impl Session {
                 });
             }
         }
-        let state = state.downgrade();
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             while let Some(report) = reports.next().await {
-                let alive = state.update(cx, |state, cx| {
-                    state.on_saved(report);
-                    cx.notify();
-                });
-                if alive.is_err() {
+                if this
+                    .update(cx, |session, cx| session.on_saved(report, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
         })
+    }
+
+    /// A save finished: an edited settings file is merged and taken over
+    /// (nothing was written over it), an unreadable one reported.
+    fn on_saved(&mut self, report: SaveReport, cx: &mut Context<Self>) {
+        match report {
+            SaveReport::FileEdited { file, known } => {
+                let current = self.state.read(cx).settings_on_disk();
+                if current.as_ref() == Some(&*known) {
+                    self.take_settings_file(*file, Some(&known), cx);
+                } else {
+                    // Taken over meanwhile (the window came to the front):
+                    // the refused save goes again, merged with it.
+                    self.state.update(cx, |state, _| state.save_settings());
+                }
+            }
+            SaveReport::FileUnreadable(error) => self.file_unreadable(&error, cx),
+            report => self.state.update(cx, |state, cx| {
+                state.on_saved(report);
+                cx.notify();
+            }),
+        }
     }
 
     /// Shows the core's notifications on the desktop, on the UI thread.
@@ -1230,8 +1250,9 @@ impl Session {
 
     /// The window came back to the front: takes over the settings file
     /// if it was edited meanwhile (*edit in settings file*), read off the
-    /// UI thread. A file that can't be read is reported once and changes
-    /// nothing; a missing one is left alone.
+    /// UI thread and merged with the window's own changes. A file that
+    /// can't be read is reported once and changes nothing; a missing one
+    /// is left alone.
     pub(crate) fn reload_settings_file(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.paths().map(Paths::config_store) else {
             return;
@@ -1246,51 +1267,71 @@ impl Session {
         let Some(known) = known else {
             return;
         };
-        let read = cx.background_executor().spawn(async move {
-            if !store.path().exists() {
-                return None;
-            }
-            Some(store.load().map_err(|error| error.to_string()))
-        });
+        let read = cx
+            .background_executor()
+            .spawn(async move { store.read().map_err(|error| error.to_string()) });
         cx.spawn(async move |this, cx| {
-            let Some(result) = read.await else {
-                return;
-            };
-            let _ = this.update(cx, |session, cx| match result {
-                Ok(config) => {
-                    session.reported_file_error = None;
-                    if config != known {
-                        session.take_settings_file(config, cx);
-                    }
+            let result = read.await;
+            let _ = this.update(cx, |session, cx| {
+                let (current, in_window) = {
+                    let state = session.state.read(cx);
+                    (state.settings_on_disk(), state.config().clone())
+                };
+                if current.as_ref() != Some(&known) {
+                    // icygui wrote the file while it was read: this read is
+                    // out of date (the writer checks the file itself).
+                    return;
                 }
-                Err(error) => {
-                    if session.reported_file_error.as_deref() == Some(error.as_str()) {
-                        return;
+                match result {
+                    Ok(None) => {}
+                    Ok(Some(file)) => {
+                        let had_error = session.reported_file_error.take().is_some();
+                        session.state.update(cx, |state, cx| {
+                            state.set_file_error(None);
+                            cx.notify();
+                        });
+                        // Edited, or holding back changes icygui couldn't
+                        // write while it didn't read.
+                        if file != known || (had_error && in_window != known) {
+                            session.take_settings_file(file, Some(&known), cx);
+                        }
                     }
-                    tracing::warn!(%error, "the edited settings file can't be read");
-                    session.reported_file_error = Some(error.clone());
-                    session.state.update(cx, |state, cx| {
-                        state.report(UserNotice::problem(
-                            "The settings file can't be read; icygui keeps its settings.",
-                            format!(
-                                "{error}. Fix it in the file; until then a change made in \
-                                 icygui writes over it (your version is kept as \
-                                 config.toml.bak)."
-                            ),
-                        ));
-                        cx.notify();
-                    });
+                    Err(error) => session.file_unreadable(&error, cx),
                 }
             });
         })
         .detach();
     }
 
-    /// Takes over settings edited in the file: the state takes them, then
-    /// engines stop, restart or start as their environments changed.
-    fn take_settings_file(&mut self, config: Config, cx: &mut Context<Self>) {
+    /// The settings file can't be read (an edit by hand with a mistake):
+    /// said once per problem, in a banner and in the settings panel's
+    /// header; nothing is written over it until it reads again.
+    fn file_unreadable(&mut self, error: &str, cx: &mut Context<Self>) {
+        let repeated = self.reported_file_error.as_deref() == Some(error);
+        self.reported_file_error = Some(error.to_owned());
+        self.state.update(cx, |state, cx| {
+            state.set_file_error(Some(error.to_owned()));
+            if !repeated {
+                tracing::warn!(%error, "the edited settings file can't be read");
+                state.report(UserNotice::problem(
+                    "The settings file can't be read; icygui keeps its settings.",
+                    format!(
+                        "{error}. Nothing is written over the file until it reads again; \
+                         changes made in icygui meanwhile are kept and added to it then."
+                    ),
+                ));
+            }
+            cx.notify();
+        });
+    }
+
+    /// Takes over settings edited in the file, merged with the window's
+    /// changes since `known`: the state takes them, then engines stop,
+    /// restart or start as their environments changed, and the login
+    /// entry follows *start at login*.
+    fn take_settings_file(&mut self, file: Config, known: Option<&Config>, cx: &mut Context<Self>) {
         let changes = self.state.update(cx, |state, cx| {
-            let changes = state.take_settings_from_file(config);
+            let changes = state.take_settings_from_file(file, known);
             cx.notify();
             changes
         });
@@ -1305,6 +1346,9 @@ impl Session {
         }
         if !changes.added.is_empty() {
             self.start(cx);
+        }
+        if let Some(enabled) = changes.launch_at_login {
+            crate::background::autostart::change(enabled, &self.state, cx);
         }
         self.state.update(cx, |state, cx| {
             state.inform("Settings taken over from the settings file", None);

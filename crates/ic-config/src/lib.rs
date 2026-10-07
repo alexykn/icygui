@@ -4,6 +4,8 @@
 //! - [`Paths`] says where files live; [`ConfigStore`] loads and saves the
 //!   settings file. Loading upgrades older formats ([`migrate()`]); saving is
 //!   atomic, keeps one `.bak` copy and makes the file user-only on Unix.
+//!   [`merge_edit`] merges an edit of the file by hand with the app's own
+//!   changes made meanwhile.
 //! - [`Config::validate`] finds settings that load but can't work (bad URLs,
 //!   missing names, duplicate ids, unparsable fingerprints).
 //! - [`export_groups`] and [`import_groups`] share dashboards as files.
@@ -23,6 +25,7 @@ mod error;
 mod files;
 mod fingerprint;
 mod keymap;
+mod merge;
 mod migrate;
 mod model;
 mod paths;
@@ -36,6 +39,7 @@ pub use environment::default_groups;
 pub use error::ConfigError;
 pub use fingerprint::{format_fingerprint, parse_fingerprint};
 pub use keymap::{KEYMAP_TEMPLATE, Keymap, KeymapAction, KeymapBinding, parse_keymap, read_keymap};
+pub use merge::merge_edit;
 pub use migrate::migrate;
 pub use model::{
     ApiUrl, Appearance, AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup, Environment,

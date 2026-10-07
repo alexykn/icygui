@@ -658,7 +658,7 @@ impl Render for ObjectPane {
         };
         // A tab is the whole main area: the connection banners show over it.
         let banners = if self.mode == PaneMode::Tab {
-            banner::banners(&self.state, now, cx)
+            banner::banners(&self.state, now, true, cx)
         } else {
             Vec::new()
         };

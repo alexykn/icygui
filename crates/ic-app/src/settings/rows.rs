@@ -2,7 +2,13 @@
 //! section label over its rows, and rows of a name, one line of
 //! description and a right-aligned control, split by the list's row
 //! rules. Rows that depend on a switch above them are indented by 20px; a
-//! value that doesn't parse shows its problem under the row.
+//! value that doesn't parse shows its problem under the row's name, in the
+//! description's line, so nothing moves while it shows.
+//!
+//! A row too narrow for its name and its control (a small window, a large
+//! interface size) puts the control on a line of its own under the name
+//! rather than over it; names and descriptions that don't fit end in
+//! `…`.
 
 use gpui::{
     AnyElement, FontWeight, HighlightStyle, IntoElement, ParentElement as _, SharedString,
@@ -18,6 +24,13 @@ const SECTION_TOP: f32 = 22.;
 const SECTION_BOTTOM: f32 = 8.;
 /// A row's padding above and below.
 const ROW_PADDING: f32 = 12.;
+/// Space between a row's name and its description: with the line heights
+/// rounded to whole pixels, this makes a two-line row 61px with its rule,
+/// as in the frames.
+const DESCRIPTION_GAP: f32 = 3.;
+/// The narrowest a row's name and description get before its control
+/// moves under them.
+const TEXT_MIN_WIDTH: f32 = 200.;
 /// The indent of a row that depends on the one above.
 pub(crate) const SUB_INDENT: f32 = 20.;
 /// The gap between a row's text and its control.
@@ -25,11 +38,14 @@ const ROW_GAP: f32 = 24.;
 
 /// A section label (`default rule · groups and dashboards notify with it
 /// unless they say otherwise`), faint. In search results the label names
-/// the category (`notifications · quiet hours`) in the secondary colour.
+/// the category (`notifications · quiet hours`) in the secondary colour,
+/// with what matches `query` (a section found by its name) in the accent
+/// colour.
 pub(crate) fn section_label(
     label: &str,
     note: Option<&str>,
     heading: bool,
+    query: &str,
     theme: &Theme,
 ) -> gpui::Div {
     let colors = theme.colors;
@@ -46,7 +62,7 @@ pub(crate) fn section_label(
             colors.text_faint
         })
         .whitespace_nowrap()
-        .child(label.to_owned())
+        .child(marked(label, query, theme))
         .when_some(note, |row, note| {
             row.child(
                 div()
@@ -125,10 +141,32 @@ impl Row {
     /// The row, drawn.
     pub(crate) fn render(self, theme: &Theme) -> AnyElement {
         let colors = theme.colors;
+        // The problem takes the description's line while it lasts.
+        let second_line = match (self.error, self.description) {
+            (Some(error), _) => Some(
+                div()
+                    .text_size(theme.text.small)
+                    .text_color(theme.states.text.critical)
+                    .truncate()
+                    .child(error)
+                    .into_any_element(),
+            ),
+            (None, Some(description)) => Some(
+                div()
+                    .text_size(theme.text.small)
+                    .text_color(colors.text_muted)
+                    .truncate()
+                    .child(description)
+                    .into_any_element(),
+            ),
+            (None, None) => None,
+        };
         div()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(px(ROW_GAP))
+            .gap_x(px(ROW_GAP))
+            .gap_y(px(8.))
             .py(px(ROW_PADDING))
             .pl(px(self.indent))
             .min_h(px(34. + 2. * ROW_PADDING))
@@ -139,36 +177,21 @@ impl Row {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_w_0()
+                    .flex_basis(px(0.))
+                    .min_w(px(TEXT_MIN_WIDTH))
+                    .overflow_hidden()
                     .child(
                         div()
-                            .flex()
                             .min_w_0()
+                            .overflow_hidden()
                             .text_size(theme.text.row)
                             .text_color(colors.text_strong)
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .child(self.name),
                     )
-                    .when_some(self.description, |text, description| {
-                        text.child(
-                            div()
-                                .mt(px(4.))
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_size(theme.text.small)
-                                .text_color(colors.text_muted)
-                                .child(description),
-                        )
-                    })
-                    .when_some(self.error, |text, error| {
-                        text.child(
-                            div()
-                                .mt(px(4.))
-                                .text_size(theme.text.label)
-                                .text_color(theme.states.text.critical)
-                                .child(error),
-                        )
+                    .when_some(second_line, |text, line| {
+                        text.child(div().mt(px(DESCRIPTION_GAP)).min_w_0().child(line))
                     }),
             )
             .when_some(self.control, |row, control| {
@@ -176,6 +199,7 @@ impl Row {
                     div()
                         .flex()
                         .flex_none()
+                        .ml_auto()
                         .items_center()
                         .justify_end()
                         .gap(px(6.))
@@ -220,14 +244,15 @@ pub(crate) fn words(text: &'static str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A key as the keymap table shows it: a small framed hint.
+/// A key as the keymap table shows it: a small framed hint, as tall as a
+/// chip.
 pub(crate) fn key_cap(key: &str, theme: &Theme) -> AnyElement {
     let colors = theme.colors;
     div()
         .flex()
         .flex_none()
         .items_center()
-        .h(px(20.))
+        .h(px(ic_ui_kit::CHIP_HEIGHT))
         .px(px(6.))
         .rounded(theme.metrics.small_radius)
         .border_1()

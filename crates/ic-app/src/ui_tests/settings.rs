@@ -556,3 +556,275 @@ fn the_general_switches_reach_the_tray_and_the_login_entry() {
         })),
     );
 }
+
+/// The default rule's minimum duration of environment `id`.
+fn min_duration(app: &Harness, cx: &App, id: &str) -> u32 {
+    app.state
+        .read(cx)
+        .notification_plan_of(id)
+        .unwrap()
+        .settings
+        .default_rule
+        .min_duration_secs
+}
+
+/// UI-06: a field found by the search applies on Tab like any other, and
+/// a change elsewhere later never puts back the old value; a value typed
+/// and left without Tab stays through such a change and applies when the
+/// panel closes.
+#[test]
+fn a_found_field_applies_on_tab_and_keeps_what_was_typed() {
+    run(FixtureOptions::default(), |app, cx| {
+        app.keys(cx, "ctrl-,");
+        app.keys(cx, "l o g");
+        let settings = panel(app, cx);
+        assert_eq!(settings.read(cx).query(), "log");
+        type_into(app, cx, &FieldId::Retention, "96");
+        app.keys(cx, "tab");
+        let retention = |app: &Harness, cx: &App| {
+            app.state
+                .read(cx)
+                .config()
+                .general
+                .event_log_retention_hours
+        };
+        assert_eq!(retention(app, cx), 96, "Tab applied it");
+        let field = |app: &Harness, cx: &App, settings: &Entity<SettingsPanel>| {
+            let _ = app;
+            settings
+                .read(cx)
+                .input(&FieldId::Retention)
+                .unwrap()
+                .read(cx)
+                .value()
+                .to_string()
+        };
+        // A change elsewhere: the field keeps the stored value.
+        app.state.update(cx, |state, cx| {
+            let mut appearance = *state.appearance();
+            appearance.row_density = RowDensity::Compact;
+            state.set_appearance(appearance);
+            cx.notify();
+        });
+        app.draw(cx);
+        assert_eq!(field(app, cx, &settings), "96");
+        // Typed, then the keyboard moved on without Tab (a click
+        // elsewhere): a change elsewhere leaves what was typed.
+        type_into(app, cx, &FieldId::Retention, "100");
+        let search = settings.read(cx).default_focus(cx);
+        app.in_window(cx, |window, cx| search.focus(window, cx));
+        app.state.update(cx, |state, cx| {
+            let mut appearance = *state.appearance();
+            appearance.row_density = RowDensity::Comfortable;
+            state.set_appearance(appearance);
+            cx.notify();
+        });
+        app.draw(cx);
+        assert_eq!(field(app, cx, &settings), "100", "not put back");
+        assert_eq!(retention(app, cx), 96);
+        // Closing applies it.
+        app.keys(cx, "escape escape");
+        assert!(app.workspace.read(cx).settings().is_none());
+        assert_eq!(retention(app, cx), 100);
+    });
+}
+
+/// A value typed for one environment's rules applies to that environment
+/// before the dropdown shows another; a value that doesn't read keeps its
+/// problem shown and the page on its environment.
+#[test]
+fn a_value_typed_applies_to_its_environment_before_another_shows() {
+    run(FixtureOptions::default(), |app, cx| {
+        let staging = ic_config::Environment::new(
+            "staging",
+            "https://staging-01:5665",
+            ic_config::AuthConfig::Basic {
+                username: "icygui".to_owned(),
+            },
+        );
+        let staging_id = staging.id.clone();
+        app.state.update(cx, |state, cx| {
+            state.save_environment(staging, false);
+            cx.notify();
+        });
+        app.keys(cx, "ctrl-,");
+        show(app, cx, SettingsPage::Notifications);
+        let settings = panel(app, cx);
+        let prod = settings.read(cx).environment().unwrap().to_owned();
+        let field = FieldId::MinDuration(ScopeKey::Environment);
+        type_into(app, cx, &field, "5m");
+        let choose = |app: &Harness, cx: &mut App, id: &str| {
+            let settings = panel(app, cx);
+            app.in_window(cx, |window, cx| {
+                settings.update(cx, |settings, cx| {
+                    settings.choose_environment(id, window, cx);
+                });
+            });
+            app.draw(cx);
+        };
+        choose(app, cx, &staging_id);
+        assert_eq!(settings.read(cx).environment(), Some(staging_id.as_str()));
+        assert_eq!(min_duration(app, cx, &prod), 300, "applied to its own");
+        assert_eq!(min_duration(app, cx, &staging_id), 0);
+        assert_eq!(
+            settings.read(cx).input(&field).unwrap().read(cx).value(),
+            "0",
+            "the shown environment's value"
+        );
+        // A value that doesn't read: the page stays, the problem shows.
+        type_into(app, cx, &field, "soon");
+        choose(app, cx, &prod);
+        assert_eq!(settings.read(cx).environment(), Some(staging_id.as_str()));
+        assert!(settings.read(cx).errors().contains_key(&field));
+        assert_eq!(min_duration(app, cx, &staging_id), 0);
+    });
+}
+
+/// Escape in the keymap filter clears it first, as in the search; the
+/// next one closes the panel.
+#[test]
+fn escape_clears_the_keymap_filter_before_closing() {
+    run(FixtureOptions::default(), |app, cx| {
+        app.keys(cx, "ctrl-,");
+        show(app, cx, SettingsPage::Keymap);
+        let settings = panel(app, cx);
+        let filter = settings.read(cx).keymap_filter().clone();
+        app.in_window(cx, |window, cx| {
+            filter.focus_handle(cx).focus(window, cx);
+            filter.update(cx, |filter, cx| filter.replace_all("pal", window, cx));
+        });
+        app.draw(cx);
+        app.keys(cx, "escape");
+        assert!(app.workspace.read(cx).settings().is_some(), "still open");
+        assert_eq!(filter.read(cx).value(), "");
+        app.keys(cx, "escape");
+        assert!(app.workspace.read(cx).settings().is_none());
+    });
+}
+
+/// Every control is reachable from the keyboard: Tab goes from the search
+/// through the page's controls and the header's buttons and round again;
+/// Space toggles a switch, ← → move a segmented control or a dropdown,
+/// Enter in the navigation gives the page its keyboard.
+#[test]
+fn every_control_is_reachable_from_the_keyboard() {
+    run(FixtureOptions::default(), |app, cx| {
+        app.keys(cx, "ctrl-,");
+        let settings = panel(app, cx);
+        let keyboard_on = |app: &Harness, cx: &mut App, key: &str| {
+            let settings = panel(app, cx);
+            app.in_window(cx, |window, cx| settings.read(cx).has_keyboard(key, window))
+        };
+        // From the search, Tab reaches general's first switch.
+        app.keys(cx, "tab");
+        assert!(keyboard_on(app, cx, "settings-close-to-tray"));
+        app.keys(cx, "space");
+        assert!(!app.state.read(cx).config().general.close_to_tray);
+        app.keys(cx, "enter");
+        assert!(app.state.read(cx).config().general.close_to_tray);
+        // Start at login is off in the demo (and so not a stop).
+        app.keys(cx, "tab");
+        assert!(keyboard_on(app, cx, "settings-quiet-mode"));
+        app.keys(cx, "shift-tab");
+        assert!(keyboard_on(app, cx, "settings-close-to-tray"));
+        // After the page: the close button (the demo has no settings
+        // file to edit), then the search again.
+        app.keys(cx, "tab tab");
+        assert!(keyboard_on(app, cx, "settings-close"));
+        app.keys(cx, "tab");
+        let search = settings.read(cx).default_focus(cx);
+        assert!(app.in_window(cx, |window, _| search.is_focused(window)));
+
+        // The navigation: Enter gives appearance's first control the
+        // keyboard; the arrows move the theme.
+        app.keys(cx, "ctrl-shift-e down enter");
+        assert_eq!(settings.read(cx).page(), SettingsPage::Appearance);
+        assert!(keyboard_on(app, cx, "settings-theme"));
+        app.keys(cx, "right");
+        assert_eq!(
+            app.state.read(cx).appearance().theme,
+            ic_config::ThemeChoice::Dark
+        );
+        app.keys(cx, "right right");
+        assert_eq!(
+            app.state.read(cx).appearance().theme,
+            ic_config::ThemeChoice::Light,
+            "the last choice stays the last"
+        );
+        app.keys(cx, "left");
+        assert_eq!(
+            app.state.read(cx).appearance().theme,
+            ic_config::ThemeChoice::Dark
+        );
+        app.keys(cx, "tab tab space");
+        assert_eq!(
+            app.state.read(cx).appearance().row_density,
+            RowDensity::Compact,
+            "Space moves a segmented control on"
+        );
+
+        // A dropdown: Enter opens it, ← → choose without it.
+        show(app, cx, SettingsPage::Advanced);
+        app.keys(cx, "tab");
+        assert!(keyboard_on(app, cx, "settings-log-level"));
+        let level = app.state.read(cx).config().general.log_level;
+        app.keys(cx, "right");
+        assert_ne!(app.state.read(cx).config().general.log_level, level);
+        app.keys(cx, "left");
+        assert_eq!(app.state.read(cx).config().general.log_level, level);
+        app.keys(cx, "enter");
+        assert!(settings.read(cx).menu_open(), "the menu opened");
+        app.keys(cx, "escape");
+        assert!(!settings.read(cx).menu_open());
+        assert!(app.workspace.read(cx).settings().is_some());
+    });
+}
+
+/// At the large interface size in the smallest window the header still
+/// fits (*edit in settings file* as its icon, the close button inside the
+/// panel), and the chips of a row that can't fit beside its name move
+/// under it instead of over it.
+#[test]
+fn the_panel_fits_the_smallest_window_at_the_large_size() {
+    let small = gpui::size(px(900.), px(560.));
+    super::run_sized(FixtureOptions::default(), small, |app, cx| {
+        app.state.update(cx, |state, cx| {
+            let mut appearance = *state.appearance();
+            appearance.interface_size = ic_config::InterfaceSize::Large;
+            state.set_appearance(appearance);
+            cx.notify();
+        });
+        app.draw(cx);
+        app.keys(cx, "ctrl-,");
+        show(app, cx, SettingsPage::Notifications);
+        app.draw(cx);
+        let settings = panel(app, cx);
+        let close = settings
+            .read(cx)
+            .drawn_bounds("settings-close")
+            .expect("the close button is drawn");
+        let viewport = app.in_window(cx, |window, _| window.viewport_size());
+        eprintln!(
+            "viewport {viewport:?} close {close:?} search {:?}",
+            settings.read(cx).drawn_bounds("settings-search")
+        );
+        // The modal keeps 16px from the window's edges.
+        assert!(
+            close.right() <= px(900. - 16.) && close.left() > px(450.),
+            "{close:?}"
+        );
+        // The states chips moved under the row's name: all of them inside
+        // the panel, the first at the page's left edge rather than over
+        // the name.
+        let chip = |key: &str| settings.read(cx).drawn_bounds(key).expect(key);
+        let first = chip("rule-environment-critical");
+        let last = chip("rule-environment-recovery");
+        assert!(last.right() <= px(900. - 16.), "{last:?}");
+        assert!(first.top() > close.bottom(), "{first:?}");
+        let page_left = close.right() - px(1080.).min(px(868.)) + px(248. * 1.15);
+        assert!(
+            first.left() < page_left + px(200.),
+            "{first:?} {page_left:?}"
+        );
+    });
+}

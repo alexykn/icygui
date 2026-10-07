@@ -9,11 +9,12 @@
 //! write the settings straight away.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, ElementId, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    div, prelude::FluentBuilder as _,
+    AnyElement, App, ClickEvent, Context, ElementId, Focusable as _, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _,
+    Styled as _, div, prelude::FluentBuilder as _,
 };
 use ic_config::{Appearance, General, InterfaceSize, ListTimes, LogLevel, RowDensity, ThemeChoice};
 use ic_core::snapshot::Summary;
@@ -25,6 +26,7 @@ use ic_ui_kit::{
 };
 
 use super::files::{self, tilde};
+use super::keyboard::{Activate, Region, Step};
 use super::model::{
     RowText, SCOPE_CHOICES, Section, Setting, contains, scope_choice, scope_meaning,
     section_matches,
@@ -40,13 +42,30 @@ use crate::keymap::{ShortcutRow, bindings_in_effect, shortcut_rows};
 use crate::menu_state::down_position;
 use crate::notifications::{PauseChoice, override_text, pause_label, paused_text};
 
+/// What choosing option `index` of a segmented control does.
+type Choose = Rc<dyn Fn(&mut SettingsPanel, usize, &mut gpui::Window, &mut Context<SettingsPanel>)>;
+
 /// The weekdays, Monday first, as quiet hours' day chips show them.
 const DAYS: [&str; 7] = ["mo", "tu", "we", "th", "fr", "sa", "su"];
+
+/// What a framed field or dropdown adds to the width the frames give
+/// (their content's): 10px of padding and a 1px border each side.
+const FIELD_FRAME: f32 = 22.;
+/// The widths of the fields and dropdowns, as the frames give them.
+const ENVIRONMENT_DROPDOWN: f32 = 180.;
+const LOG_LEVEL_DROPDOWN: f32 = 120.;
+const MIN_DURATION_FIELD: f32 = 80.;
+const TIME_FIELD: f32 = 64.;
+const STORM_FIELD: f32 = 44.;
+const RECONCILE_FIELD: f32 = 80.;
+const RETENTION_FIELD: f32 = 64.;
 
 /// The keymap table's keys column.
 const KEYS_COLUMN: f32 = 220.;
 /// The keymap table's "where" column.
 const PLACE_COLUMN: f32 = 150.;
+/// Space between the keymap table's columns.
+const COLUMN_GAP: f32 = 24.;
 /// How many rows the appearance preview shows.
 const PREVIEW_ROWS: usize = 3;
 
@@ -416,6 +435,7 @@ impl SettingsPanel {
                 section.label(),
                 Self::section_note(section, facts).as_deref(),
                 false,
+                "",
                 theme,
             ));
         }
@@ -427,7 +447,7 @@ impl SettingsPanel {
         }
         for setting in Setting::ALL {
             if setting.section() == section && Self::is_shown(setting, facts) {
-                block = block.child(self.render_setting(setting, false, theme, facts, cx));
+                block = block.child(self.render_setting(setting, theme, facts, cx));
                 if setting == Setting::Reconcile && facts.general.reconcile_interval_secs == 0 {
                     block = block.child(
                         div()
@@ -489,11 +509,16 @@ impl SettingsPanel {
                     .border_t_1()
                     .border_color(theme.colors.border_row)
                     .child(
-                        Button::new("settings-add-environment", "add environment")
-                            .icon(IconName::Plus)
-                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                                cx.emit(SettingsEvent::AddEnvironment);
-                            })),
+                        self.button(
+                            "settings-add-environment",
+                            false,
+                            Button::new("settings-add-environment", "add environment")
+                                .icon(IconName::Plus),
+                            Rc::new(|_, _, cx| cx.emit(SettingsEvent::AddEnvironment)),
+                            Region::Page,
+                            theme,
+                            cx,
+                        ),
                     ),
             );
         }
@@ -547,12 +572,15 @@ impl SettingsPanel {
                 } else {
                     format!("{} · {}", page.label(), section.label())
                 };
-                let mut block = div()
-                    .flex()
-                    .flex_col()
-                    .child(rows::section_label(&heading, None, true, theme));
-                for (setting, mark) in settings {
-                    block = block.child(self.render_setting(setting, mark, theme, facts, cx));
+                let mut block = div().flex().flex_col().child(rows::section_label(
+                    &heading,
+                    None,
+                    true,
+                    &self.query,
+                    theme,
+                ));
+                for (setting, _) in settings {
+                    block = block.child(self.render_setting(setting, theme, facts, cx));
                 }
                 if section == Section::Shortcuts {
                     let shortcuts: Vec<&ShortcutRow> = items
@@ -588,7 +616,7 @@ impl SettingsPanel {
             blocks.push(
                 div()
                     .pt(px(2.))
-                    .child(rows::section_label(&note, None, false, theme))
+                    .child(rows::section_label(&note, None, false, "", theme))
                     .into_any_element(),
             );
         }
@@ -666,10 +694,11 @@ impl SettingsPanel {
                     },
                 )
             }
+            // App-wide on the page of one environment: it says so.
             Setting::PluginOutput => text(
                 "show plugin output",
-                "The output’s first line in desktop notifications. Off for shared screens and \
-                 the lock screen.",
+                "Its first line in every environment’s notifications. Off for shared screens \
+                 and the lock screen.",
             ),
             Setting::States => text("states", "Recoveries follow problems that notified."),
             Setting::Events => text("events", "Also notify when these start or end."),
@@ -785,35 +814,18 @@ impl SettingsPanel {
         }
     }
 
-    /// A setting's row; `mark` says it is the first of a section found by
-    /// its name (its name says so, in the search).
+    /// A setting's row, its matches marked in a search (a row found by its
+    /// section's name has the match in its heading, not on itself).
     fn render_setting(
         &self,
         setting: Setting,
-        mark: bool,
         theme: &Theme,
         facts: &Facts,
         cx: &Context<Self>,
     ) -> AnyElement {
         let text = self.row_text(setting, facts);
         let query = self.query.as_str();
-        let name = div()
-            .flex()
-            .min_w_0()
-            .gap(px(8.))
-            .child(rows::marked(&text.name, query, theme))
-            .when(mark, |name| {
-                name.child(
-                    div()
-                        .text_size(theme.text.small)
-                        .text_color(theme.colors.text_faint)
-                        .child(rows::marked(
-                            &format!("· {}", setting.section().label()),
-                            query,
-                            theme,
-                        )),
-                )
-            });
+        let name = rows::marked(&text.name, query, theme);
         let description =
             (!text.description.is_empty()).then(|| rows::marked(&text.description, query, theme));
         let error = Self::fields_of(setting)
@@ -827,7 +839,7 @@ impl SettingsPanel {
             .render(theme)
     }
 
-    /// A setting's control.
+    /// A setting's control, reachable with Tab (see `keyboard`).
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per setting, each a few lines"
@@ -844,25 +856,33 @@ impl SettingsPanel {
         let rule = facts.plan.as_ref().map(|plan| &plan.settings.default_rule);
         let quiet = facts.plan.as_ref().map(|plan| plan.settings.quiet_hours);
         match setting {
-            Setting::CloseToTray => Switch::new("settings-close-to-tray", general.close_to_tray)
-                .on_change(cx.listener(|this, on: &bool, _, cx| {
-                    this.change_general(cx, |general| general.close_to_tray = *on);
-                }))
-                .into_any_element(),
-            Setting::LaunchAtLogin => {
-                Switch::new("settings-launch-at-login", general.launch_at_login)
-                    .disabled(self.demo)
-                    .on_change(cx.listener(|this, on: &bool, _, cx| {
-                        this.change_general(cx, |general| general.launch_at_login = *on);
-                    }))
-                    .into_any_element()
-            }
-            Setting::QuietMode => Switch::new("settings-quiet-mode", general.quiet_when_hidden)
-                .on_change(cx.listener(|this, on: &bool, _, cx| {
-                    this.change_general(cx, |general| general.quiet_when_hidden = *on);
-                }))
-                .into_any_element(),
-            Setting::Theme => segmented(
+            Setting::CloseToTray => self.switch(
+                "settings-close-to-tray",
+                general.close_to_tray,
+                false,
+                |this, on, _, cx| this.change_general(cx, |general| general.close_to_tray = on),
+                theme,
+                cx,
+            ),
+            Setting::LaunchAtLogin => self.switch(
+                "settings-launch-at-login",
+                general.launch_at_login,
+                self.demo,
+                |this, on, _, cx| this.change_general(cx, |general| general.launch_at_login = on),
+                theme,
+                cx,
+            ),
+            Setting::QuietMode => self.switch(
+                "settings-quiet-mode",
+                general.quiet_when_hidden,
+                false,
+                |this, on, _, cx| {
+                    this.change_general(cx, |general| general.quiet_when_hidden = on);
+                },
+                theme,
+                cx,
+            ),
+            Setting::Theme => self.segmented(
                 "settings-theme",
                 &["follow system", "dark", "light"],
                 match appearance.theme {
@@ -870,6 +890,7 @@ impl SettingsPanel {
                     ThemeChoice::Dark => 1,
                     ThemeChoice::Light => 2,
                 },
+                theme,
                 cx,
                 |this, index, _, cx| {
                     this.change_appearance(cx, |appearance| {
@@ -881,7 +902,7 @@ impl SettingsPanel {
                     });
                 },
             ),
-            Setting::InterfaceSize => segmented(
+            Setting::InterfaceSize => self.segmented(
                 "settings-interface-size",
                 &["small", "default", "large"],
                 match appearance.interface_size {
@@ -889,6 +910,7 @@ impl SettingsPanel {
                     InterfaceSize::Default => 1,
                     InterfaceSize::Large => 2,
                 },
+                theme,
                 cx,
                 |this, index, _, cx| {
                     this.change_appearance(cx, |appearance| {
@@ -900,10 +922,11 @@ impl SettingsPanel {
                     });
                 },
             ),
-            Setting::RowDensity => segmented(
+            Setting::RowDensity => self.segmented(
                 "settings-row-density",
                 &["comfortable", "compact"],
                 usize::from(appearance.row_density == RowDensity::Compact),
+                theme,
                 cx,
                 |this, index, _, cx| {
                     this.change_appearance(cx, |appearance| {
@@ -915,10 +938,11 @@ impl SettingsPanel {
                     });
                 },
             ),
-            Setting::ListTimes => segmented(
+            Setting::ListTimes => self.segmented(
                 "settings-list-times",
                 &["relative", "clock"],
                 usize::from(appearance.list_times == ListTimes::Clock),
+                theme,
                 cx,
                 |this, index, _, cx| {
                     this.change_appearance(cx, |appearance| {
@@ -930,39 +954,55 @@ impl SettingsPanel {
                     });
                 },
             ),
-            Setting::Environment => self.dropdown(
-                "settings-environment",
-                SettingsMenu::Environment,
-                facts.environment_name.clone().unwrap_or_default(),
-                180.,
-                self.environment_menu(theme, facts, cx),
-                theme,
-                cx,
-            ),
-            Setting::Enabled => Switch::new(
+            Setting::Environment => {
+                let ids: Vec<String> = facts
+                    .environments
+                    .iter()
+                    .map(|environment| environment.id.clone())
+                    .collect();
+                let current = self.environment.clone();
+                self.dropdown(
+                    "settings-environment",
+                    SettingsMenu::Environment,
+                    facts.environment_name.clone().unwrap_or_default(),
+                    ENVIRONMENT_DROPDOWN,
+                    self.environment_menu(theme, facts, cx),
+                    Rc::new(move |this, forward, window, cx| {
+                        if let Some(id) = neighbour(&ids, current.as_ref(), forward) {
+                            this.choose_environment(&id, window, cx);
+                        }
+                    }),
+                    theme,
+                    cx,
+                )
+            }
+            Setting::Enabled => self.switch(
                 "settings-notifications-enabled",
                 facts
                     .plan
                     .as_ref()
                     .is_some_and(|plan| plan.settings.enabled),
-            )
-            .on_change(cx.listener(|this, on: &bool, _, cx| {
-                this.change_plan(cx, |plan| plan.settings.enabled = *on);
-            }))
-            .into_any_element(),
-            Setting::PauseAll => Self::pause_control(theme, facts, cx),
-            Setting::PluginOutput => {
-                Switch::new("settings-plugin-output", general.show_plugin_output)
-                    .on_change(cx.listener(|this, on: &bool, _, cx| {
-                        this.change_general(cx, |general| general.show_plugin_output = *on);
-                    }))
-                    .into_any_element()
-            }
+                false,
+                |this, on, _, cx| this.change_plan(cx, |plan| plan.settings.enabled = on),
+                theme,
+                cx,
+            ),
+            Setting::PauseAll => self.pause_control(theme, facts, cx),
+            Setting::PluginOutput => self.switch(
+                "settings-plugin-output",
+                general.show_plugin_output,
+                false,
+                |this, on, _, cx| {
+                    this.change_general(cx, |general| general.show_plugin_output = on);
+                },
+                theme,
+                cx,
+            ),
             Setting::States => rule.map_or_else(empty, |rule| {
-                Self::flag_chips(&ScopeKey::Environment, &RuleFlag::STATES, rule, cx)
+                self.flag_chips(&ScopeKey::Environment, &RuleFlag::STATES, rule, theme, cx)
             }),
             Setting::Events => rule.map_or_else(empty, |rule| {
-                Self::flag_chips(&ScopeKey::Environment, &RuleFlag::EVENTS, rule, cx)
+                self.flag_chips(&ScopeKey::Environment, &RuleFlag::EVENTS, rule, theme, cx)
             }),
             Setting::HardOnly | Setting::SkipHandled | Setting::Sound => {
                 let flag = match setting {
@@ -971,31 +1011,35 @@ impl SettingsPanel {
                     _ => RuleFlag::Sound,
                 };
                 rule.map_or_else(empty, |rule| {
-                    Self::flag_switch(&ScopeKey::Environment, flag, rule, cx)
+                    self.flag_switch(&ScopeKey::Environment, flag, rule, theme, cx)
                 })
             }
-            Setting::MinDuration => {
-                self.field(&FieldId::MinDuration(ScopeKey::Environment), 80., theme)
-            }
-            Setting::QuietHours => {
-                Switch::new("settings-quiet", quiet.is_some_and(|quiet| quiet.enabled))
-                    .on_change(cx.listener(|this, on: &bool, _, cx| {
-                        this.set_quiet_hours(*on, cx);
-                    }))
-                    .into_any_element()
-            }
+            Setting::MinDuration => self.field(
+                &FieldId::MinDuration(ScopeKey::Environment),
+                MIN_DURATION_FIELD,
+                theme,
+                cx,
+            ),
+            Setting::QuietHours => self.switch(
+                "settings-quiet",
+                quiet.is_some_and(|quiet| quiet.enabled),
+                false,
+                |this, on, _, cx| this.set_quiet_hours(on, cx),
+                theme,
+                cx,
+            ),
             Setting::QuietTimes => div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .child(self.field(&FieldId::QuietStart, 72., theme))
+                .child(self.field(&FieldId::QuietStart, TIME_FIELD, theme, cx))
                 .child(
                     div()
                         .text_size(theme.text.small)
                         .text_color(theme.colors.text_faint)
                         .child("→"),
                 )
-                .child(self.field(&FieldId::QuietEnd, 72., theme))
+                .child(self.field(&FieldId::QuietEnd, TIME_FIELD, theme, cx))
                 .into_any_element(),
             Setting::QuietDays => {
                 let days = quiet.map(|quiet| quiet.days).unwrap_or_default();
@@ -1004,38 +1048,51 @@ impl SettingsPanel {
                     .gap(px(6.))
                     .children(DAYS.iter().enumerate().map(|(index, day)| {
                         let on = days[index];
-                        Chip::new(SharedString::from(format!("settings-day-{day}")), *day)
-                            .selected(on)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.change_plan(cx, |plan| {
-                                    plan.settings.quiet_hours.days[index] = !on;
-                                });
-                            }))
+                        let id = SharedString::from(format!("settings-day-{day}"));
+                        let toggle: Activate = Rc::new(move |this, _, cx| {
+                            this.change_plan(cx, |plan| {
+                                plan.settings.quiet_hours.days[index] = !on;
+                            });
+                        });
+                        let click = toggle.clone();
+                        self.focusable(
+                            id.clone(),
+                            Chip::new(id, *day).selected(on).on_click(cx.listener(
+                                move |this, _: &ClickEvent, window, cx| click(this, window, cx),
+                            )),
+                            toggle,
+                            None,
+                            theme,
+                            cx,
+                        )
                     }))
                     .into_any_element()
             }
-            Setting::QuietLoud => Switch::new(
+            Setting::QuietLoud => self.switch(
                 "settings-quiet-critical",
                 quiet.is_some_and(|quiet| quiet.allow_critical),
-            )
-            .on_change(cx.listener(|this, on: &bool, _, cx| {
-                this.change_plan(cx, |plan| plan.settings.quiet_hours.allow_critical = *on);
-            }))
-            .into_any_element(),
+                false,
+                |this, on, _, cx| {
+                    this.change_plan(cx, |plan| plan.settings.quiet_hours.allow_critical = on);
+                },
+                theme,
+                cx,
+            ),
             Setting::Storm => div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
                 .child(rows::words("at most", theme))
-                .child(self.field(&FieldId::StormThreshold, 44., theme))
+                .child(self.field(&FieldId::StormThreshold, STORM_FIELD, theme, cx))
                 .child(rows::words("in", theme))
-                .child(self.field(&FieldId::StormWindow, 44., theme))
+                .child(self.field(&FieldId::StormWindow, STORM_FIELD, theme, cx))
                 .child(rows::words("seconds", theme))
                 .into_any_element(),
-            Setting::Reconcile => segmented(
+            Setting::Reconcile => self.segmented(
                 "settings-reconcile",
                 &["adaptive", "fixed interval"],
                 usize::from(general.reconcile_interval_secs != 0),
+                theme,
                 cx,
                 |this, index, window, cx| {
                     this.change_general(cx, |general| {
@@ -1048,119 +1105,271 @@ impl SettingsPanel {
                     });
                     // The interval's field shows what is in effect now.
                     this.errors.remove(&FieldId::Reconcile);
-                    let text = this.stored_text(&FieldId::Reconcile, cx);
-                    this.set_text(&FieldId::Reconcile, text, window, cx);
+                    this.show_stored(&FieldId::Reconcile, window, cx);
                 },
             ),
             Setting::ReconcileInterval => div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .child(self.field(&FieldId::Reconcile, 80., theme))
+                .child(self.field(&FieldId::Reconcile, RECONCILE_FIELD, theme, cx))
                 .child(rows::words("seconds", theme))
                 .into_any_element(),
             Setting::Retention => div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .child(self.field(&FieldId::Retention, 64., theme))
+                .child(self.field(&FieldId::Retention, RETENTION_FIELD, theme, cx))
                 .child(rows::words("hours", theme))
                 .into_any_element(),
-            Setting::LogLevel => self.dropdown(
-                "settings-log-level",
-                SettingsMenu::LogLevel,
-                general.log_level.as_str().to_owned(),
-                120.,
-                Self::log_level_menu(facts, cx),
-                theme,
-                cx,
-            ),
-            Setting::LogFolder => Button::new("settings-open-logs", "open folder")
-                .icon(IconName::FolderOpen)
-                .disabled(self.locations.log_dir.is_none())
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            Setting::LogLevel => {
+                let level = general.log_level;
+                self.dropdown(
+                    "settings-log-level",
+                    SettingsMenu::LogLevel,
+                    level.as_str().to_owned(),
+                    LOG_LEVEL_DROPDOWN,
+                    Self::log_level_menu(facts, cx),
+                    Rc::new(move |this, forward, _, cx| {
+                        if let Some(next) = neighbour(&LogLevel::ALL, Some(&level), forward) {
+                            this.change_general(cx, |general| general.log_level = next);
+                        }
+                    }),
+                    theme,
+                    cx,
+                )
+            }
+            Setting::LogFolder => self.button(
+                "settings-open-logs",
+                self.locations.log_dir.is_none(),
+                Button::new("settings-open-logs", "open folder")
+                    .icon(IconName::FolderOpen)
+                    .disabled(self.locations.log_dir.is_none()),
+                Rc::new(|this, _, cx| {
                     if let Some(dir) = this.locations.log_dir.clone() {
                         files::open(&dir, cx);
                     }
-                }))
-                .into_any_element(),
-            Setting::ConfigFolder => Button::new("settings-open-config", "open folder")
-                .icon(IconName::FolderOpen)
-                .disabled(self.locations.config_dir.is_none())
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                }),
+                Region::Page,
+                theme,
+                cx,
+            ),
+            Setting::ConfigFolder => self.button(
+                "settings-open-config",
+                self.locations.config_dir.is_none(),
+                Button::new("settings-open-config", "open folder")
+                    .icon(IconName::FolderOpen)
+                    .disabled(self.locations.config_dir.is_none()),
+                Rc::new(|this, _, cx| {
                     if let Some(dir) = this.locations.config_dir.clone() {
                         // A first start may not have written anything yet.
                         let _ = std::fs::create_dir_all(&dir);
                         files::open(&dir, cx);
                     }
-                }))
-                .into_any_element(),
-            Setting::About => Button::new("settings-about", "about")
-                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                    cx.emit(SettingsEvent::About);
-                }))
-                .into_any_element(),
+                }),
+                Region::Page,
+                theme,
+                cx,
+            ),
+            Setting::About => self.button(
+                "settings-about",
+                false,
+                Button::new("settings-about", "about"),
+                Rc::new(|_, _, cx| cx.emit(SettingsEvent::About)),
+                Region::Page,
+                theme,
+                cx,
+            ),
         }
     }
 
-    /// A text field `width` wide, red-framed while its value has a
+    /// A switch Tab reaches; `apply` takes the new value.
+    fn switch(
+        &self,
+        id: impl Into<SharedString>,
+        on: bool,
+        disabled: bool,
+        apply: impl Fn(&mut Self, bool, &mut gpui::Window, &mut Context<Self>) + 'static,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let id = id.into();
+        let apply = Rc::new(apply);
+        let click = apply.clone();
+        let control = Switch::new(id.clone(), on)
+            .disabled(disabled)
+            .on_change(cx.listener(move |this, value: &bool, window, cx| {
+                click(this, *value, window, cx);
+            }));
+        if disabled {
+            return control.into_any_element();
+        }
+        self.focusable(
+            id,
+            control,
+            Rc::new(move |this, window, cx| apply(this, !on, window, cx)),
+            None,
+            theme,
+            cx,
+        )
+    }
+
+    /// A segmented control sized to its labels that Tab reaches, calling
+    /// `handler` with the chosen index: ← → choose the neighbour, Space
+    /// the next one round.
+    fn segmented(
+        &self,
+        id: &'static str,
+        options: &[&'static str],
+        selected: usize,
+        theme: &Theme,
+        cx: &Context<Self>,
+        handler: impl Fn(&mut SettingsPanel, usize, &mut gpui::Window, &mut Context<SettingsPanel>)
+        + 'static,
+    ) -> AnyElement {
+        let count = options.len();
+        let handler = Rc::new(handler);
+        let click = handler.clone();
+        let next = handler.clone();
+        let control = options
+            .iter()
+            .fold(Segmented::new(id).hug(), |control, option| {
+                control.option(*option)
+            })
+            .selected(selected)
+            .on_select(cx.listener(move |this, index: &usize, window, cx| {
+                click(this, *index, window, cx);
+                cx.notify();
+            }));
+        self.focusable(
+            id,
+            control,
+            Rc::new(move |this, window, cx| {
+                next(this, (selected + 1) % count, window, cx);
+                cx.notify();
+            }),
+            Some(Rc::new(move |this, forward, window, cx| {
+                let index = if forward {
+                    (selected + 1).min(count - 1)
+                } else {
+                    selected.saturating_sub(1)
+                };
+                if index != selected {
+                    handler(this, index, window, cx);
+                    cx.notify();
+                }
+            })),
+            theme,
+            cx,
+        )
+    }
+
+    /// A button (`id`, built) Tab reaches unless `disabled`: Space or
+    /// Enter does what a click does.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a button and where Tab finds it; a struct would only rename them"
+    )]
+    pub(super) fn button(
+        &self,
+        id: impl Into<SharedString>,
+        disabled: bool,
+        button: Button,
+        action: Activate,
+        region: Region,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let click = action.clone();
+        let button = button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            click(this, window, cx);
+        }));
+        if disabled {
+            return button.into_any_element();
+        }
+        self.focusable_in(id, button, action, None, region, theme, cx)
+    }
+
+    /// A text field `width` wide (the frame's content width; the field
+    /// adds its padding and border), red-framed while its value has a
     /// problem.
-    fn field(&self, id: &FieldId, width: f32, theme: &Theme) -> AnyElement {
+    fn field(&self, id: &FieldId, width: f32, theme: &Theme, cx: &App) -> AnyElement {
         let Some(input) = self.inputs.get(id) else {
             return empty();
         };
+        let key = SharedString::from(format!("field-{id:?}"));
+        self.add_stop(key.clone(), input.focus_handle(cx), Region::Page);
         div()
+            .relative()
             .flex_none()
-            .w(px(width))
+            .w(px(width + FIELD_FRAME))
             .child(
                 TextField::new(input)
                     .bordered(true)
                     .invalid(self.errors.contains_key(id))
                     .text_size(theme.text.body),
             )
+            .child(self.bounds_probe(key))
             .into_any_element()
     }
 
     /// Pausing every environment (acts at once), or the running pause and
     /// *resume*.
-    fn pause_control(theme: &Theme, facts: &Facts, cx: &Context<Self>) -> AnyElement {
+    fn pause_control(&self, theme: &Theme, facts: &Facts, cx: &Context<Self>) -> AnyElement {
         let count = facts.environments.len();
         match facts.paused_until {
-            Some(until) => div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .text_size(theme.text.small)
-                        .text_color(theme.states.text.warning)
-                        .child(paused_text(count, until, facts.now)),
-                )
-                .child(Chip::new("settings-resume", "resume").on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        this.state.update(cx, |state, cx| {
-                            state.pause_notifications(None);
-                            cx.notify();
-                        });
-                    },
-                )))
-                .into_any_element(),
+            Some(until) => {
+                let resume: Activate = Rc::new(|this, _, cx| {
+                    this.state.update(cx, |state, cx| {
+                        state.pause_notifications(None);
+                        cx.notify();
+                    });
+                });
+                let click = resume.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(theme.text.small)
+                            .text_color(theme.states.text.warning)
+                            .child(paused_text(count, until, facts.now)),
+                    )
+                    .child(self.focusable(
+                        "settings-resume",
+                        Chip::new("settings-resume", "resume").on_click(cx.listener(
+                            move |this, _: &ClickEvent, window, cx| click(this, window, cx),
+                        )),
+                        resume,
+                        None,
+                        theme,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
             None => div()
                 .flex()
                 .gap(px(6.))
                 .children(PauseChoice::ALL.map(|choice| {
-                    Chip::new(
-                        SharedString::from(format!("settings-pause-{choice:?}")),
-                        choice.short_label(),
+                    let id = SharedString::from(format!("settings-pause-{choice:?}"));
+                    let pause: Activate = Rc::new(move |this, _, cx| {
+                        this.state.update(cx, |state, cx| {
+                            state.pause_notifications(Some(choice.until(Timestamp::now())));
+                            cx.notify();
+                        });
+                    });
+                    let click = pause.clone();
+                    self.focusable(
+                        id.clone(),
+                        Chip::new(id, choice.short_label()).on_click(cx.listener(
+                            move |this, _: &ClickEvent, window, cx| click(this, window, cx),
+                        )),
+                        pause,
+                        None,
+                        theme,
+                        cx,
                     )
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.state.update(cx, |state, cx| {
-                                state.pause_notifications(Some(choice.until(Timestamp::now())));
-                                cx.notify();
-                            });
-                        },
-                    ))
                 }))
                 .into_any_element(),
         }
@@ -1168,44 +1377,69 @@ impl SettingsPanel {
 
     /// Chips that turn `flags` of `key`'s rule on and off.
     fn flag_chips(
+        &self,
         key: &ScopeKey,
         flags: &[RuleFlag],
         rule: &Rule,
+        theme: &Theme,
         cx: &Context<Self>,
     ) -> AnyElement {
         let prefix = scope_id(key);
         div()
             .flex()
-            .gap(px(6.))
+            // The frames' 6px less a fraction: the chips round to whole
+            // pixels here, and the states row's description (`Recoveries
+            // follow problems that notified.`) fits whole beside them as
+            // drawn.
+            .gap(px(5.))
             .children(flags.iter().map(|flag| {
                 let flag = *flag;
                 let key = key.clone();
                 let on = flag.get(rule);
-                Chip::new(
-                    SharedString::from(format!("{prefix}-{}", flag.label())),
-                    flag.label(),
+                let id = SharedString::from(format!("{prefix}-{}", flag.label()));
+                let toggle: Activate =
+                    Rc::new(move |this, _, cx| this.set_flag(&key, flag, !on, cx));
+                let click = toggle.clone();
+                self.focusable(
+                    id.clone(),
+                    Chip::new(id, flag.label())
+                        .selected(on)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            click(this, window, cx);
+                        })),
+                    toggle,
+                    None,
+                    theme,
+                    cx,
                 )
-                .selected(on)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.set_flag(&key, flag, !on, cx);
-                }))
             }))
             .into_any_element()
     }
 
     /// A switch for `flag` of `key`'s rule.
-    fn flag_switch(key: &ScopeKey, flag: RuleFlag, rule: &Rule, cx: &Context<Self>) -> AnyElement {
+    fn flag_switch(
+        &self,
+        key: &ScopeKey,
+        flag: RuleFlag,
+        rule: &Rule,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let id = SharedString::from(format!("{}-{flag:?}", scope_id(key)));
         let key = key.clone();
-        Switch::new(id, flag.get(rule))
-            .on_change(cx.listener(move |this, on: &bool, _, cx| {
-                this.set_flag(&key, flag, *on, cx);
-            }))
-            .into_any_element()
+        self.switch(
+            id,
+            flag.get(rule),
+            false,
+            move |this, on, _, cx| this.set_flag(&key, flag, on, cx),
+            theme,
+            cx,
+        )
     }
 
     /// A dropdown in the dashboard editor's style showing `value`, with
-    /// `menu` under it while open.
+    /// `menu` under it while open; Tab reaches it, Space or Enter opens
+    /// it, ← → `step` to the neighbouring choice.
     #[expect(
         clippy::too_many_arguments,
         reason = "a trigger and its menu; splitting it would only scatter them"
@@ -1217,15 +1451,16 @@ impl SettingsPanel {
         value: String,
         width: f32,
         menu: Menu,
+        step: Step,
         theme: &Theme,
         cx: &Context<Self>,
     ) -> AnyElement {
         let colors = theme.colors;
         let open = self.menus.is_open(&which);
-        div()
+        let trigger = div()
             .relative()
             .flex_none()
-            .w(px(width))
+            .w(px(width + FIELD_FRAME))
             .child(
                 div()
                     .id(id)
@@ -1242,7 +1477,7 @@ impl SettingsPanel {
                         colors.border_header
                     })
                     .bg(colors.code_background)
-                    .text_size(theme.text.body)
+                    .text_size(theme.text.row)
                     .cursor_pointer()
                     .child(div().flex_1().min_w_0().truncate().child(value))
                     .child(
@@ -1256,8 +1491,18 @@ impl SettingsPanel {
                         cx.notify();
                     })),
             )
-            .when(open, |slot| slot.child(Popover::new(menu)))
-            .into_any_element()
+            .when(open, |slot| slot.child(Popover::new(menu)));
+        self.focusable(
+            id,
+            trigger,
+            Rc::new(move |this, _, cx| {
+                this.menus.toggle(which, None);
+                cx.notify();
+            }),
+            Some(step),
+            theme,
+            cx,
+        )
     }
 
     fn dismiss_listener(
@@ -1272,7 +1517,8 @@ impl SettingsPanel {
     /// The environments, each with its health dot; the page's one has the
     /// selected-row background.
     fn environment_menu(&self, theme: &Theme, facts: &Facts, cx: &Context<Self>) -> Menu {
-        let mut menu = Menu::new("settings-environment-menu").min_width(px(180.));
+        let mut menu = Menu::new("settings-environment-menu")
+            .min_width(px(ENVIRONMENT_DROPDOWN + FIELD_FRAME));
         for environment in &facts.environments {
             let id = environment.id.clone();
             menu = menu.item(
@@ -1284,7 +1530,7 @@ impl SettingsPanel {
                 .selected(self.environment.as_deref() == Some(environment.id.as_str()))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.menus.close();
-                    this.set_environment(&id, window, cx);
+                    this.choose_environment(&id, window, cx);
                 })),
             );
         }
@@ -1294,7 +1540,8 @@ impl SettingsPanel {
     /// The log levels, quietest first; the one in effect has the
     /// selected-row background.
     fn log_level_menu(facts: &Facts, cx: &Context<Self>) -> Menu {
-        let mut menu = Menu::new("settings-log-level-menu").min_width(px(120.));
+        let mut menu =
+            Menu::new("settings-log-level-menu").min_width(px(LOG_LEVEL_DROPDOWN + FIELD_FRAME));
         for level in LogLevel::ALL {
             menu = menu.item(
                 MenuItem::new(
@@ -1550,19 +1797,24 @@ impl SettingsPanel {
                         .child(entry.text.clone()),
                 ),
         )
-        .control(
-            Button::new(
-                SharedString::from(format!("settings-override-remove-{index}")),
-                "remove",
+        .control({
+            let id = SharedString::from(format!("settings-override-remove-{index}"));
+            self.button(
+                id.clone(),
+                false,
+                Button::new(id, "remove")
+                    .tooltip(Tooltip::new("Notifications follow the dashboards again")),
+                Rc::new(move |this, _, cx| {
+                    let object = object.clone();
+                    this.change_plan(cx, move |plan| {
+                        plan.settings.objects.retain(|entry| entry.object != object);
+                    });
+                }),
+                Region::Page,
+                theme,
+                cx,
             )
-            .tooltip(Tooltip::new("Notifications follow the dashboards again"))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                let object = object.clone();
-                this.change_plan(cx, move |plan| {
-                    plan.settings.objects.retain(|entry| entry.object != object);
-                });
-            })),
-        )
+        })
         .render(theme)
     }
 
@@ -1584,16 +1836,38 @@ impl SettingsPanel {
         cx: &Context<Self>,
     ) -> AnyElement {
         let choose = key.clone();
-        let control = SCOPE_CHOICES
-            .iter()
-            .fold(
-                Segmented::new(SharedString::from(format!("{}-setting", scope_id(key)))).hug(),
-                |control, choice| control.option(*choice),
-            )
-            .selected(scope_choice(setting))
-            .on_select(cx.listener(move |this, index: &usize, window, cx| {
-                this.choose_scope(&choose, *index, window, cx);
-            }));
+        let id = SharedString::from(format!("{}-setting", scope_id(key)));
+        let selected = scope_choice(setting);
+        let count = SCOPE_CHOICES.len();
+        let choice: Choose =
+            Rc::new(move |this, index, window, cx| this.choose_scope(&choose, index, window, cx));
+        let click = choice.clone();
+        let next = choice.clone();
+        let control = self.focusable(
+            id.clone(),
+            SCOPE_CHOICES
+                .iter()
+                .fold(Segmented::new(id).hug(), |control, choice| {
+                    control.option(*choice)
+                })
+                .selected(selected)
+                .on_select(cx.listener(move |this, index: &usize, window, cx| {
+                    click(this, *index, window, cx);
+                })),
+            Rc::new(move |this, window, cx| next(this, (selected + 1) % count, window, cx)),
+            Some(Rc::new(move |this, forward, window, cx| {
+                let index = if forward {
+                    (selected + 1).min(count - 1)
+                } else {
+                    selected.saturating_sub(1)
+                };
+                if index != selected {
+                    choice(this, index, window, cx);
+                }
+            })),
+            theme,
+            cx,
+        );
         Row::new(
             div()
                 .flex()
@@ -1624,13 +1898,13 @@ impl SettingsPanel {
         let mut rows = vec![
             Row::new("states")
                 .description(Some("Recoveries follow problems that notified."))
-                .control(Self::flag_chips(key, &RuleFlag::STATES, rule, cx)),
+                .control(self.flag_chips(key, &RuleFlag::STATES, rule, theme, cx)),
             Row::new("events")
                 .description(Some("Also notify when these start or end."))
-                .control(Self::flag_chips(key, &RuleFlag::EVENTS, rule, cx)),
+                .control(self.flag_chips(key, &RuleFlag::EVENTS, rule, theme, cx)),
         ];
         for flag in [RuleFlag::HardOnly, RuleFlag::SkipHandled] {
-            rows.push(Row::new(flag.label()).control(Self::flag_switch(key, flag, rule, cx)));
+            rows.push(Row::new(flag.label()).control(self.flag_switch(key, flag, rule, theme, cx)));
         }
         rows.push(
             Row::new("only after")
@@ -1638,12 +1912,13 @@ impl SettingsPanel {
                     "A problem must last this long first (5m, 1h; 0 = at once).",
                 ))
                 .error(self.errors.get(&field).cloned())
-                .control(self.field(&field, 80., theme)),
+                .control(self.field(&field, MIN_DURATION_FIELD, theme, cx)),
         );
-        rows.push(Row::new(RuleFlag::Sound.label()).control(Self::flag_switch(
+        rows.push(Row::new(RuleFlag::Sound.label()).control(self.flag_switch(
             key,
             RuleFlag::Sound,
             rule,
+            theme,
             cx,
         )));
         rows.into_iter()
@@ -1693,18 +1968,28 @@ impl SettingsPanel {
                     .text_color(colors.text_faint)
                     .child(rows::marked(&environment.summary, &self.query, theme)),
             )
-            .child(
-                IconButton::new(
-                    SharedString::from(format!("settings-edit-environment-{}", environment.id)),
-                    IconName::Settings,
-                )
-                .icon_size(px(13.))
-                .color(colors.text_muted)
-                .tooltip(Tooltip::new(format!("Edit {}", environment.name)))
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+            .child({
+                let gear =
+                    SharedString::from(format!("settings-edit-environment-{}", environment.id));
+                let edit: Activate = Rc::new(move |_, _, cx| {
                     cx.emit(SettingsEvent::EditEnvironment(id.clone()));
-                })),
-            )
+                });
+                let click = edit.clone();
+                self.focusable(
+                    gear.clone(),
+                    IconButton::new(gear, IconName::Settings)
+                        .icon_size(px(13.))
+                        .color(colors.text_muted)
+                        .tooltip(Tooltip::new(format!("Edit {}", environment.name)))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            click(this, window, cx);
+                        })),
+                    edit,
+                    None,
+                    theme,
+                    cx,
+                )
+            })
             .into_any_element()
     }
 
@@ -1740,6 +2025,11 @@ impl SettingsPanel {
                 )
                 .into_any_element(),
         ];
+        self.add_stop(
+            "settings-keymap-filter".into(),
+            self.keymap_filter.focus_handle(cx),
+            Region::Page,
+        );
         if !facts.keymap_problems.is_empty() {
             let count = facts.keymap_problems.len();
             let noun = if count == 1 { "binding" } else { "bindings" };
@@ -1768,10 +2058,11 @@ impl SettingsPanel {
             div()
                 .flex()
                 .items_center()
+                .gap(px(COLUMN_GAP))
                 .py(px(6.))
                 .text_size(theme.text.label)
                 .text_color(colors.text_faint)
-                .child(div().flex_1().child("action"))
+                .child(div().flex_1().min_w_0().child("action"))
                 .child(div().flex_none().w(px(KEYS_COLUMN)).child("keys"))
                 .child(div().flex_none().w(px(PLACE_COLUMN)).child("where"))
                 .into_any_element(),
@@ -1826,6 +2117,7 @@ impl SettingsPanel {
                 div()
                     .flex()
                     .items_center()
+                    .gap(px(COLUMN_GAP))
                     .py(px(9.))
                     .border_t_1()
                     .border_color(colors.border_row)
@@ -1848,7 +2140,6 @@ impl SettingsPanel {
                             .items_center()
                             .gap(px(4.))
                             .w(px(KEYS_COLUMN))
-                            .pr(px(12.))
                             .children(keys),
                     )
                     .child(
@@ -1944,27 +2235,16 @@ fn sample_rows() -> Vec<PreviewRow> {
     ]
 }
 
-/// A segmented control sized to its labels, calling `handler` with the
-/// chosen index.
-fn segmented(
-    id: &'static str,
-    options: &[&'static str],
-    selected: usize,
-    cx: &Context<SettingsPanel>,
-    handler: impl Fn(&mut SettingsPanel, usize, &mut gpui::Window, &mut Context<SettingsPanel>)
-    + 'static,
-) -> AnyElement {
-    options
-        .iter()
-        .fold(Segmented::new(id).hug(), |control, option| {
-            control.option(*option)
-        })
-        .selected(selected)
-        .on_select(cx.listener(move |this, index: &usize, window, cx| {
-            handler(this, *index, window, cx);
-            cx.notify();
-        }))
-        .into_any_element()
+/// The choice before (`forward` false) or after `current` in `items`,
+/// if there is one.
+fn neighbour<T: Clone + PartialEq>(items: &[T], current: Option<&T>, forward: bool) -> Option<T> {
+    let index = items.iter().position(|item| Some(item) == current)?;
+    let next = if forward {
+        index.checked_add(1)?
+    } else {
+        index.checked_sub(1)?
+    };
+    items.get(next).cloned()
 }
 
 /// Nothing (a control that can't be shown without an environment).

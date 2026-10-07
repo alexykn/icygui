@@ -329,10 +329,9 @@ const CATALOGUE: &[(&str, &[&str])] = &[
     ("close the tab", &["CloseTab"]),
     ("quit", &["Quit"]),
     ("next row, previous row", &["SelectNext", "SelectPrevious"]),
-    (
-        "mark rows down, up",
-        &["ExtendSelectionNext", "ExtendSelectionPrevious"],
-    ),
+    // Four keys don't fit the keys column: a row each.
+    ("mark rows down", &["ExtendSelectionNext"]),
+    ("mark rows up", &["ExtendSelectionPrevious"]),
     ("first row, last row", &["SelectFirst", "SelectLast"]),
     ("page up, page down", &["SelectPageUp", "SelectPageDown"]),
     ("mark the row", &["ToggleMark"]),
@@ -360,7 +359,18 @@ const CATALOGUE: &[(&str, &[&str])] = &[
     ("confirm", &["ConfirmModal"]),
     ("close the dialog", &["CloseModal"]),
     ("focus navbar", &["FocusNavbar"]),
+    (
+        "next category, previous category",
+        &["NavNext", "NavPrevious"],
+    ),
+    ("open the category", &["NavOpen"]),
     ("search settings", &["FocusSettingsSearch"]),
+    ("clear the search, close", &["SettingsEscape"]),
+    ("switch, press", &["ControlActivate"]),
+    (
+        "next choice, previous choice",
+        &["ControlNext", "ControlPrevious"],
+    ),
     ("hide icygui, hide others", &["Hide", "HideOthers"]),
     ("minimize", &["Minimize"]),
 ];
@@ -380,7 +390,7 @@ fn place_of(context: Option<&str>) -> String {
         "ActionDialog" | "ActionFieldless" | "ActionConfirm" => "action dialogs",
         "Modal" => "dialogs",
         "ConfirmDialog" => "confirmations",
-        "SettingsPanel" => "settings",
+        "SettingsPanel" | "SettingsNav" | "SettingsControl" => "settings",
         other => other,
     }
     .to_owned()
@@ -409,26 +419,49 @@ fn label_of(action: &str) -> (usize, String) {
 /// The keymap page's rows for `bound`: one per catalogue entry and place,
 /// with every key of its actions there; rows whose entry and keys are the
 /// same in several places become one (`list, pane`). Catalogue order, then
-/// the rest by what they do.
+/// the rest by what they do. A row of two actions lists each action's
+/// first key, then each one's second (`j k ↓ ↑`), as the label pairs them.
 pub(crate) fn shortcut_rows(bound: &[Bound]) -> Vec<ShortcutRow> {
-    // (catalogue index, label, place) → keys.
-    let mut rows: Vec<(usize, String, String, Vec<String>)> = Vec::new();
+    // (catalogue index, label, place) → each action's keys.
+    type Keys = Vec<(&'static str, Vec<String>)>;
+    let mut by_action: Vec<(usize, String, String, Keys)> = Vec::new();
     for binding in bound {
         let (index, label) = label_of(binding.action);
         let place = place_of(binding.context.as_deref());
         let keys = binding.keys.join(" ");
-        match rows
+        let found = by_action
+            .iter()
+            .position(|(i, l, p, _)| *i == index && *l == label && *p == place);
+        let row = if let Some(row) = found {
+            row
+        } else {
+            by_action.push((index, label, place, Vec::new()));
+            by_action.len() - 1
+        };
+        let actions = &mut by_action[row].3;
+        if actions.iter().any(|(_, known)| known.contains(&keys)) {
+            continue;
+        }
+        match actions
             .iter_mut()
-            .find(|(i, l, p, _)| *i == index && *l == label && *p == place)
+            .find(|(action, _)| *action == binding.action)
         {
-            Some((_, _, _, existing)) => {
-                if !existing.contains(&keys) {
-                    existing.push(keys);
-                }
-            }
-            None => rows.push((index, label, place, vec![keys])),
+            Some((_, known)) => known.push(keys),
+            None => actions.push((binding.action, vec![keys])),
         }
     }
+    let rows = by_action.into_iter().map(|(index, label, place, actions)| {
+        let longest = actions
+            .iter()
+            .map(|(_, keys)| keys.len())
+            .max()
+            .unwrap_or(0);
+        let keys: Vec<String> = (0..longest)
+            .flat_map(|at| actions.iter().filter_map(move |(_, keys)| keys.get(at)))
+            .cloned()
+            .collect();
+        (index, label, place, keys)
+    });
     // The same keys for the same thing in several places: one row.
     let mut merged: Vec<(usize, String, String, Vec<String>)> = Vec::new();
     for (index, label, place, keys) in rows {
@@ -539,7 +572,7 @@ mod tests {
         assert_eq!(rows[0].place, "anywhere");
         assert_eq!(rows[1].keys, ["ctrl-1", "ctrl-9"]);
         assert!(rows[1].range);
-        assert_eq!(rows[2].keys, ["j", "↓", "k"]);
+        assert_eq!(rows[2].keys, ["j", "k", "↓"], "first keys first");
         assert_eq!(rows[2].place, "list");
         assert_eq!(rows[3].place, "list, pane", "the same keys in two places");
         assert_eq!(rows[4].keys, ["ctrl-g g"], "a sequence is one key hint");

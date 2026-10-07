@@ -419,6 +419,11 @@ fn move_url_into_urls(environment: &mut Table) {
 /// moves there. An `appearance.theme` already in the file wins (a file
 /// edited by hand after a newer icygui wrote it); a `general` that isn't
 /// a table is left for reading to report.
+///
+/// rc1 wrote `theme = "dark"` into every file, its default, but had no way
+/// to choose a theme: that value is no one's choice and is dropped, so an
+/// upgraded file follows the system like a new one. `light` and `system`
+/// can only come from an edit by hand and move as they are.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "every migration step has the same signature"
@@ -430,6 +435,9 @@ fn v2_to_v3(table: &mut Table) -> Result<(), ConfigError> {
     let Some(theme) = general.remove("theme") else {
         return Ok(());
     };
+    if theme.as_str() == Some("dark") {
+        return Ok(());
+    }
     // An `appearance` that isn't a table can't take it: reading reports
     // that one.
     if let Value::Table(appearance) = table
@@ -682,9 +690,31 @@ mod tests {
         // A `general` or `appearance` that isn't a table is reported, not
         // rewritten.
         assert!(parse_config("version = 2\ngeneral = 3\n").is_err());
-        let mut odd = table("version = 2\nappearance = 3\n[general]\ntheme = \"dark\"\n");
+        let mut odd = table("version = 2\nappearance = 3\n[general]\ntheme = \"light\"\n");
         v2_to_v3(&mut odd).unwrap();
         assert_eq!(odd["appearance"].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn rc1s_dark_default_becomes_follow_system() {
+        // rc1 wrote its default into every file and had no theme control:
+        // an upgraded file follows the system, as a new one does.
+        let parsed =
+            parse_config("version = 2\n\n[general]\ntheme = \"dark\"\nclose_to_tray = false\n")
+                .unwrap();
+        assert_eq!(parsed.config.appearance.theme, crate::ThemeChoice::System);
+        assert!(!parsed.config.general.close_to_tray, "the rest stays");
+        assert!(parsed.unknown_keys.is_empty(), "{:?}", parsed.unknown_keys);
+        let mut upgraded = table("version = 2\n[general]\ntheme = \"dark\"\n");
+        v2_to_v3(&mut upgraded).unwrap();
+        assert!(upgraded.get("appearance").is_none(), "{upgraded:?}");
+        assert!(upgraded["general"].as_table().unwrap().is_empty());
+        // A theme chosen by hand moves as it is.
+        let parsed = parse_config("version = 2\n[general]\ntheme = \"system\"\n").unwrap();
+        assert_eq!(parsed.config.appearance.theme, crate::ThemeChoice::System);
+        // A version 3 file's own `dark` is a choice made in the panel.
+        let parsed = parse_config("version = 3\n[appearance]\ntheme = \"dark\"\n").unwrap();
+        assert_eq!(parsed.config.appearance.theme, crate::ThemeChoice::Dark);
     }
 
     #[test]

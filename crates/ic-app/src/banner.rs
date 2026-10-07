@@ -18,11 +18,18 @@ use ic_ui_kit::{
 use crate::actions::{EditEnvironment, RestartEngine, ReviewCertificate};
 use crate::app_state::{AppState, ConnectionNotice, NoticeAction, NoticeKind, Tone};
 
-/// The banners to show over a list or tab at `now`.
-pub(crate) fn banners(state: &Entity<AppState>, now: Timestamp, cx: &App) -> Vec<AnyElement> {
+/// The banners to show over a list or tab at `now`. `with_connection`
+/// false leaves out the connection's: the body already shows it (UI-05),
+/// but a notice or a settings problem still needs its banner.
+pub(crate) fn banners(
+    state: &Entity<AppState>,
+    now: Timestamp,
+    with_connection: bool,
+    cx: &App,
+) -> Vec<AnyElement> {
     let current = state.read(cx);
     let mut banners = Vec::new();
-    if let Some(notice) = current.connection_notice(now) {
+    if with_connection && let Some(notice) = current.connection_notice(now) {
         banners.push(connection_banner(state, &notice).into_any_element());
     }
     if let Some(error) = current.save_error() {

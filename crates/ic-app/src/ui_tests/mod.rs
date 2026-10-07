@@ -1145,3 +1145,29 @@ fn a_cursor_whose_object_left_takes_no_action() {
         assert_eq!(request.targets, [app.row_key(cx, 1)]);
     });
 }
+
+/// The selection bar's buttons stay where they are when the count gains a
+/// digit (`9 selected` → `10 selected`): the count has a fixed slot.
+#[test]
+fn the_selection_bar_buttons_stay_put_as_the_count_grows() {
+    let options = FixtureOptions { generated_rows: 30 };
+    run(options, |app, cx| {
+        assert!(app.rows(cx).len() >= 10);
+        app.keys(cx, "x");
+        for _ in 0..8 {
+            app.keys(cx, "shift-j");
+        }
+        assert_eq!(app.marked(cx).len(), 9);
+        let buttons_x = |app: &Harness, cx: &App| {
+            app.dashboard(cx)
+                .read(cx)
+                .selection_buttons_x
+                .get()
+                .unwrap()
+        };
+        let nine = buttons_x(app, cx);
+        app.keys(cx, "shift-j");
+        assert_eq!(app.marked(cx).len(), 10);
+        assert_eq!(buttons_x(app, cx), nine, "the buttons didn't move");
+    });
+}

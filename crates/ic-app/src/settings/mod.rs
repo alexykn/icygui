@@ -28,18 +28,22 @@
 
 pub(crate) mod about;
 mod files;
+mod keyboard;
 mod model;
 mod pages;
 mod rows;
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EventEmitter,
+    Action, AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, Entity, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
-    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _,
+    ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    prelude::FluentBuilder as _,
 };
 use ic_config::{Appearance, General};
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
@@ -51,6 +55,9 @@ use ic_ui_kit::{
 use self::files::LogSummary;
 #[cfg(test)]
 pub(crate) use self::files::OPENED;
+use self::keyboard::{
+    CONTROL_CONTEXT, ControlActivate, ControlNext, ControlPrevious, Region, Stop,
+};
 pub(crate) use self::model::{FieldId, RuleFlag, ScopeKey, SettingsPage};
 use self::model::{
     PageMatches, Section, Setting, format_clock, format_min_duration, matching_settings,
@@ -72,6 +79,8 @@ pub(crate) const PANEL_WIDTH: f32 = 1080.;
 const PANEL_HEIGHT: f32 = 760.;
 /// The navigation's width.
 const NAV_WIDTH: f32 = 248.;
+/// A page narrower than this has a narrow header (see `render_header`).
+const NARROW_PAGE: f32 = 720.;
 /// The default reconcile interval offered when switching from adaptive.
 const FIXED_RECONCILE_DEFAULT: u32 = 600;
 
@@ -110,6 +119,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
     let panel = Some(SETTINGS_CONTEXT);
     let nav = Some(NAV_CONTEXT);
     let field = Some("SettingsPanel > Input");
+    let control = Some(CONTROL_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("secondary-shift-e", FocusNavbar, panel),
         KeyBinding::new("secondary-f", FocusSettingsSearch, panel),
@@ -117,8 +127,14 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", NavNext, nav),
         KeyBinding::new("up", NavPrevious, nav),
         KeyBinding::new("enter", NavOpen, nav),
+        KeyBinding::new("tab", NextField, panel),
+        KeyBinding::new("shift-tab", PreviousField, panel),
         KeyBinding::new("tab", NextField, field),
         KeyBinding::new("shift-tab", PreviousField, field),
+        KeyBinding::new("space", ControlActivate, control),
+        KeyBinding::new("enter", ControlActivate, control),
+        KeyBinding::new("right", ControlNext, control),
+        KeyBinding::new("left", ControlPrevious, control),
     ]);
 }
 
@@ -230,7 +246,18 @@ pub(crate) struct SettingsPanel {
     /// The keymap filter, normalized.
     keymap_query: String,
     inputs: BTreeMap<FieldId, Entity<InputState>>,
+    /// What each field showed of its setting when it last showed it: a
+    /// field whose setting didn't change since keeps what is typed in it.
+    synced: BTreeMap<FieldId, String>,
     errors: BTreeMap<FieldId, String>,
+    /// Where Tab stops, as drawn in the last frame.
+    stops: RefCell<Vec<Stop>>,
+    /// The controls' focus handles, by control.
+    control_handles: RefCell<HashMap<SharedString, FocusHandle>>,
+    /// Where each stop was drawn last.
+    stop_bounds: Rc<RefCell<HashMap<SharedString, Bounds<Pixels>>>>,
+    /// The control with the keyboard while it is in use (its ring).
+    keyboard_on: RefCell<Option<SharedString>>,
     scroll: ScrollHandle,
     /// The sections drawn last, in order (the scroll handle's items).
     drawn_sections: Vec<Section>,
@@ -257,6 +284,10 @@ impl Focusable for SettingsPanel {
 
 impl SettingsPanel {
     /// The panel on `page`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the panel's fields, subscriptions and first reads, in order"
+    )]
     pub(crate) fn new(
         state: Entity<AppState>,
         page: SettingsPage,
@@ -333,7 +364,12 @@ impl SettingsPanel {
             keymap_filter,
             keymap_query: String::new(),
             inputs: BTreeMap::new(),
+            synced: BTreeMap::new(),
             errors: BTreeMap::new(),
+            stops: RefCell::new(Vec::new()),
+            control_handles: RefCell::new(HashMap::new()),
+            stop_bounds: Rc::new(RefCell::new(HashMap::new())),
+            keyboard_on: RefCell::new(None),
             scroll: ScrollHandle::new(),
             drawn_sections: Vec::new(),
             menus: OpenMenu::default(),
@@ -393,6 +429,12 @@ impl SettingsPanel {
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn input(&self, id: &FieldId) -> Option<&Entity<InputState>> {
         self.inputs.get(id)
+    }
+
+    /// Whether a dropdown is open.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn menu_open(&self) -> bool {
+        self.menus.current().is_some()
     }
 
     /// Whether this desktop shows tray icons, once known.
@@ -487,6 +529,7 @@ impl SettingsPanel {
         if active != self.environment
             && let Some(id) = active
         {
+            self.commit_pending(window, cx);
             self.set_environment(&id, window, cx);
         }
         self.show_page(SettingsPage::Notifications, window, cx);
@@ -515,14 +558,18 @@ impl SettingsPanel {
     }
 
     fn on_nav_open(&mut self, _: &NavOpen, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus_handle, cx);
-        cx.notify();
+        self.focus_page(window, cx);
     }
 
-    /// Escape: an open dropdown closes, a search clears, else the panel
-    /// closes.
+    /// Escape: an open dropdown closes, the keymap filter or a search
+    /// clears, else the panel closes.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menus.close() {
+            cx.notify();
+        } else if !self.keymap_query.is_empty() && self.page == SettingsPage::Keymap {
+            self.keymap_filter
+                .update(cx, |filter, cx| filter.set_value("", window, cx));
+            self.keymap_query.clear();
             cx.notify();
         } else if !self.query.is_empty() {
             self.search
@@ -541,82 +588,6 @@ impl SettingsPanel {
 
     fn on_field_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         self.escape(window, cx);
-    }
-
-    /// The text fields shown, in order (Tab moves through them).
-    fn visible_inputs(&self, cx: &App) -> Vec<Entity<InputState>> {
-        let mut inputs = vec![self.search.clone()];
-        if !self.query.is_empty() {
-            return inputs;
-        }
-        let general = self.state.read(cx).config().general.clone();
-        let ids: Vec<FieldId> = match self.page {
-            SettingsPage::Icinga => {
-                let mut ids = Vec::new();
-                if general.reconcile_interval_secs != 0 {
-                    ids.push(FieldId::Reconcile);
-                }
-                ids.push(FieldId::Retention);
-                ids
-            }
-            SettingsPage::Notifications => {
-                let plan = self.plan(cx);
-                let mut ids = vec![FieldId::MinDuration(ScopeKey::Environment)];
-                if plan
-                    .as_ref()
-                    .is_some_and(|plan| plan.settings.quiet_hours.enabled)
-                {
-                    ids.extend([FieldId::QuietStart, FieldId::QuietEnd]);
-                }
-                ids.extend([FieldId::StormThreshold, FieldId::StormWindow]);
-                if let Some(plan) = plan {
-                    ids.extend(
-                        plan.rule_scopes()
-                            .into_iter()
-                            .skip(1)
-                            .map(FieldId::MinDuration),
-                    );
-                }
-                ids
-            }
-            SettingsPage::Keymap => {
-                inputs.push(self.keymap_filter.clone());
-                Vec::new()
-            }
-            _ => Vec::new(),
-        };
-        inputs.extend(ids.iter().filter_map(|id| self.inputs.get(id).cloned()));
-        inputs
-    }
-
-    /// Tab and Shift-Tab: the field left applies (as leaving it with the
-    /// mouse does), the next one gets the keyboard.
-    fn move_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let inputs = self.visible_inputs(cx);
-        let count = inputs.len();
-        let current = inputs
-            .iter()
-            .position(|input| input.focus_handle(cx).is_focused(window));
-        if let Some(index) = current
-            && let Some(id) = self.field_of(&inputs[index])
-        {
-            self.commit(&id, window, cx);
-        }
-        let next = match (current, forward) {
-            (Some(index), true) => (index + 1) % count,
-            (Some(index), false) => (index + count - 1) % count,
-            (None, true) => 0,
-            (None, false) => count - 1,
-        };
-        inputs[next].focus_handle(cx).focus(window, cx);
-    }
-
-    /// Which field an input is.
-    fn field_of(&self, input: &Entity<InputState>) -> Option<FieldId> {
-        self.inputs
-            .iter()
-            .find(|(_, each)| *each == input)
-            .map(|(id, _)| id.clone())
     }
 
     /// Applies every field whose text differs from the setting (the panel
@@ -695,6 +666,24 @@ impl SettingsPanel {
             .notification_plan_of(self.environment.as_deref()?)
     }
 
+    /// The environment dropdown (or ← → on it) chose `id`: what is typed
+    /// for the page's environment applies to it first; a value that
+    /// doesn't read keeps its problem shown and the page where it is.
+    pub(crate) fn choose_environment(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_pending(window, cx);
+        if !self.errors.is_empty() {
+            self.menus.close();
+            cx.notify();
+            return;
+        }
+        self.set_environment(id, window, cx);
+    }
+
     /// Shows the notification rules of environment `id`.
     pub(crate) fn set_environment(
         &mut self,
@@ -711,15 +700,19 @@ impl SettingsPanel {
         self.inputs.retain(
             |field, _| !matches!(field, FieldId::MinDuration(key) if *key != ScopeKey::Environment),
         );
+        self.synced.retain(
+            |field, _| !matches!(field, FieldId::MinDuration(key) if *key != ScopeKey::Environment),
+        );
         self.errors.clear();
         self.load_fields(window, cx);
         cx.notify();
     }
 
     /// The settings changed elsewhere (the settings file taken over, an
-    /// environment deleted): a field not being typed in shows the setting
-    /// again, and the notifications page moves to the environment on
-    /// screen when its own is gone.
+    /// environment deleted): a field whose setting changed shows it again
+    /// unless it is being typed in (a field holding a value not yet
+    /// applied keeps it), and the notifications page moves to the
+    /// environment on screen when its own is gone.
     fn follow_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let gone = self
             .environment
@@ -737,19 +730,17 @@ impl SettingsPanel {
                 self.environment = None;
             }
         }
-        let stale: Vec<(FieldId, String)> = self
+        let stale: Vec<FieldId> = self
             .inputs
             .iter()
             .filter(|(id, input)| {
                 !self.errors.contains_key(*id) && !input.focus_handle(cx).is_focused(window)
             })
-            .filter_map(|(id, _)| {
-                let stored = self.stored_text(id, cx);
-                (self.text(id, cx) != stored).then(|| (id.clone(), stored))
-            })
+            .filter(|(id, _)| self.synced.get(*id) != Some(&self.stored_text(id, cx)))
+            .map(|(id, _)| id.clone())
             .collect();
-        for (id, text) in stale {
-            self.set_text(&id, text, window, cx);
+        for id in stale {
+            self.show_stored(&id, window, cx);
         }
     }
 
@@ -843,8 +834,7 @@ impl SettingsPanel {
             return;
         }
         self.add_input(id.clone(), window, cx);
-        let text = self.stored_text(&id, cx);
-        self.set_text(&id, text, window, cx);
+        self.show_stored(&id, window, cx);
     }
 
     /// Adds the fields of the custom rules shown (before drawing them).
@@ -870,6 +860,15 @@ impl SettingsPanel {
         if let Some(input) = self.inputs.get(id) {
             input.update(cx, |input, cx| input.set_value(text, window, cx));
         }
+    }
+
+    /// Shows the stored setting in a field.
+    fn show_stored(&mut self, id: &FieldId, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.stored_text(id, cx);
+        if self.text(id, cx) != text {
+            self.set_text(id, text.clone(), window, cx);
+        }
+        self.synced.insert(id.clone(), text);
     }
 
     /// What a field shows for the stored setting.
@@ -907,8 +906,7 @@ impl SettingsPanel {
     fn load_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ids: Vec<FieldId> = self.inputs.keys().cloned().collect();
         for id in ids {
-            let text = self.stored_text(&id, cx);
-            self.set_text(&id, text, window, cx);
+            self.show_stored(&id, window, cx);
         }
     }
 
@@ -969,10 +967,7 @@ impl SettingsPanel {
             }
         }
         // The field shows the value as stored (`5m` for `300`).
-        let text = self.stored_text(id, cx);
-        if text != self.text(id, cx) {
-            self.set_text(id, text, window, cx);
-        }
+        self.show_stored(id, window, cx);
         cx.notify();
     }
 
@@ -998,6 +993,8 @@ impl SettingsPanel {
                 });
                 return;
             }
+            // What the file holds now, so only an edit counts as one.
+            self.state.read(cx).settings_read(&config);
         }
         files::open(&path, cx);
     }
@@ -1055,7 +1052,13 @@ impl SettingsPanel {
         clippy::too_many_lines,
         reason = "the navigation's three parts, each a few builder calls"
     )]
-    fn render_nav(&self, theme: &Theme, facts: &pages::Facts, cx: &Context<Self>) -> AnyElement {
+    fn render_nav(
+        &self,
+        theme: &Theme,
+        facts: &pages::Facts,
+        nav_focused: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let colors = theme.colors;
         let searching = !self.query.is_empty();
         let in_view = self.section_in_view();
@@ -1085,6 +1088,7 @@ impl SettingsPanel {
             list = list.child(
                 div()
                     .id(SharedString::from(format!("settings-nav-{}", page.label())))
+                    .relative()
                     .flex()
                     .flex_none()
                     .items_center()
@@ -1108,6 +1112,19 @@ impl SettingsPanel {
                                 .text_size(theme.text.label)
                                 .text_color(colors.text_muted)
                                 .child(count.to_string()),
+                        )
+                    })
+                    // While the navigation has the keyboard, the open
+                    // category says so with the focus ring.
+                    .when(active && nav_focused, |item| {
+                        item.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .border_1()
+                                .border_color(colors.accent),
                         )
                     })
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1168,6 +1185,9 @@ impl SettingsPanel {
             .flex_none()
             .w(px(NAV_WIDTH))
             .h_full()
+            // The card clips square: the corners its fill touches are
+            // rounded like the card (inside its border).
+            .rounded_l(theme.metrics.modal_radius - px(1.))
             .bg(colors.sidebar_background)
             .border_r_1()
             .border_color(colors.border_split)
@@ -1249,7 +1269,20 @@ impl SettingsPanel {
             .into_any_element()
     }
 
-    fn render_header(&self, theme: &Theme, facts: &pages::Facts, cx: &Context<Self>) -> AnyElement {
+    /// The page's header. `narrow`: the page is too narrow for every
+    /// word of it, and *edit in settings file* shows as its icon (its
+    /// words in the tooltip), so the close button always fits.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the header's parts: title, status, edit button and close, each a few builder calls"
+    )]
+    fn render_header(
+        &self,
+        theme: &Theme,
+        facts: &pages::Facts,
+        narrow: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let colors = theme.colors;
         let searching = !self.query.is_empty();
         let (title, subtitle) = if searching {
@@ -1267,11 +1300,33 @@ impl SettingsPanel {
         };
         let keymap = !searching && self.page == SettingsPage::Keymap;
         let save_error = self.state.read(cx).save_error().map(str::to_owned);
+        let file_error = self.state.read(cx).file_error().map(str::to_owned);
         let status: AnyElement = if self.demo && !keymap {
             div()
+                .id("settings-demo-status")
+                .flex_none()
                 .text_size(theme.text.small)
                 .text_color(colors.text_faint)
-                .child("the demo saves nothing")
+                .child("demo · not saved")
+                .tooltip(Tooltip::new("The demo saves nothing").builder())
+                .into_any_element()
+        } else if let Some(error) = file_error.filter(|_| !keymap) {
+            div()
+                .id("settings-file-error")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(6.))
+                .text_size(theme.text.small)
+                .text_color(theme.states.text.critical)
+                .child(Icon::new(IconName::TriangleAlert).size(px(12.)))
+                .child("file has errors")
+                .tooltip(
+                    Tooltip::new(format!(
+                        "{error}. Nothing is written over the file until it reads again."
+                    ))
+                    .builder(),
+                )
                 .into_any_element()
         } else if let Some(error) = save_error {
             div()
@@ -1296,25 +1351,74 @@ impl SettingsPanel {
                 .child("saved")
                 .into_any_element()
         };
-        let edit = if keymap {
-            Button::new("settings-edit-keymap", "edit keymap file")
-                .icon(IconName::FileCode)
-                .disabled(self.locations.keymap_file.is_none())
-                .tooltip(Tooltip::new(
-                    "Opens keymap.toml in your editor; changes apply when you come back",
-                ))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.edit_keymap_file(cx)))
+        let (id, label, tooltip, disabled, open): (_, _, _, _, keyboard::Activate) = if keymap {
+            (
+                "settings-edit-keymap",
+                "edit keymap file",
+                "Opens keymap.toml in your editor; changes apply when you come back",
+                self.locations.keymap_file.is_none(),
+                Rc::new(|this, _, cx| this.edit_keymap_file(cx)),
+            )
         } else {
-            Button::new("settings-edit-file", "edit in settings file")
-                .icon(IconName::FileCode)
-                .disabled(self.locations.settings_file.is_none())
-                .tooltip(Tooltip::new(if self.demo {
+            (
+                "settings-edit-file",
+                "edit in settings file",
+                if self.demo {
                     "The demo has no settings file"
                 } else {
                     "Opens config.toml in your editor"
-                }))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.edit_settings_file(cx)))
+                },
+                self.locations.settings_file.is_none(),
+                Rc::new(|this, _, cx| this.edit_settings_file(cx)),
+            )
         };
+        let edit = if narrow {
+            let click = open.clone();
+            let button = IconButton::new(id, IconName::FileCode)
+                .color(colors.text_muted)
+                .disabled(disabled)
+                .tooltip(Tooltip::new(format!("{label}: {tooltip}")))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    click(this, window, cx);
+                }));
+            if disabled {
+                button.into_any_element()
+            } else {
+                self.focusable_in(id, button, open, None, Region::Header, theme, cx)
+            }
+        } else {
+            self.button(
+                id,
+                disabled,
+                Button::new(id, label)
+                    .icon(IconName::FileCode)
+                    .disabled(disabled)
+                    .tooltip(Tooltip::new(tooltip)),
+                open,
+                Region::Header,
+                theme,
+                cx,
+            )
+        };
+        let close: keyboard::Activate = Rc::new(|this, window, cx| {
+            this.commit_pending(window, cx);
+            cx.emit(SettingsEvent::Close);
+        });
+        let click = close.clone();
+        let close = self.focusable_in(
+            "settings-close",
+            IconButton::new("settings-close", IconName::Close)
+                .color(colors.text_muted)
+                .tooltip(Tooltip::new("Close").key("esc"))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    click(this, window, cx);
+                })),
+            close,
+            None,
+            Region::Header,
+            theme,
+            cx,
+        );
         div()
             .flex()
             .flex_none()
@@ -1338,15 +1442,7 @@ impl SettingsPanel {
             )
             .child(status)
             .child(edit)
-            .child(
-                IconButton::new("settings-close", IconName::Close)
-                    .color(colors.text_muted)
-                    .tooltip(Tooltip::new("Close").key("esc"))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.commit_pending(window, cx);
-                        cx.emit(SettingsEvent::Close);
-                    })),
-            )
+            .child(close)
             .into_any_element()
     }
 
@@ -1378,13 +1474,24 @@ impl Render for SettingsPanel {
         let theme = cx.theme().clone();
         let facts = self.facts(cx);
         let viewport = window.viewport_size();
+        // Where Tab stops is recorded as the panel draws.
+        self.stops.borrow_mut().clear();
+        self.add_stop(
+            "settings-search".into(),
+            self.search.focus_handle(cx),
+            Region::Search,
+        );
+        self.note_keyboard_focus(window);
+        let nav_focused = self.nav_focus.is_focused(window) && window.last_input_was_keyboard();
         let height = px(PANEL_HEIGHT)
             .min(viewport.height - px(64.))
             .max(px(320.));
         let (blocks, sections) = self.render_content(&theme, &facts, cx);
         self.drawn_sections = sections;
-        let nav = self.render_nav(&theme, &facts, cx);
-        let header = self.render_header(&theme, &facts, cx);
+        let nav = self.render_nav(&theme, &facts, nav_focused, cx);
+        // The card's width as the modal sizes it, less the navigation.
+        let page_width = px(PANEL_WIDTH).min(viewport.width - px(32.)) - px(NAV_WIDTH);
+        let header = self.render_header(&theme, &facts, page_width < px(NARROW_PAGE), cx);
         let scroll = self.scroll.clone();
         div()
             .id("settings-panel")
@@ -1400,6 +1507,7 @@ impl Render for SettingsPanel {
             .w_full()
             .max_w(px(PANEL_WIDTH))
             .h(height)
+            .rounded(theme.metrics.modal_radius - px(1.))
             .bg(theme.colors.window_background)
             .child(nav)
             .child(

@@ -1,11 +1,13 @@
 //! The settings file edited by hand (*edit in settings file* in the
-//! settings panel): when the window comes back to the front and the file
-//! reads differently from what icygui last read or wrote there, its
-//! settings are taken over at once, as a change in the panel would be.
+//! settings panel): when the window comes back to the front, or before
+//! icygui writes the file, and the file reads differently from what icygui
+//! last read or wrote there, its settings are taken over at once, as a
+//! change in the panel would be.
 //!
-//! Only a real edit counts: a save of icygui's own that is still queued
-//! leaves the file as icygui last wrote it, so it never undoes a newer
-//! change made in the window.
+//! Only a real edit counts, and it is merged with what changed in the
+//! window meanwhile ([`ic_config::merge_edit`]): a change made in the
+//! window and not yet written stays (on the same setting it wins), so
+//! neither side undoes the other. The merge is then written back.
 
 use ic_config::Config;
 use ic_core::Command;
@@ -25,6 +27,8 @@ pub(crate) struct FileChanges {
     pub(crate) removed: Vec<(String, Option<Box<dyn CoreLink>>)>,
     /// Environments new in the file: their engines start.
     pub(crate) added: Vec<String>,
+    /// *Start at login* changed to this: the login entry follows.
+    pub(crate) launch_at_login: Option<bool>,
 }
 
 impl AppState {
@@ -42,19 +46,34 @@ impl AppState {
         }
     }
 
-    /// Takes over settings edited in the file: app-wide settings and the
-    /// appearance at once, every environment's dashboards and rules in
-    /// place (its engine told), a changed connection by a restart. The
-    /// environment on screen stays on screen while it exists. Returns
-    /// what the engines need (the caller does it), or `None` when the file
-    /// holds what icygui has.
-    pub(crate) fn take_settings_from_file(&mut self, mut file: Config) -> Option<FileChanges> {
-        self.settings_read(&file);
+    /// Takes over settings edited in the file (`theirs`; `known` is what
+    /// icygui last read or wrote there, `None` when it doesn't know):
+    /// merged with the changes made in the window since `known`, then
+    /// app-wide settings and the appearance at once, every environment's
+    /// dashboards and rules in place (its engine told), a changed
+    /// connection by a restart. The environment on screen stays on screen
+    /// while it exists. The merge is written back to the file (a save
+    /// that finds the file already holding it writes nothing). Returns what
+    /// the engines need (the caller does it), or `None` when nothing
+    /// changes in the window.
+    pub(crate) fn take_settings_from_file(
+        &mut self,
+        theirs: Config,
+        known: Option<&Config>,
+    ) -> Option<FileChanges> {
+        self.settings_read(&theirs);
+        let mut file = match known {
+            Some(known) => ic_config::merge_edit(known, &self.config, &theirs),
+            None => theirs,
+        };
         // The file says which environment was on screen when icygui last
         // wrote it; the window keeps showing the one it shows.
         let active = self.config.active_environment.clone();
         file.active_environment.clone_from(&active);
         if file == self.config {
+            // Changes of the window's that the file lacks (a save refused
+            // while the file was being edited) go into it.
+            self.save_config();
             return None;
         }
         tracing::info!("the settings file was edited; taking it over");
@@ -95,6 +114,9 @@ impl AppState {
             .filter(|environment| old.environment(&environment.id).is_none())
             .map(|environment| environment.id.clone())
             .collect();
+        if old.general.launch_at_login != self.config.general.launch_at_login {
+            changes.launch_at_login = Some(self.config.general.launch_at_login);
+        }
         if old.general != self.config.general {
             let general = self.config.general.clone();
             self.send_to_every_engine(|| Command::UpdateGeneral(general.clone()));
@@ -122,9 +144,9 @@ impl AppState {
             self.forget_window_requests();
             self.restore_environment_ui();
             self.announce_active();
-            // Which one is on screen is the app's to write down.
-            self.save_config();
         }
+        // The merge, and which environment is on screen, go into the file.
+        self.save_config();
         self.save_ui();
         Some(changes)
     }
@@ -132,7 +154,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use ic_config::{InterfaceSize, LogLevel};
+    use ic_config::{InterfaceSize, LogLevel, RowDensity};
 
     use super::*;
     use crate::app_state::testing::Recorder;
@@ -148,7 +170,7 @@ mod tests {
     fn a_file_like_icyguis_own_changes_nothing() {
         let (mut state, recorder) = connected();
         let file = state.config().clone();
-        assert!(state.take_settings_from_file(file).is_none());
+        assert!(state.take_settings_from_file(file, None).is_none());
         assert!(recorder.sent().is_empty());
     }
 
@@ -163,7 +185,7 @@ mod tests {
         // The file names another environment on screen: the window keeps
         // its own.
         file.active_environment = None;
-        let changes = state.take_settings_from_file(file).unwrap();
+        let changes = state.take_settings_from_file(file, None).unwrap();
         assert!(changes.reconnect.is_empty() && changes.added.is_empty());
         assert!(changes.removed.is_empty());
         assert_eq!(state.appearance().interface_size, InterfaceSize::Large);
@@ -187,6 +209,38 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_is_merged_with_the_windows_unsaved_changes() {
+        let (mut state, _recorder) = connected();
+        let known = state.config().clone();
+        // Changed in the window, not yet written.
+        let mut appearance = *state.appearance();
+        appearance.row_density = RowDensity::Compact;
+        state.set_appearance(appearance);
+        // Edited by hand meanwhile.
+        let mut file = known.clone();
+        file.general.event_log_retention_hours = 100;
+        file.general.launch_at_login = !known.general.launch_at_login;
+        let changes = state.take_settings_from_file(file, Some(&known)).unwrap();
+        assert_eq!(state.config().general.event_log_retention_hours, 100);
+        assert_eq!(state.appearance().row_density, RowDensity::Compact);
+        assert_eq!(
+            changes.launch_at_login,
+            Some(!known.general.launch_at_login),
+            "the login entry follows the file"
+        );
+        // The file as icygui knows it now is the edited one.
+        let mut again = state.config().clone();
+        again.appearance.row_density = RowDensity::Comfortable;
+        assert!(
+            state
+                .take_settings_from_file(again.clone(), Some(&again))
+                .is_none(),
+            "a file that only lacks the window's own changes takes nothing over"
+        );
+        assert_eq!(state.appearance().row_density, RowDensity::Compact);
+    }
+
+    #[test]
     fn a_changed_connection_restarts_and_new_environments_start() {
         let (mut state, _recorder) = connected();
         let id = state.active_environment_id().unwrap().to_owned();
@@ -196,7 +250,7 @@ mod tests {
         staging.id = "staging".to_owned();
         staging.name = "staging".to_owned();
         file.environments.push(staging);
-        let changes = state.take_settings_from_file(file).unwrap();
+        let changes = state.take_settings_from_file(file, None).unwrap();
         assert_eq!(changes.reconnect, [id]);
         assert_eq!(changes.added, ["staging"]);
         assert_eq!(state.environments().len(), 2);
@@ -211,7 +265,7 @@ mod tests {
         staging.id = "staging".to_owned();
         staging.name = "staging".to_owned();
         file.environments = vec![staging];
-        let changes = state.take_settings_from_file(file).unwrap();
+        let changes = state.take_settings_from_file(file, None).unwrap();
         assert_eq!(changes.removed.len(), 1);
         assert_eq!(changes.removed[0].0, id);
         assert!(changes.removed[0].1.is_some(), "its engine's link, to stop");

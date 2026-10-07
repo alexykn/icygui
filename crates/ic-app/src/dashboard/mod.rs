@@ -106,6 +106,9 @@ pub(crate) struct DashboardView {
     /// The times the object rows built in the last frame show, for tests.
     #[cfg(test)]
     shown_times: Vec<String>,
+    /// Where the selection bar's buttons start, as last drawn, for tests.
+    #[cfg(test)]
+    pub(crate) selection_buttons_x: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
     /// The rows on screen without output, last asked for (or about to
     /// be), and in which wake of the environment (`AppState::wake`): after
     /// waking up from quiet mode they are asked for again.
@@ -138,6 +141,8 @@ impl DashboardView {
             visible: 0..0,
             #[cfg(test)]
             shown_times: Vec::new(),
+            #[cfg(test)]
+            selection_buttons_x: std::rc::Rc::default(),
             hydration_wanted: (Vec::new(), 0),
             hydrate_task: None,
             reveal: None,
@@ -872,11 +877,9 @@ impl DashboardView {
         } else {
             None
         };
-        let banners = if placeholder.is_some() {
-            Vec::new()
-        } else {
-            banner::banners(&self.state, now, cx)
-        };
+        // The placeholder shows the connection's problem itself; notices
+        // and settings problems still show over it.
+        let banners = banner::banners(&self.state, now, placeholder.is_none(), cx);
         let progress = if placeholder.is_some() {
             None
         } else {

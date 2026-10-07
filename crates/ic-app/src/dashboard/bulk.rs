@@ -23,6 +23,9 @@ use crate::operate::expression;
 /// The selection bar's height.
 pub(crate) const SELECTION_BAR_HEIGHT: f32 = 40.;
 
+/// The selection count's slot, in characters (`999 selected`).
+const COUNT_SLOT_CHARS: f32 = 12.;
+
 /// Below this list width the bar drops its key hints and shortens labels.
 const COMPACT_BELOW: f32 = 760.;
 
@@ -99,11 +102,33 @@ impl DashboardView {
                 .bg(colors.pane_background)
                 .text_size(theme.text.small)
                 .child(
+                    // A slot as wide as `999 selected`, so the buttons never
+                    // move when the count gains a digit.
                     div()
+                        .id("selection-count")
+                        .relative()
                         .flex_none()
                         .mr(px(4.))
+                        .min_w(theme.text.small * (COUNT_SLOT_CHARS * ic_ui_kit::CHAR_WIDTH))
                         .text_color(colors.accent)
-                        .child(format!("{} selected", marked.len())),
+                        .child(format!("{} selected", marked.len()))
+                        .map(|count| {
+                            // Where the slot ends (the buttons follow), for
+                            // tests.
+                            #[cfg(test)]
+                            let count = count.child({
+                                let probe = self.selection_buttons_x.clone();
+                                gpui::canvas(
+                                    move |bounds, _, _| probe.set(Some(bounds.right())),
+                                    |_, (), _, _| {},
+                                )
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                            });
+                            count
+                        }),
                 )
                 .children(buttons)
                 .child(self.selection_more(&marked, cx))

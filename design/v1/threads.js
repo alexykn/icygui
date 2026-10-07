@@ -128,7 +128,7 @@ const tModeSeg = (mode, { compact = false } = {}) => `<span class="seg${compact 
 // sort in its fixed slot, ···
 function tHeader({ title, subtitle, sort, mode = '', mine = false, kind = '', rows = null, eff = 'comfortable' }) {
   const dens = rows ? `<span style="margin-right:2px">${densityToggle({ v: rows, eff })}</span>` : '';
-  return listHeader({ title, subtitle, sort, sortCh: kind ? SORT_CH[kind] : 0, extra: `${mode ? tModeSeg(mode) : ''}<span style="margin-right:6px">${sw(mine, 'only mine')}</span>${dens}` });
+  return listHeader({ title, subtitle, sort, extra: `${mode ? tModeSeg(mode) : ''}<span style="margin-right:6px">${sw(mine, 'only mine')}</span>${dens}` });
 }
-// the controls of a stacked view (in its view header): chips, then the mode switch
-const tStackedControls = (chips, sel, mode = '', { narrow = false } = {}) => `<span class="vctl">${tChipRow(chips, sel, { narrow })}${mode ? tModeSeg(mode, { compact: true }) : ''}</span>`;
+// the mode switch first, then the chips, which take the counts' place next to the sort
+const tStackedControls = (chips, sel, mode = '', { narrow = false } = {}) => `<span class="vctl">${mode ? tModeSeg(mode, { compact: true }) : ''}${tChipRow(chips, sel, { narrow })}</span>`;

@@ -39,7 +39,7 @@ function page({ sel = -1, evSel = -1, collapsed = [], focus = 1, sortOpen = fals
   return h;
 }
 
-shot('4a', '04-multi-view-a-dashboard', 'The databases dashboard with four views: summary tiles per host group, the failing database services as a list, a view with nothing to show (one header line, no empty box) and a live event stream for the database hosts. The cursor is in <i>failing services</i>, whose header has the accent bar. Each list view has a <b>handled slot</b> after its counts, in a fixed, right-aligned slot, with the summary bar’s wording and behaviour: <i>2 hidden · show</i> here (the settings hide handled problems). A view with nothing handled keeps the slot empty.',
+shot('4a', '04-multi-view-a-dashboard', 'The databases dashboard with four views: summary tiles per host group, the failing database services as a list, a view with nothing to show (one header line, no empty box) and a live event stream for the database hosts. The cursor is in <i>failing services</i>, whose header has the accent bar. Each header’s right side reads, from the right: <i>···</i>, the sort (sized to its word), the <b>counts</b> 16px from it in fixed per-state slots, then the list view’s <b>handled button</b>, left of the counts and right-aligned against them, with the summary bar’s wording and behaviour: <i>2 hidden · show</i> here (the settings hide handled problems). A view with nothing handled draws no button; its appearing would move nothing on its right.',
   appWindow(`<div class="col" style="min-height:0;overflow:hidden">${page({ sel: 0, focus: 1 })}</div>`, { activeItem: 'databases', groups: dbGroups }),
   { crops: '04-multi-view-a-headers-zoom:300,40,1140,240' });
 
@@ -51,8 +51,8 @@ const pane = `<div class="pane">${paneHeader('service')}<div class="pbody">
   ${perf([['connections_orders', '182', '180', '195', 'warn'], ['connections_billing', '41', '180', '195'], ['connections_analytics', '12', '90', '98']])}
   ${kv('check', [['command', 'check_postgres'], ['interval', '60s · retry 15s'], ['last / next', '41s ago / in 19s'], ['endpoint', 'sat-ams-01'], ['zone', 'ams'], ['attempt', 'soft 2/3']])}
 </div></div>`;
-const sortMenu = menu(['sort this view by', { label: 'severity', chk: true }, { label: 'last state change', chk: false }, { label: 'host', chk: false }, { label: 'service', chk: false }, '-', { label: 'descending', chk: true }, { label: 'ascending', chk: false }], { x: 370, y: 118, w: 200 });
-shot('4b', '04-multi-view-b-focus-and-pane', 'The tiles collapsed to their header (the counts stay). The list view’s <b>handled slot</b> was clicked: <i>2 handled · hide</i>, and its two handled problems show, hollow, with their tags; the counts beside it stay the same (they count unhandled problems). <i>replication lag</i> has nothing handled, so its slot is empty and its header lines up with the others. Tab moved the cursor into the event stream; Enter on an event opened its object in the pane, as from any row. The list view’s sort menu is open: each view sorts on its own. The views keep their headers when the pane narrows the list, and the filter summaries are cut first.',
+const sortMenu = menu(['sort by', { label: 'severity', chk: true }, { label: 'last state change', chk: false }, { label: 'host', chk: false }, { label: 'service', chk: false }, '-', { label: 'descending', chk: true }, { label: 'ascending', chk: false }], { anchor: '.vsort.sel', align: 'right' });
+shot('4b', '04-multi-view-b-focus-and-pane', 'The tiles collapsed to their header (the counts stay). The list view’s <b>handled slot</b> was clicked: <i>2 handled · hide</i>, and its two handled problems show, hollow, with their tags; the counts beside it stay the same (they count unhandled problems). <i>replication lag</i> has nothing handled, so it draws no button. Tab moved the cursor into the event stream; Enter on an event opened its object in the pane, as from any row. The list view’s sort menu is open: each view sorts on its own. The views keep their headers when the pane narrows the list, and the filter summaries are cut first.',
   appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 560px"><div class="col" style="position:relative;min-height:0;overflow:hidden">${page({ showHandled: true, evSel: 1, collapsed: [0], focus: 3, sortOpen: true })}${sortMenu}</div>${pane}</div>`, { activeItem: 'databases', groups: dbGroups }));
 
 // ---- the editor ---------------------------------------------------------
@@ -60,7 +60,7 @@ const VIEWS = [['tiles', 'clusters', '4 tiles'], ['list', 'failing services', '6
 function viewsList(sel, { menuOpen = -1 } = {}) {
   return VIEWS.map(([d, n, m], i) => `<div class="vrow${i === sel ? ' sel' : ''}"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon(DISPLAY_ICON[d], 13)}</span><span class="vn">${n}</span><span class="vm">${m}</span><span class="glyph${i === menuOpen ? ' sel' : ''}" style="font-size:12px">···</span></div>`).join('');
 }
-function inspector({ sel = 1, extra = '', viewSettings = true }) {
+function inspector({ sel = 1, extra = '', viewSettings = true, addOpen = false, sortOpen = false }) {
   const vs = VIEWS[sel];
   const settings = vs[0] === 'list' ? `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('list', 13)}list</span>`)}</div>
@@ -70,14 +70,14 @@ function inspector({ sel = 1, extra = '', viewSettings = true }) {
 service.problem<span class="caret" style="height:13px"></span></div></div>
     <div class="field"><div class="lab">show</div>${sw(true, 'problems only')}</div>
     ${handledField(0)}
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">sort</div>${select('severity')}</div><div class="field"><div class="lab">direction</div><span class="seg" style="display:flex"><span class="on" style="flex:1">↓ desc</span><span style="flex:1">↑ asc</span></span></div></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">sort</div>${sortOpen ? selectOpen('severity', ['severity', 'last state change', 'host', 'service'], { current: 'severity', focus: 'last state change', up: true }) : select('severity')}</div><div class="field"><div class="lab">direction</div><span class="seg" style="display:flex"><span class="on" style="flex:1">↓ desc</span><span style="flex:1">↑ asc</span></span></div></div>
     ${rowsField('default', 'comfortable')}` : '';
   return `<div class="pane" style="background:var(--win-bg)">
     <div class="hbar pane-h" style="padding:0 18px"><span class="title" style="font-size:13.5px">dashboard</span><span class="grow"></span><span class="right faint">4 views</span></div>
     <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
       ${dashFields('databases', 'overview', { mode: 'state', st: 'crit' })}
       <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px">${viewsList(sel, extra)}</div>
-        <div class="vadd">${icon('plus', 13)}add view</div></div>
+        <div class="vadd${addOpen ? ' open' : ''}">${icon('plus', 13)}add view</div></div>
       ${viewSettings ? `<div style="height:1px;flex:none;background:var(--bd-header);margin:0 -18px"></div>
       ${viewNameField(vs[1], `view ${sel + 1} of 4`)}${settings}` : ''}
     </div></div>`;
@@ -97,17 +97,11 @@ const editorMain = (focusView, insp, overlay = '') => `<div class="split" style=
 shot('4c', '04-multi-view-c-editor', 'The dashboard editor manages the views. The inspector lists them (drag handle, display icon, name, what each matches), with <i>add view</i> under the list. The selected view’s settings follow: its name, display, object type, filter, show, <b>handled</b>, sort and direction. <i>Handled</i> follows the settings’ defaults (2c) unless set on the view: <i>as in settings</i> (drawn: the kinds it hides, dim), <i>show</i>, or <i>hide</i> with the kinds to hide (acknowledged, in downtime, host down). The preview on the left is the whole dashboard; the selected view is marked only on its header, with the same accent bar that marks the focused view on a dashboard (4b) and a faint accent tint. Nothing is drawn around the view’s body. Clicking a view in the preview selects it in the inspector too.',
   appWindow(editorMain(1, inspector({ sel: 1 })), { activeItem: 'databases', groups: dbGroups }), { h: 960, crops: '04-multi-view-c-editor-inspector-zoom:1068,0,372,960' });
 
-const addMenu = menu(['add a view that shows',
-  { label: 'list', ic: 'list', det: 'one line per object' },
-  { label: 'grouped list', ic: 'rows-3', det: 'by host or group', hov: true },
-  { label: 'host-group grid', ic: 'layout-grid', det: 'hosts as squares, by group' },
-  { label: 'summary tiles', ic: 'chart-bar', det: 'counts per group' },
-  { label: 'event stream', ic: 'activity', det: 'changes, acks, downtimes' },
-], { x: 384, y: 346, w: 380 });  // beside the inspector, level with its add view row
-shot('4d', '04-multi-view-d-add-view', '<i>add view</i> asks for the display first. Each kind has a one-line description and its icon in the mark slot. The new view gets the dashboard’s filter as a starting point and is added under the selected view.',
-  appWindow(editorMain(1, inspector({ sel: 1 }), addMenu), { activeItem: 'databases', groups: dbGroups }), { h: 960, crops: '04-multi-view-d-add-view-inspector-zoom:1068,0,372,960' });
+const addMenu = layoutMenu({ focus: 'services by host' });
+shot('4d', '04-multi-view-d-add-view', '<i>add view</i> asks for the layout first: the layouts in three sections (lists, overviews, activity), each its icon and its name (the dropdown rule: no descriptions). The menu hangs from the pressed <i>add view</i> row, 4px below it, sized to its longest name. The new view gets the dashboard’s filter as a starting point and is added under the selected view.',
+  appWindow(editorMain(1, inspector({ sel: 1, addOpen: true }), addMenu), { activeItem: 'databases', groups: dbGroups }), { h: 960, crops: '04-multi-view-d-add-view-inspector-zoom:1068,0,372,960' });
 
-const moreMenu = menu([{ label: 'move up', key: 'alt-↑' }, { label: 'move down', key: 'alt-↓' }, { label: 'duplicate' }, { label: 'collapse by default', chk: false }, '-', { label: 'remove view', key: 'ctrl-⌫' }], { x: 902, y: 346, w: 220 });
+const moreMenu = menu([{ label: 'move up', key: 'alt-↑', chk: false }, { label: 'move down', key: 'alt-↓', chk: false }, { label: 'duplicate', chk: false }, { label: 'collapse by default', chk: false }, '-', { label: 'remove view', key: 'ctrl-⌫', chk: false }], { anchor: '.vrow .glyph.sel', align: 'right' });
 const streamSettings = `<div class="pane" style="background:var(--win-bg)">
   <div class="hbar pane-h" style="padding:0 18px"><span class="title">dashboard</span><span class="grow"></span><span class="right faint">4 views</span></div>
   <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
@@ -125,5 +119,13 @@ const streamSettings = `<div class="pane" style="background:var(--win-bg)">
   </div></div>`;
 shot('4e', '04-multi-view-e-reorder-remove', 'A view’s <i>···</i>: move up and down (or drag the handle, or alt-↑↓), duplicate, collapse by default, remove. Removing needs no confirmation in the editor; <i>discard</i> brings it back. Here the event stream view is selected, showing its own settings: which events, hard states only, and how many lines it shows before it scrolls.',
   appWindow(editorMain(3, streamSettings, moreMenu), { activeItem: 'databases', groups: dbGroups }), { crops: '04-multi-view-e-reorder-remove-inspector-zoom:1068,0,372,900' });
+
+// a name cut off at the field's width shows whole in a tooltip
+const cutTip = '<div class="tip" data-anchor=".sellist .mi.hov" style="left:0;top:0">last state change</div>';
+// 4f: an editor select open (the view's sort): the list opens from the field,
+// upward here, as there is no room below
+shot('4f', '04-multi-view-f-select-open', '<b>An editor select, open.</b> The view’s <i>sort</i>: the list opens <b>from the field</b>, exactly as wide, joined to it with no gap; here it opens <b>upward</b>, joined to the field’s top edge, because there is no room below. The field shows its open state (accent border, chevron flipped); the current value is ticked at the right, in the chevron’s column, so every name starts at the field’s text inset and <i>severity</i> sits over its own row; the keyboard focus is on <i>last state change</i>, cut off with an ellipsis at the field’s width and shown whole in a tooltip beside it. The README’s dropdown rules are the spec.',
+  appWindow(editorMain(1, inspector({ sel: 1, sortOpen: true }), cutTip), { activeItem: 'databases', groups: dbGroups }), { h: 960, crops: '04-multi-view-f-zoom:1040,640,400,260' });
+shot('4f-l', '04-multi-view-f-select-open-light', '<b>An editor select, open</b>, light.', appWindow(editorMain(1, inspector({ sel: 1, sortOpen: true }), cutTip), { activeItem: 'databases', groups: dbGroups }), { theme: 'light', h: 960 });
 </script>
 </body></html>

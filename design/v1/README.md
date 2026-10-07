@@ -23,7 +23,7 @@ answer.
 - `icons.js`: the Lucide icons the app uses (gpui-component's set), inline;
   `rows-2` and `rows-4` (the row-density toggle, topic 14) are NEW.
 - `settings.js` (the settings panel, topics 02, 03 and 12) and `views.js`
-  (dashboard views, topics 04, 05 and 12; the sort slot, the rows toggle,
+  (dashboard views, topics 04, 05 and 12; the view header, the rows toggle,
   the view's `···` and the editor's rows field, topic 14): parts shared by
   several topics.
 - `threads.js` (topic 14, round 2): the group band, the entry, the fold of a
@@ -52,8 +52,8 @@ per frame, plus `-zoom` crops of the details.
 | 01 | Downtimes in the panes | `01-downtimes.html` | 11 (+6 zooms) | approved: variant A, with revisions |
 | 02 | Settings panel | `02-settings.html` | 10 | approved; handled defaults added |
 | 03 | Light theme | `03-light-theme.html` | 5 | approved with revisions |
-| 04 | Multi-view dashboards | `04-multi-view.html` | 5 (+1) | approved; editor selection revised; view controls, sort slot and rows per view added (topic 14, round 5) |
-| 05 | Host-group grid | `05-hostgroup-grid.html` | 5 (+1) | approved; editor selection revised |
+| 04 | Multi-view dashboards | `04-multi-view.html` | 6 (+5 zooms, +1 light) | approved; editor selection revised; view controls, header right side and rows per view added (topic 14, round 5) |
+| 05 | Host-group grid | `05-hostgroup-grid.html` | 6 (+3 zooms, +1 light) | approved; editor selection revised |
 | 06 | Cluster health | `06-cluster-health.html` | 3 (+2) | approved; reached from the cluster section (topic 14) |
 | 07 | Comment, downtime and acknowledged lists | `07-comments-downtimes-lists.html` | 7 | revised and approved |
 | 08 | YAML sharing | `08-yaml-sharing.html` | 7 (+1) | approved with revisions |
@@ -115,10 +115,10 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
   bar keeps rc1's place for it, as a button in a fixed, right-aligned slot:
   `28 hidden · show`, and after a click `28 handled · hide`, saved with the
   view as rc1's toggle was (2j). On a multi-view dashboard (no summary bar)
-  every list or grouped-list **view header** has the same button in a fixed,
-  right-aligned slot after its counts (`2 hidden · show` / `2 handled ·
-  hide`, 4a, 4b); a view with nothing handled keeps the slot empty, so the
-  headers line up and nothing moves. Shown handled rows are hollow. Filters
+  every list or grouped-list **view header** has the same button **left of
+  its counts**, right-aligned against them (`2 hidden · show` / `2 handled ·
+  hide`, 4a, 4b); a view with nothing handled does not draw it, and its
+  appearing moves nothing on its right (the view-header rule below). Shown handled rows are hollow. Filters
   on `acknowledged` or `downtime_depth` still work; the switches apply on top.
 - **The per-state counts are unhandled counts**, in the summary bar and in
   every view header: show and hide never change them (2j keeps `4 critical`
@@ -162,11 +162,10 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
     filters the view, *all* clears it): handling's *acknowledged, in
     downtime, upcoming, comments*; downtimes' *in effect, upcoming, from
     config*. A list's per-state counts and its handled slot are the same in
-    both forms too (summary bar, or after the counts in the view header).
-  - **Sort is the same in both forms**: the view's own sort menu (4b), in a
-    **fixed slot sized for its kind's longest sort label**, right-aligned,
-    so a new sort changes only the word. In a tight stacked header the slot
-    gives way down to its word, after the filter summary is cut.
+    both forms too (summary bar, or the view header's counts with the
+    handled slot left of them).
+  - **Sort is the same in both forms**: the view's own sort menu (4b),
+    **sized to its current word** (the view-header rule below).
   - **The downtimes view's timeline | list switch** is a segmented control
     in both forms (compact when stacked, never the plain word). **The mode
     is saved with the view, like the sort, and it is the same setting as
@@ -178,7 +177,32 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
     header and a group in the view's `···` when stacked.
   - When a stacked header is narrow, the filter summary is cut first, then
     the chips drop their words (mark and count stay; the tooltip names
-    them), then the sort slot shrinks to its word (14-r5-e).
+    them) (14-r5-e).
+- **The view header's right side** (user, 2026-10-07; every view header,
+  stacked or a one-view page header; `viewHeader` in `views.js`). From the
+  right: **`···`, the sort, the counts, the handled slot.** The counts sit
+  next to the sort with **one fixed 16px gap** (the handled slot sits 16px
+  left of the counts); `live` (a stream) sits between the counts and the
+  sort. Handling and downtimes put their filter chips in the counts' place,
+  with the downtimes view's *timeline | list* switch left of them. The
+  filter summary takes the rest of the space on the left and is cut first.
+  - **The sort is sized to its current word**, not to the longest label:
+    changing the sort is the user's own action, so what sits left of it may
+    shift a few characters then. Live state never moves anything.
+  - **The counts keep fixed per-state slots** (critical, warning, unknown,
+    in that order), each a dot and a THREE-digit number slot (orchestrator,
+    2026-10-07: production views reach hundreds, e.g. 427 critical), so a
+    count going from 9 to 427 moves nothing and a state at zero keeps its
+    slot, empty. On a narrow header the filter summary gives way first,
+    then hides. Chips (handling, downtimes) get the same digit slots.
+  - The sort's pressed look while its menu is open never changes its box.
+  - **The handled slot** (`2 hidden · show` / `2 handled · hide`) sits left
+    of the counts, right-aligned against them; with nothing handled it is
+    not drawn (no visible space), and its appearing or disappearing moves
+    nothing on its right.
+  - This replaces round 5's sort slot sized for the kind's longest label
+    (`SORT_CH`, removed), which left the counts floating up to 280px from
+    the sort (5a's *service problems*).
 
   | Kind | One-view dashboard: page header (and second row) | Stacked: 36px view header | In the view's `···` (stacked) | Editor (the view's settings) |
   |---|---|---|---|---|
@@ -199,6 +223,49 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
   *only mine* and rows are personal and never shared in YAML (topic 08).
   The rule holds for every one-view list dashboard; frames of older topics
   predate the rows toggle, and the build follows the rule.
+- **Dropdowns: one system** (user, 2026-10-07; every select and every menu,
+  in every topic; `menu`, `selectOpen` and `anchorMenus` in `v1.js`, the
+  *one dropdown system* block in `v1.css`). Builders follow this spec.
+  - **No descriptions.** An entry is its icon (where the menu has icons) and
+    its name, nothing else: no faint details, no explanatory sentences, no
+    footer line. Section labels are short words (*lists*, *overviews*,
+    *activity*, *rows*, *hosts as*, *sort by*, *move to*). A disabled entry's
+    reason, when it needs one, is the row's tooltip. Fields carry no hint
+    sentence about their dropdown either.
+  - **The item, shared by selects and menus:** 28px high (24px in compact
+    density), a full-width highlight, the text **11px inside the card's
+    outer edge** (1px border + 10px), an optional 13px icon slot, the name
+    (cut with an ellipsis, the whole name in a tooltip), a key hint, and the
+    **check slot at the right**, where it never pushes the text. Section
+    labels at the same inset; dividers full width; a disabled entry in the
+    faint text colour. The card: `element_background`, the window border,
+    6px radius, 4px top and bottom padding.
+  - **Selects** (display, group, sort, rows, sidebar mark, environment,
+    every editor and settings select) **open from the field.** The list is
+    exactly as wide as the field (never wider) and joins its bottom edge:
+    field and list are one shape with a shared 1px accent border, a hairline
+    between them, no gap; the field's bottom corners turn square, the list's
+    bottom corners are rounded, and the shadow falls under the list only.
+    The list has the field's background. The field shows its open state
+    (accent border, chevron flipped). Names start at the field's own 11px
+    text inset, so the current value sits exactly over its own row; it is
+    ticked in the check slot, in the chevron's column. At most 10 rows, then
+    it scrolls (a thin thumb). With no room below it **opens upward**,
+    joined to the field's top edge (4f). Frames: 4f, 14-r5-g, 15f.
+  - **Action menus** (`···`, *add view*, the sidebar's `···`, the footer's
+    +, a header's sort) **hang from their trigger:** 4px below it (above
+    when there is no room), aligned to its edge (right-aligned for a trigger
+    on the right of its row or header, left-aligned otherwise); the trigger
+    is drawn pressed while the menu is open; the width is sized to the
+    longest entry, at least 180px and at most 280px. Same items, paddings,
+    check slot, labels, dividers, key hints and disabled look as selects.
+    Frames: 4b, 4d, 4e, 5f, 8a, 8b, 8d, 12f, 12g, 14-r5-b, 14-r5-c, 15c,
+    15g.
+  - **Not dropdowns:** 09's completion popup (anchored to the word being
+    typed, its own rules), the palette (10), 14-r5-f's icon picker (a
+    popover under its swatch, 4px gap), 06's environment switcher (a status
+    popover) and Windows' native menus (13) keep their own rules; they use
+    the same card.
 - **Row density per view** (topic 14, round 5; decided with the user).
   Settings → appearance → *row density* is the **default** for every list.
   Every list-like view (list, grouped list, handling, downtimes as a list
@@ -431,8 +498,10 @@ revised on 2026-10-07 at the user's request (no more accent ring).
 with four views (summary tiles, a list, an empty view, an event stream);
 4b a collapsed view, the cursor in the stream, the pane open and a view's own
 sort menu; 4c the editor managing views; 4d *add view*; 4e a view's `···`
-and the settings of an event stream view. Topic 14 round 5 adds, here: the
-sort in a fixed slot in every view header (4a, 4b) and the *rows* field in
+and the settings of an event stream view; 4f an editor select open (the
+sort, opening upward; the dropdown rules). Topic 14 round 5 adds, here: the
+view header's right side (counts next to the sort, the handled slot left of
+them; 4a, 4b) and the *rows* field in
 the list and stream settings (4c, 4e); and in 14-r5-c a view header's `···`
 open (*only mine*, *rows*).
 
@@ -465,22 +534,21 @@ open (*only mine*, *rows*).
 - **View controls and row density** follow the rules at the top of this
   file: one set of controls per view, in its view header (roomy on a
   one-view dashboard, compact when stacked); *only mine* and *rows* in the
-  view's `···` when stacked; the sort in a fixed slot sized for its kind's
-  longest label (`list` 19ch, `handling` 17ch, `downtimes` 16ch, `stream`
-  12ch, `grid` and `tiles` 11ch; `SORT_CH` in `views.js`).
+  view's `···` when stacked; the right side of the header as in *the view
+  header's right side* (the counts next to the sort).
 - **A view header's `···`** (on the dashboard, 14-r5-c): *only mine*
   (handling, downtimes), then *rows* (comfortable, compact, follow the
   default), then *collapse* (←) and *edit view* (opens the editor with the
   view selected). The editor's views list has its own `···` (4e).
 - **The view header** is 36px (the summary bar's height) on the pane surface
   (`pane_background`), so it reads as a band between views and differs from
-  a grouped list's group-header bands (`row_header`, darker). In order: a
-  collapse chevron, the display's icon (in the mark slot), the name (13px
-  medium), the filter (faint, cut off first when narrow), the counts (state
-  dot and number; handling and downtimes: their filter chips, then the
-  downtimes view's compact *timeline | list* switch), the handled slot
-  (lists), `live` for a stream, the view's own sort (in its fixed slot), and
-  `···`.
+  a grouped list's group-header bands (`row_header`, darker). From the
+  left: a collapse chevron, the display's icon (in the mark slot), the name
+  (13px medium), the filter (faint, takes the rest and is cut first). From
+  the right: `···`, the view's own sort (sized to its word), 16px, the
+  counts (fixed per-state slots; handling and downtimes: their filter chips,
+  the downtimes view's compact *timeline | list* switch left of them),
+  16px, the handled slot (lists); `live` for a stream before the sort.
 - **Empty view:** only the header, with `nothing to show` in place of the
   counts. There is no body and no empty box.
 - **Keyboard:** one cursor for the whole page. j/k move through the rows and
@@ -512,9 +580,9 @@ open (*only mine*, *rows*).
 - **Editor:** the inspector (372px, as today) gets a `views` list. Each row
   has a drag handle, the display icon, the name, what it matches, and `···`
   (move up/down with alt-↑↓, duplicate, collapse by default, remove).
-  `+ add view` asks for the display first (list, grouped list, host-group
-  grid, summary tiles, and under a faint *not counted in the sidebar, never
-  notify*: event stream, handling, downtimes); every view's filter field has *copy
+  `+ add view` asks for the layout first (topic 15's layouts, in the
+  sections lists, overviews, activity; icon and name only, the dropdown
+  rules, 4d); every view's filter field has *copy
   filter from* at its top right (topic 09, 14-r4-e); the new view starts from the
   dashboard's filter and goes under the selected one. Below a rule come the
   selected view's settings, which depend on its display (display and lists
@@ -528,14 +596,16 @@ open (*only mine*, *rows*).
   naming the current global value (new views start there), *comfortable*
   or *compact* (4c, 4e; topic 14 round 5).
 - **The handled button in the view header** (4a, 4b): a multi-view dashboard
-  has no summary bar, so each list or grouped-list view header has a fixed,
-  right-aligned slot after its counts, with the summary bar's wording and
+  has no summary bar, so each list or grouped-list view header has the
+  button left of its counts, right-aligned against them, with the summary
+  bar's wording and
   behaviour: `2 hidden · show`, and after a click `2 handled · hide` with the
   handled rows shown hollow (4b); the choice is saved with the view. The
   counts beside it are unhandled counts and don't change. A view with
-  nothing handled (replication lag) keeps the slot empty. Tiles, grid and
-  stream views have no slot. In 4b the pane is 560px, so the header keeps
-  its counts, the slot, the sort and `···`; the filter summary is cut first. The preview on the
+  nothing handled (replication lag) draws nothing there. Tiles, grid and
+  stream views have no handled button. In 4b the pane is 560px, so the
+  header keeps its counts, the button, the sort and `···`; the filter
+  summary is cut first. The preview on the
   left shows the whole dashboard. **The selected view is marked on its header
   only: the focus bar plus a faint accent tint, nothing around its body**
   (4c, 4d, 4e; class `.vh.picked` in `v1.css`). Clicking a view in the
@@ -552,7 +622,7 @@ and the editor's selection revised as in 04.
 **Shows** (`05-hostgroup-grid.html`): 5a squares, the default, as a view
 above a list; 5b hover, the keyboard cursor and the host pane; 5c a click on
 a group filters the page; 5d labelled cells, the other option; 5e the view's
-settings in the editor.
+settings in the editor; 5f the grid view's `···` open (an action menu, the dropdown rules).
 
 **Decisions**
 
@@ -1097,10 +1167,11 @@ quick switch; 12g a dashboard's `···` menu, following its group.
 - **Quick switch in the `···` menus (12f, 12g):** the group's and the
   dashboard's menus get a `notifications` row with a switch (the `Switch`
   without its label) at the right, directly above `notification settings`
-  (no trailing "…"), in their own section. The settings entry's faint detail
-  says `default times` or `custom times`. In a dashboard's menu, while it
-  follows its group, the row's faint detail says `as overview`; flipping the
-  switch sets the dashboard itself. A dashboard's `notification settings`
+  (no trailing "…"), in their own section. Menu entries carry no faint
+  details (the dropdown rules): default or custom times show as the
+  sidebar's bell or clock, and a dashboard that follows its group shows the
+  group's state in its switch; flipping the switch sets the dashboard
+  itself. A dashboard's `notification settings`
   opens the editor at the notifications row.
 - **The sidebar mark (12e):** one fixed slot after a group's name and before
   a dashboard's count. A **faint bell** when the group or dashboard notifies
@@ -1266,8 +1337,8 @@ icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
 - **Counting (04's rule, unchanged):** only problem views (list, grouped
   list, host-group grid, summary tiles) count toward the sidebar number and
   notifications. Handling, downtimes and event views never notify; the
-  editor says so in one faint line, and *add view* groups them under a faint
-  label *not counted in the sidebar, never notify*.
+  editor says so in one faint line under the view's settings; *add view*
+  lists them in the *activity* section (no explanation in the menu).
 - **New dashboard (14-r5-a; user, 2026-10-07: no starting points):** the
   group's **+**, the footer's **+ → new dashboard** and the palette's *new
   dashboard* open **the editor directly**, with **one empty list view**: no
@@ -1328,9 +1399,10 @@ icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
   *notifications*, topic 12), so it is also set in the new-dashboard flow,
   which opens the same editor (14-r5-f).
   - A small dropdown (filling the mark column), **state** (the coloured dot of the worst
-    problem) or **icon**. With no problem view on the dashboard, *state* is
-    greyed out with its reason on a second line, *no problem view on this
-    dashboard* (14-r5-g).
+    problem) or **icon**; open, it is a select joined to its field (the
+    dropdown rules). With no problem view on the dashboard, *state* is
+    greyed out; its reason, *no problem view on this dashboard*, is the
+    disabled row's tooltip (menus carry no descriptions; 14-r5-g).
   - Left of it, a **rounded square the height of a field** (30px plus the
     border, like a colour swatch) **previews the mark**; the dot (10px) or
     icon (16px) is centred exactly in it. With *state* it shows the dot and
@@ -1727,10 +1799,11 @@ pane narrowed to the group. The marking frame is 15m.
   slot stays, empty).
 - **Down hosts** (and unreachable ones): the host always shows (it can still
   be hidden for being in downtime or acknowledged, like any handled
-  problem). Its band is tinted in its state colour (down: critical,
-  unreachable: unknown; `--unk-tint` is NEW), its state word (*down 3m*,
+  problem). **Its band is the same neutral band as 10j** (no state tint,
+  user, 2026-10-07: a coloured row happens nowhere else in the app); its
+  state shows only as the state dot and the state word (*down 3m*,
   *unreachable 11m*) in the state's text colour; a handled host (in
-  downtime) has a hollow mark and no tint. Its services follow *hide
+  downtime) has a hollow mark. Its services follow *hide
   services of hosts that are down* (the same switch for unreachable hosts):
   hidden, the band shows one faint line, **4 services hidden · host down**
   (*3 services hidden · host unreachable*); shown (the handled slot's
@@ -1748,7 +1821,7 @@ pane narrowed to the group. The marking frame is 15m.
   are always worst first. The editor's *sort* says *hosts*.
 - **Marking:** a band marks its host (x on the band, ctrl-click); a row its
   service; ctrl-a marks every host and every service row shown. A marked
-  band gets the marked tint (over its state tint) and the 2px accent bar.
+  band gets the marked tint and the 2px accent bar, as a marked row does.
   The selection bar counts both kinds in a fixed slot sized for *99 hosts ·
   999 services marked*: **2 hosts · 3 services marked** (15m); the actions
   apply to all, and their dialogs list every target.
@@ -1756,12 +1829,11 @@ pane narrowed to the group. The marking frame is 15m.
 **Decisions: layouts (15f, 15g, 15h)**
 
 - **The display dropdown and *add view* list named layouts** in three
-  sections, each with its icon and name (and, in the dropdown, a faint
-  one-line description): **lists** (services, services by host, services by
-  host group, services by service group, hosts, hosts with services, hosts by
-  host group, host groups, service groups),
-  **overviews** (host-group grid, summary tiles), **activity** (event stream,
-  handling, downtimes; *not counted in the sidebar, never notify*).
+  sections, each entry its icon and its name, nothing else: **lists**
+  (services, services by host, services by host group, services by service
+  group, hosts, hosts with services, hosts by host group, host groups,
+  service groups), **overviews** (host-group grid, summary tiles),
+  **activity** (event stream, handling, downtimes).
 - **A layout is not a view kind:** it presets the existing fields
   (*display*, *lists*: services | hosts | host groups | service groups,
   *group by*, *hosts as*), which stay under it in the editor, and the
@@ -1779,12 +1851,11 @@ pane narrowed to the group. The marking frame is 15m.
   faint, *every host group · e.g. match("linux-*", hostgroup.name),
   hostgroup.vars.team == "dba"* (*every service group · e.g.
   match("db-*", servicegroup.name)*).
-- **The dropdown (15f)** ticks the current layout and shows the keyboard
-  focus as the hover row; it opens under the field, right-aligned to it,
-  wider than the inspector (580px) so names and descriptions fit on one line.
-  **add view (15g)** is compact: icon and name only, the focused entry's
-  description in a **tooltip** beside it (chosen over a second line, which
-  would double the menu's height).
+- **The display dropdown (15f)** is a select (the dropdown rules): it opens
+  from the field, exactly as wide, ticks the current layout and shows the
+  keyboard focus as the highlighted row; at 10 rows it scrolls. **add view
+  (15g)** is an action menu hanging from the pressed *add view* row, with
+  the same sections, icons and names. Neither has descriptions.
 - **Icinga's groups as lists (15i, 15j, 15k):** *lists* has four values,
   services | hosts | **host groups** | **service groups**. In a group list
   the filter picks the groups and every picked group shows; each band is the
@@ -1801,7 +1872,7 @@ pane narrowed to the group. The marking frame is 15m.
     group**, not the services: the normal host row, and in its fixed right
     slot that host's per-state counts for its services in this group
     (`● 1 ● 1 ● 12 · 14 checks`). Hosts sort worst first by those services.
-  - **A click on a host row opens the normal host pane** (rc1's; `hostPane`
+  - **A click on a host row opens the normal host pane** (rc1's; `hostPaneView`
     in `v1.js`, also 10l). From a service groups list its services tab is
     narrowed to that group, shown by a removable chip at the top of the tab,
     **service group databases ×** (× shows all its services again; 15k).

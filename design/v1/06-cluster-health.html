@@ -70,9 +70,9 @@ function healthPage({ broken = false } = {}) {
 // 6a: where it lives: the footer switcher
 const switcher = menu([], { x: 54, y: 352, w: 320, style: 'padding:4px' }).replace('<div class="menu"', '<div class="menu" id="sw"');
 const swInner = `<div class="menu" style="left:54px;top:300px;width:340px;bottom:auto">
-  <div style="padding:4px 8px"><div class="strong med">prod-cluster</div><div class="muted trunc" style="font-size:12px">https://master-01.prod.example.com:5665</div></div>
+  <div style="padding:4px 10px"><div class="strong med">prod-cluster</div><div class="muted trunc" style="font-size:12px">https://master-01.prod.example.com:5665</div></div>
   <div class="msep"></div>
-  <div class="col" style="gap:4px;padding:4px 8px;font-size:12.5px">
+  <div class="col" style="gap:4px;padding:4px 10px;font-size:12.5px">
     ${[['status', 'connected for 6d 2h'], ['node', 'master-01 · zone master'], ['view', 'full view: the whole cluster'], ['version', 'r2.14.3-1'], ['last event', '0s ago'], ['API user', 'icygui']].map(([k, v]) => `<div style="display:grid;grid-template-columns:94px 1fr;gap:10px"><span class="faint">${k}</span><span>${v}</span></div>`).join('')}</div>
   <div class="msep"></div><div class="mlabel">nodes</div>
   <div class="mi sel">${dot('ok', 'd6')}<span>master-01</span><span class="det grow">master</span></div>

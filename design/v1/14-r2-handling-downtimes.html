@@ -89,7 +89,7 @@ function axis(bars, off = '', offLow = false) {
 }
 const lock = icon('lock', 11);
 const tmlRow = ({ st, ring, name, host, text, ax, r, acc }) => `<div class="tml"><span class="c"><span class="dot ${st}${ring ? ' ring' : ''} d9"></span></span><span class="s"><span><span class="n">${name}</span>${host ? `<span class="o"> on </span>${host}` : ''}</span><span class="t2">${text}</span></span>${ax}<span class="r${acc ? ' acc' : ''}">${r}</span></div>`;
-const tlBand = ({ st, ring, name, n, text, ax, r, acc, collapsed }) => tBand({ st, ring, name: `${name}<span class="h">  + ${n} services</span>`, out: text, collapsed, cls: 'tlb', after: `${ax}<span class="r${acc ? ' acc' : ''}">${r}</span>` });
+const tlBandR2 = ({ st, ring, name, n, text, ax, r, acc, collapsed }) => tBand({ st, ring, name: `${name}<span class="h">  + ${n} services</span>`, out: text, collapsed, cls: 'tlb', after: `${ax}<span class="r${acc ? ' acc' : ''}">${r}</span>` });
 const K8S_SVCS = [['disk /'], ['disk /var'], ['kube-proxy'], ['containerd'], ['load'], ['memory'], ['ntp-offset']];
 function timeline() {
   let h = tHeader({ title: 'downtimes', subtitle: 'prod-cluster · every object', sort: 'time', mode: 'timeline' }) +
@@ -98,14 +98,14 @@ function timeline() {
   h += tmlRow({ st: 'warn', ring: true, name: 'redis-memory', host: 'cache-02', text: 'j.berg: maxmemory raised; restart at 16:00.', ax: axis([[12.25, 16.25, 'on']]), r: '2h 03m left', acc: true });
   h += tmlRow({ st: 'crit', ring: true, name: 'postgres-replication', host: 'db-prod-03', text: 'j.berg: Failover drill on db-prod-01 (CHG-4473).', ax: axis([[13, 16, 'on']]), r: '1h 48m left', acc: true });
   const k8sAx = axis([[13.5, 15.5, 'on']]);
-  h += tlBand({ st: 'ok', ring: true, name: 'k8s-node-07', n: 22, text: 'm.keller: Drained for the kernel 6.8 rollout (CHG-4470).', ax: k8sAx, r: '1h 18m left', acc: true });
+  h += tlBandR2({ st: 'ok', ring: true, name: 'k8s-node-07', n: 22, text: 'm.keller: Drained for the kernel 6.8 rollout (CHG-4470).', ax: k8sAx, r: '1h 18m left', acc: true });
   h += K8S_SVCS.map(([s]) => `<div class="tsvc tlb"><span class="c"><span class="dot ok ring d7"></span></span><span><span class="n">${s}</span><span class="o"> on k8s-node-07</span></span>${k8sAx}<span></span></div>`).join('');
   h += `<div class="morerow"><span></span><span>+ 15 more</span></div>`;
   h += tmlRow({ st: 'unk', ring: true, name: 'kubelet', host: 'k8s-node-07', text: 'j.berg: its own downtime: reimage after the drain, until 17:00.', ax: axis([[13.5, 17, 'on']]), r: '2h 48m left', acc: true });
-  h += tlBand({ st: 'ok', ring: true, name: 'sw-core-ams-02', n: 18, text: `m.keller: ${SW_TEXT}`, ax: axis([[14, 15, 'on'], [22, 30, 'flex', 'flexible 1h']], `${lock} Sat 06:00`, true), r: '48m left', acc: true, collapsed: true });
+  h += tlBandR2({ st: 'ok', ring: true, name: 'sw-core-ams-02', n: 18, text: `m.keller: ${SW_TEXT}`, ax: axis([[14, 15, 'on'], [22, 30, 'flex', 'flexible 1h']], `${lock} Sat 06:00`, true), r: '48m left', acc: true, collapsed: true });
   h += tmlRow({ st: 'ok', name: 'pg-locks', host: 'db-prod-05', text: 'dba-oncall: VACUUM FULL on orders_archive.', ax: axis([[14, 18, 'flex', 'flexible 2h']]), r: 'not started' });
   h += tmlRow({ st: 'warn', name: 'haproxy-backend', host: 'lb-prod-02', text: 'm.keller: HAProxy 2.8 rollout on lb-prod-01/02 (CHG-4471).', ax: axis([[22, 23, 'up']]), r: 'in 7h 48m' });
-  h += tlBand({ st: 'unk', name: 'backup-01', n: 6, text: 'j.berg: borg repository migration to backup-02 (CHG-4480).', ax: axis([], '→ Thu 01:00'), r: 'in 10h 48m', collapsed: true });
+  h += tlBandR2({ st: 'unk', name: 'backup-01', n: 6, text: 'j.berg: borg repository migration to backup-02 (CHG-4480).', ax: axis([], '→ Thu 01:00'), r: 'in 10h 48m', collapsed: true });
   h += tmlRow({ st: 'ok', name: 'sw-core-ams-01', text: 'from config: weekly-patching', ax: axis([], `${lock} → Sat 06:00`), r: `<span style="display:inline-flex;gap:5px;align-items:center">${lock}from config</span>` });
   return h + '<span class="nowl" data-now></span></div>';
 }

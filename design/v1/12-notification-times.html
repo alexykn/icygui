@@ -124,11 +124,11 @@ shot('12e', '12-times-e-sidebar-marks', 'The sidebar’s fixed slot, after a gro
 // ---- 12f: the group's ··· menu: the quick switch ---------------------------------
 const groupMenu12 = menu([
   { label: 'new dashboard', key: 'ctrl-n' }, { label: 'rename' }, { label: 'new group' }, { label: 'move up' }, { label: 'move down' }, { label: 'collapse' },
-  '-', { label: 'notifications', right: sw(true), hov: true }, { label: 'notification settings', det: 'custom times' },
+  '-', { label: 'notifications', right: sw(true), hov: true }, { label: 'notification settings' },
   '-', { label: 'copy group as YAML' }, { label: 'export group to file' },
   '-', { label: 'delete group' },
-], { x: 250, y: 330, w: 290 });
-shot('12f', '12-times-f-group-menu', 'The group’s <i>···</i> menu: a <b>notifications</b> row with a switch (the switch without its label) turns the whole group on or off in one click, right above <i>notification settings</i>, which opens the dialog of 12b and 12c; its faint detail says <i>default times</i> or <i>custom times</i>. The two rows replace rc1’s four notification choices (inherit, on, off, custom rule).',
+], { anchor: '.sb-gh .glyph.sel', align: 'right' });
+shot('12f', '12-times-f-group-menu', 'The group’s <i>···</i> menu: a <b>notifications</b> row with a switch (the switch without its label) turns the whole group on or off in one click, right above <i>notification settings</i>, which opens the dialog of 12b and 12c (the dropdown rule: entries are names only; the sidebar’s mark shows bell or clock). The two rows replace rc1’s four notification choices (inherit, on, off, custom rule).',
   appWindow(mainList, { groups: groupsWith({ platform: { menu: true } }), activeGroup: 'platform', activeItem: '', slots: true }) + groupMenu12);
 
 // ---- 12g: a dashboard's ··· menu, following its group ------------------------------
@@ -138,10 +138,10 @@ const dashMenu12 = menu([
   { label: 'edit dashboard' }, { label: 'rename' }, { label: 'duplicate' },
   { label: 'copy as YAML', key: 'ctrl-shift-c' }, { label: 'export to file' },
   { label: 'move up' }, { label: 'move down' }, 'move to', { label: 'platform' }, { label: 'lab' },
-  '-', { label: 'notifications', det: 'as overview', right: sw(false), hov: true }, { label: 'notification settings', det: 'default times' },
+  '-', { label: 'notifications', right: sw(false), hov: true }, { label: 'notification settings' },
   '-', { label: 'delete dashboard' },
-], { x: 280, y: 196, w: 290 });
-shot('12g', '12-times-g-dashboard-menu', 'A dashboard’s <i>···</i> menu has the same two rows. host problems follows its group, so the switch shows the group’s state (off) and the faint <i>as overview</i> says where it comes from. Flipping it sets the dashboard itself (as production was turned on), and the detail goes away; the editor’s <i>follow overview</i> hands it back. Here <i>notification settings</i> opens the editor at the notifications row (12d).',
+], { anchor: '.sb-item .glyph.sel', align: 'right' });
+shot('12g', '12-times-g-dashboard-menu', 'A dashboard’s <i>···</i> menu has the same two rows. host problems follows its group, so the switch shows the group’s state (off) and the sidebar’s bell, or its absence, says the rest (no descriptions in menus). Flipping it sets the dashboard itself (as production was turned on); the editor’s <i>follow overview</i> hands it back. Here <i>notification settings</i> opens the editor at the notifications row (12d).',
   appWindow(mainList, { groups: groupsDashMenu, activeItem: 'host problems', slots: true }) + dashMenu12);
 </script>
 </body></html>

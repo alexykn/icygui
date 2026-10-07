@@ -65,7 +65,6 @@
   --accent-tint-strong: rgba(116, 173, 232, .14);
   --warn-tint: rgba(229, 176, 74, .08);
   --crit-tint: rgba(224, 108, 108, .08);
-  --unk-tint: rgba(169, 127, 219, .08);   /* NEW v1 (topic 15): an unreachable host's band */
   --track: #2a2f33;       /* progress track = border_header */
   color-scheme: dark;
 }
@@ -127,7 +126,6 @@
   --accent-tint-strong: rgba(47, 116, 192, .12);
   --warn-tint: rgba(176, 116, 8, .08);
   --crit-tint: rgba(207, 70, 70, .07);
-  --unk-tint: rgba(154, 104, 220, .07);
   --track: #e3e6e9;
   color-scheme: light;
 }
@@ -335,16 +333,39 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .select .ic { color: var(--t-muted); }
 
 /* ---- menus, popovers, tooltips ------------------------------------- */
-.menu { position: absolute; z-index: 20; padding: 4px; border-radius: 6px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 6px 18px var(--shadow-strong); min-width: 200px; display: flex; flex-direction: column; }
-.mi { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px; border-radius: 4px; font-size: 12.5px; color: var(--t); white-space: nowrap; }
-.mi .grow { flex: 1; }
+.menu { position: absolute; z-index: 20; padding: 4px 0; border-radius: 6px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 6px 18px var(--shadow-strong); min-width: 180px; display: flex; flex-direction: column; }
+/* ONE DROPDOWN SYSTEM (README "Dropdowns"): action menus and select lists
+ * share the item: 28px (24 compact), full-bleed highlight, text 11px inside
+ * the card's outer edge (1px border + 10px), an icon slot, the name (cut with
+ * an ellipsis), a key hint, then the check slot at the right, where it never
+ * pushes the text. No descriptions. */
+.menu.am { width: max-content; min-width: 180px; max-width: 280px; }   /* an anchored action menu: sized to its longest item, 180 to 280 */
+.mi { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px; font-size: 12.5px; color: var(--t); white-space: nowrap; flex: none; }
+.menu.cmp .mi, .sellist.cmp .mi { height: 24px; }
+.mi .grow, .mi .ml { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mi .mic { display: flex; color: var(--t-muted); flex: none; }
 .mi.sel { background: var(--row-sel); }
 .mi.hov { background: var(--el-hover); color: var(--t-strong); }
 .mi.dis { color: var(--t-faint); }
+.mi.dis .mic { color: var(--t-faint); }
 .mi .det { font-size: 12px; color: var(--t-faint); }
-.mi .chk { width: 14px; flex: none; color: var(--accent); }
-.mlabel { padding: 6px 8px 2px; font-size: 11.5px; color: var(--t-faint); }
-.msep { height: 1px; background: var(--bd-window); margin: 4px -4px; }
+.mi .chk { width: 13px; flex: none; display: flex; color: var(--accent); }
+.mlabel { padding: 6px 10px 2px; font-size: 11.5px; color: var(--t-faint); flex: none; }
+.msep { height: 1px; background: var(--bd-window); margin: 4px 0; flex: none; }
+/* a select, open: the field and its list are one shape. The field keeps its
+ * place and shows the open state (accent border, chevron flipped); the list
+ * joins its bottom edge (or its top edge, opening upward), exactly as wide,
+ * with the shared accent border, a hairline between them, no gap, and a
+ * shadow under the list only. Same background as the field. */
+.selwrap { position: relative; display: block; min-width: 0; }
+.select.open { border-color: var(--accent); border-bottom-color: var(--bd-header); border-radius: 6px 6px 0 0; }
+.select.open.up { border-bottom-color: var(--accent); border-top-color: var(--bd-header); border-radius: 0 0 6px 6px; }
+.select.open > .ic { transform: rotate(180deg); color: var(--t); }
+.sellist { position: absolute; left: 0; right: 0; top: 100%; z-index: 25; display: flex; flex-direction: column; padding: 4px 0; background: var(--code-bg); border: 1px solid var(--accent); border-top: 0; border-radius: 0 0 6px 6px; box-shadow: 0 14px 20px -10px var(--shadow-strong); max-height: 280px; overflow: hidden; }
+.sellist.up { top: auto; bottom: 100%; border-top: 1px solid var(--accent); border-bottom: 0; border-radius: 6px 6px 0 0; box-shadow: 0 -14px 20px -10px var(--shadow-strong); }
+.sellist .sthumb { position: absolute; right: 3px; width: 4px; border-radius: 2px; background: var(--el-active); }
+/* the trigger of an open action menu is drawn pressed */
+.vadd.open { background: var(--el-hover); border-radius: 6px; }
 .tip { position: absolute; z-index: 30; display: flex; gap: 8px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 2px 8px var(--shadow); font-size: 11.5px; color: var(--t); white-space: nowrap; }
 
 /* ---- modal, dialog, palette ---------------------------------------- */
@@ -471,12 +492,15 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .vh .vicon { color: var(--t-muted); flex: none; }
 .vh .vn { font-size: 13px; font-weight: 500; color: var(--t-sec); flex: none; }
 .vh .vf { color: var(--t-faint); overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
-.vh .vc { display: flex; align-items: center; gap: 12px; flex: none; }
-.vh .vc span { display: flex; align-items: center; gap: 6px; }
+.vh .vc { display: flex; align-items: center; gap: 8px; flex: none; margin-right: 6px; }  /* counts: next to the sort, 16px with the row's 10px gap */
+.vh .vc .vcs { display: flex; align-items: center; gap: 6px; }
+.vh .vc .vcn { display: inline-block; min-width: 2ch; }   /* a fixed two-digit slot per state: 1 -> 12 moves nothing (100+ widens it) */
+.vh .vc .vcs.none { visibility: hidden; }                 /* a state at zero keeps its slot */
+.vh .vlive { display: flex; align-items: center; gap: 6px; color: var(--t-faint); flex: none; }
 .vh.focus::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--accent); }
 .vh.focus .vn { color: var(--t-strong); }
 .vh .empty { color: var(--t-faint); flex: none; }
-.vh .hs { flex: none; min-width: 16ch; text-align: right; color: var(--t-faint); }  /* the view's handled slot: fixed, empty when nothing is handled */
+.vh .hs { flex: none; text-align: right; color: var(--t-faint); margin-right: 6px; }  /* the handled slot: left of the counts, right-aligned against them; not drawn when nothing is handled */
 .vh .hs .hbtn { color: var(--accent); }
 .vbody { display: flex; flex-direction: column; flex: none; }
 .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px 18px 16px; }
@@ -737,7 +761,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 
 /* a stacked view's controls in its 36px header (topic 14): compact chips and
  * a compact segmented switch, the same controls as on a one-view page */
-.vh .vctl { display: flex; align-items: center; gap: 10px; flex: none; }
+.vh .vctl { display: flex; align-items: center; gap: 10px; flex: none; margin-right: 6px; }
 .vh .vctl .fchips { gap: 4px; }
 .vh .vctl .chip { height: 20px; font-size: 11px; padding: 0 7px; }
 .seg.cmp { height: 22px; font-size: 11.5px; border-radius: 5px; }
@@ -758,7 +782,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .mpick .ft .nm { color: var(--t); }
 /* VIEW CONTROLS (topic 14, round 5, every view kind): the sort in a fixed
  * slot sized for its kind's longest label (min-width set inline in ch) */
-.vsort { display: inline-block; text-align: right; flex: 0 1 auto; min-width: max-content; font-size: 12px; }
+.vsort { display: inline-block; flex: none; font-size: 12px; padding: 2px 4px; margin: 0 -4px; border-radius: 4px; }   /* sized to its current word; the pressed highlight (open menu) never changes its box */
 .hbar .vsort { color: var(--t-muted); }
 /* ROW DENSITY PER VIEW: the one-view header's two-icon toggle, in a fixed
  * slot left of the sort; .on = chosen on this view, .dflt = following the
@@ -792,14 +816,11 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
  * text inset, so every control's text starts at the same x */
 .fx.fi, .textarea.fi { padding-left: 10px; padding-right: 10px; }
 .fx.fi.cp { padding-right: 36px; }
-/* ---- topic 15 (and 10h): the host band's states and densities ----------
- * A DOWN host's band is tinted in the down colour (critical), an
- * UNREACHABLE one in the unreachable colour (unknown), unless handled (in
- * downtime or acknowledged: hollow mark, no tint). Compact: a 30px band and
- * 26px note and paging rows, with the one-line service rows. */
-.ghb.hb-crit { background: linear-gradient(var(--crit-tint), var(--crit-tint)) var(--row-header); }
-.ghb.hb-unk { background: linear-gradient(var(--unk-tint), var(--unk-tint)) var(--row-header); }
+/* ---- topic 15 (and 10h): the host band's densities. A down host's band is
+ * the same neutral band as any other (user, 2026-10-07): its state shows as
+ * the dot and the coloured state word only. Compact: a 30px band and 26px
+ * note and paging rows, with the one-line service rows. */
 .ghb.cmp { height: 30px; }
 .morerow.cmp { height: 26px; }
 .morerow.hnote { color: var(--t-faint); font-style: normal; }
-.ghb.hb-crit.marked, .ghb.hb-unk.marked { background: var(--row-marked); }  /* a marked band shows the mark, not its state tint */
+.mfield .msel .selwrap { flex: 1; }

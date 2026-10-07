@@ -3,26 +3,40 @@
 const DISPLAY_ICON = { list: 'list', grouped: 'rows-3', grid: 'layout-grid', tiles: 'chart-bar', stream: 'activity', handling: 'users', downtimes: 'calendar-clock' };
 const DISPLAY_NAME = { list: 'list', grouped: 'grouped list', grid: 'host-group grid', tiles: 'summary tiles', stream: 'event stream', handling: 'handling', downtimes: 'downtimes' };
 
-// A view's header: collapse chevron, display icon, name, filter summary,
-// counts, its own sort and ···. focus: the accent bar of the view holding the
-// cursor. picked: the view selected in the dashboard editor: the same bar plus
-// a faint accent tint on the header; nothing around the view's body.
+// A view's header (the view-header rule, user 2026-10-07). From the left:
+// collapse chevron, display icon, name, the filter summary (takes the rest of
+// the space and is cut first). From the RIGHT: ···, the sort (sized to its
+// current word), then 16px, the counts, then the handled slot. focus: the
+// accent bar of the view holding the cursor. picked: the view selected in the
+// dashboard editor: the same bar plus a faint accent tint on the header.
 //
-// handled: list and grouped-list views keep a fixed, right-aligned slot after
-// the counts for their handled problems, with the summary bar's wording and
-// behaviour: [n, shown] gives "2 hidden · show" or "2 handled · hide"; with
-// nothing handled the slot stays empty, so nothing moves. The counts are
-// unhandled counts; show and hide never change them.
+// counts: [state, n] in FIXED per-state slots (crit, warn, unk), each a dot
+// and a two-digit number slot, so 1 -> 12 moves nothing and a state at zero
+// keeps its slot, empty. Kinds that count other things pass ready HTML.
+// Handling and downtimes pass their filter chips (and the downtimes mode
+// switch) as `controls`, which take the counts' place.
+// handled: list and grouped-list views: [n, shown] gives "2 hidden · show" or
+// "2 handled · hide", LEFT of the counts and right-aligned against them; with
+// nothing handled it is not drawn, and appearing moves nothing on its right.
+const COUNT_SLOTS = ['crit', 'warn', 'unk'];
+function countSlots(counts) {
+  if (!counts.length) return '';
+  if (counts.some((x) => typeof x === 'string')) return counts.map((x) => `<span class="vcs">${x}</span>`).join('');
+  const order = counts.every(([st]) => COUNT_SLOTS.includes(st)) ? COUNT_SLOTS : counts.map(([st]) => st);
+  return order.map((st) => {
+    const hit = counts.find(([s]) => s === st);
+    return `<span class="vcs${hit ? '' : ' none'}">${dot(st, 'd7')}<span class="vcn">${hit ? hit[1] : ''}</span></span>`;
+  }).join('');
+}
 function viewHeader({ name, display = 'list', ic = '', filter = '', counts = [], sort = 'severity ↓', collapsed = false, focus = false, picked = false, empty = '', live = false, sortOpen = false, more = true, moreOpen = false, handled = null, controls = '' }) {
-  // a count is [state, n], or ready HTML for kinds that count other things (handling: ✓ 2)
-  const c = counts.map((x) => (typeof x === 'string' ? `<span>${x}</span>` : `<span>${dot(x[0], 'd7')}${x[1]}</span>`)).join('');
-  const hasSlot = display === 'list' || display === 'grouped';
-  const hs = !hasSlot ? '' : `<span class="hs">${handled && handled[0] ? `${handled[1] ? `${handled[0]} handled` : `${handled[0]} hidden`}<span class="faint"> · </span><span class="hbtn">${handled[1] ? 'hide' : 'show'}</span>` : ''}</span>`;
+  const c = countSlots(counts);
+  const hs = (display === 'list' || display === 'grouped') && handled && handled[0]
+    ? `<span class="hs">${handled[1] ? `${handled[0]} handled` : `${handled[0]} hidden`}<span class="faint"> · </span><span class="hbtn">${handled[1] ? 'hide' : 'show'}</span></span>` : '';
   return `<div class="vh${focus || picked ? ' focus' : ''}${picked ? ' picked' : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span>
     <span class="vicon">${icon(ic || DISPLAY_ICON[display], 13)}</span><span class="vn">${name}</span>
     <span class="vf">${esc(filter)}</span>
-    ${empty ? `<span class="empty">${empty}</span>` : ''}${c ? `<span class="vc">${c}</span>` : ''}${hs}${controls}
-    ${live ? `<span style="display:flex;align-items:center;gap:6px;color:var(--t-faint)">${dot('ok', 'd6')}live</span>` : ''}
+    ${empty ? `<span class="empty">${empty}</span>` : ''}${hs}${c ? `<span class="vc">${c}</span>` : ''}${controls}
+    ${live ? `<span class="vlive">${dot('ok', 'd6')}live</span>` : ''}
     ${sort ? sortSlot(display, sort, { open: sortOpen }) : ''}${more ? `<span class="glyph${moreOpen ? ' sel' : ''}">···</span>` : ''}</div>`;
 }
 
@@ -32,13 +46,9 @@ function viewHeader({ name, display = 'list', ic = '', filter = '', counts = [],
 // second row); stacked, the same controls sit compactly in the 36px header,
 // and "only mine" and the row density move into the view's ···.
 //
-// The sort sits in a fixed slot sized for its kind's longest sort label,
-// right-aligned, so choosing another sort changes only the word (nothing left
-// of it moves).
-const SORT_CH = { list: 19, grouped: 19, grid: 11, tiles: 11, stream: 12, handling: 17, downtimes: 16 };
-// When a stacked header is tight (beside a pane), the slot gives way down to
-// its word after the filter summary is gone (the filter is cut first).
-const sortSlot = (kind, sort, { open = false } = {}) => `<span class="vsort" style="width:${SORT_CH[kind] || 12}ch"><span${open ? ' class="glyph sel" style="font-size:12px"' : ''}>${sort}</span></span>`;
+// The sort is sized to its CURRENT word: changing it is the user's own
+// action, so what sits left of it may shift then; live state never moves it.
+const sortSlot = (kind, sort, { open = false } = {}) => `<span class="vsort${open ? ' glyph sel' : ''}">${sort}</span>`;
 
 // ROW DENSITY PER VIEW: Settings → appearance → row density is the default;
 // every list-like view (list, grouped list, handling, downtimes in list mode,
@@ -60,20 +70,21 @@ function densityToggle({ v = 'default', eff = 'comfortable', dim = false } = {})
 const rowsField = (v = 'default', eff = 'comfortable', note = '') => `<div class="field"><div class="lab">rows<span class="st faint">${note || (v === 'default' ? 'follows the settings' : 'set on this view')}</span></div>${select(v === 'default' ? `as in settings (${eff})` : v)}</div>`;
 // the view's ··· (stacked): only mine (handling and downtimes), the rows, then
 // the view's own items. rows: as densityToggle's v
-// hostsAs: a host list's mode ('rows' or 'with services', topic 15)
-function viewMoreMenu({ x, y, w = 268, mine = null, hostsAs = null, rows = 'default', eff = 'comfortable', hov = '' }) {
+// hostsAs: a host list's mode ('rows' or 'with services', topic 15). Anchored
+// to the header's pressed ··· (right-aligned, 4px below); names only.
+function viewMoreMenu({ mine = null, hostsAs = null, rows = 'default', hov = '', anchor = '.vh .glyph.sel' } = {}) {
   const it = (label, o = {}) => ({ label, ...o, hov: hov === label });
   return menu([
-    ...(mine === null ? [] : [it('only mine', { chk: mine, det: 'what I set' }), '-']),
-    ...(hostsAs === null ? [] : ['hosts as', it('rows', { chk: hostsAs === 'rows', det: 'one row per host' }), it('with services', { chk: hostsAs === 'with services', det: 'each host a band' }), '-']),
+    ...(mine === null ? [] : [it('only mine', { chk: mine }), '-']),
+    ...(hostsAs === null ? [] : ['hosts as', it('rows', { chk: hostsAs === 'rows' }), it('with services', { chk: hostsAs === 'with services' }), '-']),
     'rows',
     it('comfortable', { chk: rows === 'comfortable', ic: 'rows-2' }),
     it('compact', { chk: rows === 'compact', ic: 'rows-4' }),
-    it('follow the default', { chk: rows === 'default', det: `settings: ${eff}` }),
+    it('follow the default', { chk: rows === 'default' }),
     '-',
-    it('collapse', { key: '←' }),
-    it('edit view'),
-  ], { x, y, w });
+    it('collapse', { key: '←', chk: false }),
+    it('edit view', { chk: false }),
+  ], { anchor, align: 'right' });
 }
 
 const DB_TILES = [
@@ -128,12 +139,13 @@ function handledField(mode = 0, kinds = [true, true, true]) {
 // The dashboard's fields: the name, full width; then two columns on the
 // inspector's grid: the sidebar mark (swatch + dropdown filling the column,
 // a short hint as the label's suffix) and the group.
-const markField = ({ mode = 'state', st = 'crit', ic = 'users', sq = '', selOpen = false }) => {
+const markField = ({ mode = 'state', st = 'crit', ic = 'users', sq = '', selOpen = false, noProblem = false }) => {
   const swatch = mode === 'state'
     ? `<span class="mswatch dis"><span class="dot ${st}" style="width:10px;height:10px"></span></span>`
     : `<span class="mswatch${sq ? ' ' + sq : ''}">${icon(ic, 16)}</span>`;
+  const field = selOpen ? selectOpen(mode, [{ label: 'state', dis: noProblem }, 'icon'], { current: mode, focus: mode === 'icon' ? 'icon' : '' }) : select(mode);
   return `<div class="field"><div class="lab">sidebar mark</div>
-    <div class="mfield">${swatch}<span class="msel${selOpen ? ' selopen' : ''}">${select(mode)}</span></div></div>`;
+    <div class="mfield">${swatch}<span class="msel">${field}</span></div></div>`;
 };
 const dashFields = (name, group, mark, { nameFocus = false } = {}) => `<div class="field"><div class="lab">name</div><span class="input${nameFocus ? ' focus' : ''}">${nameFocus ? `<span style="background:var(--selection)">${name}</span><span class="caret" style="height:13px"></span>` : name}</span></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">${markField(mark)}<div class="field"><div class="lab">group</div>${select(group)}</div></div>`;
@@ -158,38 +170,33 @@ const hostsAsField = (mode) => `<div class="field"><div class="lab">hosts as<spa
 // it sets display, lists, group by and hosts as; the dropdown's label is
 // derived from those fields, so editing them by hand changes the label.
 // [name, icon, description, fields]
+// [name, icon, fields]
 const LAYOUTS = [
   ['lists', [
-    ['services', 'list', 'one row per service', { display: 'list', lists: 'services', groupBy: 'none' }],
-    ['services by host', 'rows-3', 'a band per host, its services under it', { display: 'list', lists: 'services', groupBy: 'host' }],
-    ['services by host group', 'folder', 'a band per host group, its services', { display: 'list', lists: 'services', groupBy: 'host group' }],
-    ['services by service group', 'tag', 'a band per service group, its services', { display: 'list', lists: 'services', groupBy: 'service group' }],
-    ['hosts', 'server', 'one row per host', { display: 'list', lists: 'hosts', groupBy: 'none', hostsAs: 'rows' }],
-    ['hosts with services', 'layout-list', 'every picked host, its services under it', { display: 'list', lists: 'hosts', groupBy: 'none', hostsAs: 'with services' }],
-    ['hosts by host group', 'folder-open', 'a band per host group, its hosts', { display: 'list', lists: 'hosts', groupBy: 'host group' }],
-    ['host groups', 'layers', 'every picked host group, its hosts', { display: 'list', lists: 'host groups' }],
-    ['service groups', 'box', 'every picked service group, its hosts', { display: 'list', lists: 'service groups' }],
+    ['services', 'list', { display: 'list', lists: 'services', groupBy: 'none' }],
+    ['services by host', 'rows-3', { display: 'list', lists: 'services', groupBy: 'host' }],
+    ['services by host group', 'folder', { display: 'list', lists: 'services', groupBy: 'host group' }],
+    ['services by service group', 'tag', { display: 'list', lists: 'services', groupBy: 'service group' }],
+    ['hosts', 'server', { display: 'list', lists: 'hosts', groupBy: 'none', hostsAs: 'rows' }],
+    ['hosts with services', 'layout-list', { display: 'list', lists: 'hosts', groupBy: 'none', hostsAs: 'with services' }],
+    ['hosts by host group', 'folder-open', { display: 'list', lists: 'hosts', groupBy: 'host group' }],
+    ['host groups', 'layers', { display: 'list', lists: 'host groups' }],
+    ['service groups', 'box', { display: 'list', lists: 'service groups' }],
   ]],
   ['overviews', [
-    ['host-group grid', 'layout-grid', 'hosts as squares, by group', { display: 'grid' }],
-    ['summary tiles', 'chart-bar', 'counts per group', { display: 'tiles' }],
+    ['host-group grid', 'layout-grid', { display: 'grid' }],
+    ['summary tiles', 'chart-bar', { display: 'tiles' }],
   ]],
-  ['activity · not counted in the sidebar, never notify', [
-    ['event stream', 'activity', 'changes, acks, downtimes', { display: 'stream' }],
-    ['handling', 'users', 'who is handling what', { display: 'handling' }],
-    ['downtimes', 'calendar-clock', 'in effect and upcoming', { display: 'downtimes' }],
+  ['activity', [
+    ['event stream', 'activity', { display: 'stream' }],
+    ['handling', 'users', { display: 'handling' }],
+    ['downtimes', 'calendar-clock', { display: 'downtimes' }],
   ]],
 ];
 const LAYOUT_ICON = Object.fromEntries(LAYOUTS.flatMap(([, ls]) => ls.map(([n, ic]) => [n, ic])));
-// the layout menu: full (the display dropdown: tick, icon, name, description)
-// or compact ("add view": icon and name; the focused entry's description in a tooltip)
-function layoutMenu({ x, y, w, current = '', focus = '', compact = false, title = '' }) {
-  const items = [];
-  if (title) items.push(title);
-  LAYOUTS.forEach(([sec, ls], i) => {
-    if (i) items.push('-');
-    items.push(compact ? sec.replace('not counted in the sidebar, never notify', 'not counted, never notify') : sec);
-    ls.forEach(([n, ic, det]) => items.push({ label: n, ic, ...(compact ? {} : { det, chk: n === current }), hov: n === focus }));
-  });
-  return menu(items, { x, y, w });
-}
+// the layouts as dropdown items: sections, icon and name
+const layoutItems = () => LAYOUTS.flatMap(([sec, ls], i) => [...(i ? ['-'] : []), { section: sec }, ...ls.map(([n, ic]) => ({ label: n, ic }))]);
+// the display field open (a select): the layouts, the current one ticked
+const layoutSelect = ({ current, focus = '' }) => selectOpen(`<span style="display:flex;align-items:center;gap:8px">${icon(LAYOUT_ICON[current], 13)}${current}</span>`, layoutItems(), { current, focus });
+// "add view" (an action menu anchored to the pressed add view row): the same items
+const layoutMenu = ({ focus = '', anchor = '.vadd.open' } = {}) => menu(layoutItems().map((it) => (it === '-' ? it : it.section ? it.section : { ...it, hov: it.label === focus })), { anchor });

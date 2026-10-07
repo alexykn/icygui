@@ -186,7 +186,7 @@ shot('10k', '10-multiselect-k-host-expanded', '<i>+ 12 more</i> on db-prod-02 (1
 // ---- 10l: a click on a host's name opens the host pane --------------------
 const H3 = H[2];
 const paneRows = H3.problems.concat(okRows(H3.oks)).slice(0, 7);
-const hostPane3 = hostPane({ title: { st: 'ok', label: 'UP', name: 'db-prod-03', sub: '10.0.2.13 · up 41d · PING OK - Packet loss = 0%, RTA = 0.42 ms' }, tab: 'services 23', rows: paneRows, more: '+ 16 more' });
+const hostPane3 = hostPaneView({ title: { st: 'ok', label: 'UP', name: 'db-prod-03', sub: '10.0.2.13 · up 41d · PING OK - Packet loss = 0%, RTA = 0.42 ms' }, tab: 'services 23', rows: paneRows, more: '+ 16 more' });
 const listL = `${hostBand(H[0], { collapsed: true })}${hostBand(H[1], { collapsed: true })}${hostBand(H3, { sel: true })}${hostRows(H3)}`;
 const ptr = (x, y) => `<svg style="position:absolute;left:${x}px;top:${y}px;width:16px;height:22px;z-index:60" viewBox="0 0 16 22"><path d="M1 1 L1 17 L5 13 L8 20 L11 19 L8 12 L14 12 Z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></svg>`;
 shot('10l', '10-multiselect-l-host-pane', 'A click on a host’s <b>name</b> (or Enter with the cursor on its band) opens the host in the pane beside the list: rc1’s host pane, which pages its own services the same way (its 2 problems, then OK services to 7 rows, <i>+ 16 more</i>). The host in the list stays as it was, paged (here db-prod-03, with db-prod-01 and db-prod-02 collapsed). The two do different things: the <b>name opens the pane</b>; <b>+ N more only expands the host in place</b> (10k) and never opens anything. The pane narrows the list; the header keeps its items and cuts the subtitle first.',

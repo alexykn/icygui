@@ -86,18 +86,18 @@ function sidebar({ activeGroup = 'overview', activeItem = 'overview', groups = S
   return html;
 }
 
-function sidebarFoot({ badge, open, env = 'prod-cluster', node = 'master-01', age = '0s', health = 'ok', bell } = {}) {
+function sidebarFoot({ badge, open, env = 'prod-cluster', node = 'master-01', age = '0s', health = 'ok', bell, plusOpen = false } = {}) {
   return `<div class="sb-foot">
     <span class="ibtn">${icon('panel-left', 16)}</span>
     <span class="ibtn">${icon(bell ? 'bell-off' : 'clock', 16)}${badge ? `<span class="badge">${badge}</span>` : ''}</span>
     <span class="status${open ? ' open' : ''}">${dot(health, 'd6')}<span class="env">${env}</span><span class="faint">${node}</span><span class="faint">${age}</span><span class="faint chev">${icon('chevron-down', 10)}</span></span>
-    <span class="grow"></span><span class="ibtn">${icon('plus', 16)}</span></div>`;
+    <span class="grow"></span><span class="ibtn${plusOpen ? ' sel' : ''}">${icon('plus', 16)}</span></div>`;
 }
 
-// sortCh: the sort's fixed slot (its kind's longest label, VIEW CONTROLS, topic 14)
-function listHeader({ title = 'overview', subtitle = 'service problems', demo = false, sort = 'severity ↓', extra = '', more = true, sortCh = 0 } = {}) {
+// the sort is sized to its current word (the view-header rule)
+function listHeader({ title = 'overview', subtitle = 'service problems', demo = false, sort = 'severity ↓', extra = '', more = true } = {}) {
   return `<div class="hbar"><span class="title">${title}</span><span class="subtitle">${subtitle}</span><span class="grow"></span>
-    ${extra}${demo ? '<span class="demo-badge">demo</span>' : ''}${sort ? `<span class="right${sortCh ? ' vsort' : ''}"${sortCh ? ` style="width:${sortCh}ch"` : ''}>${sort}</span>` : ''}${more ? '<span class="glyph">···</span>' : ''}</div>`;
+    ${extra}${demo ? '<span class="demo-badge">demo</span>' : ''}${sort ? `<span class="right">${sort}</span>` : ''}${more ? '<span class="glyph">···</span>' : ''}</div>`;
 }
 
 // The summary bar's handled slot (rc1's "N handled hidden" toggle, now a
@@ -164,17 +164,62 @@ function note({ mk = '#', author, meta = [], body }) {
   return `<div class="note"><span class="mk">${mk}</span><div class="col" style="gap:4px"><div class="hd"><span class="au">${author}</span>${meta.map((m) => `<span class="meta">${m}</span>`).join('')}</div><span>${body}</span></div></div>`;
 }
 
-function menu(items, { x, y, w, style = '' } = {}) {
-  // As ic-ui-kit's Menu: when any item has a check slot, all get one.
-  const slots = items.some((it) => typeof it === 'object' && it.chk !== undefined);
-  const body = items.map((it) => {
-    if (it === '-') return '<div class="msep"></div>';
-    if (typeof it === 'string') return `<div class="mlabel">${it}</div>`;
-    const { label, key, sel, hov, dis, chk, det, dotSt, ic, right } = it;
-    return `<div class="mi${sel ? ' sel' : ''}${hov ? ' hov' : ''}${dis ? ' dis' : ''}">${slots ? `<span class="chk">${chk ? icon('check', 13) : ''}</span>` : ''}${dotSt ? dot(dotSt, 'd6') : ''}${ic ? `<span class="muted">${icon(ic, 12)}</span>` : ''}<span${det ? '' : ' class="grow"'}>${label}</span>${det ? `<span class="det grow">${det}</span>` : ''}${right || ''}${key ? kh(key) : ''}</div>`;
-  }).join('');
-  return `<div class="menu" style="left:${x}px;top:${y}px;${w ? `width:${w}px;` : ''}${style}">${body}</div>`;
+// ---- ONE dropdown system (README "Dropdowns") --------------------------
+// An entry is its icon (where the menu has icons) and its name, nothing else:
+// no descriptions (user, 2026-10-07). The check slot sits at the right, so it
+// never pushes the text; when any item has one, all get it.
+function mItem(it, slots, { current = '', focus = '' } = {}) {
+  if (it === '-') return '<div class="msep"></div>';
+  if (typeof it === 'string') return `<div class="mlabel">${it}</div>`;
+  const { label, key, sel, dis, chk, dotSt, ic, right } = it;
+  const hov = it.hov || (focus && label === focus);
+  const ticked = chk || (current && label === current);
+  return `<div class="mi${sel ? ' sel' : ''}${hov ? ' hov' : ''}${dis ? ' dis' : ''}">${dotSt ? dot(dotSt, 'd6') : ''}${ic ? `<span class="mic">${icon(ic, 13)}</span>` : ''}<span class="ml">${label}</span>${right || ''}${key ? kh(key) : ''}${slots ? `<span class="chk">${ticked ? icon('check', 13) : ''}</span>` : ''}</div>`;
 }
+// An ACTION MENU (···, add view, header menus): anchored to its trigger's edge
+// with a 4px gap (anchor: a CSS selector for the trigger inside the same
+// frame; align: 'right' for right-side triggers; up: opens above), sized to
+// its longest item (180 to 280). The trigger is drawn pressed by its owner.
+// Without an anchor (older rounds) x, y and w place it as before.
+function menu(items, { x, y, w, style = '', anchor = '', align = 'left', up = false, compact = false } = {}) {
+  const slots = items.some((it) => typeof it === 'object' && it.chk !== undefined);
+  const body = items.map((it) => mItem(it, slots)).join('');
+  const pos = anchor ? 'left:0;top:0;' : `left:${x}px;top:${y}px;${w ? `width:${w}px;` : ''}`;
+  return `<div class="menu${anchor ? ' am' : ''}${compact ? ' cmp' : ''}"${anchor ? ` data-anchor="${anchor}" data-align="${align}"${up ? ' data-up="1"' : ''}` : ''} style="${pos}${style}">${body}</div>`;
+}
+// A SELECT, open: the field and its list as one shape (the list opens from
+// the field, exactly as wide, joined to its bottom edge, or its top edge when
+// up). items: names, { label, ic, dis }, { section: 'word' }, '-'. The current
+// value is ticked; focus is the highlighted row. Max 10 rows, then it scrolls.
+function selectOpen(value, items, { current = '', focus = '', up = false, compact = false } = {}) {
+  const rowsHtml = items.map((it) => (it === '-' ? mItem('-') : it.section ? mItem(it.section) : mItem(typeof it === 'string' ? { label: it } : it, true, { current, focus }))).join('');
+  return `<span class="selwrap"><span class="select open${up ? ' up' : ''}"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis">${value}</span>${icon('chevron-down', 13)}</span><div class="sellist${up ? ' up' : ''}${compact ? ' cmp' : ''}">${rowsHtml}</div></span>`;
+}
+// place anchored menus by their triggers and give overflowing lists a thumb
+function anchorMenus() {
+  document.querySelectorAll('.menu[data-anchor]').forEach((m) => {
+    const frame = m.closest('[data-shot]'); const trig = frame && frame.querySelector(m.dataset.anchor);
+    if (!trig) { console.error('menu trigger not found: ' + m.dataset.anchor); return; }
+    const op = m.offsetParent.getBoundingClientRect(), t = trig.getBoundingClientRect(), r = m.getBoundingClientRect();
+    m.style.left = Math.round((m.dataset.align === 'right' ? t.right - r.width : t.left) - op.left) + 'px';
+    m.style.top = Math.round((m.dataset.up ? t.top - 4 - r.height : t.bottom + 4) - op.top) + 'px';
+  });
+  // a tooltip beside an item (a cut-off name in a select), placed after the menus
+  document.querySelectorAll('.tip[data-anchor]').forEach((tp) => {
+    const frame = tp.closest('[data-shot]'); const trig = frame && frame.querySelector(tp.dataset.anchor);
+    if (!trig) { console.error('tooltip anchor not found: ' + tp.dataset.anchor); return; }
+    const op = tp.offsetParent.getBoundingClientRect(), t = trig.getBoundingClientRect(), r = tp.getBoundingClientRect();
+    const left = tp.dataset.side === 'left' ? t.left - 8 - r.width : t.right + 8;
+    tp.style.left = Math.round(left - op.left) + 'px'; tp.style.top = Math.round(t.top + (t.height - r.height) / 2 - op.top) + 'px';
+  });
+  document.querySelectorAll('.sellist').forEach((l) => {
+    if (l.scrollHeight <= l.clientHeight + 1 || l.querySelector('.sthumb')) return;
+    const th = document.createElement('span'); th.className = 'sthumb';
+    th.style.top = '4px'; th.style.height = Math.round((l.clientHeight - 8) * l.clientHeight / l.scrollHeight) + 'px';
+    l.appendChild(th);
+  });
+}
+window.addEventListener('load', () => document.fonts.ready.then(anchorMenus));
 
 function modal(width, inner, { top, center = true, style = '' } = {}) {
   const pos = top !== undefined ? `style="padding-top:${top}px"` : '';
@@ -265,9 +310,8 @@ const HOST_PREVIEW = 7;
 function hostBand(h, { marked, sel, collapsed, sticky, compact } = {}) {
   const c = (h.counts || []).map(([st, n]) => `<span>${dot(st, 'd7')}${n}</span>`).join('');
   const st = h.st || 'ok';
-  const tint = h.word && !h.ring && (st === 'crit' || st === 'unk') ? ` hb-${st}` : '';
   const word = h.word ? `<span style="color:var(--${st}-text)">${h.word}</span> · ` : '';
-  return `<div class="ghb${compact ? ' cmp' : ''}${tint}${marked ? ' marked' : ''}${sel ? ' sel' : ''}${sticky ? ' sticky' : ''}"><span class="chev">${h.none ? '' : icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span><div class="lead">${dot(st, h.ring ? 'ring' : '')}</div>
+  return `<div class="ghb${compact ? ' cmp' : ''}${marked ? ' marked' : ''}${sel ? ' sel' : ''}${sticky ? ' sticky' : ''}"><span class="chev">${h.none ? '' : icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span><div class="lead">${dot(st, h.ring ? 'ring' : '')}</div>
     <div class="t"><span class="n">${h.name}</span><span class="a">${h.addr}</span><span class="o">${word}${h.out}</span></div>
     <span class="cs">${c}</span></div>`;
 }
@@ -291,7 +335,7 @@ function hostRows(h, { marked = '', expanded = false, from = 0, compact = false 
 // ---- the host pane (rc1's, as in 10l and 15k): title, actions, the tabs, the
 // services paged by count. chip: an optional removable filter at the top of
 // the services tab (15k: "service group databases ×"; × shows all again).
-function hostPane({ title, tab, rows, more = '', chip = '' }) {
+function hostPaneView({ title, tab, rows, more = '', chip = '' }) {
   return `<div class="pane">${paneHeader('host')}<div class="col" style="gap:20px;padding:20px 24px 0;flex:none">
   ${paneTitle(title)}
   ${actionButtons({ firstDis: true })}

@@ -122,5 +122,12 @@ const editorHeader = `<div class="hbar"><span class="title">fleet</span><span cl
 shot('5e', '05-hostgroup-grid-e-editor', 'The grid view’s settings in the editor: group by host group (all, or the chosen ones) or by a custom variable (<i>host.vars.site</i>), an optional filter, colour by the worst of host and services or the host only, <b>hosts as squares (the default) or labelled cells</b>, and whether all-ok groups hide.',
   appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 372px"><div class="col" style="min-height:0;overflow:hidden">${editorHeader}${gridHeader({ picked: true })}<div class="vbody">${grid({}, 2)}</div>${listHeaderV()}<div class="vbody">${rows(probRows.slice(0, 5))}</div></div>${insp}</div>`,
     { groups: platGroups, activeGroup: 'platform', activeItem: 'fleet' }), { h: 1000, crops: '05-hostgroup-grid-e-inspector-zoom:1068,0,372,1000' });
+
+// 5f: the grid view's ··· open: an action menu hanging from the pressed ···
+const gridMore = menu(['hosts as', { label: 'squares', chk: true }, { label: 'labelled cells', chk: false }, '-', { label: 'collapse', key: '←', chk: false }, { label: 'edit view', chk: false }], { anchor: '.vh .glyph.sel', align: 'right' });
+const page5f = () => appWindow(`<div class="col" style="min-height:0;overflow:hidden;position:relative">${dashHead()}${gridHeader({ focus: true, moreOpen: true })}<div class="vbody">${grid({})}</div>${listHeaderV()}<div class="vbody">${rows(probRows)}</div>${gridMore}</div>`, { groups: platGroups, activeGroup: 'platform', activeItem: 'fleet' });
+shot('5f', '05-hostgroup-grid-f-view-menu', '<b>The grid view’s <i>···</i></b>, an action menu: it hangs from the pressed <i>···</i>, right-aligned to it, 4px below, sized to its longest entry (180 to 280px). <i>hosts as</i> (squares, ticked, or labelled cells), then <i>collapse</i> (←) and <i>edit view</i>. The check slot is at the right, so the names start at the menu’s text inset.',
+  page5f(), { crops: '05-hostgroup-grid-f-zoom:1040,0,400,260' });
+shot('5f-l', '05-hostgroup-grid-f-view-menu-light', '<b>The grid view’s <i>···</i></b>, light.', page5f(), { theme: 'light' });
 </script>
 </body></html>

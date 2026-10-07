@@ -474,6 +474,8 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .vh.focus::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--accent); }
 .vh.focus .vn { color: var(--t-strong); }
 .vh .empty { color: var(--t-faint); flex: none; }
+.vh .hs { flex: none; min-width: 16ch; text-align: right; color: var(--t-faint); }  /* the view's handled slot: fixed, empty when nothing is handled */
+.vh .hs .hbtn { color: var(--accent); }
 .vbody { display: flex; flex-direction: column; flex: none; }
 .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px 18px 16px; }
 .tile { display: flex; flex-direction: column; gap: 9px; padding: 11px 14px 12px; border: 1px solid var(--bd-header); border-radius: 6px; background: var(--win-bg); min-width: 0; }

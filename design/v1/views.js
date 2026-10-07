@@ -7,12 +7,20 @@ const DISPLAY_NAME = { list: 'list', grouped: 'grouped list', grid: 'host-group 
 // counts, its own sort and ···. focus: the accent bar of the view holding the
 // cursor. picked: the view selected in the dashboard editor: the same bar plus
 // a faint accent tint on the header; nothing around the view's body.
-function viewHeader({ name, display = 'list', filter = '', counts = [], sort = 'severity ↓', collapsed = false, focus = false, picked = false, empty = '', live = false, sortOpen = false, more = true }) {
+//
+// handled: list and grouped-list views keep a fixed, right-aligned slot after
+// the counts for their handled problems, with the summary bar's wording and
+// behaviour: [n, shown] gives "2 hidden · show" or "2 handled · hide"; with
+// nothing handled the slot stays empty, so nothing moves. The counts are
+// unhandled counts; show and hide never change them.
+function viewHeader({ name, display = 'list', filter = '', counts = [], sort = 'severity ↓', collapsed = false, focus = false, picked = false, empty = '', live = false, sortOpen = false, more = true, handled = null }) {
   const c = counts.map(([st, n]) => `<span>${dot(st, 'd7')}${n}</span>`).join('');
+  const hasSlot = display === 'list' || display === 'grouped';
+  const hs = !hasSlot ? '' : `<span class="hs">${handled && handled[0] ? `${handled[1] ? `${handled[0]} handled` : `${handled[0]} hidden`}<span class="faint"> · </span><span class="hbtn">${handled[1] ? 'hide' : 'show'}</span>` : ''}</span>`;
   return `<div class="vh${focus || picked ? ' focus' : ''}${picked ? ' picked' : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span>
     <span class="vicon">${icon(DISPLAY_ICON[display], 13)}</span><span class="vn">${name}</span>
     <span class="vf">${esc(filter)}</span>
-    ${empty ? `<span class="empty">${empty}</span>` : ''}${c ? `<span class="vc">${c}</span>` : ''}
+    ${empty ? `<span class="empty">${empty}</span>` : ''}${c ? `<span class="vc">${c}</span>` : ''}${hs}
     ${live ? `<span style="display:flex;align-items:center;gap:6px;color:var(--t-faint)">${dot('ok', 'd6')}live</span>` : ''}
     ${sort ? `<span class="${sortOpen ? 'glyph sel' : ''}" style="font-size:12px">${sort}</span>` : ''}${more ? '<span class="glyph">···</span>' : ''}</div>`;
 }

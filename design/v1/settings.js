@@ -1,20 +1,51 @@
-// The settings window (topic 02), shared with the light theme (topic 03).
-// settingsWindow({ page, search, scrolled, inactive }) returns the window's HTML.
+// The settings panel (topic 02), shared with the light theme (topic 03) and
+// notification times (topic 12). It opens over the main window as a large
+// panel inside it (not a window of its own): no traffic lights, × and Esc
+// close it. settingsWindow({ page, search, part, section }) returns the
+// panel's HTML; settingsOver(opts) the main window with the panel over it.
 
 const SETTINGS_PAGES = [
   ['general', 'settings', ['in the background']],
   ['appearance', 'sun-moon', ['theme and size', 'lists', 'preview']],
-  ['notifications', 'bell', ['this environment', 'default rule', 'quiet hours', 'storm control', 'watched and muted', 'groups and dashboards']],
+  ['notifications', 'bell', ['this environment', 'default rule', 'notification times', 'custom times', 'storm control', 'watched and muted']],
   ['icinga', 'server', ['reconcile', 'event log', 'environments']],
   ['keymap', 'keyboard', []],
   ['advanced', 'wrench', ['logs', 'files', 'about']],
 ];
 
-function srow(name, desc, control, { sub, err, nameHtml } = {}) {
-  return `<div class="srow${sub ? ' sub' : ''}"><div style="min-width:0"><div class="nm">${nameHtml || name}</div>${desc ? `<div class="ds">${desc}</div>` : ''}${err ? `<div class="err">${err}</div>` : ''}</div><div class="ctl">${control}</div></div>`;
+function srow(name, desc, control, { sub, err, nameHtml, indent } = {}) {
+  return `<div class="srow${sub ? ' sub' : ''}"${indent !== undefined ? ` style="padding-left:${indent}px"` : ''}><div style="min-width:0"><div class="nm">${nameHtml || name}</div>${desc ? `<div class="ds">${desc}</div>` : ''}${err ? `<div class="err">${err}</div>` : ''}</div><div class="ctl">${control}</div></div>`;
 }
 const ssec = (label, d = '') => `<div class="ssec"><span>${label}</span>${d ? `<span class="d">· ${d}</span>` : ''}</div>`;
 const inp = (value, w = 80, { focus, bad, suffix } = {}) => `<span class="input${focus ? ' focus' : ''}${bad ? ' bad' : ''}" style="width:${w}px;font-size:12.5px">${value}${focus ? '<span class="caret"></span>' : ''}</span>${suffix ? `<span class="muted" style="font-size:12px">${suffix}</span>` : ''}`;
+
+// ---- notification times (topic 12): the same controls on the settings
+// page (the defaults) and in a group's or dashboard's notification settings
+// (custom). mode: 0 always, 1 at set times, 2 never. windows: [[days, from,
+// to]], days as a 7-character string of 1/0 from Monday.
+const DAYS = ['mo', 'tu', 'we', 'th', 'fr', 'sa', 'su'];
+const dayChips = (days) => `<span style="display:flex;gap:4px">${DAYS.map((d, i) => chip(d, { sel: days[i] === '1' })).join('')}</span>`;
+const rmBtn = `<span class="ibtn" style="color:var(--t-faint)">${icon('x', 12)}</span>`;
+function timesRows({ mode = 1, windows = [], loud = true, sub = false } = {}) {
+  const modeDesc = ['At any hour, every day.', 'Outside them, silently into the centre.', 'Never on the desktop; silently into the centre.'][mode];
+  let html = srow('notify', modeDesc, seg(['always', 'at set times', 'never'], mode), { sub });
+  if (mode === 1) {
+    html += windows.map(([days, from, to]) => srow('', '', inp(from, 64) + `<span class="faint">→</span>` + inp(to, 64) + rmBtn, { sub: true, nameHtml: dayChips(days), indent: sub ? 40 : 20 })).join('');
+    html += `<div class="srow" style="padding:8px 0 8px ${sub ? 40 : 20}px;min-height:0"><span>${btn('add times', { icon: 'plus', sm: true })}</span><span></span></div>`;
+    html += srow('critical and down at any time', 'They notify on the desktop outside these times too.', sw(loud), { sub: true, indent: sub ? 40 : 20 });
+  }
+  return html;
+}
+// The same controls stacked for a narrow column (the editor's inspector).
+function timesFields({ mode = 1, windows = [], loud = true } = {}) {
+  let html = `<span class="seg" style="display:flex">${['always', 'at set times', 'never'].map((o, i) => `<span class="${i === mode ? 'on' : ''}" style="flex:1;padding:0 6px">${o}</span>`).join('')}</span>`;
+  if (mode === 1) {
+    html += windows.map(([days, from, to]) => `<div class="col" style="gap:6px;padding:8px 0;border-top:1px solid var(--bd-row)">${dayChips(days)}<span style="display:flex;align-items:center;gap:6px">${inp(from, 64)}<span class="faint">→</span>${inp(to, 64)}<span class="grow"></span>${rmBtn}</span></div>`).join('');
+    html += `<span style="display:flex">${btn('add times', { icon: 'plus', sm: true })}</span>`;
+    html += sw(loud, 'critical and down at any time');
+  }
+  return html;
+}
 
 function pageGeneral() {
   return ssec('in the background') +
@@ -61,19 +92,26 @@ function pageNotifications(part = 0) {
       srow('only after', 'A problem must last this long first (5m, 1h; 0 = at once).', inp('0', 80)) +
       srow('play a sound', 'The system’s alert sound, by state where the desktop plays sounds.', sw(true));
   }
-  const scopeRow = (name, inherits, on = 0, sub = false) => srow(name, inherits, seg(['inherit', 'on', 'off', 'custom'], on), { sub });
-  return ssec('quiet hours') +
-    srow('record silently at night', 'Notifications in the window go to the centre without a desktop notification.', sw(true)) +
-    srow('from and to', 'May cross midnight; the days are the ones it starts on.', inp('22:00', 72) + `<span class="faint">→</span>` + inp('07:00', 72), { sub: true }) +
-    srow('days', '', ['mo', 'tu', 'we', 'th', 'fr', 'sa', 'su'].map((d, i) => chip(d, { sel: i < 5 })).join(''), { sub: true }) +
-    srow('critical and down still notify out loud', '', sw(true), { sub: true }) +
+  const note = (html) => `<div class="srow" style="border-top:1px solid var(--bd-row);padding:12px 0;grid-template-columns:16px minmax(0,1fr);gap:10px;align-items:start;color:var(--t-muted);font-size:12px;line-height:1.5"><span class="faint" style="padding-top:1px">${icon('info', 14)}</span><span>${html}</span></div>`;
+  const envHead = (name, n, st = 'ok') => `<div style="display:flex;align-items:center;gap:8px;padding:12px 0 6px;font-size:12px;color:var(--t-sec)">${dot(st, 'd6')}<span>${name}</span><span class="faint">· ${n}</span></div>`;
+  const open = `<span class="lnk" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--accent)">open${icon('arrow-up-right', 12)}</span>`;
+  // one line per override: what it is, its times, a link to its settings
+  const custom = (ic, name, kind, summary) => `<div style="display:grid;grid-template-columns:14px 110px 170px minmax(0,1fr) auto;gap:10px;align-items:center;height:36px;border-top:1px solid var(--bd-row);font-size:12.5px;white-space:nowrap">
+    <span style="display:flex;justify-content:center">${ic}</span><span class="strong">${name}</span><span class="faint" style="font-size:12px">${kind}</span><span class="sec trunc" style="font-size:12px">${summary}</span>${open}</div>`;
+  const folder = `<span class="muted">${icon('folder', 13)}</span>`;
+  return ssec('notification times', 'defaults · now: notifying, until 22:00') +
+    note(`<span class="strong">These are the defaults for prod-cluster.</span> Every group and dashboard uses them (<i>inherit</i>) unless it is set to <i>custom</i>: then its own times replace these, for it alone. A group’s custom times pass on to its dashboards that inherit.`) +
+    timesRows({ mode: 1, windows: [['1111100', '07:00', '22:00'], ['0000011', '09:00', '20:00']], loud: true }) +
+    ssec('custom times', 'groups and dashboards that override the defaults') +
+    envHead('prod-cluster', '3 of 12') +
+    custom(folder, 'platform', 'group', 'Mon–Fri 09:00 → 17:00 · critical and down at any time') +
+    custom(dot('crit', 'd7'), 'kubernetes', 'dashboard in platform', 'always') +
+    custom(dot('crit', 'd7'), 'databases', 'dashboard in overview', 'Mon–Fri 06:00 → 23:00, Sat–Sun 08:00 → 20:00') +
+    envHead('staging', '1 of 5') +
+    custom(folder, 'releases', 'group', 'Mon–Fri 09:00 → 17:00') +
+    envHead('lab', 'none: everything uses lab’s defaults', 'warn') +
     ssec('storm control') +
-    srow('storm threshold', 'Beyond it, one summary notification.', `<span class="muted" style="font-size:12px">at most</span>${inp('5', 44)}<span class="muted" style="font-size:12px">in</span>${inp('10', 44)}<span class="muted" style="font-size:12px">seconds</span>`) +
-    ssec('watched and muted', 'from a pane’s ··· menu or the palette') +
-    srow('', '', `<span class="btn sm">remove</span>`, { nameHtml: `<span style="display:flex;align-items:center;gap:10px">${dot('crit', 'd7')}<span>postgres-replication<span class="faint"> on </span><span class="sec">db-prod-03</span></span><span class="muted" style="font-size:12px">watched: always notifies</span></span>` }) +
-    srow('', '', `<span class="btn sm">remove</span>`, { nameHtml: `<span style="display:flex;align-items:center;gap:10px">${dot('unk', 'd7')}<span>backup-01</span><span class="muted" style="font-size:12px">muted until 08:00</span></span>` }) +
-    ssec('groups and dashboards') +
-    scopeRow('overview', 'inherits prod-cluster') + scopeRow('databases', 'on: notifies even if overview is off', 1, true) + scopeRow('host problems', 'inherits overview', 0, true);
+    srow('storm threshold', 'Beyond it, one summary notification.', `<span class="muted" style="font-size:12px">at most</span>${inp('5', 44)}<span class="muted" style="font-size:12px">in</span>${inp('10', 44)}<span class="muted" style="font-size:12px">seconds</span>`);
 }
 
 function pageIcinga() {
@@ -149,7 +187,7 @@ function settingsNav({ page = 'general', search = '', section = 0 }) {
   return html;
 }
 
-function settingsWindow({ page = 'general', search = '', part = 0, section = 0, inactive = false, title, subtitle, appearance = {} } = {}) {
+function settingsWindow({ page = 'general', search = '', part = 0, section = 0, title, subtitle, appearance = {} } = {}) {
   const pages = { general: pageGeneral, appearance: () => pageAppearance(appearance), notifications: () => pageNotifications(part), icinga: pageIcinga, keymap: pageKeymap, advanced: pageAdvanced };
   const body = search ? pageSearch() : pages[page]();
   const subtitles = { general: 'for icygui on this computer', appearance: 'for icygui on this computer', notifications: 'for prod-cluster · on this computer only', icinga: 'for icygui on this computer', keymap: 'keymap.toml', advanced: 'for icygui on this computer' };
@@ -158,14 +196,22 @@ function settingsWindow({ page = 'general', search = '', part = 0, section = 0, 
     : `<span class="title">${title || page}</span><span class="subtitle">${subtitle || subtitles[page]}</span>`;
   return `<div class="swin">
     <div class="snav">
-      <div class="top">${trafficLights(inactive)}<span class="vdiv"></span><span class="muted">${icon('search', 13)}</span>
+      <div class="top"><span class="muted" style="margin-left:2px">${icon('search', 13)}</span>
         ${search ? `<span class="q typed">${search}<span class="caret"></span></span><span class="grow"></span><span class="faint">${icon('x', 12)}</span>` : '<span class="q">Search settings</span>'}</div>
       <div class="list">${settingsNav({ page, search, section })}</div>
       <div class="foot"><span>focus navbar</span><span class="grow"></span><span class="kh">ctrl-shift-e</span></div>
     </div>
     <div class="spage">
       <div class="hbar" style="padding:0 20px 0 32px">${head}<span class="grow"></span>
-        <span class="quiet" style="display:flex;align-items:center;gap:6px">${icon('check', 12)}saved</span>${btn(page === 'keymap' && !search ? 'edit keymap file' : 'edit in settings file', { icon: 'file-code' })}</div>
+        <span class="quiet" style="display:flex;align-items:center;gap:6px">${icon('check', 12)}saved</span>${btn(page === 'keymap' && !search ? 'edit keymap file' : 'edit in settings file', { icon: 'file-code' })}<span class="x" style="margin-left:4px">×</span></div>
       <div class="scontent">${body}</div>
     </div></div>`;
+}
+
+// The main window with the settings panel over it (1440×900 frame): the
+// window stays active (its traffic lights keep their colours) and dims
+// behind the panel, as behind any modal.
+function settingsOver(opts = {}, main) {
+  const behind = main || appWindow(listHeader() + summary() + `<div class="list">${rows()}</div>`);
+  return behind + `<div class="backdrop"></div><div class="osd" style="left:180px;top:70px;width:1080px;height:760px;z-index:41">${settingsWindow(opts)}</div>`;
 }

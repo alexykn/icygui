@@ -2,22 +2,21 @@
 <html><head><meta charset="utf-8"><title>icygui v1 · 02 settings</title>
 <link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="settings.js"></script></head>
 <body class="canvas">
-<div class="topic-head"><span class="topic-id">02</span><span class="topic-name">A settings window in the style of Zed's</span></div>
-<p class="topic-intro">Today's two-tab modal dialog becomes a window of its own (<b>ctrl-,</b>, the app menu, the palette). On the left: a search field in the window's top bar, the categories, and the sections of the open category. On the right: one row per setting, with its name, a one-line muted description, and the control right-aligned (switch, dropdown, segmented control, chips or a short field). Rows are split by the list's row rules. The rows, chips, switches and segmented controls are today's components; nothing new is invented for the controls.
-Changes apply at once and are written to the settings file (Zed's model). A field applies on Enter or when it loses the focus, and a bad value shows its problem under the row and isn't applied. So there is no save or cancel; <i>edit in settings file</i> opens settings.toml. 1080×760 window.</p>
+<div class="topic-head"><span class="topic-id">02</span><span class="topic-name">A settings panel in the style of Zed's</span></div>
+<p class="topic-intro">Today's two-tab modal dialog becomes a large settings panel that opens <b>over the main window, inside it</b> (not a window of its own): <b>ctrl-,</b>, the app menu or the palette open it, × or Esc close it. Approved in the review. On the left: a search field in the panel's top bar, the categories, and the sections of the open category. On the right: one row per setting, with its name, a one-line muted description, and the control right-aligned (switch, dropdown, segmented control, chips or a short field). Rows are split by the list's row rules. The rows, chips, switches and segmented controls are today's components; nothing new is invented for the controls.
+Changes apply at once and are written to the settings file (Zed's model). A field applies on Enter or when it loses the focus, and a bad value shows its problem under the row and isn't applied. So there is no save or cancel; <i>edit in settings file</i> opens settings.toml. The panel is 1080×760 in the 1440×900 window; frames 2b to 2i show the panel alone.</p>
 <div class="shots"></div>
 <script>
 const W = { w: 1080, h: 760 };
-const mainBehind = appWindow(listHeader() + summary() + `<div class="list">${rows()}</div>`, { foot: { inactive: true } });
-shot('2a', '02-settings-a-window', 'In context: the settings window is a separate window on top of the main one (whose traffic lights go grey), so a dashboard stays visible while you change things.',
-  mainBehind + `<div class="osd dark" style="left:180px;top:70px;width:1080px;height:760px">${settingsWindow({ page: 'general' })}</div>`);
+shot('2a', '02-settings-a-window', 'In context: the settings panel opens inside the main window, over the dimmed dashboard, like a large modal. The window stays the active one (its traffic lights keep their colours); × at the top right or Esc closes the panel. Changes apply at once, so the dashboard behind follows them.',
+  settingsOver({ page: 'general' }));
 shot('2b', '02-settings-b-general', 'General: the three background switches. The longer explanations that today sit under each switch move into one note, so each row keeps a one-line description.',
   settingsWindow({ page: 'general' }), W);
 shot('2c', '02-settings-c-appearance', 'Appearance: theme (follow system, dark, light), interface size, row density and times in lists, each a segmented control. A live preview shows the chosen density (here compact with clock times; compact drops the output line).',
   settingsWindow({ page: 'appearance' }), W);
 shot('2d', '02-settings-d-notifications', 'Notifications, top: the environment whose rules these are (a dropdown, since rules are per environment), the master switch, pause, the new <i>show plugin output</i> switch, then the default rule with its chips and switches. The nav lists the page’s sections; the one in view is marked on the guide line.',
   settingsWindow({ page: 'notifications', part: 0, section: 0 }), W);
-shot('2e', '02-settings-e-notifications-more', 'Notifications, scrolled: quiet hours (indented rows depend on the switch above them), storm control as a sentence with two short fields, watched and muted objects with <i>remove</i>, and every group’s and dashboard’s setting (inherit, on, off, custom), as today.',
+shot('2e', '02-settings-e-notifications-more', 'Notifications, scrolled (revised with topic 12): the <i>notification times</i> are the defaults, and the page says so; the <i>custom times</i> section lists, per environment, the groups and dashboards that override them, each with a link to its notification settings. Storm control follows, then watched and muted objects.',
   settingsWindow({ page: 'notifications', part: 1, section: 2 }), W);
 shot('2f', '02-settings-f-icinga', 'Icinga: reconcile (adaptive or fixed, a field for the seconds when fixed), the event log’s retention, and the environments, each with its health dot and connection summary and a gear that opens its editor (today’s environment editor dialog).',
   settingsWindow({ page: 'icinga' }), W);

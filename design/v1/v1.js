@@ -63,18 +63,21 @@ function trafficLights(off = false) {
     : `<span class="tl c"></span><span class="tl m"></span><span class="tl z"></span>`;
 }
 
-function sidebar({ activeGroup = 'overview', activeItem = 'overview', groups = SIDEBAR_GROUPS, foot = {}, after = '', before = '', search = '' } = {}) {
+// slots: reserve the fixed slot for the notification-times mark (topic 12)
+// after each group's name and before each dashboard's count; g.mark and an
+// item's 5th field fill it.
+function sidebar({ activeGroup = 'overview', activeItem = 'overview', groups = SIDEBAR_GROUPS, foot = {}, after = '', before = '', search = '', slots = false } = {}) {
   let html = `<div class="sb">
     <div class="sb-top">${trafficLights(foot.inactive)}<span class="vdiv"></span><span class="muted">${icon('search', 13)}</span>
       <span class="sb-search">${search || 'Search dashboards…'}</span></div>${before}`;
   for (const g of groups) {
     const on = g.name === activeGroup;
-    html += `<div class="sb-group"><div class="sb-gh${on ? ' active' : ''}"><span class="name">${g.name}</span>
+    html += `<div class="sb-group"><div class="sb-gh${on ? ' active' : ''}"><span class="name">${g.name}</span>${slots ? `<span class="nslot">${g.mark || ''}</span>` : ''}
       ${on ? `<span class="chev">${icon('chevron-down', 12)}</span><span class="grow"></span><span class="gicons">${icon('plus', 14)}<span class="${g.menu ? 'glyph sel' : ''}" style="letter-spacing:1px;font-size:13px">···</span></span>` : ''}</div>`;
     for (const it of g.items) {
-      const [label, st, count, extra] = it;
+      const [label, st, count, extra, mark] = it;
       const act = on && label === activeItem;
-      html += `<div class="sb-item${act ? ' active' : ''}">${dot(st)}<span class="label">${label}</span>${extra || ''}<span class="count">${count}</span></div>`;
+      html += `<div class="sb-item${act ? ' active' : ''}">${dot(st)}<span class="label">${label}</span>${extra || ''}${slots ? `<span class="nslot">${mark || ''}</span>` : ''}<span class="count">${count}</span></div>`;
     }
     html += `</div>`;
   }

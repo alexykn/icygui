@@ -15,7 +15,7 @@ const dashMenu = menu([
   { label: 'edit dashboard' }, { label: 'rename' }, { label: 'duplicate' },
   { label: 'copy as YAML', hov: true, key: 'ctrl-shift-c' }, { label: 'export to file' },
   { label: 'move up' }, { label: 'move down' }, 'move to', { label: 'platform' }, { label: 'lab' },
-  '-', 'notifications', { label: 'inherit', chk: false }, { label: 'on', chk: true }, { label: 'off (muted)', chk: false }, { label: 'custom rule', chk: false },
+  '-', { label: 'notification settings', det: 'custom' },
   '-', { label: 'delete dashboard' },
 ], { x: 280, y: 196, w: 250 });
 const mainList = listHeader({ title: 'databases', subtitle: '4 views' }) + summary([['crit', 1, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown']], '2 handled hidden') + `<div class="list">${rows(ROWS.filter((r) => /db-|postgres|mysql/.test(r[1] + r[2])))}</div>`;
@@ -28,7 +28,7 @@ const groupsGroupOpen = [
 ];
 const groupMenu = menu([
   { label: 'new dashboard', key: 'ctrl-n' }, { label: 'rename' }, { label: 'new group' }, { label: 'move up', dis: true }, { label: 'move down' }, { label: 'collapse' },
-  '-', 'notifications', { label: 'inherit', chk: true }, { label: 'on', chk: false }, { label: 'off (muted)', chk: false }, { label: 'custom rule', chk: false },
+  '-', { label: 'notification settings', det: 'inherit' },
   '-', { label: 'copy group as YAML', hov: true }, { label: 'export group to file' },
   '-', { label: 'delete group' },
 ], { x: 250, y: 86, w: 250 });

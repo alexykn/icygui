@@ -60,8 +60,8 @@ pub(super) fn row_keys(state: &AppState) -> Vec<ObjectKey> {
     else {
         return Vec::new();
     };
-    result
-        .rows
+    result.views[0]
+        .rows()
         .iter()
         .filter_map(|row| match row {
             DashboardRow::Object(key) => Some(key.clone()),
@@ -136,7 +136,7 @@ fn view_changes_are_evaluated_by_the_core_and_rows_get_their_details() {
                     app.state.update(cx, |state, cx| {
                         let overview = dashboard(state, "overview");
                         state.select(overview.clone());
-                        assert!(state.update_view(&overview, |view| {
+                        assert!(state.update_primary_view(&overview, |view| {
                             view.sort = Sort {
                                 key: SortKey::Host,
                                 descending: false,
@@ -172,7 +172,7 @@ fn view_changes_are_evaluated_by_the_core_and_rows_get_their_details() {
                     let rows = state
                         .selected()
                         .and_then(|reference| state.result(reference))
-                        .map(|result| result.rows.clone())
+                        .map(|result| result.views[0].rows().to_vec())
                         .unwrap_or_default();
                     visible
                         .filter_map(|index| match rows.get(index) {
@@ -233,7 +233,9 @@ fn group_by_shows_the_cores_group_headers() {
                         app.state.update(cx, |state, cx| {
                             let all = dashboard(state, "all services");
                             state.select(all.clone());
-                            assert!(state.update_view(&all, |view| view.group_by = group_by));
+                            assert!(
+                                state.update_primary_view(&all, |view| view.set_grouping(group_by))
+                            );
                             cx.notify();
                         });
                     });
@@ -243,7 +245,7 @@ fn group_by_shows_the_cores_group_headers() {
                         state
                             .selected()
                             .and_then(|reference| state.result(reference))
-                            .and_then(|result| group_sections(&result.rows))
+                            .and_then(|result| group_sections(result.views[0].rows()))
                             .is_some_and(|labels| labels.len() > 1 && labels != before)
                     })
                     .await;
@@ -254,7 +256,7 @@ fn group_by_shows_the_cores_group_headers() {
                             .selected()
                             .and_then(|reference| state.result(reference))
                             .unwrap();
-                        let labels = group_sections(&result.rows).unwrap();
+                        let labels = group_sections(result.views[0].rows()).unwrap();
                         // A group shows once, under its display name.
                         let mut unique = labels.clone();
                         unique.sort();

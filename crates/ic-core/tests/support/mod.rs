@@ -272,6 +272,7 @@ fn launch(launch: Launch) -> Engine {
     let spec = EnvironmentSpec {
         environment,
         general,
+        hide_handled: ic_config::HideHandled::ALL,
         data_dir: data_dir.clone(),
         start,
     };

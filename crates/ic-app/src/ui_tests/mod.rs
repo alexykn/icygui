@@ -29,7 +29,7 @@ use gpui::{
     MouseDownEvent, MouseUpEvent, Pixels, PlatformInput, Point, Size, Window, point, px, size,
 };
 use ic_config::{GroupBy, Sort, SortKey};
-use ic_core::snapshot::{DashboardResult, DashboardRow, Snapshot};
+use ic_core::snapshot::{DashboardRow, Snapshot, ViewBody};
 use ic_model::{Comment, CommentKind, ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::Metrics;
@@ -156,10 +156,7 @@ impl Harness {
             let old = state.snapshot().clone();
             let mut dashboards = (*old.dashboards).clone();
             let result = dashboards.get_mut(&production()).unwrap();
-            *result = DashboardResult {
-                rows: Arc::new(rows),
-                ..result.clone()
-            };
+            result.views[0].body = ViewBody::List(Arc::new(rows));
             state.set_snapshot(Arc::new(Snapshot {
                 revision: old.revision + 1,
                 dashboards: Arc::new(dashboards),
@@ -191,8 +188,8 @@ impl Harness {
         let state = self.state.read(cx);
         state
             .result(state.selected().unwrap())
+            .and_then(|result| result.views[0].list_rows())
             .unwrap()
-            .rows
             .clone()
     }
 
@@ -712,12 +709,12 @@ fn sorting_and_grouping_keep_the_selection() {
         assert_eq!(app.cursor(cx).map(|(_, key)| key), Some(replication()));
         let changed = app.state.update(cx, |state, cx| {
             cx.notify();
-            state.update_view(&production(), |view| {
+            state.update_primary_view(&production(), |view| {
                 view.sort = Sort {
                     key: SortKey::Host,
                     descending: false,
                 };
-                view.group_by = GroupBy::Host;
+                view.set_grouping(GroupBy::Host);
             })
         });
         assert!(changed);

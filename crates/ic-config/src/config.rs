@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 
-use crate::model::{Config, Environment};
+use crate::model::{Config, Dashboard, Environment};
 
 /// The namespace of ids derived from settings content (UUID v5).
 ///
@@ -35,12 +35,13 @@ impl Config {
             .find(|environment| environment.id == id)
     }
 
-    /// Gives a new id to every environment, group and dashboard whose id
-    /// is blank or already taken by an earlier one, and returns how many
-    /// ids changed. Hand-written files often have no ids at all.
+    /// Gives a new id to every environment, group, dashboard and view
+    /// whose id is blank or already taken by an earlier one, and returns
+    /// how many ids changed. Hand-written files often have no ids at all,
+    /// and the views of dashboards from before v1 have none.
     ///
     /// Environment ids must be unique in the config; group and dashboard
-    /// ids within their environment. The first holder of a duplicated id
+    /// ids within their environment; view ids within their dashboard. The first holder of a duplicated id
     /// keeps it, and new ids never take one that an entry holds.
     ///
     /// The new ids are derived from the entries' content (UUID v5), not
@@ -48,7 +49,8 @@ impl Config {
     /// can't be saved: an environment's from its name and first URL (what
     /// format version 1 called its `url`), a group's from its
     /// environment's id and its name, a dashboard's from its environment's
-    /// and group's ids and its name. Entries that are the same in all of
+    /// and group's ids and its name, a view's from those three and its
+    /// name. Entries that are the same in all of
     /// these get different ids in file order. A derived id changes only
     /// when its entry's name or first URL does, or an identical entry
     /// before it comes or goes; so a password stored under a derived
@@ -106,6 +108,28 @@ fn repair_group_and_dashboard_ids(environment: &mut Environment) -> usize {
                 changed += 1;
             }
             index += 1;
+            changed += repair_view_ids(&environment.id, &group.id, dashboard);
+        }
+    }
+    changed
+}
+
+/// [`Config::repair_ids`] for the views of one dashboard (unique within
+/// it), derived from the environment's, group's and dashboard's ids and
+/// the view's name. An rc1 dashboard's only view gets its id this way.
+fn repair_view_ids(environment_id: &str, group_id: &str, dashboard: &mut Dashboard) -> usize {
+    let mut changed = 0;
+    let mut view_ids = Scope::new(dashboard.views.iter().map(|view| view.id.as_str()));
+    for (index, view) in dashboard.views.iter_mut().enumerate() {
+        if !view_ids.keeps(index) {
+            view.id = view_ids.derive(&[
+                "view",
+                environment_id,
+                group_id,
+                &dashboard.id,
+                view.name.trim(),
+            ]);
+            changed += 1;
         }
     }
     changed
@@ -153,7 +177,7 @@ impl Scope {
 /// A UUID v5 in [`DERIVED_ID_NAMESPACE`] for `seed` and `attempt`, in the
 /// form of [`new_id`]. Each field is prefixed with its length, so
 /// different seeds never encode alike.
-fn derived_id(seed: &[&str], attempt: u64) -> String {
+pub(crate) fn derived_id(seed: &[&str], attempt: u64) -> String {
     let mut name = Vec::new();
     for field in seed {
         let length = u64::try_from(field.len()).unwrap_or(u64::MAX);
@@ -254,6 +278,36 @@ mod tests {
             assert_eq!(unique.len(), dashboards.len());
         }
         assert_eq!(config.repair_ids(), 0, "repairing twice changes nothing");
+    }
+
+    #[test]
+    fn view_ids_are_repaired_within_their_dashboard() {
+        let mut config = Config {
+            environments: vec![environment("prod")],
+            ..Config::default()
+        };
+        let dashboard = &mut config.environments[0].groups[0].dashboards[0];
+        let kept = dashboard.views[0].id.clone();
+        let mut second = dashboard.views[0].clone();
+        second.name = "lag".to_owned();
+        let mut third = second.clone();
+        third.id.clear();
+        dashboard.views.extend([second, third]);
+        // The second view repeats the first's id, the third has none.
+        assert_eq!(config.repair_ids(), 2);
+        let views = &config.environments[0].groups[0].dashboards[0].views;
+        assert_eq!(views[0].id, kept, "the first holder keeps its id");
+        let ids: HashSet<&str> = views.iter().map(|view| view.id.as_str()).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(config.repair_ids(), 0);
+        // Derived ids are the same every time (an rc1 file that can't be
+        // saved keeps the same view ids at every start).
+        let mut again = config.clone();
+        again.environments[0].groups[0].dashboards[0].views[2]
+            .id
+            .clear();
+        again.repair_ids();
+        assert_eq!(again, config);
     }
 
     #[test]

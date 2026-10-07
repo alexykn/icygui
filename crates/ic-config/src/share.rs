@@ -56,8 +56,9 @@ struct ImportFile {
 }
 
 /// Writes dashboard groups as TOML for sharing: everything about them
-/// (names, views, notification settings), marked with a `format` key and
-/// the settings format version.
+/// (names, every dashboard's views with their displays and options,
+/// notification settings), marked with a `format` key and the settings
+/// format version.
 ///
 /// # Errors
 ///
@@ -73,8 +74,10 @@ pub fn export_groups(groups: &[DashboardGroup]) -> Result<String, ConfigError> {
 }
 
 /// Reads dashboard groups from an [export](export_groups), upgrading older
-/// formats. Every group and dashboard gets a fresh id, so importing the same
-/// file twice, or into the environment it came from, never clashes.
+/// formats (an rc1 export's dashboards get one view each, as in the
+/// settings). Every group, dashboard and view gets a fresh id, so importing
+/// the same file twice, or into the environment it came from, never
+/// clashes.
 ///
 /// The `format` key may be missing (hand-written files); unknown keys are
 /// ignored.
@@ -109,6 +112,9 @@ pub fn import_groups(text: &str) -> Result<Vec<DashboardGroup>, ConfigError> {
         group.id = new_id();
         for dashboard in &mut group.dashboards {
             dashboard.id = new_id();
+            for view in &mut dashboard.views {
+                view.id = new_id();
+            }
         }
     }
     let issues = validate_groups(&groups);
@@ -187,6 +193,95 @@ mod tests {
             reason("version = 1\n[[environments]]\nname = \"prod\""),
             "this is a settings file"
         );
+    }
+
+    #[test]
+    fn views_round_trip_through_an_export() {
+        let mut groups = crate::default_groups();
+        let views = vec![
+            crate::View {
+                name: "clusters".to_owned(),
+                display: crate::ViewDisplay::SummaryTiles,
+                groups: crate::ViewGroups {
+                    host_groups: vec!["pg-*".to_owned(), "redis-cache".to_owned()],
+                    order: crate::GroupOrder::Name,
+                    ..crate::ViewGroups::default()
+                },
+                ..crate::View::default()
+            },
+            crate::View {
+                name: "hosts by group".to_owned(),
+                display: crate::ViewDisplay::HostGroupGrid,
+                grid: crate::GridOptions {
+                    cells: crate::GridCells::LabelledCells,
+                    hide_healthy_groups: true,
+                    ..crate::GridOptions::default()
+                },
+                ..crate::View::default()
+            },
+            crate::View {
+                name: "failing".to_owned(),
+                handled: crate::HandledSetting {
+                    mode: crate::HandledMode::Hide,
+                    hide: crate::HideHandled {
+                        host_down: false,
+                        ..crate::HideHandled::ALL
+                    },
+                },
+                ..crate::View::default()
+            },
+            crate::View {
+                name: "db events".to_owned(),
+                display: crate::ViewDisplay::EventStream,
+                stream: crate::StreamOptions {
+                    lines: 15,
+                    recoveries: true,
+                    ..crate::StreamOptions::default()
+                },
+                ..crate::View::default()
+            },
+        ];
+        groups[0]
+            .dashboards
+            .push(crate::Dashboard::with_views("databases", views));
+        let imported = import_groups(&export_groups(&groups).unwrap()).unwrap();
+        let original = &groups[0].dashboards[3];
+        let copy = &imported[0].dashboards[3];
+        assert_eq!(copy.views.len(), 4);
+        for (copy, original) in copy.views.iter().zip(&original.views) {
+            assert_ne!(copy.id, original.id, "fresh ids");
+            assert_eq!(
+                crate::View {
+                    id: original.id.clone(),
+                    ..copy.clone()
+                },
+                *original
+            );
+        }
+    }
+
+    #[test]
+    fn rc1_exports_import_with_one_view_per_dashboard() {
+        let text = "format = \"icygui-dashboards\"\nversion = 3\n\n[[groups]]\nname = \"db\"\n\n\
+                    [[groups.dashboards]]\nname = \"all\"\n\n[groups.dashboards.view]\n\
+                    problems_only = false\nhide_handled = false\n";
+        let imported = import_groups(text).unwrap();
+        let views = &imported[0].dashboards[0].views;
+        assert_eq!(views.len(), 1);
+        assert!(!views[0].id.is_empty());
+        assert!(!views[0].problems_only);
+        assert_eq!(views[0].handled, crate::HandledSetting::SHOW);
+    }
+
+    #[test]
+    fn imports_need_a_view_per_dashboard() {
+        let text = "[[groups]]\nname = \"db\"\n[[groups.dashboards]]\nname = \"x\"\nviews = []\n";
+        match import_groups(text) {
+            Err(ConfigError::Invalid(issues)) => {
+                assert_eq!(issues[0].path, "groups[0].dashboards[0].views");
+            }
+            other => panic!("expected invalid groups, got {other:?}"),
+        }
     }
 
     #[test]

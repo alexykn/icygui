@@ -61,7 +61,11 @@ impl Tally {
             return;
         }
         self.summary.unhandled += 1;
-        if self.worst.is_none_or(|(worst, _)| severity > worst) {
+        // Equal severities (a down host and a warning service) go to the
+        // redder state, so the dot doesn't depend on the counting order.
+        if self.worst.is_none_or(|(worst, worst_state)| {
+            (severity, state_rank(state)) > (worst, state_rank(worst_state))
+        }) {
             self.worst = Some((severity, state));
         }
     }
@@ -70,6 +74,21 @@ impl Tally {
     pub(crate) fn finish(mut self) -> Summary {
         self.summary.worst_unhandled = self.worst.map(|(_, state)| state);
         self.summary
+    }
+}
+
+/// Breaks ties between problems of equal severity: the state whose colour
+/// is the more alarming wins.
+fn state_rank(state: CheckableState) -> u8 {
+    match state {
+        CheckableState::Host(HostState::Down) => 6,
+        CheckableState::Service(ServiceState::Critical) => 5,
+        CheckableState::Host(HostState::Unreachable) => 4,
+        CheckableState::Service(ServiceState::Unknown) => 3,
+        CheckableState::Service(ServiceState::Warning) => 2,
+        CheckableState::Host(HostState::Pending)
+        | CheckableState::Service(ServiceState::Pending) => 1,
+        CheckableState::Host(HostState::Up) | CheckableState::Service(ServiceState::Ok) => 0,
     }
 }
 
@@ -89,6 +108,28 @@ mod tests {
         let mut service = Service::new(host, "s");
         service.state = state;
         service
+    }
+
+    #[test]
+    fn equal_severities_go_to_the_redder_state() {
+        // A down host and a warning service both weigh 2080.
+        let down = host("down", HostState::Down);
+        let warning = service("up", ServiceState::Warning);
+        assert_eq!(down.severity(), warning.severity());
+        for down_first in [true, false] {
+            let mut tally = Tally::default();
+            if down_first {
+                tally.add_host(&down);
+                tally.add_service(&warning, None);
+            } else {
+                tally.add_service(&warning, None);
+                tally.add_host(&down);
+            }
+            assert_eq!(
+                tally.finish().worst_unhandled,
+                Some(CheckableState::Host(HostState::Down))
+            );
+        }
     }
 
     #[test]

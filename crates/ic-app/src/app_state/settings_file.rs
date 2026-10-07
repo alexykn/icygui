@@ -127,6 +127,9 @@ impl AppState {
                 crate::logging::set_level(general.log_level);
             }
         }
+        if old.appearance.hide_handled != self.config.appearance.hide_handled {
+            self.handled_defaults_changed();
+        }
         let on_screen = active
             .as_deref()
             .is_some_and(|id| self.config.environment(id).is_some());

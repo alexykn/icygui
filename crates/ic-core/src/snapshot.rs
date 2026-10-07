@@ -14,6 +14,7 @@ use ic_model::{
 };
 use ic_rules::DashboardRef;
 
+use crate::command::LogEntry;
 use crate::topology::{ClusterNode, ConnectedNode, cluster_nodes};
 
 /// Everything known about an environment at one point in time.
@@ -158,24 +159,196 @@ pub fn state_since(check: &CheckInfo) -> Timestamp {
         .unwrap_or(Timestamp::EPOCH)
 }
 
-/// A dashboard's rows and counts, evaluated by the runtime.
+/// A dashboard evaluated by the runtime: every view's result, and the
+/// dashboard's counts for the sidebar.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DashboardResult {
-    /// Rows in display order (filtered, sorted, grouped).
-    pub rows: Arc<Vec<DashboardRow>>,
-    /// Counts over every matching object (before `problems_only` and
-    /// `hide_handled`): the sidebar's count and dot.
+    /// Counts over the objects of the views that count problems
+    /// ([`ic_config::View::counts_problems`]: every view but an event
+    /// stream), each object once even when several views show it: the
+    /// sidebar's count (`unhandled`) and dot (`worst_unhandled`), and the
+    /// tray's.
     pub summary: Summary,
-    /// Counts over the objects `rows` lists (after `problems_only` and
-    /// `hide_handled`): the summary bar, which reads as the list's size.
+    /// One result per view, in the dashboard's order.
+    pub views: Vec<ViewResult>,
+}
+
+impl DashboardResult {
+    /// The result of the view with this id ([`ic_config::View::id`]).
+    /// Match views by id, not position: after an edit, the next result may
+    /// still be on its way.
+    #[must_use]
+    pub fn view(&self, id: &str) -> Option<&ViewResult> {
+        self.views.iter().find(|view| view.id == id)
+    }
+
+    /// The first view's result: all there is of a single-view dashboard
+    /// (every dashboard from rc1).
+    #[must_use]
+    pub fn first(&self) -> Option<&ViewResult> {
+        self.views.first()
+    }
+}
+
+/// One view's result.
+///
+/// The counts, for a list of service problems:
+/// - [`ViewResult::summary`] counts every object the filter matches (the
+///   editor's *8 matches, 2 handled*);
+/// - [`ViewResult::counts`] counts the unhandled ones the view is about
+///   (after *problems only*): the view header's and the summary bar's
+///   per-state counts, which *show* and *hide* never change;
+/// - [`ViewResult::shown`] counts the rows;
+/// - [`ViewResult::hidden`] and [`ViewResult::handled`] drive the `N
+///   hidden · show` / `N handled · hide` button.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ViewResult {
+    /// The view's id ([`ic_config::View::id`]).
+    pub id: String,
+    /// Counts over every object the view's filter matches (a grid: its
+    /// hosts, with their services when it colours by the worst of both;
+    /// an event stream: none).
+    pub summary: Summary,
+    /// The per-state counts the view's header shows: the objects it is
+    /// about (a list: after *problems only*; a grid: one per host, in the
+    /// state of its square) that don't count as handled. Showing or hiding
+    /// handled problems never changes them.
+    pub counts: Summary,
+    /// Counts over the rows of a list (after *problems only* and the
+    /// handled switches); other displays: the same as `counts`.
     pub shown: Summary,
-    /// The objects `hide_handled` hides or shows: those `problems_only`
-    /// lets through that count as handled (acknowledged, behind a host
-    /// problem, or in a downtime in effect whatever their state; the
-    /// hollow marks). The summary bar's `N handled hidden`.
+    /// How many objects the view's handled switches hide (lists only):
+    /// `N hidden · show`. 0 when it hides none.
+    pub hidden: u32,
+    /// How many of the objects the view is about count as handled
+    /// (acknowledged, in downtime, or a service of a host that is down;
+    /// the hollow marks), hidden or not: `N handled · hide` when they show.
     pub handled: u32,
-    /// The filter didn't parse or evaluate; `rows` is empty.
+    /// What the view shows.
+    pub body: ViewBody,
+    /// The filter didn't parse or evaluate: the body is empty, the error
+    /// names the object.
     pub error: Option<String>,
+}
+
+impl ViewResult {
+    /// A list's rows (empty for the other displays).
+    #[must_use]
+    pub fn rows(&self) -> &[DashboardRow] {
+        match &self.body {
+            ViewBody::List(rows) => rows,
+            _ => &[],
+        }
+    }
+
+    /// A list's rows as the shared `Arc`, which stays the same while the
+    /// rows don't change (`None` for the other displays).
+    #[must_use]
+    pub fn list_rows(&self) -> Option<&Arc<Vec<DashboardRow>>> {
+        match &self.body {
+            ViewBody::List(rows) => Some(rows),
+            _ => None,
+        }
+    }
+
+    /// Whether the view has nothing to show (its header says *nothing to
+    /// show*).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        match &self.body {
+            ViewBody::List(rows) => rows.is_empty(),
+            ViewBody::Grid(grid) => grid.groups.is_empty(),
+            ViewBody::Tiles(tiles) => tiles.is_empty(),
+            ViewBody::Stream(events) => events.is_empty(),
+        }
+    }
+}
+
+/// What a view shows, by its display. Each part is an `Arc` that stays the
+/// same while it doesn't change, so the UI can skip re-rendering it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ViewBody {
+    /// A list's or grouped list's rows (filtered, sorted, grouped).
+    List(Arc<Vec<DashboardRow>>),
+    /// A host-group grid.
+    Grid(Arc<Grid>),
+    /// Summary tiles, in the view's order.
+    Tiles(Arc<Vec<Tile>>),
+    /// An event stream's events, newest first (at most
+    /// [`STREAM_EVENTS`]).
+    Stream(Arc<Vec<LogEntry>>),
+}
+
+impl Default for ViewBody {
+    fn default() -> Self {
+        Self::List(Arc::default())
+    }
+}
+
+/// The most events an event stream view holds; it scrolls past its
+/// `lines`.
+pub const STREAM_EVENTS: usize = 200;
+
+/// A host-group grid (topic 05).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Grid {
+    /// The groups, in the view's order (worst first, or by name).
+    pub groups: Vec<GridGroup>,
+    /// How many hosts the grid shows (each once).
+    pub hosts: u32,
+}
+
+/// One group of a host-group grid: a host group, or a custom variable's
+/// value.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GridGroup {
+    /// The host group's name, or the variable's value: what a click
+    /// filters the page by.
+    pub name: String,
+    /// The host group's display name, or the value.
+    pub label: String,
+    /// One per host, by host name.
+    pub cells: Vec<GridCell>,
+    /// The cells that don't count as handled, by their state: the group
+    /// header's `● 1 ● 3` and its dot (`worst_unhandled`).
+    pub counts: Summary,
+}
+
+/// One host of a grid.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridCell {
+    /// The host.
+    pub host: HostName,
+    /// What the square shows: the worst unhandled problem of the host and
+    /// (colouring by the worst of both) its services; else the worst
+    /// handled one; else the host's own state (an OK host is dim green).
+    pub state: CheckableState,
+    /// Drawn hollow: the state comes from a handled problem, or the host
+    /// has nothing wrong but is in downtime (an OK host in downtime is a
+    /// hollow green square).
+    pub handled: bool,
+    /// Unhandled problems of the host and the services that colour it: the
+    /// tooltip's problem count.
+    pub problems: u32,
+    /// The worst service that is not OK, when a service gives the cell its
+    /// state: the tooltip's and a labelled cell's service.
+    pub worst_service: Option<Arc<str>>,
+}
+
+/// One tile of a summary tiles view: a host group or a custom variable's
+/// value, with its counts.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tile {
+    /// The host group's name, or the variable's value: what a click
+    /// filters the page by.
+    pub name: String,
+    /// The host group's display name, or the value.
+    pub label: String,
+    /// How many hosts the tile's objects are on (`3 hosts`).
+    pub hosts: u32,
+    /// Counts over the tile's objects: its stacked bar and numbers, its
+    /// dot (`worst_unhandled`).
+    pub summary: Summary,
 }
 
 /// One row of a dashboard list.
@@ -192,10 +365,10 @@ pub enum DashboardRow {
     Object(ObjectKey),
 }
 
-/// Counts over a dashboard's objects: all matching ones
-/// ([`DashboardResult::summary`], the sidebar) or the listed ones
-/// ([`DashboardResult::shown`], the summary bar: `12 critical · 29 warning
-/// · 24 unknown`).
+/// Counts over objects: a dashboard's for the sidebar
+/// ([`DashboardResult::summary`]), a view's ([`ViewResult::summary`],
+/// [`ViewResult::counts`], [`ViewResult::shown`]: `12 critical · 29
+/// warning · 24 unknown`), a grid group's or a tile's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Summary {
     /// Critical services.

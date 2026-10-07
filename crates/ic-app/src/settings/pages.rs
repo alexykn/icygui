@@ -311,15 +311,20 @@ fn preview_rows(state: &AppState, now: Timestamp) -> (Option<String>, Vec<Previe
     let Some(reference) = state.selected() else {
         return (None, Vec::new());
     };
-    let name = state
-        .dashboard(reference)
-        .map(|(_, dashboard)| dashboard.name.clone());
+    let Some((_, dashboard)) = state.dashboard(reference) else {
+        return (None, Vec::new());
+    };
+    let name = Some(dashboard.name.clone());
     let snapshot = state.snapshot();
-    let Some(result) = snapshot.dashboards.get(reference) else {
+    let Some(result) = snapshot
+        .dashboards
+        .get(reference)
+        .and_then(|result| crate::dashboard::primary_result(result, &dashboard.views))
+    else {
         return (name, Vec::new());
     };
     let rows = result
-        .rows
+        .rows()
         .iter()
         .filter_map(|row| match row {
             ic_core::snapshot::DashboardRow::Object(key) => Some(key),
@@ -671,6 +676,17 @@ impl SettingsPanel {
                 "times in lists",
                 "Under the state circle: how long in this state (14m), or since when (13:58).",
             ),
+            Setting::HideAcknowledged => {
+                text("hide acknowledged", "Problems someone has acknowledged.")
+            }
+            Setting::HideInDowntime => text(
+                "hide in downtime",
+                "Hosts and services whose downtime is in effect.",
+            ),
+            Setting::HideHostDown => text(
+                "hide services of hosts that are down",
+                "The host’s own problem covers them; the host still shows.",
+            ),
             Setting::Environment => text(
                 "environment",
                 "Notification rules belong to an environment; each one notifies on its own.",
@@ -953,6 +969,42 @@ impl SettingsPanel {
                         };
                     });
                 },
+            ),
+            Setting::HideAcknowledged => self.switch(
+                "settings-hide-acknowledged",
+                appearance.hide_handled.acknowledged,
+                false,
+                |this, on, _, cx| {
+                    this.change_appearance(cx, |appearance| {
+                        appearance.hide_handled.acknowledged = on;
+                    });
+                },
+                theme,
+                cx,
+            ),
+            Setting::HideInDowntime => self.switch(
+                "settings-hide-in-downtime",
+                appearance.hide_handled.in_downtime,
+                false,
+                |this, on, _, cx| {
+                    this.change_appearance(cx, |appearance| {
+                        appearance.hide_handled.in_downtime = on;
+                    });
+                },
+                theme,
+                cx,
+            ),
+            Setting::HideHostDown => self.switch(
+                "settings-hide-host-down",
+                appearance.hide_handled.host_down,
+                false,
+                |this, on, _, cx| {
+                    this.change_appearance(cx, |appearance| {
+                        appearance.hide_handled.host_down = on;
+                    });
+                },
+                theme,
+                cx,
             ),
             Setting::Environment => {
                 let ids: Vec<String> = facts

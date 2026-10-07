@@ -961,6 +961,7 @@ impl Engine {
             self.ports.clock.now().as_unix_seconds() - f64::from(hours) * 3_600.0,
         );
         self.event_log.prune(before);
+        self.prune_recent_events(before);
     }
 
     /// Judges the queued rule inputs with the dashboards' memberships:

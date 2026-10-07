@@ -16,7 +16,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ic_config::{
-    AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind, Sort, View,
+    AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, HandledSetting,
+    HideHandled, ObjectKind, Sort, View,
 };
 use ic_core::snapshot::{DashboardResult, Snapshot};
 use ic_model::Timestamp;
@@ -50,49 +51,42 @@ pub(crate) struct Fixture {
     pub(crate) evaluator: Evaluator,
 }
 
-/// Evaluates the demo's dashboards; stands in for the core's dashboard
-/// evaluation.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Evaluator {
-    filters: BTreeMap<DashboardRef, DemoFilter>,
-}
+/// Evaluates the demo's dashboards as the core does
+/// (`ic_core::evaluate_dashboard`); the fixture has no engine.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Evaluator;
 
 impl Evaluator {
-    /// Evaluates `reference` with `view` over `snapshot`. The demo's own
-    /// dashboards use their Rust filters; others (created in a test) have
-    /// their expression evaluated by `ic-filter`, an error if it doesn't
-    /// parse.
+    /// Evaluates a dashboard's `views` over `snapshot` with the settings'
+    /// handled `defaults`.
+    #[expect(
+        clippy::unused_self,
+        reason = "an evaluator stands for the core a fixture has none of"
+    )]
     pub(crate) fn evaluate(
-        &self,
+        self,
         snapshot: &Snapshot,
-        reference: &DashboardRef,
-        view: &View,
+        views: &[View],
+        defaults: HideHandled,
     ) -> DashboardResult {
-        match self.filters.get(reference) {
-            Some(filter) if view.filter == filter.expression() => {
-                evaluate::evaluate(snapshot, view, *filter)
-            }
-            _ => preview(snapshot, view).unwrap_or_else(|error| DashboardResult {
-                error: Some(error),
-                ..DashboardResult::default()
-            }),
-        }
+        ic_core::evaluate_dashboard(views, snapshot, &[], defaults)
     }
 
     /// Fills in what the core computes: the overall counts and every
     /// dashboard.
-    fn fill(&self, snapshot: &mut Snapshot, config: &Config) {
+    fn fill(self, snapshot: &mut Snapshot, config: &Config) {
         snapshot.overall = evaluate::overall(snapshot);
         snapshot.dashboards = Arc::new(self.evaluate_all(snapshot, config));
     }
 
     /// Evaluates every dashboard of `config`'s active environment.
     pub(crate) fn evaluate_all(
-        &self,
+        self,
         snapshot: &Snapshot,
         config: &Config,
     ) -> BTreeMap<DashboardRef, DashboardResult> {
         let active = config.active_environment.as_deref();
+        let defaults = config.appearance.hide_handled;
         config
             .environments
             .iter()
@@ -100,31 +94,28 @@ impl Evaluator {
             .flat_map(|environment| environment.groups.iter())
             .flat_map(|group| {
                 group.dashboards.iter().map(move |dashboard| {
+                    let reference = DashboardRef {
+                        group_id: group.id.clone(),
+                        dashboard_id: dashboard.id.clone(),
+                    };
                     (
-                        DashboardRef {
-                            group_id: group.id.clone(),
-                            dashboard_id: dashboard.id.clone(),
-                        },
-                        &dashboard.view,
+                        reference,
+                        self.evaluate(snapshot, &dashboard.views, defaults),
                     )
                 })
-            })
-            .map(|(reference, view)| {
-                let result = self.evaluate(snapshot, &reference, view);
-                (reference, result)
             })
             .collect()
     }
 }
 
-/// Evaluates a view that isn't saved (the dashboard editor's preview), as
+/// Evaluates views that aren't saved (the dashboard editor's preview), as
 /// the core's `PreviewDashboard` does.
-///
-/// # Errors
-///
-/// The filter doesn't parse (with its line and column).
-pub(crate) fn preview(snapshot: &Snapshot, view: &View) -> Result<DashboardResult, String> {
-    evaluate::evaluate_expression(snapshot, view)
+pub(crate) fn preview(
+    snapshot: &Snapshot,
+    views: &[View],
+    defaults: HideHandled,
+) -> DashboardResult {
+    Evaluator.evaluate(snapshot, views, defaults)
 }
 
 /// Builds the demo as of `now`; times in state are relative to it.
@@ -170,7 +161,6 @@ pub(crate) fn build_with(now: Timestamp, options: FixtureOptions) -> Fixture {
     };
 
     let mut groups = Vec::new();
-    let mut filters = BTreeMap::new();
     for (group_name, dashboards) in DASHBOARDS {
         let group_id = format!("demo-{group_name}");
         let mut group = DashboardGroup {
@@ -184,19 +174,13 @@ pub(crate) fn build_with(now: Timestamp, options: FixtureOptions) -> Fixture {
             .then_some(&LOAD_TEST)
             .into_iter();
         for spec in dashboards.iter().chain(generated) {
+            let id = format!("{group_id}-{}", spec.name);
             let dashboard = Dashboard {
-                id: format!("{group_id}-{}", spec.name),
+                views: vec![spec.view(&id)],
+                id,
                 name: spec.name.to_owned(),
-                view: spec.view(),
                 notifications: ScopeSetting::Inherit,
             };
-            filters.insert(
-                DashboardRef {
-                    group_id: group_id.clone(),
-                    dashboard_id: dashboard.id.clone(),
-                },
-                spec.filter,
-            );
             group.dashboards.push(dashboard);
         }
         groups.push(group);
@@ -217,7 +201,7 @@ pub(crate) fn build_with(now: Timestamp, options: FixtureOptions) -> Fixture {
         environments: vec![environment],
         ..Config::default()
     };
-    let evaluator = Evaluator { filters };
+    let evaluator = Evaluator;
     evaluator.fill(&mut snapshot, &config);
     let selected = if options.generated_rows > 0 {
         DashboardRef {
@@ -248,15 +232,25 @@ struct DashboardSpec {
 }
 
 impl DashboardSpec {
-    fn view(&self) -> View {
-        View {
+    /// The dashboard's only view (id `<dashboard id>-view`), as rc1 would
+    /// have it after the settings' upgrade: handled hidden follows the
+    /// settings, shown is set to show.
+    fn view(&self, dashboard_id: &str) -> View {
+        let mut view = View {
+            id: format!("{dashboard_id}-view"),
             object_kind: self.kind,
             filter: self.filter.expression(),
             problems_only: self.problems_only,
-            hide_handled: self.hide_handled,
+            handled: if self.hide_handled {
+                HandledSetting::SETTINGS
+            } else {
+                HandledSetting::SHOW
+            },
             sort: Sort::default(),
-            group_by: self.group_by,
-        }
+            ..View::default()
+        };
+        view.set_grouping(self.group_by);
+        view
     }
 }
 
@@ -368,7 +362,7 @@ mod tests {
     use std::collections::HashSet;
 
     use ic_config::{SortKey, View};
-    use ic_core::snapshot::{DashboardRow, Summary};
+    use ic_core::snapshot::{DashboardRow, Summary, ViewResult};
     use ic_model::{CheckableState, HostName, HostState, ObjectKey, ServiceKey, ServiceState};
 
     use super::*;
@@ -384,16 +378,18 @@ mod tests {
         }
     }
 
-    fn result<'a>(demo: &'a Fixture, group: &str, dashboard: &str) -> &'a DashboardResult {
+    /// The only view of a demo dashboard.
+    fn result<'a>(demo: &'a Fixture, group: &str, dashboard: &str) -> &'a ViewResult {
         demo.snapshot
             .dashboards
             .get(&reference(group, dashboard))
+            .and_then(DashboardResult::first)
             .unwrap()
     }
 
-    fn row_names(result: &DashboardResult) -> Vec<String> {
+    fn row_names(result: &ViewResult) -> Vec<String> {
         result
-            .rows
+            .rows()
             .iter()
             .map(|row| match row {
                 DashboardRow::Object(key) => key.full_name(),
@@ -454,8 +450,13 @@ mod tests {
     #[test]
     fn rows_reference_objects_in_the_snapshot() {
         let demo = demo();
-        for result in demo.snapshot.dashboards.values() {
-            for row in result.rows.iter() {
+        for result in demo
+            .snapshot
+            .dashboards
+            .values()
+            .flat_map(|result| &result.views)
+        {
+            for row in result.rows() {
                 if let DashboardRow::Object(key) = row {
                     let exists = match key {
                         ObjectKey::Host { name } => demo.snapshot.hosts.contains_key(name),
@@ -542,7 +543,7 @@ mod tests {
         let demo = demo();
         let overview = result(&demo, "overview", "overview");
         assert_eq!(
-            u32::try_from(overview.rows.len()).unwrap(),
+            u32::try_from(overview.rows().len()).unwrap(),
             overview.summary.unhandled
         );
         assert!(overview.summary.handled > 0);
@@ -555,7 +556,12 @@ mod tests {
     #[test]
     fn the_shown_counts_add_up_to_the_listed_rows() {
         let demo = demo();
-        for result in demo.snapshot.dashboards.values() {
+        for result in demo
+            .snapshot
+            .dashboards
+            .values()
+            .flat_map(|result| &result.views)
+        {
             let shown = result.shown;
             let counted = shown.critical
                 + shown.warning
@@ -565,7 +571,7 @@ mod tests {
                 + shown.ok
                 + shown.pending;
             let objects = result
-                .rows
+                .rows()
                 .iter()
                 .filter(|row| matches!(row, DashboardRow::Object(_)))
                 .count();
@@ -575,7 +581,7 @@ mod tests {
                 "{counted} counted, {objects} listed"
             );
             if !result
-                .rows
+                .rows()
                 .iter()
                 .any(|row| matches!(row, DashboardRow::Group { .. }))
             {
@@ -587,7 +593,7 @@ mod tests {
     #[test]
     fn databases_are_grouped_by_host_worst_first() {
         let demo = demo();
-        let rows = &result(&demo, "overview", "databases").rows;
+        let rows = result(&demo, "overview", "databases").rows();
         let headers: Vec<_> = rows
             .iter()
             .filter_map(|row| match row {
@@ -664,39 +670,36 @@ mod tests {
     #[test]
     fn re_evaluating_follows_the_view() {
         let demo = demo();
-        let production = reference("overview", "production");
-        let mut view = demo.config.environments[0].groups[0].dashboards[1]
-            .view
-            .clone();
+        let mut view = demo.config.environments[0].groups[0].dashboards[1].views[0].clone();
         view.sort = Sort {
             key: SortKey::Host,
             descending: false,
         };
-        view.hide_handled = true;
-        let result = demo.evaluator.evaluate(&demo.snapshot, &production, &view);
-        let rows = row_names(&result);
+        view.handled = HandledSetting::SETTINGS;
+        let all = HideHandled::ALL;
+        let result = demo.evaluator.evaluate(&demo.snapshot, &[view], all);
+        assert_eq!(result.views.len(), 1);
+        let rows = row_names(&result.views[0]);
         assert_eq!(rows[0], "api-gw-01!http-latency", "hosts in name order");
         assert!(
             !rows.contains(&"web-edge-02!http-tls".to_owned()),
             "handled hidden"
         );
-        // Other dashboards (created in a test) are evaluated from their
-        // filter expression, like the core does.
-        let other =
-            demo.evaluator
-                .evaluate(&demo.snapshot, &reference("nope", "nope"), &View::default());
-        assert!(other.error.is_none());
-        assert!(!other.rows.is_empty());
+        let other = demo
+            .evaluator
+            .evaluate(&demo.snapshot, &[View::default()], all);
+        assert!(other.views[0].error.is_none());
+        assert!(!other.views[0].rows().is_empty());
         let broken = demo.evaluator.evaluate(
             &demo.snapshot,
-            &reference("nope", "nope"),
-            &View {
+            &[View {
                 filter: "host.name ==".to_owned(),
                 ..View::default()
-            },
+            }],
+            all,
         );
         assert!(
-            broken
+            broken.views[0]
                 .error
                 .as_deref()
                 .is_some_and(|error| error.contains("(line 1, column")),
@@ -707,14 +710,12 @@ mod tests {
     #[test]
     fn grouping_by_host_group_uses_display_names() {
         let demo = demo();
-        let mut view = demo.config.environments[0].groups[0].dashboards[2]
-            .view
-            .clone();
-        view.group_by = GroupBy::HostGroup;
-        let result =
-            demo.evaluator
-                .evaluate(&demo.snapshot, &reference("overview", "databases"), &view);
-        let headers: Vec<String> = row_names(&result)
+        let mut view = demo.config.environments[0].groups[0].dashboards[2].views[0].clone();
+        view.set_grouping(GroupBy::HostGroup);
+        let result = demo
+            .evaluator
+            .evaluate(&demo.snapshot, &[view], HideHandled::ALL);
+        let headers: Vec<String> = row_names(&result.views[0])
             .into_iter()
             .filter(|row| row.starts_with('['))
             .collect();
@@ -731,11 +732,11 @@ mod tests {
         );
         assert_eq!(generated.selected, reference("lab", "load-test"));
         let load = result(&generated, "lab", "load-test");
-        assert_eq!(load.rows.len(), 500);
+        assert_eq!(load.rows().len(), 500);
         // The design's dashboards don't change.
         assert_eq!(
-            result(&generated, "overview", "production").rows.len(),
-            result(&demo(), "overview", "production").rows.len()
+            result(&generated, "overview", "production").rows().len(),
+            result(&demo(), "overview", "production").rows().len()
         );
     }
 }

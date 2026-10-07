@@ -433,7 +433,9 @@ fn a_new_dashboard_is_made_in_the_editor_with_a_live_preview() {
                             .read(cx)
                             .preview_result()
                             .is_some_and(|result| {
-                                result.as_ref().is_ok_and(|result| !result.rows.is_empty())
+                                result
+                                    .as_ref()
+                                    .is_ok_and(|result| !result.views[0].rows().is_empty())
                             })
                     },
                 )
@@ -448,10 +450,10 @@ fn a_new_dashboard_is_made_in_the_editor_with_a_live_preview() {
                     let (group, dashboard) = state.selected_dashboard().unwrap();
                     assert_eq!(group.name, "overview");
                     assert_eq!(dashboard.name, "web");
-                    assert_eq!(dashboard.view.filter, "match(\"db-*\", host.name)");
-                    assert_eq!(dashboard.view.object_kind, ObjectKind::Services);
+                    assert_eq!(dashboard.views[0].filter, "match(\"db-*\", host.name)");
+                    assert_eq!(dashboard.views[0].object_kind, ObjectKind::Services);
                     let result = state.result(state.selected().unwrap()).unwrap();
-                    assert!(result.error.is_none());
+                    assert!(result.views[0].error.is_none());
                     let kept = |toast: &Toast| toast.title.contains("are kept");
                     assert!(!state.toasts().any(kept), "nothing left to keep");
                 });
@@ -495,7 +497,7 @@ fn a_save_right_after_typing_checks_the_filter_first() {
                     let error = editor.read(cx).save_error().unwrap().to_owned();
                     assert!(error.contains("(line 1, column 18)"), "{error}");
                     let (_, saved) = app.state.read(cx).selected_dashboard().unwrap();
-                    assert_ne!(saved.view.filter, "service.state != ", "not saved");
+                    assert_ne!(saved.views[0].filter, "service.state != ", "not saved");
                 });
                 // A working one, saved at once: once checked.
                 cx.update(|cx| {
@@ -523,7 +525,7 @@ fn a_save_right_after_typing_checks_the_filter_first() {
                 .await;
                 cx.update(|cx| {
                     let (_, saved) = app.state.read(cx).selected_dashboard().unwrap();
-                    assert_eq!(saved.view.filter, "service.state != 0");
+                    assert_eq!(saved.views[0].filter, "service.state != 0");
                 });
             }
             .boxed_local()

@@ -15,6 +15,9 @@ fn without_ids(groups: &[DashboardGroup]) -> Vec<DashboardGroup> {
         group.id.clear();
         for dashboard in &mut group.dashboards {
             dashboard.id.clear();
+            for view in &mut dashboard.views {
+                view.id.clear();
+            }
         }
     }
     groups
@@ -24,12 +27,12 @@ fn all_ids(groups: &[DashboardGroup]) -> Vec<&str> {
     groups
         .iter()
         .flat_map(|group| {
-            std::iter::once(group.id.as_str()).chain(
-                group
-                    .dashboards
-                    .iter()
-                    .map(|dashboard| dashboard.id.as_str()),
-            )
+            std::iter::once(group.id.as_str()).chain(group.dashboards.iter().flat_map(
+                |dashboard| {
+                    std::iter::once(dashboard.id.as_str())
+                        .chain(dashboard.views.iter().map(|view| view.id.as_str()))
+                },
+            ))
         })
         .collect()
 }
@@ -98,7 +101,7 @@ view = { object_kind = "hosts", filter = 'host.vars.role == "web"', look = "comp
     assert_eq!(imported.len(), 1);
     assert_eq!(imported[0].name, "web");
     assert!(!imported[0].id.is_empty());
-    let view = &imported[0].dashboards[0].view;
+    let view = &imported[0].dashboards[0].views[0];
     assert_eq!(view.object_kind, ic_config::ObjectKind::Hosts);
     assert_eq!(view.filter, r#"host.vars.role == "web""#);
     assert!(view.problems_only, "defaults fill in the rest");

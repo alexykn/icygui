@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use ic_config::{Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind, Sort, SortKey, View};
+use ic_config::{
+    Dashboard, DashboardGroup, Environment, GroupBy, HandledSetting, ObjectKind, Sort, SortKey,
+    View,
+};
 use ic_model::{
     AckKind, CheckableState, Host, HostGroup, HostState, ObjectKey, Service, ServiceGroup,
     ServiceState, Timestamp,
@@ -11,10 +14,25 @@ use ic_rules::DashboardRef;
 use serde_json::json;
 
 use super::*;
-use crate::snapshot::DashboardRow;
+use crate::snapshot::{DashboardRow, ViewResult};
 use crate::store::Changes;
 
-fn host(name: &str, state: HostState, groups: &[&str], role: &str) -> Host {
+impl Dashboards {
+    /// Configures with the settings' default handled switches (all hidden).
+    fn configure_all(&mut self, environment: &Environment) {
+        self.configure(environment, HideHandled::ALL);
+    }
+}
+
+/// A list's rows, as the shared `Arc`.
+fn rows_arc(result: &ViewResult) -> Arc<Vec<DashboardRow>> {
+    match &result.body {
+        crate::snapshot::ViewBody::List(rows) => Arc::clone(rows),
+        other => panic!("not a list: {other:?}"),
+    }
+}
+
+pub(super) fn host(name: &str, state: HostState, groups: &[&str], role: &str) -> Host {
     let mut host = Host::new(name);
     host.state = state;
     host.groups = groups.iter().map(|g| (*g).to_owned()).collect();
@@ -22,14 +40,14 @@ fn host(name: &str, state: HostState, groups: &[&str], role: &str) -> Host {
     host
 }
 
-fn service(host: &str, name: &str, state: ServiceState, since: f64) -> Service {
+pub(super) fn service(host: &str, name: &str, state: ServiceState, since: f64) -> Service {
     let mut service = Service::new(host, name);
     service.state = state;
     service.check.last_state_change = Timestamp::from_unix_seconds(since);
     service
 }
 
-fn data(hosts: Vec<Host>, services: Vec<Service>) -> Data {
+pub(super) fn data(hosts: Vec<Host>, services: Vec<Service>) -> Data {
     Data {
         hosts: Arc::new(
             hosts
@@ -58,6 +76,7 @@ fn data(hosts: Vec<Host>, services: Vec<Service>) -> Data {
             display_name: "Disks".to_owned(),
         }]),
         now: Timestamp::from_unix_seconds(10_000.0),
+        events: Arc::default(),
     }
 }
 
@@ -66,7 +85,7 @@ fn data(hosts: Vec<Host>, services: Vec<Service>) -> Data {
 /// - db-2 (down, groups db, web): pg CRITICAL (handled by the host), ssh OK
 /// - web-1 (up, groups web): http UNKNOWN, ssh OK
 /// - lone (up, no groups): ssh WARNING
-fn sample() -> Data {
+pub(super) fn sample() -> Data {
     let mut pg = service("db-1", "pg", ServiceState::Critical, 100.0);
     pg.check.acknowledgement = AckKind::Normal;
     let mut disk = service("db-1", "disk", ServiceState::Warning, 300.0);
@@ -91,18 +110,20 @@ fn sample() -> Data {
     )
 }
 
-fn view(filter: &str) -> View {
+pub(super) fn view(filter: &str) -> View {
     View {
+        id: "v".to_owned(),
         object_kind: ObjectKind::Services,
         filter: filter.to_owned(),
         problems_only: false,
-        hide_handled: false,
+        handled: HandledSetting::SHOW,
         sort: Sort::default(),
         group_by: GroupBy::None,
+        ..View::default()
     }
 }
 
-fn reference(id: &str) -> DashboardRef {
+pub(super) fn reference(id: &str) -> DashboardRef {
     DashboardRef {
         group_id: "g".to_owned(),
         dashboard_id: id.to_owned(),
@@ -119,7 +140,7 @@ fn environment(views: &[(&str, View)]) -> Environment {
                 .map(|(id, view)| Dashboard {
                     id: (*id).to_owned(),
                     name: (*id).to_owned(),
-                    view: view.clone(),
+                    views: vec![view.clone()],
                     ..Dashboard::default()
                 })
                 .collect(),
@@ -129,7 +150,7 @@ fn environment(views: &[(&str, View)]) -> Environment {
     }
 }
 
-fn all() -> Changes {
+pub(super) fn all() -> Changes {
     Changes {
         any: true,
         all: true,
@@ -137,7 +158,7 @@ fn all() -> Changes {
     }
 }
 
-fn some(objects: &[ObjectKey]) -> Changes {
+pub(super) fn some(objects: &[ObjectKey]) -> Changes {
     Changes {
         any: true,
         objects: objects.iter().cloned().collect(),
@@ -147,19 +168,20 @@ fn some(objects: &[ObjectKey]) -> Changes {
 
 fn evaluate(views: &[(&str, View)], data: &Data) -> Dashboards {
     let mut dashboards = Dashboards::default();
-    dashboards.configure(&environment(views));
+    dashboards.configure_all(&environment(views));
     dashboards.update(data, &all(), false, &AtomicBool::new(false));
     dashboards
 }
 
-fn result<'a>(dashboards: &'a Dashboards, id: &str) -> &'a DashboardResult {
-    &dashboards.results()[&reference(id)]
+/// The only view of dashboard `id`.
+fn result<'a>(dashboards: &'a Dashboards, id: &str) -> &'a ViewResult {
+    &dashboards.results()[&reference(id)].views[0]
 }
 
 /// Rows as `host!service` names, groups as `# label (count)`.
-fn names(result: &DashboardResult) -> Vec<String> {
+pub(super) fn names(result: &ViewResult) -> Vec<String> {
     result
-        .rows
+        .rows()
         .iter()
         .map(|row| match row {
             DashboardRow::Group { label, count } => format!("# {label} ({count})"),
@@ -168,7 +190,7 @@ fn names(result: &DashboardResult) -> Vec<String> {
         .collect()
 }
 
-fn s(host: &str, name: &str) -> ObjectKey {
+pub(super) fn s(host: &str, name: &str) -> ObjectKey {
     ObjectKey::service(host, name)
 }
 
@@ -177,7 +199,7 @@ fn filters_select_members_and_display_flags_select_rows() {
     let data = sample();
     let mut problems = view("host.vars.role == \"db\"");
     problems.problems_only = true;
-    problems.hide_handled = true;
+    problems.handled = HandledSetting::SETTINGS;
     let mut all_db = view("host.vars.role == \"db\"");
     all_db.problems_only = false;
     let dashboards = evaluate(&[("problems", problems), ("all", all_db)], &data);
@@ -238,10 +260,10 @@ fn shown_counts_follow_the_display_flags() {
     let mut dashboards = evaluate(&[("d", all.clone())], &data);
     assert_eq!(result(&dashboards, "d").shown.critical, 2);
     let mut hidden = all;
-    hidden.hide_handled = true;
+    hidden.handled = HandledSetting::SETTINGS;
     // Only the display flags changed: the rows are rebuilt, nothing is
     // evaluated again.
-    dashboards.configure(&environment(&[("d", hidden)]));
+    dashboards.configure_all(&environment(&[("d", hidden)]));
     dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
     let result = result(&dashboards, "d");
     assert_eq!(names(result), ["db-1!disk", "db-1!ssh", "db-2!ssh"]);
@@ -264,7 +286,7 @@ fn a_downtime_in_effect_counts_as_handled_whatever_the_state() {
         vec![critical, ok, warning],
     );
     let mut hidden = view("host.name == \"db-1\"");
-    hidden.hide_handled = true;
+    hidden.handled = HandledSetting::SETTINGS;
     let mut problems = hidden.clone();
     problems.problems_only = true;
     let dashboards = evaluate(&[("hidden", hidden), ("problems", problems)], &data);
@@ -408,11 +430,11 @@ fn host_views_evaluate_hosts() {
 fn group_by_orders_groups_by_worst_severity_with_ungrouped_last() {
     let data = sample();
     let mut by_host_group = view("service.state != 0");
-    by_host_group.group_by = GroupBy::HostGroup;
+    by_host_group.set_grouping(GroupBy::HostGroup);
     let mut by_service_group = view("service.state != 0");
-    by_service_group.group_by = GroupBy::ServiceGroup;
+    by_service_group.set_grouping(GroupBy::ServiceGroup);
     let mut by_host = view("service.state != 0");
-    by_host.group_by = GroupBy::Host;
+    by_host.set_grouping(GroupBy::Host);
     let dashboards = evaluate(
         &[
             ("hg", by_host_group),
@@ -475,9 +497,9 @@ fn filter_errors_empty_the_rows_and_name_the_object() {
     let bad = result(&dashboards, "bad");
     let error = bad.error.as_deref().unwrap();
     assert!(error.contains("line 1, column"), "{error}");
-    assert!(bad.rows.is_empty());
+    assert!(bad.rows().is_empty());
     assert_eq!(bad.summary, Summary::default());
-    assert_eq!(result(&dashboards, "ok").rows.len(), 8);
+    assert_eq!(result(&dashboards, "ok").rows().len(), 8);
 
     // Fails for one object only: the dashboard shows the error until the
     // object changes.
@@ -504,7 +526,7 @@ fn filter_errors_empty_the_rows_and_name_the_object() {
     );
     let fixed = result(&dashboards, "limit");
     assert_eq!(fixed.error, None);
-    assert_eq!(fixed.rows.len(), 8, "null < 5 holds (null counts as 0)");
+    assert_eq!(fixed.rows().len(), 8, "null < 5 holds (null counts as 0)");
 }
 
 /// Applies `change` to `data` and updates incrementally; the result must
@@ -540,9 +562,9 @@ fn check_incremental(
 fn incremental_updates_match_full_evaluations() {
     let mut problems = view("host.vars.role == \"db\" || service.name == \"http\"");
     problems.problems_only = true;
-    problems.hide_handled = true;
+    problems.handled = HandledSetting::SETTINGS;
     let mut grouped = view("");
-    grouped.group_by = GroupBy::HostGroup;
+    grouped.set_grouping(GroupBy::HostGroup);
     grouped.sort = Sort {
         key: SortKey::LastStateChange,
         descending: true,
@@ -617,7 +639,7 @@ fn untouched_dashboards_keep_their_rows() {
     let mut data = sample();
     let mut dashboards = evaluate(&views, &data);
     let before = Arc::clone(dashboards.results());
-    let rows = Arc::clone(&result(&dashboards, "p").rows);
+    let rows = rows_arc(result(&dashboards, "p"));
 
     // A new check result that changes nothing a dashboard shows.
     let services = Arc::make_mut(&mut data.services);
@@ -631,7 +653,7 @@ fn untouched_dashboards_keep_their_rows() {
     services.insert(key.clone(), Arc::new(ssh));
     let after = dashboards.update(&data, &some(&[key.into()]), false, &AtomicBool::new(false));
     assert!(Arc::ptr_eq(&before, &after), "nothing changed");
-    assert!(Arc::ptr_eq(&rows, &result(&dashboards, "p").rows));
+    assert!(Arc::ptr_eq(&rows, &rows_arc(result(&dashboards, "p"))));
 
     // Nothing changed at all.
     let after = dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
@@ -687,7 +709,7 @@ fn a_dashboard_quiet_since_the_start_has_no_result_rather_than_an_empty_one() {
     let data = sample();
     let views = [("p", view("service.state != 0")), ("all", view(""))];
     let mut dashboards = Dashboards::default();
-    dashboards.configure(&environment(&views));
+    dashboards.configure_all(&environment(&views));
     dashboards.set_scope(Scope::Quiet(None));
     let results = dashboards.update(&data, &all(), false, &AtomicBool::new(false));
     assert!(
@@ -708,7 +730,7 @@ fn a_dashboard_quiet_since_the_start_has_no_result_rather_than_an_empty_one() {
     // Refiltered while quiet again: its old rows don't fit the new filter,
     // and there are no new ones yet; the other one keeps its result.
     dashboards.set_scope(Scope::Quiet(None));
-    dashboards.configure(&environment(&[
+    dashboards.configure_all(&environment(&[
         ("p", view("service.state == 2")),
         ("all", view("")),
     ]));
@@ -730,14 +752,14 @@ fn display_settings_restyle_without_re_evaluating() {
     let mut data = sample();
     let mut v = view("service.state != 0");
     let mut dashboards = evaluate(&[("d", v.clone())], &data);
-    assert_eq!(result(&dashboards, "d").rows.len(), 5);
+    assert_eq!(result(&dashboards, "d").rows().len(), 5);
 
     // A filter that would match less, sneaked into the data without
     // telling: a restyle must not notice it, a recompile must.
     let services = Arc::make_mut(&mut data.services);
     services.remove(&ServiceKey::new("lone", "ssh"));
-    v.hide_handled = true;
-    dashboards.configure(&environment(&[("d", v.clone())]));
+    v.handled = HandledSetting::SETTINGS;
+    dashboards.configure_all(&environment(&[("d", v.clone())]));
     dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
     assert_eq!(
         names(result(&dashboards, "d")),
@@ -746,16 +768,16 @@ fn display_settings_restyle_without_re_evaluating() {
     );
 
     v.filter = "service.state == 2".to_owned();
-    dashboards.configure(&environment(&[("d", v.clone())]));
+    dashboards.configure_all(&environment(&[("d", v.clone())]));
     dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
     assert!(
-        result(&dashboards, "d").rows.is_empty(),
+        result(&dashboards, "d").rows().is_empty(),
         "both criticals are handled"
     );
     assert_eq!(result(&dashboards, "d").summary.critical, 2);
 
     // Removing the dashboard drops its result.
-    dashboards.configure(&environment(&[]));
+    dashboards.configure_all(&environment(&[]));
     dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
     assert!(dashboards.results().is_empty());
 }
@@ -773,7 +795,11 @@ fn filters_on_the_time_refresh_with_it() {
     );
     data.now = Timestamp::from_unix_seconds(10_150.0);
     dashboards.update(&data, &Changes::default(), false, &AtomicBool::new(false));
-    assert_eq!(result(&dashboards, "recent").rows.len(), 2, "not refreshed");
+    assert_eq!(
+        result(&dashboards, "recent").rows().len(),
+        2,
+        "not refreshed"
+    );
     dashboards.update(&data, &Changes::default(), true, &AtomicBool::new(false));
     assert_eq!(names(result(&dashboards, "recent")), ["lone!ssh"]);
     assert!(!evaluate(&[("x", view(""))], &data).time_dependent());
@@ -784,12 +810,20 @@ fn previews_evaluate_unsaved_views() {
     let data = sample();
     let mut v = view("host.name == \"web-1\"");
     v.problems_only = true;
-    let preview = preview(&v, &data).unwrap();
-    assert_eq!(names(&preview), ["web-1!http"]);
-    assert_eq!(preview.summary.ok, 1);
-    let error = super::preview(&view("(("), &data).unwrap_err();
+    let all = HideHandled::ALL;
+    let preview = preview(&[v], &data, all);
+    assert_eq!(names(&preview.views[0]), ["web-1!http"]);
+    assert_eq!(preview.views[0].summary.ok, 1);
+    assert_eq!(
+        preview.summary, preview.views[0].summary,
+        "one view: its counts"
+    );
+    let failed = super::preview(&[view("((")], &data, all);
+    let error = failed.views[0].error.as_deref().unwrap();
     assert!(error.contains("line 1"), "{error}");
-    let error = super::preview(&view("nope(1)"), &data).unwrap_err();
+    assert_eq!(failed.summary, Summary::default());
+    let failed = super::preview(&[view("nope(1)")], &data, all);
+    let error = failed.views[0].error.as_deref().unwrap();
     assert!(error.contains("nope"), "{error}");
 }
 
@@ -797,16 +831,20 @@ fn previews_evaluate_unsaved_views() {
 fn duplicate_ids_and_cancellation() {
     let data = sample();
     let mut dashboards = Dashboards::default();
-    dashboards.configure(&environment(&[
+    dashboards.configure_all(&environment(&[
         ("d", view("")),
         ("d", view("service.state == 2")),
     ]));
     dashboards.update(&data, &all(), false, &AtomicBool::new(false));
     assert_eq!(dashboards.results().len(), 1);
-    assert_eq!(result(&dashboards, "d").rows.len(), 8, "the first one wins");
+    assert_eq!(
+        result(&dashboards, "d").rows().len(),
+        8,
+        "the first one wins"
+    );
 
     let mut cancelled = Dashboards::default();
-    cancelled.configure(&environment(&[("d", view(""))]));
+    cancelled.configure_all(&environment(&[("d", view(""))]));
     let results = cancelled.update(&data, &all(), false, &AtomicBool::new(true));
     assert!(results.is_empty(), "stopped before evaluating");
 }

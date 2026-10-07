@@ -269,7 +269,9 @@ fn view_changes_and_tabs_reach_the_core() {
         // The sort menu: `severity ↓`, then "host".
         app.click(cx, point(px(1352.), px(20.)), Modifiers::default());
         app.state.update(cx, |state, cx| {
-            state.update_view(&super::production(), |view| view.hide_handled = true);
+            state.update_primary_view(&super::production(), |view| {
+                view.handled = ic_config::HandledSetting::SETTINGS;
+            });
             cx.notify();
         });
         app.draw(cx);

@@ -9,9 +9,8 @@ use url::Url;
 use crate::config::new_id;
 use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::fingerprint::parse_fingerprint;
-use crate::model::{
-    ApiUrl, AuthConfig, Dashboard, DashboardGroup, Environment, ObjectKind, TlsConfig, View,
-};
+use crate::model::{ApiUrl, AuthConfig, Dashboard, DashboardGroup, Environment, TlsConfig};
+use crate::view::{HandledSetting, ObjectKind, View};
 
 impl Environment {
     /// A new environment with a fresh id, one URL, the [default
@@ -192,15 +191,43 @@ impl DashboardGroup {
 }
 
 impl Dashboard {
-    /// A dashboard with a fresh id that inherits its group's notification
-    /// setting. `name` is stored trimmed.
+    /// A dashboard with one view and a fresh id that inherits its group's
+    /// notification setting. `name` is stored trimmed; the view gets a
+    /// fresh id if it has none.
     pub fn new(name: &str, view: View) -> Self {
+        Self::with_views(name, vec![view])
+    }
+
+    /// A dashboard with these views (fresh ids for the views without one)
+    /// and a fresh id, inheriting its group's notification setting.
+    pub fn with_views(name: &str, mut views: Vec<View>) -> Self {
+        for view in &mut views {
+            if view.id.trim().is_empty() {
+                view.id = new_id();
+            }
+        }
         Self {
             id: new_id(),
             name: name.trim().to_owned(),
-            view,
+            views,
             notifications: ScopeSetting::Inherit,
         }
+    }
+
+    /// The view with this id.
+    pub fn view(&self, view_id: &str) -> Option<&View> {
+        self.views.iter().find(|view| view.id == view_id)
+    }
+
+    /// The view with this id, for changing it.
+    pub fn view_mut(&mut self, view_id: &str) -> Option<&mut View> {
+        self.views.iter_mut().find(|view| view.id == view_id)
+    }
+
+    /// Whether the dashboard has more than one view: it then shows a header
+    /// per view and no dashboard-wide summary bar.
+    pub fn is_multi_view(&self) -> bool {
+        self.views.len() > 1
     }
 }
 
@@ -215,19 +242,19 @@ pub fn default_groups() -> Vec<DashboardGroup> {
     let problems = View {
         object_kind: ObjectKind::Services,
         problems_only: true,
-        hide_handled: true,
+        handled: HandledSetting::SETTINGS,
         ..View::default()
     };
     let host_problems = View {
         object_kind: ObjectKind::Hosts,
         problems_only: true,
-        hide_handled: true,
+        handled: HandledSetting::SETTINGS,
         ..View::default()
     };
     let all_services = View {
         object_kind: ObjectKind::Services,
         problems_only: false,
-        hide_handled: false,
+        handled: HandledSetting::SHOW,
         ..View::default()
     };
     let mut overview = DashboardGroup::new("overview");
@@ -470,15 +497,22 @@ mod tests {
         let [problems, host_problems, all_services] = &overview.dashboards[..] else {
             panic!("three dashboards");
         };
-        assert_eq!(problems.view.object_kind, ObjectKind::Services);
-        assert!(problems.view.problems_only && problems.view.hide_handled);
-        assert_eq!(host_problems.view.object_kind, ObjectKind::Hosts);
-        assert!(host_problems.view.problems_only && host_problems.view.hide_handled);
-        assert_eq!(all_services.view.object_kind, ObjectKind::Services);
-        assert!(!all_services.view.problems_only && !all_services.view.hide_handled);
+        let view = |dashboard: &Dashboard| {
+            assert_eq!(dashboard.views.len(), 1, "{}", dashboard.name);
+            dashboard.views[0].clone()
+        };
+        let (problems, host_problems, all_services) =
+            (view(problems), view(host_problems), view(all_services));
+        assert_eq!(problems.object_kind, ObjectKind::Services);
+        assert!(problems.problems_only && problems.handled == HandledSetting::SETTINGS);
+        assert_eq!(host_problems.object_kind, ObjectKind::Hosts);
+        assert!(host_problems.problems_only && host_problems.handled == HandledSetting::SETTINGS);
+        assert_eq!(all_services.object_kind, ObjectKind::Services);
+        assert!(!all_services.problems_only && all_services.handled == HandledSetting::SHOW);
         for dashboard in &overview.dashboards {
-            assert!(dashboard.view.filter.is_empty());
-            assert_eq!(dashboard.view.sort, crate::Sort::default());
+            assert!(!dashboard.views[0].id.is_empty());
+            assert!(dashboard.views[0].filter.is_empty());
+            assert_eq!(dashboard.views[0].sort, crate::Sort::default());
             assert_eq!(dashboard.notifications, ScopeSetting::Inherit);
             assert!(!dashboard.id.is_empty());
         }
@@ -552,6 +586,36 @@ mod tests {
             Dashboard::new("replication", View::default()).id
         );
         assert_ne!(group.id, DashboardGroup::new("databases").id);
+        // Views get ids of their own; one that has an id keeps it.
+        let [first, second] = &dashboard_with_two_views().views[..] else {
+            panic!("two views");
+        };
+        assert!(!first.id.is_empty());
+        assert_eq!(second.id, "kept");
+    }
+
+    fn dashboard_with_two_views() -> Dashboard {
+        Dashboard::with_views(
+            "databases",
+            vec![
+                View::default(),
+                View {
+                    id: "kept".to_owned(),
+                    ..View::default()
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn views_are_found_by_id() {
+        let mut dashboard = dashboard_with_two_views();
+        assert!(dashboard.is_multi_view());
+        assert!(dashboard.view("kept").is_some());
+        assert!(dashboard.view("missing").is_none());
+        dashboard.view_mut("kept").unwrap().name = "lag".to_owned();
+        assert_eq!(dashboard.views[1].name, "lag");
+        assert!(!Dashboard::new("one", View::default()).is_multi_view());
     }
 
     #[test]

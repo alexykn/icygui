@@ -142,7 +142,7 @@ holidays = ["2026-12-25"]
     );
     assert!(environment.tls.use_system_roots);
     assert_eq!(environment.groups[0].notifications, ScopeSetting::On);
-    assert!(!environment.groups[0].dashboards[0].view.problems_only);
+    assert!(!environment.groups[0].dashboards[0].views[0].problems_only);
     assert!(!environment.notifications.enabled);
 }
 
@@ -190,7 +190,7 @@ fn unversioned_files_are_upgraded_in_memory() {
     let dashboard = config.environments[0]
         .dashboard(GROUP_ID, DASHBOARD_ID)
         .unwrap();
-    assert_eq!(dashboard.view.filter, r#"host.vars.role == "postgres""#);
+    assert_eq!(dashboard.views[0].filter, r#"host.vars.role == "postgres""#);
     assert!(config.validate().is_empty(), "{:?}", config.validate());
 
     // Loading alone doesn't rewrite the file; the next save upgrades it and

@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserializer, Serialize};
 use toml::{Table, Value};
 
+use crate::config::derived_id;
 use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::model::{CONFIG_VERSION, Config};
 
@@ -22,7 +23,7 @@ pub(crate) type Migration = fn(&mut Table) -> Result<(), ConfigError>;
 /// `MIGRATIONS[n]` upgrades format version `n` to `n + 1`. The length is
 /// tied to [`CONFIG_VERSION`], so bumping the version without adding a step
 /// doesn't compile.
-const MIGRATIONS: [Migration; CONFIG_VERSION as usize] = [v0_to_v1, v1_to_v2, v2_to_v3];
+const MIGRATIONS: [Migration; CONFIG_VERSION as usize] = [v0_to_v1, v1_to_v2, v2_to_v3, v3_to_v4];
 
 /// Settings read from text, and what reading them noticed. Nothing is
 /// logged yet, so the caller decides whether it is worth reporting.
@@ -449,6 +450,94 @@ fn v2_to_v3(table: &mut Table) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Version 4 shows a dashboard as a list of views (v1, topic 04): its
+/// `view` becomes the only entry of `views`, which shows exactly what it
+/// showed.
+///
+/// - `hide_handled = true` (or no key: rc1's default) becomes *as in
+///   settings*, whose defaults hide every kind of handled problem, as rc1
+///   did; `hide_handled = false` becomes `handled = { mode = "show" }`.
+/// - A `group_by` other than `none` makes the view a grouped list.
+/// - A dashboard with neither `view` nor `views` had rc1's default view,
+///   which is now an explicit one.
+///
+/// The view's id is derived from the dashboard's (the same at every load,
+/// so an upgrade alone doesn't make the store save the file to record
+/// ids). A `view` that isn't a table, or a dashboard that already has
+/// `views`, is left for reading to report.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "every migration step has the same signature"
+)]
+fn v3_to_v4(table: &mut Table) -> Result<(), ConfigError> {
+    let Some(Value::Array(environments)) = table.get_mut("environments") else {
+        return Ok(());
+    };
+    for environment in environments {
+        let Some(Value::Array(groups)) = environment.get_mut("groups") else {
+            continue;
+        };
+        for group in groups {
+            let Some(Value::Array(dashboards)) = group.get_mut("dashboards") else {
+                continue;
+            };
+            for dashboard in dashboards {
+                if let Value::Table(dashboard) = dashboard {
+                    view_into_views(dashboard);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`v3_to_v4`] for one dashboard table.
+fn view_into_views(dashboard: &mut Table) {
+    if dashboard.contains_key("views") {
+        return;
+    }
+    let mut view = match dashboard.remove("view") {
+        None => Table::new(),
+        Some(Value::Table(view)) => view,
+        Some(other) => {
+            // Not a view: put it back for reading to report.
+            dashboard.insert("view".to_owned(), other);
+            return;
+        }
+    };
+    match view.remove("hide_handled") {
+        Some(Value::Boolean(false)) => {
+            let mut handled = Table::new();
+            handled.insert("mode".to_owned(), Value::String("show".to_owned()));
+            view.insert("handled".to_owned(), Value::Table(handled));
+        }
+        // Hidden (rc1's default): the settings' defaults hide every kind.
+        None | Some(Value::Boolean(true)) => {}
+        // Not a switch: keep it for reading to report as unknown.
+        Some(other) => {
+            view.insert("hide_handled".to_owned(), other);
+        }
+    }
+    let grouped = view
+        .get("group_by")
+        .and_then(Value::as_str)
+        .is_some_and(|group_by| group_by != "none");
+    if grouped {
+        view.insert(
+            "display".to_owned(),
+            Value::String("grouped_list".to_owned()),
+        );
+    }
+    if !view.contains_key("id") {
+        let dashboard_id = dashboard.get("id").and_then(Value::as_str).unwrap_or("");
+        view.insert(
+            "id".to_owned(),
+            Value::String(derived_id(&["view", dashboard_id], 0)),
+        );
+    }
+    dashboard.insert("views".to_owned(), Value::Array(vec![Value::Table(view)]));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,6 +804,184 @@ mod tests {
         // A version 3 file's own `dark` is a choice made in the panel.
         let parsed = parse_config("version = 3\n[appearance]\ntheme = \"dark\"\n").unwrap();
         assert_eq!(parsed.config.appearance.theme, crate::ThemeChoice::Dark);
+    }
+
+    /// An rc1 (version 3) settings file with every kind of dashboard rc1
+    /// could save.
+    const RC1_DASHBOARDS: &str = r#"
+version = 3
+
+[[environments]]
+id = "env"
+name = "prod"
+
+[[environments.groups]]
+id = "g"
+name = "overview"
+
+[[environments.groups.dashboards]]
+id = "problems"
+name = "problems"
+
+[environments.groups.dashboards.view]
+object_kind = "services"
+filter = "host.vars.role == \"db\""
+problems_only = true
+hide_handled = true
+group_by = "none"
+
+[environments.groups.dashboards.view.sort]
+key = "last_state_change"
+descending = false
+
+[[environments.groups.dashboards]]
+id = "all"
+name = "all services"
+notifications = { mode = "off" }
+
+[environments.groups.dashboards.view]
+problems_only = false
+hide_handled = false
+group_by = "host_group"
+
+[[environments.groups.dashboards]]
+id = "hosts"
+name = "host problems"
+
+[environments.groups.dashboards.view]
+object_kind = "hosts"
+group_by = "host"
+
+[[environments.groups.dashboards]]
+id = "bare"
+name = "written by hand"
+"#;
+
+    #[test]
+    fn version_3_dashboards_get_one_view_that_shows_the_same() {
+        let parsed = parse_config(RC1_DASHBOARDS).unwrap();
+        assert_eq!(parsed.version, 3);
+        assert!(parsed.unknown_keys.is_empty(), "{:?}", parsed.unknown_keys);
+        let dashboards = &parsed.config.environments[0].groups[0].dashboards;
+        let views: Vec<&crate::View> = dashboards
+            .iter()
+            .map(|dashboard| {
+                assert_eq!(dashboard.views.len(), 1, "{}", dashboard.name);
+                &dashboard.views[0]
+            })
+            .collect();
+        let [problems, all, hosts, bare] = views[..] else {
+            panic!("four dashboards");
+        };
+        // The filter, kind, sort and switches are kept as they were.
+        assert_eq!(problems.filter, "host.vars.role == \"db\"");
+        assert_eq!(problems.object_kind, crate::ObjectKind::Services);
+        assert_eq!(
+            problems.sort,
+            crate::Sort {
+                key: crate::SortKey::LastStateChange,
+                descending: false
+            }
+        );
+        assert!(problems.problems_only);
+        assert_eq!(problems.display, crate::ViewDisplay::List);
+        // Handled hidden follows the settings (all hidden by default),
+        // handled shown is set to show.
+        assert_eq!(problems.handled, crate::HandledSetting::SETTINGS);
+        assert_eq!(all.handled, crate::HandledSetting::SHOW);
+        assert_eq!(
+            all.hidden_handled(crate::HideHandled::ALL),
+            crate::HideHandled::NONE
+        );
+        assert!(!all.problems_only);
+        // Grouped views become grouped lists with the same grouping.
+        assert_eq!(all.display, crate::ViewDisplay::GroupedList);
+        assert_eq!(all.list_grouping(), crate::GroupBy::HostGroup);
+        assert_eq!(hosts.display, crate::ViewDisplay::GroupedList);
+        assert_eq!(hosts.list_grouping(), crate::GroupBy::Host);
+        assert_eq!(hosts.object_kind, crate::ObjectKind::Hosts);
+        // rc1's default view (hide handled, problems only) stays that.
+        assert_eq!(
+            bare,
+            &crate::View {
+                id: bare.id.clone(),
+                ..crate::View::default()
+            }
+        );
+        assert_eq!(bare.handled, crate::HandledSetting::SETTINGS);
+        // The rest of the dashboard is kept; views have no name and an id
+        // derived from the dashboard's, the same at every load.
+        assert_eq!(dashboards[1].notifications, ic_rules::ScopeSetting::Off);
+        assert!(
+            views
+                .iter()
+                .all(|view| !view.id.is_empty() && view.name.is_empty())
+        );
+        let again = parse_config(RC1_DASHBOARDS).unwrap().config;
+        assert_eq!(again, parsed.config);
+        let mut repaired = parsed.config.clone();
+        assert_eq!(repaired.repair_ids(), 0, "nothing for the store to save");
+        assert_eq!(
+            parsed.config.appearance.hide_handled,
+            crate::HideHandled::ALL,
+            "the new defaults hide every kind"
+        );
+    }
+
+    #[test]
+    fn migrated_dashboards_round_trip() {
+        let mut config = parse_config(RC1_DASHBOARDS).unwrap().config;
+        config.repair_ids();
+        let text = toml::to_string(&config).unwrap();
+        let again = parse_config(&text).unwrap();
+        assert_eq!(again.version, u64::from(CONFIG_VERSION));
+        assert!(again.unknown_keys.is_empty(), "{:?}", again.unknown_keys);
+        assert_eq!(again.config, config);
+        // Written as `views`, never as `view` or `hide_handled`.
+        assert!(
+            text.contains("[[environments.groups.dashboards.views]]"),
+            "{text}"
+        );
+        assert!(!text.contains("hide_handled = "), "{text}");
+        assert!(!text.contains(".view]"), "{text}");
+    }
+
+    #[test]
+    fn odd_version_3_views_are_left_for_reading_to_report() {
+        // A dashboard that already lists views keeps them.
+        let mut settings = table(
+            "version = 3\n[[environments]]\n[[environments.groups]]\n\
+             [[environments.groups.dashboards]]\nviews = [{ name = \"a\" }]\n",
+        );
+        v3_to_v4(&mut settings).unwrap();
+        let dashboard = settings["environments"][0]["groups"][0]["dashboards"][0]
+            .as_table()
+            .unwrap();
+        assert_eq!(dashboard["views"][0]["name"].as_str(), Some("a"));
+        // A `view` that isn't a table, or a `hide_handled` that isn't a
+        // switch, is reported, not rewritten.
+        let parsed = parse_config(
+            "version = 3\n[[environments]]\n[[environments.groups]]\n\
+             [[environments.groups.dashboards]]\nview = 3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.unknown_keys,
+            ["environments.0.groups.0.dashboards.0.view"]
+        );
+        let parsed = parse_config(
+            "version = 3\n[[environments]]\n[[environments.groups]]\n\
+             [[environments.groups.dashboards]]\nview = { hide_handled = \"no\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.unknown_keys,
+            ["environments.0.groups.0.dashboards.0.views.0.hide_handled"]
+        );
+        // Settings without environments or groups need nothing.
+        let mut empty = table("version = 3\nenvironments = [{ groups = 1 }]\n");
+        v3_to_v4(&mut empty).unwrap();
+        assert_eq!(empty["environments"][0]["groups"].as_integer(), Some(1));
     }
 
     #[test]

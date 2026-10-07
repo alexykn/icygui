@@ -160,7 +160,7 @@ impl DashboardEditor {
         let filter = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("host.vars.env == \"prod\" && service.state != 0")
-                .default_value(draft.view.filter.clone())
+                .default_value(draft.view().filter.clone())
         });
         let subscriptions = vec![
             cx.subscribe_in(
@@ -287,9 +287,9 @@ impl DashboardEditor {
 
     /// Changes the draft's view and asks for a new preview.
     fn change_view(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut View)) {
-        let before = self.draft.view.clone();
-        change(&mut self.draft.view);
-        if self.draft.view != before {
+        let before = self.draft.view().clone();
+        change(self.draft.view_mut());
+        if *self.draft.view() != before {
             self.save_error = None;
             self.request_preview(PREVIEW_DEBOUNCE, cx);
         }
@@ -303,17 +303,19 @@ impl DashboardEditor {
             self.preview = Preview::Waiting;
         }
         self.checking = true;
-        let view = self.draft.view.clone();
+        let views = self.draft.views.clone();
+        let view_id = self.draft.view().id.clone();
         self.preview_task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            let Ok(receiver) = this.update(cx, |this, cx| this.state.read(cx).preview(view)) else {
+            let Ok(receiver) = this.update(cx, |this, cx| this.state.read(cx).preview(views))
+            else {
                 return;
             };
             let preview = match receiver {
                 Some(receiver) => match receiver.await {
-                    Ok(result) => Preview::Ready(result),
+                    Ok(result) => Preview::Ready(model::preview_outcome(result, &view_id)),
                     // Replaced by a newer request in the core.
                     Err(_) => return,
                 },
@@ -335,7 +337,7 @@ impl DashboardEditor {
     /// core can't evaluate once its preview says so (a save waits for a
     /// pending preview).
     fn save(&mut self, cx: &mut Context<Self>) {
-        if let Err(error) = model::check_filter(&self.draft.view.filter) {
+        if let Err(error) = model::check_filter(&self.draft.view().filter) {
             self.save_error = Some(format!("Fix the filter first: {error}"));
             self.preview = Preview::Ready(Err(error));
             cx.notify();
@@ -493,7 +495,7 @@ impl DashboardEditor {
                 );
             }
         };
-        let items = summary_items(&result.summary, self.draft.view.object_kind);
+        let items = summary_items(&result.summary, self.draft.view().object_kind);
         let summary = (!items.is_empty()).then(|| {
             SummaryBar::new()
                 .children(
@@ -503,16 +505,19 @@ impl DashboardEditor {
                 )
                 .end(div().text_color(theme.colors.text_faint).child("preview"))
         });
-        let body = if result.rows.is_empty() {
-            let text = if model::matches(&result.summary) == 0 {
+        let Some(first) = result.view(&self.draft.view().id) else {
+            return note("Nothing matches this filter.", theme);
+        };
+        let body = if first.rows().is_empty() {
+            let text = if model::matches(&first.summary) == 0 {
                 "Nothing matches this filter."
             } else {
                 "Everything this dashboard would show is OK or handled."
             };
             note(text, theme)
         } else {
-            let rows = result.rows.clone();
-            let view = self.draft.view.clone();
+            let rows = first.list_rows().cloned().unwrap_or_default();
+            let view = self.draft.view().clone();
             let scroll = self.scroll.clone();
             div()
                 .relative()
@@ -587,7 +592,7 @@ impl DashboardEditor {
     fn render_inspector(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let colors = theme.colors;
-        let view = &self.draft.view;
+        let view = self.draft.view();
         div()
             .flex()
             .flex_col()
@@ -626,7 +631,7 @@ impl DashboardEditor {
 
     /// The inspector's fields, scrolling.
     fn render_inspector_body(&self, cx: &Context<Self>) -> Stateful<Div> {
-        let view = &self.draft.view;
+        let view = self.draft.view();
         let group_name = self
             .state
             .read(cx)
@@ -653,7 +658,11 @@ impl DashboardEditor {
             )))
             .child(Self::kind_field(view, cx))
             .child(self.filter_field(cx))
-            .child(Self::show_field(view, cx))
+            .child(Self::show_field(
+                view,
+                self.state.read(cx).handled_defaults(),
+                cx,
+            ))
             .child(self.sort_fields(cx))
             .child(Field::new("group by").control(self.dropdown(
                 "editor-group-by",
@@ -689,7 +698,11 @@ impl DashboardEditor {
     fn filter_field(&self, cx: &Context<Self>) -> Field {
         let theme = cx.theme();
         let (filter_status, filter_tone, filter_error) = match &self.preview {
-            Preview::Ready(Ok(result)) => (model::status_text(result), FieldTone::Good, None),
+            Preview::Ready(Ok(result)) => (
+                model::status_text(result, &self.draft.view().id),
+                FieldTone::Good,
+                None,
+            ),
             Preview::Ready(Err(error)) => {
                 ("invalid".to_owned(), FieldTone::Bad, Some(error.clone()))
             }
@@ -698,7 +711,7 @@ impl DashboardEditor {
         };
         let marker = filter_error.as_deref().and_then(|error| {
             let (line, column) = model::error_position(error)?;
-            model::error_marker(&self.draft.view.filter, line, column, model::MARKER_CHARS)
+            model::error_marker(&self.draft.view().filter, line, column, model::MARKER_CHARS)
         });
         Field::new("filter")
             .status(filter_status, filter_tone)
@@ -730,7 +743,7 @@ impl DashboardEditor {
     }
 
     /// Problems only, hide handled.
-    fn show_field(view: &View, cx: &Context<Self>) -> Field {
+    fn show_field(view: &View, defaults: ic_config::HideHandled, cx: &Context<Self>) -> Field {
         Field::new("show").control(
             div()
                 .flex()
@@ -745,11 +758,17 @@ impl DashboardEditor {
                         })),
                 )
                 .child(
-                    Switch::new("editor-hide-handled", view.hide_handled)
+                    Switch::new("editor-hide-handled", view.hidden_handled(defaults).any())
                         .label("hide handled problems")
                         .on_change(cx.listener(|this, on: &bool, _, cx| {
                             let on = *on;
-                            this.change_view(cx, |view| view.hide_handled = on);
+                            this.change_view(cx, |view| {
+                                view.handled = if on {
+                                    ic_config::HandledSetting::SETTINGS
+                                } else {
+                                    ic_config::HandledSetting::SHOW
+                                };
+                            });
                         })),
                 ),
         )
@@ -757,7 +776,7 @@ impl DashboardEditor {
 
     /// The sort key and direction, side by side.
     fn sort_fields(&self, cx: &Context<Self>) -> Div {
-        let view = &self.draft.view;
+        let view = self.draft.view();
         div()
             .flex()
             .gap(px(10.))
@@ -843,7 +862,7 @@ impl DashboardEditor {
                     .gap(px(8.))
                     .text_size(theme.text.label)
                     .text_color(colors.text_faint)
-                    .child(format!("shows as: {}", view_label(&self.draft.view)))
+                    .child(format!("shows as: {}", view_label(self.draft.view())))
                     .child(div().flex_1())
                     .when_some(
                         match &self.target {
@@ -933,7 +952,7 @@ impl DashboardEditor {
     }
 
     fn sort_menu(&self, cx: &Context<Self>) -> Menu {
-        let view = &self.draft.view;
+        let view = self.draft.view();
         let mut menu = Menu::new("editor-sort-menu").min_width(px(200.));
         for key in [
             SortKey::Severity,
@@ -964,7 +983,7 @@ impl DashboardEditor {
     }
 
     fn group_by_menu(&self, cx: &Context<Self>) -> Menu {
-        let view = &self.draft.view;
+        let view = self.draft.view();
         let mut menu = Menu::new("editor-group-by-menu").min_width(px(200.));
         for group_by in [
             GroupBy::None,

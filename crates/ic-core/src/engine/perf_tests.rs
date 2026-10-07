@@ -29,7 +29,10 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use ic_api::{Client, ConnectionSettings, Credentials, Detail, TlsSettings, Url};
-use ic_config::{Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind, Sort, SortKey, View};
+use ic_config::{
+    Dashboard, DashboardGroup, Environment, GroupBy, HandledSetting, ObjectKind, Sort, SortKey,
+    View, ViewDisplay,
+};
 use ic_mock::{MockConfig, MockServer, scenarios};
 use ic_model::{EventKind, ObjectKey, Service, ServiceState, Timestamp};
 use secrecy::SecretString;
@@ -145,9 +148,14 @@ fn ten_dashboards() -> Environment {
         object_kind: ObjectKind::Services,
         filter: filter.to_owned(),
         problems_only,
-        hide_handled: problems_only,
+        handled: if problems_only {
+            HandledSetting::SETTINGS
+        } else {
+            HandledSetting::SHOW
+        },
         sort: Sort::default(),
         group_by: GroupBy::None,
+        ..View::default()
     };
     let mut host_problems = services("", true);
     host_problems.object_kind = ObjectKind::Hosts;
@@ -155,14 +163,14 @@ fn ten_dashboards() -> Environment {
         "regex(\"^disk\", service.name) && service.state >= 1",
         false,
     );
-    by_group.group_by = GroupBy::HostGroup;
+    by_group.set_grouping(GroupBy::HostGroup);
     let mut racks = services("host.vars.rack in [\"r01\", \"r02\", \"r03\"]", false);
-    racks.group_by = GroupBy::Host;
+    racks.set_grouping(GroupBy::Host);
     racks.sort = Sort {
         key: SortKey::LastStateChange,
         descending: true,
     };
-    let views = [
+    let views = vec![
         services("", true),
         host_problems,
         services("", false),
@@ -183,24 +191,93 @@ fn ten_dashboards() -> Environment {
         by_group,
         racks,
     ];
+    environment_of(views.into_iter().map(|view| vec![view]).collect())
+}
+
+/// An environment with a dashboard per entry of `dashboards` (its views).
+fn environment_of(dashboards: Vec<Vec<View>>) -> Environment {
     Environment {
         groups: vec![DashboardGroup {
             id: "g".to_owned(),
             name: "team".to_owned(),
-            dashboards: views
+            dashboards: dashboards
                 .into_iter()
                 .enumerate()
-                .map(|(index, view)| Dashboard {
-                    id: format!("d{index}"),
-                    name: format!("d{index}"),
-                    view,
-                    ..Dashboard::default()
+                .map(|(index, mut views)| {
+                    for (number, view) in views.iter_mut().enumerate() {
+                        view.id = format!("v{number}");
+                    }
+                    Dashboard {
+                        id: format!("d{index}"),
+                        name: format!("d{index}"),
+                        views,
+                        ..Dashboard::default()
+                    }
                 })
                 .collect(),
             ..DashboardGroup::default()
         }],
         ..Environment::default()
     }
+}
+
+/// The ten dashboards of [`ten_dashboards`] plus three multi-view ones
+/// like topics 04 and 05 draw: a grid of every host coloured by its
+/// services above a list of service problems; tiles per host group, a list
+/// of database problems and an event stream; a grid by a custom variable
+/// in labelled cells, tiles of hosts, and a grouped list of every service.
+fn multi_view_dashboards() -> Environment {
+    let mut dashboards: Vec<Vec<View>> = ten_dashboards().groups[0]
+        .dashboards
+        .iter()
+        .map(|dashboard| dashboard.views.clone())
+        .collect();
+    let grid = View {
+        display: ViewDisplay::HostGroupGrid,
+        object_kind: ObjectKind::Hosts,
+        ..View::default()
+    };
+    let problems = View::default();
+    dashboards.push(vec![grid.clone(), problems.clone()]);
+    let tiles = View {
+        display: ViewDisplay::SummaryTiles,
+        problems_only: false,
+        ..View::default()
+    };
+    let db_problems = View {
+        filter: "host.vars.role == \"db\"".to_owned(),
+        ..View::default()
+    };
+    let stream = View {
+        display: ViewDisplay::EventStream,
+        filter: "host.vars.role == \"db\"".to_owned(),
+        ..View::default()
+    };
+    dashboards.push(vec![tiles.clone(), db_problems, stream]);
+    let by_rack = View {
+        groups: ic_config::ViewGroups {
+            by: ic_config::GroupSource::CustomVar,
+            custom_var: "rack".to_owned(),
+            ..ic_config::ViewGroups::default()
+        },
+        grid: ic_config::GridOptions {
+            cells: ic_config::GridCells::LabelledCells,
+            ..ic_config::GridOptions::default()
+        },
+        ..grid
+    };
+    let host_tiles = View {
+        object_kind: ObjectKind::Hosts,
+        ..tiles
+    };
+    let mut every_service = View {
+        problems_only: false,
+        handled: HandledSetting::SHOW,
+        ..View::default()
+    };
+    every_service.set_grouping(GroupBy::Host);
+    dashboards.push(vec![by_rack, host_tiles, every_service]);
+    environment_of(dashboards)
 }
 
 fn data_of(store: &Store) -> Data {
@@ -210,6 +287,7 @@ fn data_of(store: &Store) -> Data {
         host_groups: Arc::clone(store.host_groups()),
         service_groups: Arc::clone(store.service_groups()),
         now: Timestamp::now(),
+        events: Arc::default(),
     }
 }
 
@@ -229,7 +307,7 @@ fn apply(
     store.replace_services(control.services(), Detail::Lean, 0);
     store.take_changes();
     let mut boards = Dashboards::default();
-    boards.configure(&ten_dashboards());
+    boards.configure(&ten_dashboards(), ic_config::HideHandled::ALL);
     if dashboards {
         boards.update(&data_of(&store), &all(), false, &AtomicBool::new(false));
     }
@@ -371,15 +449,26 @@ fn production_store(hosts: usize) -> Store {
 /// incrementally after state changes of `changed` services; returns the
 /// full time and the mean incremental time.
 fn dashboards_over(hosts: usize, touched: usize) -> (Duration, Duration) {
+    evaluate_over(&ten_dashboards(), hosts, touched)
+}
+
+/// [`dashboards_over`] for the dashboards of `environment`.
+fn evaluate_over(environment: &Environment, hosts: usize, touched: usize) -> (Duration, Duration) {
     let store = production_store(hosts);
     let mut data = data_of(&store);
+    data.events = Arc::new(recent_events(&data));
     let mut dashboards = Dashboards::default();
-    dashboards.configure(&ten_dashboards());
+    dashboards.configure(environment, ic_config::HideHandled::ALL);
     let started = Instant::now();
     let results = dashboards.update(&data, &all(), false, &AtomicBool::new(false));
     let full = started.elapsed();
-    assert_eq!(results.len(), 10);
-    assert!(results.values().all(|result| result.error.is_none()));
+    assert_eq!(results.len(), environment.groups[0].dashboards.len());
+    assert!(
+        results
+            .values()
+            .flat_map(|result| &result.views)
+            .all(|view| view.error.is_none())
+    );
 
     let keys: Vec<_> = data.services.keys().cloned().collect();
     let rounds: u32 = 10;
@@ -418,6 +507,59 @@ fn dashboards_evaluate_quickly() {
     );
     assert!(full < Duration::from_secs(10), "{full:?}");
     assert!(incremental < Duration::from_secs(2), "{incremental:?}");
+}
+
+/// A full event buffer: the latest state changes of the first services.
+fn recent_events(data: &Data) -> Vec<crate::command::LogEntry> {
+    data.services
+        .values()
+        .take(crate::dashboards::RECENT_EVENTS)
+        .map(|service| crate::command::LogEntry {
+            at: Timestamp::now(),
+            object: service.object_key(),
+            kind: crate::command::LogKind::State {
+                state: ic_model::CheckableState::Service(service.state),
+                state_type: ic_model::StateType::Hard,
+            },
+            text: String::new(),
+            author: None,
+        })
+        .collect()
+}
+
+#[test]
+fn multi_view_dashboards_evaluate_quickly() {
+    let (full, incremental) = evaluate_over(&multi_view_dashboards(), 134, 100);
+    eprintln!(
+        "2 010 services × 13 dashboards (19 views): full {full:?}, 100 changed services \
+         {incremental:?}"
+    );
+    assert!(full < Duration::from_secs(10), "{full:?}");
+    assert!(incremental < Duration::from_secs(2), "{incremental:?}");
+}
+
+#[test]
+#[ignore = "production size; run with --ignored --nocapture"]
+fn multi_view_dashboards_at_production_scale() {
+    for hosts in [1_334, 2_000] {
+        let (full, incremental) = evaluate_over(&multi_view_dashboards(), hosts, 100);
+        let (_, single) = evaluate_over(&multi_view_dashboards(), hosts, 1);
+        eprintln!(
+            "{} services × 13 dashboards (19 views: lists, grids, tiles, a stream): full \
+             evaluation {full:?}, incremental (100 changed services) {incremental:?}, \
+             (1 changed service) {single:?}",
+            hosts * 15
+        );
+        // PERF-06's budgets, set for 20 000 services, as for the ten
+        // dashboards (30 000 is measured, not asserted).
+        if !cfg!(debug_assertions) && hosts == 1_334 {
+            assert!(full < Duration::from_secs(1), "PERF-06: {full:?}");
+            assert!(
+                incremental < Duration::from_millis(100),
+                "PERF-06: {incremental:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -482,7 +624,7 @@ fn memory_at_production_scale() {
     // Ten dashboards over it.
     let base = live_bytes();
     let mut dashboards = Dashboards::default();
-    dashboards.configure(&ten_dashboards());
+    dashboards.configure(&ten_dashboards(), ic_config::HideHandled::ALL);
     let results = dashboards.update(&data_of(&store), &all(), false, &AtomicBool::new(false));
     let boards = live_bytes().saturating_sub(base);
     eprintln!(
@@ -562,7 +704,7 @@ fn storm(hosts: usize) -> (Duration, Duration, Duration, usize, usize) {
     let mut store = production_store(hosts);
     let mut dashboards = Dashboards::default();
     let environment = ten_dashboards();
-    dashboards.configure(&environment);
+    dashboards.configure(&environment, ic_config::HideHandled::ALL);
     dashboards.update(&data_of(&store), &all(), false, &AtomicBool::new(false));
     let mut notify = Notify::new(&environment);
     let failing: Vec<ObjectKey> = store

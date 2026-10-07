@@ -31,7 +31,7 @@ use crate::snapshot::{DashboardResult, Snapshot};
 #[derive(Debug, Default)]
 pub(super) struct Previews {
     running: bool,
-    waiting: Option<(View, oneshot::Sender<Result<DashboardResult, String>>)>,
+    waiting: Option<(Vec<View>, oneshot::Sender<DashboardResult>)>,
 }
 
 impl Engine {
@@ -44,6 +44,7 @@ impl Engine {
             || self.notify.has_pending()
             || self.updating_changed
             || self.mode_changed
+            || self.streams_wait()
     }
 
     /// When the next throttled snapshot (or the time-dependent dashboards'
@@ -89,7 +90,7 @@ impl Engine {
         let late_changed = self.watchdog.take_changed();
         let reconfigured = std::mem::take(&mut self.dashboards_configured);
         if reconfigured {
-            dashboards.configure(&self.spec.environment);
+            dashboards.configure(&self.spec.environment, self.spec.hide_handled);
         }
         // Quiet mode keeps only the memberships notifications depend on
         // current; rows, summaries and the other dashboards come back when
@@ -105,6 +106,8 @@ impl Engine {
         let news =
             std::mem::take(&mut self.updating_changed) | std::mem::take(&mut self.mode_changed);
         let refresh_time = self.time_dependent && self.time_refreshed.elapsed() >= TIME_REFRESH;
+        // New events for the event stream views.
+        let events = std::mem::take(&mut self.events_changed) && dashboards.has_streams();
         let mut snapshot = self.store.snapshot(
             0,
             self.ports.clock.now(),
@@ -115,6 +118,7 @@ impl Engine {
         snapshot.updating = Arc::clone(&self.updating);
         let evaluate = reconfigured
             || resumed
+            || events
             || refresh_time
             || changes.all
             || changes.groups
@@ -139,6 +143,7 @@ impl Engine {
             host_groups: Arc::clone(&snapshot.host_groups),
             service_groups: Arc::clone(&snapshot.service_groups),
             now: self.evaluation_time(),
+            events: Arc::clone(&self.recent_events),
         };
         let tx = self.internal_tx.clone();
         let cancel = Arc::clone(&self.cancel);
@@ -227,35 +232,38 @@ impl Engine {
             host_groups: Arc::clone(self.store.host_groups()),
             service_groups: Arc::clone(self.store.service_groups()),
             now: self.evaluation_time(),
+            events: Arc::clone(&self.recent_events),
         }
     }
 
-    /// `Command::PreviewDashboard`: evaluates `view` over the current
-    /// objects on a blocking thread.
-    pub(super) fn preview(
-        &mut self,
-        view: View,
-        reply: oneshot::Sender<Result<DashboardResult, String>>,
-    ) {
+    /// `Command::PreviewDashboard`: evaluates `views` over the current
+    /// objects on a blocking thread. If the evaluation fails (a bug), the
+    /// reply is dropped: the receiver sees `Canceled`.
+    pub(super) fn preview(&mut self, views: Vec<View>, reply: oneshot::Sender<DashboardResult>) {
         if self.previews.running {
-            self.previews.waiting = Some((view, reply));
+            self.previews.waiting = Some((views, reply));
             return;
         }
         self.previews.running = true;
         let data = self.data();
+        let defaults = self.spec.hide_handled;
         let tx = self.internal_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let result = catch_unwind(AssertUnwindSafe(|| dashboards::preview(&view, &data)))
-                .unwrap_or_else(|_| Err("the preview failed (an internal error)".to_owned()));
-            let _ = reply.send(result);
+            if let Ok(result) = catch_unwind(AssertUnwindSafe(|| {
+                dashboards::preview(&views, &data, defaults)
+            })) {
+                let _ = reply.send(result);
+            } else {
+                tracing::error!("a dashboard preview failed");
+            }
             let _ = tx.send(Internal::PreviewDone);
         });
     }
 
     pub(super) fn on_preview_done(&mut self) {
         self.previews.running = false;
-        if let Some((view, reply)) = self.previews.waiting.take() {
-            self.preview(view, reply);
+        if let Some((views, reply)) = self.previews.waiting.take() {
+            self.preview(views, reply);
         }
     }
 }

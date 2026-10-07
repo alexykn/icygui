@@ -19,6 +19,7 @@ pub(crate) use self::header::{HeaderMenu, HeaderMenus};
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -28,7 +29,7 @@ use gpui::{
     prelude::FluentBuilder as _, uniform_list,
 };
 use ic_config::{GroupBy, ListTimes, View};
-use ic_core::snapshot::DashboardRow;
+use ic_core::snapshot::{DashboardResult, DashboardRow, ViewResult};
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::{
@@ -52,6 +53,36 @@ use crate::pane::{ObjectPane, PaneEvent, PaneMode};
 /// The rows on screen are asked for their details once scrolling has
 /// rested this long, so flinging through a long list costs one request.
 pub(crate) const HYDRATE_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// The view this page shows: a dashboard's first list view, else its first
+/// view. A single-view dashboard (every dashboard from rc1) shows as rc1
+/// did; until the page shows every view (topic 04), a multi-view one shows
+/// its first list. A dashboard without views (a settings file edited by
+/// hand) reads as the default view.
+pub(crate) fn primary_view(views: &[View]) -> &View {
+    static NONE: std::sync::LazyLock<View> = std::sync::LazyLock::new(View::default);
+    views
+        .iter()
+        .find(|view| view.is_list())
+        .or_else(|| views.first())
+        .unwrap_or(&NONE)
+}
+
+/// The result of the view this page shows ([`primary_view`]).
+pub(crate) fn primary_result<'a>(
+    result: &'a DashboardResult,
+    views: &[View],
+) -> Option<&'a ViewResult> {
+    result.view(&primary_view(views).id)
+}
+
+/// The rows of the view this page shows (the shared `Arc`; empty when it
+/// isn't a list or has no result yet).
+fn primary_rows(state: &AppState, reference: &DashboardRef) -> Option<Arc<Vec<DashboardRow>>> {
+    let (_, dashboard) = state.dashboard(reference)?;
+    let result = state.view_result(reference, &primary_view(&dashboard.views).id)?;
+    Some(result.list_rows().cloned().unwrap_or_default())
+}
 
 /// How long the cursor follows an object revealed while the rows were
 /// quiet mode's ([`Reveal`]) at most: the handover to the live stream
@@ -278,10 +309,7 @@ impl DashboardView {
                 .retain(|reference, _| state.dashboard(reference).is_some());
         }
         let reference = state.selected()?.clone();
-        let rows = state
-            .result(&reference)
-            .map(|result| result.rows.clone())
-            .unwrap_or_default();
+        let rows = primary_rows(state, &reference).unwrap_or_default();
         let list = self
             .lists
             .entry(reference.clone())
@@ -585,7 +613,7 @@ impl DashboardView {
         let snapshot = state.snapshot().clone();
         let Some(view) = state
             .dashboard(reference)
-            .map(|(_, dashboard)| dashboard.view.clone())
+            .map(|(_, dashboard)| primary_view(&dashboard.views).clone())
         else {
             return Vec::new();
         };
@@ -687,12 +715,12 @@ impl DashboardView {
     fn hydrate_rows_on_screen(&mut self, reference: &DashboardRef, cx: &mut Context<Self>) {
         let needs: Vec<ObjectKey> = {
             let state = self.state.read(cx);
-            let Some(result) = state.result(reference) else {
+            let Some(rows) = primary_rows(state, reference) else {
                 return;
             };
-            let range = self.rows_on_screen(reference, result.rows.len(), cx);
+            let range = self.rows_on_screen(reference, rows.len(), cx);
             let snapshot = state.snapshot();
-            result.rows[range]
+            rows[range]
                 .iter()
                 .filter_map(|row| match row {
                     DashboardRow::Object(key) if row_worth_asking(snapshot, key) => {
@@ -711,7 +739,7 @@ impl DashboardView {
         let Some((_, dashboard)) = state.dashboard(reference) else {
             return note("This dashboard no longer exists.", theme);
         };
-        let view = &dashboard.view;
+        let view = primary_view(&dashboard.views);
         if let Some(denial) = state.query_denial(view.object_kind) {
             return EmptyState::new("No permission")
                 .leading(
@@ -723,7 +751,7 @@ impl DashboardView {
                 .max_width(px(560.))
                 .into_any_element();
         }
-        let Some(result) = state.result(reference) else {
+        let Some(result) = state.view_result(reference, &view.id) else {
             if state.connection().is_starting() {
                 return banner::loading_body(state, cx);
             }
@@ -746,7 +774,7 @@ impl DashboardView {
                 )
                 .into_any_element();
         }
-        if result.rows.is_empty() {
+        if result.rows().is_empty() {
             return empty_dashboard(reference, view, result, cx);
         }
         let Some(list) = self.lists.get(reference) else {
@@ -756,7 +784,7 @@ impl DashboardView {
         let list_reference = reference.clone();
         let rows = uniform_list(
             "dashboard-rows",
-            result.rows.len(),
+            result.rows().len(),
             cx.processor(move |this, range: Range<usize>, _window, cx| {
                 this.render_rows(&list_reference, range, cx)
             }),
@@ -1069,7 +1097,7 @@ pub(crate) fn group_header(
 fn empty_dashboard(
     reference: &DashboardRef,
     view: &View,
-    result: &ic_core::snapshot::DashboardResult,
+    result: &ViewResult,
     cx: &Context<DashboardView>,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -1082,9 +1110,10 @@ fn empty_dashboard(
         + summary.unreachable;
     let title = format!("No {}", header::view_label(view));
     let ok = StateCircle::with_color(theme.states.fill.ok).size(CircleSize::Pane);
-    if view.hide_handled && result.handled > 0 {
+    if result.hidden > 0 {
         let reference = reference.clone();
-        let handled = result.handled as usize;
+        let view_id = view.id.clone();
+        let handled = result.hidden as usize;
         // `3 handled problems are hidden.`, `1 handled service is hidden.`
         let what = rows::count_label(handled, view);
         let (number, noun) = what.split_once(' ').unwrap_or((what.as_str(), ""));
@@ -1099,7 +1128,7 @@ fn empty_dashboard(
                     move |this, _: &ClickEvent, _, cx| {
                         let reference = reference.clone();
                         this.state.update(cx, |state, cx| {
-                            if state.update_view(&reference, |view| view.hide_handled = false) {
+                            if state.toggle_handled(&reference, &view_id) {
                                 cx.notify();
                             }
                         });

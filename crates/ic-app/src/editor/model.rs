@@ -27,7 +27,10 @@ pub(crate) fn initial_draft(
     match target {
         EditorTarget::New => Some(DashboardDraft {
             name: NEW_DASHBOARD_NAME.to_owned(),
-            view: View::default(),
+            views: vec![View {
+                id: ic_config::new_id(),
+                ..View::default()
+            }],
             notifications: ScopeSetting::Inherit,
             group_id: group_id.to_owned(),
         }),
@@ -35,7 +38,7 @@ pub(crate) fn initial_draft(
             let (group, dashboard) = state.dashboard(reference)?;
             Some(DashboardDraft {
                 name: dashboard.name.clone(),
-                view: dashboard.view.clone(),
+                views: dashboard.views.clone(),
                 notifications: dashboard.notifications.clone(),
                 group_id: group.id.clone(),
             })
@@ -47,14 +50,14 @@ pub(crate) fn initial_draft(
 /// grouping by service group goes back to none.
 pub(crate) fn with_kind(mut view: View, kind: ObjectKind) -> View {
     view.object_kind = kind;
-    if kind == ObjectKind::Hosts && view.group_by == GroupBy::ServiceGroup {
-        view.group_by = GroupBy::None;
+    if kind == ObjectKind::Hosts && view.list_grouping() == GroupBy::ServiceGroup {
+        view.set_grouping(GroupBy::None);
     }
     view
 }
 
 /// How many objects a summary counts (every filter match, before
-/// `problems_only` and `hide_handled`).
+/// *problems only* and the handled switches).
 pub(crate) fn matches(summary: &Summary) -> u32 {
     summary.ok
         + summary.critical
@@ -65,12 +68,27 @@ pub(crate) fn matches(summary: &Summary) -> u32 {
         + summary.pending
 }
 
-/// The filter's status line for a preview: `valid · 12 matches · 3
-/// shown`.
-pub(crate) fn status_text(result: &DashboardResult) -> String {
+/// The core's preview as the editor reads it: the dashboard, or why the
+/// filter of the view it edits (`view_id`) doesn't work.
+pub(crate) fn preview_outcome(
+    result: DashboardResult,
+    view_id: &str,
+) -> Result<DashboardResult, String> {
+    match result.view(view_id).and_then(|view| view.error.clone()) {
+        Some(error) => Err(error),
+        None => Ok(result),
+    }
+}
+
+/// The filter's status line for a preview of the view the editor edits
+/// (`view_id`): `valid · 12 matches · 3 shown`.
+pub(crate) fn status_text(result: &DashboardResult, view_id: &str) -> String {
+    let Some(result) = result.view(view_id) else {
+        return "valid".to_owned();
+    };
     let matched = matches(&result.summary);
     let shown = result
-        .rows
+        .rows()
         .iter()
         .filter(|row| matches!(row, ic_core::snapshot::DashboardRow::Object(_)))
         .count();
@@ -161,7 +179,7 @@ pub(crate) fn error_marker(
 mod tests {
     use std::sync::Arc;
 
-    use ic_core::snapshot::DashboardRow;
+    use ic_core::snapshot::{DashboardRow, ViewBody, ViewResult};
     use ic_model::{ObjectKey, Timestamp};
 
     use super::*;
@@ -244,35 +262,48 @@ mod tests {
             DashboardRow::Object(ObjectKey::host("a")),
             DashboardRow::Object(ObjectKey::host("b")),
         ];
-        let result = DashboardResult {
-            rows: Arc::new(rows),
-            summary,
-            ..DashboardResult::default()
+        let dashboard = |view: ViewResult| DashboardResult {
+            summary: view.summary,
+            views: vec![view],
         };
-        assert_eq!(status_text(&result), "valid · 11 matches · 2 shown");
-        let all = DashboardResult {
-            rows: Arc::new(vec![DashboardRow::Object(ObjectKey::host("a"))]),
+        let result = dashboard(ViewResult {
+            id: "v".to_owned(),
+            body: ViewBody::List(Arc::new(rows)),
+            summary,
+            ..ViewResult::default()
+        });
+        assert_eq!(status_text(&result, "v"), "valid · 11 matches · 2 shown");
+        let all = dashboard(ViewResult {
+            id: "v".to_owned(),
+            body: ViewBody::List(Arc::new(vec![DashboardRow::Object(ObjectKey::host("a"))])),
             summary: Summary {
                 ok: 1,
                 ..Summary::default()
             },
-            ..DashboardResult::default()
-        };
-        assert_eq!(status_text(&all), "valid · 1 match");
+            ..ViewResult::default()
+        });
+        assert_eq!(status_text(&all, "v"), "valid · 1 match");
+        assert_eq!(status_text(&all, "gone"), "valid");
+        // A view whose filter fails is the editor's error.
+        let failed = dashboard(ViewResult {
+            id: "v".to_owned(),
+            error: Some("bad".to_owned()),
+            ..ViewResult::default()
+        });
+        assert_eq!(preview_outcome(failed, "v"), Err("bad".to_owned()));
+        assert!(preview_outcome(all, "v").is_ok());
     }
 
     #[test]
     fn hosts_have_no_service_groups() {
-        let view = View {
-            group_by: GroupBy::ServiceGroup,
-            ..View::default()
-        };
+        let mut view = View::default();
+        view.set_grouping(GroupBy::ServiceGroup);
         assert_eq!(
-            with_kind(view.clone(), ObjectKind::Hosts).group_by,
+            with_kind(view.clone(), ObjectKind::Hosts).list_grouping(),
             GroupBy::None
         );
         assert_eq!(
-            with_kind(view, ObjectKind::Services).group_by,
+            with_kind(view, ObjectKind::Services).list_grouping(),
             GroupBy::ServiceGroup
         );
     }
@@ -287,7 +318,9 @@ mod tests {
         let new = initial_draft(&state, &EditorTarget::New, "lab").unwrap();
         assert_eq!(new.name, NEW_DASHBOARD_NAME);
         assert_eq!(new.group_id, "lab");
-        assert!(new.view.problems_only && new.view.hide_handled);
+        assert!(new.view().problems_only);
+        assert_eq!(new.view().handled, ic_config::HandledSetting::SETTINGS);
+        assert!(!new.view().id.is_empty());
         let gone = DashboardRef {
             group_id: "x".to_owned(),
             dashboard_id: "y".to_owned(),

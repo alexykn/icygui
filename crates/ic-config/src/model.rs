@@ -12,11 +12,15 @@ use ic_rules::{NotificationSettings, ScopeSetting};
 use serde::de::{self, MapAccess, Visitor, value::MapAccessDeserializer};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::view::{HideHandled, View};
+
 /// Current config file format version. Version 2 replaced an environment's
 /// single `url` (with the pin and server name in `tls`) by its list of
 /// `urls`, each with its own pin and server name (ENV-12). Version 3 moved
-/// `general.theme` into the new `[appearance]` table.
-pub const CONFIG_VERSION: u32 = 3;
+/// `general.theme` into the new `[appearance]` table. Version 4 turned a
+/// dashboard's `view` into a list of `views` (v1, topic 04) and its
+/// `hide_handled` switch into the `handled` setting.
+pub const CONFIG_VERSION: u32 = 4;
 
 /// The most URLs an environment may list ([`Environment::urls`]). The
 /// engine tries them in order on every connect, so a long list would only
@@ -156,6 +160,9 @@ pub struct Appearance {
     pub row_density: RowDensity,
     /// What the time under a list row's state circle says.
     pub list_times: ListTimes,
+    /// The handled problems list views hide unless a view sets its own
+    /// (v1; all hidden by default).
+    pub hide_handled: HideHandled,
 }
 
 /// Colour theme.
@@ -377,7 +384,9 @@ impl Default for DashboardGroup {
     }
 }
 
-/// A dashboard ("thread"): one filtered, sorted list of hosts or services.
+/// A dashboard ("thread"): one or more views stacked on one page (v1,
+/// topic 04), each a filtered list, grid, set of tiles or event stream.
+/// A dashboard from rc1 has one view and looks as it did.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Dashboard {
@@ -385,9 +394,12 @@ pub struct Dashboard {
     pub id: String,
     /// Display name.
     pub name: String,
-    /// What it shows.
-    pub view: View,
-    /// Notification setting relative to its group.
+    /// What it shows, top to bottom: at least one view, at most
+    /// [`crate::MAX_VIEWS`].
+    pub views: Vec<View>,
+    /// Notification setting relative to its group. An object notifies
+    /// through the dashboard when a view that counts problems
+    /// ([`View::counts_problems`]) matches it.
     pub notifications: ScopeSetting,
 }
 
@@ -396,99 +408,8 @@ impl Default for Dashboard {
         Self {
             id: String::new(),
             name: String::new(),
-            view: View::default(),
+            views: vec![View::default()],
             notifications: ScopeSetting::Inherit,
         }
     }
-}
-
-/// What a dashboard lists and how.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct View {
-    /// Hosts or services.
-    pub object_kind: ObjectKind,
-    /// Icinga filter expression; empty = everything.
-    pub filter: String,
-    /// Only objects in a problem state.
-    pub problems_only: bool,
-    /// Hide handled problems (the design's `handled hidden`).
-    pub hide_handled: bool,
-    /// Sort order.
-    pub sort: Sort,
-    /// Optional grouping.
-    pub group_by: GroupBy,
-}
-
-impl Default for View {
-    fn default() -> Self {
-        Self {
-            object_kind: ObjectKind::Services,
-            filter: String::new(),
-            problems_only: true,
-            hide_handled: true,
-            sort: Sort::default(),
-            group_by: GroupBy::None,
-        }
-    }
-}
-
-/// Hosts or services.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ObjectKind {
-    /// Services.
-    #[default]
-    Services,
-    /// Hosts.
-    Hosts,
-}
-
-/// Sort order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Sort {
-    /// Sort key.
-    pub key: SortKey,
-    /// Largest / newest first.
-    pub descending: bool,
-}
-
-impl Default for Sort {
-    fn default() -> Self {
-        Self {
-            key: SortKey::Severity,
-            descending: true,
-        }
-    }
-}
-
-/// Sort keys. Ties fall back to severity, then name.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SortKey {
-    /// Icinga severity (the design's default, `severity ↓`).
-    #[default]
-    Severity,
-    /// Time of the last state change.
-    LastStateChange,
-    /// Host name.
-    Host,
-    /// Service name (host name for host views).
-    Service,
-}
-
-/// Grouping of list rows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GroupBy {
-    /// Flat list.
-    #[default]
-    None,
-    /// By host.
-    Host,
-    /// By host group (an object in several groups appears in each).
-    HostGroup,
-    /// By service group.
-    ServiceGroup,
 }

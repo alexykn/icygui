@@ -69,7 +69,12 @@ impl SettingsPage {
     pub(crate) fn sections(self) -> &'static [Section] {
         match self {
             Self::General => &[Section::Background],
-            Self::Appearance => &[Section::ThemeAndSize, Section::Lists, Section::Preview],
+            Self::Appearance => &[
+                Section::ThemeAndSize,
+                Section::Lists,
+                Section::HandledProblems,
+                Section::Preview,
+            ],
             Self::Notifications => &[
                 Section::ThisEnvironment,
                 Section::DefaultRule,
@@ -107,6 +112,9 @@ pub(crate) enum Section {
     ThemeAndSize,
     /// Appearance: row density and times in lists.
     Lists,
+    /// Appearance: the handled problems list views hide unless they set
+    /// their own.
+    HandledProblems,
     /// Appearance: a dashboard as it would look.
     Preview,
     /// Notifications: the environment, its switch, pausing, plugin output.
@@ -144,6 +152,7 @@ impl Section {
             Self::Background => "in the background",
             Self::ThemeAndSize => "theme and size",
             Self::Lists => "lists",
+            Self::HandledProblems => "handled problems",
             Self::Preview => "preview",
             Self::ThisEnvironment => "this environment",
             Self::DefaultRule => "default rule",
@@ -169,6 +178,9 @@ impl Section {
                 Some("groups and dashboards notify with it unless they say otherwise")
             }
             Self::WatchedAndMuted => Some("from a pane’s ··· menu or the palette"),
+            Self::HandledProblems => {
+                Some("the defaults for every view; a view can set its own in the editor")
+            }
             Self::Environments => {
                 Some("every environment runs and notifies, whichever is on screen")
             }
@@ -204,6 +216,12 @@ pub(crate) enum Setting {
     RowDensity,
     /// Relative times or clock times in lists.
     ListTimes,
+    /// List views hide acknowledged problems (the default for every view).
+    HideAcknowledged,
+    /// List views hide hosts and services in downtime.
+    HideInDowntime,
+    /// List views hide the services of hosts that are down.
+    HideHostDown,
     /// Whose notification rules the page shows.
     Environment,
     /// The environment's notifications on or off.
@@ -252,7 +270,7 @@ pub(crate) enum Setting {
 
 impl Setting {
     /// Every setting, in page order.
-    pub(crate) const ALL: [Self; 29] = [
+    pub(crate) const ALL: [Self; 32] = [
         Self::CloseToTray,
         Self::LaunchAtLogin,
         Self::QuietMode,
@@ -260,6 +278,9 @@ impl Setting {
         Self::InterfaceSize,
         Self::RowDensity,
         Self::ListTimes,
+        Self::HideAcknowledged,
+        Self::HideInDowntime,
+        Self::HideHostDown,
         Self::Environment,
         Self::Enabled,
         Self::PauseAll,
@@ -290,6 +311,9 @@ impl Setting {
             Self::CloseToTray | Self::LaunchAtLogin | Self::QuietMode => Section::Background,
             Self::Theme | Self::InterfaceSize => Section::ThemeAndSize,
             Self::RowDensity | Self::ListTimes => Section::Lists,
+            Self::HideAcknowledged | Self::HideInDowntime | Self::HideHostDown => {
+                Section::HandledProblems
+            }
             Self::Environment | Self::Enabled | Self::PauseAll | Self::PluginOutput => {
                 Section::ThisEnvironment
             }

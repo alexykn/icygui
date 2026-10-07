@@ -126,6 +126,7 @@ mod tests {
             interface_size: InterfaceSize::Large,
             row_density: RowDensity::Compact,
             list_times: ListTimes::Clock,
+            hide_handled: ic_config::HideHandled::ALL,
         };
         let theme = theme_for(settings, ThemeMode::Light);
         assert!((theme.scale - 1.15).abs() < f32::EPSILON);

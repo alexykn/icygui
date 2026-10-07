@@ -38,6 +38,7 @@ mod load;
 mod notify;
 mod publish;
 mod quiet;
+mod recent;
 mod stream;
 mod sync;
 mod watchdog;
@@ -120,6 +121,12 @@ pub(crate) enum Internal {
     },
     /// A dashboard preview was answered.
     PreviewDone,
+    /// The event log's newest entries, read at the start (`generation`:
+    /// which read).
+    RecentEvents {
+        generation: u64,
+        entries: Vec<LogEntry>,
+    },
     /// Notifications are in the event log (the new ones; an id already
     /// there from an earlier run is dropped): emit them.
     Logged(Vec<NotificationIntent>),
@@ -503,6 +510,14 @@ pub(crate) struct Engine {
     mode_changed: bool,
     /// Every dashboard is evaluated again (after quiet mode).
     dashboards_resume: bool,
+    /// The event log's latest entries, newest first, for event stream
+    /// views (`recent.rs`).
+    recent_events: Arc<Vec<LogEntry>>,
+    /// They changed since the last evaluation.
+    events_changed: bool,
+    /// Counts the reads of the log's newest entries (an older read's
+    /// answer is dropped).
+    recent_generation: u64,
 }
 
 /// Why the select loop woke up.
@@ -525,7 +540,7 @@ impl Engine {
         internal_tx: UnboundedSender<Internal>,
     ) -> Self {
         let mut dashboards = Dashboards::default();
-        dashboards.configure(&spec.environment);
+        dashboards.configure(&spec.environment, spec.hide_handled);
         let event_log = EventLog::open(event_log_path(&spec.data_dir, &spec.environment.id));
         let notify = Notify::new(&spec.environment);
         let now = Instant::now();
@@ -622,6 +637,9 @@ impl Engine {
             updating_changed: false,
             mode_changed: false,
             dashboards_resume: false,
+            recent_events: Arc::default(),
+            events_changed: false,
+            recent_generation: 0,
         }
     }
 
@@ -635,6 +653,8 @@ impl Engine {
         // Pruned before any query can reach the log (a history asked for
         // right after the start is among the commands below).
         self.prune(Instant::now());
+        // Event stream views show the log's newest entries.
+        self.load_recent_events();
         // Commands sent right after the start (quiet mode, say) apply
         // before the first connect opens the stream.
         while let Ok(command) = commands.try_recv() {
@@ -1351,7 +1371,7 @@ impl Engine {
         let at = self.evaluation_time();
         let mut log = Vec::new();
         self.notify.seed(&self.store, &began, at, &mut log);
-        self.event_log.record(log);
+        self.record_log(log);
         waiting
     }
 
@@ -1930,7 +1950,7 @@ impl Engine {
                 }
             }
         }
-        self.event_log.record(log);
+        self.record_log(log);
     }
 
     /// A config object was created, modified or deleted (event `seq`):
@@ -2076,7 +2096,7 @@ impl Engine {
         let at = self.evaluation_time();
         self.notify
             .discovered(&self.store, found, load, at, &mut log);
-        self.event_log.record(log);
+        self.record_log(log);
     }
 
     /// A load is over (or cut off): what it found is judged now, and the
@@ -2084,7 +2104,7 @@ impl Engine {
     fn finish_discovered(&mut self) {
         let mut log = Vec::new();
         self.notify.load_finished(&self.store, &mut log);
-        self.event_log.record(log);
+        self.record_log(log);
         let appeared = self.store.take_appeared();
         self.store.track_appeared(false);
         if !appeared.is_empty() {
@@ -2113,7 +2133,8 @@ impl Engine {
             Command::LoadNotifications { limit, reply } => {
                 self.event_log.notifications(limit, reply);
             }
-            Command::PreviewDashboard { view, reply } => self.preview(view, reply),
+            Command::PreviewDashboard { views, reply } => self.preview(views, reply),
+            Command::SetHandledDefaults(defaults) => self.set_handled_defaults(defaults),
             Command::PauseNotifications(until) => {
                 let paused = self.notify.pause(until);
                 tracing::info!(?paused, "notifications paused");
@@ -2177,6 +2198,16 @@ impl Engine {
         }
     }
 
+    /// `Command::SetHandledDefaults`: the views that follow the settings
+    /// hide other handled problems now.
+    fn set_handled_defaults(&mut self, defaults: ic_config::HideHandled) {
+        if self.spec.hide_handled != defaults {
+            self.spec.hide_handled = defaults;
+            self.dashboards_configured = true;
+            self.publish_changes();
+        }
+    }
+
     fn update_environment(&mut self, environment: ic_config::Environment) {
         let old = &self.spec.environment;
         let reconnect = old.id != environment.id || old.connection_differs(&environment);
@@ -2197,6 +2228,7 @@ impl Engine {
                 &self.spec.environment.id,
             ));
             self.prune(Instant::now());
+            self.reset_recent_events();
         }
         if other_server {
             // Nothing the rule engine remembers is about this server.
@@ -2261,6 +2293,10 @@ impl Engine {
                 broken,
             } => self.on_evaluated(dashboards, *snapshot, quiet, broken),
             Internal::PreviewDone => self.on_preview_done(),
+            Internal::RecentEvents {
+                generation,
+                entries,
+            } => self.on_recent_events(generation, entries),
             Internal::Logged(intents) => self.on_logged(intents),
             Internal::NotifiedBefore { asked, known } => self.on_notified_before(&asked, &known),
             Internal::IcingaNotifications {

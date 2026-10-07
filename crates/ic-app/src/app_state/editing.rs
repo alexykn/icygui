@@ -17,6 +17,16 @@ use super::AppState;
 
 /// The name a new group gets until it's renamed.
 pub(crate) const NEW_GROUP_NAME: &str = "new group";
+/// `views`, each with an id (a fresh one where it had none).
+fn with_ids(mut views: Vec<View>) -> Vec<View> {
+    for view in &mut views {
+        if view.id.trim().is_empty() {
+            view.id = ic_config::new_id();
+        }
+    }
+    views
+}
+
 /// The name a new dashboard gets until it's named.
 pub(crate) const NEW_DASHBOARD_NAME: &str = "new dashboard";
 
@@ -26,12 +36,38 @@ pub(crate) struct DashboardDraft {
     /// Display name (trimmed when saved; blank keeps the old name, or
     /// [`NEW_DASHBOARD_NAME`]).
     pub(crate) name: String,
-    /// What it lists and how.
-    pub(crate) view: View,
+    /// What it shows: its views, top to bottom (at least one).
+    pub(crate) views: Vec<View>,
     /// Notification setting relative to its group.
     pub(crate) notifications: ScopeSetting,
     /// The group it goes into.
     pub(crate) group_id: String,
+}
+
+impl DashboardDraft {
+    /// The view the dashboard page shows (`crate::dashboard::primary_view`):
+    /// the whole of a single-view dashboard, which is what the dashboard
+    /// editor edits until it manages views (topic 04).
+    pub(crate) fn view(&self) -> &View {
+        crate::dashboard::primary_view(&self.views)
+    }
+
+    /// That view, for changing it (added if there is none).
+    pub(crate) fn view_mut(&mut self) -> &mut View {
+        if self.views.is_empty() {
+            self.views.push(View {
+                id: ic_config::new_id(),
+                ..View::default()
+            });
+        }
+        let id = self.view().id.clone();
+        let index = self
+            .views
+            .iter()
+            .position(|view| view.id == id)
+            .unwrap_or(0);
+        &mut self.views[index]
+    }
 }
 
 impl AppState {
@@ -167,7 +203,7 @@ impl AppState {
     /// it. Returns its reference.
     pub(crate) fn add_dashboard(&mut self, draft: DashboardDraft) -> Option<DashboardRef> {
         let name = non_blank(&draft.name).unwrap_or(NEW_DASHBOARD_NAME);
-        let mut dashboard = Dashboard::new(name, draft.view);
+        let mut dashboard = Dashboard::with_views(name, draft.views);
         dashboard.notifications = draft.notifications;
         let reference = DashboardRef {
             group_id: draft.group_id.clone(),
@@ -208,7 +244,7 @@ impl AppState {
             if let Some(name) = non_blank(&draft.name) {
                 name.clone_into(&mut dashboard.name);
             }
-            dashboard.view = draft.view;
+            dashboard.views = with_ids(draft.views);
             dashboard.notifications = draft.notifications;
             let unchanged =
                 group.dashboards[index] == dashboard && reference.group_id == draft.group_id;
@@ -260,7 +296,7 @@ impl AppState {
                 .position(|dashboard| dashboard.id == reference.dashboard_id)?;
             let original = &group.dashboards[index];
             let mut copy =
-                Dashboard::new(&format!("{} copy", original.name), original.view.clone());
+                Dashboard::with_views(&format!("{} copy", original.name), original.views.clone());
             copy.notifications = original.notifications.clone();
             let copy_reference = DashboardRef {
                 group_id: group.id.clone(),
@@ -287,7 +323,7 @@ impl AppState {
             let (_, dashboard) = self.dashboard(reference)?;
             DashboardDraft {
                 name: dashboard.name.clone(),
-                view: dashboard.view.clone(),
+                views: dashboard.views.clone(),
                 notifications: dashboard.notifications.clone(),
                 group_id: group_id.to_owned(),
             }
@@ -422,6 +458,7 @@ fn shifted(index: usize, delta: isize, len: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use ic_config::{ObjectKind, Paths};
+    use ic_core::snapshot::DashboardResult;
     use ic_model::Timestamp;
 
     use super::*;
@@ -543,7 +580,7 @@ mod tests {
         let added = state
             .add_dashboard(DashboardDraft {
                 name: " prod hosts ".to_owned(),
-                view: view.clone(),
+                views: vec![view.clone()],
                 notifications: ScopeSetting::Off,
                 group_id: lab.clone(),
             })
@@ -555,6 +592,7 @@ mod tests {
         assert!(
             state
                 .result(&added)
+                .and_then(DashboardResult::first)
                 .is_some_and(|result| result.error.is_none()),
             "evaluated"
         );
@@ -571,10 +609,10 @@ mod tests {
                 &added,
                 DashboardDraft {
                     name: "prod".to_owned(),
-                    view: View {
+                    views: vec![View {
                         problems_only: false,
                         ..view.clone()
-                    },
+                    }],
                     notifications: ScopeSetting::Inherit,
                     group_id: platform.clone(),
                 },
@@ -591,7 +629,7 @@ mod tests {
         let (_, current) = state.dashboard(&moved).unwrap();
         let same = DashboardDraft {
             name: current.name.clone(),
-            view: current.view.clone(),
+            views: current.views.clone(),
             notifications: current.notifications.clone(),
             group_id: platform.clone(),
         };
@@ -601,7 +639,7 @@ mod tests {
         // An unknown target group changes nothing.
         let nowhere = DashboardDraft {
             name: "x".to_owned(),
-            view,
+            views: vec![view],
             notifications: ScopeSetting::Inherit,
             group_id: "missing".to_owned(),
         };

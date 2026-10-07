@@ -15,6 +15,10 @@ pub struct EnvironmentSpec {
     pub environment: ic_config::Environment,
     /// App-wide settings (reconcile interval, log retention).
     pub general: ic_config::General,
+    /// The settings' handled defaults (`[appearance.hide_handled]`), which
+    /// list views follow unless they set their own;
+    /// [`crate::Command::SetHandledDefaults`] changes them.
+    pub hide_handled: ic_config::HideHandled,
     /// Where the environment's event log lives.
     pub data_dir: PathBuf,
     /// Whether the user is waiting for this engine ([`Start::User`]) or

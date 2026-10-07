@@ -655,11 +655,12 @@ impl Session {
         secrets: Arc<dyn SecretStore>,
         cx: &mut Context<Self>,
     ) {
-        let (environment, general, start) = {
+        let (environment, general, hide_handled, start) = {
             let state = self.state.read(cx);
             (
                 state.environment_by_id(id).cloned(),
                 state.config().general.clone(),
+                state.handled_defaults(),
                 state.start_mode(),
             )
         };
@@ -673,6 +674,7 @@ impl Session {
         let spec = EnvironmentSpec {
             environment,
             general,
+            hide_handled,
             data_dir,
             // Started at login without the window, the first load waits a
             // moment proportional to the installation (PERF-09) until the

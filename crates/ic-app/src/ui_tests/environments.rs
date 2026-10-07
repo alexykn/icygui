@@ -104,8 +104,8 @@ fn has_rows(state: &AppState) -> bool {
         .selected()
         .and_then(|reference| state.result(reference))
         .is_some_and(|result| {
-            result
-                .rows
+            result.views[0]
+                .rows()
                 .iter()
                 .any(|row| matches!(row, DashboardRow::Object(_)))
         })

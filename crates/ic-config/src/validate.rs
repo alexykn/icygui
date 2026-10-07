@@ -18,9 +18,9 @@ use crate::environment::{CREDENTIALS_REASON, has_credentials, parse_api_url};
 use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::fingerprint::parse_fingerprint;
 use crate::model::{
-    ApiUrl, AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, MAX_API_URLS,
-    ObjectKind, TlsConfig,
+    ApiUrl, AuthConfig, Config, Dashboard, DashboardGroup, Environment, MAX_API_URLS, TlsConfig,
 };
+use crate::view::{GroupBy, GroupSource, MAX_VIEWS, ObjectKind, STREAM_LINES, View, ViewDisplay};
 
 /// The shortest allowed event log retention, in hours.
 pub const MIN_EVENT_LOG_RETENTION_HOURS: u32 = 1;
@@ -382,11 +382,62 @@ fn check_groups(groups: &[DashboardGroup], path: &str, issues: &mut Issues) {
 
 fn check_dashboard(dashboard: &Dashboard, path: &str, issues: &mut Issues) {
     check_name(&dashboard.name, &join(path, "name"), issues);
-    let view = &dashboard.view;
-    if view.object_kind == ObjectKind::Hosts && view.group_by == GroupBy::ServiceGroup {
+    if dashboard.views.is_empty() {
+        issues.push(join(path, "views"), "must list at least one view");
+    } else if dashboard.views.len() > MAX_VIEWS {
         issues.push(
-            join(path, "view.group_by"),
+            join(path, "views"),
+            format!("must list at most {MAX_VIEWS} views"),
+        );
+    }
+    let mut ids = UniqueIds::default();
+    for (index, view) in dashboard.views.iter().enumerate() {
+        let view_path = join(path, &format!("views[{index}]"));
+        ids.check(issues, &view_path, &view.id);
+        check_view(view, &view_path, issues);
+    }
+}
+
+fn check_view(view: &View, path: &str, issues: &mut Issues) {
+    if view.object_kind == ObjectKind::Hosts && view.list_grouping() == GroupBy::ServiceGroup {
+        issues.push(
+            join(path, "group_by"),
             "hosts can't be grouped by service group",
+        );
+    }
+    let grouped = matches!(
+        view.display,
+        ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles
+    );
+    if grouped
+        && view.groups.by == GroupSource::CustomVar
+        && view.groups.custom_var_name().is_empty()
+    {
+        issues.push(
+            join(path, "groups.custom_var"),
+            "must name a host custom variable to group by",
+        );
+    }
+    if grouped
+        && let Some(index) = view
+            .groups
+            .host_groups
+            .iter()
+            .position(|group| group.trim().is_empty())
+    {
+        issues.push(
+            join(path, &format!("groups.host_groups[{index}]")),
+            "must not be empty",
+        );
+    }
+    if view.display == ViewDisplay::EventStream && !STREAM_LINES.contains(&view.stream.lines) {
+        issues.push(
+            join(path, "stream.lines"),
+            format!(
+                "must be between {} and {}",
+                STREAM_LINES.start(),
+                STREAM_LINES.end()
+            ),
         );
     }
 }

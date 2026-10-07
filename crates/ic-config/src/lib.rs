@@ -1,5 +1,6 @@
-//! Local settings: environments, dashboard groups, dashboards and notification
-//! rules, stored as versioned TOML with migrations and atomic writes.
+//! Local settings: environments, dashboard groups, dashboards (each a list
+//! of views) and notification rules, stored as versioned TOML with
+//! migrations and atomic writes.
 //!
 //! - [`Paths`] says where files live; [`ConfigStore`] loads and saves the
 //!   settings file. Loading upgrades older formats ([`migrate()`]); saving is
@@ -33,6 +34,7 @@ mod share;
 mod store;
 mod ui_state;
 mod validate;
+mod view;
 
 pub use config::new_id;
 pub use environment::default_groups;
@@ -43,8 +45,7 @@ pub use merge::merge_edit;
 pub use migrate::migrate;
 pub use model::{
     ApiUrl, Appearance, AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup, Environment,
-    General, GroupBy, InterfaceSize, ListTimes, LogLevel, MAX_API_URLS, ObjectKind, RowDensity,
-    Sort, SortKey, ThemeChoice, TlsConfig, View,
+    General, InterfaceSize, ListTimes, LogLevel, MAX_API_URLS, RowDensity, ThemeChoice, TlsConfig,
 };
 pub use paths::Paths;
 pub use share::{export_groups, import_groups};
@@ -54,3 +55,8 @@ pub use ui_state::{
     WindowState,
 };
 pub use validate::{MIN_EVENT_LOG_RETENTION_HOURS, MIN_RECONCILE_INTERVAL_SECS, ValidationIssue};
+pub use view::{
+    GridCells, GridColour, GridOptions, GroupBy, GroupOrder, GroupSource, HandledMode,
+    HandledSetting, HideHandled, MAX_VIEWS, ObjectKind, STREAM_LINES, Sort, SortKey, StreamEvents,
+    StreamOptions, View, ViewDisplay, ViewGroups,
+};

@@ -6,7 +6,7 @@ use gpui::{
     MouseButton, ParentElement as _, Pixels, Point, SharedString, StatefulInteractiveElement as _,
     Styled as _, Window, div, prelude::FluentBuilder as _,
 };
-use ic_config::{GroupBy, ObjectKind, Sort, SortKey, View};
+use ic_config::{GroupBy, HideHandled, ObjectKind, Sort, SortKey, View};
 use ic_core::snapshot::Summary;
 use ic_model::{CheckableState, HostState, ServiceState};
 use ic_rules::DashboardRef;
@@ -115,11 +115,14 @@ impl DashboardView {
             header = header.child(demo_chip(theme));
         }
         let header = match (reference, dashboard) {
-            (Some(reference), Some((_, dashboard))) => header
-                .title(dashboard.name.clone())
-                .subtitle(view_label(&dashboard.view))
-                .child(self.sort_trigger(reference, &dashboard.view, cx))
-                .child(self.options_trigger(reference, &dashboard.view, cx)),
+            (Some(reference), Some((_, dashboard))) => {
+                let view = super::primary_view(&dashboard.views);
+                header
+                    .title(dashboard.name.clone())
+                    .subtitle(view_label(view))
+                    .child(self.sort_trigger(reference, view, cx))
+                    .child(self.options_trigger(reference, view, cx))
+            }
             _ => header.title("icygui"),
         };
         self.drag
@@ -179,7 +182,7 @@ impl DashboardView {
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.menus.close();
                     this.state.update(cx, |state, cx| {
-                        if state.update_view(&reference, |view| view.sort = sort) {
+                        if state.update_primary_view(&reference, |view| view.sort = sort) {
                             cx.notify();
                         }
                     });
@@ -228,6 +231,7 @@ impl DashboardView {
     ) -> AnyElement {
         let theme = cx.theme();
         let open = self.menus.open() == Some(HeaderMenu::Options);
+        let defaults = self.state.read(cx).handled_defaults();
         let trigger = GlyphButton::new("dashboard-options", "···")
             .text_size(px(13.))
             .bleed()
@@ -247,18 +251,25 @@ impl DashboardView {
                 trigger.tooltip(Tooltip::new("Dashboard options"))
             })
             .when(open, |trigger| {
-                trigger.child(Popover::new(Self::options_menu(reference, view, cx)).align_right())
+                trigger.child(
+                    Popover::new(Self::options_menu(reference, view, defaults, cx)).align_right(),
+                )
             })
             .into_any_element()
     }
 
-    fn options_menu(reference: &DashboardRef, view: &View, cx: &Context<Self>) -> Menu {
+    fn options_menu(
+        reference: &DashboardRef,
+        view: &View,
+        defaults: HideHandled,
+        cx: &Context<Self>,
+    ) -> Menu {
         let update = |change: Box<dyn Fn(&mut View)>| {
             let reference = reference.clone();
             cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
                 this.menus.close();
                 this.state.update(cx, |state, cx| {
-                    if state.update_view(&reference, |view| change(view)) {
+                    if state.update_primary_view(&reference, |view| change(view)) {
                         cx.notify();
                     }
                 });
@@ -294,20 +305,20 @@ impl DashboardView {
             }
             menu = menu.item(
                 MenuItem::new(id, label)
-                    .checked(view.group_by == group_by)
+                    .checked(view.list_grouping() == group_by)
                     .on_click(update(Box::new(move |view: &mut View| {
-                        view.group_by = group_by;
+                        view.set_grouping(group_by);
                     }))),
             );
         }
-        let hide = !view.hide_handled;
+        let hiding = view.hidden_handled(defaults).any();
         let filter = view.filter.clone();
         menu.separator()
             .item(
                 MenuItem::new("toggle-handled", "hide handled problems")
-                    .checked(view.hide_handled)
+                    .checked(hiding)
                     .on_click(update(Box::new(move |view: &mut View| {
-                        view.hide_handled = hide;
+                        view.handled = view.handled.toggled(defaults);
                     }))),
             )
             .item(
@@ -343,8 +354,8 @@ impl DashboardView {
         let colors = theme.colors;
         let state = self.state.read(cx);
         let (_, dashboard) = state.dashboard(reference)?;
-        let result = state.result(reference)?;
-        let view = &dashboard.view;
+        let view = super::primary_view(&dashboard.views);
+        let result = state.view_result(reference, &view.id)?;
         // The bar counts what the list shows (LIST-02): an on-call
         // engineer reads it as the list's size.
         let items = summary_items(&result.shown, view.object_kind);
@@ -353,8 +364,16 @@ impl DashboardView {
             return None;
         }
         let toggle_reference = reference.clone();
-        let hide = !view.hide_handled;
-        let toggle_text = handled_label(view.hide_handled, result.handled);
+        let toggle_view = view.id.clone();
+        let hiding = view.hidden_handled(state.handled_defaults()).any();
+        let toggle_text = handled_label(
+            hiding,
+            if hiding {
+                result.hidden
+            } else {
+                result.handled
+            },
+        );
         // Counts from a node that sees part of the cluster never look
         // complete (ENV-12): the view's label before the toggle.
         let marker = state
@@ -400,7 +419,7 @@ impl DashboardView {
                     .cursor_pointer()
                     .hover(|style| style.text_color(colors.text_muted))
                     .child(toggle_text)
-                    .tooltip(Tooltip::text(if view.hide_handled {
+                    .tooltip(Tooltip::text(if hiding {
                         "Show acknowledged problems, downtimes and problems on down hosts"
                     } else {
                         "Hide acknowledged problems, downtimes and problems on down hosts"
@@ -409,7 +428,7 @@ impl DashboardView {
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         let reference = toggle_reference.clone();
                         this.state.update(cx, |state, cx| {
-                            if state.update_view(&reference, |view| view.hide_handled = hide) {
+                            if state.toggle_handled(&reference, &toggle_view) {
                                 cx.notify();
                             }
                         });

@@ -68,14 +68,19 @@ pub enum Command {
         /// Receives the time.
         reply: oneshot::Sender<Option<Timestamp>>,
     },
-    /// Evaluates a view that isn't saved yet (the dashboard editor's live
-    /// match count and rows).
+    /// Evaluates views that aren't saved yet (the dashboard editor's live
+    /// preview, match counts and rows) as one dashboard, with the
+    /// settings' handled defaults.
     PreviewDashboard {
-        /// The view being edited.
-        view: ic_config::View,
-        /// Receives the result, or why the filter doesn't work.
-        reply: oneshot::Sender<Result<DashboardResult, String>>,
+        /// The dashboard's views being edited.
+        views: Vec<ic_config::View>,
+        /// Receives the result; a view whose filter doesn't work has its
+        /// `error` set.
+        reply: oneshot::Sender<DashboardResult>,
     },
+    /// The settings' handled defaults changed (`[appearance.hide_handled]`):
+    /// the views that follow them are evaluated again.
+    SetHandledDefaults(ic_config::HideHandled),
     /// Fetches full details (output, perfdata, links) of lean objects: the
     /// rows on screen and an opened pane. Sent debounced by the UI.
     Hydrate(Vec<ObjectKey>),

@@ -514,15 +514,30 @@ impl AppState {
     }
 
     /// Takes new appearance settings (theme, interface size, row density,
-    /// times in lists): saved. Returns whether they changed. The views
-    /// read them from [`AppState::config`].
+    /// times in lists, the handled problems list views hide by default):
+    /// saved. Returns whether they changed. The views read them from
+    /// [`AppState::config`]; new handled defaults also go to every engine,
+    /// which evaluates the views that follow them again.
     pub(crate) fn set_appearance(&mut self, appearance: Appearance) -> bool {
         if self.config.appearance == appearance {
             return false;
         }
+        let handled_changed = self.config.appearance.hide_handled != appearance.hide_handled;
         self.config.appearance = appearance;
         self.save_config();
+        if handled_changed {
+            self.handled_defaults_changed();
+        }
         true
+    }
+
+    /// The handled defaults changed: every engine is told (the fixture
+    /// evaluates its dashboards again).
+    pub(super) fn handled_defaults_changed(&mut self) {
+        let defaults = self.config.appearance.hide_handled;
+        self.send_to_every_engine(|| Command::SetHandledDefaults(defaults));
+        #[cfg(test)]
+        self.evaluate_fixture_all();
     }
 }
 

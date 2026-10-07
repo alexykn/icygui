@@ -21,8 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::channel::oneshot;
 use ic_config::{
-    AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind, Sort,
-    TlsConfig, View,
+    AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, GroupOrder, GroupSource,
+    HandledSetting, ObjectKind, Sort, StreamOptions, TlsConfig, View, ViewDisplay, ViewGroups,
 };
 use ic_core::ports::{SecretError, SecretStore};
 use ic_mock::{
@@ -579,12 +579,16 @@ fn stable_ids(environment_id: &str, mut groups: Vec<DashboardGroup>) -> Vec<Dash
         group.id = format!("{environment_id}-{}", slug(&group.name));
         for dashboard in &mut group.dashboards {
             dashboard.id = format!("{}-{}", group.id, slug(&dashboard.name));
+            for (index, view) in dashboard.views.iter_mut().enumerate() {
+                view.id = format!("{}-view-{index}", dashboard.id);
+            }
         }
     }
     groups
 }
 
-/// One dashboard of the demo.
+/// One dashboard of the demo (a single view; `databases` and `fleet` have
+/// several, see [`databases_views`] and [`fleet_views`]).
 struct Spec {
     name: &'static str,
     kind: ObjectKind,
@@ -592,6 +596,90 @@ struct Spec {
     problems_only: bool,
     hide_handled: bool,
     group_by: GroupBy,
+}
+
+impl Spec {
+    /// The dashboard's only view: handled hidden as the settings say, or
+    /// shown.
+    fn view(&self) -> View {
+        let mut view = View {
+            object_kind: self.kind,
+            filter: self.filter.to_owned(),
+            problems_only: self.problems_only,
+            handled: if self.hide_handled {
+                HandledSetting::SETTINGS
+            } else {
+                HandledSetting::SHOW
+            },
+            sort: Sort::default(),
+            ..View::default()
+        };
+        view.set_grouping(self.group_by);
+        view
+    }
+}
+
+/// The database hosts' roles, as an Icinga filter list.
+const DB_ROLES: &str = "[\"postgres\", \"mysql\"]";
+
+/// `overview / databases` as topic 04 draws it: summary tiles per
+/// database role, the failing database services, a view with nothing to
+/// show, and the database hosts' events.
+fn databases_views() -> Vec<View> {
+    vec![
+        View {
+            name: "clusters".to_owned(),
+            display: ViewDisplay::SummaryTiles,
+            filter: "\"databases\" in host.groups".to_owned(),
+            problems_only: false,
+            groups: ViewGroups {
+                by: GroupSource::CustomVar,
+                custom_var: "role".to_owned(),
+                order: GroupOrder::Name,
+                ..ViewGroups::default()
+            },
+            ..View::default()
+        },
+        View {
+            name: "failing services".to_owned(),
+            filter: format!("host.vars.role in {DB_ROLES} && service.problem"),
+            ..View::default()
+        },
+        View {
+            name: "replication lag".to_owned(),
+            filter: "match(\"*replication*\", service.name) && service.state == 3".to_owned(),
+            ..View::default()
+        },
+        View {
+            name: "db events".to_owned(),
+            display: ViewDisplay::EventStream,
+            filter: format!("host.vars.role in {DB_ROLES}"),
+            stream: StreamOptions {
+                hard_states_only: false,
+                recoveries: true,
+                ..StreamOptions::default()
+            },
+            ..View::default()
+        },
+    ]
+}
+
+/// `platform / fleet` as topic 05 draws it: every host as a square by host
+/// group above the service problems.
+fn fleet_views() -> Vec<View> {
+    vec![
+        View {
+            name: "hosts by group".to_owned(),
+            display: ViewDisplay::HostGroupGrid,
+            object_kind: ObjectKind::Hosts,
+            ..View::default()
+        },
+        View {
+            name: "service problems".to_owned(),
+            filter: "service.problem && !service.handled".to_owned(),
+            ..View::default()
+        },
+    ]
 }
 
 const fn spec(
@@ -663,6 +751,7 @@ const GROUPS: &[(&str, &[Spec])] = &[
                 false,
             ),
             spec("all services", ObjectKind::Services, "", false, false),
+            spec("fleet", ObjectKind::Hosts, "", true, true),
         ],
     ),
     (
@@ -689,18 +778,26 @@ fn groups() -> Vec<DashboardGroup> {
                 notifications: ScopeSetting::Inherit,
                 dashboards: dashboards
                     .iter()
-                    .map(|spec| Dashboard {
-                        id: format!("{group_id}-{}", slug(spec.name)),
-                        name: spec.name.to_owned(),
-                        view: View {
-                            object_kind: spec.kind,
-                            filter: spec.filter.to_owned(),
-                            problems_only: spec.problems_only,
-                            hide_handled: spec.hide_handled,
-                            sort: Sort::default(),
-                            group_by: spec.group_by,
-                        },
-                        notifications: ScopeSetting::Inherit,
+                    .map(|spec| {
+                        let id = format!("{group_id}-{}", slug(spec.name));
+                        let views = match spec.name {
+                            "databases" => databases_views(),
+                            "fleet" => fleet_views(),
+                            _ => vec![spec.view()],
+                        };
+                        Dashboard {
+                            views: views
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, view)| View {
+                                    id: format!("{id}-view-{index}"),
+                                    ..view
+                                })
+                                .collect(),
+                            id,
+                            name: spec.name.to_owned(),
+                            notifications: ScopeSetting::Inherit,
+                        }
                     })
                     .collect(),
             }
@@ -742,8 +839,10 @@ mod tests {
                 assert!(ids.insert(group.id.clone()));
                 for dashboard in &group.dashboards {
                     assert!(ids.insert(dashboard.id.clone()), "{}", dashboard.id);
-                    ic_filter::Filter::parse(&dashboard.view.filter)
-                        .unwrap_or_else(|error| panic!("{}: {error:?}", dashboard.name));
+                    for view in &dashboard.views {
+                        ic_filter::Filter::parse(&view.filter)
+                            .unwrap_or_else(|error| panic!("{}: {error:?}", dashboard.name));
+                    }
                 }
             }
         }

@@ -146,11 +146,13 @@ function note({ mk = '#', author, meta = [], body }) {
 }
 
 function menu(items, { x, y, w, style = '' } = {}) {
+  // As ic-ui-kit's Menu: when any item has a check slot, all get one.
+  const slots = items.some((it) => typeof it === 'object' && it.chk !== undefined);
   const body = items.map((it) => {
     if (it === '-') return '<div class="msep"></div>';
     if (typeof it === 'string') return `<div class="mlabel">${it}</div>`;
     const { label, key, sel, hov, dis, chk, det, dotSt, ic, right } = it;
-    return `<div class="mi${sel ? ' sel' : ''}${hov ? ' hov' : ''}${dis ? ' dis' : ''}">${chk !== undefined ? `<span class="chk">${chk ? icon('check', 13) : ''}</span>` : ''}${dotSt ? dot(dotSt, 'd6') : ''}${ic ? `<span class="muted">${icon(ic, 12)}</span>` : ''}<span${det ? '' : ' class="grow"'}>${label}</span>${det ? `<span class="det grow">${det}</span>` : ''}${right || ''}${key ? kh(key) : ''}</div>`;
+    return `<div class="mi${sel ? ' sel' : ''}${hov ? ' hov' : ''}${dis ? ' dis' : ''}">${slots ? `<span class="chk">${chk ? icon('check', 13) : ''}</span>` : ''}${dotSt ? dot(dotSt, 'd6') : ''}${ic ? `<span class="muted">${icon(ic, 12)}</span>` : ''}<span${det ? '' : ' class="grow"'}>${label}</span>${det ? `<span class="det grow">${det}</span>` : ''}${right || ''}${key ? kh(key) : ''}</div>`;
   }).join('');
   return `<div class="menu" style="left:${x}px;top:${y}px;${w ? `width:${w}px;` : ''}${style}">${body}</div>`;
 }

@@ -199,3 +199,63 @@ pane; 3c the palette over the dimmed window; 3d Settings → appearance with
    perfdata)?
 2. Should light also get a slightly grey sidebar (Zed's light themes do), or
    keep one surface as in dark (drawn)?
+
+---
+
+## 04 Multi-view dashboards
+
+**Shows** (`04-multi-view.html`, `views.js`): 4a the databases dashboard
+with four views (summary tiles, a list, an empty view, an event stream);
+4b a collapsed view, the cursor in the stream, the pane open and a view's own
+sort menu; 4c the editor managing views; 4d *add view*; 4e a view's `···`
+and the settings of an event stream view.
+
+**Decisions**
+
+- **A dashboard is a list of views stacked on one page,** which scrolls as a
+  whole (each view sizes to its content; a long list virtualises inside the
+  page's scroll). A single-view dashboard stays exactly as in rc1 (header and
+  summary bar), so nothing changes for existing dashboards.
+- **The dashboard header** keeps the title. Its subtitle says `4 views`, and
+  sort moves into the views. With several views there is no summary bar:
+  each view header carries its own counts.
+- **The view header** is 36px (the summary bar's height) on the pane surface
+  (`pane_background`), so it reads as a band between views and differs from
+  a grouped list's group-header rows (`row_header`, darker, row height). In
+  order: a collapse chevron, the display's icon (in the mark slot), the name
+  (13px medium), the filter (faint, cut off first when narrow), the counts
+  (state dot and number), `live` for a stream, the view's own sort, and `···`.
+- **Empty view:** only the header, with `nothing to show` in place of the
+  counts. There is no body and no empty box.
+- **Keyboard:** one cursor for the whole page. j/k move through the rows and
+  continue into the next view (they skip collapsed views); Tab and shift-Tab
+  jump to the first row of the next or previous view. The view holding the
+  cursor has a 2px accent bar on its header and its name in strong text. On a
+  header, ←/→ collapse and expand it. ctrl-a marks the rows of the focused
+  view only. Enter on an event opens its object in the pane.
+- **Summary tiles:** one tile per host group (or custom var value). Each
+  tile has the worst state's dot in the mark slot, the name, the host count,
+  a stacked 6px bar and the counts in state colours. A click filters the page
+  to that group (topic 05 shows the same on the grid).
+- **Event stream:** the history tab's line format (time, dot, KIND in the
+  state colour, `service on host`, the note) from the local event log,
+  filtered by the view's filter and newest first, with `N lines` before it
+  scrolls. Acks and downtimes are drawn in the accent colour (see topic 01,
+  open question 2).
+- **Editor:** the inspector (372px, as today) gets a `views` list. Each row
+  has a drag handle, the display icon, the name, what it matches, and `···`
+  (move up/down with alt-↑↓, duplicate, collapse by default, remove).
+  `+ add view` asks for the display first (list, grouped list, host-group
+  grid, summary tiles, event stream). Below a rule come the selected view's
+  settings, which depend on its display. The preview shows the whole
+  dashboard; the selected view has an accent ring, and clicking a view there
+  selects it in the inspector. Removing a view needs no confirmation (the
+  editor's *discard* undoes it).
+
+**Open questions**
+
+1. Should the dashboard keep a summary bar with totals across all views,
+   counting each object once, above the first view?
+2. Should notifications (and the sidebar's count and dot) count the
+   dashboard's list views only (drawn), or also tiles, grid and stream?
+3. ←/→ on a view header to collapse: or should space toggle it?

@@ -49,3 +49,16 @@ function eventRow([t, st, kind, name, host, note], { sel } = {}) {
   return `<div class="ev${sel ? ' sel' : ''}"><span class="t">${t}</span><span class="d">${dot(st, 'd7')}</span>
     <div style="min-width:0"><div class="l1"><span class="k" style="color:${color}">${kind}</span> <span class="n">${name}</span><span class="faint"> on </span>${host}</div><div class="l2">${note}</div></div></div>`;
 }
+
+// The editor's "handled" field of a list view: follow the settings (the
+// default), or set here (show, or hide the chosen kinds). The kinds row is
+// always there, so nothing below it moves: dim and read-only while following
+// the settings, editable with "hide", a faint line with "show".
+function handledField(mode = 0, kinds = [true, true, true]) {
+  const segs = ['as in settings', 'show', 'hide'].map((o, i) => `<span class="${i === mode ? 'on' : ''}" style="flex:1;padding:0 6px">${o}</span>`).join('');
+  const chips = ['acknowledged', 'in downtime', 'host down'].map((k, i) => chip(k, { sel: kinds[i] })).join('');
+  const second = mode === 1
+    ? `<span class="faint" style="font-size:11.5px;height:24px;display:flex;align-items:center">every handled problem shows, hollow</span>`
+    : `<div style="display:flex;gap:6px;align-items:center;height:24px${mode === 0 ? ';opacity:.55' : ''}"><span class="faint" style="font-size:11.5px">hide</span>${chips}</div>`;
+  return `<div class="field"><div class="lab">handled<span class="st faint">${mode === 0 ? 'follows the settings' : 'set on this view'}</span></div><span class="seg" style="display:flex">${segs}</span>${second}</div>`;
+}

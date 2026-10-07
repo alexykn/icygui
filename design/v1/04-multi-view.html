@@ -58,12 +58,13 @@ function viewsList(sel, { menuOpen = -1 } = {}) {
 function inspector({ sel = 1, extra = '', viewSettings = true }) {
   const vs = VIEWS[sel];
   const settings = vs[0] === 'list' ? `
-    <div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('list', 13)}list</span>`)}</div>
-    <div class="field"><div class="lab">lists</div><span class="seg" style="display:flex">${['services', 'hosts'].map((o, i) => `<span class="${i === 0 ? 'on' : ''}" style="flex:1">${o}</span>`).join('')}</span></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('list', 13)}list</span>`)}</div>
+    <div class="field"><div class="lab">lists</div><span class="seg" style="display:flex">${['services', 'hosts'].map((o, i) => `<span class="${i === 0 ? 'on' : ''}" style="flex:1">${o}</span>`).join('')}</span></div></div>
     <div class="field"><div class="lab">filter<span class="st c-ok">valid · 6 matches</span></div><div class="textarea focus" style="height:66px">(host.vars.role == "postgres" ||
  host.vars.role == "mysql") &amp;&amp;
 service.problem &amp;&amp; !service.handled<span class="caret" style="height:13px"></span></div></div>
-    <div class="field"><div class="lab">show</div><div class="col" style="gap:8px">${sw(true, 'problems only')}${sw(true, 'hide handled problems')}</div></div>
+    <div class="field"><div class="lab">show</div>${sw(true, 'problems only')}</div>
+    ${handledField(0)}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">sort</div>${select('severity')}</div><div class="field"><div class="lab">direction</div><span class="seg" style="display:flex"><span class="on" style="flex:1">↓ desc</span><span style="flex:1">↑ asc</span></span></div></div>` : '';
   return `<div class="pane" style="background:var(--win-bg)">
     <div class="hbar pane-h" style="padding:0 18px"><span class="title" style="font-size:13.5px">dashboard</span><span class="grow"></span><span class="right faint">4 views</span></div>
@@ -88,7 +89,7 @@ function preview(focusView) {
 }
 const editorMain = (focusView, insp, overlay = '') => `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${editorHeader}<div class="col" style="min-height:0;overflow:hidden">${preview(focusView)}</div></div>${insp}${overlay}</div>`;
 
-shot('4c', '04-multi-view-c-editor', 'The dashboard editor manages the views. The inspector lists them (drag handle, display icon, name, what each matches), with <i>add view</i> under the list. The selected view’s settings follow: its name, display, object type, filter, show, sort and direction. The preview on the left is the whole dashboard; the selected view is marked only on its header, with the same accent bar that marks the focused view on a dashboard (4b) and a faint accent tint. Nothing is drawn around the view’s body. Clicking a view in the preview selects it in the inspector too.',
+shot('4c', '04-multi-view-c-editor', 'The dashboard editor manages the views. The inspector lists them (drag handle, display icon, name, what each matches), with <i>add view</i> under the list. The selected view’s settings follow: its name, display, object type, filter, show, <b>handled</b>, sort and direction. <i>Handled</i> follows the settings’ defaults (2c) unless set on the view: <i>as in settings</i> (drawn: the kinds it hides, dim), <i>show</i>, or <i>hide</i> with the kinds to hide (acknowledged, in downtime, host down). The preview on the left is the whole dashboard; the selected view is marked only on its header, with the same accent bar that marks the focused view on a dashboard (4b) and a faint accent tint. Nothing is drawn around the view’s body. Clicking a view in the preview selects it in the inspector too.',
   appWindow(editorMain(1, inspector({ sel: 1 })), { activeItem: 'databases', groups: dbGroups }));
 
 const addMenu = menu(['add a view that shows',

@@ -12,7 +12,7 @@ shot('2a', '02-settings-a-window', 'In context: the settings panel opens inside 
   settingsOver({ page: 'general' }));
 shot('2b', '02-settings-b-general', 'General: the three background switches. The longer explanations that today sit under each switch move into one note, so each row keeps a one-line description.',
   settingsWindow({ page: 'general' }), W);
-shot('2c', '02-settings-c-appearance', 'Appearance: theme (follow system, dark, light), interface size, row density and times in lists, each a segmented control. A live preview shows the chosen density (here compact with clock times; compact drops the output line).',
+shot('2c', '02-settings-c-appearance', 'Appearance: theme (follow system, dark, light), interface size, row density and times in lists, each a segmented control. <b>Handled problems</b>: three switches, all on by default, which together are Icinga’s <i>handled</i>: hide acknowledged, hide in downtime, hide services of hosts that are down. They are the defaults for every view; a view follows them unless the dashboard editor sets its own (4c), and each view’s summary bar can show what it hides (2j). Sidebar counts are unchanged: they count unhandled problems. A live preview follows (here compact with clock times; compact drops the output line).',
   settingsWindow({ page: 'appearance' }), W);
 shot('2d', '02-settings-d-notifications', 'Notifications, top: the environment whose rules these are (a dropdown, since rules are per environment), the environment’s master switch (off silences every group and dashboard of the environment; on never turns one on, since notifications are opt-in, topic 12), pause, the new <i>show plugin output</i> switch, then the default rule with its chips and switches, for the groups and dashboards that are turned on. The nav lists the page’s sections; the one in view is marked on the guide line.',
   settingsWindow({ page: 'notifications', part: 0, section: 0 }), W);
@@ -24,6 +24,20 @@ shot('2g', '02-settings-g-keymap', 'Keymap: every shortcut, searchable by name o
   settingsWindow({ page: 'keymap', subtitle: 'keymap.toml · 46 shortcuts' }), W);
 shot('2h', '02-settings-h-advanced', 'Advanced: the log level, and buttons that open the log and config folders in the file manager. About moves here.',
   settingsWindow({ page: 'advanced' }), W);
+// 2j: the summary bar's handled slot, before and after a click
+const hRows = [
+  ['crit', 'rabbitmq-queue', 'mq-prod-01', 'CRITICAL - queue orders.retry depth 18,402', '6m'],
+  ['crit', 'disk /var', 'k8s-node-07', 'DISK CRITICAL - /var 97% used (1.2 GiB free)', '38m'],
+];
+const shownRows = [
+  [hRows[0], {}], [hRows[1], {}],
+  [['crit', 'http-tls', 'web-edge-02', 'SSL CRITICAL - certificate expires in 2 days', '2h'], { handled: true, tag: 'ack m.keller' }],
+  [['crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'], { handled: true, tag: 'downtime 1h 48m' }],
+];
+const half = (end, list, tag) => `<div class="col" style="height:50%;border-bottom:1px solid var(--bd-window)">${listHeader({ subtitle: `service problems · ${tag}` })}${summary(undefined, end)}<div class="list">${list}</div></div>`;
+shot('2j', '02-settings-j-handled-slot', 'The summary bar keeps rc1’s place for the handled problems a view hides, as a button in a fixed, right-aligned slot. <b>Top</b>: the view hides them (as the settings say), and the slot reads <i>28 hidden · show</i>. <b>Bottom</b>: after a click the view shows them, hollow (handled), with their tags, and the slot reads <i>28 handled · hide</i>. The choice is saved with the view, as rc1’s toggle was. The counts on the left never move. Filters on <i>acknowledged</i> or <i>downtime_depth</i> still work; the switches apply on top of them.',
+  `<div class="col" style="height:100%">${half(handledEnd(28), rows(hRows), 'handled hidden, as the settings say')}${half(handledEnd(28, true), shownRows.map(([r, o]) => row(r, o)).join(''), 'after a click on show')}</div>`, { w: 1140, h: 640 });
+
 shot('2i', '02-settings-i-search', 'Searching “quiet”: the nav dims the categories without a match and counts the matches of the others; the page lists the matching rows from every category under the category’s name, with the match in the accent colour (as in the palette). The default notification times are found by their rc1 name, <i>quiet hours</i>, and come as a whole section. The rows work in place. Esc clears the search.',
   settingsWindow({ search: 'quiet' }), W);
 </script>

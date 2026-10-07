@@ -44,7 +44,7 @@ per frame, plus `-zoom` crops of the details.
 | # | Topic | Page | Frames | Status |
 |---|---|---|---|---|
 | 01 | Downtimes in the panes | `01-downtimes.html` | 11 (+6 zooms) | approved: variant A, with revisions |
-| 02 | Settings panel | `02-settings.html` | 9 | approved |
+| 02 | Settings panel | `02-settings.html` | 10 | approved; handled defaults added |
 | 03 | Light theme | `03-light-theme.html` | 5 | approved with revisions |
 | 04 | Multi-view dashboards | `04-multi-view.html` | 5 (+1) | approved; editor selection revised |
 | 05 | Host-group grid | `05-hostgroup-grid.html` | 5 (+1) | approved; editor selection revised |
@@ -52,10 +52,10 @@ per frame, plus `-zoom` crops of the details.
 | 07 | Comment, downtime and acknowledged lists | `07-comments-downtimes-lists.html` | 7 | revised and approved |
 | 08 | YAML sharing | `08-yaml-sharing.html` | 7 (+1) | approved with revisions |
 | 09 | Filter autocomplete | `09-filter-autocomplete.html` | 7 (+7) | revised and approved |
-| 10 | Palette multi-select | `10-palette-multiselect.html` | 10 (+9) | approved with two changes; combined view rebuilt |
+| 10 | Palette multi-select | `10-palette-multiselect.html` | 11 (+10) | approved with two changes; combined view rebuilt, hosts page by count |
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
-| 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | new, for review |
+| 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
 
 ---
 
@@ -81,7 +81,34 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
   gets the marked tint and bar on its band, so no mark is out of sight. This
   **replaces rc1's grouped-list header** (a full-height host row with a small
   circle and indented service rows) in every host-with-services view (10h,
-  10j).
+  10j, 10k).
+- **Hosts page by count, not by state** (the rule of rc1's host pane,
+  `HOST_SERVICES_PREVIEW = 7`), in every host-with-services view and in the
+  host pane: a host shows up to 7 service rows, its problems first (worst
+  first, never hidden, even when there are more than 7), then OK services in
+  name order to fill the 7. A `+ N more` row follows (an all-OK host shows
+  its first 7 and `+ 12 more`); a click, Enter or → on it shows the whole host
+  in place (the list is virtualised), and the same slot then reads `− show
+  fewer` (click, Enter or ←), so nothing else moves. While an expanded host
+  scrolls, its band sticks to the top of the list. A click on a host band's
+  name opens the host in the pane; the chevron and ←/→ collapse it. Paging
+  and collapsing only change what shows (summaries, counts and *mark all
+  problems* cover every service). rc1's `+ N more ok` becomes `+ N more`.
+- **Handled problems: shown or hidden per kind.** Icinga's *handled* has
+  three parts, and each is its own switch: hide acknowledged, hide in
+  downtime, hide services of hosts that are down. The defaults are in
+  Settings → appearance → *handled problems* (all on, 2c). Every list view
+  follows them unless the dashboard editor sets its own (*handled: as in
+  settings / show / hide*, with the kinds to hide; 4c, 9a–g). The summary
+  bar keeps rc1's place for it, as a button in a fixed, right-aligned slot:
+  `28 hidden · show`, and after a click `28 handled · hide`, saved with the
+  view as rc1's toggle was (2j). Shown handled rows are hollow. Filters on
+  `acknowledged` or `downtime_depth` still work; the switches apply on top.
+  Sidebar counts are unchanged: they count unhandled problems.
+- **The pane's ×** sits left of `↗ open as tab`, in a fixed slot, on every
+  platform, so it never sits next to a window's close button (topic 13). A
+  pane that is already a tab keeps the tab slot, empty. The combined view's
+  `×` (back to the dashboard) likewise sits left of `↗ pin as tab`.
 - **The view selected in the dashboard editor** is marked on its header
   only: the 2px accent bar that marks the focused view on a dashboard (4b),
   plus a faint accent tint on the header (`accent-tint`, 8 % dark, 7 % light).
@@ -188,7 +215,8 @@ notifications page is revised with topic 12 (2d, 2e).
 **Shows** (`02-settings.html`, `settings.js`): 2a the panel over the main
 window; 2b general; 2c appearance; 2d notifications (top); 2e notifications
 (scrolled: the default times and which groups and dashboards are on); 2f
-icinga; 2g keymap; 2h advanced; 2i a search for "quiet".
+icinga; 2g keymap; 2h advanced; 2i a search for "quiet"; 2j the summary
+bar's handled slot, hiding and after a click on *show*.
 
 **Decisions**
 
@@ -223,8 +251,10 @@ icinga; 2g keymap; 2h advanced; 2i a search for "quiet".
     hidden; the longer explanations sit in one note under the rows.
   - **Appearance:** theme (follow system, dark, light), **interface size
     90 / 100 / 115 %** (small, default, large), row density (comfortable or
-    compact), times in lists (relative or clock), and a live preview of the
-    databases dashboard. Compact rows are 32px plus the rule, with a 14px
+    compact), times in lists (relative or clock), **handled problems** (three
+    switches, all on: hide acknowledged, hide in downtime, hide services of
+    hosts that are down; the defaults for every view, which a view can
+    override in the editor), and a live preview of the databases dashboard. Compact rows are 32px plus the rule, with a 14px
     circle and the time at the right, and no output line.
   - **Notifications:** an `environment` dropdown first (rules are per
     environment), the environment's master switch (off silences every group
@@ -345,7 +375,14 @@ and the settings of an event stream view.
   `+ add view` asks for the display first (list, grouped list, host-group
   grid, summary tiles, event stream); the new view starts from the
   dashboard's filter and goes under the selected one. Below a rule come the
-  selected view's settings, which depend on its display. The preview on the
+  selected view's settings, which depend on its display (display and lists
+  share a row). A list view's **handled** field: *as in settings* (the
+  default; a dim row shows the kinds the settings hide), *show* (a faint
+  line: every handled problem shows, hollow) or *hide* (the kinds to hide as
+  chips: acknowledged, in downtime, host down); the kinds row is always
+  there, so nothing below it moves (4c; 9a–g show *show*). On a multi-view
+  dashboard there is no summary bar; a view's handled slot is an entry in its
+  `···` menu (`show 2 handled` / `hide 2 handled`). The preview on the
   left shows the whole dashboard. **The selected view is marked on its header
   only: the focus bar plus a faint accent tint, nothing around its body**
   (4c, 4d, 4e; class `.vh.picked` in `v1.css`). Clicking a view in the
@@ -682,20 +719,26 @@ object with its state dot (it scrolls; it no longer stops at five with `+ N
 more`). Skipped objects are listed with the reason, as today. The send button
 counts (`acknowledge 7`).
 
-**The combined view (10h, 10j):** in the main area, like a dashboard. The
-header reads `3 hosts · db-prod-01, db-prod-02, db-prod-03`, then `↗ pin as
-tab`, *save as dashboard* and `×` (back to the dashboard). The summary bar
+**The combined view (10h, 10j, 10k):** in the main area, like a dashboard.
+The header reads `3 hosts · db-prod-01, db-prod-02, db-prod-03`, then `×`
+(back to the dashboard), `↗ pin as tab` and *save as dashboard*. The summary bar
 counts the services by state and ends with `3 hosts · 63 services`.
 
 - **A grouped list by host,** built from the list's parts (the
   host-with-services rule above): each host is a slim group-header band
   (36px, `row_header`; the host's state dot in the rows' mark column, the
   name, the address and its check output faint, the per-state counts on the
-  right); its problem services are standard list rows under it **with no
-  indent** (the same circle, time and text column as on every dashboard); its
-  OK services fold into a `+ N more ok` line in the text column. A selected
+  right); its services are standard list rows under it **with no indent**
+  (the same circle, time and text column as on every dashboard). A selected
   service shows under its host; **a selection of services only** opens the
   same way, grouped by their hosts.
+- **Paged by count (10h, 10k):** up to 7 rows per host, problems first and
+  never hidden, OK services in name order fill the rest; `+ N more` in the
+  text column (db-prod-02, all OK: 7 rows and `+ 12 more`). A click, Enter or
+  → shows the whole host in place, and the slot reads `− show fewer`; the
+  expansion lasts while the view is open. While an expanded host scrolls,
+  its band sticks to the top of the list (10k). A click on the host's name
+  opens it in the pane, which pages its services the same way.
 - **Collapsible hosts:** the collapse chevron at the left of each band, at the
   x of 04's view-header chevron (the dot, the name and the counts keep their
   places). A click on the chevron, or ←/→ with the cursor on the band,
@@ -716,6 +759,7 @@ counts the services by state and ends with `3 hosts · 63 services`.
   `···`, and `clear esc`. Esc clears the marks and the bar returns to *mark
   all problems*.
 - Everything else is the normal list: x, shift-↓, ctrl-a, Enter for the pane.
+  In 10j, db-prod-02 (all OK) is collapsed, so every marked row is in view.
 - **This band replaces rc1's grouped-list header** (the full-height host row
   with a small circle and indented rows) in every host-with-services view.
 
@@ -885,7 +929,8 @@ quick switch; 12g a dashboard's `···` menu, following its group.
 
 ## 13 icygui on Windows: the installer, the window, the tray and toasts
 
-**Status: new, for review** (PLAN.md §4.2, *Windows support*).
+**Status: drawn, its open points decided; for the user's review** (PLAN.md
+§4.2, *Windows support*).
 
 **Shows** (`13-windows.html`): the installer, each page in Windows' dark and
 light mode side by side: 13a welcome; 13b install for me or for everyone;
@@ -951,8 +996,8 @@ notification centre; 13n the tray menu and a toast in light mode.
 - **Caption buttons (13j, 13k):** Windows 11's minimise, maximise (restore
   when maximised) and close, 46 px wide each and the full height of the 40 px
   header row, in a fixed slot at the top right of the right-most header (the
-  pane's, or the list's when no pane is open), so the header's own items keep
-  their places and nothing moves when the window becomes active, inactive or
+  pane's, or the list's when no pane is open; the pane's × sits left of
+  `↗ open as tab`), so the header's own items keep their places and nothing moves when the window becomes active, inactive or
   maximised. Glyphs in the theme's strong text colour (faint while the
   window is inactive); hover: a faint fill; close: `#c42b1c` with a white
   glyph, pressed `#c83c31`. Our theme decides their colours, as for the rest
@@ -976,19 +1021,16 @@ notification centre; 13n the tray menu and a toast in light mode.
   They stay in Windows' notification centre, grouped under icygui; icygui's
   own notification centre keeps the full history.
 
-**For the user to decide**
+**Decided** (by the coordinator, for the user's review of the frames)
 
-1. In the pane header, the pane's × now sits near Windows' close button.
-   Drawn as is; alternatives: a 1 px divider before the caption buttons, or
-   moving the pane's × left of *↗ open as tab*.
-2. The app's mark in the traffic-light slot on Windows (drawn), or leave the
-   slot empty.
+1. The pane's × moves left of `↗ open as tab` on every platform (a fixed
+   slot), so it never sits next to Windows' close button (all pane frames
+   re-rendered).
+2. The app's mark sits in the traffic-light slot on Windows.
 3. *Remove them* in the uninstaller also deletes the saved passwords in
-   Credential Manager (drawn), or keep the passwords always.
-4. The toast's image: the state circle (drawn) or no image (only the app
-   icon in the header).
+   Credential Manager.
+4. The toast's image is the state circle.
 5. The tall wizard image: the mark, the name, `Icinga 2 on your desktop` and
-   the grid corner (drawn); the tagline's wording.
-6. `Browse` without Inno's trailing dots (drawn), or keep Inno's native
-   "Browse...".
+   the grid corner.
+6. `Browse` without Inno's trailing dots.
 

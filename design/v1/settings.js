@@ -6,7 +6,7 @@
 
 const SETTINGS_PAGES = [
   ['general', 'settings', ['in the background']],
-  ['appearance', 'sun-moon', ['theme and size', 'lists', 'preview']],
+  ['appearance', 'sun-moon', ['theme and size', 'lists', 'handled problems', 'preview']],
   ['notifications', 'bell', ['this environment', 'default rule', 'notification times', 'turned on', 'storm control', 'watched and muted']],
   ['icinga', 'server', ['reconcile', 'event log', 'environments']],
   ['keymap', 'keyboard', []],
@@ -73,6 +73,10 @@ function pageAppearance({ density = 1, times = 1, theme = 0 } = {}) {
     ssec('lists') +
     srow('row density', 'Compact drops the output line: one line per object, about twice the rows.', seg(['comfortable', 'compact'], density)) +
     srow('times in lists', `Under the state circle: how long in this state (14m), or since when (13:58).`, seg(['relative', 'clock'], times)) +
+    ssec('handled problems', 'the defaults for every view; a view can set its own in the editor') +
+    srow('hide acknowledged', 'Problems someone has acknowledged.', sw(true)) +
+    srow('hide in downtime', 'Hosts and services whose downtime is in effect.', sw(true)) +
+    srow('hide services of hosts that are down', 'The host’s own problem covers them; the host still shows.', sw(true)) +
     ssec('preview', 'the databases dashboard as it would look') +
     `<div style="border:1px solid var(--bd-header);border-radius:6px;overflow:hidden;margin-top:2px">${preview}</div>`;
 }

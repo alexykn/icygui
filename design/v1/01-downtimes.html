@@ -188,7 +188,7 @@ const hostTop = `<div class="col" style="gap:20px;padding:20px 24px 0;flex:none"
   ${paneTitle({ st: 'ok', label: 'UP', ring: true, name: 'sw-core-ams-02', sub: '10.0.9.2 · up 213d · SNMP OK - Cisco IOS XE 17.9.4, uptime 213d' })}
   ${actionButtons({ firstDis: true })}
   <div class="subtabs"><span class="on">services 18</span><span>history</span><span>vars</span><span>config</span></div></div>`;
-const otherDts = `<div class="col" style="gap:14px;padding:16px 24px;border-bottom:1px solid var(--bd-row)">
+const otherDts = `<div class="col" style="gap:14px;padding:16px 24px;border-bottom:1px solid var(--bd-row);flex:none">
   ${seclabel('other downtimes')}
   ${dte({ d1: 'flexible, 1h · window tonight 22:00 → 06:00 · not started', au: 'm.keller', meta: '13:57', body: 'IOS XE 17.9.5 upgrade if the vendor build passes the lab tonight.', hov: true })}
   ${dte({ ic: 'lock', d1: 'fixed · Sat 10 Oct 06:00 → 10:00 · from config: weekly-patching', au: 'icingaadmin', meta: 'config', body: 'Weekly patch window for the core switches.' })}

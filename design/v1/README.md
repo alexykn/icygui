@@ -49,7 +49,7 @@ per frame, plus `-zoom` crops of the details.
 | 08 | YAML sharing | `08-yaml-sharing.html` | 7 (+1) | approved with revisions |
 | 09 | Filter autocomplete | `09-filter-autocomplete.html` | 7 (+7) | revised and approved |
 | 10 | Palette multi-select | `10-palette-multiselect.html` | 10 (+9) | approved with two changes; combined view rebuilt |
-| 11 | Read-only config | `11-config-tab.html` | 3 (+3) | approved, both parts |
+| 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 
 ---
@@ -728,7 +728,8 @@ host.name)`). The result is a grouped list by host, editable later.
 **Status: approved, both parts.**
 
 **Shows** (`11-config-tab.html`): 11a the host pane's config tab; 11b the
-service pane's check section; 11c both without the extra permissions.
+service pane's check section; 11c both without the extra permissions; 11d
+11b with the argument table unfolded.
 
 **Decisions**
 
@@ -741,11 +742,16 @@ service pane's check section; 11c both without the extra permissions.
   command line as Icinga would run it, every macro resolved and the resolved
   values tinted in the accent. A copy button sits at the right of the section
   label, which also names the CheckCommand and where it runs. **The argument
-  table (argument, value, `from`: `$check_address$ → host.address`,
-  `host.vars.pg_user`, `command default`) folds under the command line:**
-  folded by default, one click unfolds it. (11a and 11b draw it unfolded, to
-  show its contents.) Protected variables show `***` in both, and the table
-  says `protected`.
+  table folds under the command line, folded by default** (11a, 11b): a 28px
+  fold row right under the code block, with a chevron in a fixed 12px slot
+  (`›` folded, `⌄` open), `N arguments` and a faint `where each value comes
+  from`. A click on the row, or →/← with the cursor on it, unfolds and folds
+  it. Unfolded (11d), the table opens below the row: argument, value, and
+  `from` (`$check_address$ → host.address`, `host.vars.pg_user`, `command
+  default`, `set in the command`), one row per argument of the command line.
+  The row and everything above it never move; only what is below the table
+  moves down. Protected variables show `***` in both the command line and
+  the table, and the table says `protected`.
 - **Who Icinga notifies** (`objects/query/User`, `UserGroup`, `TimePeriod`):
   one block per Notification object (name, the apply rule, the command), its
   user groups with their members indented, each user's email and pager, and

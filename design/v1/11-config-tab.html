@@ -9,6 +9,10 @@
 .args .r { display: grid; grid-template-columns: 120px 150px minmax(0,1fr); gap: 10px; font-size: 12.5px; padding: 5px 0; border-top: 1px solid var(--bd-row); white-space: nowrap; }
 .args .r > * { overflow: hidden; text-overflow: ellipsis; }
 .args .h { font-size: 11.5px; color: var(--t-faint); border-top: 0; padding: 0 0 6px; }
+.argf { display: flex; align-items: center; gap: 10px; height: 28px; font-size: 12px; color: var(--t-muted); white-space: nowrap; }
+.argf .chev { width: 12px; flex: none; display: flex; color: var(--t-faint); }  /* fixed slot: the chevron turns, nothing moves */
+.argf .n { color: var(--t-sec); flex: none; }
+.args.open { margin-top: -2px; }
 .nt { display: flex; flex-direction: column; gap: 2px; }
 .nt .th { display: flex; align-items: baseline; gap: 10px; padding: 0 0 6px; white-space: nowrap; }
 .nt .th .nm { font-size: 12.5px; color: var(--t-strong); }
@@ -23,7 +27,7 @@
 </style></head>
 <body class="canvas">
 <div class="topic-head"><span class="topic-id">11</span><span class="topic-name">Read-only Icinga config: the command line, and who Icinga notifies</span></div>
-<p class="topic-intro">Lower priority; this topic is meant to help decide. It adds two read-only things to the host pane's <i>config</i> tab and the service pane's <i>check</i> section. <b>First</b>, the check command's actual command line, with every argument resolved from the object's macros, and where each value comes from. <b>Second</b>, who Icinga would notify: each notification object with its users and user groups, their email and pager, the time period, and the states and types. Both need API permissions icygui doesn't ask for today: <b>objects/query/CheckCommand</b> for the first, <b>objects/query/User</b>, <b>UserGroup</b> and <b>TimePeriod</b> for the second. Without them the sections say what is missing and show what is known from today's objects (frame 11c). Protected values (passwords, tokens, community strings) are always <b>***</b>.</p>
+<p class="topic-intro">Approved in the review, both parts, each shown when its permission is granted. It adds two read-only things to the host pane's <i>config</i> tab and the service pane's <i>check</i> section. <b>First</b>, the check command's actual command line, with every argument resolved from the object's macros; the table of where each value comes from <b>folds under the command line</b> and is folded by default (11a, 11b; unfolded in 11d). <b>Second</b>, who Icinga would notify: each notification object with its users and user groups, their email and pager, the time period, and the states and types. Both need API permissions icygui doesn't ask for today: <b>objects/query/CheckCommand</b> for the first, <b>objects/query/User</b>, <b>UserGroup</b> and <b>TimePeriod</b> for the second. Without them the sections say what is missing and show what is known from today's objects (frame 11c). Protected values (passwords, tokens, community strings) are always <b>***</b>.</p>
 <div class="shots"></div>
 <script>
 const groupsDb = [{ name: 'overview', items: [['overview', 'crit', 38], ['production', 'crit', 38], ['databases', 'crit', 7], ['host problems', 'crit', 7]] }, SIDEBAR_GROUPS[1], SIDEBAR_GROUPS[2]];
@@ -38,7 +42,11 @@ const dbRows = [
 const list = (sel) => listHeader({ title: 'databases', subtitle: 'service problems' }) + summary([['crit', 1, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown']], '2 handled hidden') + `<div class="list">${rows(dbRows, (r, i) => ({ sel: i === sel }))}</div>`;
 const R = (s) => `<span class="r">${s}</span>`;
 const P = (s) => `<span class="p">${s}</span>`;
-const args = (title, rowsA) => `<div class="args"><div class="r h"><span>${title}</span><span>value</span><span>from</span></div>${rowsA.map(([a, v, f]) => `<div class="r"><span class="sec">${a}</span><span>${v}</span><span class="faint">${f}</span></div>`).join('')}</div>`;
+// The argument table folds under the command line: a fold row (chevron in a
+// fixed slot, "N arguments", what the table holds), folded by default; the
+// table opens below it, so nothing above it ever moves.
+const args = (title, rowsA, { open = false } = {}) => `<div class="argf"><span class="chev">${icon(open ? 'chevron-down' : 'chevron-right', 12)}</span><span class="n">${rowsA.length} arguments</span><span class="faint">where each value comes from</span></div>` +
+  (open ? `<div class="args open"><div class="r h"><span>${title}</span><span>value</span><span>from</span></div>${rowsA.map(([a, v, f]) => `<div class="r"><span class="sec">${a}</span><span>${v}</span><span class="faint">${f}</span></div>`).join('')}</div>` : '');
 const u = (ic, name, contact, right = '', sub = false) => `<div class="u${sub ? ' sub' : ''}"><span class="ic">${icon(ic, 12)}</span><span>${name}</span><span class="muted">${contact}</span><span class="faint" style="font-size:12px">${right}</span></div>`;
 
 // ---- 11a: host pane, config tab ----------------------------------------
@@ -61,18 +69,18 @@ const hostConfig = `<div class="pane">${paneHeader('host')}
     </div>
     ${kv("Icinga's switches", [['active checks', 'on'], ['notifications', 'on'], ['flap detection', 'on']])}
   </div></div>`;
-shot('11a', '11-config-a-host-tab', 'The host pane’s <i>config</i> tab. Under today’s check table: the command line with every macro resolved (resolved values tinted, copy at the right), and a table of where each value came from. Then the notification objects for the host: the user group with its members, each user’s email and own time period, and the conditions (period, states, types, interval). Icinga’s switches stay last, read-only.',
+shot('11a', '11-config-a-host-tab', 'The host pane’s <i>config</i> tab. Under today’s check table: the command line with every macro resolved (resolved values tinted, copy at the right). The table of where each value came from is <b>folded under it</b>, by default: a chevron in a fixed slot and <i>4 arguments</i> (a click, or →/← on the row, unfolds and folds it; 11d shows it open). Then the notification objects for the host: the user group with its members, each user’s email and own time period, and the conditions (period, states, types, interval). Icinga’s switches stay last, read-only.',
   appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${list(-1)}</div>${hostConfig}</div>`, { groups: groupsDb, activeItem: 'databases' }),
   { crops: '11-config-a-zoom:820,280,620,620' });
 
 // ---- 11b: service pane, check section -----------------------------------
-const svcCheck = `<div class="pane">${paneHeader('service')}
+const svcCheck = (open) => `<div class="pane">${paneHeader('service')}
   <div class="col stack" style="gap:22px;padding:20px 24px;overflow:hidden">
     ${paneTitle({ st: 'crit', label: 'CRIT', name: 'postgres-replication', sub: 'on <a>db-prod-03</a> · 14m · hard 3/3' })}
     ${kv('check', [['command', 'check_postgres'], ['interval', '60s · retry 15s'], ['last / next', '12s ago / in 48s'], ['endpoint', 'sat-ams-01'], ['notified', 'dba-oncall · 12:58']])}
     <div class="col" style="gap:8px"><div style="display:flex;align-items:baseline;gap:10px">${seclabel('command line')}<span class="faint" style="font-size:11.5px">CheckCommand check_postgres · runs on sat-ams-01</span><span class="grow"></span><span class="faint">${icon('copy', 12)}</span></div>
       <div class="cmdl">/usr/lib/nagios/plugins/check_postgres.pl --action=hot_standby_delay --host=${R('10.0.2.11,10.0.2.13')} --port=${R('5432')} --dbuser=${R('monitoring')} --dbpass=${R('***')} --warning=${R('60')} --critical=${R('300')}</div>
-      ${args('argument', [['--host', '10.0.2.11,10.0.2.13', 'host.vars.pg_primary, host.address'], ['--dbuser', 'monitoring', 'host.vars.pg_user'], ['--dbpass', '***', 'host.vars.pg_password · protected'], ['--warning', '60', 'service.vars.lag_warn'], ['--critical', '300', 'service.vars.lag_crit']])}</div>
+      ${args('argument', [['--action', 'hot_standby_delay', 'set in the command'], ['--host', '10.0.2.11,10.0.2.13', 'host.vars.pg_primary, host.address'], ['--port', '5432', '$postgres_port$ · command default'], ['--dbuser', 'monitoring', 'host.vars.pg_user'], ['--dbpass', '***', 'host.vars.pg_password · protected'], ['--warning', '60', 'service.vars.lag_warn'], ['--critical', '300', 'service.vars.lag_crit']], { open })}</div>
     <div class="col" style="gap:10px"><div style="display:flex;align-items:baseline;gap:10px">${seclabel('notifications')}<span class="faint" style="font-size:11.5px">now: dba-oncall by mail at once; dba-pager from 18:00</span></div>
       <div class="nt"><div class="th"><span class="nm">mail-service-notification</span><span class="mt">apply rule dba-mail</span></div>
         ${u('users', 'dba-oncall', 'user group · 2 users')}
@@ -84,8 +92,8 @@ const svcCheck = `<div class="pane">${paneHeader('service')}
         <div class="cond">period oncall-nights (weekdays 18:00 to 08:00, weekends) · states critical · types problem, recovery · after 5m · every 15m</div></div>
     </div>
   </div></div>`;
-shot('11b', '11-config-b-service-check', 'The service pane’s <i>check</i> section. Under the check table: the resolved command line (the password shows as ***, and the table says it is protected), then both notification objects with their users, contacts, periods and conditions. The section label sums them up for <i>now</i>: who gets what, and when.',
-  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${list(0)}</div>${svcCheck}</div>`, { groups: groupsDb, activeItem: 'databases' }),
+shot('11b', '11-config-b-service-check', 'The service pane’s <i>check</i> section. Under the check table: the resolved command line (the password shows as ***), with its argument table folded under it (<i>7 arguments</i>), then both notification objects with their users, contacts, periods and conditions. The section label sums them up for <i>now</i>: who gets what, and when.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${list(0)}</div>${svcCheck(false)}</div>`, { groups: groupsDb, activeItem: 'databases' }),
   { crops: '11-config-b-zoom:820,180,620,720' });
 
 // ---- 11c: without the permissions ---------------------------------------
@@ -103,5 +111,10 @@ const svcNoPerm = `<div class="pane">${paneHeader('service')}
 shot('11c', '11-config-c-without-permission', 'Without the extra permissions (today’s least-privilege API user): each section says which permission it needs, in a dashed box with a lock, and shows what icygui knows anyway. The command is shown by name. The notifications and the names they send to come from the Notification objects rc1 already reads. Nothing is greyed out without a reason.',
   appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${list(0)}</div>${svcNoPerm}</div>`, { groups: groupsDb, activeItem: 'databases' }),
   { crops: '11-config-c-zoom:820,180,620,560' });
+
+// ---- 11d: the argument table unfolded -------------------------------------
+shot('11d', '11-config-d-arguments-open', 'The argument table unfolded (a click on <i>7 arguments</i>, or → on the row): the chevron turns in its slot and the table opens below the row: argument, value, and where the value comes from (<i>host.vars.pg_user</i>, <i>service.vars.lag_warn</i>). The protected password shows <i>***</i> and says <i>protected</i>. The command line and everything above it stay where they were (compare 11b); only what is below the table moves down.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${list(0)}</div>${svcCheck(true)}</div>`, { groups: groupsDb, activeItem: 'databases' }),
+  { crops: '11-config-d-zoom:820,180,620,720' });
 </script>
 </body></html>

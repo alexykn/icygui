@@ -341,7 +341,7 @@ Status markers: ✅ done · ⏳ in progress · ☐ not started.
 6. YAML sharing (08) and filter autocomplete (09).
 7. Cluster health (06) and the read-only config (11).
 8. Windows (13).
-9. Final v1 audit and gate, including a design pass over every screen against the mock-ups for the small divergences left by the stages (user, 2026-10-07: stage 1 accepted, "only some minimal divergences from the mocks").
+9. Final v1 audit and gate, including a design pass over every screen against the mock-ups (and: the comments list shows an acknowledgement comment's expiry only when it has one and drops 'sticky'; the acknowledged list keeps both) for the small divergences left by the stages (user, 2026-10-07: stage 1 accepted, "only some minimal divergences from the mocks").
 
 **Can start now** (independent of the trial):
 

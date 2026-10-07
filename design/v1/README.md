@@ -59,7 +59,7 @@ per frame, plus `-zoom` crops of the details.
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
-| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r3-scopes.html` (round 3), `14-r2-handling-downtimes.html` (round 2), `14-comments-acks.html` (round 1) | 6 (+6 light) | model approved; round 3 (scopes, fixes) for review |
+| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r4-kinds.html` (round 4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 5 (+5 light) | model approved; round 4 (dashboard kinds, copy filter) for review |
 
 ---
 
@@ -387,7 +387,8 @@ and the settings of an event stream view.
   has a drag handle, the display icon, the name, what it matches, and `···`
   (move up/down with alt-↑↓, duplicate, collapse by default, remove).
   `+ add view` asks for the display first (list, grouped list, host-group
-  grid, summary tiles, event stream); the new view starts from the
+  grid, summary tiles, event stream); every view's filter field has *copy
+  filter from* at its top right (topic 09, 14-r4-e); the new view starts from the
   dashboard's filter and goes under the selected one. Below a rule come the
   selected view's settings, which depend on its display (display and lists
   share a row). A list view's **handled** field: *as in settings* (the
@@ -685,6 +686,17 @@ hover help; 9g a parse error.
 - **Syntax colours** in the field: attributes muted, strings in the OK
   colour, numbers in the unknown colour, functions in the accent, operators
   faint. They are all theme tokens, so the light theme follows.
+- **Copy filter from** (topic 14, 14-r4-e), on **every** filter field: the
+  editor's for every kind of dashboard (problems, handling, downtimes) and
+  each view's filter in a multi-view dashboard. A small icon button (copy)
+  in a fixed slot at the field's top right, tooltip *copy filter from*,
+  opens a menu of the other dashboards and views, found by typing: each row
+  with its mark (state dot or kind icon), its name, its group and kind, and
+  its filter faint on a second line. The pointed row's filter shows in full
+  in a card to the **left** of the menu (the rule above), with what it would
+  match here. Enter copies it into the field, replacing what is there;
+  ctrl-z (or the editor's *discard*) brings the old filter back. The copy is
+  plain text: the dashboards don't stay linked.
 - The inspector in these frames also shows topic 12's notifications row.
 
 ---
@@ -1076,9 +1088,61 @@ notification centre; 13n the tray menu and a toast in light mode.
 
 ## 14 Comments, acknowledgements and downtimes
 
-### Round 3 (final): scopes, the cluster section, three fixes
+### Round 4 (current): handling and downtimes as kinds of dashboard
 
-**Status: the model is approved; round 3 is for the user's review.**
+**Status: for the user's review.** Replaces round 3's group scope.
+
+**Shows** (`14-r4-kinds.html`, each dark and `-light`): 14-r4-a the *new
+dashboard* choice of kind (the group's + in dark, the footer's + in light);
+14-r4-b the editor of a handling dashboard; 14-r4-c the editor of a
+downtimes dashboard; 14-r4-d the voip group with its three dashboards,
+*voip handling* open; 14-r4-e *copy filter from* on a filter field.
+
+**Decisions**
+
+- **Kinds of dashboard, not scopes.** *handling* and *downtimes* are kinds of
+  dashboard next to **problems** (today's dashboards), each with its own
+  filter, placed in any group like other dashboards (a team keeps *voip
+  problems*, *voip handling* and *voip downtimes* in its *voip* group, in its
+  own order). **Groups stay plain folders**: no switches, no aggregation;
+  *new group* stays rc1's instant create and rename. Round 3's group
+  settings dialog (14-r3-h) and group entries (14-r3-d) are dropped.
+- **The cluster section** (handling, downtimes, health for the whole
+  environment) stays as drawn in round 3.
+- **New dashboard (14-r4-a):** the group's **+** opens a small menu, like
+  04's *add view*: *new dashboard in voip*, then **problems** ("objects with
+  problems: a list, a grid or several views"), **handling** ("who is handling
+  what: acknowledgements, downtimes, comments"), **downtimes** ("downtimes in
+  effect and upcoming, as a timeline or a list"), each with its icon in the
+  mark slot. The footer's **+** has *new dashboard ›* with the same three.
+  The choice opens the editor for that kind. The kind is fixed once created
+  (the editor shows it, `chosen when created`).
+- **The editor of a handling dashboard (14-r4-b):** the kind, name and
+  group, the **filter** (topic 09's autocomplete and syntax colours, with
+  *copy filter from*), its live status `matches 214 objects · 12 being
+  handled`, *opens with* (the chip it opens on) and the sort. **No
+  notifications row**: one faint line, "Handling dashboards don't notify;
+  notifications come from problems dashboards." The preview on the left is
+  the handling view for exactly that filter.
+- **The editor of a downtimes dashboard (14-r4-c):** the same, with the
+  status `matches 214 objects · 3 downtimes`, **opens as** `timeline | list`
+  (timeline by default) and **shows** (in effect, upcoming, from config).
+  The preview is the timeline for that filter, its axis fitted to the
+  preview's width. No notifications row.
+- **In the sidebar (14-r4-d):** a handling or downtimes dashboard has its
+  kind's icon in the mark slot and its count in the count slot (handling:
+  the objects being handled; downtimes: in effect now), like the cluster
+  section's entries; a problems dashboard keeps its state dot and problem
+  count. The page header's scope line is the dashboard's group and filter
+  (`voip · host.vars.team == "voip" · 214 objects`).
+- **Data:** no new requests; a handling or downtimes dashboard evaluates its
+  filter on the snapshot icygui already holds, like a problems dashboard.
+- **Copy filter from (14-r4-e):** on every filter field (topic 09).
+
+### Round 3: scopes, the cluster section, three fixes
+
+**Status: the cluster section and the three fixes are kept; the group scope
+(14-r3-d, 14-r3-h) is replaced by round 4.**
 
 **Shows** (`14-r3-scopes.html`, each dark and `-light`): 14-r3-a the
 sidebar's cluster section with handling open; 14-r3-d platform's own

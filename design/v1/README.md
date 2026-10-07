@@ -740,7 +740,9 @@ service pane's check section; 11c both without the extra permissions; 11d
   greyed out without a reason.
 - **Command line** (`objects/query/CheckCommand`): a code block with the
   command line as Icinga would run it, every macro resolved and the resolved
-  values tinted in the accent. A copy button sits at the right of the section
+  values tinted in the accent. Each argument (flag and value, e.g.
+  `--host=10.0.2.11,10.0.2.13`) is unbreakable, so a long command line wraps
+  only between arguments, never inside one. A copy button sits at the right of the section
   label, which also names the CheckCommand and where it runs. **The argument
   table folds under the command line, folded by default** (11a, 11b): a 28px
   fold row right under the code block, with a chevron in a fixed 12px slot

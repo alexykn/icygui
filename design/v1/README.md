@@ -52,7 +52,7 @@ per frame, plus `-zoom` crops of the details.
 | 07 | Comment, downtime and acknowledged lists | `07-comments-downtimes-lists.html` | 7 | revised and approved |
 | 08 | YAML sharing | `08-yaml-sharing.html` | 7 (+1) | approved with revisions |
 | 09 | Filter autocomplete | `09-filter-autocomplete.html` | 7 (+7) | revised and approved |
-| 10 | Palette multi-select | `10-palette-multiselect.html` | 11 (+10) | approved with two changes; combined view rebuilt, hosts page by count |
+| 10 | Palette multi-select | `10-palette-multiselect.html` | 12 (+11) | approved with two changes; combined view rebuilt, hosts page by count |
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
@@ -682,8 +682,11 @@ for a selection of services only.
 crops): 10a no selection; 10b one block (shift-↓ twice); 10c several blocks
 (ctrl-click); 10d ctrl-a; 10e the cursor on *all N matches*; 10f the one
 bulk dialog; 10g hosts selected without a verb; 10h the combined multi-host
-view, one host collapsed; 10i pinned as a tab, and *save as dashboard*; 10j
-*mark all problems*.
+view, paged by count, one host collapsed; 10i pinned as a tab, and *save as
+dashboard*; 10j *mark all problems*; 10k a host expanded in place by `+ N
+more` (no pane, full width, sticky band, `− show fewer`); 10l a click on a
+host's name opens the host pane (a paged host; the pane pages its own
+services, `+ 16 more`).
 
 **Behaviour**
 
@@ -748,10 +751,12 @@ counts the services by state and ends with `3 hosts · 63 services`.
 - **Paged by count (10h, 10k):** up to 7 rows per host, problems first and
   never hidden, OK services in name order fill the rest; `+ N more` in the
   text column (db-prod-02, all OK: 7 rows and `+ 12 more`). A click, Enter or
-  → shows the whole host in place, and the slot reads `− show fewer`; the
-  expansion lasts while the view is open. While an expanded host scrolls,
-  its band sticks to the top of the list (10k). A click on the host's name
-  opens it in the pane, which pages its services the same way.
+  → shows the whole host in place, downward, and the slot reads `− show
+  fewer`; nothing opens, and the expansion lasts while the view is open.
+  While an expanded host scrolls, its band sticks to the top of the list
+  (10k). A click on the host's **name** (or Enter on its band) opens the
+  host in the pane, which pages its own services the same way (10l): the
+  name opens the pane, `+ N more` only expands in place.
 - **Collapsible hosts:** the collapse chevron at the left of each band, at the
   x of 04's view-header chevron (the dot, the name and the counts keep their
   places). A click on the chevron, or ←/→ with the cursor on the band,

@@ -9,18 +9,7 @@
 In the banner, accent blue means in effect (the problem is handled). Grey means scheduled but not in effect yet (flexible and waiting, or in the future), so the problem is still unhandled. Wall clock in every frame: Wed 7 Oct, 14:12.</p>
 <div class="shots"></div>
 <script>
-// ---- parts of this topic ------------------------------------------------
-function dtBanner({ quiet = false, ic = 'calendar-clock', what, left = '', action = '', l2 = '', l3 = '', l4 = '', progress = 0 }) {
-  return `<div class="dtb${quiet ? ' quiet' : ''}">
-    <div class="l1">${icon(ic, 14)}<span class="what">${what}</span>${left ? `<span class="left">${left}</span>` : ''}<span class="grow"></span>${action}</div>
-    ${l2 ? `<div class="l2">${l2}</div>` : ''}${l3 ? `<div class="l3">${l3}</div>` : ''}${l4 ? `<div class="l4">${l4}</div>` : ''}
-    <div class="prog"><span style="width:${progress}%"></span></div></div>`;
-}
-const S = '<span class="sep"> · </span>';
-const au = (who, at, text) => `<span style="color:var(--t)">${who}</span> <span class="faint">${at}</span> ${text}`;
-function dte({ ic = 'calendar-clock', d1, au, meta = '', body, hov }) {
-  return `<div class="dte">${icon(ic, 13)}<div class="col" style="min-width:0"><span class="d1">${d1}</span><span class="d2"><span class="au">${au}</span> <span class="meta">${meta}</span> ${body}</span></div><span class="rm${hov ? ' hov' : ''}">${icon('x', 12)}</span></div>`;
-}
+// dtBanner, dte, au and S live in v1.js (shared with topics 03 and 07).
 function servicePane({ banner = '', header = paneHeader('service'), title, buttons = actionButtons(), sections = '' }) {
   return `<div class="pane">${header}${banner}<div class="pbody">${title}${buttons}${sections}</div></div>`;
 }

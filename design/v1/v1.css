@@ -60,28 +60,32 @@
   color-scheme: dark;
 }
 
-/* ---- tokens: light (Theme::light, NEW in v1; topic 03) -------------- */
+/* ---- tokens: light (Theme::light, NEW in v1; topic 03) --------------
+ * Same structure as dark: the window and sidebar share one surface, the
+ * pane is a band off it, code blocks a band further. Text levels keep the
+ * dark theme's contrast steps (muted about 5:1, faint about 3.2:1); the
+ * state colours are darkened to about 4.3:1 or more on white. */
 .light {
   --win-bg: #ffffff;
   --pane-bg: #f7f8f9;
-  --code-bg: #f1f3f5;
-  --el-bg: #eceef0;
-  --el-hover: #e3e6e9;
-  --el-active: #d9dde1;
-  --row-sel: #e4ebf3;
-  --row-hover: #f3f5f7;
-  --row-marked: #dfeaf7;
-  --row-header: #f1f3f5;
-  --group-active: #e6e9ec;
-  --group-hover: #eef0f2;
-  --item-active: #eceef1;
-  --item-hover: #f3f4f6;
-  --bd-window: #d3d7db;
-  --bd-split: #dcdfe3;
-  --bd-header: #e1e4e7;
-  --bd-row: #eceef0;
+  --code-bg: #f2f4f6;
+  --el-bg: #edf0f2;
+  --el-hover: #e4e8eb;
+  --el-active: #dadfe3;
+  --row-sel: #e3ebf4;
+  --row-hover: #f4f6f8;
+  --row-marked: #dbe8f7;
+  --row-header: #f2f4f6;
+  --group-active: #e7eaed;
+  --group-hover: #eff1f3;
+  --item-active: #eceff2;
+  --item-hover: #f4f5f7;
+  --bd-window: #d5d9dd;
+  --bd-split: #dfe2e6;
+  --bd-header: #e3e6e9;
+  --bd-row: #eef0f2;
   --t-emph: #0e1012;
-  --t-strong: #15181b;
+  --t-strong: #16191c;
   --t: #2b2f33;
   --t-sec: #474c51;
   --t-muted: #687077;
@@ -91,24 +95,28 @@
   --accent-hover: #1f5c9e;
   --accent-btn-hover: #3d82cf;
   --on-accent: #ffffff;
-  --on-accent-muted: #c3d9f1;
+  --on-accent-muted: #c9dcf1;
   --selection: rgba(47, 116, 192, .22);
-  --ok: #2f9a50;
-  --warn: #b97c0d;
+  --ok: #2a8a4a;
+  --warn: #b07408;
   --crit: #cf4646;
   --unk: #8a5cc8;
   --pend: #c5cacf;
-  --shadow: rgba(16,22,29,.12);
-  --shadow-strong: rgba(16,22,29,.16);
-  --shadow-modal: rgba(16,22,29,.22);
+  --shadow: rgba(16,22,29,.10);
+  --shadow-strong: rgba(16,22,29,.14);
+  --shadow-modal: rgba(16,22,29,.20);
   --backdrop: rgba(30, 36, 42, .28);
   --accent-tint: rgba(47, 116, 192, .07);
   --accent-tint-strong: rgba(47, 116, 192, .12);
-  --warn-tint: rgba(185, 124, 13, .08);
+  --warn-tint: rgba(176, 116, 8, .08);
   --crit-tint: rgba(207, 70, 70, .07);
-  --track: #e1e4e7;
+  --track: #e3e6e9;
   color-scheme: light;
 }
+
+/* a theme wrapper sets its own text colour, so a light block inside a dark
+ * frame (or the reverse) doesn't inherit the other theme's body text */
+.dark, .light { color: var(--t); }
 
 /* ---- the canvas page (not part of the app) -------------------------- */
 html, body { margin: 0; }

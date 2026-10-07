@@ -158,3 +158,44 @@ notifications (scrolled); 2f icinga; 2g keymap; 2h advanced; 2i a search for
 4. New icons for the nav: `sun-moon`, `server`, `keyboard`, `wrench`,
    `file-code`, `folder-open` (all Lucide, from the set gpui-component
    ships).
+
+---
+
+## 03 Light theme
+
+**Shows** (`03-light-theme.html`): 3a the main window (sidebar, overview
+dashboard, service pane, footer with an unread badge); 3b every row state,
+marked rows with the selection bar, and topic 01's downtime banner in a host
+pane; 3c the palette over the dimmed window; 3d Settings → appearance with
+*light* chosen; 3e a component sheet, dark beside light.
+
+**Decisions**
+
+- `Theme::light()` has the same fields as `Theme::dark()`. Every value is in
+  `v1.css` under `.light`. Its structure copies dark: the window and sidebar
+  share one surface (`#ffffff`), the pane is a band off it (`#f7f8f9`), and
+  code blocks a band further (`#f2f4f6`). Rules are light greys
+  (`#d5d9dd` window, `#dfe2e6` splits, `#e3e6e9` headers, `#eef0f2` rows).
+- **Text keeps the dark theme's contrast steps:** muted `#687077` is about
+  5:1 and faint `#899097` about 3.2:1 on white, like `#8b9094` and `#6c7175`
+  on `#1d2125`. Strong and body text are near-black greys, never pure black.
+- **State colours are the same hues, darker,** at about 4.3:1 or more on
+  white, so `CRIT`, `late 3m` and perfdata values stay readable as text: ok
+  `#2a8a4a`, warning `#b07408`, critical `#cf4646`, unknown `#8a5cc8`,
+  pending `#c5cacf`, accent `#2f74c0` (on-accent text white).
+- **Selection** is tinted towards the accent, as in dark: selected row
+  `#e3ebf4`, marked row `#dbe8f7` with the 2px accent bar, hover `#f4f6f8`.
+- **Shadows and backdrop** are softer: the modal backdrop is a light grey veil
+  (`rgba(30,36,42,.28)`) instead of near-black. The traffic lights keep their
+  colours.
+- *follow system* (the default) switches live with the desktop's appearance.
+  The tray icon follows the desktop, not this setting.
+
+**Open questions**
+
+1. Warning `#b07408` reads as dark amber. A brighter amber (`#c98a12`) looks
+   friendlier as a filled circle but drops to 2.9:1 as text. Should there be
+   a separate fill shade per state (circles) and text shade (labels,
+   perfdata)?
+2. Should light also get a slightly grey sidebar (Zed's light themes do), or
+   keep one surface as in dark (drawn)?

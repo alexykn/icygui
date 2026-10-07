@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 03 light theme</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="settings.js"></script></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">03</span><span class="topic-name">The light theme</span></div>
+<p class="topic-intro">A second <b>Theme</b> value with the same structure as the dark one. The window and sidebar share one surface (white); the pane is a band off it (#f7f8f9) and code blocks a band further (#f2f4f6). Rules are light greys, and the selected row is tinted towards the accent, as in dark. Text keeps the dark theme's contrast steps: muted about 5:1 and faint about 3.2:1 on its background. The state colours are the same hues, darkened to 4.3:1 or more on white: ok #2a8a4a, warning #b07408, critical #cf4646, unknown #8a5cc8, accent #2f74c0. Every token is in v1.css under <b>.light</b>. It is chosen in Settings → appearance (follow system, dark, light).</p>
+<div class="shots"></div>
+<script>
+const L = { theme: 'light' };
+const svcPane = `<div class="pane">${paneHeader('service')}
+  <div class="pbody">
+    ${paneTitle({ name: 'postgres-replication', sub: 'on <a>db-prod-03</a> · 14m · hard 3/3' })}
+    ${actionButtons()}
+    ${codeBlock('CRITICAL - standby lag 412s (&gt; 300s)\nprimary  db-prod-01  lsn 4A/9C21F0D8\nstandby  db-prod-03  lsn 4A/2E77A120\nslot     repl_db03   retained 1.8 GiB')}
+    ${perf([['replication_lag', '412s', '60', '300', 'crit'], ['wal_retained', '1.8GiB', '4', '8'], ['active_connections', '182', '400', '450']])}
+    ${kv('check', [['command', 'check_postgres'], ['interval', '60s · retry 15s'], ['last / next', '12s ago / in 48s'], ['endpoint', 'sat-ams-01'], ['zone', 'ams'], ['attempt', 'hard 3/3'], ['latency / runtime', '0.004s / 1.82s'], ['notifications', 'enabled'], ['flapping', 'no · 4.2%'], ['notified', 'dba-oncall, m.keller · 13:58']])}
+    ${note({ author: 'j.berg', meta: ['13:41', 'expires 16:00'], body: 'Failover drill on db-prod-01 at 15:00. Expect lag on 03.' })}
+  </div></div>`;
+const listCol = listHeader() + summary() + `<div class="list">${rows(ROWS, (r, i) => ({ sel: i === 2 }))}</div>`;
+shot('3a', '03-light-a-main-window', 'The main window in light: sidebar, the overview dashboard, the service pane and the footer. It is the same layout, the same sizes and the same components as the dark baseline; only the tokens change.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${listCol}</div>${svcPane}</div>`, { foot: { badge: 3 } }), L);
+
+// 3b: host pane with downtime, handled rows, marked rows and the selection bar
+const netRows = [
+  [['crit', 'rabbitmq-queue', 'mq-prod-01', 'CRITICAL - queue orders.retry depth 18,402', '6m'], { marked: true }],
+  [['crit', 'ping4', 'edge-ams-05', 'PING CRITICAL - Packet loss = 100%', '11m'], { marked: true }],
+  [['unk', 'kubelet', 'k8s-node-04', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m'], {}],
+  [['unk', 'borg-last-run', 'backup-01', 'UNKNOWN - repository lock held by PID 4412', '52m'], { marked: true }],
+  [['warn', 'haproxy-backend', 'lb-prod-02', 'WARNING - backend api: 2/6 servers down', '9m'], { tag: 'downtime at 22:00' }],
+  [['warn', 'http-latency', 'api-gw-01', 'WARNING - p95 1.84s (> 1.5s)', '21m'], {}],
+  [['warn', 'pg-connections', 'db-prod-03', 'WARNING - 182 of 200 per-db limit (orders)', '22m'], { late: 'late 3m' }],
+  [['crit', 'http-tls', 'web-edge-02', 'SSL CRITICAL - certificate expires in 2 days', '2h'], { handled: true, tag: 'ack m.keller' }],
+  [['crit', 'uplink edge-ams', 'sw-core-ams-02', 'CRITICAL - Interface Po12 (uplink edge-ams) is down', '11m'], { handled: true, tag: 'downtime 48m', sel: true }],
+  [['crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'], { handled: true, tag: 'downtime 1h 48m' }],
+  [['warn', 'redis-memory', 'cache-02', 'WARNING - used_memory 81% of maxmemory', '3h'], { handled: true, tag: 'downtime 2h 03m' }],
+  [['ok', 'smart-disks', 'store-fra-01', 'OK - 12/12 disks healthy', '4m'], {}],
+];
+const bannerSwitch = dtBanner({
+  what: 'In downtime', left: '48m left', action: btn('remove downtime'),
+  l2: `fixed${S}14:00 → 15:00 today${S}host and its 18 services`,
+  l3: au('m.keller', '13:52', 'Line card swap in slot 3 (CHG-4468): Po12 to edge-ams is down during the swap.'),
+  progress: 20,
+});
+const swServices = [
+  ['crit', 'uplink edge-ams', 'CRITICAL - Interface Po12 (uplink edge-ams) is down', '11m', true],
+  ['warn', 'if-errors Gi1/0/7', 'WARNING - 38 CRC errors/min', '24m', true],
+  ['ok', 'bgp-peers', 'OK - 6/6 peers established', '21d'],
+  ['ok', 'cpu', 'OK - 5min load 11%', '40d'],
+  ['ok', 'environment', 'OK - temperature 38°C, 4/4 fans, 2/2 PSUs', '213d'],
+  ['pend', 'netflow-export', 'waiting for the first check result', '2m'],
+];
+const hostPane = `<div class="pane">${paneHeader('host', { back: true })}${bannerSwitch}
+  <div class="col" style="gap:20px;padding:20px 24px 0;flex:none">
+  ${paneTitle({ st: 'ok', label: 'UP', name: 'sw-core-ams-02', sub: '10.0.9.2 · up 213d · SNMP OK - Cisco IOS XE 17.9.4' })}
+  ${actionButtons({ firstDis: true, keys: false })}
+  <div class="subtabs"><span class="on">services 18</span><span>history</span><span>vars</span><span>config</span></div></div>
+  <div class="col">${swServices.map(([st, n, o, s, h]) => `<div class="crow">${circle(st, 14, h)}<div class="col" style="gap:2px;min-width:0"><span class="n">${n}</span><span class="o">${o}</span></div><span class="s">${s}</span></div>`).join('')}
+  <div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 12 more ok</div></div></div>`;
+const selBar = `<div style="display:flex;align-items:center;gap:8px;height:40px;padding:0 18px;border-top:1px solid var(--bd-header);background:var(--pane-bg);font-size:12px;flex:none">
+  <span class="acc" style="margin-right:4px">3 selected</span>${btn('ack', { primary: true })}${btn('downtime')}${btn('check')}${btn('comment')}<span class="glyph">···</span><span class="grow"></span><span class="faint">clear</span></div>`;
+shot('3b', '03-light-b-states', 'Every state in light: filled and hollow circles, a pending one, <i>late</i>, the tags, three marked rows (the accent bar and tint) beside the selected one, the selection bar, and topic 01’s downtime banner in the host pane.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${listHeader({ subtitle: 'service problems' })}${summary([['crit', 6, 'critical'], ['warn', 4, 'warning'], ['unk', 2, 'unknown']], 'handled shown')}<div class="list">${netRows.map(([r, o]) => row(r, o)).join('')}</div>${selBar}</div>${hostPane}</div>`,
+    { activeGroup: 'platform', activeItem: 'network' }), L);
+
+// 3c: palette over the window in light
+const pal = `<div class="pal-in"><span class="gt">›</span><span class="q">ack db-prod<span class="caret"></span></span><span class="n">19 results</span></div>
+  <div class="pal-list">
+    <div class="pal-sec">commands</div>
+    <div class="prow sel"><span class="slot">${dot('crit', 'd7')}</span><span class="lbl">Acknowledge · postgres-replication</span><span class="det">on db-prod-03 · critical</span><span class="kh">a</span></div>
+    <div class="prow"><span class="slot">${dot('warn', 'd7')}</span><span class="lbl">Acknowledge · load</span><span class="det">on db-prod-01 · warning</span></div>
+    <div class="prow"><span class="slot">${dot('warn', 'd7')}</span><span class="lbl">Acknowledge · pg-connections</span><span class="det">on db-prod-03 · warning</span></div>
+    <div class="prow"><span class="slot" style="color:var(--crit)">${icon('layers', 10)}</span><span class="lbl">Acknowledge · all 4 matches</span><span class="det">4 services</span><span class="kh">ctrl-↵</span></div>
+    <div class="pal-sec">hosts</div>
+    ${['01', '02', '03', '04', '05'].map((n) => `<div class="prow"><span class="slot">${dot('ok', 'd7')}</span><span class="lbl"><span class="hl">db-prod</span>-${n}</span><span class="det">10.0.2.1${n.slice(1)} · up</span></div>`).join('')}
+  </div>
+  <div class="pal-foot"><span>↑↓ navigate</span><span>↵ run</span><span>⇥ open as tab</span><span>ctrl-↵ run on all matches</span><span class="grow"></span><span>esc</span></div>`;
+shot('3c', '03-light-c-palette', 'The command palette and the dimmed window behind it. The backdrop is a light grey veil instead of near-black; modal shadows are softer.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${listCol}</div>${svcPane}</div>`) + modal(640, pal, { top: 70 }), L);
+
+// 3d: settings, appearance, light
+shot('3d', '03-light-d-settings-appearance', 'Settings → appearance in light, with <i>light</i> chosen and the preview in the comfortable density with relative times.',
+  settingsWindow({ page: 'appearance', appearance: { theme: 2, density: 0, times: 0 } }), { theme: 'light', w: 1080, h: 760 });
+
+// 3e: component sheet, dark beside light
+function sheet() {
+  const sr = [['crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'], ['warn', 'pg-connections', 'db-prod-03', 'WARNING - 182 of 200 per-db limit (orders)', '22m'], ['unk', 'kubelet', 'k8s-node-04', 'UNKNOWN - connection refused (10.0.4.24:10250)', '4m'], ['ok', 'load', 'db-prod-01', 'OK - load average 3.1, 2.8, 2.6', '2d'], ['pend', 'netflow-export', 'sw-core-ams-02', 'waiting for the first check result', '2m']];
+  const ban = (tone, tint, ic, t, sub) => `<div class="banner" style="--tone:var(--${tone});--tint:var(--${tint})"><span style="color:var(--${tone})">${icon(ic, 14)}</span><div class="col" style="gap:2px;min-width:0"><span style="font-size:12.5px;color:var(--t-strong)">${t}</span><span class="trunc" style="font-size:12px;color:var(--t-muted)">${sub}</span></div><span class="grow"></span><span class="acc" style="font-size:12px">retry now</span></div>`;
+  return `<div style="height:100%;display:flex;flex-direction:column;background:var(--win-bg)">
+    ${summary([['crit', 4, 'critical'], ['warn', 28, 'warning'], ['unk', 6, 'unknown'], ['ok', 312, 'ok']], '28 handled hidden')}
+    ${row(sr[0], { sel: true })}${row(sr[1], { marked: true })}${row(sr[2], { hover: true })}${row(sr[0], { handled: true, tag: 'downtime 1h 48m' })}${row(sr[3])}${row(sr[4])}
+    <div class="col" style="gap:14px;padding:18px">
+      <div class="btns">${btn('acknowledge', { key: 'a', primary: true })}${btn('downtime', { key: 'd' })}${btn('check now', { key: 'r', hov: true })}${btn('comment', { key: 'c', dis: true })}${btn('remove 24 downtimes', { danger: true })}</div>
+      <div class="btns">${chip('critical', { sel: true })}${chip('warning')}${chip('prod-cluster', { filled: true })}${chip('staging', { marked: true })}<span style="width:12px"></span>${sw(true, 'on')}${sw(false, 'off')}<span style="width:12px"></span>${seg(['inherit', 'on', 'off'], 0)}</div>
+      <div class="btns" style="gap:16px;font-size:12.5px"><span class="strong">strong</span><span>body</span><span class="sec">secondary</span><span class="muted">muted</span><span class="faint">faint</span><a class="lnk">link</a><span class="c-crit">412s</span><span class="c-warn">late 3m</span></div>
+      <div class="code" style="padding:8px 12px">CRITICAL - standby lag 412s (&gt; 300s)</div>
+    </div>
+    ${ban('crit', 'crit-tint', 'triangle-alert', 'Connection to master-01 lost. Retrying in 12s.', 'connect: connection refused (10.0.1.11:5665)')}
+    ${ban('warn', 'warn-tint', 'triangle-alert', 'staging is stale: last event 41s ago.', 'the event stream stalled; a reconnect is under way')}
+    <div style="flex:1"></div>
+  </div>`;
+}
+shot('3e', '03-light-e-sheet', 'Component sheet, dark beside light: list rows (selected, marked, hovered, handled, ok, pending), buttons (primary, secondary, hovered, disabled, danger), chips, switches, segmented control, text levels, a code block and the connection banners. Each component keeps the same role and the same step of emphasis in both themes.',
+  `<div style="display:grid;grid-template-columns:1fr 1fr;height:100%"><div class="dark" style="border-right:1px solid #33383c">${sheet()}</div><div class="light">${sheet()}</div></div>`);
+</script>
+</body></html>

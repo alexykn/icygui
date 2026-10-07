@@ -188,3 +188,16 @@ function shot(id, name, label, html, { theme = 'dark', w = 1440, h = 900, crops 
 function appWindow(main, sb = {}) {
   return `<div class="win">${sidebar(sb)}<div class="col" style="min-height:0">${main}</div></div>`;
 }
+
+// ---- the downtime banner (topic 01) ------------------------------------
+function dtBanner({ quiet = false, ic = 'calendar-clock', what, left = '', action = '', l2 = '', l3 = '', l4 = '', progress = 0 }) {
+  return `<div class="dtb${quiet ? ' quiet' : ''}">
+    <div class="l1">${icon(ic, 14)}<span class="what">${what}</span>${left ? `<span class="left">${left}</span>` : ''}<span class="grow"></span>${action}</div>
+    ${l2 ? `<div class="l2">${l2}</div>` : ''}${l3 ? `<div class="l3">${l3}</div>` : ''}${l4 ? `<div class="l4">${l4}</div>` : ''}
+    <div class="prog"><span style="width:${progress}%"></span></div></div>`;
+}
+const S = '<span class="sep"> · </span>';
+const au = (who, at, text) => `<span style="color:var(--t)">${who}</span> <span class="faint">${at}</span> ${text}`;
+function dte({ ic = 'calendar-clock', d1, au, meta = '', body, hov }) {
+  return `<div class="dte">${icon(ic, 13)}<div class="col" style="min-width:0"><span class="d1">${d1}</span><span class="d2"><span class="au">${au}</span> <span class="meta">${meta}</span> ${body}</span></div><span class="rm${hov ? ' hov' : ''}">${icon('x', 12)}</span></div>`;
+}

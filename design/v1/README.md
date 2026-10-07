@@ -102,9 +102,15 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
   settings / show / hide*, with the kinds to hide; 4c, 9a–g). The summary
   bar keeps rc1's place for it, as a button in a fixed, right-aligned slot:
   `28 hidden · show`, and after a click `28 handled · hide`, saved with the
-  view as rc1's toggle was (2j). Shown handled rows are hollow. Filters on
-  `acknowledged` or `downtime_depth` still work; the switches apply on top.
-  Sidebar counts are unchanged: they count unhandled problems.
+  view as rc1's toggle was (2j). On a multi-view dashboard (no summary bar)
+  every list or grouped-list **view header** has the same button in a fixed,
+  right-aligned slot after its counts (`2 hidden · show` / `2 handled ·
+  hide`, 4a, 4b); a view with nothing handled keeps the slot empty, so the
+  headers line up and nothing moves. Shown handled rows are hollow. Filters
+  on `acknowledged` or `downtime_depth` still work; the switches apply on top.
+- **The per-state counts are unhandled counts**, in the summary bar and in
+  every view header: show and hide never change them (2j keeps `4 critical`
+  after *show*), and they match the sidebar's counts, which are unchanged.
 - **The pane's ×** sits left of `↗ open as tab`, in a fixed slot, on every
   platform, so it never sits next to a window's close button (topic 13). A
   pane that is already a tab keeps the tab slot, empty. The combined view's
@@ -345,7 +351,7 @@ and the settings of an event stream view.
   view header carries its own counts.
 - **Counting:** every view whose objects are problems counts toward the
   sidebar's count and dot and toward notifications, each object once even
-  when several views show it.
+  when several views show it. A view header's counts are unhandled counts.
 - **The view header** is 36px (the summary bar's height) on the pane surface
   (`pane_background`), so it reads as a band between views and differs from
   a grouped list's group-header bands (`row_header`, darker). In order: a
@@ -380,9 +386,16 @@ and the settings of an event stream view.
   default; a dim row shows the kinds the settings hide), *show* (a faint
   line: every handled problem shows, hollow) or *hide* (the kinds to hide as
   chips: acknowledged, in downtime, host down); the kinds row is always
-  there, so nothing below it moves (4c; 9a–g show *show*). On a multi-view
-  dashboard there is no summary bar; a view's handled slot is an entry in its
-  `···` menu (`show 2 handled` / `hide 2 handled`). The preview on the
+  there, so nothing below it moves (4c; 9a–g show *show*).
+- **The handled button in the view header** (4a, 4b): a multi-view dashboard
+  has no summary bar, so each list or grouped-list view header has a fixed,
+  right-aligned slot after its counts, with the summary bar's wording and
+  behaviour: `2 hidden · show`, and after a click `2 handled · hide` with the
+  handled rows shown hollow (4b); the choice is saved with the view. The
+  counts beside it are unhandled counts and don't change. A view with
+  nothing handled (replication lag) keeps the slot empty. Tiles, grid and
+  stream views have no slot. In 4b the pane is 560px, so the header keeps
+  its counts, the slot, the sort and `···`; the filter summary is cut first. The preview on the
   left shows the whole dashboard. **The selected view is marked on its header
   only: the focus bar plus a faint accent tint, nothing around its body**
   (4c, 4d, 4e; class `.vh.picked` in `v1.css`). Clicking a view in the

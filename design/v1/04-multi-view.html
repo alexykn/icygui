@@ -19,22 +19,27 @@ const failing = [
   ['warn', 'load', 'db-prod-01', 'WARNING - load average 14.2, 12.8, 11.1', '1h'],
   ['warn', 'mysql-slow-queries', 'db-mysql-01', 'WARNING - 41 slow queries in 5m (> 20)', '3h'],
 ];
-const fFilter = '(host.vars.role == "postgres" || host.vars.role == "mysql") && service.problem && !service.handled';
+const fFilter = '(host.vars.role == "postgres" || host.vars.role == "mysql") && service.problem';
+// the failing view's handled problems: hidden by default (the settings), shown in 4b
+const handledFailing = [
+  ['crit', 'pg-autovacuum', 'db-prod-01', 'CRITICAL - autovacuum has not run on orders for 26h', '1h', 'ack dba-oncall'],
+  ['warn', 'pg-locks', 'db-prod-05', 'WARNING - 41 waiting locks on orders_archive', '2h', 'downtime 1h 30m'],
+];
 const dashHeader = (extra = '') => `<div class="hbar"><span class="title">databases</span><span class="subtitle">4 views</span><span class="grow"></span>${extra}<span class="glyph">···</span></div>`;
 
-function page({ sel = -1, evSel = -1, collapsed = [], focus = 1, sortOpen = false, narrow = false } = {}) {
+function page({ sel = -1, evSel = -1, collapsed = [], focus = 1, sortOpen = false, narrow = false, showHandled = false } = {}) {
   let h = dashHeader();
   h += viewHeader({ name: 'clusters', display: 'tiles', filter: 'host groups pg-*, mysql-*, redis-*', counts: [['crit', 1], ['warn', 4], ['unk', 1]], sort: 'name ↑', collapsed: collapsed.includes(0), focus: focus === 0 });
   if (!collapsed.includes(0)) h += tilesBody(DB_TILES, narrow ? 2 : 4);
-  h += viewHeader({ name: 'failing services', display: 'list', filter: fFilter, counts: [['crit', 1], ['warn', 4], ['unk', 1]], collapsed: collapsed.includes(1), focus: focus === 1, sortOpen });
-  if (!collapsed.includes(1)) h += `<div class="vbody">${failing.map((r, i) => row(r, { sel: i === sel })).join('')}</div>`;
+  h += viewHeader({ name: 'failing services', display: 'list', filter: fFilter, counts: [['crit', 1], ['warn', 4], ['unk', 1]], collapsed: collapsed.includes(1), focus: focus === 1, sortOpen, handled: [2, showHandled] });
+  if (!collapsed.includes(1)) h += `<div class="vbody">${failing.map((r, i) => row(r, { sel: i === sel })).join('')}${showHandled ? handledFailing.map(([st, n, hh, o, t, tag]) => row([st, n, hh, o, t], { handled: true, tag })).join('') : ''}</div>`;
   h += viewHeader({ name: 'replication lag', display: 'list', filter: 'service.name.contains("replication") && service.perf.lag > 60', empty: 'nothing to show', sort: '', focus: focus === 2 });
   h += viewHeader({ name: 'db events', display: 'stream', filter: 'host.vars.role in ["postgres", "mysql"]', sort: 'newest first', live: true, collapsed: collapsed.includes(3), focus: focus === 3 });
   if (!collapsed.includes(3)) h += `<div class="vbody">${DB_EVENTS.map((e, i) => eventRow(e, { sel: i === evSel })).join('')}</div>`;
   return h;
 }
 
-shot('4a', '04-multi-view-a-dashboard', 'The databases dashboard with four views: summary tiles per host group, the failing database services as a list, a view with nothing to show (one header line, no empty box) and a live event stream for the database hosts. The cursor is in <i>failing services</i>, whose header has the accent bar.',
+shot('4a', '04-multi-view-a-dashboard', 'The databases dashboard with four views: summary tiles per host group, the failing database services as a list, a view with nothing to show (one header line, no empty box) and a live event stream for the database hosts. The cursor is in <i>failing services</i>, whose header has the accent bar. Each list view has a <b>handled slot</b> after its counts, in a fixed, right-aligned slot, with the summary bar’s wording and behaviour: <i>2 hidden · show</i> here (the settings hide handled problems). A view with nothing handled keeps the slot empty.',
   appWindow(`<div class="col" style="min-height:0;overflow:hidden">${page({ sel: 0, focus: 1 })}</div>`, { activeItem: 'databases', groups: dbGroups }),
   { crops: '04-multi-view-a-headers-zoom:300,40,1140,240' });
 
@@ -46,9 +51,9 @@ const pane = `<div class="pane">${paneHeader('service')}<div class="pbody">
   ${perf([['connections_orders', '182', '180', '195', 'warn'], ['connections_billing', '41', '180', '195'], ['connections_analytics', '12', '90', '98']])}
   ${kv('check', [['command', 'check_postgres'], ['interval', '60s · retry 15s'], ['last / next', '41s ago / in 19s'], ['endpoint', 'sat-ams-01'], ['zone', 'ams'], ['attempt', 'soft 2/3']])}
 </div></div>`;
-const sortMenu = menu(['sort this view by', { label: 'severity', chk: true }, { label: 'last state change', chk: false }, { label: 'host', chk: false }, { label: 'service', chk: false }, '-', { label: 'descending', chk: true }, { label: 'ascending', chk: false }], { x: 300, y: 118, w: 200 });
-shot('4b', '04-multi-view-b-focus-and-pane', 'The tiles collapsed to their header (the counts stay). Tab moved the cursor into the event stream; Enter on an event opened its object in the pane, as from any row. The list view’s sort menu is open: each view sorts on its own. The views keep their headers when the pane narrows the list, and the filter summaries are cut first.',
-  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col" style="position:relative;min-height:0;overflow:hidden">${page({ evSel: 1, collapsed: [0], focus: 3, sortOpen: true })}${sortMenu}</div>${pane}</div>`, { activeItem: 'databases', groups: dbGroups }));
+const sortMenu = menu(['sort this view by', { label: 'severity', chk: true }, { label: 'last state change', chk: false }, { label: 'host', chk: false }, { label: 'service', chk: false }, '-', { label: 'descending', chk: true }, { label: 'ascending', chk: false }], { x: 370, y: 118, w: 200 });
+shot('4b', '04-multi-view-b-focus-and-pane', 'The tiles collapsed to their header (the counts stay). The list view’s <b>handled slot</b> was clicked: <i>2 handled · hide</i>, and its two handled problems show, hollow, with their tags; the counts beside it stay the same (they count unhandled problems). <i>replication lag</i> has nothing handled, so its slot is empty and its header lines up with the others. Tab moved the cursor into the event stream; Enter on an event opened its object in the pane, as from any row. The list view’s sort menu is open: each view sorts on its own. The views keep their headers when the pane narrows the list, and the filter summaries are cut first.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 560px"><div class="col" style="position:relative;min-height:0;overflow:hidden">${page({ showHandled: true, evSel: 1, collapsed: [0], focus: 3, sortOpen: true })}${sortMenu}</div>${pane}</div>`, { activeItem: 'databases', groups: dbGroups }));
 
 // ---- the editor ---------------------------------------------------------
 const VIEWS = [['tiles', 'clusters', '4 tiles'], ['list', 'failing services', '6 matches'], ['list', 'replication lag', '0 matches'], ['stream', 'db events', '8 today']];
@@ -60,9 +65,9 @@ function inspector({ sel = 1, extra = '', viewSettings = true }) {
   const settings = vs[0] === 'list' ? `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('list', 13)}list</span>`)}</div>
     <div class="field"><div class="lab">lists</div><span class="seg" style="display:flex">${['services', 'hosts'].map((o, i) => `<span class="${i === 0 ? 'on' : ''}" style="flex:1">${o}</span>`).join('')}</span></div></div>
-    <div class="field"><div class="lab">filter<span class="st c-ok">valid · 6 matches</span></div><div class="textarea focus" style="height:66px">(host.vars.role == "postgres" ||
+    <div class="field"><div class="lab">filter<span class="st c-ok">valid · 8 matches, 2 handled</span></div><div class="textarea focus" style="height:66px">(host.vars.role == "postgres" ||
  host.vars.role == "mysql") &amp;&amp;
-service.problem &amp;&amp; !service.handled<span class="caret" style="height:13px"></span></div></div>
+service.problem<span class="caret" style="height:13px"></span></div></div>
     <div class="field"><div class="lab">show</div>${sw(true, 'problems only')}</div>
     ${handledField(0)}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">sort</div>${select('severity')}</div><div class="field"><div class="lab">direction</div><span class="seg" style="display:flex"><span class="on" style="flex:1">↓ desc</span><span style="flex:1">↑ asc</span></span></div></div>` : '';
@@ -81,7 +86,7 @@ const editorHeader = `<div class="hbar"><span class="title">databases</span><spa
 function preview(focusView) {
   let h = viewHeader({ name: 'clusters', display: 'tiles', filter: 'host groups pg-*, mysql-*, redis-*', counts: [['crit', 1], ['warn', 4], ['unk', 1]], sort: 'name ↑', picked: focusView === 0 });
   h += tilesBody(DB_TILES, 2);
-  h += viewHeader({ name: 'failing services', display: 'list', filter: fFilter, counts: [['crit', 1], ['warn', 4], ['unk', 1]], picked: focusView === 1 }) + `<div class="vbody">${failing.map((r) => row(r)).join('')}</div>`;
+  h += viewHeader({ name: 'failing services', display: 'list', filter: fFilter, counts: [['crit', 1], ['warn', 4], ['unk', 1]], picked: focusView === 1, handled: [2, false] }) + `<div class="vbody">${failing.map((r) => row(r)).join('')}</div>`;
   h += viewHeader({ name: 'replication lag', display: 'list', filter: 'service.name.contains("replication") && service.perf.lag > 60', empty: 'nothing to show', sort: '' });
   h += viewHeader({ name: 'db events', display: 'stream', filter: 'host.vars.role in ["postgres", "mysql"]', sort: 'newest first', live: true, picked: focusView === 3 });
   h += `<div class="vbody">${DB_EVENTS.slice(0, 4).map((e) => eventRow(e)).join('')}</div>`;

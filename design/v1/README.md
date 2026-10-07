@@ -23,6 +23,9 @@ answer.
 - `icons.js`: the Lucide icons the app uses (gpui-component's set), inline.
 - `settings.js` (the settings panel, topics 02, 03 and 12) and `views.js`
   (dashboard views, topics 04, 05 and 12): parts shared by several topics.
+- `threads.js` (topic 14, round 2): the group band, the entry, the fold of a
+  host's services, the section label, the filter chips and the view header
+  shared by the handling view, the downtimes view and the object's pane.
 - `NN-topic.html`: one page per topic, each a column of 1440×900 frames (the
   app's default window) with a caption. Open a page in a browser to view it.
 - `00-baseline.html`: rc1's service pane redrawn with the kit, as a check
@@ -56,7 +59,7 @@ per frame, plus `-zoom` crops of the details.
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
-| 14 | Comments, acknowledgements, downtimes: drafts | `14-comments-acks.html` | 13 drafts, each dark + light | drafts for the user to choose from |
+| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r2-handling-downtimes.html` (round 2), `14-comments-acks.html` (round 1 drafts) | 6 (+6 light) | round 2 for review; round 1 decided |
 
 ---
 
@@ -1066,10 +1069,112 @@ notification centre; 13n the tray menu and a toast in light mode.
 
 ---
 
-## 14 Comments, acknowledgements and downtimes: drafts
+## 14 Comments, acknowledgements and downtimes
 
-**Status: drafts for the user to choose from** (feedback on stage 2's 07a,
-07d, 07f). Not decided; nothing here is built yet.
+### Round 2 (current): handling and downtimes
+
+**Status: round 2, for the user's review.** Built from the user's verdict on
+round 1 (below) and the coordinator's decisions. Consistency across the views
+is the main goal: every part comes from one component, `threads.js` (styles:
+*threads* in `v1.css`).
+
+**Shows** (`14-r2-handling-downtimes.html`, each dark and `-light`):
+14-r2-a handling, all kinds; 14-r2-b handling filtered to comments; 14-r2-c
+handling filtered to acknowledged; 14-r2-d downtimes, timeline; 14-r2-e
+downtimes, list; 14-r2-f a service pane with its thread.
+
+**Decisions**
+
+- **Two dedicated views and one pane section.**
+  1. **Handling** (round 1's handling A): one thread per object with its
+     acknowledgement, downtimes (in effect and upcoming) and free-standing
+     comments, oldest first inside, like a chat. The summary bar's kind
+     counts are **filter chips** (*all*, *acknowledged*, *in downtime*,
+     *upcoming*, *comments*): *comments* gives round 1's comments A
+     (14-r2-b), *acknowledged* the acknowledged view (14-r2-c), in the same
+     look. There is **no separate comments view and no separate
+     acknowledged view**. *only mine* and the sort stay in the header.
+  2. **Downtimes**: one view with two displays in a segmented control in the
+     header, as 05's squares and labelled cells: **timeline** (the default,
+     14-r2-d) and **list** (round 1's A and B combined, 14-r2-e). In effect,
+     upcoming and from config are distinguishable in both (and are filter
+     chips).
+  3. **The object's pane** (round 1's comments C): the open object's thread
+     as a *handling* section, with the same entries, and a field to add a
+     comment (c). A downtime already shown in the pane's banner (topic 01)
+     keeps its place in the thread without repeating its text (14-r2-f).
+- **A comment is the text of its acknowledgement or downtime**, shown as part
+  of that entry; Icinga's automatic comments never appear; only free-standing
+  comments are entries of their own.
+- **One grouping pattern everywhere** (handling, downtimes list and
+  timeline, and the problem views of 10h): a group is the slim band (36px,
+  `row_header`; the chevron at the left, at the x of 04's view headers and
+  10h's host bands, only collapses; a click elsewhere on the band opens the
+  object's pane; the state dot, hollow = handled; `service on host`; the
+  output faint; a fixed right slot that says what the thread holds, e.g.
+  `in downtime · 3 comments`). Entries sit under it without indent. Groups
+  page by count (7, then `+ N more`, as everywhere).
+- **The entry** (one component): the kind's icon in the mark slot (✓
+  acknowledged and the calendar in effect in the accent; the calendar
+  upcoming faint; a lock from config; a speech bubble for comments), the
+  kind word (none for comments), the author, the time and details (window,
+  fixed or flexible, scope), then the text; later entries of a thread carry
+  a 2px left rule as replies. Two fixed tag slots at the right: **slot A**
+  `sticky` or the progress line, **slot B** the expiry (`expires 15:00, in
+  48m`, the warning text colour within 2 hours), the time left (accent), or
+  when it starts. Nothing moves when a value changes.
+- **Sections** (expires within 2 hours, in effect, upcoming…) are light
+  30px labels without the band's fill, so they never read as a group.
+- **Host downtime with all services**: one group, the host's band (`host and
+  18 services in downtime`); its child service downtimes are **folded by
+  default** into one row (`18 services, same downtime · folded: they are
+  identical`); the chevron opens them, paged by count (7, then `+ 15 more`).
+  A service with its **own different** downtime or acknowledgement is not
+  hidden in the fold: it is its own group or row (kubelet on k8s-node-07).
+  In the timeline the host row has one bar and `+ 22 services`; its chevron
+  opens the services, each with the same bar. In dashboards and the combined
+  view (problem views) host-with-services stays expanded by default, as
+  approved (there the services differ).
+- **Downtimes list: sections, then groups.** An object sits in the section of
+  its most current downtime (*in effect*, else *upcoming*) and appears once;
+  its other downtimes stay in its group with their kind (sw-core-ams-02: in
+  effect, upcoming, from config). Splitting an object across sections would
+  show it twice, so sections above the groups read better than a section per
+  entry.
+- **Timeline**: one row per object on a shared axis (noon to midnight here;
+  the axis follows the window and the earliest start), bars in the
+  progress-line style: in effect a track with the elapsed part in the
+  accent, upcoming a faint track, flexible a dashed line over its window; a
+  thin accent line at now; later ones say when they start at the right edge,
+  config ones with the lock.
+- **Config downtimes** keep the lock and `from config` everywhere and can't
+  be removed.
+
+**Sorting** (the sort control always shows the current sort; the menu offers
+*latest activity*, *expires or ends soonest*, *object*, *author*):
+
+| view / filter | default sort |
+|---|---|
+| handling, all kinds | latest activity (newest thread first; oldest first inside) |
+| handling, comments | latest activity |
+| handling, acknowledged | expires soonest, in sections *expires within 2 hours*, *expires later*, *no expiry* (always last) |
+| handling, in downtime / upcoming | ends soonest / starts soonest |
+| downtimes, list | in effect: ends soonest; upcoming: starts soonest |
+| downtimes, timeline | by time (start) |
+
+**Dropped after round 1:** the separate comments view (comments A becomes
+handling's *comments* filter; B dropped); comments D and acknowledged D (the
+merged "acknowledged and comments" view: handling covers it and reads like a
+history); acknowledged B and C as views (author is a sort; the compact
+table isn't needed); downtimes C (ticket grouping: confusing). Acknowledged A's
+expiry sections live on in handling's *acknowledged* filter.
+
+### Round 1: drafts (decided)
+
+**Status: decided by the user** (see round 2): handling A yes; comments A is
+the look for comments; comments C liked in the pane; comments D and
+acknowledged D dropped; downtimes A and B combined; downtimes D loved, as the
+default display; downtimes C dropped; acknowledged A's expiry sections kept.
 
 **The model behind every draft** (the user's notes): a comment is the text
 someone typed into the acknowledge or downtime dialog, so it is shown as part

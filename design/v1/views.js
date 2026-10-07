@@ -126,12 +126,11 @@ function handledField(mode = 0, kinds = [true, true, true]) {
 // The dashboard's fields: the name, full width; then two columns on the
 // inspector's grid: the sidebar mark (swatch + dropdown filling the column,
 // a short hint as the label's suffix) and the group.
-const MARK_HINT = { state: 'worst dot', icon: 'pick one' };  // fits the column's label line
 const markField = ({ mode = 'state', st = 'crit', ic = 'users', sq = '', selOpen = false }) => {
   const swatch = mode === 'state'
     ? `<span class="mswatch dis"><span class="dot ${st}" style="width:10px;height:10px"></span></span>`
     : `<span class="mswatch${sq ? ' ' + sq : ''}">${icon(ic, 16)}</span>`;
-  return `<div class="field"><div class="lab">sidebar mark<span class="st faint">${MARK_HINT[mode]}</span></div>
+  return `<div class="field"><div class="lab">sidebar mark</div>
     <div class="mfield">${swatch}<span class="msel${selOpen ? ' selopen' : ''}">${select(mode)}</span></div></div>`;
 };
 const dashFields = (name, group, mark, { nameFocus = false } = {}) => `<div class="field"><div class="lab">name</div><span class="input${nameFocus ? ' focus' : ''}">${nameFocus ? `<span style="background:var(--selection)">${name}</span><span class="caret" style="height:13px"></span>` : name}</span></div>

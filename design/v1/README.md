@@ -1330,10 +1330,9 @@ icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
     highlight, and open it keeps the highlight with the accent border.
   - **Layout (user, 2026-10-07):** *name* is a full-width row; the next row
     has two columns on the inspector's grid: **sidebar mark** (the square,
-    12px, then the dropdown filling the column) and **group**. The label's
-    faint suffix says what the mark shows, right-aligned to the column
-    (*worst dot* / *pick one*); the square and the dropdown keep their size
-    and place, so switching moves nothing.
+    12px, then the dropdown filling the column) and **group**. The label is
+    just *sidebar mark*, no hint suffix (user: removed); the square and the
+    dropdown keep their size and place, so switching moves nothing.
   - **The icon picker** (like an emoji picker, 14-r5-f): a search field, a
     **recent** row (the last 8 chosen), and a grid of **the app's own
     icons** (its Lucide set, `icons.js` and `IconName`: 76 of the 102, the

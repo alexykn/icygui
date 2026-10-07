@@ -324,7 +324,7 @@ const histLines = [
 const histRow = ([t, st, kind, obj, note]) => {
   const fill = st === 'pend' ? 'var(--t-faint)' : st === 'accb' ? 'var(--accent)' : `var(--${st})`;
   const text = st === 'pend' || st === 'accb' ? fill : `var(--${st}-text)`;
-  return `<div class="hl"><span class="t">${t}</span><span class="d"><span class="dot d7" style="background:${fill}"></span></span>
+  return `<div class="hist"><span class="t">${t}</span><span class="d"><span class="dot d7" style="background:${fill}"></span></span>
     <div style="min-width:0"><div class="l1"><span class="k" style="color:${text}">${kind}</span><span class="o">${obj}</span></div><div class="l2">${note}</div></div></div>`;
 };
 const k2Banner = dtBanner({

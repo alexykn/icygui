@@ -402,13 +402,13 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .hbar.dts .prog > span { display: block; height: 100%; background: var(--accent); }
 /* a line of the pane's history (pane/history.rs: time, dot, KIND object,
  * the note under it); downtimes take the accent, as acknowledgements */
-.hl { display: grid; grid-template-columns: 44px 7px minmax(0, 1fr); gap: 10px; align-items: start; padding: 5px 24px; }
-.hl .t { font-size: 11.5px; color: var(--t-faint); padding-top: 1px; }
-.hl .d { padding-top: 5px; display: flex; }
-.hl .l1 { display: flex; gap: 6px; font-size: 12.5px; white-space: nowrap; overflow: hidden; }
-.hl .l1 .k { font-weight: 600; flex: none; }
-.hl .l1 .o { color: var(--t); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.hl .l2 { font-size: 12px; color: var(--t-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.hist { display: grid; grid-template-columns: 44px 7px minmax(0, 1fr); gap: 10px; align-items: start; padding: 5px 24px; }
+.hist .t { font-size: 11.5px; color: var(--t-faint); padding-top: 1px; }
+.hist .d { padding-top: 5px; display: flex; }
+.hist .l1 { display: flex; gap: 6px; font-size: 12.5px; white-space: nowrap; overflow: hidden; }
+.hist .l1 .k { font-weight: 600; flex: none; }
+.hist .l1 .o { color: var(--t); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.hist .l2 { font-size: 12px; color: var(--t-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
 /* one downtime in a pane's downtimes section */
 .dte { display: grid; grid-template-columns: 14px minmax(0,1fr) auto; gap: 10px; align-items: start; font-size: 12.5px; }
 .dte .ic { color: var(--t-muted); margin-top: 1px; }
@@ -598,6 +598,25 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .sighelp { position: absolute; z-index: 30; padding: 5px 9px; box-sizing: border-box; max-width: 306px; border-radius: 6px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 6px 18px var(--shadow-strong); font-size: 12.5px; color: var(--t-sec); white-space: nowrap; display: flex; flex-direction: column; gap: 4px; }
 .sighelp .cur { color: var(--t-strong); text-decoration: underline; text-underline-offset: 3px; }
 .sighelp .d { font-size: 11.5px; color: var(--t-faint); white-space: normal; line-height: 1.45; }
+
+/* ---- grouped list by host (topic 10's combined view, a grouped list):
+ * a host is a 36px group-header band (row_header, header rule) with its
+ * state dot in the rows' 44px mark column, the name, the address and
+ * output faint, and per-state counts at the right; the services under it
+ * are plain list rows (no indent); "+ N more ok" is a 30px row whose text
+ * starts in the rows' text column. */
+.ghb { position: relative; display: grid; grid-template-columns: 44px minmax(0,1fr) auto; gap: 14px; align-items: center; height: 36px; padding: 0 18px; background: var(--row-header); border-bottom: 1px solid var(--bd-header); flex: none; white-space: nowrap; }
+.ghb .lead { display: flex; justify-content: center; }
+.ghb .t { display: flex; align-items: baseline; gap: 10px; min-width: 0; overflow: hidden; }
+.ghb .t .n { font-size: 13px; font-weight: 600; color: var(--t-emph); flex: none; }
+.ghb .t .a { font-size: 12px; color: var(--t-faint); flex: none; }
+.ghb .t .o { font-size: 12px; color: var(--t-faint); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ghb .cs { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--t-muted); }
+.ghb .cs span { display: flex; align-items: center; gap: 6px; }
+.ghb.marked { background: var(--row-marked); }
+.ghb.marked::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--accent); }
+.ghb.sel { background: var(--row-sel); }
+.morerow { display: grid; grid-template-columns: 44px minmax(0,1fr); gap: 14px; align-items: center; height: 30px; padding: 0 18px; border-bottom: 1px solid var(--bd-row); font-size: 12px; color: var(--t-faint); flex: none; }
 
 /* ---- NEW v1: palette multi-select (topic 10) ------------------------- */
 /* One rounded outline per block of selected rows: the block wraps the

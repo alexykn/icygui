@@ -111,20 +111,21 @@ const H = [
   { name: 'db-prod-02', addr: '10.0.2.12', out: 'up 41d · PING OK - rta 0.41ms', counts: [['ok', 19]], svcs: [], more: 19 },
   { name: 'db-prod-03', addr: '10.0.2.13', out: 'up 41d · PING OK - rta 0.42ms', counts: [['crit', 1], ['warn', 1], ['ok', 21]], svcs: [['crit', 'postgres-replication', 'CRITICAL - standby lag 412s (> 300s)', '14m'], ['warn', 'pg-connections', 'WARNING - 182 of 200 per-db limit (orders)', '22m']], more: 21 },
 ];
+// A host is a group-header band of the grouped list (36px, the state dot in
+// the mark column, counts at the right); its services are plain list rows.
 function hostHeaderRow(h, { marked, sel } = {}) {
-  const c = h.counts.map(([st, n]) => `<span style="display:flex;align-items:center;gap:5px">${dot(st, 'd7')}${n}</span>`).join('');
-  return `<div class="row ghdr${marked ? ' marked' : ''}${sel ? ' sel' : ''}">
-    <div class="lead">${circle('ok', 14)}<span class="since" style="color:var(--ok-text);font-weight:600">UP</span></div>
-    <div class="text"><span class="t1"><span class="n" style="font-weight:600">${h.name}</span><span class="on">  ${h.addr}</span></span><span class="t2">${h.out}</span></div>
-    <span class="tag" style="gap:12px;color:var(--t-muted)">${c}</span></div>`;
+  const c = h.counts.map(([st, n]) => `<span>${dot(st, 'd7')}${n}</span>`).join('');
+  return `<div class="ghb${marked ? ' marked' : ''}${sel ? ' sel' : ''}"><div class="lead">${dot('ok')}</div>
+    <div class="t"><span class="n">${h.name}</span><span class="a">${h.addr}</span><span class="o">${h.out}</span></div>
+    <span class="cs">${c}</span></div>`;
 }
 // marked: 'hosts' | 'problems' | '' (the view arrives with nothing marked)
 function combined({ marked = '', cursor = -1 } = {}) {
   let out = '';
   H.forEach((h, i) => {
     out += hostHeaderRow(h, { marked: marked === 'hosts', sel: cursor === i });
-    out += h.svcs.map(([st, n, o, s]) => row([st, n, h.name, o, s], { cls: 'indent', hostRow: true, marked: marked === 'problems' })).join('');
-    out += `<div style="display:flex;align-items:center;height:30px;padding:0 18px 0 76px;border-bottom:1px solid var(--bd-row);font-size:12px;color:var(--t-faint)">+ ${h.more} more ok</div>`;
+    out += h.svcs.map(([st, n, o, s]) => row([st, n, h.name, o, s], { marked: marked === 'problems' })).join('');
+    out += `<div class="morerow"><span></span><span>+ ${h.more} more ok</span></div>`;
   });
   return out;
 }
@@ -137,7 +138,7 @@ const multiHeader = (pinned) => `<div class="hbar"><span class="title">3 hosts</
   ${pinned ? '<span class="quiet" style="visibility:hidden">↗ pin as tab</span>' : '<span class="quiet">↗ pin as tab</span>'}${btn('save as dashboard', { icon: 'layout-dashboard' })}<span class="x">×</span></div>`;
 const multiMain = (pinned, marked = '') => multiHeader(pinned) + summary([['crit', 1, 'critical'], ['warn', 2, 'warning'], ['ok', 60, 'ok']], '3 hosts · 63 services') + `<div class="list">${combined({ marked })}</div>` + (marked ? selBarProblems : selBarEmpty);
 const groupsNoActive = [{ name: 'overview', items: SIDEBAR_GROUPS[0].items }, SIDEBAR_GROUPS[1], SIDEBAR_GROUPS[2]];
-shot('10h', '10-multiselect-h-combined-view', 'Enter opened the three hosts together in the main area. Each host has a summary row (the grouped list’s header band: its state, address, uptime and service counts) with its problems under it, and its OK services folded into <i>+ N more ok</i>. The view arrives with <b>nothing marked</b>: the palette’s selection chose what to show, not what to act on. The bulk bar under the list is always there in this view, so nothing moves when rows get marked; empty, it offers <i>mark all problems</i> (the 3 services with an unhandled problem). It is a normal list: x, shift-↓, ctrl-a and the pane work as everywhere.',
+shot('10h', '10-multiselect-h-combined-view', 'Enter opened the three hosts together in the main area. It is a grouped list by host, built from the list’s parts: each host is a group-header band (36px, its state dot in the rows’ mark column, the name, the address and its check output faint, the counts per state at the right), its problems are ordinary list rows under it (the same circle, time and text column as on every dashboard), and its OK services fold into a <i>+ N more ok</i> line in the text column. The view arrives with <b>nothing marked</b>: the palette’s selection chose what to show, not what to act on. The bulk bar under the list is always there in this view, so nothing moves when rows get marked; empty, it offers <i>mark all problems</i> (the 3 services with an unhandled problem). It is a normal list: x, shift-↓, ctrl-a and the pane work as everywhere.',
   appWindow(multiMain(false), { groups: groupsNoActive, activeGroup: '' }), { crops: '10-multiselect-h-zoom:300,640,1140,260' });
 
 // ---- 10i: pinned + save as dashboard ---------------------------------

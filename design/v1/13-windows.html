@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 13 windows</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script>
+<style>
+/* Topic 13: Windows. Native parts (Inno Setup's wizard, the title-bar caption
+ * buttons' glyphs, the tray menu, toasts, the taskbar) use Windows' font,
+ * Segoe UI; where it isn't installed (the Linux machine that renders these
+ * frames) Open Sans stands in. Our own window keeps IBM Plex Mono. */
+.frame .seg-ui, .frame .iw, .frame .wm, .frame .tst, .frame .ncp, .frame .tbar, .frame .wtip, .frame .mdlg { font-family: 'Segoe UI Variable Text', 'Segoe UI', 'Open Sans', sans-serif; -webkit-font-smoothing: antialiased; }
+.frame .iw, .frame .iw *, .frame .wm, .frame .wm *, .frame .tst, .frame .tst *, .frame .ncp, .frame .ncp *, .frame .tbar *, .frame .mdlg * { box-sizing: border-box; }
+
+/* ---- a desktop behind native windows ------------------------------------ */
+.desk { position: absolute; overflow: hidden; }
+.desk.dk { background: radial-gradient(120% 95% at 82% 105%, #1d4178 0%, #0d1d3a 42%, #070b14 100%); }
+.desk.lt { background: radial-gradient(120% 95% at 82% 105%, #9fc1ee 0%, #d3e2f6 45%, #eef3fa 100%); }
+.desk .tag { position: absolute; left: 20px; top: 12px; font: 11px 'IBM Plex Mono', monospace; }
+.desk.dk .tag { color: rgba(255,255,255,.55); } .desk.lt .tag { color: rgba(0,0,0,.5); }
+
+/* ---- Inno Setup's modern wizard (WizardStyle=modern dynamic) -------------- */
+.iw { position: absolute; display: flex; flex-direction: column; border-radius: 8px; overflow: hidden; font-size: 12px; line-height: 16px; }
+.iw.dk { --tb:#202020; --hd:#2b2b2b; --bd:#202020; --bb:#1c1c1c; --ln:#383838; --tx:#ffffff; --sub:#d0d0d0; --fnt:#9d9d9d;
+  --acc:#60cdff; --acc-tx:#000000; --btn:#2d2d2d; --btn-bd:#3a3a3a; --in:#2d2d2d; --in-bd:#3a3a3a; --in-bt:#9a9a9a; --ck:#9a9a9a; --trk:#3a3a3a;
+  color: var(--tx); border: 1px solid #454545; box-shadow: 0 22px 60px rgba(0,0,0,.6); }
+.iw.lt { --tb:#ffffff; --hd:#ffffff; --bd:#ffffff; --bb:#f3f3f3; --ln:#e5e5e5; --tx:#1a1a1a; --sub:#5c5c5c; --fnt:#8a8a8a;
+  --acc:#005fb8; --acc-tx:#ffffff; --btn:#fdfdfd; --btn-bd:#d0d0d0; --in:#ffffff; --in-bd:#e5e5e5; --in-bt:#868686; --ck:#868686; --trk:#d6d6d6;
+  color: var(--tx); border: 1px solid #c8c8c8; box-shadow: 0 22px 60px rgba(20,40,80,.28); }
+.iw .tb { display: flex; align-items: center; height: 32px; background: var(--tb); flex: none; }
+.iw .tb .ti { width: 16px; height: 16px; margin: 0 10px 0 12px; display: flex; }
+.iw .tb .tt { flex: 1; font-size: 12px; }
+.iw .tb .cb { width: 46px; height: 32px; display: flex; align-items: center; justify-content: center; color: var(--tx); }
+.iw .tb .cb.dis { opacity: .36; }
+.iw .ib { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--bd); }
+.iw .bb { display: flex; align-items: center; justify-content: flex-end; gap: 8px; height: 56px; padding: 0 20px; background: var(--bb); border-top: 1px solid var(--ln); flex: none; }
+.iw .bb .gap { width: 8px; }
+.iw .bb .lft { margin-right: auto; color: var(--fnt); font-size: 11.5px; }
+.wbtn { display: inline-flex; align-items: center; justify-content: center; min-width: 92px; height: 30px; padding: 0 14px; border-radius: 4px; background: var(--btn); border: 1px solid var(--btn-bd); color: var(--tx); font-size: 12px; white-space: nowrap; }
+.iw.lt .wbtn:not(.def) { border-bottom-color: #b8b8b8; }
+.wbtn.def { background: var(--acc); border-color: var(--acc); color: var(--acc-tx); }
+.wbtn.hidden { visibility: hidden; }
+/* welcome / finished: the wizard image left (WizardImageFile) */
+.iw .wl { flex: 1; display: grid; grid-template-columns: 240px minmax(0,1fr); min-height: 0; }
+.iw .wl .wimg { overflow: hidden; }
+.iw .wl .wtx { display: flex; flex-direction: column; gap: 14px; padding: 26px 28px 0 28px; }
+.iw .wl h1 { margin: 0 0 4px; font-size: 18px; line-height: 24px; font-weight: 600; }
+.iw p { margin: 0; color: var(--tx); }
+/* inner pages: the header band with title, subtitle and WizardSmallImageFile */
+.iw .hd { display: flex; align-items: flex-start; height: 64px; padding: 0 0 0 24px; background: var(--hd); border-bottom: 1px solid var(--ln); flex: none; }
+.iw .hd .ht { font-weight: 700; margin-top: 14px; }
+.iw .hd .hs { margin: 4px 0 0 16px; color: var(--sub); }
+.iw .hd .simg { margin: 3px 3px 0 auto; width: 58px; height: 58px; display: flex; }
+.iw .pg { flex: 1; display: flex; flex-direction: column; gap: 12px; padding: 18px 40px 0 40px; min-height: 0; }
+.iw .wrow { display: flex; align-items: center; gap: 10px; }
+.win-in { display: flex; align-items: center; height: 32px; padding: 0 10px; border-radius: 4px; background: var(--in); border: 1px solid var(--in-bd); border-bottom: 1px solid var(--in-bt); font-size: 12px; white-space: nowrap; overflow: hidden; }
+.win-memo { border-radius: 4px; background: var(--in); border: 1px solid var(--in-bd); border-bottom: 1px solid var(--in-bt); padding: 8px 10px; font-size: 12px; line-height: 18px; white-space: pre; overflow: hidden; }
+.wck { display: inline-flex; align-items: center; gap: 10px; }
+.wck .bx { width: 18px; height: 18px; border-radius: 4px; border: 1px solid var(--ck); display: flex; align-items: center; justify-content: center; flex: none; }
+.wck.on .bx { background: var(--acc); border-color: var(--acc); color: var(--acc-tx); }
+.wrd { display: inline-flex; align-items: center; gap: 10px; }
+.wrd .bx { width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--ck); flex: none; display: flex; align-items: center; justify-content: center; }
+.wrd.on .bx { background: var(--acc); border-color: var(--acc); }
+.wrd.on .bx::after { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--acc-tx); }
+.wgrp { color: var(--sub); margin-top: 6px; }
+.wprog { height: 4px; border-radius: 2px; background: var(--trk); overflow: hidden; }
+.wprog > span { display: block; height: 100%; background: var(--acc); border-radius: 2px; }
+/* a message box or task dialog (Inno's MsgBox / TaskDialogMsgBox) */
+.mdlg .minst { font-size: 15px; line-height: 20px; color: var(--mi); }
+.iw.dk { --mi:#99ebff; } .iw.lt { --mi:#003e92; }
+
+/* ---- our window's caption buttons on Windows ------------------------------ */
+.capb { display: flex; align-self: stretch; margin: -1px -20px -1px 12px; flex: none; }
+.capb.in-list { margin-right: -18px; }
+.capb .cbn { width: 46px; display: flex; align-items: center; justify-content: center; color: var(--t-strong); }
+.capb .cbn.hov { background: rgba(255,255,255,.06); }
+.light .capb .cbn.hov { background: rgba(0,0,0,.05); }
+.capb .cbn.x.hov { background: #c42b1c; color: #ffffff; }
+.capb .cbn.x.press { background: #c83c31; color: rgba(255,255,255,.8); }
+.capb.inactive .cbn { color: var(--t-faint); }
+.markslot { display: flex; align-items: center; width: 52px; flex: none; }
+
+/* ---- the taskbar, the tray menu, tooltips, toasts, the notification centre - */
+.tbar { position: absolute; left: 0; right: 0; bottom: 0; height: 48px; display: flex; align-items: center; justify-content: flex-end; gap: 2px; padding: 0 8px 0 0; font-size: 12px; }
+.desk.dk .tbar { background: rgba(28,28,28,.88); border-top: 1px solid rgba(255,255,255,.08); color: #fff; }
+.desk.lt .tbar { background: rgba(243,243,243,.9); border-top: 1px solid rgba(0,0,0,.08); color: #1a1a1a; }
+.tbar .ti { height: 40px; min-width: 32px; padding: 0 6px; border-radius: 4px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.desk.dk .tbar .ti.hov { background: rgba(255,255,255,.08); } .desk.lt .tbar .ti.hov { background: rgba(0,0,0,.05); }
+.tbar .clock { display: flex; flex-direction: column; align-items: flex-end; line-height: 16px; padding: 0 8px; }
+.wm { position: absolute; padding: 4px; border-radius: 8px; font-size: 12px; }
+.desk.dk .wm { background: #2c2c2c; border: 1px solid #454545; color: #fff; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+.desk.lt .wm { background: #f9f9f9; border: 1px solid #e0e0e0; color: #1a1a1a; box-shadow: 0 8px 24px rgba(0,0,0,.16); }
+.wm .it { display: flex; align-items: center; height: 30px; padding: 0 10px 0 6px; border-radius: 4px; white-space: nowrap; }
+.wm .it .ck { width: 26px; display: flex; justify-content: center; flex: none; }
+.wm .it .lb { flex: 1; }
+.wm .it .ar { width: 16px; display: flex; justify-content: flex-end; opacity: .8; }
+.desk.dk .wm .it.hov { background: rgba(255,255,255,.07); } .desk.lt .wm .it.hov { background: rgba(0,0,0,.05); }
+.wm .sp { height: 1px; margin: 4px 0; }
+.desk.dk .wm .sp { background: #454545; } .desk.lt .wm .sp { background: #e3e3e3; }
+.wtip { position: absolute; padding: 6px 9px; border-radius: 4px; font-size: 12px; line-height: 17px; white-space: pre; }
+.desk.dk .wtip { background: #2b2b2b; border: 1px solid #454545; color: #fff; box-shadow: 0 4px 12px rgba(0,0,0,.35); }
+.desk.lt .wtip { background: #f9f9f9; border: 1px solid #e0e0e0; color: #1a1a1a; box-shadow: 0 4px 12px rgba(0,0,0,.12); }
+.tst { position: absolute; width: 364px; border-radius: 8px; padding: 12px 16px 16px; font-size: 12.5px; line-height: 17px; }
+.desk.dk .tst, .desk.dk .ncp { background: rgba(43,43,43,.97); border: 1px solid rgba(255,255,255,.09); color: #fff; box-shadow: 0 16px 40px rgba(0,0,0,.45); --tsub:#c8c8c8; --tfnt:#9d9d9d; --tbtn: rgba(255,255,255,.08); --tcard: rgba(255,255,255,.05); }
+.desk.lt .tst, .desk.lt .ncp { background: rgba(249,249,249,.97); border: 1px solid rgba(0,0,0,.08); color: #1a1a1a; box-shadow: 0 16px 40px rgba(20,40,80,.18); --tsub:#3d3d3d; --tfnt:#6b6b6b; --tbtn: rgba(0,0,0,.05); --tcard: rgba(255,255,255,.75); }
+.tst .ah, .ncp .ah { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--tsub); }
+.tst .ah .x, .ncp .ah .x { margin-left: auto; display: flex; gap: 14px; color: var(--tfnt); }
+.tst .bd { display: grid; grid-template-columns: 48px minmax(0,1fr); gap: 12px; margin-top: 12px; }
+.tst .t1 { font-weight: 600; font-size: 13.5px; line-height: 18px; }
+.tst .t2 { color: var(--tsub); margin-top: 4px; }
+.tst .t3 { color: var(--tfnt); font-size: 11.5px; margin-top: 4px; }
+.tst .bt { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+.tst .bt span, .ncp .bt span { height: 32px; border-radius: 4px; background: var(--tbtn); display: flex; align-items: center; justify-content: center; font-size: 12.5px; }
+.lgo { width: 48px; height: 48px; border-radius: 50%; }
+.ncp { position: absolute; border-radius: 8px; font-size: 12.5px; line-height: 17px; }
+.ncp .hdr { display: flex; align-items: center; padding: 14px 16px 10px; font-size: 14px; font-weight: 600; }
+.ncp .hdr .ca { margin-left: auto; font-size: 12px; font-weight: 400; padding: 4px 10px; border-radius: 4px; background: var(--tbtn); }
+.ncp .card { margin: 0 8px 8px; padding: 12px; border-radius: 6px; background: var(--tcard); }
+.ncp .card .ttl { display: grid; grid-template-columns: 32px minmax(0,1fr) auto; gap: 10px; }
+.ncp .card .tm { color: var(--tfnt); font-size: 11.5px; }
+.ncp .bt { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+
+/* ---- the images sheet ------------------------------------------------------ */
+.sheet { position: absolute; inset: 0; background: #16191c; color: #b5b9bc; padding: 28px 32px; display: flex; gap: 40px; font-size: 12px; }
+.sheet .cap { color: #8b9094; font-size: 11.5px; line-height: 17px; margin-top: 8px; max-width: 300px; }
+.sheet .cap b { color: #d6d8da; font-weight: 500; }
+.chk-bg { background-color: #e9ecef; background-image: linear-gradient(45deg, #dfe3e7 25%, transparent 25%), linear-gradient(-45deg, #dfe3e7 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #dfe3e7 75%), linear-gradient(-45deg, transparent 75%, #dfe3e7 75%); background-size: 12px 12px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; }
+</style></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">13</span><span class="topic-name">icygui on Windows: the installer, the window, the tray and toasts</span><span class="topic-id" style="background:#f2d974">new</span></div>
+<p class="topic-intro">Windows support in v1 (PLAN.md §4.2). <b>The installer</b> is a setup .exe built with Inno Setup 6.6 in its modern wizard, <i>WizardStyle=modern dynamic</i>, which follows Windows between dark and light, so every page is drawn in both. Inno fixes the layout (the header band with title and subtitle on the inner pages, Back, Next and Cancel at the bottom right), the native controls and Segoe UI. <b>What we ship</b>: the tall wizard image (<i>WizardImageFile</i>) and the small one (<i>WizardSmallImageFile</i>), each with its dark variant (<i>…DynamicDark</i>), the setup icon (<i>SetupIconFile</i>), the texts (<i>[Messages]</i>, <i>[CustomMessages]</i>), the tasks and the uninstall question (<i>[Tasks]</i>, <i>[Run]</i>, <i>[Code]</i>). The images are made from the logo's mark in the app's palette, so the installer looks like icygui in both modes. Per-user install without admin rights is the default (<i>%LOCALAPPDATA%\Programs\icygui</i>), all users as an option.
+<b>The app</b> keeps its own window and font; Windows adds its caption buttons (minimise, maximise or restore, close) at the top right of our title row, the tray icon in the notification area with its native menu, and Windows toasts. Native parts are drawn with Segoe UI (Open Sans stands in where these frames are rendered). Wall clock: Wed 7 Oct, 14:12.</p>
+<div class="shots"></div>
+<script>
+// ---- shapes -------------------------------------------------------------------
+let uid = 0;
+const ORANGE = (id) => `<linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffb35c"/><stop offset="1" stop-color="#f2862f"/></linearGradient>`;
+// the logo's mark (assets/logo/icygui-mark.svg); node: the accent of the theme
+function MARK(size, { node = '#74ade8' } = {}) {
+  const id = `og${uid++}`;
+  return `<svg viewBox="190 190 644 644" width="${size}" height="${size}" style="display:block;flex:none"><defs>${ORANGE(id)}</defs>
+    <path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" fill="none" stroke="url(#${id})" stroke-width="30" stroke-linecap="round"/>
+    <circle cx="512" cy="512" r="178" fill="url(#${id})"/><circle cx="718.5" cy="305.5" r="44" fill="${node}"/></svg>`;
+}
+// the tray icon: orbit and core in the state colour (ic-platform tray/icon.rs)
+function TRAYMARK(size, tint) {
+  return `<svg viewBox="190 190 644 644" width="${size}" height="${size}" style="display:block;flex:none">
+    <path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" fill="none" stroke="${tint}" stroke-width="40" stroke-linecap="round"/>
+    <circle cx="512" cy="512" r="178" fill="${tint}"/><circle cx="718.5" cy="305.5" r="50" fill="#74ade8"/></svg>`;
+}
+// the app icon (assets/logo/icygui.svg): the mark on the dark tile
+function APPICON(size) {
+  const id = `og${uid++}`, tid = `tg${uid++}`;
+  return `<svg viewBox="100 100 824 824" width="${size}" height="${size}" style="display:block;flex:none"><defs>${ORANGE(id)}<linearGradient id="${tid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2b3036"/><stop offset="1" stop-color="#15181b"/></linearGradient></defs>
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#${tid})"/>
+    <path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" fill="none" stroke="url(#${id})" stroke-width="30" stroke-linecap="round"/>
+    <circle cx="512" cy="512" r="178" fill="url(#${id})"/><circle cx="718.5" cy="305.5" r="44" fill="#74ade8"/></svg>`;
+}
+// Windows 11 caption glyphs (Segoe Fluent Icons' Chrome* glyphs, drawn as lines)
+const G = {
+  min: `<svg width="10" height="10" viewBox="0 0 10 10" style="display:block"><path d="M0 5.5h10" stroke="currentColor" stroke-width="1"/></svg>`,
+  max: `<svg width="10" height="10" viewBox="0 0 10 10" style="display:block"><rect x=".5" y=".5" width="9" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1"/></svg>`,
+  res: `<svg width="10" height="10" viewBox="0 0 10 10" style="display:block"><rect x=".5" y="2.5" width="7" height="7" rx="1.2" fill="none" stroke="currentColor"/><path d="M2.5 2.5V1.7a1.2 1.2 0 0 1 1.2-1.2h4.6a1.2 1.2 0 0 1 1.2 1.2v4.6a1.2 1.2 0 0 1-1.2 1.2H7.5" fill="none" stroke="currentColor"/></svg>`,
+  x: `<svg width="10" height="10" viewBox="0 0 10 10" style="display:block"><path d="M.5 .5l9 9M9.5 .5l-9 9" stroke="currentColor" stroke-width="1"/></svg>`,
+};
+const CHECK = (s = 12) => `<svg width="${s}" height="${s}" viewBox="0 0 12 12" style="display:block"><path d="M2.2 6.3l2.5 2.4 5.1-5.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const CHEV = `<svg width="8" height="8" viewBox="0 0 8 8" style="display:block"><path d="M2.5 1l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>`;
+const FOLDER = (s = 32) => `<svg width="${s}" height="${s}" viewBox="0 0 32 32" style="display:block;flex:none"><path d="M3 8a2 2 0 0 1 2-2h7l3 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="#e8a325"/><path d="M3 12h26v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="#f9c74f"/></svg>`;
+const SHIELD = `<svg width="16" height="16" viewBox="0 0 16 16" style="display:block;flex:none"><path d="M8 1l6 2.2v4.3c0 3.6-2.5 6.3-6 7.5-3.5-1.2-6-3.9-6-7.5V3.2z" fill="#2f6fd6"/><path d="M8 1v14c3.5-1.2 6-3.9 6-7.5V8H8z" fill="#f6c343"/><path d="M2 8h6V1L2 3.2z" fill="#f6c343"/></svg>`;
+const QMARK = `<svg width="32" height="32" viewBox="0 0 32 32" style="display:block;flex:none"><circle cx="16" cy="16" r="15" fill="#2f6fd6"/><path d="M12.3 12.2a3.8 3.8 0 1 1 5.6 3.4c-1.2.7-1.9 1.5-1.9 2.8v.8" fill="none" stroke="#fff" stroke-width="2.3" stroke-linecap="round"/><circle cx="16" cy="23.2" r="1.5" fill="#fff"/></svg>`;
+const WIFI = `<svg width="16" height="16" viewBox="0 0 16 16" style="display:block"><path d="M1.5 6.2a9.5 9.5 0 0 1 13 0M3.8 8.6a6.2 6.2 0 0 1 8.4 0M6 11a3 3 0 0 1 4 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="13.2" r="1" fill="currentColor"/></svg>`;
+const SPEAKER = `<svg width="16" height="16" viewBox="0 0 16 16" style="display:block"><path d="M2.5 6h2.3L8 3.4v9.2L4.8 10H2.5z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M10.5 5.6a3.3 3.3 0 0 1 0 4.8M12.3 3.9a5.8 5.8 0 0 1 0 8.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
+const BELLW = `<svg width="16" height="16" viewBox="0 0 16 16" style="display:block"><path d="M4 11.5V7.2a4 4 0 0 1 8 0v4.3l1.2 1.3H2.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M6.6 14a1.5 1.5 0 0 0 2.8 0" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
+const CARET = `<svg width="12" height="12" viewBox="0 0 12 12" style="display:block"><path d="M3 7.5l3-3 3 3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
+
+// ---- the wizard images we ship ------------------------------------------------
+// WizardImageFile (light) and WizardImageFileDynamicDark: the mark, the name and
+// a corner of the host-group grid (topic 05) in the app's colours.
+function WIZIMG(mode, w = 240, h = 452) {
+  const dk = mode === 'dk';
+  const bg = dk ? 'linear-gradient(180deg,#252a30 0%,#15181b 100%)' : 'linear-gradient(180deg,#f6f7f9 0%,#e6e9ed 100%)';
+  const ok = dk ? 'rgba(86,184,112,.30)' : 'rgba(52,160,88,.36)';
+  const S = { w: dk ? '#e5b04a' : '#e0a020', c: dk ? '#e06c6c' : '#e04848', u: dk ? '#a97fdb' : '#9a68dc' };
+  const special = { 9: 'w', 22: 'c', 31: 'u', 47: 'w', 58: 'ring' };
+  let sq = '';
+  for (let i = 0; i < 16 * 6; i += 1) {
+    const s = special[i];
+    if (s === 'ring') sq += `<span style="width:9px;height:9px;border-radius:2px;box-shadow:inset 0 0 0 2px ${dk ? '#56b870' : '#34a058'}"></span>`;
+    else sq += `<span style="width:9px;height:9px;border-radius:2px;background:${s ? S[s] : ok}"></span>`;
+  }
+  return `<div style="position:relative;width:${w}px;height:${h}px;background:${bg};overflow:hidden">
+    <div style="position:absolute;left:0;right:0;top:78px;display:flex;justify-content:center">${MARK(118, { node: dk ? '#74ade8' : '#2f74c0' })}</div>
+    <div style="position:absolute;left:0;right:0;top:222px;text-align:center;font:500 22px/28px 'IBM Plex Mono',monospace;color:${dk ? '#eceeef' : '#16191c'}">icygui</div>
+    <div style="position:absolute;left:0;right:0;top:254px;text-align:center;font:11px/16px 'IBM Plex Mono',monospace;color:${dk ? '#8b9094' : '#687077'}">Icinga 2 on your desktop</div>
+    <div style="position:absolute;left:24px;right:24px;bottom:26px;display:grid;grid-template-columns:repeat(16,9px);gap:3px;justify-content:center;-webkit-mask-image:linear-gradient(180deg,transparent 0%,#000 70%)">${sq}</div>
+  </div>`;
+}
+// WizardSmallImageFile (light) and …DynamicDark: the mark, its node in the theme's accent
+const SMALLIMG = (mode) => `<div style="width:58px;height:58px;display:flex;align-items:center;justify-content:center">${MARK(46, { node: mode === 'dk' ? '#74ade8' : '#2f74c0' })}</div>`;
+
+// ---- the wizard window -----------------------------------------------------------
+const PATH = 'C:\\Users\\j.berg\\AppData\\Local\\Programs\\icygui';
+function wizard(mode, { x, y, body, buttons, w = 700, h = 540, title = 'Setup - icygui', closeDis = false }) {
+  return `<div class="iw ${mode}" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px">
+    <div class="tb"><span class="ti">${APPICON(16)}</span><span class="tt">${title}</span><span class="cb">${G.min}</span><span class="cb${closeDis ? ' dis' : ''}">${G.x}</span></div>
+    <div class="ib">${body(mode)}</div>
+    <div class="bb">${buttons}</div></div>`;
+}
+const B = (label, { def, hidden } = {}) => `<span class="wbtn${def ? ' def' : ''}${hidden ? ' hidden' : ''}">${label}</span>`;
+const NAV = (next = 'Next >', { back = true } = {}) => `${B('&lt; Back', { hidden: !back })}${B(next, { def: true })}<span class="gap"></span>${B('Cancel')}`;
+const inner = (title, sub, content) => (mode) => `<div class="hd"><div style="min-width:0"><div class="ht">${title}</div><div class="hs">${sub}</div></div><div class="simg">${SMALLIMG(mode)}</div></div><div class="pg">${content}</div>`;
+const welcomeBody = (h1, paras, extra = '') => (mode) => `<div class="wl"><div class="wimg">${WIZIMG(mode)}</div><div class="wtx"><h1>${h1}</h1>${paras.map((p) => `<p>${p}</p>`).join('')}${extra}</div></div>`;
+const ck = (on, label) => `<span class="wck${on ? ' on' : ''}"><span class="bx">${on ? CHECK(12) : ''}</span>${label}</span>`;
+const rd = (on, label) => `<span class="wrd${on ? ' on' : ''}"><span class="bx"></span>${label}</span>`;
+
+// both modes side by side, each on its own desktop
+function pair(make, { w = 700, h = 540, fw = 1480, fh = 620 } = {}) {
+  const half = fw / 2;
+  const x = (half - w) / 2, y = 40 + (fh - 40 - h) / 2 - 10;
+  return `<div class="desk dk" style="left:0;top:0;width:${half}px;height:${fh}px"><span class="tag">Windows in dark mode</span>${make('dk', x, y)}</div>
+    <div class="desk lt" style="left:${half}px;top:0;width:${half}px;height:${fh}px"><span class="tag">Windows in light mode</span>${make('lt', x, y)}</div>`;
+}
+const PAIR = { w: 1480, h: 620 };
+
+// ---- a. welcome ------------------------------------------------------------------
+shot('13a', '13-windows-a-welcome', 'Welcome. Inno’s modern wizard in both modes, <i>WizardStyle=modern dynamic</i>: Windows decides, the wizard follows. <b>Ours</b>: the tall image on the left (<i>WizardImageFile</i>, and <i>WizardImageFileDynamicDark</i> for dark): the logo’s mark, the name in the app’s font and a corner of the host-group grid in the state colours; the setup icon in the title bar (<i>SetupIconFile</i>); the texts (<i>[Messages] WelcomeLabel2</i>: per user, no administrator rights). <b>Inno’s</b>: the layout, the title bar, the buttons and their look, Segoe UI. No Back button on the first page.',
+  pair((m, x, y) => wizard(m, { x, y, body: welcomeBody('Welcome to the icygui Setup Wizard', ['This will install icygui 1.0.0 on your computer, for you only: no administrator rights are needed.', 'icygui watches your Icinga 2 monitoring from the desktop: dashboards, notifications and actions, straight from Icinga’s API.', 'Click Next to continue, or Cancel to exit Setup.']), buttons: NAV('Next >', { back: false }) })), PAIR);
+
+// ---- b. install mode (Inno's privileges dialog) ------------------------------------
+function modeDialog(mode, x, y) {
+  const w = 500, h = 300;
+  return `<div class="iw ${mode} mdlg" style="left:${x + 100}px;top:${y + 90}px;width:${w}px;height:${h}px">
+    <div class="tb"><span class="ti">${APPICON(16)}</span><span class="tt">Select Setup Install Mode</span><span class="cb">${G.x}</span></div>
+    <div class="ib" style="padding:20px 24px 0;gap:12px;display:flex;flex-direction:column">
+      <span class="minst">Select install mode</span>
+      <p>icygui can be installed for you only (recommended), or for all users (requires administrative privileges).</p>
+      <div style="display:flex;flex-direction:column;gap:12px;margin-top:4px">${rd(true, 'Install for me only (recommended)')}<span class="wrd"><span class="bx"></span>Install for all users<span style="margin-left:2px">${SHIELD}</span></span></div>
+    </div>
+    <div class="bb">${B('OK', { def: true })}${B('Cancel')}</div></div>`;
+}
+shot('13b', '13-windows-b-install-mode', 'Install for me or for everyone. Inno shows this dialog before the wizard because the script says <i>PrivilegesRequired=lowest</i> with <i>PrivilegesRequiredOverridesAllowed=dialog</i>; its look and its texts are Inno’s (<i>Default.isl</i>, the <i>PrivilegesRequiredOverride…</i> messages), with our app name and setup icon. <b>For me only</b> is preselected and needs no administrator rights: icygui goes to <i>%LOCALAPPDATA%\\Programs\\icygui</i>. <b>All users</b> asks Windows for elevation (the shield) and installs to <i>C:\\Program Files\\icygui</i>; <i>DefaultDirName={autopf}\\icygui</i> covers both. <i>setup.exe /CURRENTUSER</i> or <i>/ALLUSERS</i> skip the question.',
+  pair((m, x, y) => modeDialog(m, x, y)), PAIR);
+
+// ---- c. destination -------------------------------------------------------------
+const destPage = inner('Select Destination Location', 'Where should icygui be installed?', `
+  <div class="wrow" style="gap:14px">${FOLDER(32)}<span>Setup will install icygui into the following folder.</span></div>
+  <p>To continue, click Next. If you would like to select a different folder, click Browse.</p>
+  <div class="wrow"><span class="win-in" style="flex:1">${PATH}</span>${B('Browse')}</div>
+  <span style="flex:1"></span><p style="color:var(--sub);margin-bottom:16px">At least 42.6 MB of free disk space is required.</p>`);
+shot('13c', '13-windows-c-destination', 'Destination. An inner page: Inno’s header band (title and subtitle) with <b>our small image</b> at the top right (<i>WizardSmallImageFile</i>, and <i>WizardSmallImageFileDynamicDark</i>: the mark, its node in each theme’s accent). The folder defaults to <i>%LOCALAPPDATA%\\Programs\\icygui</i> for a per-user install. Inno shows the page on a first install only (<i>DisableDirPage=auto</i>); an update goes to the same folder. <i>[Messages] ButtonBrowse=&amp;Browse</i> drops Inno’s “Browse...”, as the app’s labels have no trailing dots.',
+  pair((m, x, y) => wizard(m, { x, y, body: destPage, buttons: NAV() })), PAIR);
+
+// ---- d. tasks ---------------------------------------------------------------------
+const tasksPage = inner('Select Additional Tasks', 'Which additional tasks should be performed?', `
+  <p>Select the additional tasks you would like Setup to perform while installing icygui, then click Next.</p>
+  <span class="wgrp">Shortcuts:</span>
+  <div style="padding-left:16px">${ck(false, 'Create a desktop shortcut')}</div>
+  <span class="wgrp">When you sign in to Windows:</span>
+  <div style="padding-left:16px">${ck(true, 'Start icygui in the tray')}</div>`);
+shot('13d', '13-windows-d-tasks', 'Additional tasks, kept to two (<i>[Tasks]</i>): a desktop shortcut, <b>off</b> (<i>Flags: unchecked</i>; the Start menu shortcut is always made, with the app’s AppUserModelID, which the toasts need), and <b>start icygui in the tray when you sign in, on</b>. The second writes the same per-user Run entry as the app’s own <i>start at login</i> switch (<i>HKCU\\…\\Run</i>, <i>icygui.exe --background</i>), so the installer and the settings never disagree, and it can be changed later in Settings → general. Inno draws the page, the group labels and the check boxes (one line each, no extra notes); we write the texts.',
+  pair((m, x, y) => wizard(m, { x, y, body: tasksPage, buttons: NAV() })), PAIR);
+
+// ---- e. ready ----------------------------------------------------------------------
+const readyPage = inner('Ready to Install', 'Setup is now ready to begin installing icygui on your computer.', `
+  <p>Click Install to continue with the installation, or click Back if you want to review or change any settings.</p>
+  <div class="win-memo" style="height:200px">Destination location:
+      ${PATH}
+
+Additional tasks:
+      When you sign in to Windows:
+         Start icygui in the tray</div>`);
+shot('13e', '13-windows-e-ready', 'Ready to install: Inno’s summary of the choices, its own page and wording (<i>ReadyLabel1</i>, <i>ReadyMemo…</i>). The default button becomes <i>Install</i>.',
+  pair((m, x, y) => wizard(m, { x, y, body: readyPage, buttons: NAV('Install') })), PAIR);
+
+// ---- f. installing --------------------------------------------------------------------
+const installingPage = inner('Installing', 'Please wait while Setup installs icygui on your computer.', `
+  <p style="margin-top:6px">Extracting files...</p>
+  <span style="color:var(--sub);white-space:nowrap;overflow:hidden">${PATH}\\icygui.exe</span>
+  <div class="wprog" style="margin-top:4px"><span style="width:62%"></span></div>`);
+shot('13f', '13-windows-f-installing', 'Installing: Inno’s progress page, only <i>Cancel</i> is active. A running icygui is asked to close first (<i>CloseApplications=yes</i>, by the restart manager) and is started again at the end if it was running; an update keeps every setting. The progress bar and the buttons take Inno’s style; their exact look is checked on the Windows runner’s screenshots.',
+  pair((m, x, y) => wizard(m, { x, y, body: installingPage, buttons: `${B('&lt; Back', { hidden: true })}${B('Next >', { hidden: true })}<span class="gap"></span>${B('Cancel')}` })), PAIR);
+
+// ---- g. finished ------------------------------------------------------------------------
+shot('13g', '13-windows-g-finished', 'Finished, with <b>launch icygui</b> checked (<i>[Run] … Flags: postinstall nowait skipifsilent</i>): the same tall image as the welcome page. A silent install (<i>/VERYSILENT</i>, for software distribution) skips the launch.',
+  pair((m, x, y) => wizard(m, { x, y, body: welcomeBody('Completing the icygui Setup Wizard', ['Setup has finished installing icygui on your computer. The application may be launched by selecting the installed shortcuts.', 'Click Finish to exit Setup.'], `<div style="margin-top:6px">${ck(true, 'Launch icygui')}</div>`), buttons: `${B('&lt; Back', { hidden: true })}${B('Finish', { def: true })}<span class="gap"></span>${B('Cancel', { hidden: true })}` })), PAIR);
+
+// ---- h. uninstall ----------------------------------------------------------------------------
+function confirmBox(mode, x, y) {
+  return `<div class="iw ${mode} mdlg" style="left:${x}px;top:${y}px;width:420px;height:176px">
+    <div class="tb"><span class="ti">${APPICON(16)}</span><span class="tt">icygui Uninstall</span><span class="cb">${G.x}</span></div>
+    <div class="ib" style="padding:20px 24px 0;flex-direction:row;gap:14px;align-items:flex-start">${QMARK}<p style="margin-top:6px">Are you sure you want to completely remove icygui and all of its components?</p></div>
+    <div class="bb">${B('Yes')}${B('No', { def: true })}</div></div>`;
+}
+function keepBox(mode, x, y) {
+  return `<div class="iw ${mode} mdlg" style="left:${x}px;top:${y}px;width:520px;height:250px">
+    <div class="tb"><span class="ti">${APPICON(16)}</span><span class="tt">icygui Uninstall</span><span class="cb">${G.x}</span></div>
+    <div class="ib" style="padding:20px 24px 0;gap:10px">
+      <span class="minst">Keep your settings and event history?</span>
+      <p>Your environments, dashboards and notification settings are in <span style="white-space:nowrap">%APPDATA%\\icygui</span>, the event history in <span style="white-space:nowrap">%LOCALAPPDATA%\\icygui</span>. Keep them if you might install icygui again.</p>
+      <p style="color:var(--sub)">Removing them also deletes the passwords icygui saved in Windows Credential Manager.</p>
+    </div>
+    <div class="bb">${B('Keep them', { def: true })}${B('Remove them')}</div></div>`;
+}
+shot('13h', '13-windows-h-uninstall', 'Uninstall, from Windows’ <i>Installed apps</i> or the Start menu. First Inno’s own confirmation (<i>ConfirmUninstall</i>; the safe answer, No, is the default). Then <b>our question</b>, a task dialog from the uninstaller’s <i>[Code]</i> (<i>TaskDialogMsgBox</i> with our two button labels): <b>keep them</b> is the default, so a reinstall finds everything again; <b>remove them</b> deletes both folders and the saved passwords. The program files and the Start menu, desktop and sign-in entries always go.',
+  pair((m, x, y) => `${confirmBox(m, x + 140, y + 20)}${keepBox(m, x + 90, y + 236)}`), PAIR);
+
+// ---- i. the images we ship -----------------------------------------------------------------------
+const imgCol = (label, img, cap) => `<div style="display:flex;flex-direction:column"><span style="color:#d6d8da;margin-bottom:8px">${label}</span>${img}<div class="cap">${cap}</div></div>`;
+shot('13i', '13-windows-i-images', 'What we ship for the installer, at 100 %. The tall image, light (<i>WizardImageFile</i>) and dark (<i>WizardImageFileDynamicDark</i>), 240 × 459 px at 100 %; the small image (<i>WizardSmallImageFile</i>, <i>…DynamicDark</i>), 58 × 58 px; and the setup and uninstall icon (<i>SetupIconFile</i>, <i>UninstallDisplayIcon</i>), the app’s icon from <i>assets/logo/icygui.svg</i>. Each image comes in several scales (100, 125, 150, 200 and 250 %), listed comma-separated in the directive; Inno picks the closest to the screen’s scaling. All are generated from the logo by <i>cargo xtask icons</i>, like the app icons.',
+  `<div class="sheet">
+    ${imgCol('WizardImageFile', `<div style="border:1px solid #2a2f33;width:max-content">${WIZIMG('lt', 240, 459)}</div>`, '<b>wizard-light-100.png</b> … <b>-250.png</b>. The mark with its node in the light accent, the name in IBM Plex Mono, a corner of the host-group grid fading in from the bottom (dim green hosts, one critical, two warnings, one unknown, one handled).')}
+    ${imgCol('WizardImageFileDynamicDark', `<div style="border:1px solid #2a2f33;width:max-content">${WIZIMG('dk', 240, 459)}</div>`, '<b>wizard-dark-100.png</b> … The same on the app icon’s dark tile gradient, in the dark palette.')}
+    <div style="display:flex;flex-direction:column;gap:28px">
+      ${imgCol('WizardSmallImageFile, …DynamicDark', `<div style="display:flex;gap:14px"><div class="chk-bg" style="border-radius:4px">${SMALLIMG('lt')}</div><div style="background:#2b2b2b;border-radius:4px">${SMALLIMG('dk')}</div></div>`, '<b>small-light-100.png</b>, <b>small-dark-100.png</b> …, 58 × 58 at 100 %, transparent around the mark; the node takes each theme’s accent (#2f74c0 light, #74ade8 dark).')}
+      ${imgCol('SetupIconFile, UninstallDisplayIcon', `<div style="display:flex;align-items:flex-end;gap:16px">${APPICON(16)}${APPICON(24)}${APPICON(32)}${APPICON(48)}${APPICON(96)}</div>`, '<b>icygui.ico</b> with 16, 24, 32, 48, 64 and 256 px, the same file the app’s executable embeds. It shows in the title bars, in Explorer and in Installed apps.')}
+      ${imgCol('the tray icon (the app, not the installer)', `<div style="display:flex;align-items:center;gap:16px;padding:10px 14px;background:#202020;border-radius:6px;width:max-content">${TRAYMARK(16, '#7d848a')}${TRAYMARK(16, '#56b870')}${TRAYMARK(16, '#e5b04a')}${TRAYMARK(16, '#a97fdb')}${TRAYMARK(16, '#e06c6c')}</div>`, 'Drawn in code as today (<i>ic-platform tray/icon.rs</i>): orbit and core in the worst unhandled state’s colour, grey while nothing is connected.')}
+    </div></div>`, { w: 1180, h: 640 });
+
+// ---- j. the main window with Windows' caption buttons -------------------------------------------
+const CAPS = ({ hov = '', press = '', maxed = false, inactive = false, list = false } = {}) => `<span class="capb${inactive ? ' inactive' : ''}${list ? ' in-list' : ''}">
+  <span class="cbn${hov === 'min' ? ' hov' : ''}">${G.min}</span><span class="cbn${hov === 'max' ? ' hov' : ''}">${maxed ? G.res : G.max}</span><span class="cbn x${hov === 'x' ? ' hov' : ''}${press === 'x' ? ' press' : ''}">${G.x}</span></span>`;
+const withCaps = (hbar, opts) => hbar.replace(/<\/div>\s*$/, `${CAPS(opts)}</div>`);
+const MARKSLOT = `<span class="markslot">${MARK(16)}</span>`;
+const winWindow = (main, sb = {}) => appWindow(main, sb).replace(trafficLights(sb.foot && sb.foot.inactive), MARKSLOT);
+const pointer = (x, y) => `<svg style="position:absolute;left:${x}px;top:${y}px;width:16px;height:22px;z-index:60" viewBox="0 0 16 22"><path d="M1 1 L1 17 L5 13 L8 20 L11 19 L8 12 L14 12 Z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></svg>`;
+const svcPane = (caps) => `<div class="pane">${withCaps(paneHeader('service'), caps)}<div class="pbody">
+  ${paneTitle({ st: 'crit', label: 'CRIT', name: 'postgres-replication', sub: 'on <a>db-prod-03</a> · 14m · hard 3/3' })}
+  ${actionButtons()}
+  ${codeBlock('CRITICAL - standby lag 412s (&gt; 300s)\nprimary  db-prod-01  lsn 4A/9C21F0D8\nstandby  db-prod-03  lsn 4A/2E77A120')}
+  ${kv('check', [['command', 'check_postgres'], ['interval', '60s · retry 15s'], ['last / next', '12s ago / in 48s'], ['endpoint', 'sat-ams-01'], ['zone', 'ams'], ['attempt', 'hard 3/3']])}
+</div></div>`;
+const listMain = listHeader() + summary() + `<div class="list">${rows(ROWS, (r, i) => ({ sel: i === 2 }))}</div>`;
+shot('13j', '13-windows-j-window', 'The main window on Windows. Our window keeps its own title row, font and design; Windows 11’s <b>caption buttons</b> (minimise, maximise, close; 46 px wide, the full height of the 40 px header row) sit at the top right of the right-most header: the pane’s here, the list’s when no pane is open. They take a fixed slot there, so the header’s own items (<i>↗ open as tab</i>, the pane’s ×) keep their places and nothing moves when the window becomes active or maximised. The pointer is on close, which turns red (#c42b1c) as everywhere in Windows. The traffic lights’ slot at the top left holds the <b>app’s mark</b>, as Windows apps show their icon there; a click on it opens the window menu (as alt-space does). Dragging the headers moves the window, a double click maximises it, Windows’ snap layouts appear on the maximise button.',
+  winWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px">${`<div class="col" style="min-height:0">${listMain}</div>`}${svcPane({ hov: 'x' })}</div>`) + pointer(1416, 18),
+  { crops: '13-windows-j-zoom:980,0,460,140;13-windows-j-zoom-left:0,0,420,140' });
+
+// ---- k. the caption buttons, every state ----------------------------------------------------------
+const paneEnd = (theme, caps) => `<div class="${theme}" style="width:520px;background:var(--pane-bg);border:1px solid var(--bd-window)">${withCaps(`<div class="hbar pane-h"><span class="label">service</span><span class="grow"></span><span class="quiet">↗ open as tab</span><span class="x">×</span></div>`, caps)}</div>`;
+const listEnd = (theme, caps) => `<div class="${theme}" style="width:520px;background:var(--win-bg);border:1px solid var(--bd-window)">${withCaps(listHeader(), { ...caps, list: true })}</div>`;
+const sbTop = (theme, win) => `<div class="${theme}" style="width:300px;background:var(--sb-bg);border:1px solid var(--bd-window)"><div class="sb-top">${win ? MARKSLOT : trafficLights()}<span class="vdiv"></span><span class="muted">${icon('search', 13)}</span><span class="sb-search">Search dashboards…</span></div></div>`;
+const kRow = (label, dk, lt) => `<div style="display:grid;grid-template-columns:200px 540px 540px;gap:24px;align-items:center"><span style="color:#8b9094;font-size:12px">${label}</span>${dk}${lt}</div>`;
+shot('13k', '13-windows-k-caption-buttons', 'Every state of the caption buttons, dark and light (the app’s theme decides, as for the rest of our window). Pointer on minimise or maximise: a faint fill; pointer on close: red with a white glyph, pressed a lighter red; maximised: the restore glyph; window inactive: the glyphs fade, nothing else changes. The list header carries them when no pane is open. Last row: the sidebar header on Linux and macOS (traffic lights) and on Windows (the mark in the same slot); the search keeps its place.',
+  `<div style="position:absolute;inset:0;background:#16191c;padding:24px 28px;display:flex;flex-direction:column;gap:14px">
+    ${kRow('', '<span style="color:#d6d8da;font-size:12px">dark theme</span>', '<span style="color:#d6d8da;font-size:12px">light theme</span>')}
+    ${kRow('normal', paneEnd('dark', {}), paneEnd('light', {}))}
+    ${kRow('pointer on minimise', paneEnd('dark', { hov: 'min' }), paneEnd('light', { hov: 'min' }))}
+    ${kRow('pointer on close', paneEnd('dark', { hov: 'x' }), paneEnd('light', { hov: 'x' }))}
+    ${kRow('pressing close', paneEnd('dark', { press: 'x' }), paneEnd('light', { press: 'x' }))}
+    ${kRow('maximised', paneEnd('dark', { maxed: true }), paneEnd('light', { maxed: true }))}
+    ${kRow('window inactive', paneEnd('dark', { inactive: true }), paneEnd('light', { inactive: true }))}
+    ${kRow('no pane: the list header', listEnd('dark', {}), listEnd('light', {}))}
+    ${kRow('sidebar header: Linux, macOS', sbTop('dark', false), sbTop('light', false))}
+    ${kRow('sidebar header: Windows', sbTop('dark', true), sbTop('light', true))}
+  </div>`, { w: 1360, h: 560, crops: '13-windows-k-zoom:228,60,1130,340' });
+
+// ---- l. the tray -------------------------------------------------------------------------------------
+const CRIT_DK = '#e06c6c', CRIT_LT = '#e04848';
+const taskbar = (mode, { hovTray = false } = {}) => `<div class="tbar">
+  <span class="ti">${CARET}</span>
+  <span class="ti${hovTray ? ' hov' : ''}">${TRAYMARK(16, mode === 'dk' ? CRIT_DK : CRIT_LT)}</span>
+  <span class="ti" style="gap:10px">${WIFI}${SPEAKER}</span>
+  <span class="clock"><span>14:12</span><span>07/10/2026</span></span>
+  <span class="ti">${BELLW}</span></div>`;
+const trayTip = (x, y) => `<div class="wtip" style="left:${x}px;top:${y}px">prod-cluster: 38 unhandled, 4 critical
+staging: 3 unhandled
+lab: nothing unhandled</div>`;
+const wmItem = (label, { ck: c, ar, hov } = {}) => `<div class="it${hov ? ' hov' : ''}"><span class="ck">${c ? CHECK(12) : ''}</span><span class="lb">${label}</span><span class="ar">${ar ? CHEV : ''}</span></div>`;
+const trayMenu = (x, y) => `<div class="wm" style="left:${x}px;top:${y}px;width:220px">
+  ${wmItem('Open icygui')}<div class="sp"></div>${wmItem('Pause notifications', { ar: true })}<div class="sp"></div>${wmItem('Environment', { ar: true, hov: true })}<div class="sp"></div>${wmItem('Quit icygui')}</div>`;
+const envMenu = (x, y) => `<div class="wm" style="left:${x}px;top:${y}px;width:170px">${wmItem('prod-cluster', { ck: true, hov: true })}${wmItem('staging')}${wmItem('lab')}</div>`;
+const panel = (mode, left, w, h, inner) => `<div class="desk ${mode}" style="left:${left}px;top:0;width:${w}px;height:${h}px">${inner}</div>`;
+shot('13l', '13-windows-l-tray', 'The tray icon in Windows’ notification area: the mark tinted with the worst unhandled state of every environment, as on Linux and macOS (here critical). <b>Left</b>, the pointer on it: Windows’ tooltip, which Windows cuts at 128 characters, so on Windows it is one short line per environment (<i>prod-cluster: 38 unhandled, 4 critical</i>). <b>Right</b>, a right click: the native menu with today’s items (open, pause notifications ▸, environment ▸, quit), drawn by Windows 11 in its dark or light menu style; the environment submenu opens to the left at the screen’s edge, with a check at the active one. A left click opens the window. Windows may hide new tray icons behind ^ at first; the user pins them with a drag.',
+  panel('dk', 0, 700, 560, `<span class="tag">pointer on the icon</span>${trayTip(410, 434)}${taskbar('dk', { hovTray: true })}`) +
+  panel('dk', 740, 700, 560, `<span class="tag">right click</span>${trayMenu(436, 320)}${envMenu(258, 392)}${taskbar('dk', { hovTray: true })}`),
+  { w: 1440, h: 560 });
+
+// ---- m. a toast and the notification centre --------------------------------------------------------------
+const winToast = (mode, x, y, { buttons = true } = {}) => `<div class="tst" style="left:${x}px;top:${y}px">
+  <div class="ah">${APPICON(16)}<span>icygui</span><span class="x"><span>···</span><span>✕</span></span></div>
+  <div class="bd"><span class="lgo" style="background:${mode === 'dk' ? CRIT_DK : CRIT_LT}"></span><div style="min-width:0">
+    <div class="t1">CRITICAL · postgres&#8209;replication on db&#8209;prod&#8209;03</div>
+    <div class="t2">CRITICAL - standby lag 412s (&gt; 300s)</div>
+    <div class="t3">overview / databases · prod-cluster</div></div></div>
+  ${buttons ? '<div class="bt"><span>Acknowledge</span><span>Open</span></div>' : ''}</div>`;
+const nbh = (t) => t.replace(/-/g, '\u2011');
+const ncCard = (mode, { st, title, body, place, time, btns }) => `<div class="card"><div class="ttl"><span class="lgo" style="width:32px;height:32px;background:${st}"></span><div style="min-width:0"><div style="font-weight:600">${nbh(title)}</div><div style="color:var(--tsub);margin-top:3px">${body}</div><div style="color:var(--tfnt);font-size:11.5px;margin-top:3px">${place}</div></div><span class="tm">${time}</span></div>${btns ? '<div class="bt"><span>Acknowledge</span><span>Open</span></div>' : ''}</div>`;
+const centre = (mode, x, y) => {
+  const c = mode === 'dk' ? { crit: CRIT_DK, warn: '#e5b04a', ok: '#56b870' } : { crit: CRIT_LT, warn: '#e0a020', ok: '#34a058' };
+  return `<div class="ncp" style="left:${x}px;top:${y}px;width:380px">
+    <div class="hdr">Notifications<span class="ca">Clear all</span></div>
+    <div class="ah" style="padding:0 16px 8px">${APPICON(16)}<span>icygui</span><span class="x"><span>···</span><span>✕</span></span></div>
+    ${ncCard(mode, { st: c.crit, title: 'CRITICAL · postgres-replication on db-prod-03', body: 'CRITICAL - standby lag 412s (&gt; 300s)', place: 'overview / databases · prod-cluster', time: '14:12', btns: true })}
+    ${ncCard(mode, { st: c.warn, title: 'WARNING · pg-connections on db-prod-03', body: 'WARNING - 182 of 200 per-db limit (orders)', place: 'overview / databases · prod-cluster', time: '13:50' })}
+    ${ncCard(mode, { st: c.ok, title: 'OK · mysql-replication on db-mysql-02', body: 'OK - replica in sync, lag 0s', place: 'overview / databases · prod-cluster', time: '13:58' })}
+  </div>
+  <div class="ncp" style="left:${x}px;top:${y + 498}px;width:380px;height:46px;display:flex;align-items:center;padding:0 16px;font-weight:600">Wednesday, 7 October<span style="margin-left:auto;transform:rotate(180deg);display:flex">${CARET}</span></div>`;
+};
+shot('13m', '13-windows-m-toast-centre', '<b>Left</b>, a desktop notification as a Windows 11 toast: the app’s icon and name at the top (from the Start menu shortcut and its AppUserModelID, which the installer makes), our title and the output’s first line as today, where it matched in small text, and the <b>Acknowledge</b> and <b>Open</b> buttons; a click on the body opens the object. The state circle sits where Windows allows an image beside the text (<i>appLogoOverride</i>, cropped to a circle). <b>Right</b>, Windows’ notification centre (the bell or the clock): our notifications grouped under icygui, newest first, with their times; buttons show on the latest. icygui’s own notification centre keeps the full history.',
+  panel('dk', 0, 700, 640, `<span class="tag">a toast</span>${winToast('dk', 316, 392)}${taskbar('dk')}`) +
+  panel('dk', 740, 700, 640, `<span class="tag">Windows’ notification centre</span>${centre('dk', 308, 26)}${taskbar('dk')}`),
+  { w: 1440, h: 640 });
+
+// ---- n. light ----------------------------------------------------------------------------------------------
+shot('13n', '13-windows-n-light', 'The same native parts with Windows in light mode: the tray menu and a toast follow Windows’ setting (our window follows the app’s theme setting, which by default follows the system too). The tray icon keeps the state colours’ light-theme fill shades (topic 03).',
+  panel('lt', 0, 700, 600, `<span class="tag">right click on the tray icon</span>${trayMenu(436, 360)}${envMenu(258, 432)}${taskbar('lt', { hovTray: true })}`) +
+  panel('lt', 740, 700, 600, `<span class="tag">a toast</span>${winToast('lt', 316, 352)}${taskbar('lt')}`),
+  { w: 1440, h: 600 });
+</script>
+</body></html>

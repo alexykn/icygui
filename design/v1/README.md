@@ -33,6 +33,10 @@ answer.
   (needs `playwright-core` and a Chromium; `PLAYWRIGHT_BROWSERS_PATH` or
   `CHROMIUM`).
 
+Topic 13 draws native Windows parts in Segoe UI; where Segoe UI isn't
+installed, its frames fall back to Open Sans (the renders here used Open Sans
+through a fontconfig file; `render.js` is unchanged).
+
 The wall clock in every frame is Wednesday 7 October 2026, 14:12. The data is
 the demo's prod-cluster. Rendered PNGs are named `NN-topic-x-state.png`, one
 per frame, plus `-zoom` crops of the details.
@@ -51,6 +55,7 @@ per frame, plus `-zoom` crops of the details.
 | 10 | Palette multi-select | `10-palette-multiselect.html` | 10 (+9) | approved with two changes; combined view rebuilt |
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
+| 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | new, for review |
 
 ---
 
@@ -875,3 +880,115 @@ quick switch; 12g a dashboard's `···` menu, following its group.
   them (topic 08), so imported groups and dashboards arrive off.
 - **Replaces** rc1's four notification choices in the group menu (inherit,
   on, off, custom rule) and rc1's quiet hours.
+
+---
+
+## 13 icygui on Windows: the installer, the window, the tray and toasts
+
+**Status: new, for review** (PLAN.md §4.2, *Windows support*).
+
+**Shows** (`13-windows.html`): the installer, each page in Windows' dark and
+light mode side by side: 13a welcome; 13b install for me or for everyone;
+13c destination; 13d additional tasks; 13e ready; 13f installing; 13g
+finished; 13h uninstall; 13i the images we ship. The app: 13j the main
+window with Windows' caption buttons (zooms of both header ends); 13k every
+state of the caption buttons, dark and light, and the sidebar header per
+platform; 13l the tray icon's tooltip and menu; 13m a toast and Windows'
+notification centre; 13n the tray menu and a toast in light mode.
+
+**The installer** (Inno Setup 6.6; only what Inno does)
+
+- **Style:** `WizardStyle=modern dynamic`: Inno's modern wizard, which
+  follows Windows between dark and light. Inno fixes the layout (welcome and
+  finished pages with the tall image on the left; inner pages with the header
+  band, title, subtitle and the small image at the top right; Back, Next and
+  Cancel at the bottom right), the native controls and Segoe UI. About 700 ×
+  540 px at 100 %.
+- **What we ship** (generated from `assets/logo/` by `cargo xtask icons`,
+  like the app icons, each at 100, 125, 150, 200 and 250 %, listed
+  comma-separated so Inno picks the closest to the screen's scaling):
+  - `WizardImageFile` / `WizardImageFileDynamicDark` (240 × 459 at 100 %):
+    the logo's mark (its node in the theme's accent, `#2f74c0` light,
+    `#74ade8` dark), `icygui` in IBM Plex Mono, `Icinga 2 on your desktop`,
+    and a corner of the host-group grid (topic 05) fading in at the bottom,
+    on a light grey gradient or the app icon's dark tile gradient;
+  - `WizardSmallImageFile` / `…DynamicDark` (58 × 58): the mark alone,
+    transparent around it;
+  - `SetupIconFile` and `UninstallDisplayIcon`: `icygui.ico` (16 to 256 px),
+    the same icon the executable embeds.
+- **Texts** in `[Messages]` and `[CustomMessages]`; the welcome page says the
+  install is per user and needs no administrator rights.
+  `ButtonBrowse=&Browse` drops Inno's "Browse...", per the app's label rule.
+- **Install mode (13b):** `PrivilegesRequired=lowest` with
+  `PrivilegesRequiredOverridesAllowed=dialog`, so Inno asks first, in its
+  own dialog and words: **for me only** (preselected, no administrator
+  rights, `%LOCALAPPDATA%\Programs\icygui`) or **for all users** (elevation,
+  shield, `C:\Program Files\icygui`); `DefaultDirName={autopf}\icygui`
+  covers both. `/CURRENTUSER` and `/ALLUSERS` skip the question.
+- **Destination (13c):** shown on a first install only (`DisableDirPage=auto`).
+- **Tasks (13d), `[Tasks]`:** *create a desktop shortcut* (off, `Flags:
+  unchecked`) and *start icygui in the tray when you sign in* (on). The
+  second writes the same per-user Run entry as Settings → general → start at
+  login (`HKCU\…\Run`, `icygui.exe --background`). The Start menu shortcut
+  is always made, with the app's AppUserModelID (the toasts need it).
+- **Ready (13e), installing (13f):** Inno's pages. A running icygui is closed
+  by the restart manager (`CloseApplications=yes`) and started again after an
+  update if it was running; updates keep every setting.
+- **Finished (13g):** *launch icygui*, checked (`[Run] … Flags: postinstall
+  nowait skipifsilent`); a silent install doesn't launch.
+- **Uninstall (13h):** Inno's confirmation (`ConfirmUninstall`, *No* the
+  default), then our question from the uninstaller's `[Code]`
+  (`TaskDialogMsgBox` with our button labels): **keep them** (default) or
+  **remove them**: the settings in `%APPDATA%\icygui`, the event history in
+  `%LOCALAPPDATA%\icygui`, and the passwords icygui saved in Windows
+  Credential Manager. Program files, Start menu, desktop and sign-in entries
+  always go.
+- **Also:** a portable `.zip`; unsigned unless a code-signing certificate is
+  configured (SmartScreen warns on first start, documented).
+
+**The app on Windows**
+
+- **Caption buttons (13j, 13k):** Windows 11's minimise, maximise (restore
+  when maximised) and close, 46 px wide each and the full height of the 40 px
+  header row, in a fixed slot at the top right of the right-most header (the
+  pane's, or the list's when no pane is open), so the header's own items keep
+  their places and nothing moves when the window becomes active, inactive or
+  maximised. Glyphs in the theme's strong text colour (faint while the
+  window is inactive); hover: a faint fill; close: `#c42b1c` with a white
+  glyph, pressed `#c83c31`. Our theme decides their colours, as for the rest
+  of our window. Snap layouts on the maximise button come from Windows.
+- **Top left:** the slot of the traffic lights (52 px) holds the app's mark
+  (16 px); a click on it opens the window menu (as alt-space does); the
+  search keeps its place. Dragging a header moves the window, a double click
+  maximises it (as on Linux; `chrome.rs` gets a third `Controls` variant).
+- **Tray (13l, 13n):** the mark tinted with the worst unhandled state of every
+  environment, as today. Windows cuts tooltips at 128 characters, so the
+  tooltip is one short line per environment (`prod-cluster: 38 unhandled, 4
+  critical`). Right click: the native Windows 11 menu with today's items
+  (open, pause notifications ▸, environment ▸ with a check at the active one,
+  quit); left click opens the window. Native menus follow Windows' dark or
+  light mode.
+- **Toasts (13m, 13n):** app icon and name from the Start menu shortcut's
+  AppUserModelID; title and body as today (`CRITICAL · postgres-replication
+  on db-prod-03`, the output's first line, where it matched); the state
+  circle as the toast's image (`appLogoOverride`, cropped to a circle);
+  **Acknowledge** and **Open** buttons; a click on the body opens the object.
+  They stay in Windows' notification centre, grouped under icygui; icygui's
+  own notification centre keeps the full history.
+
+**For the user to decide**
+
+1. In the pane header, the pane's × now sits near Windows' close button.
+   Drawn as is; alternatives: a 1 px divider before the caption buttons, or
+   moving the pane's × left of *↗ open as tab*.
+2. The app's mark in the traffic-light slot on Windows (drawn), or leave the
+   slot empty.
+3. *Remove them* in the uninstaller also deletes the saved passwords in
+   Credential Manager (drawn), or keep the passwords always.
+4. The toast's image: the state circle (drawn) or no image (only the app
+   icon in the header).
+5. The tall wizard image: the mark, the name, `Icinga 2 on your desktop` and
+   the grid corner (drawn); the tagline's wording.
+6. `Browse` without Inno's trailing dots (drawn), or keep Inno's native
+   "Browse...".
+

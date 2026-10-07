@@ -26,15 +26,15 @@ use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Render,
     ScrollStrategy, Styled as _, Subscription, Task, UniformListScrollHandle, Window, div,
-    prelude::FluentBuilder as _, px, uniform_list,
+    prelude::FluentBuilder as _, uniform_list,
 };
-use ic_config::{GroupBy, View};
+use ic_config::{GroupBy, ListTimes, View};
 use ic_core::snapshot::DashboardRow;
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::{
-    ActiveTheme as _, CircleSize, CodeBlock, EmptyState, Icon, IconName, Link, ListRow, Metrics,
-    RowEmphasis, Scrollbar, StateCircle, Theme,
+    ActiveTheme as _, CircleSize, CodeBlock, Density, EmptyState, Icon, IconName, Link, ListRow,
+    Metrics, RowEmphasis, Scrollbar, StateCircle, Theme, px,
 };
 
 use self::header::HeaderMenus;
@@ -103,6 +103,9 @@ pub(crate) struct DashboardView {
     /// The rows built in the last frame: the rows on screen. Sets the page
     /// size.
     visible: Range<usize>,
+    /// The times the object rows built in the last frame show, for tests.
+    #[cfg(test)]
+    shown_times: Vec<String>,
     /// The rows on screen without output, last asked for (or about to
     /// be), and in which wake of the environment (`AppState::wake`): after
     /// waking up from quiet mode they are asked for again.
@@ -133,6 +136,8 @@ impl DashboardView {
             sidebar_open: true,
             drag: WindowDrag::default(),
             visible: 0..0,
+            #[cfg(test)]
+            shown_times: Vec::new(),
             hydration_wanted: (Vec::new(), 0),
             hydrate_task: None,
             reveal: None,
@@ -571,6 +576,8 @@ impl DashboardView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         self.visible = range.clone();
+        #[cfg(test)]
+        self.shown_times.clear();
         let state = self.state.read(cx);
         let snapshot = state.snapshot().clone();
         let Some(view) = state
@@ -586,6 +593,7 @@ impl DashboardView {
         let cursor = selection.cursor();
         let theme = cx.theme();
         let now = Timestamp::now();
+        let times = state.appearance().list_times;
         // Under a host's header, `on <host>` would repeat it on every row.
         let show_host = view.group_by != GroupBy::Host;
         let grouped = view.group_by != GroupBy::None;
@@ -610,7 +618,10 @@ impl DashboardView {
                             RowEmphasis::new(cursor == Some(index), selection.is_marked(key));
                         let id = row_id(group.as_deref(), key);
                         let clicked = key.clone();
-                        let row = object_row(&snapshot, id, key, show_host, now, theme);
+                        let row = object_row(&snapshot, id, key, show_host, times, now, theme);
+                        #[cfg(test)]
+                        self.shown_times
+                            .push(row.time_text().map(ToString::to_string).unwrap_or_default());
                         // An action on its way shows instead of the tag.
                         let row = match self.state.read(cx).pending_label(key) {
                             Some(pending) => row.tag(pending),
@@ -624,7 +635,8 @@ impl DashboardView {
                     }
                     DashboardRow::Group { label, count } => {
                         group = Some(label.clone());
-                        let header = group_header(&snapshot, &view, label, *count, now, theme);
+                        let header =
+                            group_header(&snapshot, &view, label, *count, times, now, theme);
                         if view.group_by == GroupBy::Host {
                             let host = ObjectKey::host(label);
                             header.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -719,7 +731,7 @@ impl DashboardView {
                 .leading(
                     Icon::new(IconName::TriangleAlert)
                         .size(px(20.))
-                        .color(theme.states.critical),
+                        .color(theme.states.fill.critical),
                 )
                 .detail(error.clone())
                 .max_width(px(560.))
@@ -971,22 +983,23 @@ pub(crate) fn row_id(group: Option<&str>, key: &ObjectKey) -> ElementId {
     ElementId::Name(name.into())
 }
 
-/// An object row; `show_host` adds `on <host>` after a service's name.
+/// An object row; `show_host` adds `on <host>` after a service's name;
+/// `times` says how its time reads.
 pub(crate) fn object_row(
     snapshot: &ic_core::snapshot::Snapshot,
     id: ElementId,
     key: &ObjectKey,
     show_host: bool,
+    times: ListTimes,
     now: Timestamp,
     theme: &Theme,
 ) -> ListRow {
     match rows::object_row(snapshot, key, now) {
         Some(row) => {
             let list_row = ListRow::new(id)
-                .leading(
-                    StateCircle::new(row.state)
-                        .handled(row.handled)
-                        .caption(row.since),
+                .state(
+                    StateCircle::new(row.state).handled(row.handled),
+                    row.time(times).to_owned(),
                 )
                 .title(row.name)
                 .detail(row.output);
@@ -1006,7 +1019,7 @@ pub(crate) fn object_row(
         // The core removed the object between evaluating the dashboard and
         // publishing the snapshot; the next snapshot drops the row.
         None => ListRow::new(id)
-            .leading(StateCircle::with_color(theme.states.pending))
+            .state(StateCircle::with_color(theme.states.fill.pending), "")
             .title(key.full_name())
             .detail("not in the latest snapshot"),
     }
@@ -1014,11 +1027,13 @@ pub(crate) fn object_row(
 
 /// A group header row: a darker band with the group's name in semibold;
 /// grouped by host, the host's state as a compact circle and its output.
+/// Compact rows have no second line: the count moves to the tag.
 pub(crate) fn group_header(
     snapshot: &ic_core::snapshot::Snapshot,
     view: &View,
     label: &str,
     count: usize,
+    times: ListTimes,
     now: Timestamp,
     theme: &Theme,
 ) -> ListRow {
@@ -1026,23 +1041,26 @@ pub(crate) fn group_header(
     let row = ListRow::new(ElementId::Name(format!("group:{label}").into()))
         .header(true)
         .title(group.label);
-    match group.host {
-        Some(host) => row
-            .leading(
+    if let Some(host) = group.host {
+        return row
+            .state(
                 StateCircle::new(host.state)
                     .size(CircleSize::Compact)
-                    .handled(host.handled)
-                    .caption(host.since),
+                    .handled(host.handled),
+                host.time(times).to_owned(),
             )
             .detail(host.output)
-            .tag(group.count),
-        None => row
-            .leading(
-                Icon::new(IconName::Folder)
-                    .size(px(14.))
-                    .color(theme.colors.text_muted),
-            )
-            .detail(group.count),
+            .tag(group.count);
+    }
+    let row = row.leading(
+        Icon::new(IconName::Folder)
+            .size(px(14.))
+            .color(theme.colors.text_muted),
+    );
+    if theme.density == Density::Compact {
+        row.tag(group.count)
+    } else {
+        row.detail(group.count)
     }
 }
 
@@ -1061,7 +1079,7 @@ fn empty_dashboard(
         + summary.down
         + summary.unreachable;
     let title = format!("No {}", header::view_label(view));
-    let ok = StateCircle::with_color(theme.states.ok).size(CircleSize::Pane);
+    let ok = StateCircle::with_color(theme.states.fill.ok).size(CircleSize::Pane);
     if view.hide_handled && summary.handled > 0 {
         let reference = reference.clone();
         let handled = summary.handled;
@@ -1096,7 +1114,7 @@ fn empty_dashboard(
             view.filter.clone()
         };
         return EmptyState::new("Nothing matches this dashboard")
-            .leading(StateCircle::with_color(theme.states.pending).size(CircleSize::Pane))
+            .leading(StateCircle::with_color(theme.states.fill.pending).size(CircleSize::Pane))
             .detail("No host or service matches its filter:")
             .max_width(px(560.))
             .child(div().w(px(520.)).text_left().child(CodeBlock::new(filter)))
@@ -1174,6 +1192,12 @@ impl DashboardView {
     /// covers it).
     pub(crate) fn visible_rows(&self) -> Range<usize> {
         self.visible.clone()
+    }
+
+    /// The times the object rows built in the last frame show.
+    #[cfg(test)]
+    pub(crate) fn shown_times(&self) -> &[String] {
+        &self.shown_times
     }
 
     /// The open header menu.

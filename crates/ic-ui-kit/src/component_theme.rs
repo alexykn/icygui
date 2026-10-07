@@ -1,26 +1,37 @@
 //! Restyles gpui-component (text inputs, its window frame on Linux, menus)
 //! with our [`Theme`], so its controls look like the rest of the app.
 
-use gpui::{App, px};
-use gpui_component::{Theme as ComponentTheme, ThemeMode};
+use gpui::App;
+use gpui_component::{Theme as ComponentTheme, ThemeMode as ComponentMode};
 
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeMode};
 
-/// gpui-component's base font size; GPUI's rem size follows it. Our own
-/// components use pixel sizes, so this only affects gpui-component controls.
+/// gpui-component's base font size at 100 %; GPUI's rem size follows it.
+/// Our own components use the theme's sizes, so this only affects
+/// gpui-component controls (scaled with the interface size too).
 const BASE_FONT_SIZE: f32 = 16.;
 
-/// Installs `theme`'s colours, font and radii into gpui-component's theme.
+/// Installs `theme`'s mode, colours, font and radii into gpui-component's
+/// theme.
 pub(crate) fn apply(theme: &Theme, cx: &mut App) {
-    ComponentTheme::change(ThemeMode::Dark, None, cx);
+    let mode = match theme.mode {
+        ThemeMode::Dark => ComponentMode::Dark,
+        ThemeMode::Light => ComponentMode::Light,
+    };
+    ComponentTheme::change(mode, None, cx);
     let colors = theme.colors;
-    let states = theme.states;
+    let states = theme.states.fill;
     let font_family = theme.font_family.clone();
     let radius = theme.metrics.button_radius;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "scaled here by the theme's own factor"
+    )]
+    let font_size = gpui::px(BASE_FONT_SIZE * theme.scale);
     ComponentTheme::update(cx, move |component| {
         component.font_family = font_family.clone();
         component.mono_font_family = font_family;
-        component.font_size = px(BASE_FONT_SIZE);
+        component.font_size = font_size;
         component.radius = radius;
         component.radius_lg = radius * 2.;
         component.shadow = true;
@@ -64,7 +75,7 @@ pub(crate) fn apply(theme: &Theme, cx: &mut App) {
 
         component.colors.title_bar = colors.window_background;
         component.colors.title_bar_border = colors.border_header;
-        component.colors.sidebar = colors.window_background;
+        component.colors.sidebar = colors.sidebar_background;
         component.colors.sidebar_foreground = colors.text_secondary;
         component.colors.sidebar_border = colors.border_split;
         component.colors.scrollbar_thumb = colors.element_active;

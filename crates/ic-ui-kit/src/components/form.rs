@@ -5,11 +5,12 @@
 use std::fmt;
 use std::rc::Rc;
 
+use crate::px;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, Entity, Focusable as _, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Pixels, RenderOnce, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
-    relative,
+    AnyElement, App, BoxShadow, ClickEvent, ElementId, Entity, Focusable as _, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, RenderOnce,
+    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, point,
+    prelude::FluentBuilder as _, relative,
 };
 use gpui_component::input::{Textarea, TextareaState};
 
@@ -32,13 +33,13 @@ pub enum FieldTone {
 }
 
 impl FieldTone {
-    /// The tone's colour.
+    /// The tone's colour (the state text shades: it colours words).
     #[must_use]
     pub fn color(self, theme: &Theme) -> Hsla {
         match self {
             Self::Neutral => theme.colors.text_faint,
-            Self::Good => theme.states.ok,
-            Self::Bad => theme.states.critical,
+            Self::Good => theme.states.text.ok,
+            Self::Bad => theme.states.text.critical,
         }
     }
 }
@@ -121,7 +122,7 @@ impl RenderOnce for Field {
         let theme = cx.theme();
         let colors = theme.colors;
         let below = match (self.error, self.hint) {
-            (Some(error), _) => Some((error, theme.states.critical)),
+            (Some(error), _) => Some((error, theme.states.text.critical)),
             (None, Some(hint)) => Some((hint, colors.text_faint)),
             (None, None) => None,
         };
@@ -252,9 +253,18 @@ impl RenderOnce for Switch {
                     .size(px(12.))
                     .rounded_full()
                     .bg(if on {
-                        colors.text_emphasis
+                        colors.switch_thumb_on
                     } else {
-                        colors.text_muted
+                        colors.switch_thumb
+                    })
+                    .when(!colors.switch_thumb_shadow.is_transparent(), |knob| {
+                        knob.shadow(vec![BoxShadow {
+                            color: colors.switch_thumb_shadow,
+                            offset: point(px(0.), px(1.)),
+                            blur_radius: px(2.),
+                            spread_radius: px(0.),
+                            inset: false,
+                        }])
                     }),
             );
         div()
@@ -648,7 +658,7 @@ impl RenderOnce for TextArea {
 /// invalid, the header rule otherwise.
 pub(crate) fn field_border(theme: &Theme, focused: bool, invalid: bool) -> Hsla {
     if invalid {
-        theme.states.critical
+        theme.states.fill.critical
     } else if focused {
         theme.colors.accent
     } else {
@@ -678,8 +688,8 @@ mod tests {
     #[test]
     fn tones_use_the_state_colours() {
         let theme = Theme::dark();
-        assert_eq!(FieldTone::Good.color(&theme), theme.states.ok);
-        assert_eq!(FieldTone::Bad.color(&theme), theme.states.critical);
+        assert_eq!(FieldTone::Good.color(&theme), theme.states.text.ok);
+        assert_eq!(FieldTone::Bad.color(&theme), theme.states.text.critical);
         assert_eq!(FieldTone::Neutral.color(&theme), theme.colors.text_faint);
     }
 
@@ -711,7 +721,7 @@ mod tests {
     #[test]
     fn field_borders_prefer_errors_over_focus() {
         let theme = Theme::dark();
-        assert_eq!(field_border(&theme, true, true), theme.states.critical);
+        assert_eq!(field_border(&theme, true, true), theme.states.fill.critical);
         assert_eq!(field_border(&theme, true, false), theme.colors.accent);
         assert_eq!(
             field_border(&theme, false, false),

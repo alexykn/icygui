@@ -13,15 +13,15 @@ use std::collections::HashMap;
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    div, prelude::FluentBuilder as _, px,
+    div, prelude::FluentBuilder as _,
 };
 use ic_config::{Appearance, General, InterfaceSize, ListTimes, LogLevel, RowDensity, ThemeChoice};
 use ic_core::snapshot::Summary;
 use ic_model::{CheckableState, ObjectKey, Timestamp};
 use ic_rules::{ObjectMode, Rule, ScopeSetting};
 use ic_ui_kit::{
-    Button, Chip, CircleSize, Icon, IconButton, IconName, ListRow, Menu, MenuItem, Popover,
-    Segmented, StateCircle, StateDot, Switch, TextField, Theme, Tooltip,
+    Button, Chip, Icon, IconButton, IconName, ListRow, Menu, MenuItem, Popover, Segmented,
+    StateCircle, StateDot, Switch, TextField, Theme, Tooltip, px,
 };
 
 use super::files::{self, tilde};
@@ -308,11 +308,6 @@ fn preview_rows(state: &AppState, now: Timestamp) -> (Option<String>, Vec<Previe
         })
         .filter_map(|key| {
             let row = crate::dashboard::rows::object_row(snapshot, key, now)?;
-            let check = match key {
-                ObjectKey::Host { name } => &snapshot.hosts.get(name)?.check,
-                ObjectKey::Service { key } => &snapshot.services.get(key)?.check,
-            };
-            let since = ic_core::snapshot::state_since(check);
             Some(PreviewRow {
                 state: row.state,
                 handled: row.handled,
@@ -320,10 +315,7 @@ fn preview_rows(state: &AppState, now: Timestamp) -> (Option<String>, Vec<Previe
                 host: row.host,
                 output: row.output,
                 relative: row.since,
-                clock: since
-                    .non_zero()
-                    .map(|at| crate::format::clock(at, now))
-                    .unwrap_or_default(),
+                clock: row.clock,
             })
         })
         .take(PREVIEW_ROWS)
@@ -359,10 +351,10 @@ fn scope_id(key: &ScopeKey) -> String {
 /// objects match and nothing is unhandled, grey otherwise.
 fn summary_color(summary: Option<&Summary>, theme: &Theme) -> gpui::Hsla {
     let Some(summary) = summary else {
-        return theme.states.pending;
+        return theme.states.fill.pending;
     };
     if let Some(state) = summary.worst_unhandled {
-        return theme.states.checkable(state);
+        return theme.states.fill.checkable(state);
     }
     let checked = summary.ok
         + summary.critical
@@ -371,9 +363,9 @@ fn summary_color(summary: Option<&Summary>, theme: &Theme) -> gpui::Hsla {
         + summary.down
         + summary.unreachable;
     if checked > 0 {
-        theme.states.ok
+        theme.states.fill.ok
     } else {
-        theme.states.pending
+        theme.states.fill.pending
     }
 }
 
@@ -1141,7 +1133,7 @@ impl SettingsPanel {
                 .child(
                     div()
                         .text_size(theme.text.small)
-                        .text_color(theme.states.warning)
+                        .text_color(theme.states.text.warning)
                         .child(paused_text(count, until, facts.now)),
                 )
                 .child(Chip::new("settings-resume", "resume").on_click(cx.listener(
@@ -1514,9 +1506,9 @@ impl SettingsPanel {
     ) -> AnyElement {
         let colors = theme.colors;
         let object = entry.object.clone();
-        let dot = entry
-            .state
-            .map_or(theme.states.pending, |state| theme.states.checkable(state));
+        let dot = entry.state.map_or(theme.states.fill.pending, |state| {
+            theme.states.fill.checkable(state)
+        });
         let label = match &entry.object {
             ObjectKey::Service { key } => div()
                 .flex()
@@ -1758,7 +1750,7 @@ impl SettingsPanel {
                     .gap(px(2.))
                     .pb(px(10.))
                     .text_size(theme.text.small)
-                    .text_color(theme.states.critical)
+                    .text_color(theme.states.text.critical)
                     .child(format!(
                         "keymap.toml: {count} {noun} skipped (the log has every one)"
                     ))
@@ -1875,8 +1867,10 @@ impl SettingsPanel {
 
     // --- Appearance preview -------------------------------------------
 
-    /// The selected dashboard's first rows in the chosen density and time
-    /// format (sample rows while nothing is loaded).
+    /// The preview: the selected dashboard's first rows (sample rows while
+    /// nothing is loaded) as the dashboard list draws them, in the row
+    /// density and with the times the settings ask for (the density is the
+    /// theme's, so it follows at once).
     fn render_preview(theme: &Theme, facts: &Facts) -> AnyElement {
         let colors = theme.colors;
         let rows = if facts.preview.1.is_empty() {
@@ -1884,7 +1878,6 @@ impl SettingsPanel {
         } else {
             facts.preview.1.clone()
         };
-        let compact = facts.appearance.row_density == RowDensity::Compact;
         let clock = facts.appearance.list_times == ListTimes::Clock;
         div()
             .flex()
@@ -1896,65 +1889,14 @@ impl SettingsPanel {
             .overflow_hidden()
             .children(rows.into_iter().enumerate().map(|(index, row)| {
                 let time = if clock { row.clock } else { row.relative };
-                if compact {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(14.))
-                        .h(px(32.))
-                        .px(px(18.))
-                        .when(index > 0, gpui::Styled::border_t_1)
-                        .border_color(colors.border_row)
-                        .child(
-                            div().flex().flex_none().w(px(44.)).justify_center().child(
-                                StateCircle::new(row.state)
-                                    .size(CircleSize::Compact)
-                                    .handled(row.handled),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_size(theme.text.row)
-                                .child(
-                                    div()
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(colors.text_strong)
-                                        .child(row.name),
-                                )
-                                .when_some(row.host, |line, host| {
-                                    line.child(
-                                        div().text_color(colors.text_faint).child("\u{a0}on\u{a0}"),
-                                    )
-                                    .child(div().text_color(colors.text_secondary).child(host))
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(theme.text.label)
-                                .text_color(colors.text_faint)
-                                .child(time),
-                        )
-                        .into_any_element()
-                } else {
-                    let mut line = ListRow::new(("settings-preview", index))
-                        .leading(
-                            StateCircle::new(row.state)
-                                .handled(row.handled)
-                                .caption(time),
-                        )
-                        .title(row.name)
-                        .detail(row.output);
-                    if let Some(host) = row.host {
-                        line = line.context("on", host);
-                    }
-                    line.into_any_element()
+                let mut line = ListRow::new(("settings-preview", index))
+                    .state(StateCircle::new(row.state).handled(row.handled), time)
+                    .title(row.name)
+                    .detail(row.output);
+                if let Some(host) = row.host {
+                    line = line.context("on", host);
                 }
+                line.into_any_element()
             }))
             .into_any_element()
     }
@@ -2068,13 +2010,19 @@ mod tests {
     #[test]
     fn dashboard_dots_follow_their_counts() {
         let theme = Theme::dark();
-        assert_eq!(summary_color(None, &theme), theme.states.pending);
+        assert_eq!(summary_color(None, &theme), theme.states.fill.pending);
         let mut summary = Summary::default();
-        assert_eq!(summary_color(Some(&summary), &theme), theme.states.pending);
+        assert_eq!(
+            summary_color(Some(&summary), &theme),
+            theme.states.fill.pending
+        );
         summary.ok = 3;
-        assert_eq!(summary_color(Some(&summary), &theme), theme.states.ok);
+        assert_eq!(summary_color(Some(&summary), &theme), theme.states.fill.ok);
         summary.worst_unhandled = Some(CheckableState::Service(ic_model::ServiceState::Critical));
-        assert_eq!(summary_color(Some(&summary), &theme), theme.states.critical);
+        assert_eq!(
+            summary_color(Some(&summary), &theme),
+            theme.states.fill.critical
+        );
     }
 
     #[test]

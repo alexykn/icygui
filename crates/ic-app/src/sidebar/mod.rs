@@ -27,14 +27,14 @@ use gpui::{
     AnyElement, AppContext as _, ClickEvent, Context, Div, Entity, EventEmitter, FontWeight,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
     Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, prelude::FluentBuilder as _, px,
+    Window, div, prelude::FluentBuilder as _,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::{DashboardRef, ScopeSetting};
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{
     ActiveTheme as _, Divider, DividerColor, GlyphButton, Icon, IconButton, IconName, Link,
-    Metrics, Popover, StateDot, TextField, Theme, Tooltip,
+    Metrics, Popover, StateDot, TextField, Theme, Tooltip, px,
 };
 
 use crate::actions::FocusMain;
@@ -646,7 +646,7 @@ impl Sidebar {
             .h(theme.metrics.group_row_height)
             .pl(theme.metrics.sidebar_padding)
             // The `···` button's reach makes up the rest of the 12px.
-            .pr(theme.metrics.sidebar_padding - GlyphButton::REACH)
+            .pr(theme.metrics.sidebar_padding - GlyphButton::reach())
             .cursor_pointer()
             .when(group.active || menu_open, |row| row.bg(colors.group_active))
             .when(!group.active && !menu_open, |row| {
@@ -778,7 +778,7 @@ impl Sidebar {
             .gap(px(12.))
             .h(metrics.item_row_height)
             .pl(px(14.))
-            .pr(metrics.sidebar_padding - GlyphButton::REACH)
+            .pr(metrics.sidebar_padding - GlyphButton::reach())
             .cursor_pointer()
             .when(item.selected || menu_open, |row| row.bg(colors.item_active))
             .when(!item.selected && !menu_open, |row| {
@@ -864,7 +864,7 @@ impl Sidebar {
                 div()
                     .when(menu_open, gpui::Styled::invisible)
                     .group_hover(hover.clone(), gpui::Styled::invisible)
-                    .pr(GlyphButton::REACH)
+                    .pr(GlyphButton::reach())
                     .text_size(theme.text.label)
                     .text_color(colors.text_muted)
                     .children(item.count.map(|count| count.to_string())),
@@ -1016,7 +1016,7 @@ impl Sidebar {
                         .max_w(px(STATUS_NODE_MAX))
                         .ml(px(5.))
                         .truncate()
-                        .when(partial, |node| node.text_color(theme.states.warning))
+                        .when(partial, |node| node.text_color(theme.states.text.warning))
                         .child(short_node(&endpoint).to_owned()),
                 )
                 .child(div().flex_1())
@@ -1097,7 +1097,7 @@ impl Sidebar {
                         .justify_center()
                         .rounded_full()
                         .border_1()
-                        .border_color(colors.window_background)
+                        .border_color(colors.sidebar_background)
                         .bg(colors.accent)
                         .text_size(px(8.5))
                         .font_weight(FontWeight::SEMIBOLD)
@@ -1211,10 +1211,10 @@ const AGE_SLOT_CHARS: f32 = 3.;
 /// red when reconnecting or failed, grey otherwise.
 pub(crate) fn health_color(health: Health, theme: &Theme) -> gpui::Hsla {
     match health {
-        Health::Live => theme.states.ok,
-        Health::Stale => theme.states.warning,
-        Health::Reconnecting | Health::Failed => theme.states.critical,
-        Health::Connecting | Health::Idle => theme.states.pending,
+        Health::Live => theme.states.fill.ok,
+        Health::Stale => theme.states.fill.warning,
+        Health::Reconnecting | Health::Failed => theme.states.fill.critical,
+        Health::Connecting | Health::Idle => theme.states.fill.pending,
     }
 }
 
@@ -1224,6 +1224,7 @@ impl Render for Sidebar {
         let theme = cx.theme();
         let width = theme.metrics.sidebar_width;
         let border = theme.colors.border_split;
+        let background = theme.colors.sidebar_background;
         let header = self.render_header(window, cx);
         let groups = self.render_groups(cx);
         let footer = self.render_footer(cx);
@@ -1233,6 +1234,7 @@ impl Render for Sidebar {
             .flex_none()
             .w(width)
             .h_full()
+            .bg(background)
             .border_r_1()
             .border_color(border)
             .child(header)
@@ -1245,8 +1247,8 @@ impl Render for Sidebar {
 fn dot(dot: Dot, theme: &Theme) -> StateDot {
     match dot {
         Dot::State(state) => StateDot::new(state),
-        Dot::Ok => StateDot::with_color(theme.states.ok),
-        Dot::Empty => StateDot::with_color(theme.states.pending),
+        Dot::Ok => StateDot::with_color(theme.states.fill.ok),
+        Dot::Empty => StateDot::with_color(theme.states.fill.pending),
     }
 }
 
@@ -1273,7 +1275,7 @@ fn empty_note(
                 .pr(metrics.sidebar_padding)
                 .text_size(theme.text.row)
                 .text_color(theme.colors.text_muted)
-                .child(StateDot::with_color(theme.states.pending).size(metrics.sidebar_dot))
+                .child(StateDot::with_color(theme.states.fill.pending).size(metrics.sidebar_dot))
                 .child(text),
         )
         .when_some(link, |note, link| {

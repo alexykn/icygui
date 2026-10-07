@@ -1,8 +1,9 @@
 //! State indicators: the list's state circles and the sidebar's dots.
 
+use crate::px;
 use gpui::{
     App, FontWeight, Hsla, IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 use ic_model::CheckableState;
 
@@ -18,11 +19,20 @@ pub enum Paint {
 }
 
 impl Paint {
-    /// The colour in `theme`.
+    /// The colour in `theme`, for a shape (the state's fill shade).
     #[must_use]
     pub fn resolve(self, theme: &Theme) -> Hsla {
         match self {
-            Self::State(state) => theme.states.checkable(state),
+            Self::State(state) => theme.states.fill.checkable(state),
+            Self::Color(color) => color,
+        }
+    }
+
+    /// The colour in `theme`, for words (the state's text shade).
+    #[must_use]
+    pub fn resolve_text(self, theme: &Theme) -> Hsla {
+        match self {
+            Self::State(state) => theme.states.text.checkable(state),
             Self::Color(color) => color,
         }
     }
@@ -171,7 +181,7 @@ impl RenderOnce for StateCircle {
                 div()
                     .text_size(theme.text.caption)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color)
+                    .text_color(self.paint.resolve_text(theme))
                     .whitespace_nowrap()
                     .child(state.short_label())
             }),
@@ -261,9 +271,12 @@ mod tests {
     fn paint_resolves_states_through_the_theme() {
         let theme = Theme::dark();
         let critical = Paint::from(CheckableState::Service(ServiceState::Critical));
-        assert_eq!(critical.resolve(&theme), theme.states.critical);
+        assert_eq!(critical.resolve(&theme), theme.states.fill.critical);
         let down = Paint::from(CheckableState::Host(HostState::Down));
-        assert_eq!(down.resolve(&theme), theme.states.critical);
+        assert_eq!(down.resolve(&theme), theme.states.fill.critical);
+        let light = Theme::light();
+        assert_eq!(critical.resolve_text(&light), light.states.text.critical);
+        assert_ne!(critical.resolve_text(&light), critical.resolve(&light));
         let custom = Paint::from(theme.colors.accent);
         assert_eq!(custom.resolve(&theme), theme.colors.accent);
     }

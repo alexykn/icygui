@@ -4,10 +4,11 @@
 
 use std::fmt;
 
+use crate::px;
 use gpui::{
     AnyElement, App, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px, relative,
+    Window, div, prelude::FluentBuilder as _, relative,
 };
 
 use crate::components::Tooltip;
@@ -32,13 +33,23 @@ pub enum BannerTone {
 }
 
 impl BannerTone {
-    /// The tone's colour.
+    /// The tone's colour, for the tone bar and the icon.
     #[must_use]
     pub fn color(self, theme: &Theme) -> Hsla {
         match self {
-            Self::Critical => theme.states.critical,
-            Self::Warning => theme.states.warning,
+            Self::Critical => theme.states.fill.critical,
+            Self::Warning => theme.states.fill.warning,
             Self::Info => theme.colors.accent,
+        }
+    }
+
+    /// The tone's faint wash, for the banner's background.
+    #[must_use]
+    pub fn tint(self, theme: &Theme) -> Hsla {
+        match self {
+            Self::Critical => theme.colors.critical_tint,
+            Self::Warning => theme.colors.warning_tint,
+            Self::Info => theme.colors.accent_tint,
         }
     }
 }
@@ -143,7 +154,7 @@ impl RenderOnce for Banner {
             .py(px(8.))
             .pl(theme.metrics.list_padding)
             .pr(theme.metrics.list_padding)
-            .bg(tone.opacity(0.08))
+            .bg(self.tone.tint(theme))
             .border_b_1()
             .border_color(colors.border_header)
             .child(
@@ -277,8 +288,12 @@ mod tests {
     #[test]
     fn tones_use_the_state_colours() {
         let theme = Theme::dark();
-        assert_eq!(BannerTone::Critical.color(&theme), theme.states.critical);
-        assert_eq!(BannerTone::Warning.color(&theme), theme.states.warning);
+        assert_eq!(
+            BannerTone::Critical.color(&theme),
+            theme.states.fill.critical
+        );
+        assert_eq!(BannerTone::Warning.color(&theme), theme.states.fill.warning);
+        assert_eq!(BannerTone::Warning.tint(&theme), theme.colors.warning_tint);
         assert_eq!(BannerTone::Info.color(&theme), theme.colors.accent);
     }
 

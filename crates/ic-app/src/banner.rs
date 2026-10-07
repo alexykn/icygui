@@ -8,11 +8,11 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Entity, IntoElement, ParentElement as _, SharedString,
-    Styled as _, Window, div, px,
+    Styled as _, Window, div,
 };
 use ic_model::Timestamp;
 use ic_ui_kit::{
-    ActiveTheme as _, Banner, BannerTone, Button, EmptyState, Icon, IconName, Link, ProgressBar,
+    ActiveTheme as _, Banner, BannerTone, Button, EmptyState, Icon, IconName, Link, ProgressBar, px,
 };
 
 use crate::actions::{EditEnvironment, RestartEngine, ReviewCertificate};
@@ -159,8 +159,8 @@ pub(crate) fn connection_body(
 ) -> AnyElement {
     let theme = cx.theme();
     let color = match notice.tone {
-        Tone::Critical => theme.states.critical,
-        Tone::Warning => theme.states.warning,
+        Tone::Critical => theme.states.fill.critical,
+        Tone::Warning => theme.states.fill.warning,
     };
     let mut buttons = div().flex().flex_wrap().justify_center().gap(px(8.));
     for (index, action) in notice.actions.iter().enumerate() {

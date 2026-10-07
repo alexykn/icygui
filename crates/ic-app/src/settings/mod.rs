@@ -39,13 +39,13 @@ use gpui::{
     Action, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
     ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _,
 };
 use ic_config::{Appearance, General};
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{
     ActiveTheme as _, Button, Icon, IconButton, IconName, Metrics, Scrollbar, TextField, Theme,
-    Tooltip,
+    Tooltip, px,
 };
 
 use self::files::LogSummary;
@@ -1168,6 +1168,7 @@ impl SettingsPanel {
             .flex_none()
             .w(px(NAV_WIDTH))
             .h_full()
+            .bg(colors.sidebar_background)
             .border_r_1()
             .border_color(colors.border_split)
             .child(
@@ -1279,7 +1280,7 @@ impl SettingsPanel {
                 .items_center()
                 .gap(px(6.))
                 .text_size(theme.text.small)
-                .text_color(theme.states.critical)
+                .text_color(theme.states.text.critical)
                 .child(Icon::new(IconName::TriangleAlert).size(px(12.)))
                 .child("not saved")
                 .tooltip(Tooltip::new(error).builder())

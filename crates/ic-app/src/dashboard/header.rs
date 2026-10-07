@@ -4,7 +4,7 @@
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, Pixels, Point, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 use ic_config::{GroupBy, ObjectKind, Sort, SortKey, View};
 use ic_core::snapshot::Summary;
@@ -12,7 +12,7 @@ use ic_model::{CheckableState, HostState, ServiceState};
 use ic_rules::DashboardRef;
 use ic_ui_kit::{
     ActiveTheme as _, Dismissal, GlyphButton, Menu, MenuItem, PaneHeader, Popover, SummaryBar,
-    SummaryItem, Tooltip,
+    SummaryItem, Tooltip, px,
 };
 
 use super::DashboardView;
@@ -382,7 +382,7 @@ impl DashboardView {
             div()
                 .id("view-marker")
                 .text_color(if marker.partial {
-                    cx.theme().states.warning
+                    cx.theme().states.text.warning
                 } else {
                     colors.text_faint
                 })
@@ -551,7 +551,7 @@ fn demo_chip(theme: &ic_ui_kit::Theme) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{point, px};
+    use gpui::point;
 
     use super::*;
 

@@ -1,7 +1,7 @@
 //! What a dashboard row shows, computed from the snapshot for the rows on
 //! screen only. Pure, so it's tested without a window.
 
-use ic_config::{GroupBy, ObjectKind, View};
+use ic_config::{GroupBy, ListTimes, ObjectKind, View};
 use ic_core::snapshot::Snapshot;
 use ic_model::{
     CheckInfo, CheckableState, Comment, CommentKind, Host, HostState, ObjectKey, ServiceState,
@@ -19,6 +19,8 @@ pub(crate) struct ObjectRow {
     pub(crate) handled: bool,
     /// Time in state under the circle (`14m`).
     pub(crate) since: String,
+    /// Since when, as a clock time (`13:58`), for *times in lists: clock*.
+    pub(crate) clock: String,
     /// Service or host display name.
     pub(crate) name: String,
     /// The host's display name, for services.
@@ -44,6 +46,17 @@ pub(crate) struct GroupRow {
     pub(crate) host: Option<ObjectRow>,
 }
 
+impl ObjectRow {
+    /// The time the row shows, as the settings ask: how long in this state
+    /// (`14m`) or since when (`13:58`).
+    pub(crate) fn time(&self, times: ListTimes) -> &str {
+        match times {
+            ListTimes::Relative => &self.since,
+            ListTimes::Clock => &self.clock,
+        }
+    }
+}
+
 /// The row for `key`; `None` if the snapshot doesn't have the object (the
 /// list then shows a placeholder until the next snapshot).
 pub(crate) fn object_row(
@@ -60,6 +73,7 @@ pub(crate) fn object_row(
                 state: CheckableState::Host(host.state),
                 handled: host.is_handled(),
                 since: format::time_in_state(&host.check, now),
+                clock: format::state_clock(&host.check, now),
                 name: host.display_name.clone(),
                 host: None,
                 output: output(&host.check, CheckableState::Host(host.state)),
@@ -76,6 +90,7 @@ pub(crate) fn object_row(
                 state,
                 handled: service.is_handled(host_problem),
                 since: format::time_in_state(&service.check, now),
+                clock: format::state_clock(&service.check, now),
                 name: service.display_name.clone(),
                 host: Some(host.map_or_else(
                     || service_key.host.to_string(),
@@ -281,6 +296,33 @@ mod tests {
         assert_eq!(row.state, CheckableState::Service(ServiceState::Critical));
         assert!(!row.handled);
         assert_eq!(row.tag, None);
+    }
+
+    #[test]
+    fn rows_show_their_time_as_the_settings_ask() {
+        let key = ObjectKey::service("db-prod-03", "postgres-replication");
+        let snapshot = snapshot(
+            vec![host("db-prod-03", HostState::Up)],
+            vec![service(
+                "db-prod-03",
+                "postgres-replication",
+                ServiceState::Critical,
+                "CRITICAL",
+            )],
+            vec![],
+        );
+        let row = object_row(&snapshot, &key, now()).unwrap();
+        assert_eq!(row.time(ListTimes::Relative), "14m");
+        assert_eq!(row.time(ListTimes::Relative), row.since);
+        // Since when: 14 minutes before now, on the same day or not (the
+        // test's clock and zone decide), always short enough for the slot.
+        assert_eq!(row.time(ListTimes::Clock), row.clock);
+        assert_eq!(
+            row.clock,
+            format::list_clock(ago(14. * 60.), now()),
+            "the state change's clock time"
+        );
+        assert!(row.clock.chars().count() <= 6);
     }
 
     #[test]

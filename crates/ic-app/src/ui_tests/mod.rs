@@ -9,6 +9,10 @@
 //! on the test thread only on Linux (macOS needs the process's main thread),
 //! so these tests are Linux-only. Each test runs one app; a lock keeps them
 //! from running in parallel.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "pointer positions and window sizes are real pixels"
+)]
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -42,6 +46,7 @@ use crate::window_state::InitialBounds;
 use crate::workspace::{self, ToggleSidebar, Workspace};
 
 mod actions;
+mod appearance;
 mod background;
 mod editing;
 mod environments;

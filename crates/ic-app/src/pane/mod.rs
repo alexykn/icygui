@@ -28,13 +28,13 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
     ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    Window, div, prelude::FluentBuilder as _, px,
+    Window, div, prelude::FluentBuilder as _,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::ObjectMode;
 use ic_ui_kit::{
     ActiveTheme as _, Button, Dismissal, EmptyState, GlyphButton, Icon, IconButton, IconName, Link,
-    Menu, MenuItem, PaneHeader, Popover, Scrollbar, Theme, Tooltip,
+    Menu, MenuItem, PaneHeader, Popover, Scrollbar, Theme, Tooltip, px,
 };
 
 use crate::actions::{
@@ -941,7 +941,7 @@ fn failure_line(pane: &ObjectPane, cx: &Context<ObjectPane>) -> Option<impl Into
                 div().pt(px(2.)).child(
                     Icon::new(IconName::TriangleAlert)
                         .size(theme.metrics.icon_small)
-                        .color(theme.states.critical),
+                        .color(theme.states.fill.critical),
                 ),
             )
             .child(

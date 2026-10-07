@@ -1,8 +1,9 @@
 //! Single-line text fields: gpui-component's input, styled like the design.
 
+use crate::px;
 use gpui::{
     App, Entity, Focusable as _, IntoElement, ParentElement as _, Pixels, RenderOnce, Styled,
-    Window, div, px,
+    Window, div,
 };
 use gpui_component::input::{Input, InputState};
 

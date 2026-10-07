@@ -5,11 +5,12 @@
 use std::fmt;
 use std::rc::Rc;
 
+use crate::px;
 use gpui::{
     Anchor, AnyElement, AnyWindowHandle, App, BoxShadow, ClickEvent, ElementId, Global, Hsla,
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Point,
     RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
-    Window, anchored, deferred, div, point, prelude::FluentBuilder as _, px, relative,
+    Window, anchored, deferred, div, point, prelude::FluentBuilder as _, relative,
 };
 
 use crate::components::{KeyHint, Tooltip};

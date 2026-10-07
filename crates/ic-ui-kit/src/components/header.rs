@@ -4,10 +4,11 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::px;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 
 use crate::components::{GlyphButton, Tooltip};
@@ -372,8 +373,11 @@ pub fn sub_tab_width(label: &str, text_size: Pixels) -> Pixels {
     text_size * (chars * crate::theme::CHAR_WIDTH)
 }
 
-/// The space [`SubTabs`] puts between two tabs.
-pub const SUB_TAB_GAP: Pixels = px(TAB_GAP);
+/// The space [`SubTabs`] puts between two tabs, at the interface size.
+#[must_use]
+pub fn sub_tab_gap() -> Pixels {
+    px(TAB_GAP)
+}
 
 #[cfg(test)]
 mod tests {

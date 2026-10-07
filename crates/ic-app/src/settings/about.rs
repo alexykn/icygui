@@ -5,9 +5,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Image, ImageFormat, IntoElement, ParentElement as _, Styled as _, div, img, px,
+    AnyElement, App, Image, ImageFormat, IntoElement, ParentElement as _, Styled as _, div, img,
 };
-use ic_ui_kit::{ActiveTheme as _, DialogBody, KvTable};
+use ic_ui_kit::{ActiveTheme as _, DialogBody, KvTable, px};
 
 /// The app icon, 128 px.
 const ICON: &[u8] = include_bytes!("../../../../assets/icons/icygui-128.png");

@@ -9,13 +9,14 @@
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _,
 };
+use ic_config::ListTimes;
 use ic_core::snapshot::Snapshot;
 use ic_model::{CheckableState, Host, ObjectKey, Timestamp};
 use ic_ui_kit::{
     ActiveTheme as _, CircleSize, CompactRow, KvTable, Link, StateCircle, SubTabs, Theme, Tooltip,
-    TreeTable,
+    TreeTable, px,
 };
 
 use super::service::{full_output, links_table, notes};
@@ -81,7 +82,7 @@ pub(super) fn render(
                 .flex()
                 .flex_col()
                 .children(notes)
-                .child(services_tab(&services, host.is_problem(), now, cx))
+                .child(services_tab(pane, &services, host.is_problem(), now, cx))
                 .into_any_element()
         }
         HostTab::History => super::history::host_tab(pane, &host.display_name, now, cx),
@@ -159,7 +160,7 @@ fn title(host: &Host, late: Option<String>, now: Timestamp, theme: &Theme) -> im
                             line.child(
                                 div()
                                     .flex_none()
-                                    .text_color(theme.states.warning)
+                                    .text_color(theme.states.text.warning)
                                     .child(format!("\u{a0}· {late}")),
                             )
                         }),
@@ -168,12 +169,14 @@ fn title(host: &Host, late: Option<String>, now: Timestamp, theme: &Theme) -> im
 }
 
 fn services_tab(
+    pane: &ObjectPane,
     services: &model::HostServices,
     host_problem: bool,
     now: Timestamp,
     cx: &Context<ObjectPane>,
 ) -> AnyElement {
     let theme = cx.theme();
+    let times = pane.state.read(cx).appearance().list_times;
     let rows = services.shown.iter().map(|service| {
         let key = service.object_key();
         CompactRow::new(SharedString::from(format!(
@@ -187,7 +190,10 @@ fn services_tab(
         )
         .title(service.display_name.clone())
         .detail(service.check.output().to_owned())
-        .trailing(format::time_in_state(&service.check, now))
+        .trailing(match times {
+            ListTimes::Relative => format::time_in_state(&service.check, now),
+            ListTimes::Clock => format::state_clock(&service.check, now),
+        })
         .on_click(
             cx.listener(move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
                 pane.navigate(key.clone(), cx);

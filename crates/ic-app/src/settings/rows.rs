@@ -6,9 +6,9 @@
 
 use gpui::{
     AnyElement, FontWeight, HighlightStyle, IntoElement, ParentElement as _, SharedString,
-    Styled as _, StyledText, div, prelude::FluentBuilder as _, px,
+    Styled as _, StyledText, div, prelude::FluentBuilder as _,
 };
-use ic_ui_kit::{Icon, IconName, Theme};
+use ic_ui_kit::{Icon, IconName, Theme, px};
 
 use super::model::match_ranges;
 
@@ -166,7 +166,7 @@ impl Row {
                             div()
                                 .mt(px(4.))
                                 .text_size(theme.text.label)
-                                .text_color(theme.states.critical)
+                                .text_color(theme.states.text.critical)
                                 .child(error),
                         )
                     }),

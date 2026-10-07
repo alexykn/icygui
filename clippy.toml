@@ -3,3 +3,10 @@ allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-print-in-tests = true
 allow-unwrap-in-tests = true
+
+# Lengths in views are design pixels that follow the interface size: write
+# them with `ic_ui_kit::px`. `gpui::px` is for real pixels only (window
+# geometry, test coordinates), with an `#[expect]` saying so.
+disallowed-methods = [
+    { path = "gpui::px", reason = "lengths follow the interface size: use ic_ui_kit::px (gpui::px only for real pixels, with an #[expect] saying why)" },
+]

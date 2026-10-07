@@ -6,12 +6,12 @@
 
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Styled as _, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Pixels, Styled as _, div, prelude::FluentBuilder as _,
 };
 use ic_model::ObjectKey;
 use ic_rules::DashboardRef;
 use ic_ui_kit::{
-    ActiveTheme as _, Button, GlyphButton, KeyHint, Link, Menu, MenuItem, Popover, Tooltip,
+    ActiveTheme as _, Button, GlyphButton, KeyHint, Link, Menu, MenuItem, Popover, Tooltip, px,
 };
 
 use super::DashboardView;
@@ -21,7 +21,7 @@ use crate::menu_state::down_position;
 use crate::operate::expression;
 
 /// The selection bar's height.
-pub(crate) const SELECTION_BAR_HEIGHT: Pixels = px(40.);
+pub(crate) const SELECTION_BAR_HEIGHT: f32 = 40.;
 
 /// Below this list width the bar drops its key hints and shortens labels.
 const COMPACT_BELOW: f32 = 760.;
@@ -92,7 +92,7 @@ impl DashboardView {
                 .flex_none()
                 .items_center()
                 .gap(px(8.))
-                .h(SELECTION_BAR_HEIGHT)
+                .h(px(SELECTION_BAR_HEIGHT))
                 .px(theme.metrics.list_padding)
                 .border_t_1()
                 .border_color(colors.border_header)

@@ -1,9 +1,10 @@
 //! Tooltips: a short label with an optional key hint, shown by GPUI after a
 //! hover delay.
 
+use crate::px;
 use gpui::{
     AnyView, App, AppContext as _, BoxShadow, Context, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Window, div, point, prelude::FluentBuilder as _, px,
+    SharedString, Styled as _, Window, div, point, prelude::FluentBuilder as _,
 };
 
 use crate::theme::ActiveTheme as _;

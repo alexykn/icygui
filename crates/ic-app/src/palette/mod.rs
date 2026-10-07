@@ -17,11 +17,11 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement,
     KeyBinding, ParentElement as _, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _,
 };
 use ic_model::Timestamp;
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
-use ic_ui_kit::{ActiveTheme as _, Icon, IconName, KeyHint, StateDot, TextField, Theme};
+use ic_ui_kit::{ActiveTheme as _, Icon, IconName, KeyHint, StateDot, TextField, Theme, px};
 
 pub(crate) use self::model::{Focus, PaletteCommand, PaletteItem};
 use self::model::{PaletteIndex, Section};
@@ -479,9 +479,9 @@ fn dot_of(dot: Dot, theme: &Theme) -> StateDot {
 /// The colour of a row's dot.
 fn dot_color(dot: Dot, theme: &Theme) -> gpui::Hsla {
     match dot {
-        Dot::State(state) => theme.states.checkable(state),
-        Dot::Ok => theme.states.ok,
-        Dot::Empty => theme.states.pending,
+        Dot::State(state) => theme.states.fill.checkable(state),
+        Dot::Ok => theme.states.fill.ok,
+        Dot::Empty => theme.states.fill.pending,
     }
 }
 

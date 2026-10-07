@@ -8,14 +8,14 @@ use std::time::Instant;
 
 use gpui::{
     ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use ic_config::DashboardGroup;
 use ic_model::{Timestamp, format_compact};
 use ic_rules::{DashboardRef, ScopeSetting};
 use ic_ui_kit::{
     ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissal, IconName, ItemAction, Link, Menu, MenuItem,
-    Tooltip,
+    Tooltip, px,
 };
 
 use super::{RenameTarget, Sidebar, SidebarEvent};
@@ -427,8 +427,10 @@ impl Sidebar {
             DETAILS_WIDTH
         };
         let nodes = node_rows(state);
+        // In the design's pixels: the popover's rows scale with the
+        // interface size, the window doesn't.
         let budget = switcher_budget(
-            f32::from(self.viewport),
+            f32::from(self.viewport) / ic_ui_kit::scale(),
             state.environments().len(),
             nodes.len(),
         );
@@ -524,9 +526,9 @@ impl Sidebar {
             .enumerate()
             .map(|(index, node)| {
                 let color = match node.state {
-                    Some(NodeState::Connected) => theme.states.ok,
-                    Some(NodeState::Disconnected) => theme.states.critical,
-                    Some(NodeState::Unknown) | None => theme.states.pending,
+                    Some(NodeState::Connected) => theme.states.fill.ok,
+                    Some(NodeState::Disconnected) => theme.states.fill.critical,
+                    Some(NodeState::Unknown) | None => theme.states.fill.pending,
                 };
                 MenuItem::new(("cluster-node", index), node.name)
                     .dot(color)
@@ -618,7 +620,7 @@ impl Sidebar {
         .selected(is_active)
         .dot(super::health_color(health, theme));
         let item = if partial {
-            item.detail_colored(detail, theme.states.warning)
+            item.detail_colored(detail, theme.states.text.warning)
         } else {
             item.detail(detail)
         };
@@ -705,7 +707,7 @@ impl Sidebar {
                         .min_w_0()
                         .truncate()
                         .line_height(px(CHIP_HEIGHT))
-                        .text_color(theme.states.warning)
+                        .text_color(theme.states.text.warning)
                         .child(format!(
                             "{} muted until {}",
                             environment.name,

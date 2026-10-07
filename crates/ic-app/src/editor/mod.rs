@@ -26,7 +26,7 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
     MouseButton, ParentElement as _, Render, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle,
-    Window, div, prelude::FluentBuilder as _, px, uniform_list,
+    Window, div, prelude::FluentBuilder as _, uniform_list,
 };
 use ic_config::{GroupBy, ObjectKind, Sort, SortKey, View};
 use ic_core::snapshot::{DashboardResult, DashboardRow};
@@ -36,7 +36,7 @@ use ic_ui_kit::input::{Escape, InputEvent, InputState, TextareaState};
 use ic_ui_kit::{
     ActiveTheme as _, Button, Dismissal, EmptyState, Field, FieldTone, Icon, IconName, Link, Menu,
     MenuItem, Metrics, Popover, Scrollbar, Segmented, SummaryBar, SummaryItem, Switch, TextArea,
-    TextField, Theme,
+    TextField, Theme, px,
 };
 
 pub(crate) use self::model::EditorTarget;
@@ -479,7 +479,7 @@ impl DashboardEditor {
                     .leading(
                         Icon::new(IconName::TriangleAlert)
                             .size(px(20.))
-                            .color(theme.states.critical),
+                            .color(theme.states.fill.critical),
                     )
                     .detail(error.clone())
                     .max_width(px(520.))
@@ -556,6 +556,7 @@ impl DashboardEditor {
         let snapshot = state.snapshot();
         let theme = cx.theme();
         let now = Timestamp::now();
+        let times = state.appearance().list_times;
         let show_host = view.group_by != GroupBy::Host;
         let grouped = view.group_by != GroupBy::None;
         let mut group: Option<String> = None;
@@ -564,15 +565,17 @@ impl DashboardEditor {
                 let row = match rows.get(index)? {
                     DashboardRow::Object(key) => {
                         let id = row_id(group.as_deref(), key);
-                        object_row(snapshot, id, key, show_host, now, theme).indent(if grouped {
-                            theme.metrics.row_indent
-                        } else {
-                            px(0.)
-                        })
+                        object_row(snapshot, id, key, show_host, times, now, theme).indent(
+                            if grouped {
+                                theme.metrics.row_indent
+                            } else {
+                                px(0.)
+                            },
+                        )
                     }
                     DashboardRow::Group { label, count } => {
                         group = Some(label.clone());
-                        group_header(snapshot, view, label, *count, now, theme)
+                        group_header(snapshot, view, label, *count, times, now, theme)
                     }
                 };
                 Some(row.into_any_element())
@@ -714,7 +717,7 @@ impl DashboardEditor {
                             div()
                                 .px(px(13.))
                                 .text_size(theme.text.small)
-                                .text_color(theme.states.critical)
+                                .text_color(theme.states.text.critical)
                                 .child(div().whitespace_nowrap().child(line))
                                 .child(div().whitespace_nowrap().child(caret)),
                         )
@@ -829,7 +832,7 @@ impl DashboardEditor {
                 footer.child(
                     div()
                         .text_size(theme.text.label)
-                        .text_color(theme.states.critical)
+                        .text_color(theme.states.text.critical)
                         .child(error),
                 )
             })

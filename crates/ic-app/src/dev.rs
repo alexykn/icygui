@@ -23,7 +23,13 @@
 //!   the list, screen 2c), `tab` (postgres-replication as a tab), or an
 //!   object name (`db-prod-03`, `db-prod-03!postgres-replication`, or
 //!   `tab:<name>` for a tab).
+//! - `ICYGUI_DEMO_APPEARANCE=light,compact,clock` starts with these
+//!   appearance settings, comma separated: a theme (`system`, `dark`,
+//!   `light`), an interface size (`small`, `default`, `large`), a row
+//!   density (`comfortable`, `compact`) and times in lists (`relative`,
+//!   `clock`); the rest keep the demo's defaults.
 
+use ic_config::{Appearance, InterfaceSize, ListTimes, RowDensity, ThemeChoice};
 use ic_model::ObjectKey;
 
 use crate::live::demo::DemoFault;
@@ -42,6 +48,8 @@ pub(crate) const OPEN_ENV: &str = "ICYGUI_DEMO_OPEN";
 pub(crate) const STORM_ENV: &str = "ICYGUI_DEMO_STORM";
 /// How many demo environments.
 pub(crate) const ENVIRONMENTS_ENV: &str = "ICYGUI_DEMO_ENVIRONMENTS";
+/// Appearance settings at start.
+pub(crate) const APPEARANCE_ENV: &str = "ICYGUI_DEMO_APPEARANCE";
 
 /// What to open at start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +85,8 @@ pub(crate) struct DevOptions {
     pub(crate) storm_every: Option<u64>,
     /// `ICYGUI_DEMO_ENVIRONMENTS`.
     pub(crate) environments: Option<usize>,
+    /// `ICYGUI_DEMO_APPEARANCE`.
+    pub(crate) appearance: Option<Appearance>,
 }
 
 impl DevOptions {
@@ -131,6 +141,9 @@ impl DevOptions {
             }
             parsed
         });
+        let appearance = get(APPEARANCE_ENV)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_appearance(&value));
         Self {
             scenario,
             seed,
@@ -139,6 +152,7 @@ impl DevOptions {
             open,
             storm_every,
             environments,
+            appearance,
         }
     }
 
@@ -151,7 +165,37 @@ impl DevOptions {
             || self.open.is_some()
             || self.storm_every.is_some()
             || self.environments.is_some()
+            || self.appearance.is_some()
     }
+}
+
+/// The appearance `value` names (`light,compact,clock`), on the defaults;
+/// words it doesn't know are ignored with a warning.
+fn parse_appearance(value: &str) -> Appearance {
+    let mut appearance = Appearance::default();
+    for word in value
+        .split(',')
+        .map(str::trim)
+        .filter(|word| !word.is_empty())
+    {
+        match word {
+            "system" => appearance.theme = ThemeChoice::System,
+            "dark" => appearance.theme = ThemeChoice::Dark,
+            "light" => appearance.theme = ThemeChoice::Light,
+            "small" => appearance.interface_size = InterfaceSize::Small,
+            "default" => appearance.interface_size = InterfaceSize::Default,
+            "large" => appearance.interface_size = InterfaceSize::Large,
+            "comfortable" => appearance.row_density = RowDensity::Comfortable,
+            "compact" => appearance.row_density = RowDensity::Compact,
+            "relative" => appearance.list_times = ListTimes::Relative,
+            "clock" => appearance.list_times = ListTimes::Clock,
+            other => tracing::warn!(
+                word = other,
+                "{APPEARANCE_ENV} doesn't know it; ignoring it"
+            ),
+        }
+    }
+    appearance
 }
 
 fn replication() -> ObjectKey {
@@ -250,6 +294,24 @@ mod tests {
         assert_eq!(parse(&[(OPEN_ENV, "!broken")]).open, None);
         assert_eq!(parse(&[(OPEN_ENV, "tab:")]).open, None);
         assert_eq!(parse(&[(OPEN_ENV, "  ")]).open, None);
+    }
+
+    #[test]
+    fn appearance_words() {
+        let appearance = parse(&[(APPEARANCE_ENV, "light, compact,clock,large,sepia")])
+            .appearance
+            .unwrap();
+        assert_eq!(appearance.theme, ThemeChoice::Light);
+        assert_eq!(appearance.row_density, RowDensity::Compact);
+        assert_eq!(appearance.list_times, ListTimes::Clock);
+        assert_eq!(appearance.interface_size, InterfaceSize::Large);
+        let dark = parse(&[(APPEARANCE_ENV, "dark")]).appearance.unwrap();
+        assert_eq!(
+            dark.row_density,
+            RowDensity::Comfortable,
+            "the rest: defaults"
+        );
+        assert_eq!(parse(&[(APPEARANCE_ENV, " ")]).appearance, None);
     }
 
     #[test]

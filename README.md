@@ -163,7 +163,7 @@ Trying it against production for the first time? Read the [first-run checklist](
 
 ## Status
 
-Release candidate: everything planned for the first release is built, and CI builds and tests it on Linux and macOS. The desktop integration has so far only run on Linux, though: on macOS the menu-bar icon, notifications with their *Acknowledge* and *Open* buttons, launch at login and keychain access after an update are still unverified (the [Mac checklist](docs/spikes.md#still-to-run-on-a-mac)). The first production trial is next. Light theme, multi-view dashboards, a host-group grid and cluster health come after it (see [PLAN.md](PLAN.md)).
+Release candidate: everything planned for the first release is built, and CI builds and tests it on Linux and macOS. The desktop integration has so far only run on Linux, though: on macOS the menu-bar icon, notifications with their *Acknowledge* and *Open* buttons, launch at login and keychain access after an update are still unverified (the [Mac checklist](docs/spikes.md#still-to-run-on-a-mac)). The first production trial is next. Work on v1 has begun on the development branch: a settings panel in the style of Zed's, and the appearance settings (a light theme that follows the desktop's light or dark mode, three interface sizes, compact rows and clock times in lists). Multi-view dashboards, a host-group grid and cluster health come after it (see [PLAN.md](PLAN.md)).
 
 ## Licence
 

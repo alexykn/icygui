@@ -34,14 +34,13 @@ use std::collections::HashSet;
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
-    px,
 };
 use gpui::{BoxShadow, point};
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::Tone;
 use ic_ui_kit::{
     ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissable, Dismissal, Icon, IconButton, IconName, Link,
-    Menu, MenuItem, Popover, StateDot, Theme, Tooltip, chip_width,
+    Menu, MenuItem, Popover, StateDot, Theme, Tooltip, chip_width, px,
 };
 
 use super::{Sidebar, SidebarEvent, SidebarMenu};
@@ -107,10 +106,10 @@ pub(super) struct CentreState {
 /// The colour of a notification's tone.
 pub(crate) fn tone_color(tone: Tone, theme: &Theme) -> gpui::Hsla {
     match tone {
-        Tone::Critical => theme.states.critical,
-        Tone::Warning => theme.states.warning,
-        Tone::Unknown => theme.states.unknown,
-        Tone::Recovery => theme.states.ok,
+        Tone::Critical => theme.states.fill.critical,
+        Tone::Warning => theme.states.fill.warning,
+        Tone::Unknown => theme.states.fill.unknown,
+        Tone::Recovery => theme.states.fill.ok,
         Tone::Info => theme.colors.accent,
     }
 }
@@ -375,7 +374,9 @@ impl Sidebar {
         let has_environment = state.environment().is_some();
         let header = Self::centre_header(&view, theme, cx);
         let pause_row = has_environment.then(|| self.centre_pause(now, theme, cx));
-        let height = list_height(f32::from(self.viewport));
+        // The window's height in the design's pixels: the card's parts
+        // scale with the interface size, the window doesn't.
+        let height = list_height(f32::from(self.viewport) / ic_ui_kit::scale());
         let list = self.centre_list(&view, height, theme, cx);
         let bar = self.centre_bar(state, has_environment, theme, cx);
         let card = div()
@@ -571,12 +572,14 @@ impl Sidebar {
             .iter()
             .map(|tab| f32::from(chip_width(&tab.label, size)))
             .collect();
-        let gear = f32::from(theme.metrics.icon_button) + 8.;
+        // In window pixels: the chips' widths follow the interface size.
+        let scale = ic_ui_kit::scale();
+        let gear = f32::from(theme.metrics.icon_button) + 8. * scale;
         let (shown, hidden) = fit_tabs(
             &widths,
             selected,
-            CENTRE_WIDTH - 2. * CENTRE_PADDING - 2. - gear,
-            CHIP_GAP,
+            (CENTRE_WIDTH - 2. * CENTRE_PADDING) * scale - 2. - gear,
+            CHIP_GAP * scale,
             f32::from(chip_width(MORE, size)),
         );
         let mut chips: Vec<AnyElement> = shown
@@ -709,7 +712,7 @@ impl Sidebar {
                     div()
                         .flex_1()
                         .line_height(px(CHIP_HEIGHT))
-                        .text_color(theme.states.warning)
+                        .text_color(theme.states.text.warning)
                         .child(format!(
                             "{}: shown silently",
                             paused_text(environments, until, now)
@@ -737,7 +740,7 @@ impl Sidebar {
                         .line_height(px(CHIP_HEIGHT))
                         .min_w_0()
                         .truncate()
-                        .text_color(theme.states.warning)
+                        .text_color(theme.states.text.warning)
                         .tooltip(Tooltip::text(text.clone()))
                         .child(text),
                 )
@@ -882,6 +885,8 @@ impl Sidebar {
         cx: &Context<Self>,
     ) -> AnyElement {
         let colors = theme.colors;
+        // Compact rows drop the output line, as in the dashboard list.
+        let compact = theme.density == ic_ui_kit::Density::Compact;
         let tone = tone_color(entry.tone, theme);
         let unread = storm.map_or(entry.unread, StormGroup::unread);
         let silent = entry.is_silent();
@@ -903,11 +908,11 @@ impl Sidebar {
             .flex()
             .items_start()
             .gap(px(10.))
-            .pl(px(if member {
-                CENTRE_PADDING + f32::from(theme.metrics.row_indent)
+            .pl(if member {
+                px(CENTRE_PADDING) + theme.metrics.row_indent
             } else {
-                CENTRE_PADDING
-            }))
+                px(CENTRE_PADDING)
+            })
             .pr(px(CENTRE_PADDING))
             .py(px(7.))
             .cursor_pointer()
@@ -951,7 +956,7 @@ impl Sidebar {
                             .text_color(title_color)
                             .child(entry.title.clone()),
                     )
-                    .when(!entry.body.is_empty(), |column| {
+                    .when(!compact && !entry.body.is_empty(), |column| {
                         column.child(
                             div()
                                 .truncate()

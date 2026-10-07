@@ -8,6 +8,7 @@
 
 mod actions;
 mod app_state;
+mod appearance;
 mod background;
 mod banner;
 mod chrome;
@@ -65,6 +66,7 @@ const APP_ID: &str = "io.github.alexykn.icygui";
 const APP_NAME: &str = "icygui";
 
 /// The main window's size at start: the design's.
+#[expect(clippy::disallowed_methods, reason = "window geometry is real pixels")]
 const WINDOW_SIZE: Size<Pixels> = Size {
     width: px(1440.),
     height: px(900.),
@@ -211,6 +213,9 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
                 if let Some(count) = dev.environments {
                     live::demo::set_count(&mut config, count);
                 }
+                if let Some(appearance) = dev.appearance {
+                    config.appearance = appearance;
+                }
                 let mut state = AppState::demo(config, now);
                 if let Some(name) = &dev.dashboard {
                     if let Some(reference) = state.dashboard_named(name) {
@@ -317,6 +322,10 @@ fn live_state(paths: &Paths, now: Timestamp) -> AppState {
 }
 
 /// Opens the main window where `bounds` says.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "window geometry is real pixels; the traffic lights are the system's"
+)]
 fn open_main_window(
     state: Entity<AppState>,
     bounds: InitialBounds,

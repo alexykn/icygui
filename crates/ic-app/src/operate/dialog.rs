@@ -18,14 +18,14 @@
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
 };
 use ic_core::snapshot::Snapshot;
 use ic_model::{CheckableState, ChildOptions, CommandType, ObjectKey, Timestamp};
 use ic_ui_kit::input::{InputEvent, InputState, TextareaState};
 use ic_ui_kit::{
     ActiveTheme as _, Button, ButtonVariant, Chip, DialogBody, Field, FieldTone, KvTable,
-    Segmented, StateDot, Switch, TextArea, TextField, Theme,
+    Segmented, StateDot, Switch, TextArea, TextField, Theme, px,
 };
 
 use super::ActionSpec;
@@ -865,7 +865,7 @@ impl ActionDialog {
         if targets.is_empty() {
             column = column.child(
                 div()
-                    .text_color(theme.states.warning)
+                    .text_color(theme.states.text.warning)
                     .child(format!("{}.", self.kind.nothing())),
             );
         }
@@ -877,7 +877,7 @@ impl ActionDialog {
                     .gap(px(8.))
                     .child(match object_state(snapshot, object) {
                         Some(state) => StateDot::new(state).size(px(7.)),
-                        None => StateDot::with_color(theme.states.pending).size(px(7.)),
+                        None => StateDot::with_color(theme.states.fill.pending).size(px(7.)),
                     })
                     .child(
                         div()
@@ -1368,7 +1368,7 @@ impl ActionDialog {
             table.into_any_element(),
             div()
                 .text_size(theme.text.small)
-                .text_color(theme.states.warning)
+                .text_color(theme.states.text.warning)
                 .child("Icinga runs it at once on the endpoint; it can't be called back.")
                 .into_any_element(),
         ]
@@ -1560,7 +1560,7 @@ impl Render for ActionDialog {
             body = body.child(
                 div()
                     .text_size(theme.text.small)
-                    .text_color(theme.states.critical)
+                    .text_color(theme.states.text.critical)
                     .child(error.clone()),
             );
         }

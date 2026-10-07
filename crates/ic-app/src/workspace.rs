@@ -28,14 +28,14 @@ use gpui::{
     Action, AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
     FocusHandle, Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, MouseDownEvent,
     ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task,
-    Window, div, prelude::FluentBuilder as _, px,
+    Window, div, prelude::FluentBuilder as _,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{
     ActiveTheme as _, Button, ButtonVariant, DialogBody, Divider, DividerColor, Field, IconButton,
-    IconName, Modal, ModalPlacement, Root, TextField, Theme, Tooltip,
+    IconName, Modal, ModalPlacement, Root, TextField, Theme, Tooltip, px,
 };
 
 use crate::actions::{
@@ -45,6 +45,7 @@ use crate::actions::{
 };
 use crate::app_state::editing::DashboardDraft;
 use crate::app_state::{AppState, UserNotice};
+use crate::appearance;
 use crate::background::presence;
 use crate::chrome::{self, Controls, WindowControls, WindowDrag};
 use crate::dashboard::{DashboardEvent, DashboardView};
@@ -292,6 +293,10 @@ impl Workspace {
         // may first report it hidden until it is mapped; only changes
         // count).
         presence::shown(&state, cx);
+        // The appearance settings, with the desktop's light or dark mode as
+        // this window reports it, before the first frame.
+        let appearance = *state.read(cx).appearance();
+        appearance::window_opened(window.appearance(), appearance, cx);
         let sidebar = cx.new(|cx| Sidebar::new(state.clone(), window, cx));
         let dashboard = cx.new(|cx| DashboardView::new(state.clone(), cx));
         // Keyboard shortcuts reach the list through the focus path.
@@ -307,6 +312,12 @@ impl Workspace {
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
                 this.window_moved(window, cx);
+            }),
+            // The desktop switched between light and dark: *follow system*
+            // follows at once.
+            cx.observe_window_appearance(window, |this, window, cx| {
+                let appearance = *this.state.read(cx).appearance();
+                appearance::system_changed(window.appearance(), appearance, cx);
             }),
             // Out of sight for a while (minimised, another desktop), the
             // environment on screen turns quiet too (PERF-09).
@@ -608,6 +619,10 @@ impl Workspace {
     /// onboarding form current, and moves the focus when the main area
     /// switches between the dashboard and a tab.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A changed appearance setting (the settings panel, the settings
+        // file) applies at once.
+        let appearance = *self.state.read(cx).appearance();
+        appearance::apply(appearance, cx);
         let active = self
             .state
             .read(cx)
@@ -2479,7 +2494,7 @@ impl Render for Workspace {
         let toasts = crate::operate::toasts::render(
             &self.state,
             if bar {
-                16. + f32::from(crate::dashboard::SELECTION_BAR_HEIGHT)
+                16. + crate::dashboard::SELECTION_BAR_HEIGHT
             } else {
                 16.
             },

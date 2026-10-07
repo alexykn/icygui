@@ -57,6 +57,7 @@ Environment variables for development (the `ICYGUI_DEMO_*` ones only affect `--d
 | `ICYGUI_DEMO_OPEN=service` | Opens an object once it is loaded: `service` (postgres-replication beside the list, screen 2b), `host` (its host db-prod-03, screen 2c), `tab` (postgres-replication as a tab), an object name (`db-prod-03`, `db-prod-03!postgres-replication`) or `tab:<name>`. |
 | `ICYGUI_DEMO_STORM=20` | Starts the simulator's problem storm (24 services fail at once) every 20 seconds instead of every five minutes: a few desktop notifications, the rest silent, then one summary, for the notification centre. `staging` and `lab` storm three and six times less often (every 15 and 30 minutes without it). |
 | `ICYGUI_DEMO_ENVIRONMENTS=1` | How many demo environments run (1 to 11, default 3): `1` shows the app with a single environment (no scope tabs in the notification centre), more than 3 add environments serving `lab` (`dev-cluster`, `qa`, `edge-ams`, …), for the switcher and the centre's `···` overflow. |
+| `ICYGUI_DEMO_APPEARANCE=light,compact,clock` | Starts with these appearance settings, comma separated: a theme (`system`, `dark`, `light`), an interface size (`small`, `default`, `large`), a row density (`comfortable`, `compact`) and times in lists (`relative`, `clock`); the rest keep their defaults. The demo saves nothing, so the panel's changes last until it quits. Under Xvfb there is no desktop colour scheme: *follow system* is light there. |
 | `ICYGUI_WINDOW_CONTROLS=always` | Draws the window's own close/minimise/maximise buttons (`never`, `auto`): on Linux the default depends on the desktop; screenshots under Xvfb need `always`. |
 | `GPUI_X11_SCALE_FACTOR=2` | GPUI's own switch (X11): renders at that scale whatever the display reports; `cargo xtask screenshots` uses 2. |
 
@@ -76,7 +77,7 @@ cargo xtask screenshots --only keyboard,palette  # some scenes, by name
 ```
 
 Linux only. It builds the debug app, starts its own Xvfb on a free display (`:90` and up), and runs `icygui --demo` once per scene:
-- with `ICYGUI_DEMO_SEED=7`, `ICYGUI_WINDOW_CONTROLS=always` and the scene's `ICYGUI_DEMO_*` switches (above);
+- with `ICYGUI_DEMO_SEED=7`, `ICYGUI_WINDOW_CONTROLS=always`, `ICYGUI_DEMO_APPEARANCE=dark` (the README shows the dark theme; Xvfb has no desktop colour scheme) and the scene's `ICYGUI_DEMO_*` switches (above);
 - with `GPUI_X11_SCALE_FACTOR=2`, so the stills are rendered at twice the size (2880×1800 for the default 1440×900 window) and stay sharp on high-density screens;
 - with a private home, XDG directories and runtime directory under `target/screenshots/`, and without `DBUS_SESSION_BUS_ADDRESS`, so nothing reaches the desktop you run it on (no notifications, no tray icon, no keychain);
 - drives it with `xdotool` (keys, typing, and two clicks at fixed window coordinates) and records it with `ffmpeg`'s `x11grab`.
@@ -90,11 +91,14 @@ The scenes are a table in `xtask/src/screenshots.rs` (`SCENES`): a name (the fil
 - **The design rule.** Everything fits the design (`design/project/*.dc.html`): the theme's tokens (`ic_ui_kit::Theme`) and the kit's components, nothing invented beside them. Nothing changes size or position with the state it shows (a count, a status, a hover, a selection, an object's state, an action on its way): slots are fixed (`Button::width` for a button whose label changes, `Button::key_blank` for a key hint that doesn't apply just now), long text is cut short, a menu or card keeps its size while it is open, and a list doesn't move under the pointer (the notification centre holds arrivals while the pointer is over it).
 - **Selection** is the selected-row background (`row_selected`), in lists, menus (`MenuItem::selected`: the environment on screen, the connected node) and chips (`Chip::filled`). Check marks only in menus that are lists of choices or toggles (sort, group by, notifications), where every item keeps the check column so the rows line up.
 - **No trailing `…` on labels**: buttons, links, menu items, palette commands and dialog texts (*add environment*, *Settings*, *Review certificate*, *delete dashboard*), and the user guide names them the same way. An ellipsis appears only where text is actually cut short for lack of room (a name, an output line, an excerpt), on **progress text**, which says something is under way (`Loading services…`, `Connecting to master-01…`, `ack pending…`, `checking…`, `saving…`, `testing…`, `updating…`, a toast's `Acknowledging …`; the user accepted this, PLAN.md §4.1), in the search fields' placeholders the design shows (`Search dashboards…`), and as "and so on" inside example text (`e.g. AB:CD:…`).
+- **Colours and lengths come from the theme**, so the light theme, the interface size and the row density reach every view: colours from `cx.theme()` (never a literal; a state colour as `states.fill` for shapes and `states.text` for words), lengths in design pixels with `ic_ui_kit::px` (scaled to the interface size; `gpui::px` is a disallowed method outside window geometry and test coordinates), a list row's state circle through `ListRow::state` (it follows the row density). Arithmetic against the window's size converts between window and design pixels with `ic_ui_kit::scale()`.
 - **Marks in a fixed slot**: every palette row has one in the dot's place (a state dot, the several-objects stack, or a small muted Lucide icon); menu rows with actions keep a slot per action at their right (`ItemAction`), shown or not.
 
 ## Lints
 
 Every crate inherits `[workspace.lints]` from the root `Cargo.toml`: `clippy::pedantic`, plus restriction lints such as no `unwrap`/`expect`/`panic` outside tests and no `println!`. CI treats every warning as an error.
+
+`clippy.toml` adds one project rule: `gpui::px` is a disallowed method (lengths follow the interface size through `ic_ui_kit::px`); real pixels take an `#[expect(clippy::disallowed_methods, reason = "…")]`.
 
 When a lint has to be silenced, use `#[expect(clippy::lint_name, reason = "why")]`. `#[allow]` is itself linted, and an `expect` fails once it's no longer needed.
 

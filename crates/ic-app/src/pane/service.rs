@@ -4,13 +4,13 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Styled as _, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Styled as _, div, prelude::FluentBuilder as _,
 };
 use ic_core::snapshot::Snapshot;
 use ic_model::{CheckableState, CommentKind, Links, ObjectKey, Service, ServiceState, Timestamp};
 use ic_ui_kit::{
     ActiveTheme as _, CircleSize, CodeBlock, IconButton, IconName, KvTable, Link, NoteEntry,
-    PerfdataTable, SectionLabel, StateCircle, Theme, Tooltip, TreeTable,
+    PerfdataTable, SectionLabel, StateCircle, Theme, Tooltip, TreeTable, px,
 };
 
 use super::{
@@ -222,7 +222,7 @@ fn title(
                         .when_some(late, |line, late| {
                             line.child(
                                 div()
-                                    .text_color(theme.states.warning)
+                                    .text_color(theme.states.text.warning)
                                     .child(format!("\u{a0}· {late}")),
                             )
                         }),

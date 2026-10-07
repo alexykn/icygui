@@ -62,7 +62,7 @@ per frame, plus `-zoom` crops of the details.
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
-| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+7 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
+| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+15 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
 
 ---
 
@@ -186,15 +186,22 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
   | summary tiles | sort, `···`; second row: per-state counts | counts, sort, `···` | none | its settings (04); no rows |
   | event stream | `live`, rows toggle, sort, `···` | `live`, sort, `···` | rows | events, show, lines, rows |
   | handling | only mine, rows toggle, sort, `···`; second row: chips all, acknowledged, in downtime, upcoming, comments | chips, sort, `···` | only mine, rows | opens with, sort, rows |
-  | downtimes | timeline \| list, only mine, rows toggle (dim in timeline mode), sort, `···`; second row: chips all, in effect, upcoming, from config | chips, timeline \| list (compact), sort, `···` | only mine, rows (list mode) | opens as (= the switch), shows, sort, rows |
+  | downtimes | timeline \| list, only mine, rows toggle, sort, `···`; second row: chips all, in effect, upcoming, from config | chips, timeline \| list (compact), sort, `···` | only mine, rows | opens as (= the switch), shows, sort, rows |
 
-  Saved with the view: sort, mode, rows, the handled show or hide, and
-  *only mine*. A chip click is not saved: the view opens with its *opens
-  with* chip.
+  **Every header control is remembered with the view** (orchestrator,
+  round 5 follow-up): sort, mode, the chip, *only mine*, rows and the
+  handled show or hide; the editor shows the same values (its *opens with*
+  and *opens as* are the chip and the mode). **A problem list's per-state
+  counts become clickable filter chips too**, like handling's and
+  downtimes' (not drawn yet: the frames still show plain counts).
+  *only mine* and rows are personal and never shared in YAML (topic 08).
+  The rule holds for every one-view list dashboard; frames of older topics
+  predate the rows toggle, and the build follows the rule.
 - **Row density per view** (topic 14, round 5; decided with the user).
   Settings → appearance → *row density* is the **default** for every list.
-  Every list-like view (list, grouped list, handling, downtimes in list
-  mode, event stream) has **rows: as in settings / comfortable / compact**.
+  Every list-like view (list, grouped list, handling, downtimes as a list
+  **or a timeline** (compact: one line per downtime), event stream) has
+  **rows: as in settings / comfortable / compact**.
   New views start at *as in settings* and follow the global value until a
   density is chosen on that view; *follow the default* in the view's `···`
   removes the choice. **Shared or imported dashboards never carry a
@@ -204,9 +211,8 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
     left of the sort. Chosen on the view: that icon is filled, as a
     segmented control's *on*. Following the settings: the global value's
     icon has a dashed inset outline (dashed = not set here, as topic 10's
-    preview outline). In a downtimes view's timeline mode the toggle is dim
-    and does nothing, and keeps its slot, so switching to *list* moves
-    nothing (14-r5-d, with its tooltip).
+    preview outline). It works in both of a downtimes view's modes, so it
+    is never dim (14-r5-d, with its tooltip).
   - **Stacked:** the view's `···` has *rows*: *comfortable*, *compact*,
     *follow the default* (`settings: comfortable`), with a check on the
     current one (14-r5-c).
@@ -444,8 +450,9 @@ open (*only mine*, *rows*).
 - **View kinds (topic 14, round 5):** list, grouped list, host-group grid,
   summary tiles, and, not counted, event stream, **handling** and
   **downtimes** (topic 14's threads and timeline, each with its own filter).
-  *New dashboard* offers starting points (problems list, handling, downtimes,
-  events), each a dashboard with that one view.
+  *New dashboard* opens the editor at once with **one empty list view**
+  (no presets, no preset filters; user, 2026-10-07); a view's kind is its
+  *display*, changed there or chosen in *add view*, which lists the kinds.
 - **Sidebar rule:** a dashboard with a problem view shows its worst state's
   dot and its problem count; a dashboard with only handling, downtimes or
   event views shows its first view's kind icon and that view's count
@@ -735,10 +742,12 @@ preview with clashes; 8f a broken paste; 8g a clashing group selected.
   It imports nothing. A newer format version says *update icygui to import
   this*; unknown fields are listed and ignored. Text that isn't icygui YAML
   at all only gets a toast.
-- **Row density is never shared** (topic 14 round 5, decided with the
-  user): copied or exported YAML leaves out each view's *rows*, and an
-  imported view follows the importer's settings (*as in settings*). The
-  rest of a view's saved controls (sort, mode, handled) travel with it.
+- **Row density and *only mine* are never shared** (topic 14 round 5,
+  decided with the user and the orchestrator): they are personal, so copied
+  or exported YAML leaves them out, and an imported view follows the
+  importer's settings (*as in settings*, *only mine* off). The rest of a
+  view's remembered controls (sort, mode, chip, handled) travel with it, and
+  so does the dashboard's **sidebar mark**.
 
 ---
 
@@ -1211,16 +1220,17 @@ density per view** and the **sidebar mark** per dashboard (PLAN.md §4.2,
 topic 14), drawn in 14-r5-b to g.
 
 **Shows** (`14-r5-view-kinds.html`, each dark and `-light`): 14-r5-a *new
-dashboard* with starting points; 14-r5-b 04's editor for *voip handling*,
+dashboard*: the editor at once, one empty list view (zoom of the inspector);
+14-r5-b 04's editor for *voip handling*,
 its handling view selected and *add view* open, the one-view header's
 controls kept in the editor (zoom `-b-header-zoom`); 14-r5-c the *voip*
-dashboard with a problems list (rows set to compact on the view), a handling
-view and a downtimes timeline, each view's controls compact in its header,
+dashboard with a list view named *problems* (rows set to compact on the
+view), a handling view and a downtimes view in timeline mode, each view's controls compact in its header,
 the handling view's `···` open (zoom `-c-zoom`); 14-r5-d the sidebar rule
 (zoom of the sidebar) and *voip downtimes*, a one-view page with the same
-controls roomy, the rows toggle dim in timeline mode with its tooltip (zoom
+controls roomy, the rows toggle with its tooltip (zoom
 `-d-header-zoom`); **sidebar mark:** 14-r5-e the *voip* editor, mark
-*state* (zoom); 14-r5-f the new-dashboard flow (*sbc*), mark *icon*, the
+*state* (zoom); 14-r5-f a new dashboard (*sbc*) still in the editor, mark *icon*, the
 icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
 *voip handling*, the dropdown open with *state* greyed out (zoom).
 
@@ -1237,11 +1247,28 @@ icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
   notifications. Handling, downtimes and event views never notify; the
   editor says so in one faint line, and *add view* groups them under a faint
   label *not counted in the sidebar, never notify*.
-- **New dashboard (14-r5-a):** the group's **+** and the footer's **+ → new
-  dashboard ›** offer **starting points**: *problems list*, *handling*,
-  *downtimes*, *events*, each with its icon and one line. Each creates a
-  dashboard with that one view and opens the editor; more views can be added
-  there. Nothing about the start is fixed.
+- **New dashboard (14-r5-a; user, 2026-10-07: no starting points):** the
+  group's **+**, the footer's **+ → new dashboard** and the palette's *new
+  dashboard* open **the editor directly**, with **one empty list view**: no
+  menu of presets, no preset filters. The name (*new dashboard*) is
+  selected, ready to type over; the group is the one whose **+** was used.
+  The view is named after its kind (*list*) until renamed. **Its filter is
+  empty, which means every object**: the field shows *every object*, faint,
+  and its status counts what that shows (`empty: every object · 38
+  problems`), so the preview is every problem until a filter is written.
+  People write their own Icinga filters, with topic 09's autocomplete and
+  *copy filter from* to help. The kind is the view's **display** (its
+  dropdown), and *add view* simply lists the kinds (list, grouped list,
+  host-group grid, summary tiles, event stream, handling, downtimes). The
+  sidebar mark starts at *state* (a list is a problem view). The frames of
+  round 4 and the first draft of round 5 with a kind or starting-point menu
+  are dropped.
+- **A view's name and its kind are separate** (user question, 2026-10-07):
+  the name (*problems*, *failing services*) is what the view header and the
+  editor's views list show; the kind is the *display* field. The selected
+  view's settings start with **view name** (a text field, as built in stage
+  3, `editor/inspector.rs`), then display and the rest (14-r5-b, e, f;
+  4c, 4e).
 - **The editor is 04's (14-r5-b)** for every dashboard: the dashboard's
   name, group and **sidebar mark**, the views list, *add view* with the
   full list of kinds, the selected view's settings. A handling view:
@@ -1267,13 +1294,13 @@ icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
   of a stacked dashboard (14-r5-e) the chips drop their words (mark and
   count stay).
 - **Row density per view (14-r5-b, c, d, e; the rule at the top of this
-  file).** The problems list in 14-r5-c is set to *compact* on the view
+  file).** The list named *problems* in 14-r5-c is set to *compact* on the view
   (its rows are one line; the editor shows `rows: compact`, 14-r5-e); the
   handling view follows the settings (its `···`: *follow the default*,
   `settings: comfortable`). In a one-view header the toggle sits left of the
-  sort (14-r5-b: following the settings, dashed outline; 14-r5-d: dim in
-  timeline mode). Not drawn: compact rows of handling, the downtimes list
-  and the event stream, which put each entry on one line (the header line
+  sort (14-r5-b, 14-r5-d: following the settings, dashed outline). Not
+  drawn: compact rows of handling, the downtimes list and timeline, and the
+  event stream, which put each entry on one line (the header line
   with the text after it, cut off), as compact list rows drop the output.
 - **Sidebar mark (14-r5-e, f, g).** Each dashboard has a *sidebar mark*
   setting, in the editor's dashboard fields under name and group (above
@@ -1283,10 +1310,14 @@ icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
     problem) or **icon**. With no problem view on the dashboard, *state* is
     greyed out with its reason on a second line, *no problem view on this
     dashboard* (14-r5-g).
-  - Left of it, a **rounded square the height of a field** (30px, like a
-    colour swatch) **previews the mark**. With *state* it shows the dot and
-    is **not clickable: no hover highlight** (14-r5-e: the pointer over it
-    changes nothing). With *icon* it is a button with the normal hover
+  - Left of it, a **rounded square the height of a field** (30px plus the
+    border, like a colour swatch) **previews the mark**. The square and the
+    dropdown share their top, bottom and height and sit 12px apart (the gap
+    between side-by-side fields); the dot (10px) or icon (16px) is centred
+    exactly in the square (`-row-zoom` crops of e, f, g, dark and light).
+    With *state* it shows the dot and is **not clickable: no hover
+    highlight** (14-r5-e: the pointer, drawn just beside the square so the
+    alignment shows, has passed over it and nothing lit up). With *icon* it is a button with the normal hover
     highlight, and open it keeps the highlight with the accent border.
   - The label's right side says what the mark shows (*the worst problem's
     colour* / *the square picks the icon*). The square and the dropdown
@@ -1320,7 +1351,8 @@ icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
   icon and no count); health keeps the cluster's state dot (topic 06).
   Groups stay plain folders (round 4).
 - **Dropped from round 4:** the dashboard-kind editors (14-r4-b, 14-r4-c) and
-  their *kind* field; the kind menu (14-r4-a) becomes the starting points.
+  their *kind* field; the kind menu (14-r4-a): *new dashboard* opens the
+  editor with one empty list view instead.
   **Kept:** *copy filter from* (14-r4-e), on every view's filter field.
 
 ### Round 4: handling and downtimes as kinds of dashboard

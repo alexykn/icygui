@@ -48,8 +48,8 @@ const sortSlot = (kind, sort, { open = false } = {}) => `<span class="vsort" sty
 // One-view header: two icons in a fixed slot (left of the sort). Chosen on
 // the view: the icon is filled, as a segmented control's "on". Following the
 // settings: the icon of the global value has a dashed inset outline (dashed =
-// not set here, as topic 10's preview outline). dim: the slot stays but does
-// nothing (a downtimes view in timeline mode), so nothing moves on switching.
+// not set here, as topic 10's preview outline). dim: kept for a control that
+// cannot act (unused: the timeline has rows too).
 function densityToggle({ v = 'default', eff = 'comfortable', dim = false } = {}) {
   const cur = v === 'default' ? eff : v;
   const cell = (d, ic) => `<span class="${d === cur ? (v === 'default' ? 'dflt' : 'on') : ''}">${icon(ic, 13)}</span>`;
@@ -59,15 +59,15 @@ function densityToggle({ v = 'default', eff = 'comfortable', dim = false } = {})
 // global value; new views start here), comfortable or compact
 const rowsField = (v = 'default', eff = 'comfortable', note = '') => `<div class="field"><div class="lab">rows<span class="st faint">${note || (v === 'default' ? 'follows the settings' : 'set on this view')}</span></div>${select(v === 'default' ? `as in settings (${eff})` : v)}</div>`;
 // the view's ··· (stacked): only mine (handling and downtimes), the rows, then
-// the view's own items. rows: as densityToggle's v; rowsDim: timeline mode
-function viewMoreMenu({ x, y, w = 268, mine = null, rows = 'default', eff = 'comfortable', rowsDim = false, hov = '' }) {
+// the view's own items. rows: as densityToggle's v
+function viewMoreMenu({ x, y, w = 268, mine = null, rows = 'default', eff = 'comfortable', hov = '' }) {
   const it = (label, o = {}) => ({ label, ...o, hov: hov === label });
   return menu([
     ...(mine === null ? [] : [it('only mine', { chk: mine, det: 'what I set' }), '-']),
-    rowsDim ? 'rows · in list mode' : 'rows',
-    it('comfortable', { chk: rows === 'comfortable', ic: 'rows-2', dis: rowsDim }),
-    it('compact', { chk: rows === 'compact', ic: 'rows-4', dis: rowsDim }),
-    it('follow the default', { chk: rows === 'default', det: `settings: ${eff}`, dis: rowsDim }),
+    'rows',
+    it('comfortable', { chk: rows === 'comfortable', ic: 'rows-2' }),
+    it('compact', { chk: rows === 'compact', ic: 'rows-4' }),
+    it('follow the default', { chk: rows === 'default', det: `settings: ${eff}` }),
     '-',
     it('collapse', { key: '←' }),
     it('edit view'),

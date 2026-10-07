@@ -111,12 +111,13 @@ shot('4d', '04-multi-view-d-add-view', '<i>add view</i> asks for the display fir
 const moreMenu = menu([{ label: 'move up', key: 'alt-↑' }, { label: 'move down', key: 'alt-↓' }, { label: 'duplicate' }, { label: 'collapse by default', chk: false }, '-', { label: 'remove view', key: 'ctrl-⌫' }], { x: 894, y: 288, w: 220 });
 const streamSettings = `<div class="pane" style="background:var(--win-bg)">
   <div class="hbar pane-h" style="padding:0 18px"><span class="title">dashboard</span><span class="grow"></span><span class="right faint">4 views</span></div>
-  <div class="col" style="gap:16px;padding:16px 18px;overflow:hidden">
+  <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">name</div><span class="input">databases</span></div><div class="field"><div class="lab">group</div>${select('overview')}</div></div>
     <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px;margin:0 -6px">${viewsList(3, { menuOpen: 3 })}</div>
       <span style="display:flex;align-items:center;gap:8px;height:28px;font-size:12px;color:var(--t-muted)">${icon('plus', 13)}add view</span></div>
     <div style="height:1px;background:var(--bd-header);margin:0 -18px"></div>
     <div class="field"><div class="lab"><span class="strong" style="font-size:12.5px">db events</span><span class="st faint">view 4 of 4</span></div></div>
+    <div class="field"><div class="lab">view name</div><span class="input">db events</span></div>
     <div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('activity', 13)}event stream</span>`)}</div>
     <div class="field"><div class="lab">filter<span class="st c-ok">valid · 9 hosts and their services</span></div><div class="textarea" style="height:22px">host.vars.role in ["postgres", "mysql"]</div></div>
     <div class="field"><div class="lab">events</div><div style="display:flex;gap:6px;flex-wrap:wrap">${chip('state changes', { sel: true })}${chip('acknowledgements', { sel: true })}${chip('downtimes', { sel: true })}${chip('comments', { sel: true })}${chip('flapping')}</div></div>

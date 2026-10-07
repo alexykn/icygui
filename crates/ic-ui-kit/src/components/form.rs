@@ -287,6 +287,7 @@ pub struct Segmented {
     options: Vec<SharedString>,
     selected: usize,
     disabled: bool,
+    hug: bool,
     on_select: Option<SelectHandler>,
 }
 
@@ -298,8 +299,16 @@ impl Segmented {
             options: Vec::new(),
             selected: 0,
             disabled: false,
+            hug: false,
             on_select: None,
         }
+    }
+
+    /// Sizes each option to its label (14px either side) instead of
+    /// sharing the width given: for a control at the end of a settings row.
+    pub fn hug(mut self) -> Self {
+        self.hug = true;
+        self
     }
 
     /// Adds an option.
@@ -351,10 +360,12 @@ impl RenderOnce for Segmented {
         let enabled = !self.disabled;
         let id = self.id.clone();
         let count = self.options.len();
+        let hug = self.hug;
         div()
             .id(self.id)
             .role(Role::RadioGroup)
             .flex()
+            .when(hug, gpui::Styled::flex_none)
             .h(theme.metrics.field_height)
             .rounded(theme.metrics.code_radius)
             .border_1()
@@ -372,7 +383,8 @@ impl RenderOnce for Segmented {
                     ))
                     .role(Role::RadioButton)
                     .flex()
-                    .flex_1()
+                    .when(hug, |option| option.flex_none().px(px(14.)))
+                    .when(!hug, gpui::Styled::flex_1)
                     .items_center()
                     .justify_center()
                     .when(index + 1 < count, |option| {

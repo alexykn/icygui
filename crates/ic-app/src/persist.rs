@@ -9,6 +9,7 @@
 //! Ansible, a full disk).
 
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -38,6 +39,10 @@ enum Job {
 pub(crate) struct Persistence {
     jobs: Option<Sender<Job>>,
     thread: Option<JoinHandle<()>>,
+    /// The settings as the file holds them: as last read, or as the
+    /// writer last saved them. A file that reads differently was changed
+    /// by someone else (*edit in settings file*).
+    on_disk: Arc<Mutex<Option<Config>>>,
 }
 
 impl Persistence {
@@ -53,13 +58,30 @@ impl Persistence {
         report: Reporter,
     ) -> std::io::Result<Self> {
         let (jobs, receiver) = mpsc::channel();
+        let on_disk = Arc::new(Mutex::new(None));
+        let written = on_disk.clone();
         let thread = std::thread::Builder::new()
             .name("icygui-persist".to_owned())
-            .spawn(move || run(&config, &ui, &receiver, &report))?;
+            .spawn(move || run(&config, &ui, &receiver, &report, &written))?;
         Ok(Self {
             jobs: Some(jobs),
             thread: Some(thread),
+            on_disk,
         })
+    }
+
+    /// The settings as the file holds them, as far as icygui knows: as
+    /// last read ([`Persistence::read_from_disk`]) or saved.
+    pub(crate) fn on_disk(&self) -> Option<Config> {
+        self.on_disk
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The settings file was read and holds `config`.
+    pub(crate) fn read_from_disk(&self, config: Config) {
+        *self.on_disk.lock().unwrap_or_else(PoisonError::into_inner) = Some(config);
     }
 
     /// Saves the settings (soon; a newer save replaces a waiting one).
@@ -101,7 +123,13 @@ impl Drop for Persistence {
     }
 }
 
-fn run(config_store: &ConfigStore, ui_store: &StateStore, jobs: &Receiver<Job>, report: &Reporter) {
+fn run(
+    config_store: &ConfigStore,
+    ui_store: &StateStore,
+    jobs: &Receiver<Job>,
+    report: &Reporter,
+    on_disk: &Mutex<Option<Config>>,
+) {
     while let Ok(first) = jobs.recv() {
         let mut config = None;
         let mut ui = None;
@@ -119,8 +147,13 @@ fn run(config_store: &ConfigStore, ui_store: &StateStore, jobs: &Receiver<Job>, 
             let result = config_store
                 .save(&config)
                 .map_err(|error| error.to_string());
-            if let Err(error) = &result {
-                tracing::warn!(%error, path = %config_store.path().display(), "the settings could not be saved");
+            match &result {
+                Ok(()) => {
+                    *on_disk.lock().unwrap_or_else(PoisonError::into_inner) = Some(*config);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, path = %config_store.path().display(), "the settings could not be saved");
+                }
             }
             report(SaveReport::Config(result));
         }
@@ -196,6 +229,11 @@ mod tests {
         persistence.save_ui(ui.clone());
         assert!(persistence.flush(Duration::from_secs(10)));
         assert_eq!(config_store.load().unwrap().environments[0].name, "second");
+        assert_eq!(
+            persistence.on_disk().unwrap().environments[0].name,
+            "second",
+            "what was written is what the file holds"
+        );
         assert_eq!(ui_store.load().unwrap(), ui);
         let reports = reports.lock().unwrap().clone();
         assert!(reports.contains(&SaveReport::Config(Ok(()))));

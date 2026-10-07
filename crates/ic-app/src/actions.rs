@@ -25,7 +25,10 @@
 //! | | `secondary-b` | `ToggleSidebar` |
 //! | | — | [`FocusMain`]: hand the keyboard to the list or the tab shown (Enter and Escape in the sidebar search do this) |
 //! | | — | [`ReviewCertificate`], [`EditEnvironment`], [`RestartEngine`]: from the connection banner |
-//! | `SettingsDialog` | `secondary-s`, `enter` in a field | save the settings; `tab` / `shift-tab` move between fields |
+//! | `SettingsPanel` | `secondary-shift-e`, then `up` / `down`, `enter` | `FocusNavbar`: the categories, then back to the page |
+//! | | `secondary-f` | `FocusSettingsSearch` |
+//! | | `escape` | clear the search, else close the panel (a field being typed in applies first) |
+//! | | `enter`, `tab` / `shift-tab` in a field | apply it; move between the fields (applying the one left) |
 //! | (anywhere, also without a window) | `secondary-,` | [`OpenSettings`] |
 //! | | `secondary-q` | [`Quit`]: quit, even when the app keeps running in the tray |
 //! | | — | [`ShowAbout`], [`OpenNotifications`], [`ShowWindow`]: the app menu, the tray |
@@ -189,7 +192,7 @@ pub(crate) struct EditEnvironment;
 #[action(namespace = icygui)]
 pub(crate) struct RestartEngine;
 
-/// Opens the settings dialog (`secondary-,`; the macOS app menu's
+/// Opens the settings panel (`secondary-,`; the macOS app menu's
 /// *Settings*). Without a window, the window opens first.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]

@@ -1,80 +1,124 @@
-//! The settings dialog (`secondary-,`, the macOS app menu's *Settings*,
-//! the palette; PLAN.md §2.8), a modal with two tabs:
+//! The settings panel (`secondary-,`, the app menu's *Settings*, the
+//! palette; PLAN.md §4.2, mock-up 02): a large panel over the main window,
+//! in the style of Zed's settings.
 //!
-//! - *general*: keep running in the tray when the window closes (BG-01,
-//!   with whether this desktop shows tray icons), launch at login in the
-//!   background (BG-03), the event log's retention and the reconcile
-//!   interval;
-//! - *notifications* for the active environment (NOTE-02..06): the master
-//!   switch and pausing (30 minutes, an hour, until 08:00, resume), the
-//!   default rule with every condition (states, hard only, skip handled,
-//!   acknowledgement, downtime and flapping events, minimum duration,
-//!   sound), every group's and dashboard's setting (inherit, on, off, or a
-//!   custom rule of its own), quiet hours (crossing midnight, by day,
-//!   critical and down allowed), storm control, and the watched and muted
-//!   objects.
+//! - *Left:* a search field, the six categories (general, appearance,
+//!   notifications, icinga, keymap, advanced) with their icons, the open
+//!   category's sections on a guide line (the one in view in the accent
+//!   colour; a click scrolls to it), and `focus navbar` (`secondary-shift-e`,
+//!   then the arrows).
+//! - *Right:* the page's header (its name, whom it is for, `✓ saved`,
+//!   *edit in settings file*, which opens the settings file in the default
+//!   editor) and one row per setting: name, one line of description, the
+//!   control at the right.
 //!
-//! Changes are a draft until *save* (`secondary-s`, or Enter in a field);
-//! Escape or *cancel* drops them. Pausing acts at once (it is not a
-//! setting). Fields are checked when saving; problems show under them and
-//! the keyboard goes to the first. Everything stays on this computer
-//! (D6): Icinga's own notification switches are never touched.
+//! Changes apply at once, as in Zed: every switch, choice and chip writes
+//! the settings straight away; a text field applies on Enter or when it
+//! loses the keyboard, and a value that doesn't parse shows its problem
+//! under the row and isn't applied. So there is no save or cancel; Escape
+//! clears the search, or closes the panel.
+//!
+//! A search looks through every category: the navigation dims the
+//! categories without a match and counts the matches of the others; the
+//! page lists the matching rows under `category · section` headings with
+//! the match marked, and the rows work in place.
+//!
+//! Everything stays on this computer (D6): Icinga's own notification
+//! switches are never touched.
 
 pub(crate) mod about;
+mod files;
 mod model;
+mod pages;
+mod rows;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
-    prelude::FluentBuilder as _, px,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
+    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
-use ic_config::General;
-use ic_model::Timestamp;
-use ic_rules::{ObjectMode, Rule, ScopeSetting};
-use ic_ui_kit::input::{InputEvent, InputState};
+use ic_config::{Appearance, General};
+use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{
-    ActiveTheme as _, Button, CHIP_HEIGHT, Chip, DialogBody, Field, Link, Segmented, Switch,
-    TextField, Theme, Tooltip,
+    ActiveTheme as _, Button, Icon, IconButton, IconName, Metrics, Scrollbar, TextField, Theme,
+    Tooltip,
 };
 
-pub(crate) use self::model::{FieldId, RuleFlag, ScopeKey, SettingsTab};
+use self::files::LogSummary;
+#[cfg(test)]
+pub(crate) use self::files::OPENED;
+pub(crate) use self::model::{FieldId, RuleFlag, ScopeKey, SettingsPage};
 use self::model::{
-    SCOPE_CHOICES, format_clock, format_min_duration, parse_clock, parse_min_duration,
-    parse_reconcile, parse_retention, parse_threshold, parse_window, scope_choice, scope_meaning,
+    PageMatches, Section, Setting, format_clock, format_min_duration, matching_settings,
+    normalized, parse_clock, parse_min_duration, parse_reconcile, parse_retention, parse_threshold,
+    parse_window,
 };
 use crate::app_state::{AppState, NotificationPlan};
-use crate::notifications::{PauseChoice, override_text, pause_label, paused_text};
+use crate::menu_state::OpenMenu;
 use crate::operate::dialog::{NextField, PreviousField};
 
-/// Key context of the dialog.
-pub(crate) const SETTINGS_CONTEXT: &str = "SettingsDialog";
+/// Key context of the panel.
+pub(crate) const SETTINGS_CONTEXT: &str = "SettingsPanel";
+/// Key context of the navigation while it has the keyboard.
+const NAV_CONTEXT: &str = "SettingsNav";
 
+/// The panel's size, fitted to smaller windows.
+pub(crate) const PANEL_WIDTH: f32 = 1080.;
+/// The panel's height, fitted to smaller windows.
+const PANEL_HEIGHT: f32 = 760.;
+/// The navigation's width.
+const NAV_WIDTH: f32 = 248.;
 /// The default reconcile interval offered when switching from adaptive.
 const FIXED_RECONCILE_DEFAULT: u32 = 600;
 
-/// The weekdays, Monday first, as quiet hours' day chips show them.
-const DAYS: [&str; 7] = ["mo", "tu", "we", "th", "fr", "sa", "su"];
-
-/// Saves the settings.
+/// Moves the keyboard to the navigation (`secondary-shift-e`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
-pub(crate) struct SaveSettings;
+pub(crate) struct FocusNavbar;
 
-/// Registers the dialog's keys: `secondary-s` saves, Enter in a field
-/// saves, Tab and Shift-Tab move between the fields.
+/// Moves the keyboard to the search field (`secondary-f`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct FocusSettingsSearch;
+
+/// Escape in the panel: clears the search, or closes the panel.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct SettingsEscape;
+
+/// The next category, in the navigation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct NavNext;
+
+/// The previous category, in the navigation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct NavPrevious;
+
+/// Back from the navigation to the page.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct NavOpen;
+
+/// Registers the panel's keys.
 pub(crate) fn bind_keys(cx: &mut App) {
-    let field = Some("SettingsDialog > Input");
-    let dialog = Some(SETTINGS_CONTEXT);
+    let panel = Some(SETTINGS_CONTEXT);
+    let nav = Some(NAV_CONTEXT);
+    let field = Some("SettingsPanel > Input");
     cx.bind_keys([
-        KeyBinding::new("secondary-s", SaveSettings, dialog),
-        KeyBinding::new("enter", SaveSettings, field),
+        KeyBinding::new("secondary-shift-e", FocusNavbar, panel),
+        KeyBinding::new("secondary-f", FocusSettingsSearch, panel),
+        KeyBinding::new("escape", SettingsEscape, panel),
+        KeyBinding::new("down", NavNext, nav),
+        KeyBinding::new("up", NavPrevious, nav),
+        KeyBinding::new("enter", NavOpen, nav),
         KeyBinding::new("tab", NextField, field),
         KeyBinding::new("shift-tab", PreviousField, field),
-        KeyBinding::new("tab", NextField, dialog),
-        KeyBinding::new("shift-tab", PreviousField, dialog),
     ]);
 }
 
@@ -96,209 +140,247 @@ pub(crate) fn quit_key() -> &'static str {
     }
 }
 
-/// What the dialog asks its owner to do.
+/// The navigation shortcut as the panel shows it.
+fn navbar_key() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⇧⌘E"
+    } else {
+        "ctrl-shift-e"
+    }
+}
+
+/// What the panel asks its owner to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsEvent {
-    /// Close it (cancelled, or saved).
+    /// Close it.
     Close,
-    /// Saved: launch at login changed to this (the owner writes the login
-    /// entry off the UI thread).
+    /// *Start at login* changed to this (the owner writes the login entry
+    /// off the UI thread).
     LaunchAtLogin(bool),
     /// Show the about dialog.
     About,
+    /// Open the environment editor for the environment with this id.
+    EditEnvironment(String),
+    /// Open the environment editor for a new environment.
+    AddEnvironment,
 }
 
-/// The settings dialog.
-pub(crate) struct SettingsDialog {
+/// The panel's dropdowns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsMenu {
+    /// Whose notification rules the page shows.
+    Environment,
+    /// The log level.
+    LogLevel,
+}
+
+/// Where the settings' files and folders are (`None` where there is none:
+/// the demo has no settings file).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Locations {
+    /// The settings file.
+    pub(crate) settings_file: Option<PathBuf>,
+    /// The keymap file.
+    pub(crate) keymap_file: Option<PathBuf>,
+    /// The folder of the settings and keymap files.
+    pub(crate) config_dir: Option<PathBuf>,
+    /// The log folder.
+    pub(crate) log_dir: Option<PathBuf>,
+}
+
+impl Locations {
+    /// The running app's: the live app's paths, or in the demo the
+    /// system's (for the keymap and the logs; no settings file).
+    fn of_app(cx: &App) -> Self {
+        let live = crate::live::session(cx).and_then(|session| session.read(cx).paths().cloned());
+        match live {
+            Some(paths) => Self {
+                settings_file: Some(paths.config_file.clone()),
+                keymap_file: Some(paths.keymap_file()),
+                config_dir: Some(paths.config_dir()),
+                log_dir: Some(paths.log_dir),
+            },
+            // The demo (and tests without a session) read the user's keymap
+            // but have no settings file of their own.
+            None if crate::live::session(cx).is_some() => {
+                let system = ic_config::Paths::from_system().ok();
+                Self {
+                    settings_file: None,
+                    keymap_file: system.as_ref().map(ic_config::Paths::keymap_file),
+                    config_dir: system.as_ref().map(ic_config::Paths::config_dir),
+                    log_dir: system.map(|paths| paths.log_dir),
+                }
+            }
+            None => Self::default(),
+        }
+    }
+}
+
+/// The settings panel.
+pub(crate) struct SettingsPanel {
     state: Entity<AppState>,
-    tab: SettingsTab,
-    general: General,
-    /// Reconciles adaptively (`reconcile_interval_secs` 0).
-    adaptive: bool,
-    /// The active environment's notification settings (`None` without an
-    /// environment).
-    plan: Option<NotificationPlan>,
-    /// The active environment's name.
-    environment: String,
+    page: SettingsPage,
+    /// The environment whose notification rules the notifications page
+    /// shows (the active one when the panel opened).
+    environment: Option<String>,
+    search: Entity<InputState>,
+    /// The search, normalized (empty: no search).
+    query: String,
+    keymap_filter: Entity<InputState>,
+    /// The keymap filter, normalized.
+    keymap_query: String,
     inputs: BTreeMap<FieldId, Entity<InputState>>,
     errors: BTreeMap<FieldId, String>,
-    /// Saving was tried: problems update as the fields change.
-    tried: bool,
+    scroll: ScrollHandle,
+    /// The sections drawn last, in order (the scroll handle's items).
+    drawn_sections: Vec<Section>,
+    menus: OpenMenu<SettingsMenu>,
     /// Whether this desktop shows tray icons (`None` while asking).
     tray_host: Option<bool>,
+    /// What the log folder holds (`None` while reading).
+    log_summary: Option<LogSummary>,
+    locations: Locations,
     demo: bool,
     focus_handle: FocusHandle,
+    nav_focus: FocusHandle,
     subscriptions: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
 }
 
-impl EventEmitter<SettingsEvent> for SettingsDialog {}
+impl EventEmitter<SettingsEvent> for SettingsPanel {}
 
-impl Focusable for SettingsDialog {
+impl Focusable for SettingsPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
-impl SettingsDialog {
-    /// The dialog on `tab`. With `custom`, that group or dashboard starts
-    /// with a custom rule of its own (the sidebar's *custom rule*).
+impl SettingsPanel {
+    /// The panel on `page`.
     pub(crate) fn new(
         state: Entity<AppState>,
-        tab: SettingsTab,
-        custom: Option<&ScopeKey>,
+        page: SettingsPage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (general, mut plan, environment, demo) = {
+        let (environment, demo) = {
             let state = state.read(cx);
             (
-                state.config().general.clone(),
-                state.notification_plan(),
-                state
-                    .environment()
-                    .map(|environment| environment.name.clone())
-                    .unwrap_or_default(),
+                state.active_environment_id().map(str::to_owned),
                 state.is_demo(),
             )
         };
-        if let (Some(plan), Some(key)) = (plan.as_mut(), custom) {
-            plan.choose(key, 3);
-        }
-        let adaptive = general.reconcile_interval_secs == 0;
+        let locations = Locations::of_app(cx);
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        let keymap_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder("filter shortcuts by name or key"));
+        let mut subscriptions = vec![
+            cx.observe_in(&state, window, |this: &mut Self, _, window, cx| {
+                this.follow_state(window, cx);
+                cx.notify();
+            }),
+            cx.subscribe_in(
+                &search,
+                window,
+                |this: &mut Self, search, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.query = normalized(&search.read(cx).value());
+                        this.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                        cx.notify();
+                    }
+                },
+            ),
+        ];
+        subscriptions.push(cx.subscribe_in(
+            &keymap_filter,
+            window,
+            |this: &mut Self, filter, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.keymap_query = normalized(&filter.read(cx).value());
+                    cx.notify();
+                }
+            },
+        ));
+        let mut tasks = Vec::new();
         let host_check = cx
             .background_executor()
             .spawn(async { ic_platform::tray::host_available() });
-        let tray_task = cx.spawn(async move |this, cx| {
+        tasks.push(cx.spawn(async move |this, cx| {
             let available = host_check.await;
             let _ = this.update(cx, |this, cx| {
                 this.tray_host = Some(available);
                 cx.notify();
             });
-        });
-        let mut dialog = Self {
+        }));
+        if let Some(dir) = locations.log_dir.clone() {
+            let read = cx
+                .background_executor()
+                .spawn(async move { LogSummary::of(&dir) });
+            tasks.push(cx.spawn(async move |this, cx| {
+                let summary = read.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.log_summary = Some(summary);
+                    cx.notify();
+                });
+            }));
+        }
+        let mut panel = Self {
             state,
-            tab,
-            general: general.clone(),
-            adaptive,
-            plan,
+            page,
             environment,
+            search,
+            query: String::new(),
+            keymap_filter,
+            keymap_query: String::new(),
             inputs: BTreeMap::new(),
             errors: BTreeMap::new(),
-            tried: false,
+            scroll: ScrollHandle::new(),
+            drawn_sections: Vec::new(),
+            menus: OpenMenu::default(),
             tray_host: None,
+            log_summary: None,
+            locations,
             demo,
             focus_handle: cx.focus_handle(),
-            subscriptions: Vec::new(),
-            _tasks: vec![tray_task],
+            nav_focus: cx.focus_handle(),
+            subscriptions,
+            _tasks: tasks,
         };
-        dialog.add_input(
+        for id in [
             FieldId::Retention,
-            general.event_log_retention_hours.to_string(),
-            "48",
-            window,
-            cx,
-        );
-        let reconcile = if adaptive {
-            String::new()
-        } else {
-            general.reconcile_interval_secs.to_string()
-        };
-        dialog.add_input(
             FieldId::Reconcile,
-            reconcile,
-            &FIXED_RECONCILE_DEFAULT.to_string(),
-            window,
-            cx,
-        );
-        if let Some(plan) = dialog.plan.clone() {
-            let quiet = plan.settings.quiet_hours;
-            let storm = plan.settings.storm;
-            dialog.add_input(
-                FieldId::QuietStart,
-                format_clock(quiet.start_minute),
-                "22:00",
-                window,
-                cx,
-            );
-            dialog.add_input(
-                FieldId::QuietEnd,
-                format_clock(quiet.end_minute),
-                "07:00",
-                window,
-                cx,
-            );
-            dialog.add_input(
-                FieldId::StormThreshold,
-                storm.threshold.to_string(),
-                "5",
-                window,
-                cx,
-            );
-            dialog.add_input(
-                FieldId::StormWindow,
-                storm.window_secs.to_string(),
-                "10",
-                window,
-                cx,
-            );
-            for key in plan.rule_scopes() {
-                dialog.add_rule_input(&key, window, cx);
-            }
+            FieldId::QuietStart,
+            FieldId::QuietEnd,
+            FieldId::StormThreshold,
+            FieldId::StormWindow,
+            FieldId::MinDuration(ScopeKey::Environment),
+        ] {
+            panel.add_input(id, window, cx);
         }
-        dialog
+        panel.load_fields(window, cx);
+        panel
     }
 
-    /// Adds a text field.
-    fn add_input(
-        &mut self,
-        id: FieldId,
-        value: String,
-        placeholder: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(placeholder.to_owned())
-                .default_value(value)
-        });
-        self.subscriptions.push(cx.subscribe_in(
-            &input,
-            window,
-            |this: &mut Self, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change) && this.tried {
-                    this.errors = this.collect(cx).err().unwrap_or_default();
-                    cx.notify();
-                }
-            },
-        ));
-        self.inputs.insert(id, input);
+    /// Where the keyboard goes when the panel opens: the search field.
+    pub(crate) fn default_focus(&self, cx: &App) -> FocusHandle {
+        self.search.focus_handle(cx)
     }
 
-    /// Adds the minimum-duration field of a scope's rule, unless it has one.
-    fn add_rule_input(&mut self, key: &ScopeKey, window: &mut Window, cx: &mut Context<Self>) {
-        let id = FieldId::MinDuration(key.clone());
-        if self.inputs.contains_key(&id) {
-            return;
-        }
-        let seconds = self
-            .plan
-            .as_ref()
-            .and_then(|plan| plan.rule(key))
-            .map_or(0, |rule| rule.min_duration_secs);
-        self.add_input(id, format_min_duration(seconds), "0", window, cx);
+    /// The page shown.
+    pub(crate) fn page(&self) -> SettingsPage {
+        self.page
     }
 
-    /// Where the keyboard goes when the dialog opens.
-    pub(crate) fn default_focus(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-
-    /// The tab shown.
+    /// The search, normalized.
     #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn tab(&self) -> SettingsTab {
-        self.tab
+    pub(crate) fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// The environment whose notification rules the page shows.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn environment(&self) -> Option<&str> {
+        self.environment.as_deref()
     }
 
     /// The problems shown, by field.
@@ -319,235 +401,207 @@ impl SettingsDialog {
         self.tray_host
     }
 
-    /// The notification draft, for tests.
+    /// Sets where the files are, for tests.
     #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn plan(&self) -> Option<&NotificationPlan> {
-        self.plan.as_ref()
+    pub(crate) fn set_locations(&mut self, locations: Locations) {
+        self.locations = locations;
     }
 
-    /// Shows `tab`.
-    pub(crate) fn show_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
-        if self.tab != tab {
-            self.tab = tab;
-            cx.notify();
-        }
-    }
-
-    /// Turns a rule condition on or off.
-    pub(crate) fn set_flag(
-        &mut self,
-        key: &ScopeKey,
-        flag: RuleFlag,
-        on: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(rule) = self.plan.as_mut().and_then(|plan| plan.rule_mut(key)) {
-            flag.set(rule, on);
-            cx.notify();
-        }
-    }
-
-    /// Turns quiet hours on or off.
-    pub(crate) fn set_quiet_hours(&mut self, on: bool, cx: &mut Context<Self>) {
-        if let Some(plan) = self.plan.as_mut() {
-            plan.settings.quiet_hours.enabled = on;
-            cx.notify();
-        }
-    }
-
-    /// Chooses a group's or dashboard's setting.
-    pub(crate) fn choose_scope(
-        &mut self,
-        key: &ScopeKey,
-        choice: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let changed = self
-            .plan
-            .as_mut()
-            .is_some_and(|plan| plan.choose(key, choice));
-        if changed {
-            if choice == 3 {
-                self.add_rule_input(key, window, cx);
-            }
-            cx.notify();
-        }
-    }
-
-    /// The text of a field.
-    fn text(&self, id: &FieldId, cx: &App) -> String {
-        self.inputs
-            .get(id)
-            .map(|input| input.read(cx).value().to_string())
-            .unwrap_or_default()
-    }
-
-    /// The settings as edited, or the problems by field.
-    fn collect(
-        &self,
-        cx: &App,
-    ) -> Result<(General, Option<NotificationPlan>), BTreeMap<FieldId, String>> {
-        let mut errors = BTreeMap::new();
-        let mut general = self.general.clone();
-        match parse_retention(&self.text(&FieldId::Retention, cx)) {
-            Ok(hours) => general.event_log_retention_hours = hours,
-            Err(error) => {
-                errors.insert(FieldId::Retention, error);
-            }
-        }
-        if self.adaptive {
-            general.reconcile_interval_secs = 0;
-        } else {
-            let text = self.text(&FieldId::Reconcile, cx);
-            let text = if text.trim().is_empty() {
-                FIXED_RECONCILE_DEFAULT.to_string()
-            } else {
-                text
-            };
-            match parse_reconcile(&text) {
-                Ok(seconds) => general.reconcile_interval_secs = seconds,
-                Err(error) => {
-                    errors.insert(FieldId::Reconcile, error);
-                }
-            }
-        }
-        let mut plan = self.plan.clone();
-        if let Some(plan) = plan.as_mut() {
-            let mut check = |id: FieldId, parsed: Result<u32, String>| match parsed {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    errors.insert(id, error);
-                    None
-                }
-            };
-            let quiet = &mut plan.settings.quiet_hours;
-            if let Some(minute) = check(
-                FieldId::QuietStart,
-                parse_clock(&self.text(&FieldId::QuietStart, cx)).map(u32::from),
-            ) {
-                quiet.start_minute = u16::try_from(minute).unwrap_or_default();
-            }
-            if let Some(minute) = check(
-                FieldId::QuietEnd,
-                parse_clock(&self.text(&FieldId::QuietEnd, cx)).map(u32::from),
-            ) {
-                quiet.end_minute = u16::try_from(minute).unwrap_or_default();
-            }
-            if let Some(threshold) = check(
-                FieldId::StormThreshold,
-                parse_threshold(&self.text(&FieldId::StormThreshold, cx)),
-            ) {
-                plan.settings.storm.threshold = threshold;
-            }
-            if let Some(window) = check(
-                FieldId::StormWindow,
-                parse_window(&self.text(&FieldId::StormWindow, cx)),
-            ) {
-                plan.settings.storm.window_secs = window;
-            }
-            for key in plan.rule_scopes() {
-                let id = FieldId::MinDuration(key.clone());
-                if let Some(seconds) = check(id.clone(), parse_min_duration(&self.text(&id, cx)))
-                    && let Some(rule) = plan.rule_mut(&key)
-                {
-                    rule.min_duration_secs = seconds;
-                }
-            }
-        }
-        if errors.is_empty() {
-            Ok((general, plan))
-        } else {
-            Err(errors)
-        }
-    }
-
-    /// Saves, or shows what's wrong and moves the keyboard there.
-    pub(crate) fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tried = true;
-        let (general, plan) = match self.collect(cx) {
-            Ok(collected) => collected,
-            Err(errors) => {
-                let first = errors.keys().next().cloned();
-                // A problem on the other tab: show that tab.
-                if let Some(first) = &first {
-                    self.tab = match first {
-                        FieldId::Retention | FieldId::Reconcile => SettingsTab::General,
-                        _ => SettingsTab::Notifications,
-                    };
-                    if let Some(input) = self.inputs.get(first) {
-                        input.focus_handle(cx).focus(window, cx);
-                    }
-                }
-                self.errors = errors;
-                cx.notify();
-                return;
-            }
-        };
-        self.errors.clear();
-        let login = (general.launch_at_login
-            != self.state.read(cx).config().general.launch_at_login)
-            .then_some(general.launch_at_login);
-        self.state.update(cx, |state, cx| {
-            let mut changed = state.set_general(&general);
-            if let Some(plan) = plan {
-                changed |= state.apply_notification_plan(plan);
-            }
-            if changed {
-                state.inform("Settings saved", None);
-            }
-            cx.notify();
-        });
-        if let Some(enabled) = login {
-            cx.emit(SettingsEvent::LaunchAtLogin(enabled));
-        }
-        cx.emit(SettingsEvent::Close);
-    }
-
-    fn on_save(&mut self, _: &SaveSettings, window: &mut Window, cx: &mut Context<Self>) {
-        self.save(window, cx);
-    }
-
-    /// The text fields shown on the current tab, in order.
-    fn visible_inputs(&self) -> Vec<Entity<InputState>> {
-        let ids: Vec<FieldId> = match self.tab {
-            SettingsTab::General => {
-                let mut ids = vec![FieldId::Retention];
-                if !self.adaptive {
-                    ids.push(FieldId::Reconcile);
-                }
-                ids
-            }
-            SettingsTab::Notifications => {
-                let Some(plan) = &self.plan else {
-                    return Vec::new();
-                };
-                let mut ids: Vec<FieldId> = plan
-                    .rule_scopes()
-                    .into_iter()
-                    .map(FieldId::MinDuration)
-                    .collect();
-                if plan.settings.quiet_hours.enabled {
-                    ids.extend([FieldId::QuietStart, FieldId::QuietEnd]);
-                }
-                ids.extend([FieldId::StormThreshold, FieldId::StormWindow]);
-                ids
-            }
-        };
-        ids.iter()
-            .filter_map(|id| self.inputs.get(id).cloned())
+    /// What the search finds, by page, for tests.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn search_counts(&self, cx: &App) -> Vec<(SettingsPage, usize)> {
+        let facts = self.facts(cx);
+        SettingsPage::ALL
+            .into_iter()
+            .map(|page| (page, self.page_matches(page, &facts, cx).1))
             .collect()
     }
 
-    fn move_focus(&self, forward: bool, window: &mut Window, cx: &mut App) {
-        let inputs = self.visible_inputs();
-        if inputs.is_empty() {
-            return;
+    // --- Navigation -------------------------------------------------------
+
+    /// Shows `page` from its top, ending a search.
+    pub(crate) fn show_page(
+        &mut self,
+        page: SettingsPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.page = page;
+        self.menus.close();
+        if !self.query.is_empty() {
+            self.search
+                .update(cx, |search, cx| search.set_value("", window, cx));
+            self.query.clear();
         }
+        self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+        cx.notify();
+    }
+
+    /// Scrolls to `section` of the page shown.
+    fn show_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .drawn_sections
+            .iter()
+            .position(|drawn| *drawn == section)
+        {
+            self.scroll.scroll_to_top_of_item(index);
+            cx.notify();
+        }
+    }
+
+    /// The section in view: the last one whose top has scrolled to the
+    /// top of the page (the first before any has; the last once the page
+    /// is scrolled to its end).
+    fn section_in_view(&self) -> Option<Section> {
+        let offset = self.scroll.offset().y;
+        // The sections' bounds are laid out unscrolled.
+        let top = self.scroll.bounds().top() - offset;
+        let max = self.scroll.max_offset().y;
+        if max > px(0.) && -offset >= max - px(1.) {
+            return self.drawn_sections.last().copied();
+        }
+        let mut current = self.drawn_sections.first().copied();
+        for (index, section) in self.drawn_sections.iter().enumerate() {
+            match self.scroll.bounds_for_item(index) {
+                Some(bounds) if bounds.top() <= top + px(24.) => current = Some(*section),
+                _ => break,
+            }
+        }
+        current
+    }
+
+    /// Opens the notifications page of the active environment with
+    /// `key`'s custom rule (the sidebar's *custom rule*): the scope turns
+    /// custom at once, starting from the rule it notified with.
+    pub(crate) fn show_custom_rule(
+        &mut self,
+        key: &ScopeKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self
+            .state
+            .read(cx)
+            .active_environment_id()
+            .map(str::to_owned);
+        if active != self.environment
+            && let Some(id) = active
+        {
+            self.set_environment(&id, window, cx);
+        }
+        self.show_page(SettingsPage::Notifications, window, cx);
+        self.choose_scope(key, 3, window, cx);
+        self.show_section(Section::GroupsAndDashboards, cx);
+    }
+
+    fn on_focus_navbar(&mut self, _: &FocusNavbar, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.nav_focus, cx);
+        cx.notify();
+    }
+
+    fn on_focus_search(
+        &mut self,
+        _: &FocusSettingsSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search
+            .update(cx, |search, cx| search.focus(window, cx));
+    }
+
+    fn on_nav_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let page = self.page.step(forward);
+        self.show_page(page, window, cx);
+    }
+
+    fn on_nav_open(&mut self, _: &NavOpen, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// Escape: an open dropdown closes, a search clears, else the panel
+    /// closes.
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menus.close() {
+            cx.notify();
+        } else if !self.query.is_empty() {
+            self.search
+                .update(cx, |search, cx| search.set_value("", window, cx));
+            self.query.clear();
+            cx.notify();
+        } else {
+            self.commit_pending(window, cx);
+            cx.emit(SettingsEvent::Close);
+        }
+    }
+
+    fn on_escape(&mut self, _: &SettingsEscape, window: &mut Window, cx: &mut Context<Self>) {
+        self.escape(window, cx);
+    }
+
+    fn on_field_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        self.escape(window, cx);
+    }
+
+    /// The text fields shown, in order (Tab moves through them).
+    fn visible_inputs(&self, cx: &App) -> Vec<Entity<InputState>> {
+        let mut inputs = vec![self.search.clone()];
+        if !self.query.is_empty() {
+            return inputs;
+        }
+        let general = self.state.read(cx).config().general.clone();
+        let ids: Vec<FieldId> = match self.page {
+            SettingsPage::Icinga => {
+                let mut ids = Vec::new();
+                if general.reconcile_interval_secs != 0 {
+                    ids.push(FieldId::Reconcile);
+                }
+                ids.push(FieldId::Retention);
+                ids
+            }
+            SettingsPage::Notifications => {
+                let plan = self.plan(cx);
+                let mut ids = vec![FieldId::MinDuration(ScopeKey::Environment)];
+                if plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.settings.quiet_hours.enabled)
+                {
+                    ids.extend([FieldId::QuietStart, FieldId::QuietEnd]);
+                }
+                ids.extend([FieldId::StormThreshold, FieldId::StormWindow]);
+                if let Some(plan) = plan {
+                    ids.extend(
+                        plan.rule_scopes()
+                            .into_iter()
+                            .skip(1)
+                            .map(FieldId::MinDuration),
+                    );
+                }
+                ids
+            }
+            SettingsPage::Keymap => {
+                inputs.push(self.keymap_filter.clone());
+                Vec::new()
+            }
+            _ => Vec::new(),
+        };
+        inputs.extend(ids.iter().filter_map(|id| self.inputs.get(id).cloned()));
+        inputs
+    }
+
+    /// Tab and Shift-Tab: the field left applies (as leaving it with the
+    /// mouse does), the next one gets the keyboard.
+    fn move_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let inputs = self.visible_inputs(cx);
+        let count = inputs.len();
         let current = inputs
             .iter()
             .position(|input| input.focus_handle(cx).is_focused(window));
-        let count = inputs.len();
+        if let Some(index) = current
+            && let Some(id) = self.field_of(&inputs[index])
+        {
+            self.commit(&id, window, cx);
+        }
         let next = match (current, forward) {
             (Some(index), true) => (index + 1) % count,
             (Some(index), false) => (index + count - 1) % count,
@@ -555,6 +609,29 @@ impl SettingsDialog {
             (None, false) => count - 1,
         };
         inputs[next].focus_handle(cx).focus(window, cx);
+    }
+
+    /// Which field an input is.
+    fn field_of(&self, input: &Entity<InputState>) -> Option<FieldId> {
+        self.inputs
+            .iter()
+            .find(|(_, each)| *each == input)
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Applies every field whose text differs from the setting (the panel
+    /// closes while one is being edited); a bad value shows its problem
+    /// and isn't applied.
+    pub(crate) fn commit_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pending: Vec<FieldId> = self
+            .inputs
+            .keys()
+            .filter(|id| self.text(id, cx) != self.stored_text(id, cx))
+            .cloned()
+            .collect();
+        for id in pending {
+            self.commit(&id, window, cx);
+        }
     }
 
     fn on_next_field(&mut self, _: &NextField, window: &mut Window, cx: &mut Context<Self>) {
@@ -570,809 +647,798 @@ impl SettingsDialog {
         self.move_focus(false, window, cx);
     }
 
-    // --- Rendering --------------------------------------------------------
+    // --- Applying changes ---------------------------------------------------
 
-    /// A text field with its label, problem and hint.
-    fn field(
-        &self,
-        label: &'static str,
-        id: &FieldId,
-        width: f32,
-        hint: Option<&'static str>,
-    ) -> Field {
-        let error = self.errors.get(id).cloned();
-        let mut field = Field::new(label);
-        if let Some(input) = self.inputs.get(id) {
-            field = field.control(
-                div().w(px(width)).child(
-                    TextField::new(input)
-                        .bordered(true)
-                        .invalid(error.is_some()),
-                ),
-            );
-        }
-        let field = field.error(error);
-        match hint {
-            Some(hint) => field.hint(hint),
-            None => field,
-        }
-    }
-
-    /// A text field inside a sentence (storm control), with no label.
-    fn inline_field(&self, id: &FieldId, width: f32) -> AnyElement {
-        let invalid = self.errors.contains_key(id);
-        match self.inputs.get(id) {
-            Some(input) => div()
-                .w(px(width))
-                .child(TextField::new(input).bordered(true).invalid(invalid))
-                .into_any_element(),
-            None => div().into_any_element(),
-        }
-    }
-
-    fn render_general(&self, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
-        let mut blocks = self.render_background(theme, cx);
-        blocks.extend(self.render_engine(theme, cx));
-        blocks
-    }
-
-    /// The tray, launch at login and quiet mode (BG-01, BG-03, PERF-09).
-    fn render_background(&self, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
-        let tray_hint = match self.tray_host {
-            None => "Checking whether this desktop shows tray icons",
-            Some(true) => {
-                "The tray icon shows the worst unhandled state; its menu opens the window, \
-                 pauses notifications, switches environments and quits."
+    /// Changes the app-wide settings at once.
+    fn change_general(&self, cx: &mut Context<Self>, change: impl FnOnce(&mut General)) {
+        let mut general = self.state.read(cx).config().general.clone();
+        let login = general.launch_at_login;
+        change(&mut general);
+        let login_changed = general.launch_at_login != login;
+        self.state.update(cx, |state, cx| {
+            if state.set_general(&general) {
+                cx.notify();
             }
-            Some(false) => {
-                "This desktop shows no tray icons (stock GNOME needs the AppIndicator \
-                 extension): closing the window quits icygui."
+        });
+        if login_changed {
+            cx.emit(SettingsEvent::LaunchAtLogin(general.launch_at_login));
+        }
+    }
+
+    /// Changes the appearance at once.
+    fn change_appearance(&self, cx: &mut Context<Self>, change: impl FnOnce(&mut Appearance)) {
+        let mut appearance = *self.state.read(cx).appearance();
+        change(&mut appearance);
+        self.state.update(cx, |state, cx| {
+            if state.set_appearance(appearance) {
+                cx.notify();
             }
-        };
-        let login_hint = if self.demo {
-            "Not in the demo: it would start the demo at every login."
-        } else {
-            "Starts icygui in the tray, without its window, when you log in."
-        };
-        vec![
-            div()
-                .text_size(theme.text.label)
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.colors.text_muted)
-                .child("in the background")
-                .into_any_element(),
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(
-                    Switch::new("settings-close-to-tray", self.general.close_to_tray)
-                        .label("keep running in the tray when the window closes")
-                        .on_change(cx.listener(|this, on: &bool, _, cx| {
-                            this.general.close_to_tray = *on;
-                            cx.notify();
-                        })),
-                )
-                .child(hint(tray_hint, theme))
-                .into_any_element(),
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(
-                    Switch::new("settings-launch-at-login", self.general.launch_at_login)
-                        .label("start at login")
-                        .disabled(self.demo)
-                        .on_change(cx.listener(|this, on: &bool, _, cx| {
-                            this.general.launch_at_login = *on;
-                            cx.notify();
-                        })),
-                )
-                .child(hint(login_hint, theme))
-                .into_any_element(),
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(
-                    Switch::new("settings-quiet-mode", self.general.quiet_when_hidden)
-                        .label("quiet mode when hidden")
-                        .on_change(cx.listener(|this, on: &bool, _, cx| {
-                            this.general.quiet_when_hidden = *on;
-                            cx.notify();
-                        })),
-                )
-                .child(hint(
-                    "Environments off screen, and the one on screen once the window has \
-                     been closed, minimised or otherwise out of sight for half a minute, \
-                     follow Icinga without check results: far less load on the master, \
-                     notifications as prompt as ever; outputs catch up when you look.",
-                    theme,
-                ))
-                .into_any_element(),
-        ]
+        });
     }
 
-    /// The event log, reconciles, and the version.
-    fn render_engine(&self, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
-        let colors = theme.colors;
-        vec![
-            section(theme, "event log").into_any_element(),
-            self.field(
-                "keep events for (hours)",
-                &FieldId::Retention,
-                120.,
-                Some("The history tabs and the notification centre read the local log."),
-            )
-            .into_any_element(),
-            section(theme, "reconcile with Icinga").into_any_element(),
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(
-                    div().w(px(320.)).child(
-                        Segmented::new("settings-reconcile")
-                            .option("adaptive")
-                            .option("fixed interval")
-                            .selected(usize::from(!self.adaptive))
-                            .on_select(cx.listener(|this, index: &usize, window, cx| {
-                                this.adaptive = *index == 0;
-                                if !this.adaptive
-                                    && let Some(input) = this.inputs.get(&FieldId::Reconcile)
-                                {
-                                    input.focus_handle(cx).focus(window, cx);
-                                }
-                                cx.notify();
-                            })),
-                    ),
-                )
-                .when(!self.adaptive, |column| {
-                    column.child(self.field(
-                        "every (seconds)",
-                        &FieldId::Reconcile,
-                        120.,
-                        Some("At least 60 seconds."),
-                    ))
-                })
-                .child(hint(
-                    "A lean reload of every object catches what the event stream missed. \
-                     Adaptive: from every 5 minutes for a small Icinga to every 15 at \
-                     30 000 objects, up to an hour while the stream runs without a break.",
-                    theme,
-                ))
-                .into_any_element(),
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .pt(px(4.))
-                .text_size(theme.text.small)
-                .text_color(colors.text_faint)
-                .child(format!("icygui {}", env!("CARGO_PKG_VERSION")))
-                .child(
-                    Link::new("settings-about", "about")
-                        .quiet()
-                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                            cx.emit(SettingsEvent::About);
-                        })),
-                )
-                .into_any_element(),
-        ]
+    /// Changes the page's environment's notification settings at once.
+    fn change_plan(&self, cx: &mut Context<Self>, change: impl FnOnce(&mut NotificationPlan)) {
+        let Some(id) = self.environment.clone() else {
+            return;
+        };
+        self.state.update(cx, |state, cx| {
+            if state.change_notifications(&id, change) {
+                cx.notify();
+            }
+        });
     }
 
-    /// The editor of one rule: states, events, switches, minimum duration.
-    fn rule_editor(
-        &self,
+    /// The page's environment's notification settings now.
+    fn plan(&self, cx: &App) -> Option<NotificationPlan> {
+        self.state
+            .read(cx)
+            .notification_plan_of(self.environment.as_deref()?)
+    }
+
+    /// Shows the notification rules of environment `id`.
+    pub(crate) fn set_environment(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.environment.as_deref() == Some(id) {
+            return;
+        }
+        self.environment = Some(id.to_owned());
+        self.menus.close();
+        // Another environment's scopes: their fields start over.
+        self.inputs.retain(
+            |field, _| !matches!(field, FieldId::MinDuration(key) if *key != ScopeKey::Environment),
+        );
+        self.errors.clear();
+        self.load_fields(window, cx);
+        cx.notify();
+    }
+
+    /// The settings changed elsewhere (the settings file taken over, an
+    /// environment deleted): a field not being typed in shows the setting
+    /// again, and the notifications page moves to the environment on
+    /// screen when its own is gone.
+    fn follow_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let gone = self
+            .environment
+            .as_deref()
+            .is_some_and(|id| self.state.read(cx).environment_by_id(id).is_none());
+        if gone || self.environment.is_none() {
+            let active = self
+                .state
+                .read(cx)
+                .active_environment_id()
+                .map(str::to_owned);
+            if let Some(id) = active {
+                self.set_environment(&id, window, cx);
+            } else {
+                self.environment = None;
+            }
+        }
+        let stale: Vec<(FieldId, String)> = self
+            .inputs
+            .iter()
+            .filter(|(id, input)| {
+                !self.errors.contains_key(*id) && !input.focus_handle(cx).is_focused(window)
+            })
+            .filter_map(|(id, _)| {
+                let stored = self.stored_text(id, cx);
+                (self.text(id, cx) != stored).then(|| (id.clone(), stored))
+            })
+            .collect();
+        for (id, text) in stale {
+            self.set_text(&id, text, window, cx);
+        }
+    }
+
+    /// Turns a rule condition of `key`'s rule on or off.
+    pub(crate) fn set_flag(
+        &mut self,
         key: &ScopeKey,
-        rule: &Rule,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let prefix = scope_id(key);
-        let chip = |flag: RuleFlag| {
-            let key = key.clone();
-            let on = flag.get(rule);
-            Chip::new(
-                SharedString::from(format!("{prefix}-{}", flag.label())),
-                flag.label(),
-            )
-            .selected(on)
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.set_flag(&key, flag, !on, cx);
-            }))
+        flag: RuleFlag,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.change_plan(cx, |plan| {
+            if let Some(rule) = plan.rule_mut(key) {
+                flag.set(rule, on);
+            }
+        });
+    }
+
+    /// Chooses a group's or dashboard's setting (inherit, on, off,
+    /// custom); a custom rule's fields appear under it.
+    pub(crate) fn choose_scope(
+        &mut self,
+        key: &ScopeKey,
+        choice: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = key.clone();
+        self.change_plan(cx, |plan| {
+            plan.choose(&key, choice);
+        });
+        if choice == 3 {
+            self.ensure_rule_input(&key, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Turns quiet hours on or off.
+    pub(crate) fn set_quiet_hours(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.change_plan(cx, |plan| plan.settings.quiet_hours.enabled = on);
+    }
+
+    // --- Text fields ----------------------------------------------------------
+
+    /// Adds a text field that applies on Enter and when it loses the
+    /// keyboard.
+    fn add_input(&mut self, id: FieldId, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholder = match &id {
+            FieldId::Retention => "48",
+            FieldId::Reconcile => "600",
+            FieldId::MinDuration(_) => "0",
+            FieldId::QuietStart => "22:00",
+            FieldId::QuietEnd => "07:00",
+            FieldId::StormThreshold => "5",
+            FieldId::StormWindow => "10",
         };
-        let switch = |flag: RuleFlag| {
-            let key = key.clone();
-            Switch::new(
-                SharedString::from(format!("{prefix}-{flag:?}")),
-                flag.get(rule),
-            )
-            .label(flag.label())
-            .on_change(cx.listener(move |this, on: &bool, _, cx| {
-                this.set_flag(&key, flag, *on, cx);
-            }))
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let field = id.clone();
+        self.subscriptions.push(cx.subscribe_in(
+            &input,
+            window,
+            move |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    this.commit(&field, window, cx);
+                }
+                InputEvent::Change => {
+                    // A problem shown updates as the value is fixed; the
+                    // value applies on Enter or when leaving the field.
+                    if this.errors.contains_key(&field) {
+                        match this.parse(&field, cx) {
+                            Ok(_) => {
+                                this.errors.remove(&field);
+                            }
+                            Err(error) => {
+                                this.errors.insert(field.clone(), error);
+                            }
+                        }
+                        cx.notify();
+                    }
+                }
+                InputEvent::Focus => {}
+            },
+        ));
+        self.inputs.insert(id, input);
+    }
+
+    /// Adds the minimum-duration field of a scope's rule, unless it has one.
+    fn ensure_rule_input(&mut self, key: &ScopeKey, window: &mut Window, cx: &mut Context<Self>) {
+        let id = FieldId::MinDuration(key.clone());
+        if self.inputs.contains_key(&id) {
+            return;
+        }
+        self.add_input(id.clone(), window, cx);
+        let text = self.stored_text(&id, cx);
+        self.set_text(&id, text, window, cx);
+    }
+
+    /// Adds the fields of the custom rules shown (before drawing them).
+    fn ensure_rule_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(plan) = self.plan(cx) else {
+            return;
         };
-        let label = |text: &'static str| {
-            div()
-                .w(px(64.))
-                .flex_none()
-                .text_size(theme.text.small)
-                .text_color(theme.colors.text_faint)
-                .child(text)
+        for key in plan.rule_scopes() {
+            self.ensure_rule_input(&key, window, cx);
+        }
+    }
+
+    /// The text of a field.
+    fn text(&self, id: &FieldId, cx: &App) -> String {
+        self.inputs
+            .get(id)
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Sets a field's text.
+    fn set_text(&self, id: &FieldId, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = self.inputs.get(id) {
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+    }
+
+    /// What a field shows for the stored setting.
+    fn stored_text(&self, id: &FieldId, cx: &App) -> String {
+        let state = self.state.read(cx);
+        let general = &state.config().general;
+        let plan = self.plan(cx);
+        match id {
+            FieldId::Retention => general.event_log_retention_hours.to_string(),
+            FieldId::Reconcile => match general.reconcile_interval_secs {
+                0 => FIXED_RECONCILE_DEFAULT.to_string(),
+                seconds => seconds.to_string(),
+            },
+            FieldId::MinDuration(key) => format_min_duration(
+                plan.as_ref()
+                    .and_then(|plan| plan.rule(key))
+                    .map_or(0, |rule| rule.min_duration_secs),
+            ),
+            FieldId::QuietStart => plan
+                .map(|plan| format_clock(plan.settings.quiet_hours.start_minute))
+                .unwrap_or_default(),
+            FieldId::QuietEnd => plan
+                .map(|plan| format_clock(plan.settings.quiet_hours.end_minute))
+                .unwrap_or_default(),
+            FieldId::StormThreshold => plan
+                .map(|plan| plan.settings.storm.threshold.to_string())
+                .unwrap_or_default(),
+            FieldId::StormWindow => plan
+                .map(|plan| plan.settings.storm.window_secs.to_string())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Fills every field from the stored settings.
+    fn load_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<FieldId> = self.inputs.keys().cloned().collect();
+        for id in ids {
+            let text = self.stored_text(&id, cx);
+            self.set_text(&id, text, window, cx);
+        }
+    }
+
+    /// Reads a field.
+    fn parse(&self, id: &FieldId, cx: &App) -> Result<u32, String> {
+        let text = self.text(id, cx);
+        match id {
+            FieldId::Retention => parse_retention(&text),
+            FieldId::Reconcile => parse_reconcile(&text),
+            FieldId::MinDuration(_) => parse_min_duration(&text),
+            FieldId::QuietStart | FieldId::QuietEnd => parse_clock(&text).map(u32::from),
+            FieldId::StormThreshold => parse_threshold(&text),
+            FieldId::StormWindow => parse_window(&text),
+        }
+    }
+
+    /// Applies a field (Enter, or the keyboard left it): its value, or
+    /// its problem under the row.
+    pub(crate) fn commit(&mut self, id: &FieldId, window: &mut Window, cx: &mut Context<Self>) {
+        let value = match self.parse(id, cx) {
+            Ok(value) => value,
+            Err(error) => {
+                self.errors.insert(id.clone(), error);
+                cx.notify();
+                return;
+            }
         };
+        self.errors.remove(id);
+        match id {
+            FieldId::Retention => self.change_general(cx, |general| {
+                general.event_log_retention_hours = value;
+            }),
+            FieldId::Reconcile => self.change_general(cx, |general| {
+                general.reconcile_interval_secs = value;
+            }),
+            FieldId::MinDuration(key) => self.change_plan(cx, |plan| {
+                if let Some(rule) = plan.rule_mut(key) {
+                    rule.min_duration_secs = value;
+                }
+            }),
+            FieldId::QuietStart | FieldId::QuietEnd => {
+                let minute = u16::try_from(value).unwrap_or_default();
+                let start = matches!(id, FieldId::QuietStart);
+                self.change_plan(cx, |plan| {
+                    let quiet = &mut plan.settings.quiet_hours;
+                    if start {
+                        quiet.start_minute = minute;
+                    } else {
+                        quiet.end_minute = minute;
+                    }
+                });
+            }
+            FieldId::StormThreshold => {
+                self.change_plan(cx, |plan| plan.settings.storm.threshold = value);
+            }
+            FieldId::StormWindow => {
+                self.change_plan(cx, |plan| plan.settings.storm.window_secs = value);
+            }
+        }
+        // The field shows the value as stored (`5m` for `300`).
+        let text = self.stored_text(id, cx);
+        if text != self.text(id, cx) {
+            self.set_text(id, text, window, cx);
+        }
+        cx.notify();
+    }
+
+    // --- Files ------------------------------------------------------------------
+
+    /// *Edit in settings file*: writes the settings first if there is no
+    /// file yet, then opens it in the default editor.
+    fn edit_settings_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.locations.settings_file.clone() else {
+            return;
+        };
+        if !path.exists() {
+            // Nothing written yet (a first start): the editor opens the
+            // settings as they are.
+            let config = self.state.read(cx).config().clone();
+            if let Err(error) = ic_config::ConfigStore::new(path.clone()).save(&config) {
+                self.state.update(cx, |state, cx| {
+                    state.inform(
+                        "The settings file couldn't be written",
+                        Some(error.to_string()),
+                    );
+                    cx.notify();
+                });
+                return;
+            }
+        }
+        files::open(&path, cx);
+    }
+
+    /// *Edit keymap file*: creates it with a commented template if there
+    /// is none, then opens it in the default editor. Changes apply when
+    /// the window comes back to the front.
+    fn edit_keymap_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.locations.keymap_file.clone() else {
+            return;
+        };
+        if let Err(error) = crate::keymap::ensure_file(&path) {
+            self.state.update(cx, |state, cx| {
+                state.inform(
+                    "The keymap file couldn't be created",
+                    Some(error.to_string()),
+                );
+                cx.notify();
+            });
+            return;
+        }
+        files::open(&path, cx);
+    }
+
+    // --- Rendering --------------------------------------------------------------
+
+    /// What the rows read from the state, gathered once per frame.
+    fn facts(&self, cx: &App) -> pages::Facts {
+        pages::Facts::read(self, cx)
+    }
+
+    /// What a search finds on `page`: its static settings and how many
+    /// rows match, data rows included.
+    fn page_matches(
+        &self,
+        page: SettingsPage,
+        facts: &pages::Facts,
+        cx: &App,
+    ) -> (PageMatches, usize) {
+        if self.query.is_empty() {
+            return (PageMatches::default(), 0);
+        }
+        let settings: Vec<(Setting, bool)> =
+            matching_settings(&self.query, |setting| self.row_text(setting, facts))
+                .into_iter()
+                .filter(|(setting, _)| setting.section().page() == page)
+                .filter(|(setting, _)| Self::is_shown(*setting, facts))
+                .collect();
+        let data = self.data_matches(page, facts, cx);
+        let count = settings.len() + data;
+        (PageMatches { settings }, count)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the navigation's three parts, each a few builder calls"
+    )]
+    fn render_nav(&self, theme: &Theme, facts: &pages::Facts, cx: &Context<Self>) -> AnyElement {
+        let colors = theme.colors;
+        let searching = !self.query.is_empty();
+        let in_view = self.section_in_view();
+        let mut list = div().flex().flex_col().py(px(6.));
+        for page in SettingsPage::ALL {
+            let count = if searching {
+                self.page_matches(page, facts, cx).1
+            } else {
+                0
+            };
+            let active = !searching && page == self.page;
+            let dim = searching && count == 0;
+            let text_color = if active {
+                colors.text_emphasis
+            } else if dim {
+                colors.text_faint
+            } else {
+                colors.text_secondary
+            };
+            let icon_color = if active {
+                colors.text_secondary
+            } else if dim {
+                colors.text_faint
+            } else {
+                colors.text_muted
+            };
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("settings-nav-{}", page.label())))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(12.))
+                    .h(px(30.))
+                    .pl(px(14.))
+                    .pr(px(12.))
+                    .text_size(theme.text.row)
+                    .text_color(text_color)
+                    .when(active, |item| item.bg(colors.item_active))
+                    .when(!active, |item| {
+                        item.hover(|style| style.bg(colors.item_hover))
+                    })
+                    .cursor_pointer()
+                    .child(Icon::new(page.icon()).size(px(14.)).color(icon_color))
+                    .child(div().flex_1().min_w_0().truncate().child(page.label()))
+                    .when(searching && count > 0, |item| {
+                        item.child(
+                            div()
+                                .flex_none()
+                                .text_size(theme.text.label)
+                                .text_color(colors.text_muted)
+                                .child(count.to_string()),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.show_page(page, window, cx);
+                    })),
+            );
+            if active && page != SettingsPage::Keymap {
+                for section in page.sections() {
+                    let section = *section;
+                    let on = in_view == Some(section);
+                    list = list.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "settings-nav-section-{}",
+                                section.label()
+                            )))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(12.))
+                            .h(px(26.))
+                            .pl(px(14.))
+                            .pr(px(12.))
+                            .text_size(theme.text.body)
+                            .text_color(if on {
+                                colors.text_strong
+                            } else {
+                                colors.text_muted
+                            })
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(colors.text))
+                            .child(
+                                div().relative().flex_none().w(px(14.)).h(px(26.)).child(
+                                    div()
+                                        .absolute()
+                                        .left(px(6.5))
+                                        .top_0()
+                                        .bottom_0()
+                                        .w(px(1.))
+                                        .bg(if on {
+                                            colors.accent
+                                        } else {
+                                            colors.border_window
+                                        }),
+                                ),
+                            )
+                            .child(div().min_w_0().truncate().child(section.label()))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.show_section(section, cx);
+                            })),
+                    );
+                }
+            }
+        }
         div()
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .flex_none()
+            .w(px(NAV_WIDTH))
+            .h_full()
+            .border_r_1()
+            .border_color(colors.border_split)
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .gap(px(6.))
-                    .child(label("states"))
-                    .children(RuleFlag::STATES.map(chip)),
+                    .gap(px(8.))
+                    .h(Metrics::with_rule(theme.metrics.header_height))
+                    .px(px(12.))
+                    .border_b_1()
+                    .border_color(colors.border_header)
+                    .child(
+                        Icon::new(IconName::Search)
+                            .size(px(13.))
+                            .color(colors.text_muted),
+                    )
+                    .child(div().flex_1().min_w_0().child(TextField::new(&self.search)))
+                    .when(searching, |bar| {
+                        bar.child(
+                            IconButton::new("settings-search-clear", IconName::Close)
+                                .icon_size(px(12.))
+                                .color(colors.text_faint)
+                                .tooltip(Tooltip::new("Clear the search").key("esc"))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.search
+                                        .update(cx, |search, cx| search.set_value("", window, cx));
+                                    this.query.clear();
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(label("events"))
-                    .children(RuleFlag::EVENTS.map(chip)),
+                    .id("settings-nav")
+                    .key_context(NAV_CONTEXT)
+                    .track_focus(&self.nav_focus)
+                    .on_action(cx.listener(|this, _: &NavNext, window, cx| {
+                        this.on_nav_step(true, window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &NavPrevious, window, cx| {
+                        this.on_nav_step(false, window, cx);
+                    }))
+                    .on_action(cx.listener(Self::on_nav_open))
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list),
             )
-            .child(switch(RuleFlag::HardOnly))
-            .child(switch(RuleFlag::SkipHandled))
-            .child(switch(RuleFlag::Sound))
-            .child(self.field(
-                "only after",
-                &FieldId::MinDuration(key.clone()),
-                120.,
-                Some(
-                    "A problem must last this long first (5m, 1h; 0 = at once); it is \
-                     dropped if it recovers or is handled before.",
-                ),
-            ))
+            .child(
+                div()
+                    .id("settings-focus-navbar")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(8.))
+                    .h(Metrics::with_rule(theme.metrics.footer_height))
+                    .px(px(14.))
+                    .border_t_1()
+                    .border_color(colors.border_header)
+                    .text_size(theme.text.small)
+                    .text_color(colors.text_muted)
+                    .cursor_pointer()
+                    .child("focus navbar")
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(theme.text.hint)
+                            .text_color(colors.text_faint)
+                            .child(navbar_key()),
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        window.focus(&this.nav_focus, cx);
+                        cx.notify();
+                    })),
+            )
             .into_any_element()
     }
 
-    /// A group's or dashboard's setting, and its custom rule.
-    fn scope_row(&self, row: &ScopeRow<'_>, theme: &Theme, cx: &Context<Self>) -> AnyElement {
-        let ScopeRow {
-            key,
-            name,
-            setting,
-            parent,
-            indent,
-        } = *row;
-        let choose = key.clone();
-        let rule = match setting {
-            ScopeSetting::Custom(rule) => Some(rule),
-            _ => None,
+    fn render_header(&self, theme: &Theme, facts: &pages::Facts, cx: &Context<Self>) -> AnyElement {
+        let colors = theme.colors;
+        let searching = !self.query.is_empty();
+        let (title, subtitle) = if searching {
+            let total: usize = SettingsPage::ALL
+                .into_iter()
+                .map(|page| self.page_matches(page, facts, cx).1)
+                .sum();
+            let noun = if total == 1 { "setting" } else { "settings" };
+            (
+                format!("{total} {noun}"),
+                format!("match “{}”", self.search.read(cx).value().trim()),
+            )
+        } else {
+            (self.page.label().to_owned(), self.subtitle(facts))
+        };
+        let keymap = !searching && self.page == SettingsPage::Keymap;
+        let save_error = self.state.read(cx).save_error().map(str::to_owned);
+        let status: AnyElement = if self.demo && !keymap {
+            div()
+                .text_size(theme.text.small)
+                .text_color(colors.text_faint)
+                .child("the demo saves nothing")
+                .into_any_element()
+        } else if let Some(error) = save_error {
+            div()
+                .id("settings-not-saved")
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(theme.text.small)
+                .text_color(theme.states.critical)
+                .child(Icon::new(IconName::TriangleAlert).size(px(12.)))
+                .child("not saved")
+                .tooltip(Tooltip::new(error).builder())
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(theme.text.small)
+                .text_color(colors.text_faint)
+                .child(Icon::new(IconName::Check).size(px(12.)))
+                .child("saved")
+                .into_any_element()
+        };
+        let edit = if keymap {
+            Button::new("settings-edit-keymap", "edit keymap file")
+                .icon(IconName::FileCode)
+                .disabled(self.locations.keymap_file.is_none())
+                .tooltip(Tooltip::new(
+                    "Opens keymap.toml in your editor; changes apply when you come back",
+                ))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.edit_keymap_file(cx)))
+        } else {
+            Button::new("settings-edit-file", "edit in settings file")
+                .icon(IconName::FileCode)
+                .disabled(self.locations.settings_file.is_none())
+                .tooltip(Tooltip::new(if self.demo {
+                    "The demo has no settings file"
+                } else {
+                    "Opens config.toml in your editor"
+                }))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.edit_settings_file(cx)))
         };
         div()
             .flex()
-            .flex_col()
-            .gap(px(8.))
-            .pl(px(indent))
+            .flex_none()
+            .items_center()
+            .gap(px(12.))
+            .h(Metrics::with_rule(theme.metrics.header_height))
+            .pl(px(32.))
+            .pr(px(12.))
+            .border_b_1()
+            .border_color(colors.border_header)
+            .whitespace_nowrap()
+            .child(rows::title(title, theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.text.small)
+                    .text_color(colors.text_faint)
+                    .child(subtitle),
+            )
+            .child(status)
+            .child(edit)
+            .child(
+                IconButton::new("settings-close", IconName::Close)
+                    .color(colors.text_muted)
+                    .tooltip(Tooltip::new("Close").key("esc"))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.commit_pending(window, cx);
+                        cx.emit(SettingsEvent::Close);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The faint words after the page's name: whom it is for.
+    fn subtitle(&self, facts: &pages::Facts) -> String {
+        match self.page {
+            SettingsPage::Notifications => match &facts.environment_name {
+                Some(name) => format!("for {name} · on this computer only"),
+                None => "on this computer only".to_owned(),
+            },
+            SettingsPage::Keymap => {
+                let count = facts.shortcut_count;
+                let noun = if count == 1 { "shortcut" } else { "shortcuts" };
+                match facts.keymap_problems.len() {
+                    0 => format!("keymap.toml · {count} {noun}"),
+                    problems => format!("keymap.toml · {count} {noun} · {problems} skipped"),
+                }
+            }
+            _ => "for icygui on this computer".to_owned(),
+        }
+    }
+}
+
+impl Render for SettingsPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.page == SettingsPage::Notifications || !self.query.is_empty() {
+            self.ensure_rule_inputs(window, cx);
+        }
+        let theme = cx.theme().clone();
+        let facts = self.facts(cx);
+        let viewport = window.viewport_size();
+        let height = px(PANEL_HEIGHT)
+            .min(viewport.height - px(64.))
+            .max(px(320.));
+        let (blocks, sections) = self.render_content(&theme, &facts, cx);
+        self.drawn_sections = sections;
+        let nav = self.render_nav(&theme, &facts, cx);
+        let header = self.render_header(&theme, &facts, cx);
+        let scroll = self.scroll.clone();
+        div()
+            .id("settings-panel")
+            .key_context(SETTINGS_CONTEXT)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::on_focus_navbar))
+            .on_action(cx.listener(Self::on_focus_search))
+            .on_action(cx.listener(Self::on_escape))
+            .on_action(cx.listener(Self::on_field_escape))
+            .on_action(cx.listener(Self::on_next_field))
+            .on_action(cx.listener(Self::on_previous_field))
+            .flex()
+            .w_full()
+            .max_w(px(PANEL_WIDTH))
+            .h(height)
+            .bg(theme.colors.window_background)
+            .child(nav)
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap(px(12.))
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(header)
                     .child(
                         div()
+                            .relative()
                             .flex()
                             .flex_col()
                             .flex_1()
-                            .min_w_0()
+                            .min_h_0()
                             .child(
                                 div()
-                                    .truncate()
-                                    .when(indent == 0., |name| name.font_weight(FontWeight::MEDIUM))
-                                    .text_color(theme.colors.text_strong)
-                                    .child(name.to_owned()),
+                                    .id("settings-content")
+                                    .flex()
+                                    .flex_col()
+                                    .size_full()
+                                    .px(px(32.))
+                                    .pt(px(8.))
+                                    .pb(px(24.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&scroll)
+                                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            if this.menus.close() {
+                                                cx.notify();
+                                            }
+                                        }),
+                                    )
+                                    .children(blocks),
                             )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(theme.text.small)
-                                    .text_color(theme.colors.text_faint)
-                                    .child(scope_meaning(setting, parent)),
-                            ),
-                    )
-                    .child(
-                        div().w(px(280.)).flex_none().child(
-                            SCOPE_CHOICES
-                                .iter()
-                                .fold(
-                                    Segmented::new(SharedString::from(format!(
-                                        "{}-setting",
-                                        scope_id(key)
-                                    ))),
-                                    |control, choice| control.option(*choice),
-                                )
-                                .selected(scope_choice(setting))
-                                .on_select(cx.listener(move |this, index: &usize, window, cx| {
-                                    this.choose_scope(&choose, *index, window, cx);
-                                })),
-                        ),
-                    ),
-            )
-            .when_some(rule, |row, rule| {
-                row.child(
-                    div()
-                        .ml(px(4.))
-                        .pl(px(14.))
-                        .py(px(4.))
-                        .border_l_2()
-                        .border_color(theme.colors.border_header)
-                        .child(self.rule_editor(key, rule, theme, cx)),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn render_notifications(&self, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
-        let Some(plan) = &self.plan else {
-            return vec![
-                div()
-                    .text_color(theme.colors.text_muted)
-                    .child("Add an environment first: notification rules belong to an environment.")
-                    .into_any_element(),
-            ];
-        };
-        let mut blocks = vec![
-            self.render_master_switch(plan, theme, cx),
-            section(theme, "default rule").into_any_element(),
-            hint(
-                "Groups and dashboards notify with it unless they say otherwise. Recoveries \
-                 notify only for problems that notified.",
-                theme,
-            )
-            .into_any_element(),
-            self.rule_editor(
-                &ScopeKey::Environment,
-                &plan.settings.default_rule,
-                theme,
-                cx,
-            ),
-            section(theme, "groups and dashboards").into_any_element(),
-        ];
-        blocks.extend(self.render_scopes(plan, theme, cx));
-        blocks.extend(self.render_quiet_hours(plan, theme, cx));
-        blocks.extend(self.render_storm(theme));
-        blocks.extend(Self::render_overrides(plan, Timestamp::now(), theme, cx));
-        blocks
-    }
-
-    /// The environment's master switch, and pausing (acts at once).
-    fn render_master_switch(
-        &self,
-        plan: &NotificationPlan,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let colors = theme.colors;
-        let now = Timestamp::now();
-        let environments = self.state.read(cx).environments().len();
-        let paused = self
-            .state
-            .read(cx)
-            .paused_until()
-            .filter(|until| *until > now);
-        let pause: AnyElement = match paused {
-            Some(until) => div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .text_size(theme.text.small)
-                .text_color(theme.states.warning)
-                .child(div().line_height(px(CHIP_HEIGHT)).child(paused_text(
-                    environments,
-                    until,
-                    now,
-                )))
-                .child(Link::new("settings-resume", "resume").on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        this.state.update(cx, |state, cx| {
-                            state.pause_notifications(None);
-                            cx.notify();
-                        });
-                    },
-                )))
-                .into_any_element(),
-            None => div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .text_size(theme.text.small)
-                        .text_color(colors.text_faint)
-                        .child(pause_label(environments)),
-                )
-                .children(PauseChoice::ALL.map(|choice| {
-                    Chip::new(
-                        SharedString::from(format!("settings-pause-{choice:?}")),
-                        choice.short_label(),
-                    )
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.state.update(cx, |state, cx| {
-                                state.pause_notifications(Some(choice.until(Timestamp::now())));
-                                cx.notify();
-                            });
-                        },
-                    ))
-                }))
-                .into_any_element(),
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap(px(12.))
-            .child(
-                div().flex_1().child(
-                    Switch::new("settings-notifications-enabled", plan.settings.enabled)
-                        .label(format!("notifications for {}", self.environment))
-                        .on_change(cx.listener(|this, on: &bool, _, cx| {
-                            if let Some(plan) = this.plan.as_mut() {
-                                plan.settings.enabled = *on;
-                            }
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(pause)
-            .into_any_element()
-    }
-
-    /// Every group's and dashboard's setting.
-    fn render_scopes(
-        &self,
-        plan: &NotificationPlan,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> Vec<AnyElement> {
-        let mut blocks = Vec::new();
-        if plan.groups.is_empty() {
-            blocks.push(hint("No dashboards yet.", theme).into_any_element());
-        }
-        let environment = self.environment.clone();
-        for group in &plan.groups {
-            let key = ScopeKey::Group(group.id.clone());
-            blocks.push(self.scope_row(
-                &ScopeRow {
-                    key: &key,
-                    name: &group.name,
-                    setting: &group.setting,
-                    parent: &environment,
-                    indent: 0.,
-                },
-                theme,
-                cx,
-            ));
-            let parent = group.name.clone();
-            for (id, name, setting) in &group.dashboards {
-                blocks.push(self.scope_row(
-                    &ScopeRow {
-                        key: &ScopeKey::Dashboard(group.id.clone(), id.clone()),
-                        name,
-                        setting,
-                        parent: &parent,
-                        indent: 20.,
-                    },
-                    theme,
-                    cx,
-                ));
-            }
-        }
-        blocks
-    }
-
-    fn render_quiet_hours(
-        &self,
-        plan: &NotificationPlan,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> Vec<AnyElement> {
-        let quiet = plan.settings.quiet_hours;
-        let mut blocks = vec![
-            section(theme, "quiet hours").into_any_element(),
-            Switch::new("settings-quiet", quiet.enabled)
-                .label("record notifications silently at night")
-                .on_change(cx.listener(|this, on: &bool, _, cx| {
-                    this.set_quiet_hours(*on, cx);
-                }))
-                .into_any_element(),
-        ];
-        if quiet.enabled {
-            blocks.push(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(self.field("from", &FieldId::QuietStart, 100., None))
-                    .child(self.field("to", &FieldId::QuietEnd, 100., None))
-                    .into_any_element(),
-            );
-            blocks.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .w(px(64.))
-                            .text_size(theme.text.small)
-                            .text_color(theme.colors.text_faint)
-                            .child("starting"),
-                    )
-                    .children(DAYS.iter().enumerate().map(|(index, day)| {
-                        let on = quiet.days.get(index).copied().unwrap_or(false);
-                        Chip::new(SharedString::from(format!("settings-day-{day}")), *day)
-                            .selected(on)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                if let Some(plan) = this.plan.as_mut()
-                                    && let Some(day) = plan.settings.quiet_hours.days.get_mut(index)
-                                {
-                                    *day = !on;
-                                }
-                                cx.notify();
-                            }))
-                    }))
-                    .into_any_element(),
-            );
-            blocks.push(
-                Switch::new("settings-quiet-critical", quiet.allow_critical)
-                    .label("critical and down still notify out loud")
-                    .on_change(cx.listener(|this, on: &bool, _, cx| {
-                        if let Some(plan) = this.plan.as_mut() {
-                            plan.settings.quiet_hours.allow_critical = *on;
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-            blocks.push(
-                hint(
-                    "A window may cross midnight (22:00 to 07:00); the days are the ones it \
-                     starts on. Quiet notifications still go to the notification centre.",
-                    theme,
-                )
-                .into_any_element(),
-            );
-        }
-        blocks
-    }
-
-    fn render_storm(&self, theme: &Theme) -> Vec<AnyElement> {
-        let text = |text: &'static str| {
-            div()
-                .flex_none()
-                .text_color(theme.colors.text_muted)
-                .child(text)
-        };
-        let error = [FieldId::StormThreshold, FieldId::StormWindow]
-            .iter()
-            .find_map(|id| self.errors.get(id).cloned());
-        vec![
-            section(theme, "storm control").into_any_element(),
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(text("at most"))
-                        .child(self.inline_field(&FieldId::StormThreshold, 64.))
-                        .child(text("notifications in"))
-                        .child(self.inline_field(&FieldId::StormWindow, 64.))
-                        .child(text("seconds, then one summary")),
-                )
-                .children(error.map(|error| {
-                    div()
-                        .text_size(theme.text.small)
-                        .text_color(theme.states.critical)
-                        .child(error)
-                }))
-                .into_any_element(),
-        ]
-    }
-
-    fn render_overrides(
-        plan: &NotificationPlan,
-        now: Timestamp,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> Vec<AnyElement> {
-        let current: Vec<_> = plan
-            .settings
-            .objects
-            .iter()
-            .filter(|entry| entry.until.is_none_or(|until| until > now))
-            .collect();
-        let mut blocks = vec![section(theme, "watched and muted").into_any_element()];
-        if current.is_empty() {
-            blocks.push(
-                hint(
-                    "Nothing is watched or muted. Watch or mute a host or service from its \
-                     pane's ··· menu or the palette.",
-                    theme,
-                )
-                .into_any_element(),
-            );
-            return blocks;
-        }
-        for (index, entry) in current.into_iter().enumerate() {
-            let object = entry.object.clone();
-            let color = match entry.mode {
-                ObjectMode::Watch => theme.colors.accent,
-                ObjectMode::Mute => theme.colors.text_faint,
-            };
-            blocks.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.colors.text)
-                            .child(crate::operate::forms::describe_objects(
-                                std::slice::from_ref(&entry.object),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(theme.text.small)
-                            .text_color(color)
-                            .child(override_text(entry, now)),
-                    )
-                    .child(
-                        Link::new(
-                            SharedString::from(format!("settings-override-remove-{index}")),
-                            "remove",
-                        )
-                        .quiet()
-                        .tooltip(Tooltip::new("Notifications follow the dashboards again"))
-                        .on_click(cx.listener(
-                            move |this, _: &ClickEvent, _, cx| {
-                                if let Some(plan) = this.plan.as_mut() {
-                                    plan.settings.objects.retain(|entry| entry.object != object);
-                                }
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .into_any_element(),
-            );
-        }
-        blocks
-    }
-}
-
-/// A group's or dashboard's row in the notification settings.
-#[derive(Clone, Copy)]
-struct ScopeRow<'a> {
-    key: &'a ScopeKey,
-    name: &'a str,
-    setting: &'a ScopeSetting,
-    /// What it inherits from: `the group databases`.
-    parent: &'a str,
-    indent: f32,
-}
-
-/// A section's heading: a rule above it, its name in the muted text.
-fn section(theme: &Theme, label: &'static str) -> gpui::Div {
-    div()
-        .mt(px(4.))
-        .pt(px(12.))
-        .border_t_1()
-        .border_color(theme.colors.border_row)
-        .text_size(theme.text.label)
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.colors.text_muted)
-        .child(label)
-}
-
-/// A faint line of explanation.
-fn hint(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
-    div()
-        .text_size(theme.text.small)
-        .text_color(theme.colors.text_faint)
-        .child(text.into())
-}
-
-/// A stable element id prefix for a scope.
-fn scope_id(key: &ScopeKey) -> String {
-    match key {
-        ScopeKey::Environment => "rule-environment".to_owned(),
-        ScopeKey::Group(id) => format!("rule-group-{id}"),
-        ScopeKey::Dashboard(group, id) => format!("rule-dashboard-{group}-{id}"),
-    }
-}
-
-impl Render for SettingsDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let title = div()
-            .flex()
-            .flex_1()
-            .items_center()
-            .gap(px(16.))
-            .child("Settings")
-            .child(div().flex_1())
-            .child(
-                div().w(px(260.)).font_weight(FontWeight::NORMAL).child(
-                    SettingsTab::ALL
-                        .iter()
-                        .fold(Segmented::new("settings-tabs"), |control, tab| {
-                            control.option(tab.label())
-                        })
-                        .selected(
-                            SettingsTab::ALL
-                                .iter()
-                                .position(|tab| *tab == self.tab)
-                                .unwrap_or(0),
-                        )
-                        .on_select(cx.listener(|this, index: &usize, _, cx| {
-                            let tab = SettingsTab::ALL.get(*index).copied().unwrap_or_default();
-                            this.show_tab(tab, cx);
-                        })),
-                ),
-            );
-        let blocks = match self.tab {
-            SettingsTab::General => self.render_general(&theme, cx),
-            SettingsTab::Notifications => self.render_notifications(&theme, cx),
-        };
-        let status = match (self.tab, self.demo) {
-            (_, true) => "the demo saves nothing".to_owned(),
-            (SettingsTab::General, false) => "for icygui on this computer".to_owned(),
-            (SettingsTab::Notifications, false) => {
-                format!("for {} · on this computer only", self.environment)
-            }
-        };
-        let body = blocks
-            .into_iter()
-            .fold(DialogBody::new(title), DialogBody::child);
-        div()
-            .id("settings-dialog")
-            .key_context(SETTINGS_CONTEXT)
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::on_save))
-            .on_action(cx.listener(Self::on_next_field))
-            .on_action(cx.listener(Self::on_previous_field))
-            .max_h(px(760.))
-            .flex()
-            .flex_col()
-            .child(
-                body.footer_start(div().text_color(theme.colors.text_faint).child(status))
-                    .action(
-                        Button::new("settings-cancel", "cancel")
-                            .key_hint("esc")
-                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                                cx.emit(SettingsEvent::Close);
-                            })),
-                    )
-                    .action(
-                        Button::new("settings-save", "save")
-                            .primary()
-                            .key_hint(if cfg!(target_os = "macos") {
-                                "⌘S"
-                            } else {
-                                "ctrl-s"
-                            })
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.save(window, cx);
-                            })),
+                            .child(Scrollbar::vertical(&scroll)),
                     ),
             )
     }

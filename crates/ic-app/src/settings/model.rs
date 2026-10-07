@@ -1,4 +1,5 @@
-//! The settings dialog's data: what each tab edits, how the text fields
+//! The settings panel's data: its pages, sections and settings (what the
+//! navigation lists and the search looks through), how the text fields
 //! read and are checked, and the notification rules of every scope
 //! (environment, group, dashboard) with their inheritance. Pure, so it is
 //! tested without a window.
@@ -7,30 +8,399 @@ use std::fmt::Write as _;
 
 use ic_config::{MIN_EVENT_LOG_RETENTION_HOURS, MIN_RECONCILE_INTERVAL_SECS};
 use ic_rules::{Rule, ScopeSetting};
+use ic_ui_kit::IconName;
 
 use crate::app_state::NotificationPlan;
 
-/// The dialog's tabs.
+/// The panel's pages, as the navigation lists them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(crate) enum SettingsTab {
-    /// Background, launch at login, the event log, reconciles.
+pub(crate) enum SettingsPage {
+    /// Running in the background: the tray, start at login, quiet mode.
     #[default]
     General,
-    /// The active environment's notification rules (NOTE-02..06).
+    /// Theme, interface size, row density, times in lists.
+    Appearance,
+    /// An environment's notification rules (NOTE-02..06).
     Notifications,
+    /// Reconciles, the event log, the environments.
+    Icinga,
+    /// Every shortcut, and the keymap file.
+    Keymap,
+    /// The log level, the log and config folders, about.
+    Advanced,
 }
 
-impl SettingsTab {
-    /// Both tabs, in order.
-    pub(crate) const ALL: [Self; 2] = [Self::General, Self::Notifications];
+impl SettingsPage {
+    /// Every page, in navigation order.
+    pub(crate) const ALL: [Self; 6] = [
+        Self::General,
+        Self::Appearance,
+        Self::Notifications,
+        Self::Icinga,
+        Self::Keymap,
+        Self::Advanced,
+    ];
 
-    /// The tab's label.
+    /// The page's name.
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::General => "general",
+            Self::Appearance => "appearance",
             Self::Notifications => "notifications",
+            Self::Icinga => "icinga",
+            Self::Keymap => "keymap",
+            Self::Advanced => "advanced",
         }
     }
+
+    /// Its icon in the navigation.
+    pub(crate) fn icon(self) -> IconName {
+        match self {
+            Self::General => IconName::Settings,
+            Self::Appearance => IconName::SunMoon,
+            Self::Notifications => IconName::Bell,
+            Self::Icinga => IconName::Server,
+            Self::Keymap => IconName::Keyboard,
+            Self::Advanced => IconName::Wrench,
+        }
+    }
+
+    /// Its sections, in order (the keymap page is one table).
+    pub(crate) fn sections(self) -> &'static [Section] {
+        match self {
+            Self::General => &[Section::Background],
+            Self::Appearance => &[Section::ThemeAndSize, Section::Lists, Section::Preview],
+            Self::Notifications => &[
+                Section::ThisEnvironment,
+                Section::DefaultRule,
+                Section::QuietHours,
+                Section::StormControl,
+                Section::WatchedAndMuted,
+                Section::GroupsAndDashboards,
+            ],
+            Self::Icinga => &[Section::Reconcile, Section::EventLog, Section::Environments],
+            Self::Keymap => &[Section::Shortcuts],
+            Self::Advanced => &[Section::Logs, Section::Files, Section::About],
+        }
+    }
+
+    /// The next page (`down` in the navigation), or the previous one.
+    pub(crate) fn step(self, forward: bool) -> Self {
+        let index = Self::ALL.iter().position(|page| *page == self).unwrap_or(0);
+        let count = Self::ALL.len();
+        let next = if forward {
+            (index + 1).min(count - 1)
+        } else {
+            index.saturating_sub(1)
+        };
+        Self::ALL[next]
+    }
+}
+
+/// A section of a page: a label over its rows, listed under the open page
+/// in the navigation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Section {
+    /// General: the tray, start at login, quiet mode.
+    Background,
+    /// Appearance: theme and interface size.
+    ThemeAndSize,
+    /// Appearance: row density and times in lists.
+    Lists,
+    /// Appearance: a dashboard as it would look.
+    Preview,
+    /// Notifications: the environment, its switch, pausing, plugin output.
+    ThisEnvironment,
+    /// Notifications: the environment's default rule.
+    DefaultRule,
+    /// Notifications: quiet hours.
+    QuietHours,
+    /// Notifications: storm control.
+    StormControl,
+    /// Notifications: watched and muted objects.
+    WatchedAndMuted,
+    /// Notifications: every group's and dashboard's setting.
+    GroupsAndDashboards,
+    /// Icinga: reconciles.
+    Reconcile,
+    /// Icinga: the local event log.
+    EventLog,
+    /// Icinga: the environments.
+    Environments,
+    /// Keymap: the table of shortcuts.
+    Shortcuts,
+    /// Advanced: the log level and folder.
+    Logs,
+    /// Advanced: the config folder.
+    Files,
+    /// Advanced: the version and the about dialog.
+    About,
+}
+
+impl Section {
+    /// The section's label.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Background => "in the background",
+            Self::ThemeAndSize => "theme and size",
+            Self::Lists => "lists",
+            Self::Preview => "preview",
+            Self::ThisEnvironment => "this environment",
+            Self::DefaultRule => "default rule",
+            Self::QuietHours => "quiet hours",
+            Self::StormControl => "storm control",
+            Self::WatchedAndMuted => "watched and muted",
+            Self::GroupsAndDashboards => "groups and dashboards",
+            Self::Reconcile => "reconcile",
+            Self::EventLog => "event log",
+            Self::Environments => "environments",
+            Self::Shortcuts => "shortcuts",
+            Self::Logs => "logs",
+            Self::Files => "files",
+            Self::About => "about",
+        }
+    }
+
+    /// What follows the label (`· groups and dashboards notify with it
+    /// unless they say otherwise`).
+    pub(crate) fn note(self) -> Option<&'static str> {
+        match self {
+            Self::DefaultRule => {
+                Some("groups and dashboards notify with it unless they say otherwise")
+            }
+            Self::WatchedAndMuted => Some("from a pane’s ··· menu or the palette"),
+            Self::Environments => {
+                Some("every environment runs and notifies, whichever is on screen")
+            }
+            _ => None,
+        }
+    }
+
+    /// The page it is on.
+    pub(crate) fn page(self) -> SettingsPage {
+        SettingsPage::ALL
+            .into_iter()
+            .find(|page| page.sections().contains(&self))
+            .unwrap_or_default()
+    }
+}
+
+/// One setting: a row with a name, a line of description and a control.
+/// The rows that come from data (watched objects, groups, environments,
+/// shortcuts) are not settings of their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Setting {
+    /// Keep running in the tray when the window closes (BG-01).
+    CloseToTray,
+    /// Start at login (BG-03).
+    LaunchAtLogin,
+    /// Quiet mode when hidden (PERF-09).
+    QuietMode,
+    /// Follow the system, dark or light.
+    Theme,
+    /// 90, 100 or 115 %.
+    InterfaceSize,
+    /// Comfortable or compact rows.
+    RowDensity,
+    /// Relative times or clock times in lists.
+    ListTimes,
+    /// Whose notification rules the page shows.
+    Environment,
+    /// The environment's notifications on or off.
+    Enabled,
+    /// Pause every environment.
+    PauseAll,
+    /// The plugin output in desktop notifications.
+    PluginOutput,
+    /// The default rule's states.
+    States,
+    /// The default rule's events.
+    Events,
+    /// Hard states only.
+    HardOnly,
+    /// Skip handled problems.
+    SkipHandled,
+    /// A problem must last this long first.
+    MinDuration,
+    /// Play a sound.
+    Sound,
+    /// Quiet hours on or off.
+    QuietHours,
+    /// Quiet hours' start and end.
+    QuietTimes,
+    /// The days quiet hours start on.
+    QuietDays,
+    /// Critical and down still notify during quiet hours.
+    QuietLoud,
+    /// Storm control's threshold and window.
+    Storm,
+    /// Reconcile adaptively or at a fixed interval.
+    Reconcile,
+    /// The fixed reconcile interval.
+    ReconcileInterval,
+    /// How long the event log keeps events.
+    Retention,
+    /// What icygui writes to its log.
+    LogLevel,
+    /// The log folder.
+    LogFolder,
+    /// The config folder.
+    ConfigFolder,
+    /// The version and the about dialog.
+    About,
+}
+
+impl Setting {
+    /// Every setting, in page order.
+    pub(crate) const ALL: [Self; 29] = [
+        Self::CloseToTray,
+        Self::LaunchAtLogin,
+        Self::QuietMode,
+        Self::Theme,
+        Self::InterfaceSize,
+        Self::RowDensity,
+        Self::ListTimes,
+        Self::Environment,
+        Self::Enabled,
+        Self::PauseAll,
+        Self::PluginOutput,
+        Self::States,
+        Self::Events,
+        Self::HardOnly,
+        Self::SkipHandled,
+        Self::MinDuration,
+        Self::Sound,
+        Self::QuietHours,
+        Self::QuietTimes,
+        Self::QuietDays,
+        Self::QuietLoud,
+        Self::Storm,
+        Self::Reconcile,
+        Self::ReconcileInterval,
+        Self::Retention,
+        Self::LogLevel,
+        Self::LogFolder,
+        Self::ConfigFolder,
+        Self::About,
+    ];
+
+    /// Its section.
+    pub(crate) fn section(self) -> Section {
+        match self {
+            Self::CloseToTray | Self::LaunchAtLogin | Self::QuietMode => Section::Background,
+            Self::Theme | Self::InterfaceSize => Section::ThemeAndSize,
+            Self::RowDensity | Self::ListTimes => Section::Lists,
+            Self::Environment | Self::Enabled | Self::PauseAll | Self::PluginOutput => {
+                Section::ThisEnvironment
+            }
+            Self::States
+            | Self::Events
+            | Self::HardOnly
+            | Self::SkipHandled
+            | Self::MinDuration
+            | Self::Sound => Section::DefaultRule,
+            Self::QuietHours | Self::QuietTimes | Self::QuietDays | Self::QuietLoud => {
+                Section::QuietHours
+            }
+            Self::Storm => Section::StormControl,
+            Self::Reconcile | Self::ReconcileInterval => Section::Reconcile,
+            Self::Retention => Section::EventLog,
+            Self::LogLevel | Self::LogFolder => Section::Logs,
+            Self::ConfigFolder => Section::Files,
+            Self::About => Section::About,
+        }
+    }
+
+    /// Its row depends on the switch above it (indented by 20px).
+    pub(crate) fn is_sub(self) -> bool {
+        matches!(
+            self,
+            Self::QuietTimes | Self::QuietDays | Self::QuietLoud | Self::ReconcileInterval
+        )
+    }
+}
+
+/// A row's name and description, which can name the environment or a
+/// path (the panel fills them in; the search looks through them).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RowText {
+    /// The name (13px).
+    pub(crate) name: String,
+    /// One line of description (12px, muted; empty for none).
+    pub(crate) description: String,
+}
+
+/// What a search found on one page: its static settings (with the section
+/// whose name matched, which brings the whole section), and how many
+/// rows of data matched (counted by the panel).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PageMatches {
+    /// The settings that match, in page order, each with whether it is
+    /// the first of a section found by its name.
+    pub(crate) settings: Vec<(Setting, bool)>,
+}
+
+/// The query as a search compares it: trimmed, lower case.
+pub(crate) fn normalized(query: &str) -> String {
+    query.trim().to_lowercase()
+}
+
+/// Whether `text` contains the (normalized) query.
+pub(crate) fn contains(text: &str, query: &str) -> bool {
+    !query.is_empty() && text.to_lowercase().contains(query)
+}
+
+/// Whether a search for `query` (normalized) brings all of `section`:
+/// its name or its page's name matches.
+pub(crate) fn section_matches(section: Section, query: &str) -> bool {
+    contains(section.label(), query) || contains(section.page().label(), query)
+}
+
+/// The settings that match `query` (normalized, not empty): by name or
+/// description; a section or page whose name matches brings all of its
+/// settings. `text` gives a setting's row text. Each comes with whether it
+/// is the first of a section found by its name (its row says so).
+pub(crate) fn matching_settings(
+    query: &str,
+    text: impl Fn(Setting) -> RowText,
+) -> Vec<(Setting, bool)> {
+    let mut found = Vec::new();
+    let mut first_of: Option<Section> = None;
+    for setting in Setting::ALL {
+        let section = setting.section();
+        let row = text(setting);
+        let own = contains(&row.name, query) || contains(&row.description, query);
+        let by_section = section_matches(section, query);
+        if own || by_section {
+            // The first row of a section found by its name says so.
+            let mark = by_section && !own && first_of != Some(section);
+            if by_section {
+                first_of = Some(section);
+            }
+            found.push((setting, mark));
+        }
+    }
+    found
+}
+
+/// Where `query` (normalized) occurs in `text`, as byte ranges, for
+/// drawing the matches in the accent colour (as the palette marks its
+/// matches). Lower-casing keeps byte offsets only for ASCII; other text
+/// gets no marks.
+pub(crate) fn match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let lower = text.to_lowercase();
+    if query.is_empty() || lower.len() != text.len() {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut at = 0;
+    while let Some(found) = lower[at..].find(query) {
+        let start = at + found;
+        let end = start + query.len();
+        ranges.push(start..end);
+        at = end;
+    }
+    ranges
 }
 
 /// A notification scope: the environment's default rule, a group or a
@@ -45,7 +415,7 @@ pub(crate) enum ScopeKey {
     Dashboard(String, String),
 }
 
-/// A text field of the dialog.
+/// A text field of the panel.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum FieldId {
     /// Event log retention, hours.
@@ -210,7 +580,7 @@ fn parse_seconds(text: &str) -> Result<u32, String> {
 }
 
 /// The three ways a group or dashboard can relate to its parent, plus a
-/// rule of its own, as the dialog's segmented control offers them.
+/// rule of its own, as the panel's segmented control offers them.
 pub(crate) const SCOPE_CHOICES: [&str; 4] = ["inherit", "on", "off", "custom"];
 
 /// The index of `setting` in [`SCOPE_CHOICES`].
@@ -344,7 +714,7 @@ impl NotificationPlan {
     }
 }
 
-/// One on/off condition of a rule (NOTE-03), as the dialog's chips and
+/// One on/off condition of a rule (NOTE-03), as the panel's chips and
 /// switches edit it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RuleFlag {
@@ -375,7 +745,7 @@ pub(crate) enum RuleFlag {
 }
 
 impl RuleFlag {
-    /// The states, in the order the dialog shows them.
+    /// The states, in the order the panel shows them.
     pub(crate) const STATES: [Self; 6] = [
         Self::Critical,
         Self::Warning,
@@ -399,8 +769,8 @@ impl RuleFlag {
             Self::Acknowledgements => "acknowledgements",
             Self::Downtimes => "downtimes",
             Self::Flapping => "flapping",
-            Self::HardOnly => "hard states only: soft states are retries in progress",
-            Self::SkipHandled => "skip handled problems: acknowledged, in downtime, host down",
+            Self::HardOnly => "hard states only",
+            Self::SkipHandled => "skip handled problems",
             Self::Sound => "play a sound",
         }
     }
@@ -448,9 +818,9 @@ impl RuleFlag {
 pub(crate) fn scope_meaning(setting: &ScopeSetting, parent: &str) -> String {
     match setting {
         ScopeSetting::Inherit => format!("inherits {parent}"),
-        ScopeSetting::On => format!("notifies with {parent}'s rule, even when that is off"),
-        ScopeSetting::Off => "never notifies (bell off in the sidebar)".to_owned(),
-        ScopeSetting::Custom(_) => "notifies with its own rule".to_owned(),
+        ScopeSetting::On => format!("on: notifies even if {parent} is off"),
+        ScopeSetting::Off => "off: never notifies (bell off in the sidebar)".to_owned(),
+        ScopeSetting::Custom(_) => "custom: notifies with its own rule, below".to_owned(),
     }
 }
 

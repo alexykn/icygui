@@ -1039,12 +1039,31 @@ impl Client {
     }
 
     /// Sends a request; done when the response headers have arrived, which
-    /// must happen within the request timeout (connecting included).
+    /// must happen within the request timeout (connecting included). At
+    /// the `debug` level each request's method, path, status and time to
+    /// the headers are logged (the path only: no query, no credentials).
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, ApiError> {
-        tokio::time::timeout(self.inner.timeout, request.send())
+        let (http, request) = request.build_split();
+        let request = request.map_err(|error| ApiError::from_reqwest(&error))?;
+        let method = request.method().clone();
+        let path = request.url().path().to_owned();
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(self.inner.timeout, http.execute(request))
             .await
-            .map_err(|_| ApiError::Timeout)?
-            .map_err(|error| ApiError::from_reqwest(&error))
+            .map_err(|_| ApiError::Timeout)
+            .and_then(|sent| sent.map_err(|error| ApiError::from_reqwest(&error)));
+        let elapsed_ms = started.elapsed().as_millis();
+        match &result {
+            Ok(response) => tracing::debug!(
+                %method,
+                path,
+                status = response.status().as_u16(),
+                elapsed_ms,
+                "request"
+            ),
+            Err(error) => tracing::debug!(%method, path, %error, elapsed_ms, "request failed"),
+        }
+        result
     }
 
     /// Sends a request and parses its JSON body; non-success statuses are

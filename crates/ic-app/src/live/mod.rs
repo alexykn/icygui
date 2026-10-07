@@ -137,6 +137,9 @@ pub(crate) struct Session {
     demo_secrets: Arc<DemoSecrets>,
     demo_dir: Option<tempfile::TempDir>,
     pending_open: Option<OpenAtStart>,
+    /// The settings file's problem last reported (an edit that doesn't
+    /// read), so coming back to the window doesn't repeat it.
+    reported_file_error: Option<String>,
     /// Shows notifications on the desktop.
     desktop: Box<dyn Desktop>,
     /// Recent notifications' tags and objects, for their clicks.
@@ -259,6 +262,7 @@ impl Session {
             demo_secrets,
             demo_dir: None,
             pending_open,
+            reported_file_error: None,
             desktop,
             targets: VecDeque::new(),
             #[cfg(all(test, target_os = "linux"))]
@@ -285,7 +289,14 @@ impl Session {
             }),
         );
         match started {
-            Ok(persistence) => state.update(cx, |state, _| state.set_persistence(persistence)),
+            Ok(persistence) => state.update(cx, |state, _| {
+                // What the file holds now: an edit by hand shows as a
+                // difference from it (`reload_settings_file`).
+                if state.config_problem().is_none() {
+                    persistence.read_from_disk(state.config().clone());
+                }
+                state.set_persistence(persistence);
+            }),
             Err(error) => {
                 tracing::error!(%error, "the settings writer couldn't start; nothing will be saved");
                 state.update(cx, |state, _| {
@@ -333,7 +344,7 @@ impl Session {
     /// it goes to that environment's engine, whichever is active by then.
     fn post(&mut self, raised: &Raised, cx: &mut Context<Self>) {
         let intent = &raised.intent;
-        let (acknowledge, name, prefix) = {
+        let (acknowledge, name, prefix, output) = {
             let state = self.state.read(cx);
             let Some(environment) = state.environment_by_id(&raised.environment) else {
                 tracing::debug!(id = %intent.id, "a notification of a removed environment was dropped");
@@ -343,7 +354,8 @@ impl Session {
                 .action_denial_in(&raised.environment, &ObjectAction::Acknowledge)
                 .is_none();
             let prefix = (state.environments().len() > 1).then(|| environment.name.clone());
-            (acknowledge, environment.name.clone(), prefix)
+            let output = state.config().general.show_plugin_output;
+            (acknowledge, environment.name.clone(), prefix, output)
         };
         if let Some(object) = &intent.object {
             self.targets.push_front(Target {
@@ -353,7 +365,7 @@ impl Session {
             });
             self.targets.truncate(MAX_TARGETS);
         }
-        let mut posted = desktop::posted(intent, &name, acknowledge);
+        let mut posted = desktop::posted(intent, &name, acknowledge, output);
         if let Some(name) = prefix {
             posted.title = desktop::prefixed_title(&posted.title, &name);
         }
@@ -455,6 +467,15 @@ impl Session {
                 let _ = state.request(acknowledge);
                 cx.notify();
             });
+        }
+    }
+
+    /// Where the settings, data and logs are (`None` in the demo, which
+    /// keeps nothing).
+    pub(crate) fn paths(&self) -> Option<&Paths> {
+        match &self.launch {
+            Launch::Live { paths, .. } => Some(paths),
+            Launch::Demo { .. } => None,
         }
     }
 
@@ -1182,6 +1203,7 @@ impl Session {
                 Ok(config) => {
                     tracing::info!(?choice, "settings recovered");
                     session.state.update(cx, |state, cx| {
+                        state.settings_read(&config);
                         state.adopt_config(config);
                         cx.notify();
                     });
@@ -1204,6 +1226,90 @@ impl Session {
             });
         })
         .detach();
+    }
+
+    /// The window came back to the front: takes over the settings file
+    /// if it was edited meanwhile (*edit in settings file*), read off the
+    /// UI thread. A file that can't be read is reported once and changes
+    /// nothing; a missing one is left alone.
+    pub(crate) fn reload_settings_file(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.paths().map(Paths::config_store) else {
+            return;
+        };
+        let known = {
+            let state = self.state.read(cx);
+            if state.config_problem().is_some() {
+                return;
+            }
+            state.settings_on_disk()
+        };
+        let Some(known) = known else {
+            return;
+        };
+        let read = cx.background_executor().spawn(async move {
+            if !store.path().exists() {
+                return None;
+            }
+            Some(store.load().map_err(|error| error.to_string()))
+        });
+        cx.spawn(async move |this, cx| {
+            let Some(result) = read.await else {
+                return;
+            };
+            let _ = this.update(cx, |session, cx| match result {
+                Ok(config) => {
+                    session.reported_file_error = None;
+                    if config != known {
+                        session.take_settings_file(config, cx);
+                    }
+                }
+                Err(error) => {
+                    if session.reported_file_error.as_deref() == Some(error.as_str()) {
+                        return;
+                    }
+                    tracing::warn!(%error, "the edited settings file can't be read");
+                    session.reported_file_error = Some(error.clone());
+                    session.state.update(cx, |state, cx| {
+                        state.report(UserNotice::problem(
+                            "The settings file can't be read; icygui keeps its settings.",
+                            format!(
+                                "{error}. Fix it in the file; until then a change made in \
+                                 icygui writes over it (your version is kept as \
+                                 config.toml.bak)."
+                            ),
+                        ));
+                        cx.notify();
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Takes over settings edited in the file: the state takes them, then
+    /// engines stop, restart or start as their environments changed.
+    fn take_settings_file(&mut self, config: Config, cx: &mut Context<Self>) {
+        let changes = self.state.update(cx, |state, cx| {
+            let changes = state.take_settings_from_file(config);
+            cx.notify();
+            changes
+        });
+        let Some(changes) = changes else {
+            return;
+        };
+        for (id, core) in changes.removed {
+            self.stop_engine(&id, core, None, cx);
+        }
+        for id in &changes.reconnect {
+            self.replace_engine(id, None, cx);
+        }
+        if !changes.added.is_empty() {
+            self.start(cx);
+        }
+        self.state.update(cx, |state, cx| {
+            state.inform("Settings taken over from the settings file", None);
+            cx.notify();
+        });
     }
 
     /// Stops every engine (side by side, each with its bounded wait),

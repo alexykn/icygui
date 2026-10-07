@@ -28,7 +28,7 @@ use crate::actions::ObjectAction;
 use crate::app_state::AppState;
 use crate::app_state::environments::url_summary;
 use crate::notifications::{MuteChoice, OverrideChange, PauseChoice};
-use crate::settings::SettingsTab;
+use crate::settings::SettingsPage;
 use crate::sidebar::Dot;
 
 /// The palette's sections, in display order.
@@ -117,7 +117,7 @@ pub(crate) enum PaletteCommand {
     /// Mark every notification read.
     MarkNotificationsRead,
     /// Open the settings (`secondary-,`), on this tab.
-    Settings(SettingsTab),
+    Settings(SettingsPage),
     /// Show what icygui is.
     About,
     /// Quit the app, even when it keeps running in the tray.
@@ -1137,7 +1137,7 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
             String::new(),
             None,
             IconName::Settings,
-            PaletteCommand::Settings(SettingsTab::Notifications),
+            PaletteCommand::Settings(SettingsPage::Notifications),
         ));
     }
     items.push(command(
@@ -1145,7 +1145,7 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
         String::new(),
         Some(crate::settings::settings_key()),
         IconName::Settings,
-        PaletteCommand::Settings(SettingsTab::General),
+        PaletteCommand::Settings(SettingsPage::General),
     ));
     items.push(command(
         "About icygui",

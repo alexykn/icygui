@@ -19,6 +19,7 @@ mod environments;
 #[cfg(test)]
 mod fixture;
 mod format;
+mod keymap;
 mod live;
 mod logging;
 mod menu_state;
@@ -189,6 +190,11 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
         cx.set_global(ControlsPreference::from_env());
         workspace::bind_keys(cx);
         background::menus::install(cx);
+        // The user's own bindings on top of the defaults (the demo reads
+        // them too: they belong to the user, not to the settings).
+        if let Some(path) = keymap_file(&startup) {
+            keymap::install(path, cx);
+        }
 
         let now = Timestamp::now();
         let (state, launch, pending_open) = match startup {
@@ -216,6 +222,8 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
                 (state, Launch::Demo { options }, dev.open)
             }
         };
+        // The settings are read: their log level from now on.
+        logging::apply_setting(state.config().general.log_level);
         let bounds = window_state::initial_bounds(
             state.window_state(),
             &cx.displays()
@@ -254,6 +262,14 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
             session.update(cx, Session::start);
         }
     });
+}
+
+/// Where the keymap file is: next to the settings file.
+fn keymap_file(startup: &Startup) -> Option<std::path::PathBuf> {
+    match startup {
+        Startup::Live { paths } => Some(paths.keymap_file()),
+        Startup::Demo { .. } => Paths::from_system().ok().map(|paths| paths.keymap_file()),
+    }
 }
 
 /// The instance lock and listener, held while the app runs.

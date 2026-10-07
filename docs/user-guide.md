@@ -88,7 +88,7 @@ Reload Icinga afterwards (`systemctl reload icinga2`).
 - Permissions restricted with a `filter` in the `ApiUser` work too: icygui then shows and acts on only the objects the user may see.
 - **Read-only:** leave out the `actions/*` lines. Action buttons are then disabled, and hovering one says which permission is missing.
 - **Run command is opt-in, and it is remote code execution.** `actions/execute-command` runs a check or event command on an endpoint, and icygui's *run command* sends whatever macros you type. With a command such as the ITL's `by_ssh` (its `by_ssh_command` is free text), or any command with a free-form argument, whoever holds this API user's password can run arbitrary commands as the `icinga` user on every agent and satellite the master reaches, and that password sits in the keychain of every on-call laptop. Without the permission, *run command* is disabled and says which permission is missing. If you do need it:
-  - give it to a **separate `ApiUser`** that only the people who need it have (in icygui, a second environment with the same URL, switched to only to run a command). Turn that environment's notifications off (switch to it, then Settings → notifications → *notifications for <name>*), or both environments notify about the same problems; a mute from the switcher ends by 08:00 at the latest. Like every environment it stays connected: a second event stream (a quiet one while it is off screen), its own load on start and its reconciles, so it costs the master as much as a second laptop. And/or
+  - give it to a **separate `ApiUser`** that only the people who need it have (in icygui, a second environment with the same URL, switched to only to run a command). Turn that environment's notifications off (Settings → notifications, pick it under *environment*, then *notifications for <name>*), or both environments notify about the same problems; a mute from the switcher ends by 08:00 at the latest. Like every environment it stays connected: a second event stream (a quiet one while it is off screen), its own load on start and its reconciles, so it costs the master as much as a second laptop. And/or
   - **restrict it with a filter** to the objects it may target, for example `{ permission = "actions/execute-command", filter = {{ "lab" in host.groups }} }` (`host` is the host itself or the service's host). A filter limits *which* hosts and services, not *what* runs on them.
 - `objects/query/Notification` and `events/Notification` let the panes show whom Icinga notified about a problem, and when. Without them, that row says it can't tell; everything else works.
 - `status/query` lets icygui notice an Icinga restart and a stalled event stream. Without it, the periodic reconcile still catches up.
@@ -244,6 +244,9 @@ Click a row (or press <kbd>Enter</kbd>) for the **pane** at the right:
 | <kbd>Ctrl Tab</kbd>, <kbd>Ctrl Shift Tab</kbd> | anywhere | Next / previous tab |
 | <kbd>⌘W</kbd> | anywhere | Close the tab |
 | <kbd>⌘,</kbd> | anywhere | Settings |
+| <kbd>⌘⇧E</kbd>, then <kbd>↑</kbd> <kbd>↓</kbd> | settings | Move through the categories (<kbd>Enter</kbd> back to the page) |
+| <kbd>⌘F</kbd> | settings | Search the settings |
+| <kbd>Esc</kbd> | settings | Clear the search, then close |
 | <kbd>⌘Q</kbd> | anywhere | Quit (also from the tray) |
 | <kbd>⌘S</kbd>, <kbd>Esc</kbd> | dashboard editor | Save, discard |
 | <kbd>Tab</kbd>, <kbd>Shift Tab</kbd> | dialogs | Next / previous field |
@@ -283,10 +286,10 @@ icygui decides about notifications **on your machine**, from the live event stre
 
 Notifications come from **every environment** (see [Environments](#environments)): while you look at staging, production still notifies.
 
-**What a notification looks like:** `CRITICAL · postgres-replication on db-prod-03`, the first line of the output, and the group and dashboard; with more than one environment the environment's name comes first (`production · CRITICAL · postgres-replication on db-prod-03`). *Open* (or a click) brings the window back (it is recreated if you closed it), switches to the notification's environment and shows the object's pane. *Acknowledge* opens the acknowledge dialog for the object in its own environment without switching (its title names the environment), and the acknowledgement goes to that environment's Icinga, never to the one on screen.
+**What a notification looks like:** `CRITICAL · postgres-replication on db-prod-03`, the first line of the output, and the group and dashboard (without the output when Settings → notifications → *show plugin output* is off, for shared screens and the lock screen: the title still names the object and its state); with more than one environment the environment's name comes first (`production · CRITICAL · postgres-replication on db-prod-03`). *Open* (or a click) brings the window back (it is recreated if you closed it), switches to the notification's environment and shows the object's pane. *Acknowledge* opens the acknowledge dialog for the object in its own environment without switching (its title names the environment), and the acknowledgement goes to that environment's Icinga, never to the one on screen.
 
 **Rules** are inherited from top to bottom, and the most specific one wins:
-1. **Environment default rule** (Settings → *notifications*).
+1. **Environment default rule** (Settings → *notifications*; its *environment* dropdown picks whose rules the page shows, the one on screen when the settings open).
 2. **Group:** inherit, on, off, or a custom rule.
 3. **Dashboard:** inherit, on, off, or a custom rule (in its `···` menu, the editor or the settings).
 4. **Object:** from the pane's `···` menu: *watch: always notify* (even when none of its dashboards notify), or *mute* for 1 hour, 4 hours, until 08:00, or until unmuted. Muted groups, dashboards and objects show a bell-off in the sidebar or pane.
@@ -319,7 +322,7 @@ Recoveries only notify for problems that notified.
 - The centre keeps its size and place while it is open, so nothing moves under the pointer when notifications arrive or you pick a scope or a label; in a short window its list is shorter. While the pointer is over the list, new notifications wait until it leaves (the heading counts them at once), so the entry under the pointer stays the one a click opens.
 - *mark all read* marks what the list shows: the scope's environments, or only what a label left.
 
-The history stays on this computer, for as long as Settings → general → *keep events for* says.
+The history stays on this computer, for as long as Settings → icinga → *keep events for* says.
 
 No notifications are sent for what's already wrong when icygui connects, but icygui keeps track of it: a service still critical from before its host went down waits for a fresh check (or five minutes) once the host is back, and an object that is flapping stays quiet until it stops. A problem that notified before icygui restarted (or before the environment's connection settings changed) still notifies its recovery, as long as the event log keeps it. Problems that a reconcile finds after a reconnect do notify, also one that recovered and failed again while your laptop slept.
 
@@ -327,7 +330,7 @@ Platform notes: on macOS, notifications come from the app bundle (allow them in 
 
 ## In the background
 
-- **Closing the window** keeps icygui running in the tray (Linux) or the menu bar (macOS), still connected to every environment and notifying for each (Settings → general → *keep running in the tray when the window closes*, on by default). Where no tray icon can be shown (stock GNOME without the AppIndicator extension), closing the window quits, and the settings say so. With unsaved work in the window (dashboard editor changes, also those kept in another environment, environment editor changes, text typed in an action dialog) it asks first.
+- **Closing the window** keeps icygui running in the tray (Linux) or the menu bar (macOS), still connected to every environment and notifying for each (Settings → general → *keep running in the tray*, on by default). Where no tray icon can be shown (stock GNOME without the AppIndicator extension), closing the window quits, and the settings say so. With unsaved work in the window (dashboard editor changes, also those kept in another environment, environment editor changes, text typed in an action dialog) it asks first.
 - **The tray icon** is the logo mark tinted with the worst unhandled state across all environments; its tooltip has a line per environment with its connection (`partial view: zone ams` while on a satellite, *muted* when muted on its own) and its counts; its menu has *Open*, *Pause notifications* (every environment), the environments and *Quit*. Choosing another environment there switches like the footer does.
 - **Start at login** (Settings → general) starts icygui in the background, without a window, with every environment connected in [quiet mode](#quiet-mode) (a launch agent on macOS, an XDG autostart entry on Linux). If no tray shows its icon within 20 seconds (a panel that starts after icygui gets that long), the window opens instead.
 - **One instance:** starting icygui again brings the running one's window forward.
@@ -344,11 +347,50 @@ While nobody looks, icygui follows Icinga more quietly (Settings → general →
 - **Started at login** (in the background, with the tray), every environment starts quiet and loads after a short random wait that grows with the size of its Icinga; opening the window ends the wait. A problem that begins during the wait notifies as soon as the load is in (what was already wrong before stays quiet, as on any start).
 - Turn it off to keep every environment fully live all the time (each then costs its Icinga a full event stream).
 
+## Settings
+
+<kbd>⌘,</kbd> (<kbd>Ctrl ,</kbd> on Linux), the app menu on macOS or the palette (*settings*, *notification settings*) open the settings: a large panel over the window, which dims behind it. <kbd>Esc</kbd>, the × or a click outside closes it.
+
+On the left: a search field, the six categories and, under the one open, its sections (the one in view in blue; a click scrolls to it). <kbd>⌘⇧E</kbd> (*focus navbar*) moves the keyboard there, then <kbd>↑</kbd> <kbd>↓</kbd> pick a category. On the right: the category's rows, each a name, one line of description and its control.
+
+**Changes apply at once**, as in Zed: every switch, choice and chip is saved the moment you click it, and the header says *✓ saved* (*not saved*, in red, with the reason when the file can't be written). A text field applies on <kbd>Enter</kbd>, <kbd>Tab</kbd>, or when you click elsewhere or close the panel; a value that doesn't read (`lots` hours, a storm threshold of 0, a reconcile interval under a minute) shows its problem under its row and changes nothing until you fix it. There is no save or cancel.
+
+**The search** looks through every category at once: the categories without a match dim, the others count their matches, and the page lists the matching rows under `category · section` with the match in blue. The rows work in place. A section's or category's name brings all of it (`quiet hours`, `keymap`); environments are found by name and host, shortcuts by what they do and their keys.
+
+- **general:** *keep running in the tray*, *start at login* and *quiet mode when hidden* (see [In the background](#in-the-background)).
+- **appearance:** *theme* (follow system, dark or light), *interface size* (small, default or large: 90, 100 or 115 %), *row density* (comfortable, or compact: one line per object without the output) and *times in lists* (how long in this state, `14m`, or since when, `13:58`), with a preview of the selected dashboard's first rows. These are saved now; the light theme, the sizes, compact rows and clock times reach the rest of the window in a later v1 update.
+- **notifications:** the rules of one environment (pick it under *environment*; each environment notifies on its own), its *notifications for <name>* switch, *pause all*, *show plugin output*, the default rule, quiet hours, storm control, the watched and muted objects (*remove* ends a watch or mute) and every group's and dashboard's setting (inherit, on, off or custom, with the custom rule's conditions under it). See [Notifications](#notifications).
+- **icinga:** *reconcile with Icinga* (adaptive, or a fixed interval in seconds or as `10m`), *keep events for* (hours), and every environment with its health dot, its URLs' hosts and what its connection does; the gear opens its editor over the settings, *add environment* a new one.
+- **keymap:** every shortcut in effect (yours included), what it does, its keys and where it works, filtered by name or key. *edit keymap file* opens `keymap.toml` (created with commented examples the first time) in your editor.
+- **advanced:** *log level* (applies at once), the log folder and the config folder (*open folder* opens them in your file manager), the version and *about*.
+
+**The settings file.** *edit in settings file* (top right) opens `config.toml` in your default editor. When you come back to icygui's window, an edited file is taken over at once, as a change in the panel would be: app-wide settings and the appearance, every environment's rules and dashboards; an environment whose URLs, login or TLS changed reconnects, a new one connects, one removed from the file disconnects (its password and event log stay). A file that doesn't read is reported once and changes nothing; the next change you make in icygui writes over it (your version is kept as `config.toml.bak`).
+
+**The keymap file** adds your own bindings on top of the defaults, read again when you come back to the window:
+
+```toml
+# Bindings before the first table work everywhere.
+"ctrl-shift-p" = "icygui::ToggleCommandPalette"
+
+# Each table is a key context: Workspace (the window), DashboardView (the
+# list), ObjectPane (an object open as a tab), CommandPalette,
+# DashboardEditor, ActionDialog, SettingsPanel.
+[DashboardView]
+"space" = "icygui::ToggleMark"
+"x" = "none"                                # switches the default off
+
+[Workspace]
+"alt-3" = ["icygui::SelectDashboard", 3]    # an action with an argument
+```
+
+A binding that can't be used (an unknown action, keys that don't parse) is skipped; the keymap page says how many and the log names each.
+
 ## Files and data
 
 | | Linux | macOS |
 |---|---|---|
 | Settings | `~/.config/icygui/config.toml` (and `config.toml.bak`) | `~/Library/Application Support/io.github.alexykn.icygui/config.toml` |
+| Your own key bindings | `~/.config/icygui/keymap.toml` | `~/Library/Application Support/io.github.alexykn.icygui/keymap.toml` |
 | Window, open tabs, selected dashboards | `~/.local/share/icygui/state.toml` | `~/Library/Application Support/io.github.alexykn.icygui/state.toml` |
 | Local event log (one per environment) | `~/.local/share/icygui/events-<id>.sqlite3` | `~/Library/Application Support/io.github.alexykn.icygui/events-<id>.sqlite3` |
 | Log | `~/.local/state/icygui/logs/icygui.log` | `~/Library/Logs/io.github.alexykn.icygui/icygui.log` |
@@ -357,9 +399,9 @@ While nobody looks, icygui follows Icinga more quietly (Settings → general →
 The Linux paths follow `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME`.
 
 - The settings file is written atomically, readable only by you (0600), with the previous version kept as `config.toml.bak`. It never contains passwords.
-- The event log keeps state changes, acknowledgements, comments, downtimes, flapping and notifications for 48 hours (Settings → general → *keep events for*). It feeds the notification centre and the history tabs, so history starts when icygui first connected.
-- The log rotates at 10 MiB and keeps four old files. Passwords and authentication headers are never logged. More detail: `RUST_LOG=info,icygui=debug,ic_core=debug,ic_api=debug icygui` (start the list with `info`: without it, every other part's messages, warnings and errors included, are left out).
-- *Reconcile with Icinga* (Settings → general): *adaptive* reloads the lean object list at an interval that grows with the installation (every 5 minutes up to about 10 000 hosts and services, about every 15 minutes at 30 000, at most hourly), and less often while the event stream has been running without a break and the reloads found nothing it missed (up to an hour); *fixed interval* lets you choose (at least a minute, and at least 5 minutes from 5 000 objects on). Quiet mode reconciles every 30 minutes at most.
+- The event log keeps state changes, acknowledgements, comments, downtimes, flapping and notifications for 48 hours (Settings → icinga → *keep events for*). It feeds the notification centre and the history tabs, so history starts when icygui first connected.
+- The log rotates at 10 MiB and keeps four old files. Passwords and authentication headers are never logged. Settings → advanced → *log level* sets how much goes in, at once (*debug* adds each request's method, path, status and time); `RUST_LOG`, when set, decides at start instead, e.g. `RUST_LOG=info,icygui=debug,ic_core=debug,ic_api=debug icygui` (start the list with `info`: without it, every other part's messages, warnings and errors included, are left out).
+- *Reconcile with Icinga* (Settings → icinga): *adaptive* reloads the lean object list at an interval that grows with the installation (every 5 minutes up to about 10 000 hosts and services, about every 15 minutes at 30 000, at most hourly), and less often while the event stream has been running without a break and the reloads found nothing it missed (up to an hour); *fixed interval* lets you choose (at least a minute, and at least 5 minutes from 5 000 objects on). Quiet mode reconciles every 30 minutes at most.
 
 ## How icygui talks to Icinga
 

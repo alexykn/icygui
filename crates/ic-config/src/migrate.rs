@@ -22,7 +22,7 @@ pub(crate) type Migration = fn(&mut Table) -> Result<(), ConfigError>;
 /// `MIGRATIONS[n]` upgrades format version `n` to `n + 1`. The length is
 /// tied to [`CONFIG_VERSION`], so bumping the version without adding a step
 /// doesn't compile.
-const MIGRATIONS: [Migration; CONFIG_VERSION as usize] = [v0_to_v1, v1_to_v2];
+const MIGRATIONS: [Migration; CONFIG_VERSION as usize] = [v0_to_v1, v1_to_v2, v2_to_v3];
 
 /// Settings read from text, and what reading them noticed. Nothing is
 /// logged yet, so the caller decides whether it is worth reporting.
@@ -414,6 +414,33 @@ fn move_url_into_urls(environment: &mut Table) {
     environment.insert("urls".to_owned(), Value::Array(vec![Value::Table(entry)]));
 }
 
+/// Version 3 keeps how the app looks in a table of its own,
+/// `[appearance]` (the settings panel's appearance page): `general.theme`
+/// moves there. An `appearance.theme` already in the file wins (a file
+/// edited by hand after a newer icygui wrote it); a `general` that isn't
+/// a table is left for reading to report.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "every migration step has the same signature"
+)]
+fn v2_to_v3(table: &mut Table) -> Result<(), ConfigError> {
+    let Some(Value::Table(general)) = table.get_mut("general") else {
+        return Ok(());
+    };
+    let Some(theme) = general.remove("theme") else {
+        return Ok(());
+    };
+    // An `appearance` that isn't a table can't take it: reading reports
+    // that one.
+    if let Value::Table(appearance) = table
+        .entry("appearance")
+        .or_insert_with(|| Value::Table(Table::new()))
+    {
+        appearance.entry("theme").or_insert(theme);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,13 +630,61 @@ mod tests {
     #[test]
     fn current_files_are_read_from_the_text() {
         // Same content, so errors come with a line number.
-        let error = parse_config("version = 2\n\n[general]\ntheme = \"sepia\"\n").unwrap_err();
+        let current = "version = 3\n\n[appearance]\ntheme = \"sepia\"\n";
+        let error = parse_config(current).unwrap_err();
         assert!(error.to_string().contains("line 4"), "{error}");
-        let error = migrate(table("version = 2\n\n[general]\ntheme = \"sepia\"\n")).unwrap_err();
-        assert!(error.to_string().contains("general.theme"), "{error}");
-        // Without environments the upgrade changes nothing either.
-        let error = parse_config("version = 1\n\n[general]\ntheme = \"sepia\"\n").unwrap_err();
+        let error = migrate(table(current)).unwrap_err();
+        assert!(error.to_string().contains("appearance.theme"), "{error}");
+        // Without environments or a theme the upgrade changes nothing either.
+        let error = parse_config("version = 1\n\n[general]\nlog_level = \"loud\"\n").unwrap_err();
         assert!(error.to_string().contains("line 4"), "{error}");
+    }
+
+    #[test]
+    fn version_2_themes_move_into_the_appearance_table() {
+        let parsed =
+            parse_config("version = 2\n\n[general]\ntheme = \"light\"\nclose_to_tray = false\n")
+                .unwrap();
+        assert_eq!(parsed.version, 2);
+        assert!(parsed.unknown_keys.is_empty(), "{:?}", parsed.unknown_keys);
+        assert_eq!(parsed.config.appearance.theme, crate::ThemeChoice::Light);
+        assert!(!parsed.config.general.close_to_tray, "the rest stays");
+        assert_eq!(
+            parsed.config.appearance.row_density,
+            crate::RowDensity::Comfortable,
+            "the new settings take their defaults"
+        );
+
+        // An appearance table already there keeps its own theme and the
+        // rest of what it holds.
+        let parsed = parse_config(
+            "version = 2\n[general]\ntheme = \"light\"\n\
+             [appearance]\ntheme = \"dark\"\nrow_density = \"compact\"\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.config.appearance.theme, crate::ThemeChoice::Dark);
+        assert_eq!(
+            parsed.config.appearance.row_density,
+            crate::RowDensity::Compact
+        );
+
+        // Without a theme nothing moves; a new file follows the system.
+        let parsed = parse_config("version = 2\n[general]\nclose_to_tray = true\n").unwrap();
+        assert_eq!(parsed.config.appearance, crate::Appearance::default());
+        assert_eq!(
+            crate::Appearance::default().theme,
+            crate::ThemeChoice::System
+        );
+
+        // A bad theme from version 2 is reported where it went.
+        let error = parse_config("version = 2\n[general]\ntheme = \"sepia\"\n").unwrap_err();
+        assert!(error.to_string().contains("appearance.theme"), "{error}");
+        // A `general` or `appearance` that isn't a table is reported, not
+        // rewritten.
+        assert!(parse_config("version = 2\ngeneral = 3\n").is_err());
+        let mut odd = table("version = 2\nappearance = 3\n[general]\ntheme = \"dark\"\n");
+        v2_to_v3(&mut odd).unwrap();
+        assert_eq!(odd["appearance"].as_integer(), Some(3));
     }
 
     #[test]

@@ -8,14 +8,14 @@
 //! pauses never touch Icinga's own notification switches.
 
 use futures::channel::oneshot;
-use ic_config::General;
+use ic_config::{Appearance, General};
 use ic_core::{Command, LogEntry, NotificationRecord};
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::{NotificationSettings, ObjectMode, ObjectOverride, ScopeSetting};
 
 use super::{AppState, MAX_NOTIFICATIONS};
 
-/// The notification settings of one environment as the settings dialog
+/// The notification settings of one environment as the settings panel
 /// edits them: the environment's own (rule, quiet hours, storm control,
 /// watched and muted objects) and every group's and dashboard's setting.
 #[derive(Clone, Debug, PartialEq)]
@@ -406,9 +406,16 @@ impl AppState {
     }
 
     /// The active environment's notification settings as the settings
-    /// dialog edits them.
+    /// panel edits them.
+    #[cfg(test)]
     pub(crate) fn notification_plan(&self) -> Option<NotificationPlan> {
-        let environment = self.environment()?;
+        self.notification_plan_of(self.active_environment_id()?)
+    }
+
+    /// Environment `id`'s notification settings as the settings panel
+    /// edits them (`None` for an unknown environment).
+    pub(crate) fn notification_plan_of(&self, id: &str) -> Option<NotificationPlan> {
+        let environment = self.config.environment(id)?;
         Some(NotificationPlan {
             environment_id: environment.id.clone(),
             settings: environment.notifications.clone(),
@@ -435,21 +442,14 @@ impl AppState {
         })
     }
 
-    /// Saves the notification settings from the settings dialog (groups
-    /// and dashboards deleted meanwhile are skipped). A plan read from
-    /// another environment than the active one changes nothing: another
-    /// environment's rules and mutes must never overwrite these. Returns
-    /// whether anything changed.
+    /// Takes notification settings from the settings panel into the
+    /// environment they were read from (`plan.environment_id`, on screen
+    /// or not): saved, and that environment's engine told. Groups and
+    /// dashboards deleted meanwhile are skipped; an unknown environment
+    /// changes nothing. Returns whether anything changed.
     pub(crate) fn apply_notification_plan(&mut self, plan: NotificationPlan) -> bool {
-        if self.active_environment_id() != Some(plan.environment_id.as_str()) {
-            tracing::warn!(
-                plan = %plan.environment_id,
-                active = ?self.active_environment_id(),
-                "notification settings of another environment were not applied"
-            );
-            return false;
-        }
-        self.change_environment(|environment| {
+        let id = plan.environment_id.clone();
+        self.change_environment_of(&id, |environment| {
             let mut changed = environment.notifications != plan.settings;
             environment.notifications = plan.settings;
             for planned in plan.groups {
@@ -474,21 +474,54 @@ impl AppState {
         .is_some()
     }
 
+    /// Changes environment `id`'s notification settings through `change`
+    /// (the settings panel applies every change at once). Returns whether
+    /// anything changed.
+    pub(crate) fn change_notifications(
+        &mut self,
+        id: &str,
+        change: impl FnOnce(&mut NotificationPlan),
+    ) -> bool {
+        let Some(mut plan) = self.notification_plan_of(id) else {
+            return false;
+        };
+        change(&mut plan);
+        self.apply_notification_plan(plan)
+    }
+
     /// Takes new app-wide settings (keep running in the tray, launch at
-    /// login, event log retention, reconcile interval, quiet mode): saved,
-    /// and every environment's engine told (and, for quiet mode, whether
-    /// it is quiet now). Returns whether they changed.
+    /// login, event log retention, reconcile interval, quiet mode, plugin
+    /// output in desktop notifications, log level): saved, and every
+    /// environment's engine told (and, for quiet mode, whether it is quiet
+    /// now); a new log level applies at once. Returns whether they
+    /// changed.
     pub(crate) fn set_general(&mut self, general: &General) -> bool {
         if self.config.general == *general {
             return false;
         }
         let quiet_changed = self.config.general.quiet_when_hidden != general.quiet_when_hidden;
+        let level_changed = self.config.general.log_level != general.log_level;
         self.config.general = general.clone();
         self.save_config();
         self.send_to_every_engine(|| Command::UpdateGeneral(general.clone()));
         if quiet_changed {
             self.announce_quiet();
         }
+        if level_changed {
+            crate::logging::set_level(general.log_level);
+        }
+        true
+    }
+
+    /// Takes new appearance settings (theme, interface size, row density,
+    /// times in lists): saved. Returns whether they changed. The views
+    /// read them from [`AppState::config`].
+    pub(crate) fn set_appearance(&mut self, appearance: Appearance) -> bool {
+        if self.config.appearance == appearance {
+            return false;
+        }
+        self.config.appearance = appearance;
+        self.save_config();
         true
     }
 }
@@ -711,10 +744,11 @@ mod tests {
             setting: ScopeSetting::On,
             dashboards: Vec::new(),
         });
-        // Read from another environment: never applied here.
+        // An environment that doesn't exist: nothing changes.
         let mut elsewhere = plan.clone();
         elsewhere.environment_id = "staging".to_owned();
         assert!(!state.apply_notification_plan(elsewhere));
+        assert!(state.notification_plan_of("staging").is_none());
         assert!(
             !state
                 .environment()
@@ -752,6 +786,49 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert!(sent[0].starts_with("UpdateGeneral("), "{sent:?}");
         let _ = Rc::new(RefCell::new(()));
+
+        // The new switches are app-wide settings too.
+        let quiet_screen = General {
+            show_plugin_output: false,
+            log_level: ic_config::LogLevel::Debug,
+            ..general
+        };
+        assert!(state.set_general(&quiet_screen));
+        assert!(!state.config().general.show_plugin_output);
+        assert_eq!(state.config().general.log_level, ic_config::LogLevel::Debug);
+    }
+
+    #[test]
+    fn appearance_is_kept_without_telling_the_engines() {
+        let (mut state, recorder) = connected();
+        let compact = Appearance {
+            row_density: ic_config::RowDensity::Compact,
+            interface_size: ic_config::InterfaceSize::Large,
+            ..*state.appearance()
+        };
+        assert!(state.set_appearance(compact));
+        assert!(!state.set_appearance(compact), "unchanged");
+        assert_eq!(*state.appearance(), compact);
+        assert!((state.appearance().interface_size.scale() - 1.15).abs() < f32::EPSILON);
+        assert!(recorder.sent().is_empty(), "the engines don't care");
+    }
+
+    #[test]
+    fn notifications_change_through_a_closure() {
+        let (mut state, recorder) = connected();
+        let id = state.active_environment_id().unwrap().to_owned();
+        assert!(state.change_notifications(&id, |plan| {
+            plan.settings.storm.threshold = 9;
+        }));
+        assert!(!state.change_notifications(&id, |_| {}), "nothing changed");
+        assert!(!state.change_notifications("gone", |plan| {
+            plan.settings.enabled = false;
+        }));
+        assert_eq!(
+            state.environment().unwrap().notifications.storm.threshold,
+            9
+        );
+        assert_eq!(recorder.sent(), ["UpdateEnvironment(prod-cluster)"]);
     }
 
     #[test]

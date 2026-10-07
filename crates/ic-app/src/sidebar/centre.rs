@@ -50,7 +50,7 @@ use crate::notifications::entry::{
     self, CentreEntry, CentreItem, CentreView, Place, Scope, Source, StormGroup,
 };
 use crate::notifications::{PauseChoice, pause_label, paused_text, when};
-use crate::settings::SettingsTab;
+use crate::settings::SettingsPage;
 
 /// The centre's width.
 const CENTRE_WIDTH: f32 = 420.;
@@ -516,7 +516,7 @@ impl Sidebar {
                 .tooltip(Tooltip::new("Notification settings"))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.menus.close();
-                    cx.emit(SidebarEvent::OpenSettings(SettingsTab::Notifications));
+                    cx.emit(SidebarEvent::OpenSettings(SettingsPage::Notifications));
                     cx.notify();
                 }))
         });

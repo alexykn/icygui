@@ -51,6 +51,7 @@ mod live_actions;
 mod notifications;
 mod quiet;
 mod scopes;
+mod settings;
 mod states;
 mod topology;
 

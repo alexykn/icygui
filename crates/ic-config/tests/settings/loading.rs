@@ -131,7 +131,7 @@ holidays = ["2026-12-25"]
 "#
     );
     let config = store_with(dir.path(), &text).load().unwrap();
-    assert_eq!(config.general.theme, ThemeChoice::Light);
+    assert_eq!(config.appearance.theme, ThemeChoice::Light);
     let environment = &config.environments[0];
     assert_eq!(environment.id, PROD_ID);
     assert_eq!(
@@ -186,7 +186,7 @@ fn unversioned_files_are_upgraded_in_memory() {
     let config = store.load().unwrap();
     assert_eq!(config.version, CONFIG_VERSION);
     assert_eq!(config.active_environment.as_deref(), Some(PROD_ID));
-    assert_eq!(config.general.theme, ThemeChoice::Light);
+    assert_eq!(config.appearance.theme, ThemeChoice::Light);
     let dashboard = config.environments[0]
         .dashboard(GROUP_ID, DASHBOARD_ID)
         .unwrap();
@@ -331,9 +331,14 @@ fn values_of_the_wrong_kind_are_reported_with_a_line() {
     let dir = tempfile::tempdir().unwrap();
     let cases = [
         (
-            "version = 1\n[general]\n\ntheme = \"sepia\"\n",
+            "version = 3\n[appearance]\n\ntheme = \"sepia\"\n",
             "line 4",
             "unknown variant `sepia`",
+        ),
+        (
+            "version = 1\n[general]\n\nlog_level = \"loud\"\n",
+            "line 4",
+            "unknown variant `loud`",
         ),
         (
             "version = 1\n[general]\nclose_to_tray = \"yes\"\n",
@@ -357,8 +362,11 @@ fn values_of_the_wrong_kind_are_reported_with_a_line() {
         assert!(message.contains(problem), "{message}");
     }
     // Unversioned files are read from the text too.
-    let message = parse_message(store_with(dir.path(), "[general]\ntheme = 3\n").load());
+    let message = parse_message(store_with(dir.path(), "[appearance]\ntheme = 3\n").load());
     assert!(message.contains("line 2"), "{message}");
+    // A theme from before version 3 moved, so its error names where it went.
+    let message = parse_message(store_with(dir.path(), "[general]\ntheme = 3\n").load());
+    assert!(message.contains("appearance.theme"), "{message}");
 }
 
 #[test]
@@ -370,7 +378,7 @@ fn byte_order_marks_are_accepted() {
     )
     .load()
     .unwrap();
-    assert_eq!(config.general.theme, ThemeChoice::Light);
+    assert_eq!(config.appearance.theme, ThemeChoice::Light);
 }
 
 #[test]
@@ -591,7 +599,7 @@ fn files_this_version_cannot_read_survive_starting_fresh() {
         let mut config = Config::default();
         store.save(&config).unwrap();
         for theme in [ThemeChoice::Light, ThemeChoice::System, ThemeChoice::Dark] {
-            config.general.theme = theme;
+            config.appearance.theme = theme;
             store.save(&config).unwrap();
         }
         let kept: Vec<String> = entries(dir.path())
@@ -638,7 +646,7 @@ fn readable_files_are_not_kept_apart() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path(), WITHOUT_IDS);
     let mut config = store.load().unwrap();
-    config.general.theme = ThemeChoice::Light;
+    config.appearance.theme = ThemeChoice::Light;
     store.save(&config).unwrap();
     assert_eq!(entries(dir.path()), ["config.toml", "config.toml.bak"]);
 }
@@ -649,7 +657,7 @@ fn saves_and_loads_at_the_same_time_never_see_a_partial_file() {
     let store = ConfigStore::new(dir.path().join("config.toml"));
     let first = full_config();
     let mut second = first.clone();
-    second.general.theme = ThemeChoice::Light;
+    second.appearance.theme = ThemeChoice::Light;
     second.environments.truncate(1);
     store.save(&first).unwrap();
 
@@ -742,7 +750,7 @@ fn the_backup_restores_settings_after_corruption() {
 
     let older = full_config();
     let mut newer = older.clone();
-    newer.general.theme = ThemeChoice::Light;
+    newer.appearance.theme = ThemeChoice::Light;
     store.save(&older).unwrap();
     store.save(&newer).unwrap();
     fs::write(store.path(), "version = 1\n[general\n").unwrap();

@@ -1460,7 +1460,7 @@ fn endpoint_default(snapshot: &Snapshot, targets: &[ObjectKey]) -> String {
 }
 
 /// An object's state for its dot.
-fn object_state(snapshot: &Snapshot, object: &ObjectKey) -> Option<CheckableState> {
+pub(crate) fn object_state(snapshot: &Snapshot, object: &ObjectKey) -> Option<CheckableState> {
     match object {
         ObjectKey::Host { name } => snapshot
             .hosts

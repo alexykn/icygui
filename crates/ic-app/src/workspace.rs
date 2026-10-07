@@ -57,7 +57,7 @@ use crate::operate::forms::{self, describe_objects};
 use crate::operate::{ActionSpec, CHECK_CONFIRM_ABOVE};
 use crate::palette::{CommandPalette, Focus, PaletteCommand, PaletteEvent};
 use crate::pane::{ObjectPane, PaneMode};
-use crate::settings::{ScopeKey, SettingsDialog, SettingsEvent, SettingsTab};
+use crate::settings::{ScopeKey, SettingsEvent, SettingsPage, SettingsPanel};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::{live, recovery, window_state};
 
@@ -216,7 +216,6 @@ enum OpenModal {
     Action(Held<ActionDialog>),
     Confirm(Confirmation),
     Path(PathPrompt),
-    Settings(Held<SettingsDialog>),
     About,
 }
 
@@ -236,8 +235,6 @@ pub(crate) enum ModalKind {
     Confirm(Box<Confirmation>),
     /// A file path.
     Path,
-    /// The settings.
-    Settings,
     /// The about dialog.
     About,
 }
@@ -258,6 +255,9 @@ pub(crate) struct Workspace {
     drafts_elsewhere: HashMap<String, (EditorTarget, DashboardDraft)>,
     onboarding: Option<(Entity<EnvironmentEditor>, Subscription)>,
     modal: Option<OpenModal>,
+    /// The settings panel, over the main area and under the modals (an
+    /// environment's editor or the about dialog opens over it).
+    settings: Option<Held<SettingsPanel>>,
     /// The environment active when the open modal opened.
     modal_environment: Option<String>,
     /// The modal the question before closing the window replaced (a
@@ -313,6 +313,13 @@ impl Workspace {
             cx.observe_window_visibility(window, |this, visibility, _, cx| {
                 presence::visibility_changed(&this.state, visibility, cx);
             }),
+            // Back from an editor (*edit in settings file*, *edit keymap
+            // file*): what changed there applies now.
+            cx.observe_window_activation(window, |_, window, cx| {
+                if window.is_window_active() {
+                    Self::files_may_have_changed(cx);
+                }
+            }),
             cx.subscribe_in(
                 &sidebar,
                 window,
@@ -364,6 +371,7 @@ impl Workspace {
             drafts_elsewhere: HashMap::new(),
             onboarding: None,
             modal: None,
+            settings: None,
             modal_environment: None,
             behind_close: None,
             environment,
@@ -379,6 +387,17 @@ impl Workspace {
         };
         workspace.sync_onboarding(window, cx);
         workspace
+    }
+
+    /// The window came to the front: the keymap and settings files are
+    /// read again if they were edited meanwhile.
+    fn files_may_have_changed(cx: &mut Context<Self>) {
+        if crate::keymap::reload_if_changed(cx) {
+            cx.notify();
+        }
+        if let Some(session) = live::session(cx) {
+            session.update(cx, live::Session::reload_settings_file);
+        }
     }
 
     /// The window moved or changed size: remember where, and save it once
@@ -520,18 +539,14 @@ impl Workspace {
             OpenModal::Action(dialog) => ModalKind::Action(dialog.view.read(cx).kind()),
             OpenModal::Confirm(confirmation) => ModalKind::Confirm(Box::new(confirmation.clone())),
             OpenModal::Path(_) => ModalKind::Path,
-            OpenModal::Settings(_) => ModalKind::Settings,
             OpenModal::About => ModalKind::About,
         })
     }
 
-    /// The open settings dialog.
+    /// The settings panel, while open.
     #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn settings(&self) -> Option<&Entity<SettingsDialog>> {
-        match &self.modal {
-            Some(OpenModal::Settings(settings)) => Some(&settings.view),
-            _ => None,
-        }
+    pub(crate) fn settings(&self) -> Option<&Entity<SettingsPanel>> {
+        self.settings.as_ref().map(|settings| &settings.view)
     }
 
     /// The open palette.
@@ -783,14 +798,15 @@ impl Workspace {
                     let handle = prompt.input.focus_handle(cx);
                     (handle.clone(), handle)
                 }
-                OpenModal::Settings(settings) => (
-                    settings.view.focus_handle(cx),
-                    settings.view.read(cx).default_focus(cx),
-                ),
                 OpenModal::Confirm(_) | OpenModal::About => {
                     (self.modal_focus.clone(), self.modal_focus.clone())
                 }
             }
+        } else if let Some(settings) = &self.settings {
+            (
+                settings.view.focus_handle(cx),
+                settings.view.read(cx).default_focus(cx),
+            )
         } else if let Some(editor) = &self.editor {
             (
                 editor.view.focus_handle(cx),
@@ -1314,9 +1330,9 @@ impl Workspace {
                 environment,
                 object,
             } => self.reveal_in(environment, object, window, cx),
-            SidebarEvent::OpenSettings(tab) => self.open_settings(*tab, None, window, cx),
+            SidebarEvent::OpenSettings(page) => self.open_settings(*page, None, window, cx),
             SidebarEvent::CustomRule(key) => {
-                self.open_settings(SettingsTab::Notifications, Some(key), window, cx);
+                self.open_settings(SettingsPage::Notifications, Some(key), window, cx);
             }
         }
     }
@@ -1346,37 +1362,88 @@ impl Workspace {
         self.sidebar.update(cx, Sidebar::open_notifications);
     }
 
-    /// Opens the settings on `tab`; with `custom`, that group or dashboard
-    /// gets a custom rule to edit.
+    /// Opens the settings panel on `page` (or shows `page` in the open
+    /// one); with `custom`, that group or dashboard of the environment on
+    /// screen gets a custom rule to edit, on the notifications page.
     pub(crate) fn open_settings(
         &mut self,
-        tab: SettingsTab,
+        page: SettingsPage,
         custom: Option<&ScopeKey>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(OpenModal::Settings(settings)) = &self.modal
-            && custom.is_none()
-        {
-            settings
-                .view
-                .update(cx, |settings, cx| settings.show_tab(tab, cx));
-            return;
+        // A modal over the main area (the palette that opened this) goes.
+        if self.modal.is_some() {
+            self.close_modal(window, cx);
         }
-        let state = self.state.clone();
-        let dialog = cx.new(|cx| SettingsDialog::new(state, tab, custom, window, cx));
-        let events = cx.subscribe_in(
-            &dialog,
-            window,
-            |this, _, event: &SettingsEvent, window, cx| match event {
-                SettingsEvent::Close => this.close_modal(window, cx),
-                SettingsEvent::About => this.open_about(window, cx),
-                SettingsEvent::LaunchAtLogin(enabled) => {
-                    crate::background::autostart::change(*enabled, &this.state, cx);
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.close_menu(cx);
+        });
+        let panel = if let Some(settings) = &self.settings {
+            settings.view.clone()
+        } else {
+            {
+                let state = self.state.clone();
+                let panel = cx.new(|cx| SettingsPanel::new(state, page, window, cx));
+                let events = cx.subscribe_in(
+                    &panel,
+                    window,
+                    |this, _, event: &SettingsEvent, window, cx| match event {
+                        SettingsEvent::Close => this.close_settings(window, cx),
+                        SettingsEvent::About => this.open_about(window, cx),
+                        SettingsEvent::LaunchAtLogin(enabled) => {
+                            crate::background::autostart::change(*enabled, &this.state, cx);
+                        }
+                        SettingsEvent::EditEnvironment(id) => {
+                            this.open_environment_editor(Some(id), window, cx);
+                        }
+                        SettingsEvent::AddEnvironment => {
+                            this.open_environment_editor(None, window, cx);
+                        }
+                    },
+                );
+                self.settings = Some(Held::new(panel.clone(), events));
+                panel
+            }
+        };
+        panel.update(cx, |panel, cx| match custom {
+            Some(key) => panel.show_custom_rule(key, window, cx),
+            None => panel.show_page(page, window, cx),
+        });
+        let focus = panel.read(cx).default_focus(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Closes the settings panel; the keyboard goes back to the main area.
+    pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.take().is_some() {
+            self.focus_main(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The settings panel over the dimmed window, centred, about
+    /// 1080×760 and fitted to smaller windows.
+    fn render_settings(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let settings = self.settings.as_ref()?;
+        Some(
+            Modal::new(
+                "settings",
+                px(crate::settings::PANEL_WIDTH),
+                settings.view.clone(),
+            )
+            .on_dismiss(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                // Everything applied already but a field being typed in.
+                if let Some(settings) = &this.settings {
+                    settings
+                        .view
+                        .update(cx, |panel, cx| panel.commit_pending(window, cx));
                 }
-            },
-        );
-        self.open_modal(OpenModal::Settings(Held::new(dialog, events)), window, cx);
+                this.close_settings(window, cx);
+            }))
+            .into_any_element(),
+        )
     }
 
     /// Shows the about dialog.
@@ -1385,7 +1452,14 @@ impl Workspace {
     }
 
     fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_settings(SettingsTab::General, None, window, cx);
+        // ctrl-, again shows the page already open.
+        let page = self
+            .settings
+            .as_ref()
+            .map_or(SettingsPage::General, |settings| {
+                settings.view.read(cx).page()
+            });
+        self.open_settings(page, None, window, cx);
     }
 
     fn on_show_about(&mut self, _: &ShowAbout, window: &mut Window, cx: &mut Context<Self>) {
@@ -2196,11 +2270,6 @@ impl Workspace {
                 ModalPlacement::Center,
                 Self::render_path_prompt(prompt, cx),
             ),
-            OpenModal::Settings(settings) => (
-                700.,
-                ModalPlacement::Top(px(48.)),
-                settings.view.clone().into_any_element(),
-            ),
             OpenModal::About => (460., ModalPlacement::Center, self.render_about(cx)),
         };
         Some(
@@ -2400,7 +2469,8 @@ impl Render for Workspace {
             .unwrap_or_else(|| self.dashboard.clone().into_any_element())
         };
         let modal = self.render_modal(cx);
-        let modal_open = self.modal.is_some();
+        let settings = self.render_settings(cx);
+        let modal_open = self.modal.is_some() || self.settings.is_some();
         // Above the list's selection bar while rows are marked.
         let bar = matches!(self.shown, Shown::Dashboard(_))
             && self.editor.is_none()
@@ -2452,6 +2522,7 @@ impl Render for Workspace {
                 workspace.child(self.sidebar.clone())
             })
             .child(div().flex().flex_1().min_w_0().h_full().child(main))
+            .children(settings)
             .children(toasts)
             .children(modal)
             .into_any_element()

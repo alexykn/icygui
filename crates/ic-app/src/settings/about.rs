@@ -71,7 +71,8 @@ pub(crate) fn render(facts: &AboutFacts, close: impl IntoElement, cx: &App) -> A
                 .child(
                     "Live state from Icinga's event stream; notification rules, mutes and \
                      pauses stay on this computer. MIT licensed; IBM Plex Mono under the SIL \
-                     Open Font License.",
+                     Open Font License, the Lucide icons under the ISC License, GPUI under \
+                     Apache 2.0.",
                 ),
         )
         .action(close)

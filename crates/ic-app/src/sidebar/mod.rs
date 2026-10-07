@@ -41,7 +41,7 @@ use crate::actions::FocusMain;
 use crate::app_state::{AppState, Health};
 use crate::chrome::{Controls, WindowControls, WindowDrag};
 use crate::menu_state::{OpenMenu, down_position};
-use crate::settings::{ScopeKey, SettingsTab};
+use crate::settings::{ScopeKey, SettingsPage};
 use crate::workspace::ToggleSidebar;
 
 pub(crate) use self::menus::new_key;
@@ -82,7 +82,7 @@ pub(crate) enum SidebarEvent {
         object: ObjectKey,
     },
     /// Open the settings on this tab.
-    OpenSettings(SettingsTab),
+    OpenSettings(SettingsPage),
     /// Give this group or dashboard a custom notification rule, in the
     /// notification settings.
     CustomRule(ScopeKey),
@@ -1209,7 +1209,7 @@ const AGE_SLOT_CHARS: f32 = 3.;
 
 /// The footer dot's colour (ENV-06): green while live, yellow when stale,
 /// red when reconnecting or failed, grey otherwise.
-pub(super) fn health_color(health: Health, theme: &Theme) -> gpui::Hsla {
+pub(crate) fn health_color(health: Health, theme: &Theme) -> gpui::Hsla {
     match health {
         Health::Live => theme.states.ok,
         Health::Stale => theme.states.warning,

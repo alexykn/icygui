@@ -57,9 +57,26 @@ impl AppState {
         Some(result)
     }
 
+    /// [`AppState::change_environment`] for environment `id`, on screen or
+    /// not: an environment off screen is saved and its own engine told.
+    pub(super) fn change_environment_of<R>(
+        &mut self,
+        id: &str,
+        change: impl FnOnce(&mut Environment) -> Option<R>,
+    ) -> Option<R> {
+        if self.config.active_environment.as_deref() == Some(id) {
+            return self.change_environment(change);
+        }
+        let environment = self.config.environment_mut(id)?;
+        let result = change(environment)?;
+        self.save_config();
+        self.send_environment_to(id);
+        Some(result)
+    }
+
     /// After a change: a selected dashboard that's gone selects the first
     /// one (and the UI state remembers it).
-    fn repair_selection(&mut self) {
+    pub(super) fn repair_selection(&mut self) {
         let valid = self
             .selected
             .as_ref()

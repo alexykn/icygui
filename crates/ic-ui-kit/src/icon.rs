@@ -43,18 +43,24 @@ pub enum IconName {
     Ellipsis,
     /// `external-link`: notes and action URLs.
     ExternalLink,
+    /// `file-code`: open a settings file in the editor.
+    FileCode,
     /// `file-input`: import from a file.
     FileInput,
     /// `file-output`: export to a file.
     FileOutput,
     /// `folder`: host group and service group headers in lists.
     Folder,
+    /// `folder-open`: open a folder in the file manager.
+    FolderOpen,
     /// `folder-plus`: a new group.
     FolderPlus,
     /// `info`: informational notes.
     Info,
     /// `key-round`: a login Icinga refused, a password that is missing.
     KeyRound,
+    /// `keyboard`: the keymap.
+    Keyboard,
     /// `layers`: several objects at once (the palette's *all N matches*).
     Layers,
     /// `loader-circle`: loading.
@@ -79,17 +85,23 @@ pub enum IconName {
     Refresh,
     /// `search`: search fields.
     Search,
+    /// `server`: Icinga and its environments.
+    Server,
     /// `settings`: settings (an environment's, the notifications', the app's).
     Settings,
+    /// `sun-moon`: appearance (theme and size).
+    SunMoon,
     /// `triangle-alert`: errors such as a dashboard filter that fails.
     TriangleAlert,
     /// `unplug`: the connection to Icinga is lost.
     Unplug,
+    /// `wrench`: advanced settings.
+    Wrench,
 }
 
 impl IconName {
     /// Every icon, for tests and asset listings.
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 43] = [
         Self::ArrowDown,
         Self::ArrowLeft,
         Self::ArrowLeftRight,
@@ -106,12 +118,15 @@ impl IconName {
         Self::Copy,
         Self::Ellipsis,
         Self::ExternalLink,
+        Self::FileCode,
         Self::FileInput,
         Self::FileOutput,
         Self::Folder,
+        Self::FolderOpen,
         Self::FolderPlus,
         Self::Info,
         Self::KeyRound,
+        Self::Keyboard,
         Self::Layers,
         Self::Loader,
         Self::Lock,
@@ -124,9 +139,12 @@ impl IconName {
         Self::Power,
         Self::Refresh,
         Self::Search,
+        Self::Server,
         Self::Settings,
+        Self::SunMoon,
         Self::TriangleAlert,
         Self::Unplug,
+        Self::Wrench,
     ];
 
     /// The asset path [`crate::Assets`] serves the SVG under.
@@ -155,12 +173,15 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::Copy => Self::Copy,
             IconName::Ellipsis => Self::Ellipsis,
             IconName::ExternalLink => Self::ExternalLink,
+            IconName::FileCode => Self::FileCode,
             IconName::FileInput => Self::FileInput,
             IconName::FileOutput => Self::FileOutput,
             IconName::Folder => Self::Folder,
+            IconName::FolderOpen => Self::FolderOpen,
             IconName::FolderPlus => Self::FolderPlus,
             IconName::Info => Self::Info,
             IconName::KeyRound => Self::KeyRound,
+            IconName::Keyboard => Self::Keyboard,
             IconName::Layers => Self::Layers,
             IconName::Loader => Self::LoaderCircle,
             IconName::Lock => Self::Lock,
@@ -173,9 +194,12 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::Power => Self::Power,
             IconName::Refresh => Self::RefreshCw,
             IconName::Search => Self::Search,
+            IconName::Server => Self::Server,
             IconName::Settings => Self::Settings,
+            IconName::SunMoon => Self::SunMoon,
             IconName::TriangleAlert => Self::TriangleAlert,
             IconName::Unplug => Self::Unplug,
+            IconName::Wrench => Self::Wrench,
         }
     }
 }

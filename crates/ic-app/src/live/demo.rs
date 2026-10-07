@@ -21,8 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::channel::oneshot;
 use ic_config::{
-    AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup, Environment, General, GroupBy,
-    ObjectKind, Sort, TlsConfig, View,
+    AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind, Sort,
+    TlsConfig, View,
 };
 use ic_core::ports::{SecretError, SecretStore};
 use ic_mock::{
@@ -536,8 +536,6 @@ pub(crate) fn options_for(environment_id: &str, prod_cluster: &DemoOptions) -> O
 /// master and its satellite (ENV-12).
 pub(crate) fn config() -> Config {
     Config {
-        version: CONFIG_VERSION,
-        general: General::default(),
         active_environment: Some(ENVIRONMENT_ID.to_owned()),
         environments: vec![
             environment(ENVIRONMENT_ID, "prod-cluster", groups()),
@@ -552,6 +550,7 @@ pub(crate) fn config() -> Config {
                 stable_ids(LAB_ID, ic_config::default_groups()),
             ),
         ],
+        ..Config::default()
     }
 }
 

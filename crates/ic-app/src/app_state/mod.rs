@@ -26,6 +26,7 @@ mod notifications;
 mod operations;
 pub(crate) mod permissions;
 mod presence;
+pub(crate) mod settings_file;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -441,6 +442,13 @@ impl AppState {
     /// The settings.
     pub(crate) fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// How the app looks (theme, interface size, row density, times in
+    /// lists), as the settings say. The settings panel changes it
+    /// ([`AppState::set_appearance`]); the views read it here.
+    pub(crate) fn appearance(&self) -> &ic_config::Appearance {
+        &self.config.appearance
     }
 
     /// The UI state (window, tabs and selections) to save.

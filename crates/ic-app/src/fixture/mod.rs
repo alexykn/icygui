@@ -16,8 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ic_config::{
-    AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup, Environment, General, GroupBy,
-    ObjectKind, Sort, View,
+    AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind, Sort, View,
 };
 use ic_core::snapshot::{DashboardResult, Snapshot};
 use ic_model::Timestamp;
@@ -214,10 +213,9 @@ pub(crate) fn build_with(now: Timestamp, options: FixtureOptions) -> Fixture {
         ..Environment::default()
     };
     let config = Config {
-        version: CONFIG_VERSION,
-        general: General::default(),
         active_environment: Some(ENVIRONMENT_ID.to_owned()),
         environments: vec![environment],
+        ..Config::default()
     };
     let evaluator = Evaluator { filters };
     evaluator.fill(&mut snapshot, &config);

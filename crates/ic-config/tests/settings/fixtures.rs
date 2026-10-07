@@ -4,9 +4,9 @@ use std::fs;
 use std::path::Path;
 
 use ic_config::{
-    ApiUrl, AuthConfig, CONFIG_VERSION, Config, ConfigStore, Dashboard, DashboardGroup,
-    Environment, General, GroupBy, ObjectKind, Sort, SortKey, ThemeChoice, TlsConfig, View,
-    format_fingerprint,
+    ApiUrl, Appearance, AuthConfig, CONFIG_VERSION, Config, ConfigStore, Dashboard, DashboardGroup,
+    Environment, General, GroupBy, InterfaceSize, ListTimes, LogLevel, ObjectKind, RowDensity,
+    Sort, SortKey, ThemeChoice, TlsConfig, View, format_fingerprint,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::{
@@ -25,12 +25,19 @@ pub(crate) fn full_config() -> Config {
     Config {
         version: CONFIG_VERSION,
         general: General {
-            theme: ThemeChoice::System,
             close_to_tray: false,
             launch_at_login: true,
             event_log_retention_hours: 72,
             reconcile_interval_secs: 120,
             quiet_when_hidden: false,
+            show_plugin_output: false,
+            log_level: LogLevel::Debug,
+        },
+        appearance: Appearance {
+            theme: ThemeChoice::Dark,
+            interface_size: InterfaceSize::Large,
+            row_density: RowDensity::Compact,
+            list_times: ListTimes::Clock,
         },
         active_environment: Some(prod.id.clone()),
         environments: vec![prod, staging()],

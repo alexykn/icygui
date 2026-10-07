@@ -17,7 +17,7 @@ answer.
 - `v1.css`: the tokens of `crates/ic-ui-kit/src/theme.rs` as CSS variables
   (dark, and the light theme of topic 03), and the ic-ui-kit components as
   classes. Values that v1 adds to the theme are marked `NEW`.
-- `v1.js`: the app's building blocks as HTML helpers (sidebar, list rows, pane
+- `v1.js`: the app's building blocks as HTML helpers (the host band, `hostBand` and `hostRows`, shared by 10 and 15; sidebar, list rows, pane
   title, buttons, menus, dialogs, toasts), named after ic-ui-kit. Every topic
   draws its chrome through them, so the frames stay consistent.
 - `icons.js`: the Lucide icons the app uses (gpui-component's set), inline;
@@ -63,6 +63,7 @@ per frame, plus `-zoom` crops of the details.
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
 | 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+16 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
+| 15 | Host lists with services; group lists; layouts | `15-host-list-with-services.html` | 12 (+1 compare, +10 zooms, +12 light) | drawn for review |
 
 ---
 
@@ -182,6 +183,7 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
   | Kind | One-view dashboard: page header (and second row) | Stacked: 36px view header | In the view's `···` (stacked) | Editor (the view's settings) |
   |---|---|---|---|---|
   | list, grouped list | rows toggle, sort, `···`; second row: per-state counts, handled slot | counts, handled slot, sort, `···` | rows | handled, sort, direction, rows |
+  | list of hosts (15) | hosts as: rows \| with services, rows toggle, sort, `···`; second row: per-state counts, handled slot | counts, handled slot, sort, `···` | hosts as, rows | display (layout), lists, group by, hosts as, sort, rows |
   | host-group grid | sort, `···`; second row: hosts per worst state | counts, sort, `···` | none | its settings (5e); no rows |
   | summary tiles | sort, `···`; second row: per-state counts | counts, sort, `···` | none | its settings (04); no rows |
   | event stream | `live`, rows toggle, sort, `···` | `live`, sort, `···` | rows | events, show, lines, rows |
@@ -906,6 +908,10 @@ The header reads `3 hosts · db-prod-01, db-prod-02, db-prod-03`, then `×`
 (back to the dashboard), `↗ pin as tab` and *save as dashboard*. The summary bar
 counts the services by state and ends with `3 hosts · 63 services`.
 
+- **10h, 10j and 15 share one band component** (`hostBand` and `hostRows`
+  in `v1.js`): the service list grouped by host and topic 15's host list
+  "with services" are drawn from the same parts, and 10's frames render
+  byte-identical since the move.
 - **A grouped list by host,** built from the list's parts (the
   host-with-services rule above): each host is a slim group-header band
   (36px, `row_header`; the host's state dot in the rows' mark column, the
@@ -1677,4 +1683,132 @@ comments (it subsumes comments D), with the comment thread also in the pane
 as *downtimes A* (tighter sections), with *downtimes D* (timeline) as a
 display option of it if the user likes it. Drop the separate comments view.
 Acknowledgements keep sticky and expiry, as small tags.
+
+---
+
+## 15 Host lists with their services; layouts
+
+**Status: drawn for review** (user, 2026-10-07). The host-group grid (05)
+is unchanged: Icinga's groups as lists are list layouts (15i to 15k), not a
+grid option.
+
+**Shows** (`15-host-list-with-services.html`, each dark and `-light`):
+15a the *host problems* dashboard as a host list *with services* (zoom of the
+header and bands); 15b compact, handled shown; 15e a down host's services
+shown, hollow (and 15e2, the same hidden, for the two `-zoom-hidden` /
+`-zoom-shown` crops); 15k marking two hosts and three services, the selection
+bar (zoom); 15c a stacked host view with the mode in its `···`, folded all-ok
+hosts and *no services* lines; 15d the editor; 15f the display dropdown open
+with every layout; 15g *add view* with the same layouts, compact; 15h after
+choosing *hosts by host group*; 15i a *host groups* list (one view); 15j a
+*service groups* list stacked under tiles; 15k a host clicked in it, the host
+pane narrowed to the group. The marking frame is 15m.
+
+**Decisions: host lists with services**
+
+- **One band component.** 10h, 10j and 15 share `hostBand` and `hostRows`
+  (`v1.js`): the band (chevron that only folds, state mark, name, address,
+  output, counts), the rows under it, the paging row (7, then `+ N more`),
+  folding. The only differences come from the filter picking hosts: a down
+  host always shows; a band can read **no services**; a down host's band can
+  read **N services hidden · host down**.
+- **A mode of host lists: hosts as: rows | with services**, following the
+  view-controls rule: a small two-option switch in a one-view header (15a,
+  left of the rows toggle), a *hosts as* group in the view's `···` when
+  stacked (15c), and in the editor a *hosts as* field shown only for host
+  lists (15d). Saved with the view; the editor shows the same value. In the
+  editor's narrow header the switch sits in `···` (tight space).
+- **What shows under a host:** *problems only* on: its service problems;
+  off: every service. The filter's `host.` terms pick hosts, its `service.`
+  terms the services under them (15c: `service.name == "smart-disks"`).
+  Problem hosts are expanded by default; hosts whose services are all OK are
+  folded, their counts still showing. A host with no services, or none left
+  after the filter, shows a faint **no services** line and no chevron (its
+  slot stays, empty).
+- **Down hosts** (and unreachable ones): the host always shows (it can still
+  be hidden for being in downtime or acknowledged, like any handled
+  problem). Its band is tinted in its state colour (down: critical,
+  unreachable: unknown; `--unk-tint` is NEW), its state word (*down 3m*,
+  *unreachable 11m*) in the state's text colour; a handled host (in
+  downtime) has a hollow mark and no tint. Its services follow *hide
+  services of hosts that are down* (the same switch for unreachable hosts):
+  hidden, the band shows one faint line, **4 services hidden · host down**
+  (*3 services hidden · host unreachable*); shown (the handled slot's
+  *show*), they are ordinary rows, **hollow**, tagged *host down*, *host
+  unreachable* or *downtime 1h 14m* (15b, 15e).
+- **Counts:** a band's counts are the unhandled per-state counts of what is
+  under it, so a down host whose services are all handled shows an empty
+  counts slot; show and hide never change them. The summary bar counts hosts
+  by state in words (*2 down*, *5 unreachable*) and its handled slot counts
+  every hidden host and service (*27 hidden · show*).
+- **Row density** applies to the service rows and to the band: compact is a
+  30px band, one-line rows, 26px note and paging rows (15b).
+- **Sort** applies to the hosts (severity, name, last change; severity is
+  the worst of the host and the services under it); the services under a host
+  are always worst first. The editor's *sort* says *hosts*.
+- **Marking:** a band marks its host (x on the band, ctrl-click); a row its
+  service; ctrl-a marks every host and every service row shown. A marked
+  band gets the marked tint (over its state tint) and the 2px accent bar.
+  The selection bar counts both kinds in a fixed slot sized for *99 hosts ·
+  999 services marked*: **2 hosts · 3 services marked** (15m); the actions
+  apply to all, and their dialogs list every target.
+
+**Decisions: layouts (15f, 15g, 15h)**
+
+- **The display dropdown and *add view* list named layouts** in three
+  sections, each with its icon and name (and, in the dropdown, a faint
+  one-line description): **lists** (services, services by host, services by
+  host group, services by service group, hosts, hosts with services, hosts by
+  host group, host groups, service groups),
+  **overviews** (host-group grid, summary tiles), **activity** (event stream,
+  handling, downtimes; *not counted in the sidebar, never notify*).
+- **A layout is not a view kind:** it presets the existing fields
+  (*display*, *lists*: services | hosts | host groups | service groups,
+  *group by*, *hosts as*), which stay under it in the editor, and the
+  dropdown's label is derived from them: changing *group by* by hand
+  changes the label (15h: *hosts by host group*; *group by: none* would read
+  *hosts with services*). Nothing extra is stored.
+- **Every grouping exists from both sides:** members grouped by their
+  container (the filter picks members; a container shows only with matching
+  members: *services by host*, *by host group*, *by service group*, *hosts
+  by host group*) and containers with their members (the filter picks the
+  containers; every picked container shows, even with nothing under it, as a
+  faint *no hosts* / *no services* line: *hosts with services*,
+  *host groups*, *service groups*). A container list's filter reads the
+  container (`hostgroup.*`, `servicegroup.*`); empty, the field shows,
+  faint, *every host group · e.g. match("linux-*", hostgroup.name),
+  hostgroup.vars.team == "dba"* (*every service group · e.g.
+  match("db-*", servicegroup.name)*).
+- **The dropdown (15f)** ticks the current layout and shows the keyboard
+  focus as the hover row; it opens under the field, right-aligned to it,
+  wider than the inspector (580px) so names and descriptions fit on one line.
+  **add view (15g)** is compact: icon and name only, the focused entry's
+  description in a **tooltip** beside it (chosen over a second line, which
+  would double the menu's height).
+- **Icinga's groups as lists (15i, 15j, 15k):** *lists* has four values,
+  services | hosts | **host groups** | **service groups**. In a group list
+  the filter picks the groups and every picked group shows; each band is the
+  **shared band** (the group's display name, its host or service count, the
+  per-state counts of its members); the chevron only folds, a click on the
+  band's name filters the page to that group (as on the grid, 5c); rows page
+  by count (7, then `+ N more`); all-ok groups are folded by default, their
+  counts showing; a picked group with nothing in it reads, faint, **no
+  hosts**.
+  - **host groups** (15i): each row is one **host** of the group, an
+    ordinary host row (state circle, name, address and output, the handled
+    tag).
+  - **service groups** (15j): each row is a **host that has services in the
+    group**, not the services: the normal host row, and in its fixed right
+    slot that host's per-state counts for its services in this group
+    (`● 1 ● 1 ● 12 · 14 checks`). Hosts sort worst first by those services.
+  - **A click on a host row opens the normal host pane** (rc1's; `hostPane`
+    in `v1.js`, also 10l). From a service groups list its services tab is
+    narrowed to that group, shown by a removable chip at the top of the tab,
+    **service group databases ×** (× shows all its services again; 15k).
+    From a host groups list the pane opens unfiltered. Nothing else in the
+    pane is new.
+  - The host-group grid (05) is unchanged.
+- Not redrawn here: 04's *add view* (4d) and 14-r5-b still show the kinds
+  list; the layouts list replaces it when built. 04's *grouped list* display
+  is the layout *services by host* (display list, group by host).
 

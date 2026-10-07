@@ -130,33 +130,15 @@ const H = [
     oks: ALL19.filter((n) => !['postgres-replication', 'pg-connections'].includes(n)).concat(['pgbouncer', 'vm-tools', 'wal-g', 'zfs-arc']) },
 ];
 Object.assign(OKS, { 'vm-tools': 'OK - open-vm-tools running', 'zfs-arc': 'OK - ARC hit ratio 97%', pgbouncer: 'OK - 2 pools, 0 waiting', 'wal-g': 'OK - last backup 3h ago' });
-const PREVIEW = 7;
-// A host is a group-header band of the grouped list (36px, the collapse
-// chevron at its left as on 04's view headers, the state dot in the mark
-// column, counts at the right); its services are plain list rows. A click on
-// the name opens the host in the pane; the chevron (or ←/→) collapses it.
-function hostHeaderRow(h, { marked, sel, collapsed, sticky } = {}) {
-  const c = h.counts.map(([st, n]) => `<span>${dot(st, 'd7')}${n}</span>`).join('');
-  return `<div class="ghb${marked ? ' marked' : ''}${sel ? ' sel' : ''}${sticky ? ' sticky' : ''}"><span class="chev">${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span><div class="lead">${dot('ok')}</div>
-    <div class="t"><span class="n">${h.name}</span><span class="a">${h.addr}</span><span class="o">${h.out}</span></div>
-    <span class="cs">${c}</span></div>`;
-}
-// The rows of one host: problems (never hidden), then OK ones up to 7 rows,
-// then the paging row. expanded: every service, and "− show fewer".
-function hostRows(h, { marked = '', expanded = false, from = 0 } = {}) {
-  const keep = expanded ? h.total : Math.min(h.total, Math.max(PREVIEW, h.problems.length));
-  const list = h.problems.concat(okRows(h.oks)).slice(0, keep).slice(from);
-  let out = list.map(([st, n, o, t]) => row([st, n, h.name, o, t], { marked: marked === 'problems' && st !== 'ok' })).join('');
-  const label = expanded ? '− show fewer' : `+ ${h.total - keep} more`;
-  if (h.total > PREVIEW) out += `<div class="morerow"><span></span><span>${label}</span></div>`;
-  return out;
-}
+// The host band and its rows are the shared component (hostBand, hostRows in
+// v1.js), the same parts as topic 15's host list "with services".
+H.forEach((h) => { h.okRows = () => okRows(h.oks); });
 // marked: 'hosts' | 'problems' | '' (the view arrives with nothing marked)
 // collapsed: indices of the hosts folded to their header band
 function combined({ marked = '', cursor = -1, collapsed = [], expanded = [] } = {}) {
   let out = '';
   H.forEach((h, i) => {
-    out += hostHeaderRow(h, { marked: marked === 'hosts', sel: cursor === i, collapsed: collapsed.includes(i) });
+    out += hostBand(h, { marked: marked === 'hosts', sel: cursor === i, collapsed: collapsed.includes(i) });
     if (collapsed.includes(i)) return;
     out += hostRows(h, { marked, expanded: expanded.includes(i) });
   });
@@ -196,7 +178,7 @@ shot('10j', '10-multiselect-j-mark-problems', '<i>mark all problems</i> marked t
 const H2 = H[1];
 const sumBar = summary([['crit', 1, 'critical'], ['warn', 2, 'warning'], ['ok', 60, 'ok']], '3 hosts · 63 services');
 const thumb = (top, h) => `<span style="position:absolute;right:3px;top:${top}px;width:4px;height:${h}px;border-radius:2px;background:var(--el-active);z-index:3"></span>`;
-const tailK = `${hostHeaderRow(H2, { sticky: true, sel: true })}${hostRows(H2, { expanded: true, from: 11 })}${hostHeaderRow(H[2])}${hostRows(H[2])}`;
+const tailK = `${hostBand(H2, { sticky: true, sel: true })}${hostRows(H2, { expanded: true, from: 11 })}${hostBand(H[2])}${hostRows(H[2])}`;
 shot('10k', '10-multiselect-k-host-expanded', '<i>+ 12 more</i> on db-prod-02 (10h) expanded the host <b>in place, downward</b>: its other 12 services opened under the 7 it showed, and everything below moved down; no pane opens. Here the list is scrolled to the end of db-prod-02 (the scroll thumb at the right): the same slot that said <i>+ 12 more</i> now reads <b>− show fewer</b> (click, Enter or ←), and db-prod-03 follows. While its rows scroll, the host’s band stays at the top of the list (a sticky header, with the selected-row background as the cursor’s host), so its chevron and its name are always at hand. The expansion is kept while the view is open; the list is virtualised, so a host with hundreds of services costs nothing.',
   appWindow(`<div class="col" style="min-height:0">${multiHeader(false)}${sumBar}<div class="list" style="position:relative">${thumb(250, 300)}${tailK}</div>${selBarEmpty}</div>`, { groups: groupsNoActive, activeGroup: '' }),
   { crops: '10-multiselect-k-zoom:300,40,1140,860' });
@@ -204,13 +186,8 @@ shot('10k', '10-multiselect-k-host-expanded', '<i>+ 12 more</i> on db-prod-02 (1
 // ---- 10l: a click on a host's name opens the host pane --------------------
 const H3 = H[2];
 const paneRows = H3.problems.concat(okRows(H3.oks)).slice(0, 7);
-const hostPane3 = `<div class="pane">${paneHeader('host')}<div class="col" style="gap:20px;padding:20px 24px 0;flex:none">
-  ${paneTitle({ st: 'ok', label: 'UP', name: 'db-prod-03', sub: '10.0.2.13 · up 41d · PING OK - Packet loss = 0%, RTA = 0.42 ms' })}
-  ${actionButtons({ firstDis: true })}
-  <div class="subtabs"><span class="on">services 23</span><span>history</span><span>vars</span><span>config</span></div></div>
-  <div class="col">${paneRows.map(([st, n, o, t]) => `<div class="crow">${circle(st, 14)}<div class="col" style="gap:2px;min-width:0"><span class="n">${n}</span><span class="o">${o}</span></div><span class="s">${t}</span></div>`).join('')}
-  <div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">+ 16 more</div></div></div>`;
-const listL = `${hostHeaderRow(H[0], { collapsed: true })}${hostHeaderRow(H[1], { collapsed: true })}${hostHeaderRow(H3, { sel: true })}${hostRows(H3)}`;
+const hostPane3 = hostPane({ title: { st: 'ok', label: 'UP', name: 'db-prod-03', sub: '10.0.2.13 · up 41d · PING OK - Packet loss = 0%, RTA = 0.42 ms' }, tab: 'services 23', rows: paneRows, more: '+ 16 more' });
+const listL = `${hostBand(H[0], { collapsed: true })}${hostBand(H[1], { collapsed: true })}${hostBand(H3, { sel: true })}${hostRows(H3)}`;
 const ptr = (x, y) => `<svg style="position:absolute;left:${x}px;top:${y}px;width:16px;height:22px;z-index:60" viewBox="0 0 16 22"><path d="M1 1 L1 17 L5 13 L8 20 L11 19 L8 12 L14 12 Z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></svg>`;
 shot('10l', '10-multiselect-l-host-pane', 'A click on a host’s <b>name</b> (or Enter with the cursor on its band) opens the host in the pane beside the list: rc1’s host pane, which pages its own services the same way (its 2 problems, then OK services to 7 rows, <i>+ 16 more</i>). The host in the list stays as it was, paged (here db-prod-03, with db-prod-01 and db-prod-02 collapsed). The two do different things: the <b>name opens the pane</b>; <b>+ N more only expands the host in place</b> (10k) and never opens anything. The pane narrows the list; the header keeps its items and cuts the subtitle first.',
   appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 560px"><div class="col" style="min-height:0">${multiHeader(false)}${sumBar}<div class="list">${listL}</div>${selBarEmpty}</div>${hostPane3}</div>`, { groups: groupsNoActive, activeGroup: '' }) + ptr(410, 170),

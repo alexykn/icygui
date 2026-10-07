@@ -242,3 +242,60 @@ const sbWithIcons = (html) => html.replace(/<span class="dot ic-([a-z-]+) *"><\/
 // the main window with the cluster section and the round-3 groups
 const clusterWindow = (main, { cluster = '', health = 'ok', activeGroup = '', activeItem = '', on = 'none', menuOn = false, foot = {} } = {}) => sbWithIcons(appWindow(main, {
   groups: clusterGroups(on).map((g) => (menuOn && g.name === 'platform' ? { ...g, menu: true } : g)), activeGroup, activeItem, foot, before: clusterSection({ active: cluster, health }) }));
+
+// ---- host bands: ONE component for every host-with-services view ----------
+// 10h/10j/10k/10l (a service list grouped by host, the combined view) and 15
+// (a host list "with services") draw their hosts with these, so they cannot
+// drift apart. A host is a group-header band (36px, compact 30px; the
+// collapse chevron at its left, the state mark in the rows' mark column, the
+// name, the address and the output faint, the per-state counts of the
+// services under it at the right); its services are ordinary list rows,
+// paged by count (HOST_PREVIEW, then "+ N more" / "− show fewer").
+//   h: { name, addr, out, counts, total, problems, okRows,
+//        st ('ok' by default), ring (handled: hollow), word (a host state
+//        word before the output, e.g. "down 3m", in the state's text colour),
+//        note (a faint line instead of the rows: "4 services hidden · host
+//        down", "no services", "no hosts", "all ok"), none (nothing under
+//        it: no chevron), members ('hosts' for a host group's band) }
+// The same band is a host group's or a service group's (topic 15's
+// container lists, 10's grouped lists): name, a faint count, the counts.
+//   problems: [state, service, output, since, { handled, tag }]
+//   okRows: rows or a function returning [state, service, output, since]
+const HOST_PREVIEW = 7;
+function hostBand(h, { marked, sel, collapsed, sticky, compact } = {}) {
+  const c = (h.counts || []).map(([st, n]) => `<span>${dot(st, 'd7')}${n}</span>`).join('');
+  const st = h.st || 'ok';
+  const tint = h.word && !h.ring && (st === 'crit' || st === 'unk') ? ` hb-${st}` : '';
+  const word = h.word ? `<span style="color:var(--${st}-text)">${h.word}</span> · ` : '';
+  return `<div class="ghb${compact ? ' cmp' : ''}${tint}${marked ? ' marked' : ''}${sel ? ' sel' : ''}${sticky ? ' sticky' : ''}"><span class="chev">${h.none ? '' : icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}</span><div class="lead">${dot(st, h.ring ? 'ring' : '')}</div>
+    <div class="t"><span class="n">${h.name}</span><span class="a">${h.addr}</span><span class="o">${word}${h.out}</span></div>
+    <span class="cs">${c}</span></div>`;
+}
+// The rows of one host: problems (never paged away), then OK ones up to the
+// preview, then the paging row. expanded: every service and "− show fewer".
+// marked: 'problems' (every problem row) or a list of service names.
+function hostRows(h, { marked = '', expanded = false, from = 0, compact = false } = {}) {
+  if (h.note) return `<div class="morerow hnote${compact ? ' cmp' : ''}"><span></span><span>${h.note}</span></div>`;
+  const oks = typeof h.okRows === 'function' ? h.okRows() : (h.okRows || []);
+  const keep = expanded ? h.total : Math.min(h.total, Math.max(HOST_PREVIEW, h.problems.length));
+  const list = h.problems.concat(oks).slice(0, keep).slice(from);
+  const isMarked = (n, st) => (marked === 'problems' ? st !== 'ok' : Array.isArray(marked) && marked.includes(n));
+  // members: a host's services ("service on host"), a host group's hosts
+  // (host rows; h.members = 'hosts') or a service group's services (x.host)
+  let out = list.map(([st, n, o, t, x = {}]) => row([st, n, x.host || h.name, o, t], { marked: isMarked(n, st), handled: x.handled, tag: x.tag || '', compact, hostRow: h.members === 'hosts' })).join('');
+  const label = expanded ? '− show fewer' : `+ ${h.total - keep} more`;
+  if (h.total > HOST_PREVIEW) out += `<div class="morerow${compact ? ' cmp' : ''}"><span></span><span>${label}</span></div>`;
+  return out;
+}
+
+// ---- the host pane (rc1's, as in 10l and 15k): title, actions, the tabs, the
+// services paged by count. chip: an optional removable filter at the top of
+// the services tab (15k: "service group databases ×"; × shows all again).
+function hostPane({ title, tab, rows, more = '', chip = '' }) {
+  return `<div class="pane">${paneHeader('host')}<div class="col" style="gap:20px;padding:20px 24px 0;flex:none">
+  ${paneTitle(title)}
+  ${actionButtons({ firstDis: true })}
+  <div class="subtabs"><span class="on">${tab}</span><span>history</span><span>vars</span><span>config</span></div></div>
+  <div class="col">${chip ? `<div style="display:flex;padding:12px 24px 4px">${chip}</div>` : ''}${rows.map(([st, n, o, t]) => `<div class="crow">${circle(st, 14)}<div class="col" style="gap:2px;min-width:0"><span class="n">${n}</span><span class="o">${o}</span></div><span class="s">${t}</span></div>`).join('')}
+  ${more ? `<div style="padding:10px 24px 12px;font-size:12px;color:var(--t-faint)">${more}</div>` : ''}</div></div>`;
+}

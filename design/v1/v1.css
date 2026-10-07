@@ -65,6 +65,7 @@
   --accent-tint-strong: rgba(116, 173, 232, .14);
   --warn-tint: rgba(229, 176, 74, .08);
   --crit-tint: rgba(224, 108, 108, .08);
+  --unk-tint: rgba(169, 127, 219, .08);   /* NEW v1 (topic 15): an unreachable host's band */
   --track: #2a2f33;       /* progress track = border_header */
   color-scheme: dark;
 }
@@ -126,6 +127,7 @@
   --accent-tint-strong: rgba(47, 116, 192, .12);
   --warn-tint: rgba(176, 116, 8, .08);
   --crit-tint: rgba(207, 70, 70, .07);
+  --unk-tint: rgba(154, 104, 220, .07);
   --track: #e3e6e9;
   color-scheme: light;
 }
@@ -790,3 +792,14 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
  * text inset, so every control's text starts at the same x */
 .fx.fi, .textarea.fi { padding-left: 10px; padding-right: 10px; }
 .fx.fi.cp { padding-right: 36px; }
+/* ---- topic 15 (and 10h): the host band's states and densities ----------
+ * A DOWN host's band is tinted in the down colour (critical), an
+ * UNREACHABLE one in the unreachable colour (unknown), unless handled (in
+ * downtime or acknowledged: hollow mark, no tint). Compact: a 30px band and
+ * 26px note and paging rows, with the one-line service rows. */
+.ghb.hb-crit { background: linear-gradient(var(--crit-tint), var(--crit-tint)) var(--row-header); }
+.ghb.hb-unk { background: linear-gradient(var(--unk-tint), var(--unk-tint)) var(--row-header); }
+.ghb.cmp { height: 30px; }
+.morerow.cmp { height: 26px; }
+.morerow.hnote { color: var(--t-faint); font-style: normal; }
+.ghb.hb-crit.marked, .ghb.hb-unk.marked { background: var(--row-marked); }  /* a marked band shows the mark, not its state tint */

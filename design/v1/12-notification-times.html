@@ -46,11 +46,12 @@ shot('12a', '12-times-a-settings-defaults', 'Settings → notifications, scrolle
 // ---- the group's notification settings dialog -----------------------------
 // what each of platform's dashboards does, before (12b) and after (12c) the
 // group was turned on
-const DASH_BEFORE = [['unk', 'network', 'off, as platform'], ['crit', 'kubernetes', 'on · set on the dashboard · custom: always'], ['warn', 'certificates', 'off, as platform'], ['crit', 'all services', 'off · set on the dashboard']];
-const DASH_AFTER = [['unk', 'network', 'on, as platform · platform’s times'], ['crit', 'kubernetes', 'on · set on the dashboard · custom: always'], ['warn', 'certificates', 'on, as platform · platform’s times'], ['crit', 'all services', 'off · set on the dashboard']];
+// [state, name, on or off, where that comes from, the times it uses]
+const DASH_BEFORE = [['unk', 'network', 'off', 'as platform', ''], ['crit', 'kubernetes', 'on', 'set on the dashboard', 'custom: always'], ['warn', 'certificates', 'off', 'as platform', ''], ['crit', 'all services', 'off', 'set on the dashboard', '']];
+const DASH_AFTER = [['unk', 'network', 'on', 'as platform', 'platform’s times'], ['crit', 'kubernetes', 'on', 'set on the dashboard', 'custom: always'], ['warn', 'certificates', 'on', 'as platform', 'platform’s times'], ['crit', 'all services', 'off', 'set on the dashboard', '']];
 const dashList = (list) => `<div class="col" style="gap:6px">${seclabel('its dashboards')}
   <div class="targets" style="gap:0">
-    ${list.map(([st, n, what]) => `<div class="t">${dot(st, 'd7')}<span>${n}</span><span class="faint">${what}</span></div>`).join('')}
+    ${list.map(([st, n, on, from, times]) => `<div class="t">${dot(st, 'd7')}<span style="width:13ch">${n}</span><span class="${on === 'on' ? 'sec' : 'faint'}" style="width:3ch">${on}</span><span class="faint" style="width:22ch">${from}</span><span class="faint">${times}</span></div>`).join('')}
   </div></div>`;
 const defaultsBox = `<div class="col" style="gap:6px;padding:12px 14px;border-radius:6px;background:var(--code-bg);font-size:12.5px">
   <span class="faint" style="font-size:11.5px">prod-cluster’s default times</span>
@@ -132,7 +133,7 @@ shot('12f', '12-times-f-group-menu', 'The group’s <i>···</i> menu: a <b>not
 
 // ---- 12g: a dashboard's ··· menu, following its group ------------------------------
 const glyphSel = '<span class="glyph sel" style="font-size:13px">···</span>';
-const groupsDashMenu = groupsWith({ overview: { items: [['overview', 'crit', 38], ['production', 'crit', 38, '', BELL], ['databases', 'crit', 7, '', CLOCK], ['host problems', 'crit', '', glyphSel]] } });
+const groupsDashMenu = groupsWith({ overview: { items: [['overview', 'crit', 38], ['production', 'crit', 38, '', BELL], ['databases', 'crit', 7, '', CLOCK], ['host problems', 'crit', glyphSel]] } });
 const dashMenu12 = menu([
   { label: 'edit dashboard' }, { label: 'rename' }, { label: 'duplicate' },
   { label: 'copy as YAML', key: 'ctrl-shift-c' }, { label: 'export to file' },

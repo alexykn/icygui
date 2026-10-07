@@ -86,7 +86,14 @@ These come from the review and PLAN.md §4.3, and hold in every frame.
   read `service on host`. The same object never gets two rows.
 - **Nothing moves with state:** fixed slots for hints, badges and marks (the
   pane's `updating` hint, the sidebar's notification mark, the combined
-  view's bulk bar, the pin slot).
+  view's bulk bar, the pin slot). **A label that changes width gets a slot
+  sized for its longest value**, and what follows it starts at a fixed x:
+  the import preview's status and choice columns (08), the selection bar's
+  count (`N selected`, 12ch; `N services marked`, 19ch), the palette footer's
+  count, the comment list's kind and detail (07), the bulk bar's problem
+  count (10). Choosing another option changes only the word in its slot.
+  (rc1's selection bar has no fixed count slot yet: its buttons shift when
+  the count gains a digit.)
 - **No trailing "…"** on button, menu or command labels; an ellipsis only
   where text is cut off, and on progress text.
 - **The operator sees every target** before anything is sent: bulk dialogs
@@ -469,14 +476,17 @@ list, three marked; 7g the remove-acknowledgements confirmation.
   `not started`, `in 7h 48m`, `by 22:00`. **Config downtimes** have a lock in
   the progress slot and `from config`, and **can't be removed**. A host
   downtime with `all_services` is one row (`+ 18 services`, unfolds on → or a
-  click). Comments: `author time · text` with an icon in the tag (✓ for
-  acknowledgement comments); downtime and flapping comments are left out (the
-  summary bar says so). Acknowledged: `who time, how long ago · comment`, and
+  click). Comments: `author time · text`; the tag has two fixed,
+  left-aligned slots: the kind with its icon (`✓ acknowledgement` or
+  `comment`) and the detail (`sticky`, `expires Fri 12:00`), so the icons
+  line up. Downtime and flapping comments are left out (the summary bar says
+  so). Acknowledged: `who time, how long ago · comment`, and
   in the tag fixed slots for `sticky` (or empty) and the expiry (`expires Thu
   08:00`, `no expiry`).
 - **Selection** works as in every list; the selection bar has this list's
   actions: `remove downtimes ⌫`, `remove comments ⌫` or `remove
-  acknowledgements ⌫` (primary), `copy names`, and `···`.
+  acknowledgements ⌫` (primary), `copy names`, and `···`. Its count sits in
+  a fixed slot, so the buttons never move.
 - **Every removal confirms** (bulk removal), listing every target: downtimes
   grouped by the downtime they belong to (a host downtime lists the host and
   each service), comments with author and time, acknowledgements with who,
@@ -524,9 +534,12 @@ preview with clashes; 8f a broken paste; 8g a clashing group selected.
   imports straight away.
 - **Import preview** (a 1040px dialog): on the left, what the YAML holds as a
   tree (groups with a folder icon, dashboards with a dot and view count),
-  each with its status on the right: `new` (OK colour), `exists here ·
-  merge`, `name taken · keep both` (warning colour, with the chosen action
-  faint). The selected row opens a detail with the choice, what it leads to
+  each with its status and choice on the right **in two fixed-width,
+  left-aligned columns**: the status (`new` in the OK colour, `exists here`
+  or `name taken` in the warning colour), sized for `exists here`, then the
+  choice (`· merge`, `· keep both`, `· replace`, `· skip`, faint), sized for
+  `· keep both`; `new` rows leave the choice column empty. Switching a choice
+  changes only its word; nothing else moves. The selected row opens a detail with the choice, what it leads to
   (`imported as databases 2`), and what doesn't fit this environment (host
   groups that don't exist here). **A clashing dashboard name defaults to
   keep both** (or replace, skip). **A clashing group defaults to merge** (its
@@ -652,10 +665,11 @@ view, one host collapsed; 10i pinned as a tab, and *save as dashboard*; 10j
   tint. Outside a block it is the selected-row background, as today.
 - **Nothing moves:** the block wraps the rows without adding size; section
   labels break a block in two; there is never a check column.
-- **Footer:** `3 selected` in the accent (the selection bar's counter), then
-  what Enter does (`↵ acknowledge all 3`, `↵ open together`), then
-  `ctrl-a select all 7`, then `esc clear` at the right. Without a selection
-  it shows the keys as today, plus `shift-↑↓ select`.
+- **Footer:** `3 selected` in the accent, in a fixed slot (14ch, so `all 7
+  selected` fits), then what Enter does (`↵ acknowledge all 3`, `↵ open
+  together`); at the right, `ctrl-a select all 7` and `esc clear`. A
+  growing count or action pushes nothing. Without a selection it shows the
+  keys as today, plus `shift-↑↓ select`.
 
 **The bulk dialog (10f):** today's action dialog. The title counts the
 targets (`Acknowledge · 7 services`), and the target box lists **every**
@@ -688,10 +702,12 @@ counts the services by state and ends with `3 hosts · 63 services`.
 - **It arrives with nothing marked:** the palette's selection chose what to
   show, not what to act on. The bulk bar under the list is always there in
   this view, so nothing moves when rows get marked. Empty, it reads `nothing
-  marked · x marks a row · ctrl-a marks all` and offers **mark all problems**
-  with its count (`3 services`: the services with an unhandled problem, and a
-  host that is down or unreachable). With marks (10j), it turns in place into
-  the selection bar: the count, acknowledge, downtime, check now, comment,
+  marked · x marks a row · ctrl-a marks all` and, at the right, the count of
+  problems (`3 services`: the services with an unhandled problem, and a host
+  that is down or unreachable) in a fixed right-aligned slot before **mark
+  all problems**, so the button stays put when the count changes. With marks
+  (10j), it turns in place into the selection bar: the count (`3 services
+  marked`, in a fixed slot), acknowledge, downtime, check now, comment,
   `···`, and `clear esc`. Esc clears the marks and the bar returns to *mark
   all problems*.
 - Everything else is the normal list: x, shift-↓, ctrl-a, Enter for the pane.
@@ -793,33 +809,39 @@ quick switch; 12g a dashboard's `···` menu, following its group.
   on, unless one has custom times, and that nothing notifies until a group
   or dashboard is turned on. Below it, **`turned on`** lists per environment
   the groups and dashboards whose notifications are on (a group with how many
-  of its dashboards follow it; a dashboard set on by itself), each with what
+  of its dashboards are on; a dashboard set on by itself), each with what
   it uses: `default times` (faint) or `custom: <its times>`, and `open ↗`,
   which opens its notification settings. The environment line counts them
   (`4 on · 3 with custom times`); an environment with nothing on says that
   it doesn't notify.
 - **A group's notification settings (12b, 12c):** a dialog from the group's
   `···` → `notification settings`. First row: **notifications**, with the
-  switch and a one-line summary of what applies (`on · default times: Mon–Fri
-  07:00 → 22:00 · Sat–Sun 09:00 → 20:00, critical any time`, or `off`). Then
-  **when**: `default | custom` (segmented). `default` shows a read-only box
-  with the environment's default times and rule, whether they are notifying
-  now, and `change the defaults ↗` (opens the settings panel at them).
+  switch and a one-line summary of what applies (`on · default times:
+  Mon–Fri 07:00 → 22:00 · Sat–Sun 09:00 → 20:00, critical any time`; `on ·
+  custom times: Mon–Fri 09:00 → 17:00, critical and down at any time`; `off ·
+  nothing in platform notifies, except dashboards turned on themselves`).
+  Then **when**: `default | custom` (segmented). `default` shows a read-only
+  box with the environment's default times and rule, whether they are
+  notifying now (or, while the group is off, `used once notifications are
+  on`), and `change the defaults ↗` (opens the settings panel at them).
   `custom` drops down, in place and indented, the same controls as the
   settings page, for this group only, with a faint line saying what they
-  replace. The dialog lists the group's dashboards and what each one does
-  (`on, as platform · platform's times`, `on · set on the dashboard · custom:
-  always`, `off · set on the dashboard`). The *when* controls stay usable
+  replace. The dialog lists the group's dashboards and what each one does,
+  in fixed columns: name, `on` or `off`, where that comes from (`as
+  platform` or `set on the dashboard`), and the times it uses
+  (`platform's times`, `custom: always`). The *when* controls stay usable
   while the group is off, so times can be set before turning it on. Changes
   apply at once; `done` closes.
 - **A dashboard's notifications (12d):** a row in the dashboard editor's
   inspector, with the dashboard's name and group (it belongs to the
-  dashboard, not to a view): the switch, with a faint line saying where its
-  state comes from (`as overview`, or `set on this dashboard · follow
-  overview` to go back to following the group); then `when: default |
-  custom`, the custom controls stacked for the narrow column. A faint line
-  says what applies now. It is saved with the dashboard, like the rest of the
-  editor.
+  dashboard, not to a view): the label says where the state comes from (`as
+  overview`, or `set on this dashboard`); then the switch with `on`/`off`, a
+  faint note on the group (`overview is off`) and, when set on the
+  dashboard, `follow overview` at the right to hand the choice back to the
+  group (12d; 09's frames show a dashboard following its group); then `when:
+  default | custom`, the custom controls stacked for the narrow column. A
+  faint line says what applies now. It is saved with the dashboard, like the
+  rest of the editor.
 - **Quick switch in the `···` menus (12f, 12g):** the group's and the
   dashboard's menus get a `notifications` row with a switch (the `Switch`
   without its label) at the right, directly above `notification settings`
@@ -834,8 +856,9 @@ quick switch; 12g a dashboard's `···` menu, following its group.
   instead when it notifies with custom times set on it, and **nothing when
   it is off**. The slot is always reserved, so turning notifications on or
   setting times moves nothing. Hovering the mark says what applies and
-  whether it is notifying now (`platform: on, its own times · Mon–Fri 09:00
-  → 17:00 · critical and down at any time · notifying now, until 17:00`).
+  whether it is notifying now (`platform: on, its own times` / `Mon–Fri
+  09:00 → 17:00 · critical and down at any time` / `notifying now, until
+  17:00 · 3 of its 4 dashboards on`).
 - **The environment's master switch** (top of the notifications page) stays
   as a way to silence a whole environment; off overrides every group and
   dashboard, and on never turns any of them on.

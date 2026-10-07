@@ -112,8 +112,6 @@ function pageNotifications(part = 0) {
     onRow(dot('crit', 'd7'), 'kubernetes', 'dashboard in platform', cus('always')) +
     onRow(dot('crit', 'd7'), 'production', 'dashboard in overview', def) +
     onRow(dot('crit', 'd7'), 'databases', 'dashboard in overview', cus('Mon–Fri 06:00 → 23:00, Sat–Sun 08:00 → 20:00')) +
-    envHead('staging', '1 on') +
-    onRow(folder, 'releases', 'group · 2 of 2 on', def) +
     envHead('lab', 'nothing turned on: lab doesn’t notify', 'warn') +
     ssec('storm control') +
     srow('storm threshold', 'Beyond it, one summary notification.', `<span class="muted" style="font-size:12px">at most</span>${inp('5', 44)}<span class="muted" style="font-size:12px">in</span>${inp('10', 44)}<span class="muted" style="font-size:12px">seconds</span>`);

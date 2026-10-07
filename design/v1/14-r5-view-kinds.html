@@ -78,22 +78,7 @@ shot('14-r5-c-l', '14-r5-c-combined-light', '<b>One dashboard, three view kinds<
 // that opens the picker. Fixed sizes: the swatch and the dropdown keep their
 // size and place whichever is chosen; only the hint at the right of the label
 // changes (nothing follows it).
-const MARK_HINT = { state: 'the worst problem’s colour', icon: 'the square picks the icon' };
-const markField = ({ mode = 'state', st = 'crit', ic = 'users', sq = '', selOpen = false }) => {
-  const swatch = mode === 'state'
-    ? `<span class="mswatch dis"><span class="dot ${st}" style="width:10px;height:10px"></span></span>`
-    : `<span class="mswatch${sq ? ' ' + sq : ''}">${icon(ic, 16)}</span>`;
-  // on the inspector's two-column grid: swatch + gap + dropdown span exactly
-  // the name column; the hint is right-aligned with the group field
-  return `<div class="field"><div class="lab">sidebar mark<span class="st faint">${MARK_HINT[mode]}</span></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="mfield">${swatch}<span class="msel${selOpen ? ' selopen' : ''}">${select(mode)}</span></div></div></div>`;
-};
-const dashFields = (name, group, mark) => `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">name</div><span class="input">${name}</span></div><div class="field"><div class="lab">group</div>${select(group)}</div></div>${markField(mark)}`;
-const rule = '<div style="height:1px;background:var(--bd-header);margin:0 -18px"></div>';
-// the selected view's own name (the built inspector's "view name" field, first
-// in the view's settings): the name is what the view header and the views list
-// show; the kind is the display field below
-const viewNameField = (n) => `<div class="field"><div class="lab">view name</div><span class="input">${n}</span></div>`;
+const rule = '<div style="height:1px;flex:none;background:var(--bd-header);margin:0 -18px"></div>';
 const pointer = (x, y) => `<svg style="position:absolute;left:${x}px;top:${y}px;width:16px;height:22px;z-index:60" viewBox="0 0 16 22"><path d="M1 1 L1 17 L5 13 L8 20 L11 19 L8 12 L14 12 Z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></svg>`;
 
 // ---- a. new dashboard: the editor at once, with one empty list view ---------------------------
@@ -105,18 +90,16 @@ const newEditorHeader = `<div class="hbar"><span class="title">new dashboard</sp
 const newInspector = `<div class="pane" style="background:var(--win-bg)">
   <div class="hbar pane-h" style="padding:0 18px"><span class="title" style="font-size:13.5px">dashboard</span><span class="grow"></span><span class="right faint">1 view</span></div>
   <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">name</div><span class="input focus"><span style="background:var(--selection)">new dashboard</span><span class="caret" style="height:13px"></span></span></div><div class="field"><div class="lab">group</div>${select('voip')}</div></div>
-    ${markField({ mode: 'state', st: 'crit' })}
-    <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px;margin:0 -6px">
+    ${dashFields('new dashboard', 'voip', { mode: 'state', st: 'crit' }, { nameFocus: true })}
+    <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px">
       <div class="vrow sel"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon('list', 13)}</span><span class="vn">list</span><span class="vm">38 matches</span><span class="glyph" style="font-size:12px">···</span></div></div>
-      <span style="display:flex;align-items:center;gap:8px;height:28px;font-size:12px;color:var(--t)">${icon('plus', 13)}add view</span></div>
+      <div class="vadd">${icon('plus', 13)}add view</div></div>
     ${rule}
-    <div class="field"><div class="lab"><span class="strong" style="font-size:12.5px">list</span><span class="st faint">view 1 of 1</span></div></div>
-    ${viewNameField('list')}
+    ${viewNameField('list', 'view 1 of 1')}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('list', 13)}list</span>`)}</div>
       <div class="field"><div class="lab">lists</div><span class="seg" style="display:flex">${['services', 'hosts'].map((o, i) => `<span class="${i === 0 ? 'on' : ''}" style="flex:1">${o}</span>`).join('')}</span></div></div>
     <div class="field"><div class="lab">filter<span class="st faint">empty: every object · 38 problems</span></div>
-      <div class="fx cp" style="min-height:44px"><span class="faint">every object</span><span class="fxcp">${icon('copy', 12)}</span></div></div>
+      <div class="fx fi cp" style="min-height:44px"><span class="faint">every object</span><span class="fxcp">${icon('copy', 12)}</span></div></div>
     <div class="field"><div class="lab">show</div>${sw(true, 'problems only')}</div>
     ${handledField(0)}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">sort</div>${select('severity')}</div><div class="field"><div class="lab">direction</div><span class="seg" style="display:flex"><span class="on" style="flex:1">↓ desc</span><span style="flex:1">↑ asc</span></span></div></div>
@@ -127,7 +110,7 @@ const NEWDASH = { name: 'voip', items: [...VOIP.items, ['new dashboard', 'crit',
 const winNew = (main) => sbWithIcons(appWindow(main, { groups: [SIDEBAR_GROUPS[0], NEWDASH, PLAIN_PLATFORM, SIDEBAR_GROUPS[2]], activeGroup: 'voip', activeItem: 'new dashboard', before: clusterSection({}) }));
 const editorA = `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${newEditorHeader}${newPreview}</div>${newInspector}</div>`;
 shot('14-r5-a', '14-r5-a-new-dashboard', '<b>New dashboard: the editor at once.</b> The group’s <i>+</i>, the footer’s <i>+ → new dashboard</i> and the palette’s <i>new dashboard</i> all open the editor directly, with <b>one empty list view</b>: no menu of presets, no preset filters. The name is selected, ready to type over; the group is the one whose <i>+</i> was clicked (voip). The view is named after its kind (<i>list</i>) until renamed; its <b>filter is empty</b>, which means <i>every object</i> (the field says so, faint, and its status counts what that shows: 38 problems), so the preview on the left is every problem until a filter is written (topic 09’s autocomplete and <i>copy filter from</i>, the button at the field’s top right, help). The kind is the view’s <b>display</b>: change it there, or add views of any kind with <i>add view</i>, which simply lists the kinds. The sidebar mark starts at <i>state</i> (a list is a problem view). With one view, the editor’s header carries the view’s controls (the rows toggle, the sort, <i>···</i>), as in b.',
-  winNew(editorA), { crops: '14-r5-a-zoom:1040,40,400,560;14-r5-a-row-zoom:1068,56,372,180' });
+  winNew(editorA), { crops: '14-r5-a-zoom:1040,40,400,560;14-r5-a-row-zoom:1068,56,372,180;14-r5-a-inspector-zoom:1068,0,372,900' });
 shot('14-r5-a-l', '14-r5-a-new-dashboard-light', '<b>New dashboard</b>, light: the same editor, whichever <i>+</i> opened it.', winNew(editorA), { ...L, crops: '14-r5-a-row-zoom-light:1068,56,372,180' });
 
 // ---- b. the editor (04's) for "voip handling", one handling view -----------------------------
@@ -140,15 +123,14 @@ const handlingInspector = ({ selOpen = false } = {}) => `<div class="pane" style
   <div class="hbar pane-h" style="padding:0 18px"><span class="title" style="font-size:13.5px">dashboard</span><span class="grow"></span><span class="right faint">1 view</span></div>
   <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
     ${dashFields('voip handling', 'voip', { mode: 'icon', ic: 'users', selOpen })}
-    <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px;margin:0 -6px">
+    <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px">
       <div class="vrow sel"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon('users', 13)}</span><span class="vn">handling</span><span class="vm">4 handled</span><span class="glyph" style="font-size:12px">···</span></div></div>
-      <span style="display:flex;align-items:center;gap:8px;height:28px;font-size:12px;color:var(--t)">${icon('plus', 13)}add view</span></div>
+      <div class="vadd">${icon('plus', 13)}add view</div></div>
     ${rule}
-    <div class="field"><div class="lab"><span class="strong" style="font-size:12.5px">handling</span><span class="st faint">view 1 of 1</span></div></div>
-    ${viewNameField('handling')}
+    ${viewNameField('handling', 'view 1 of 1')}
     <div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('users', 13)}handling</span>`)}</div>
     <div class="field"><div class="lab">filter<span class="st c-ok">matches 214 objects · 4 being handled</span></div>
-      <div class="fx focus cp" style="min-height:44px">${K('host.vars.team')} ${O('==')} ${Str('"voip"')}<span class="caret" style="height:13px"></span><span class="fxcp">${icon('copy', 12)}</span></div></div>
+      <div class="fx fi focus cp" style="min-height:44px">${K('host.vars.team')} ${O('==')} ${Str('"voip"')}<span class="caret" style="height:13px"></span><span class="fxcp">${icon('copy', 12)}</span></div></div>
     <div class="field"><div class="lab">opens with</div><div style="display:flex;gap:6px;flex-wrap:wrap">${chip('all', { sel: true })}${chip('acknowledged')}${chip('in downtime')}${chip('upcoming')}${chip('comments')}</div></div>
     <div class="field"><div class="lab">sort<span class="st faint">the header’s sort</span></div>${select('latest activity')}</div>
     ${rowsField('default', 'comfortable', 'the header’s toggle · follows the settings')}
@@ -163,11 +145,11 @@ const addMenu = menu(['add a view that shows',
   { label: 'event stream', ic: 'activity', det: 'changes, acks, downtimes' },
   { label: 'handling', ic: 'users', det: 'who is handling what' },
   { label: 'downtimes', ic: 'calendar-clock', det: 'in effect and upcoming', hov: true },
-], { x: 380, y: 270, w: 384 });
+], { x: 380, y: 244, w: 384 });  // beside the inspector, level with its add view row
 const singleHandling = () => tChips(VOIP_CHIPS, 'all') + `<div class="list">${VT.trunk()}${VT.pbx()}${VT.jitter()}${VT.prov()}</div>`;
 const editorB = (overlay = addMenu, o = {}) => `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${editorHeader}${singleHandling()}</div>${handlingInspector(o)}${overlay}</div>`;
 shot('14-r5-b', '14-r5-b-editor', '<b>The editor is 04’s</b>, for every dashboard. <i>voip handling</i> has one view, a handling view, selected in the views list; its settings follow: its <b>view name</b> (the name its header and the views list show; the kind is <i>display</i>), display, the <b>filter</b> (topic 09’s autocomplete, the copy button at its top right, the live status), which chip it <i>opens with</i>, the <b>sort</b> and the <b>rows</b>: <i>as in settings (comfortable)</i>, naming the global value (new views start there; the other choices are comfortable and compact). No notifications row; a faint line says the view never notifies. Above the views, the dashboard’s <b>sidebar mark</b> (14-r5-e to g): <i>icon</i>, the handling icon, as this dashboard has no problem view. <i>add view</i> is open with the full list of kinds. The preview on the left is the dashboard: with one view, <b>the view header is the page header</b>, so the editor’s header keeps the view’s controls (the <b>rows toggle</b>, the sort and <i>···</i>) before <i>discard</i> and <i>save</i>; the preview is narrow, so <i>only mine</i> is in the <i>···</i>, as the rule says for tight space, and the chips follow as its second row, as on the page. The toggle’s dashed outline on the spacious-rows icon says the view follows the settings.',
-  win(editorB(), { activeItem: 'voip handling' }), { crops: '14-r5-b-header-zoom:300,0,780,120' });
+  win(editorB(), { activeItem: 'voip handling' }), { crops: '14-r5-b-header-zoom:300,0,780,120;14-r5-b-inspector-zoom:1068,0,372,900' });
 shot('14-r5-b-l', '14-r5-b-editor-light', '<b>The editor</b>, light.', win(editorB(), { activeItem: 'voip handling' }), L);
 
 // ---- d. the sidebar rule, and a one-view page: the same controls, roomy ---------------------------
@@ -182,29 +164,28 @@ shot('14-r5-d-l', '14-r5-d-sidebar-light', '<b>The sidebar rule and a one-view p
 // and is not clickable: the pointer over it draws no hover
 const voipEditorHeader = `<div class="hbar"><span class="title">voip</span><span class="acc" style="font-size:12px">editing · voip</span><span class="grow"></span>${btn('discard', { key: 'esc' })}${btn('save dashboard', { key: 'ctrl-s', primary: true })}</div>`;
 const VOIP_VIEWS = [['list', 'problems', '3 matches'], ['handling', 'handling', '4 handled'], ['downtimes', 'downtimes', '3 downtimes']];
-const viewsField = (sel) => `<div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px;margin:0 -6px">${VOIP_VIEWS.map(([d, n, m], i) => `<div class="vrow${i === sel ? ' sel' : ''}"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon(DISPLAY_ICON[d], 13)}</span><span class="vn">${n}</span><span class="vm">${m}</span><span class="glyph" style="font-size:12px">···</span></div>`).join('')}</div>
-  <span style="display:flex;align-items:center;gap:8px;height:28px;font-size:12px;color:var(--t)">${icon('plus', 13)}add view</span></div>`;
+const viewsField = (sel) => `<div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px">${VOIP_VIEWS.map(([d, n, m], i) => `<div class="vrow${i === sel ? ' sel' : ''}"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon(DISPLAY_ICON[d], 13)}</span><span class="vn">${n}</span><span class="vm">${m}</span><span class="glyph" style="font-size:12px">···</span></div>`).join('')}</div>
+  <div class="vadd">${icon('plus', 13)}add view</div></div>`;
 const voipInspector = (mark) => `<div class="pane" style="background:var(--win-bg)">
   <div class="hbar pane-h" style="padding:0 18px"><span class="title" style="font-size:13.5px">dashboard</span><span class="grow"></span><span class="right faint">3 views</span></div>
   <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
     ${dashFields('voip', 'voip', mark)}
     ${viewsField(0)}
     ${rule}
-    <div class="field"><div class="lab"><span class="strong" style="font-size:12.5px">problems</span><span class="st faint">view 1 of 3</span></div></div>
-    ${viewNameField('problems')}
+    ${viewNameField('problems', 'view 1 of 3')}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('list', 13)}list</span>`)}</div>
       <div class="field"><div class="lab">lists</div><span class="seg" style="display:flex">${['services', 'hosts'].map((o, i) => `<span class="${i === 0 ? 'on' : ''}" style="flex:1">${o}</span>`).join('')}</span></div></div>
     <div class="field"><div class="lab">filter<span class="st c-ok">matches 3 problems · 2 handled</span></div>
-      <div class="fx cp" style="min-height:44px">${K('host.vars.team')} ${O('==')} ${Str('"voip"')}<br>${O('&&')} ${K('service.problem')}<span class="fxcp">${icon('copy', 12)}</span></div></div>
+      <div class="fx fi cp" style="min-height:44px">${K('host.vars.team')} ${O('==')} ${Str('"voip"')}<br>${O('&&')} ${K('service.problem')}<span class="fxcp">${icon('copy', 12)}</span></div></div>
     ${handledField(0)}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">sort</div>${select('severity')}</div><div class="field"><div class="lab">direction</div><span class="seg" style="display:flex"><span class="on" style="flex:1">↓ desc</span><span style="flex:1">↑ asc</span></span></div></div>
     ${rowsField('compact')}
   </div></div>`;
 const editorE = (mark, overlay = '') => `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${voipEditorHeader}<div class="col" style="min-height:0;overflow:hidden">${voipViews({ picked: 0, narrow: true })}</div></div>${voipInspector(mark)}${overlay}</div>`;
-// the swatch sits at the inspector's left padding, under name and group
+// the swatch sits at the inspector's left padding, under the name, beside the group
 const SW = { x: 788, y: 141 }; // the swatch's top left in the editor's split
-shot('14-r5-e', '14-r5-e-mark-state', '<b>Sidebar mark: state.</b> Every dashboard has a <b>sidebar mark</b>, set here in the editor’s dashboard fields (under name and group) and in the new-dashboard flow, which opens the same editor (14-r5-f). A small dropdown, <b>state</b> or <b>icon</b>; left of it a rounded square, a field’s height like a colour swatch, <b>previews the mark</b>. <i>voip</i> has a problem view, so it defaults to <b>state</b>: the square shows the worst problem’s dot (red, as in the sidebar), and is <b>not clickable</b>: hovering it draws no highlight (the pointer, just beside it, has just passed over it). The dot sits in the exact centre of the square, and the square and the dropdown share their top, bottom and height (a field’s), 12px apart like side-by-side fields. The hint at the right of the label says what the mark shows. The selected view, a list named <i>problems</i> (its <i>view name</i> field comes first, its kind is <i>display</i>), has its <b>rows</b> set to <i>compact</i> on the view (14-r5-c draws it), so its preview rows are compact.',
-  win(editorE({ mode: 'state', st: 'crit' }, pointer(SW.x - 17, SW.y + 9)), { activeItem: 'voip' }), { crops: '14-r5-e-zoom:1040,40,400,180;14-r5-e-row-zoom:1068,56,372,180' });
+shot('14-r5-e', '14-r5-e-mark-state', '<b>Sidebar mark: state.</b> Every dashboard has a <b>sidebar mark</b>, set here in the editor’s dashboard fields (beside the group, under the name) and in the new-dashboard flow, which opens the same editor (14-r5-f). A small dropdown, <b>state</b> or <b>icon</b>; left of it a rounded square, a field’s height like a colour swatch, <b>previews the mark</b>. <i>voip</i> has a problem view, so it defaults to <b>state</b>: the square shows the worst problem’s dot (red, as in the sidebar), and is <b>not clickable</b>: hovering it draws no highlight (the pointer, just beside it, has just passed over it). The dot sits in the exact centre of the square. The dashboard fields are <i>name</i> (full width), then <b>sidebar mark | group</b> on the inspector’s two columns: the square, 12px, and the dropdown fill the mark column, and the label’s faint suffix (<i>worst dot</i>) says what the mark shows. Every row of the inspector shares one left and one right edge; the views rows are field boxes, and the view’s settings start with its <i>view name</i>. The selected view, a list named <i>problems</i> (its <i>view name</i> field comes first, its kind is <i>display</i>), has its <b>rows</b> set to <i>compact</i> on the view (14-r5-c draws it), so its preview rows are compact.',
+  win(editorE({ mode: 'state', st: 'crit' }, pointer(SW.x - 17, SW.y + 9)), { activeItem: 'voip' }), { crops: '14-r5-e-zoom:1040,40,400,180;14-r5-e-row-zoom:1068,56,372,180;14-r5-e-inspector-zoom:1068,0,372,900' });
 shot('14-r5-e-l', '14-r5-e-mark-state-light', '<b>Sidebar mark: state</b>, light.', win(editorE({ mode: 'state', st: 'crit' }, pointer(SW.x - 17, SW.y + 9)), { activeItem: 'voip' }), { ...L, crops: '14-r5-e-row-zoom-light:1068,56,372,180' });
 
 // f. a new dashboard in voip, named "sbc", its list view renamed "problems": the mark set
@@ -235,15 +216,14 @@ const sbcInspector = `<div class="pane" style="background:var(--win-bg)">
   <div class="hbar pane-h" style="padding:0 18px"><span class="title" style="font-size:13.5px">dashboard</span><span class="grow"></span><span class="right faint">1 view</span></div>
   <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
     ${dashFields('sbc', 'voip', { mode: 'icon', ic: 'list', sq: 'open' })}
-    <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px;margin:0 -6px">
+    <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px">
       <div class="vrow sel"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon('list', 13)}</span><span class="vn">problems</span><span class="vm">2 matches</span><span class="glyph" style="font-size:12px">···</span></div></div>
-      <span style="display:flex;align-items:center;gap:8px;height:28px;font-size:12px;color:var(--t)">${icon('plus', 13)}add view</span></div>
+      <div class="vadd">${icon('plus', 13)}add view</div></div>
     ${rule}
-    <div class="field"><div class="lab"><span class="strong" style="font-size:12.5px">problems</span><span class="st faint">view 1 of 1</span></div></div>
-    ${viewNameField('problems')}
+    ${viewNameField('problems', 'view 1 of 1')}
     <div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('list', 13)}list</span>`)}</div>
     <div class="field"><div class="lab">filter<span class="st c-ok">matches 2 problems</span></div>
-      <div class="fx cp" style="min-height:44px">${K('host.name')} ${O('in')} [${Str('"sbc-01"')}, ${Str('"sbc-02"')}]<br>${O('&&')} ${K('service.problem')}<span class="fxcp">${icon('copy', 12)}</span></div></div>
+      <div class="fx fi cp" style="min-height:44px">${K('host.name')} ${O('in')} [${Str('"sbc-01"')}, ${Str('"sbc-02"')}]<br>${O('&&')} ${K('service.problem')}<span class="fxcp">${icon('copy', 12)}</span></div></div>
     ${handledField(0)}
     ${rowsField('default', 'comfortable')}
   </div></div>`;
@@ -251,7 +231,7 @@ const sbcSidebar = { name: 'voip', items: [['voip', 'crit', 3], ['voip handling'
 const winF = (main) => sbWithIcons(appWindow(main, { groups: [SIDEBAR_GROUPS[0], sbcSidebar, PLAIN_PLATFORM, SIDEBAR_GROUPS[2]], activeGroup: 'voip', activeItem: 'sbc', before: clusterSection({}) }));
 const editorF = (q) => `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${sbcEditorHeader}${summary([['crit', 1, 'critical'], ['warn', 1, 'warning']], '')}<div class="list">${rows(SBC_ROWS)}</div></div>${sbcInspector}${iconPicker({ q, hov: q ? 'server' : 'clock', cur: 'list', x: SW.x, y: SW.y + 38 })}</div>`;
 shot('14-r5-f', '14-r5-f-mark-icon-picker', `<b>Sidebar mark: icon, the picker open.</b> The new-dashboard flow (a): a new dashboard in <i>voip</i>, named <i>sbc</i>, its one list view renamed <i>problems</i> and given a filter, still in the editor, where the mark is set like in any dashboard. Its mark was switched to <b>icon</b>: the first view’s kind icon (list) is the starting icon, and the square is now a button (hover highlight; open, it keeps the highlight with the accent border). A click opens the <b>icon picker</b>, like an emoji picker: a search field, a <b>recent</b> row, and a grid of <b>the app’s own icons</b> (the Lucide set it already ships, ${PICK_ALL.length} of them once the pure controls such as chevrons, arrows and close are left out), all <b>monochrome and neutral</b>, so colour in the sidebar keeps meaning state. <i>ser</i> is typed: the grid shows the 6 matches; the recent row stays above and the picker keeps its size, so nothing moves while typing. The cell under the cursor is highlighted and named in the footer (<i>server</i>); the current icon, shown in the square, has an accent ring where it appears in the grid. Arrows move, ↵ chooses, esc closes. The sidebar row previews the mark: an icon instead of the dot, the count stays (2 problems).`,
-  winF(editorF('ser')), { crops: '14-r5-f-zoom:1040,40,400,480;14-r5-f-row-zoom:1068,56,372,180' });
+  winF(editorF('ser')), { crops: '14-r5-f-zoom:1040,40,400,480;14-r5-f-row-zoom:1068,56,372,180;14-r5-f-inspector-zoom:1068,0,372,900' });
 shot('14-r5-f-l', '14-r5-f-mark-icon-picker-light', '<b>The icon picker</b>, light, before typing: the recent row and all icons (the grid scrolls).', winF(editorF('')), { ...L, crops: '14-r5-f-row-zoom-light:1068,56,372,180' });
 
 // g. voip handling: no problem view, so "state" is greyed out with its reason
@@ -260,7 +240,7 @@ const markMenu = `<div class="menu" style="left:${SW.x + 44}px;top:${SW.y + 36}p
   <div class="mi dis" style="height:auto;padding:5px 8px;align-items:flex-start"><span class="chk"></span><span style="display:flex;flex-direction:column;gap:2px"><span>state</span><span style="font-size:11.5px">no problem view on this dashboard</span></span></div>
   <div class="mi hov"><span class="chk">${icon('check', 13)}</span><span class="grow">icon</span></div></div>`;
 shot('14-r5-g', '14-r5-g-mark-no-problem-view', '<b>Sidebar mark without a problem view.</b> <i>voip handling</i> has only a handling view, so its mark defaults to <b>icon</b>, the first view’s kind icon (handling), and the dropdown’s <b>state</b> is greyed out with its reason, <i>no problem view on this dashboard</i>. Adding a problem view makes <i>state</i> available (it does not switch the mark by itself); removing a dashboard’s last problem view switches a <i>state</i> mark to the first view’s kind icon.',
-  win(editorB(markMenu, { selOpen: true }), { activeItem: 'voip handling' }), { crops: '14-r5-g-zoom:1040,40,400,240;14-r5-g-row-zoom:1068,56,372,180' });
+  win(editorB(markMenu, { selOpen: true }), { activeItem: 'voip handling' }), { crops: '14-r5-g-zoom:1040,40,400,240;14-r5-g-row-zoom:1068,56,372,180;14-r5-g-inspector-zoom:1068,0,372,900' });
 shot('14-r5-g-l', '14-r5-g-mark-no-problem-view-light', '<b>Sidebar mark without a problem view</b>, light.', win(editorB(markMenu, { selOpen: true }), { activeItem: 'voip handling' }), { ...L, crops: '14-r5-g-row-zoom-light:1068,56,372,180' });
 
 // the now lines on the timeline axes

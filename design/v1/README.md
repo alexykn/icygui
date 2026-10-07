@@ -496,6 +496,17 @@ open (*only mine*, *rows*).
   state colour, `service on host`, the note) from the local event log,
   filtered by the view's filter, newest first, with `N lines` before it
   scrolls. Acks and downtimes are in the accent colour (topic 01).
+- **Inspector layout (every editor frame, topic 14 round 5):** one left
+  and one right edge for every row: the dashboard's *name* (full width);
+  *sidebar mark* | *group* (two columns, 12px apart); *views*, whose rows
+  are field boxes (the same edges, 32px height, 6px radius and 11px text
+  inset as an input; the selected row has the selected-row background) with
+  *add view* as the list's last row, its + under the handles; then the
+  selected view's settings, starting with **view name** (its label says
+  *view 2 of 4*; there is no separate title row). Every control's text
+  starts 11px inside its box (inputs, dropdowns, filters, view rows); fields
+  are 12px apart. 4c and 4d are 960px tall and 5e 1000px, so the whole
+  inspector shows (`-inspector-zoom` crops).
 - **Editor:** the inspector (372px, as today) gets a `views` list. Each row
   has a drag handle, the display icon, the name, what it matches, and `···`
   (move up/down with alt-↑↓, duplicate, collapse by default, remove).
@@ -1303,30 +1314,26 @@ icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
   event stream, which put each entry on one line (the header line
   with the text after it, cut off), as compact list rows drop the output.
 - **Sidebar mark (14-r5-e, f, g).** Each dashboard has a *sidebar mark*
-  setting, in the editor's dashboard fields under name and group (above
+  setting, in the editor's dashboard fields, beside the group under the name (above
   *notifications*, topic 12), so it is also set in the new-dashboard flow,
   which opens the same editor (14-r5-f).
-  - A small dropdown (the rest of the name column), **state** (the coloured dot of the worst
+  - A small dropdown (filling the mark column), **state** (the coloured dot of the worst
     problem) or **icon**. With no problem view on the dashboard, *state* is
     greyed out with its reason on a second line, *no problem view on this
     dashboard* (14-r5-g).
   - Left of it, a **rounded square the height of a field** (30px plus the
-    border, like a colour swatch) **previews the mark**. The row sits on the
-    inspector's two-column grid: the square's left edge is the name field's,
-    and square, 12px gap and dropdown span exactly the name column (the
-    dropdown ends where the name field ends); the hint on the label line is
-    right-aligned with the group field, as on the other label rows. The
-    square and the dropdown share their top, bottom and height; the dot
-    (10px) or icon (16px) is centred exactly in the square. The name row,
-    the mark row and *views* are 12px apart, the inspector's field spacing
-    (`-row-zoom` crops of a, e, f, g, dark and light).
-    With *state* it shows the dot and is **not clickable: no hover
-    highlight** (14-r5-e: the pointer, drawn just beside the square so the
-    alignment shows, has passed over it and nothing lit up). With *icon* it is a button with the normal hover
+    border, like a colour swatch) **previews the mark**; the dot (10px) or
+    icon (16px) is centred exactly in it. With *state* it shows the dot and
+    is **not clickable: no hover highlight** (14-r5-e: the pointer, drawn
+    just beside the square so the alignment shows, has passed over it and
+    nothing lit up). With *icon* it is a button with the normal hover
     highlight, and open it keeps the highlight with the accent border.
-  - The label's right side says what the mark shows (*the worst problem's
-    colour* / *the square picks the icon*). The square and the dropdown
-    keep their size and place, so switching moves nothing.
+  - **Layout (user, 2026-10-07):** *name* is a full-width row; the next row
+    has two columns on the inspector's grid: **sidebar mark** (the square,
+    12px, then the dropdown filling the column) and **group**. The label's
+    faint suffix says what the mark shows, right-aligned to the column
+    (*worst dot* / *pick one*); the square and the dropdown keep their size
+    and place, so switching moves nothing.
   - **The icon picker** (like an emoji picker, 14-r5-f): a search field, a
     **recent** row (the last 8 chosen), and a grid of **the app's own
     icons** (its Lucide set, `icons.js` and `IconName`: 76 of the 102, the

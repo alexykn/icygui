@@ -102,16 +102,18 @@ shot('5d', '05-hostgroup-grid-d-cells', 'Labelled cells, the other option of the
 // 5e: the view's settings in the editor
 const insp = `<div class="pane" style="background:var(--win-bg)">
   <div class="hbar pane-h" style="padding:0 18px"><span class="title">dashboard</span><span class="grow"></span><span class="right faint">2 views</span></div>
-  <div class="col" style="gap:16px;padding:16px 18px;overflow:hidden">
-    <div class="field"><div class="lab">views</div><div class="col" style="gap:2px;margin:0 -6px">
+  <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
+    ${dashFields('fleet', 'platform', { mode: 'state', st: 'crit' })}
+    <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px">
       <div class="vrow sel"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon('layout-grid', 13)}</span><span class="vn">hosts by group</span><span class="vm">124 hosts</span><span class="glyph" style="font-size:12px">···</span></div>
       <div class="vrow"><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon('list', 13)}</span><span class="vn">service problems</span><span class="vm">20 matches</span><span class="glyph" style="font-size:12px">···</span></div></div>
-      <span style="display:flex;align-items:center;gap:8px;height:28px;font-size:12px;color:var(--t-muted)">${icon('plus', 13)}add view</span></div>
-    <div style="height:1px;background:var(--bd-header);margin:0 -18px"></div>
+      <div class="vadd">${icon('plus', 13)}add view</div></div>
+    <div style="height:1px;flex:none;background:var(--bd-header);margin:0 -18px"></div>
+    ${viewNameField('hosts by group', 'view 1 of 2')}
     <div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('layout-grid', 13)}host-group grid</span>`)}</div>
     <div class="field"><div class="lab">group by</div><span class="seg" style="display:flex"><span class="on" style="flex:1">host group</span><span style="flex:1">custom var</span></span></div>
     <div class="field"><div class="lab">host groups<span class="st faint">all 10 · or pick some</span></div><div style="display:flex;gap:6px;flex-wrap:wrap">${['databases', 'edge-ams', 'edge-fra', 'k8s-workers', 'messaging', 'storage', 'backup', 'core-network', 'k8s-control', 'web'].map((g) => chip(g, { sel: true })).join('')}</div></div>
-    <div class="field"><div class="lab">filter<span class="st c-ok">valid · 124 hosts</span></div><div class="textarea" style="height:20px"><span class="faint">empty: every host of those groups</span></div></div>
+    <div class="field"><div class="lab">filter<span class="st c-ok">valid · 124 hosts</span></div><div class="textarea fi" style="height:20px"><span class="faint">empty: every host of those groups</span></div></div>
     <div class="field"><div class="lab">colour by</div><span class="seg" style="display:flex"><span class="on" style="flex:1">worst of host and services</span><span style="flex:1">host only</span></span></div>
     <div class="field"><div class="lab">hosts as<span class="st faint">squares by default</span></div><span class="seg" style="display:flex"><span class="on" style="flex:1">squares</span><span style="flex:1">labelled cells</span></span></div>
     <div class="field"><div class="lab">show</div><div class="col" style="gap:8px">${sw(false, 'hide groups where every host is ok')}${sw(true, 'a host in several groups shows in each')}</div></div>
@@ -119,6 +121,6 @@ const insp = `<div class="pane" style="background:var(--win-bg)">
 const editorHeader = `<div class="hbar"><span class="title">fleet</span><span class="acc" style="font-size:12px">editing · platform</span><span class="grow"></span>${btn('discard', { key: 'esc' })}${btn('save dashboard', { key: 'ctrl-s', primary: true })}</div>`;
 shot('5e', '05-hostgroup-grid-e-editor', 'The grid view’s settings in the editor: group by host group (all, or the chosen ones) or by a custom variable (<i>host.vars.site</i>), an optional filter, colour by the worst of host and services or the host only, <b>hosts as squares (the default) or labelled cells</b>, and whether all-ok groups hide.',
   appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 372px"><div class="col" style="min-height:0;overflow:hidden">${editorHeader}${gridHeader({ picked: true })}<div class="vbody">${grid({}, 2)}</div>${listHeaderV()}<div class="vbody">${rows(probRows.slice(0, 5))}</div></div>${insp}</div>`,
-    { groups: platGroups, activeGroup: 'platform', activeItem: 'fleet' }));
+    { groups: platGroups, activeGroup: 'platform', activeItem: 'fleet' }), { h: 1000, crops: '05-hostgroup-grid-e-inspector-zoom:1068,0,372,1000' });
 </script>
 </body></html>

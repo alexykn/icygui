@@ -119,3 +119,24 @@ function handledField(mode = 0, kinds = [true, true, true]) {
     : `<div style="display:flex;gap:6px;align-items:center;height:24px${mode === 0 ? ';opacity:.55' : ''}"><span class="faint" style="font-size:11.5px">hide</span>${chips}</div>`;
   return `<div class="field"><div class="lab">handled<span class="st faint">${mode === 0 ? 'follows the settings' : 'set on this view'}</span></div><span class="seg" style="display:flex">${segs}</span>${second}</div>`;
 }
+
+// ---- the dashboard editor's dashboard fields (topic 14, round 5; every editor) ----
+// The sidebar mark (state or icon) with its swatch, a field's height; with
+// state the swatch is not clickable (no hover), with icon it opens the picker.
+// The dashboard's fields: the name, full width; then two columns on the
+// inspector's grid: the sidebar mark (swatch + dropdown filling the column,
+// a short hint as the label's suffix) and the group.
+const MARK_HINT = { state: 'worst dot', icon: 'pick one' };  // fits the column's label line
+const markField = ({ mode = 'state', st = 'crit', ic = 'users', sq = '', selOpen = false }) => {
+  const swatch = mode === 'state'
+    ? `<span class="mswatch dis"><span class="dot ${st}" style="width:10px;height:10px"></span></span>`
+    : `<span class="mswatch${sq ? ' ' + sq : ''}">${icon(ic, 16)}</span>`;
+  return `<div class="field"><div class="lab">sidebar mark<span class="st faint">${MARK_HINT[mode]}</span></div>
+    <div class="mfield">${swatch}<span class="msel${selOpen ? ' selopen' : ''}">${select(mode)}</span></div></div>`;
+};
+const dashFields = (name, group, mark, { nameFocus = false } = {}) => `<div class="field"><div class="lab">name</div><span class="input${nameFocus ? ' focus' : ''}">${nameFocus ? `<span style="background:var(--selection)">${name}</span><span class="caret" style="height:13px"></span>` : name}</span></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">${markField(mark)}<div class="field"><div class="lab">group</div>${select(group)}</div></div>`;
+
+// the selected view's settings start with its name: the field's label carries
+// where it is (view 2 of 4), so no separate title row
+const viewNameField = (n, pos = '') => `<div class="field"><div class="lab">view name${pos ? `<span class="st faint">${pos}</span>` : ''}</div><span class="input">${n}</span></div>`;

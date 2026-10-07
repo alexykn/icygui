@@ -1,7 +1,8 @@
-//! The service pane's body (screen 2b): state and name, actions, plugin
-//! output, performance data, check details, comments and other downtimes
-//! (the one in effect is the banner under the pane's header), custom
-//! variables, groups, notes and links.
+//! The service pane's body (screen 2b): state and name, actions, the
+//! object's thread (topic 14: its acknowledgement, downtimes and comments,
+//! with a field to add one; the downtime in effect is also the banner
+//! under the pane's header), plugin output, performance data, check
+//! details, custom variables, groups, notes and links.
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
@@ -9,23 +10,19 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use ic_core::snapshot::Snapshot;
-use ic_model::{CommentKind, Links, ObjectKey, Service, ServiceState, Timestamp};
+use ic_model::{Links, ObjectKey, Service, ServiceState, Timestamp};
 use ic_ui_kit::{
-    ActiveTheme as _, CircleSize, CodeBlock, Icon, IconButton, IconName, KvTable, Link, NoteEntry,
-    ObjectMark, PerfdataTable, SectionLabel, StateCircle, Theme, Tooltip, TreeTable, px,
+    ActiveTheme as _, CircleSize, CodeBlock, Icon, IconName, KvTable, Link, ObjectMark,
+    PerfdataTable, SectionLabel, StateCircle, Theme, Tooltip, TreeTable, px,
 };
 
 use super::{
     BodyLayout, ObjectPane, TAB_COLUMN_GAP, TAB_CONTENT_WIDTH, TAB_SIDE_WIDTH, TITLE_GROUP,
     action_buttons, copy_button, model, scroll_area, web_link,
 };
-use crate::actions::ObjectAction;
 
 /// The hover group of the plugin output (reveals its copy button).
 const OUTPUT_GROUP: &str = "pane-output";
-
-/// The hover group of a comment (reveals its remove button).
-const NOTE_GROUP: &str = "pane-note";
 
 /// Space between the body's sections.
 const SECTION_GAP: f32 = 24.;
@@ -58,8 +55,7 @@ pub(super) fn render(
         });
     let readable = pane.state.read(cx).can_read_notifications();
     let check = check_table(snapshot, &key, service, readable, now).into_any_element();
-    let notes = notes(pane, snapshot, &key, now, cx);
-    let other_downtimes = super::downtime::others(pane, snapshot, &key, now, cx);
+    let thread = super::thread::section(pane, snapshot, &key, now, cx);
     let vars = vars(service).map(IntoElement::into_any_element);
     let groups =
         groups(snapshot, service, host.map(|host| host.groups.as_slice())).into_any_element();
@@ -96,11 +92,10 @@ pub(super) fn render(
             .when(layout == BodyLayout::Tab, |column| {
                 column.max_w(px(TAB_CONTENT_WIDTH))
             })
+            .children(thread)
             .child(output)
             .children(perfdata)
             .child(check)
-            .children(notes)
-            .children(other_downtimes)
             .children(vars)
             .child(groups)
             .children(links)
@@ -116,10 +111,9 @@ pub(super) fn render(
                         sections()
                             .flex_1()
                             .min_w_0()
+                            .children(thread)
                             .child(output)
                             .children(perfdata)
-                            .children(notes)
-                            .children(other_downtimes)
                             .child(history),
                     )
                     .child(
@@ -345,74 +339,6 @@ fn check_table(
         .fold(KvTable::new().title("check"), |table, (key, value)| {
             table.row(key, value)
         })
-}
-
-/// Comments and acknowledgements, each comment with a remove button
-/// (acknowledgements are removed with the "remove ack" button). A
-/// downtime's automatic comment is left out: the downtime banner and the
-/// other downtimes say it (topic 01).
-pub(super) fn notes(
-    pane: &ObjectPane,
-    snapshot: &Snapshot,
-    key: &ObjectKey,
-    now: Timestamp,
-    cx: &Context<ObjectPane>,
-) -> Option<AnyElement> {
-    let theme = cx.theme();
-    let comments: Vec<&ic_model::Comment> = snapshot
-        .comments
-        .get(key)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-        .iter()
-        .filter(|comment| comment.kind != CommentKind::Downtime)
-        .collect();
-    if comments.is_empty() {
-        return None;
-    }
-    let state = pane.state.read(cx);
-    // Shown while the mouse is over its note, like the copy buttons;
-    // disabled with the reason when the API user may not remove it.
-    let remove = |id: String, tooltip: &'static str, action: ObjectAction| {
-        let button = IconButton::new(gpui::SharedString::from(id), IconName::Close)
-            .size(px(20.))
-            .icon_size(px(12.))
-            .color(theme.colors.text_faint);
-        let button = match state.action_denial(&action) {
-            Some(denial) => button.disabled(true).tooltip(Tooltip::new(denial)),
-            None => button.tooltip(Tooltip::new(tooltip)).on_click(cx.listener(
-                move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
-                    pane.request(action.clone(), cx);
-                },
-            )),
-        };
-        div()
-            .flex_none()
-            .invisible()
-            .group_hover(NOTE_GROUP, gpui::Styled::visible)
-            .child(button)
-    };
-    let mut column = div().flex().flex_col().gap(px(14.));
-    for comment in comments {
-        let note = model::comment_note(comment, now);
-        let mut entry = note_entry(&note);
-        if comment.kind != CommentKind::Acknowledgement {
-            entry = entry.child(remove(
-                format!("remove-comment-{}", note.name),
-                "Remove comment",
-                ObjectAction::RemoveComments(vec![note.name.clone()]),
-            ));
-        }
-        column = column.child(div().group(NOTE_GROUP).child(entry));
-    }
-    Some(column.into_any_element())
-}
-
-fn note_entry(note: &model::Note) -> NoteEntry {
-    note.meta.iter().fold(
-        NoteEntry::new(note.author.clone(), note.body.clone()).marker(note.marker),
-        |entry, meta| entry.meta(meta.clone()),
-    )
 }
 
 fn vars(service: &Service) -> Option<TreeTable> {

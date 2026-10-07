@@ -116,30 +116,37 @@ pub struct EnvironmentUiState {
     /// Objects open as tabs ("↗ open as tab"), in sidebar order, by full
     /// name (`db-prod-03`, `db-prod-03!postgres-replication`).
     pub tabs: Vec<String>,
-    /// The lists of every downtime, comment and acknowledged problem open
-    /// as tabs (v1, topic 07), by id (`downtimes`, `comments`,
-    /// `acknowledged`); the app ignores ids it doesn't know.
+    /// The handling and downtimes views open as tabs (v1, topic 14), by
+    /// id (`handling`, `downtimes`; stage 2's `comments` and `acknowledged`
+    /// open handling); the app ignores ids it doesn't know.
     pub lists: Vec<String>,
     /// The dashboard shown last.
     pub selected: Option<DashboardRef>,
-    /// Each list's choices (sort, *only mine*, system comments), by list
-    /// id, kept when the list is closed or the app restarts.
+    /// Each view's choices (chip, sort, *only mine*, timeline or list), by
+    /// view id, kept when the view is closed or the app restarts.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub list_options: BTreeMap<String, ListOptionsState>,
 }
 
-/// A list's choices (v1, topic 07): its sort (by id, `ends-soonest`; the
-/// app ignores ids it doesn't know), *only mine*, and whether the comment
-/// list shows downtime and flapping comments.
+/// A view's choices (v1, topic 14): the chip picked, its sort (by id,
+/// `latest-activity`; the app ignores ids it doesn't know), *only mine*,
+/// and the downtimes view's display (`timeline`, `list`). Stage 2's
+/// `system_comments` is read and dropped (Icinga's own comments never
+/// show).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ListOptionsState {
-    /// The sort, by id; none: the list's default.
+    /// The sort, by id; none: the chip's (or the display's) own.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
     /// Only what the environment's author set.
     pub only_mine: bool,
-    /// The comment list shows downtime and flapping comments too.
-    pub system_comments: bool,
+    /// The chip picked, by id; none: *all*.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chip: Option<String>,
+    /// The downtimes view's display, by id; none: the timeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// The main window's size and position in logical pixels, as the window
@@ -283,6 +290,25 @@ mod tests {
     }
 
     #[test]
+    fn stage_two_list_choices_still_load() {
+        // Stage 2's lists kept `system_comments`; topic 14 dropped it.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        fs::write(
+            store.path(),
+            "version = 1\n[environments.e]\ntabs = []\nlists = [\"comments\"]\n\
+             [environments.e.list_options.comments]\nsort = \"newest\"\nonly_mine = true\n\
+             system_comments = true\n",
+        )
+        .unwrap();
+        let state = store.load().unwrap();
+        let saved = &state.environments["e"].list_options["comments"];
+        assert_eq!(saved.sort.as_deref(), Some("newest"));
+        assert!(saved.only_mine);
+        assert_eq!(saved.chip, None);
+    }
+
+    #[test]
     fn round_trips_window_tabs_and_selection() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -305,9 +331,10 @@ mod tests {
                 list_options: BTreeMap::from([(
                     "downtimes".to_owned(),
                     ListOptionsState {
-                        sort: Some("name".to_owned()),
+                        sort: Some("object".to_owned()),
                         only_mine: true,
-                        system_comments: false,
+                        chip: Some("upcoming".to_owned()),
+                        mode: Some("list".to_owned()),
                     },
                 )]),
             },

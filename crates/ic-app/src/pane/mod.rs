@@ -25,6 +25,7 @@ mod history;
 mod host;
 pub(crate) mod model;
 mod service;
+mod thread;
 
 use std::time::{Duration, Instant};
 
@@ -188,6 +189,16 @@ pub(crate) struct ObjectPane {
     /// Rows are marked in the list beside the pane: the action keys act on
     /// them, not on this object, so the buttons show no key hints.
     keys_elsewhere: bool,
+    /// The thread's `add a comment` field (made at the first render), and
+    /// the object what is typed in it is for.
+    comment_input: Option<Entity<ic_ui_kit::input::InputState>>,
+    comment_events: Option<Subscription>,
+    comment_object: Option<ObjectKey>,
+    /// Why the last comment couldn't be sent.
+    comment_error: Option<String>,
+    /// Where the keyboard goes back to from the comment field: the list
+    /// beside the pane.
+    return_focus: Option<FocusHandle>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -243,8 +254,19 @@ impl ObjectPane {
             log: None,
             log_task: None,
             keys_elsewhere: false,
+            comment_input: None,
+            comment_events: None,
+            comment_object: None,
+            comment_error: None,
+            return_focus: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Where the keyboard goes back to from the comment field (the list
+    /// beside the pane).
+    pub(crate) fn set_return_focus(&mut self, handle: FocusHandle) {
+        self.return_focus = Some(handle);
     }
 
     /// The rows this pane offers the engine: a host pane's service rows
@@ -566,8 +588,11 @@ impl ObjectPane {
         self.request(ObjectAction::CheckNow, cx);
     }
 
-    fn on_comment(&mut self, _: &AddComment, _: &mut Window, cx: &mut Context<Self>) {
-        self.request(ObjectAction::AddComment, cx);
+    /// `c`: the thread's comment field when it shows, else the dialog.
+    fn on_comment(&mut self, _: &AddComment, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_comment_field(window, cx) {
+            self.request(ObjectAction::AddComment, cx);
+        }
     }
 
     /// Escape in a tab: back to the dashboard; the tab stays open.
@@ -652,6 +677,17 @@ impl Render for ObjectPane {
         self.want_focus(cx);
         self.want_details(cx);
         self.want_history(cx);
+        self.ensure_comment_input(window, cx);
+        // What was typed for another object never goes to this one.
+        if self.comment_object.as_ref() != Some(&self.object) {
+            self.comment_object = Some(self.object.clone());
+            self.comment_error = None;
+            if let Some(input) = self.comment_input.clone()
+                && !input.read(cx).value().is_empty()
+            {
+                input.update(cx, |input, cx| input.set_value("", window, cx));
+            }
+        }
         let theme = cx.theme().clone();
         let snapshot = self.state.read(cx).snapshot().clone();
         let updating = self.updating_hint(snapshot.is_updating(&self.object), cx);

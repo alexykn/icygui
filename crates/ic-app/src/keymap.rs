@@ -218,7 +218,9 @@ pub(crate) fn bindings_in_effect(cx: &App) -> Vec<Bound> {
                 .iter()
                 .map(|keystroke| keystroke_label(keystroke.inner()))
                 .collect();
-            let context = binding.predicate().map(|predicate| predicate.to_string());
+            let context = binding
+                .predicate()
+                .map(|predicate| shown_context(&predicate.to_string()));
             if !seen.insert((keys.clone(), context.clone())) {
                 return None;
             }
@@ -234,6 +236,12 @@ pub(crate) fn bindings_in_effect(cx: &App) -> Vec<Bound> {
         .collect();
     bound.reverse();
     bound
+}
+
+/// A context as the keymap file names it: without the `&& !Input` that
+/// keeps the list's and the pane's keys out of the text fields inside them.
+fn shown_context(context: &str) -> String {
+    context.replace(" && !Input", "")
 }
 
 /// A keystroke as the app shows key hints: `ctrl-shift-e`, `↓`, `esc` on

@@ -899,6 +899,7 @@ pub fn prod_cluster() -> Scenario {
 
     downtimes_in_the_panes(&mut b);
     the_lists(&mut b);
+    the_threads(&mut b);
 
     // Objects the demo should keep showing.
     let mut pinned: Vec<ObjectKey> = [
@@ -1215,6 +1216,54 @@ fn the_lists_comments_and_downtimes(b: &mut Builder) {
             "Weekly patch window for the core switches.",
             b.later(hours(63) + mins(48)),
             b.later(hours(67) + mins(48)),
+        )
+    });
+}
+
+/// The threads of topic 14 (`design/v1/14-r2-handling-downtimes.html`)
+/// besides what the lists above hold: a conversation under
+/// postgres-replication's comment, a comment after pg-autovacuum's
+/// acknowledgement, a second comment on backup-01, and kubelet on
+/// k8s-node-07 with a longer downtime of its own beside its host's (so it
+/// stays apart from the services folded into the host's).
+fn the_threads(b: &mut Builder) {
+    let replication = ObjectKey::service("db-prod-03", "postgres-replication");
+    b.comment(
+        replication.clone(),
+        "dba-oncall",
+        "Replica rebuild started on db-prod-03, about 45 minutes. Leaving the alert as it is.",
+        mins(14),
+        None,
+    );
+    b.comment(
+        replication,
+        "j.berg",
+        "Thanks. I'll check again after the drill.",
+        mins(7),
+        None,
+    );
+    b.comment(
+        ObjectKey::service("db-prod-01", "pg-autovacuum"),
+        "j.berg",
+        "Still running; nothing extended, the acknowledgement expires on its own.",
+        mins(28),
+        None,
+    );
+    b.comment(
+        ObjectKey::host("backup-01"),
+        "j.berg",
+        "Moved to Thursday 01:00; the downtime is scheduled.",
+        hours(28) + mins(10),
+        None,
+    );
+    b.downtime_with(ScenarioDowntime {
+        entry: Some(b.ago(mins(44))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::service("k8s-node-07", "kubelet"),
+            "j.berg",
+            "Its own downtime: reimage after the drain, kubelet stays down until it rejoins.",
+            b.ago(mins(42)),
+            b.later(hours(2) + mins(48)),
         )
     });
 }

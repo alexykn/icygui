@@ -1,4 +1,5 @@
-//! Removing from the lists of topic 07: the confirmation's content, before
+//! Removing from the handling and downtimes views (topics 07 and 14) and
+//! the pane's thread: the confirmation's content, before
 //! anything is sent. Every removal confirms and lists every target (the
 //! dialog's box scrolls): downtimes grouped by the downtime they belong to
 //! (a host's downtime lists the host and each service that goes with it),
@@ -21,7 +22,7 @@ use ic_model::{
     ObjectKey, Timestamp,
 };
 
-use super::model::{ListKind, ack_comment, day_clock, short_when};
+use super::model::{ack_comment, day_clock, short_when};
 use crate::actions::ObjectAction;
 use crate::downtimes;
 use crate::operate::ActionSpec;
@@ -45,11 +46,25 @@ pub(crate) enum TargetRow {
     },
 }
 
+/// What a removal removes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemovalKind {
+    /// Downtimes, by name.
+    Downtimes,
+    /// Free-standing comments, by name.
+    Comments,
+    /// Acknowledgements, by object.
+    Acknowledgements,
+    /// Several of these at once (handling's marks), each in its part of
+    /// the box.
+    Mixed,
+}
+
 /// A removal from a list, before anything is sent.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BulkRemoval {
-    /// The list it comes from.
-    pub(crate) kind: ListKind,
+    /// What it removes.
+    pub(crate) kind: RemovalKind,
     /// How many rows were selected.
     pub(crate) selected: usize,
     /// What the box lists, in order.
@@ -71,23 +86,26 @@ impl BulkRemoval {
     /// The dialog's title.
     pub(crate) fn title(&self) -> &'static str {
         match self.kind {
-            ListKind::Downtimes => "Remove downtimes",
-            ListKind::Comments => "Remove comments",
-            ListKind::Acknowledged => "Remove acknowledgements",
+            RemovalKind::Downtimes => "Remove downtimes",
+            RemovalKind::Comments => "Remove comments",
+            RemovalKind::Acknowledgements => "Remove acknowledgements",
+            RemovalKind::Mixed => "Remove",
         }
     }
 
     /// What the title names: `3 selected · 26 downtimes`, `3 selected`.
     pub(crate) fn what(&self) -> String {
         match self.kind {
-            ListKind::Acknowledged => format!("{} selected", self.selected),
-            ListKind::Downtimes | ListKind::Comments => {
+            RemovalKind::Acknowledgements | RemovalKind::Mixed => {
+                format!("{} selected", self.selected)
+            }
+            RemovalKind::Downtimes | RemovalKind::Comments => {
                 format!("{} selected · {}", self.selected, self.counted())
             }
         }
     }
 
-    /// `26 downtimes`, `1 comment`, `3 acknowledgements`.
+    /// `26 downtimes`, `1 comment`, `3 acknowledgements`, `5 records`.
     fn counted(&self) -> String {
         let (one, many) = self.nouns();
         format!(
@@ -99,16 +117,17 @@ impl BulkRemoval {
 
     fn nouns(&self) -> (&'static str, &'static str) {
         match self.kind {
-            ListKind::Downtimes => ("downtime", "downtimes"),
-            ListKind::Comments => ("comment", "comments"),
-            ListKind::Acknowledged => ("acknowledgement", "acknowledgements"),
+            RemovalKind::Downtimes => ("downtime", "downtimes"),
+            RemovalKind::Comments => ("comment", "comments"),
+            RemovalKind::Acknowledgements => ("acknowledgement", "acknowledgements"),
+            RemovalKind::Mixed => ("record", "records"),
         }
     }
 
     /// The label above the box: `26 downtimes on 1 host and 25 services`
     /// (downtimes only).
     pub(crate) fn label(&self) -> Option<String> {
-        if self.kind != ListKind::Downtimes || self.count == 0 {
+        if self.kind != RemovalKind::Downtimes || self.count == 0 {
             return None;
         }
         let objects: HashSet<&ObjectKey> = self
@@ -139,14 +158,53 @@ impl BulkRemoval {
         Some(format!("{} on {on}", self.counted()))
     }
 
-    /// The danger button: `remove 26 downtimes`, `remove comment`.
+    /// The danger button: `remove 26 downtimes`, `remove comment`,
+    /// `remove all 5`.
     pub(crate) fn button(&self) -> String {
         let (one, many) = self.nouns();
-        if self.count == 1 {
-            format!("remove {one}")
-        } else {
-            format!("remove {} {many}", self.count)
+        match (self.kind, self.count) {
+            (RemovalKind::Mixed, count) => format!("remove all {count}"),
+            (_, 1) => format!("remove {one}"),
+            (_, count) => format!("remove {count} {many}"),
         }
+    }
+
+    /// Several removals as one confirmation (handling's marks of several
+    /// kinds): each part under a heading naming what it removes, the
+    /// words of each, and everything sent with the button. One part stays
+    /// as it is.
+    pub(crate) fn merge(parts: Vec<Self>) -> Option<Self> {
+        let mut parts: Vec<Self> = parts.into_iter().filter(|part| part.selected > 0).collect();
+        if parts.len() <= 1 {
+            return parts.pop();
+        }
+        let mut merged = Self {
+            kind: RemovalKind::Mixed,
+            selected: 0,
+            rows: Vec::new(),
+            count: 0,
+            skipped: Vec::new(),
+            consequence: None,
+            note: None,
+            specs: Vec::new(),
+        };
+        let mut consequences = Vec::new();
+        let mut notes = Vec::new();
+        for part in parts {
+            if part.count > 0 {
+                merged.rows.push(TargetRow::Heading(part.counted()));
+            }
+            merged.selected += part.selected;
+            merged.count += part.count;
+            merged.rows.extend(part.rows);
+            merged.skipped.extend(part.skipped);
+            consequences.extend(part.consequence);
+            notes.extend(part.note);
+            merged.specs.extend(part.specs);
+        }
+        merged.consequence = (!consequences.is_empty()).then(|| consequences.join(" "));
+        merged.note = (!notes.is_empty()).then(|| notes.join(" "));
+        Some(merged)
     }
 
     /// The objects it changes.
@@ -321,7 +379,7 @@ where
         }]
     };
     BulkRemoval {
-        kind: ListKind::Downtimes,
+        kind: RemovalKind::Downtimes,
         selected: names.len(),
         rows,
         count,
@@ -556,7 +614,7 @@ where
         }]
     };
     BulkRemoval {
-        kind: ListKind::Comments,
+        kind: RemovalKind::Comments,
         selected: names.len(),
         rows,
         count,
@@ -689,7 +747,7 @@ where
         )]
     };
     BulkRemoval {
-        kind: ListKind::Acknowledged,
+        kind: RemovalKind::Acknowledgements,
         selected: objects.len(),
         rows,
         count,

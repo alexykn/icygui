@@ -72,15 +72,16 @@ pub(crate) fn query_denial(info: Option<&ApiInfo>, kind: ObjectKind) -> Option<S
     })
 }
 
-/// Why the user may not read what list `kind` shows (downtimes, comments),
-/// or `None` if it may. The acknowledged list reads hosts and services,
-/// which the dashboards already need.
+/// Why the user may not read what view `kind` shows, or `None` if it may:
+/// the downtimes view needs `objects/query/Downtime`. Handling always
+/// shows the acknowledgements (from the hosts and services the dashboards
+/// already read); what it can't read it says in its summary
+/// ([`handling_gap`]).
 pub(crate) fn list_denial(info: Option<&ApiInfo>, kind: ListKind) -> Option<String> {
     let info = info?;
     let permission = match kind {
         ListKind::Downtimes => "objects/query/Downtime",
-        ListKind::Comments => "objects/query/Comment",
-        ListKind::Acknowledged => return None,
+        ListKind::Handling => return None,
     };
     (!info.allows(permission)).then(|| {
         format!(
@@ -91,19 +92,23 @@ pub(crate) fn list_denial(info: Option<&ApiInfo>, kind: ListKind) -> Option<Stri
     })
 }
 
-/// Why the acknowledged list can't say who acknowledged a problem and why
-/// (that is the acknowledgement's comment), or `None` if it can: without
-/// `objects/query/Comment` there are no comments, so *only mine* can't tell
-/// whose an acknowledgement is either.
-pub(crate) fn ack_detail_denial(info: Option<&ApiInfo>) -> Option<String> {
+/// What handling can't show for lack of a permission: `no comments: needs
+/// objects/query/Comment` (who acknowledged and why are comments too),
+/// `no downtimes: needs objects/query/Downtime`.
+pub(crate) fn handling_gap(info: Option<&ApiInfo>) -> Option<String> {
     let info = info?;
-    (!info.allows("objects/query/Comment")).then(|| {
-        format!(
-            "The API user {} may not read comments (needs objects/query/Comment): who \
-             acknowledged and why aren't known, so only mine can't tell whose they are.",
-            info.user
-        )
-    })
+    let missing: Vec<(&str, &str)> = [
+        ("comments", "objects/query/Comment"),
+        ("downtimes", "objects/query/Downtime"),
+    ]
+    .into_iter()
+    .filter(|(_, permission)| !info.allows(permission))
+    .collect();
+    match missing.as_slice() {
+        [] => None,
+        [(what, permission)] => Some(format!("no {what}: needs {permission}")),
+        _ => Some("no comments or downtimes: needs objects/query/Comment, Downtime".to_owned()),
+    }
 }
 
 /// Whether the panes can say who Icinga notified (PANE-06): `Some(false)`

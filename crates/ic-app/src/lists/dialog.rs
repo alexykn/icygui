@@ -1,5 +1,5 @@
-//! The confirmation before removing from a list (topic 07, frames 7c, 7d
-//! and 7g): `Remove downtimes  3 selected · 26 downtimes`, a box listing
+//! The confirmation before removing downtimes, comments or
+//! acknowledgements (topic 07, frames 7c, 7d and 7g; topic 14's views): `Remove downtimes  3 selected · 26 downtimes`, a box listing
 //! every target (it scrolls; only the rows in view are built), grouped by
 //! the downtime they belong to; what follows; what it skips and why; and a
 //! danger button that counts what goes. Nothing is sent before the button
@@ -18,8 +18,7 @@ use ic_ui_kit::{
     px,
 };
 
-use super::ListKind;
-use super::removal::{BulkRemoval, TargetRow};
+use super::removal::{BulkRemoval, RemovalKind, TargetRow};
 use crate::app_state::AppState;
 use crate::operate::dialog::{DialogEvent, object_mark};
 use crate::operate::forms::describe_objects;
@@ -110,17 +109,17 @@ impl RemovalDialog {
         &self.removal
     }
 
-    /// Which list it removes from.
+    /// What it removes.
     #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn kind(&self) -> ListKind {
+    pub(crate) fn kind(&self) -> RemovalKind {
         self.removal.kind
     }
 
     /// The modal's width, as drawn.
     pub(crate) fn width(&self) -> f32 {
         match self.removal.kind {
-            ListKind::Acknowledged => 600.,
-            ListKind::Downtimes | ListKind::Comments => 560.,
+            RemovalKind::Acknowledgements | RemovalKind::Mixed => 600.,
+            RemovalKind::Downtimes | RemovalKind::Comments => 560.,
         }
     }
 
@@ -214,8 +213,8 @@ impl RemovalDialog {
     fn render_box(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let colors = theme.colors;
         let most = match self.removal.kind {
-            ListKind::Downtimes => DOWNTIME_BOX,
-            ListKind::Comments | ListKind::Acknowledged => OTHER_BOX,
+            RemovalKind::Downtimes | RemovalKind::Mixed => DOWNTIME_BOX,
+            RemovalKind::Comments | RemovalKind::Acknowledgements => OTHER_BOX,
         } - 2. * PADDING;
         #[expect(
             clippy::cast_precision_loss,
@@ -253,7 +252,7 @@ impl RemovalDialog {
             );
         }
         // The comments' skipped line sits in the box, under the list.
-        if self.removal.kind == ListKind::Comments {
+        if self.removal.kind == RemovalKind::Comments {
             for line in &self.removal.skipped {
                 column = column.child(
                     div()
@@ -340,7 +339,7 @@ impl Render for RemovalDialog {
             any_words = true;
             words = words.child(div().text_color(colors.text_faint).child(note.clone()));
         }
-        if removal.kind != ListKind::Comments {
+        if removal.kind != RemovalKind::Comments {
             for line in &removal.skipped {
                 any_words = true;
                 words = words.child(div().text_color(colors.text_faint).child(line.clone()));

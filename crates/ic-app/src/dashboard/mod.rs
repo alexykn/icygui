@@ -545,9 +545,11 @@ impl DashboardView {
         } else {
             let state = self.state.clone();
             let sidebar_open = self.sidebar_open;
+            let focus = self.focus_handle.clone();
             let view = cx.new(|cx| {
                 let mut pane = ObjectPane::new(state, key, PaneMode::Split, cx);
                 pane.set_sidebar_open(sidebar_open, cx);
+                pane.set_return_focus(focus);
                 pane
             });
             let closed = reference.clone();

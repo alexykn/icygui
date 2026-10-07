@@ -257,8 +257,8 @@ pub(crate) enum ModalKind {
     Path,
     /// The about dialog.
     About,
-    /// Removing from a list.
-    Removal(ListKind),
+    /// Removing downtimes, comments or acknowledgements.
+    Removal(crate::lists::removal::RemovalKind),
 }
 
 /// The window's content.
@@ -1188,8 +1188,12 @@ impl Workspace {
                     .dashboard
                     .update(cx, |dashboard, cx| dashboard.run_action(action, cx)),
             },
-            PaletteCommand::OpenList(kind) => self.state.update(cx, |state, cx| {
-                if state.open_list(kind) {
+            PaletteCommand::OpenList(kind, chip) => self.state.update(cx, |state, cx| {
+                let changed = match chip {
+                    Some(chip) => state.open_list_on(kind, chip),
+                    None => state.open_list(kind),
+                };
+                if changed {
                     cx.notify();
                 }
             }),

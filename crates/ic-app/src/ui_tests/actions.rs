@@ -693,9 +693,9 @@ fn every_downtime_case_renders_in_the_panes_and_tabs() {
             assert_eq!(banner.in_effect, object != &pg, "{object}");
         }
         assert_eq!(
-            crate::downtimes::others(&snapshot, &host, now).len(),
-            2,
-            "the banner shows one of three"
+            crate::lists::threads::thread_of(&snapshot, &host, now).len(),
+            3,
+            "the banner shows one of three; the thread lists them all"
         );
         let dashboard = app.dashboard(cx);
         for object in [&host, &load, &pg] {

@@ -559,29 +559,21 @@ impl AppState {
         permissions::query_denial(self.engine.permissions.as_ref(), kind)
     }
 
-    /// Why the user may not read what list `kind` shows, if it may not.
+    /// Why the user may not read what view `kind` shows, if it may not.
     pub(crate) fn list_denial(&self, kind: ListKind) -> Option<String> {
         permissions::list_denial(self.engine.permissions.as_ref(), kind)
     }
 
-    /// Why *only mine* can't be used in the list `kind`: no author, or
-    /// (the acknowledged list) no comments to read who acknowledged.
-    pub(crate) fn only_mine_denial(&self, kind: ListKind) -> Option<String> {
-        if self.author().is_empty() {
-            return Some("No author is set for this environment".to_owned());
-        }
-        match kind {
-            ListKind::Acknowledged => {
-                permissions::ack_detail_denial(self.engine.permissions.as_ref())
-            }
-            ListKind::Downtimes | ListKind::Comments => None,
-        }
+    /// Why *only mine* can't be used in view `kind`: no author is set.
+    pub(crate) fn only_mine_denial(&self, _kind: ListKind) -> Option<String> {
+        self.author()
+            .is_empty()
+            .then(|| "No author is set for this environment".to_owned())
     }
 
-    /// Why the acknowledged list can't say who acknowledged and why, if it
-    /// can't.
-    pub(crate) fn ack_detail_denial(&self) -> Option<String> {
-        permissions::ack_detail_denial(self.engine.permissions.as_ref())
+    /// What the handling view can't show for lack of a permission.
+    pub(crate) fn handling_gap(&self) -> Option<String> {
+        permissions::handling_gap(self.engine.permissions.as_ref())
     }
 
     /// The active environment's author (*only mine*): its `author`, else
@@ -976,6 +968,19 @@ impl AppState {
     /// The list shown instead of the dashboard, if any.
     pub(crate) fn active_list(&self) -> Option<ListKind> {
         self.active_list
+    }
+
+    /// Opens view `kind` as a tab showing `chip` (the palette's
+    /// *acknowledged* opens handling on its acknowledged chip), with the
+    /// chip's own sort.
+    pub(crate) fn open_list_on(&mut self, kind: ListKind, chip: crate::lists::model::Chip) -> bool {
+        let mut options = crate::lists::model::Options::saved(kind, &self.list_options(kind));
+        let changed = options.chip != chip;
+        if changed {
+            options.pick_chip(chip);
+            self.set_list_options(kind, options.to_saved(kind));
+        }
+        self.open_list(kind) || changed
     }
 
     /// Opens the list `kind` as a tab (unless it is one already) and shows

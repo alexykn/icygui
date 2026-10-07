@@ -22,8 +22,10 @@
 //!   postgres-replication, screen 2b), `host` (its host db-prod-03 beside
 //!   the list, screen 2c), `tab` (postgres-replication as a tab), or an
 //!   object name (`db-prod-03`, `db-prod-03!postgres-replication`, or
-//!   `tab:<name>` for a tab), or a list of topic 07 as a tab
-//!   (`list:downtimes`, `list:comments`, `list:acknowledged`).
+//!   `tab:<name>` for a tab), or a view of topic 14 as a tab
+//!   (`list:handling`, `list:downtimes`, with a chip or display after a
+//!   colon: `list:handling:comments`, `list:downtimes:list`;
+//!   `list:acknowledged` and `list:comments` open handling on that chip).
 //! - `ICYGUI_DEMO_APPEARANCE=light,compact,clock` starts with these
 //!   appearance settings, comma separated: a theme (`system`, `dark`,
 //!   `light`), an interface size (`small`, `default`, `large`), a row
@@ -34,6 +36,7 @@ use ic_config::{Appearance, InterfaceSize, ListTimes, RowDensity, ThemeChoice};
 use ic_model::ObjectKey;
 
 use crate::lists::ListKind;
+use crate::lists::model::{Chip, Mode};
 use crate::live::demo::DemoFault;
 
 /// The demo's scenario.
@@ -68,8 +71,17 @@ pub(crate) enum OpenAtStart {
     },
     /// Open the object as a tab.
     Tab(ObjectKey),
-    /// Open a list of every downtime, comment or acknowledged problem.
-    List(ListKind),
+    /// Open the handling or downtimes view, on a chip or a display:
+    /// `list:handling`, `list:handling:comments`, `list:acknowledged`
+    /// (handling on that chip), `list:downtimes:list`.
+    List {
+        /// Which view.
+        kind: ListKind,
+        /// The chip it opens on.
+        chip: Option<Chip>,
+        /// The downtimes view's display.
+        mode: Option<Mode>,
+    },
 }
 
 /// The switches that are set.
@@ -216,8 +228,8 @@ fn parse_open(value: &str) -> Option<OpenAtStart> {
         }),
         "tab" => Some(OpenAtStart::Tab(replication())),
         other => {
-            if let Some(id) = other.strip_prefix("list:") {
-                return ListKind::from_id(id).map(OpenAtStart::List);
+            if let Some(spec) = other.strip_prefix("list:") {
+                return parse_list(spec);
             }
             match other.strip_prefix("tab:") {
                 Some(name) => object(name).map(OpenAtStart::Tab),
@@ -225,6 +237,26 @@ fn parse_open(value: &str) -> Option<OpenAtStart> {
             }
         }
     }
+}
+
+/// `handling`, `handling:comments`, `acknowledged`, `downtimes:list`.
+fn parse_list(spec: &str) -> Option<OpenAtStart> {
+    let (id, rest) = spec.split_once(':').unwrap_or((spec, ""));
+    let kind = ListKind::from_id(id)?;
+    let mut chip = match id {
+        "acknowledged" => Some(Chip::Acknowledged),
+        "comments" => Some(Chip::Comments),
+        _ => None,
+    };
+    let mut mode = None;
+    if !rest.is_empty() {
+        match (Chip::from_id(kind, rest), Mode::from_id(rest)) {
+            (Some(found), _) => chip = Some(found),
+            (None, Some(found)) if kind == ListKind::Downtimes => mode = Some(found),
+            _ => return None,
+        }
+    }
+    Some(OpenAtStart::List { kind, chip, mode })
 }
 
 fn object(name: &str) -> Option<ObjectKey> {
@@ -287,9 +319,30 @@ mod tests {
         );
         assert_eq!(
             parse(&[(OPEN_ENV, "list:acknowledged")]).open,
-            Some(OpenAtStart::List(ListKind::Acknowledged))
+            Some(OpenAtStart::List {
+                kind: ListKind::Handling,
+                chip: Some(Chip::Acknowledged),
+                mode: None,
+            })
+        );
+        assert_eq!(
+            parse(&[(OPEN_ENV, "list:downtimes:list")]).open,
+            Some(OpenAtStart::List {
+                kind: ListKind::Downtimes,
+                chip: None,
+                mode: Some(Mode::List),
+            })
+        );
+        assert_eq!(
+            parse(&[(OPEN_ENV, "list:handling:comments")]).open,
+            Some(OpenAtStart::List {
+                kind: ListKind::Handling,
+                chip: Some(Chip::Comments),
+                mode: None,
+            })
         );
         assert_eq!(parse(&[(OPEN_ENV, "list:nonsense")]).open, None);
+        assert_eq!(parse(&[(OPEN_ENV, "list:handling:list")]).open, None);
     }
 
     #[test]

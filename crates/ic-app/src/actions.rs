@@ -50,6 +50,13 @@ pub(crate) const DASHBOARD_CONTEXT: &str = "DashboardView";
 /// Key context of an object opened as a tab.
 pub(crate) const PANE_CONTEXT: &str = "ObjectPane";
 
+/// Where the list's keys apply: a dashboard or a view, not a text field
+/// inside it.
+pub(crate) const DASHBOARD_KEYS: &str = "DashboardView && !Input";
+
+/// Where the pane's keys apply: the pane, not a text field inside it.
+pub(crate) const PANE_KEYS: &str = "ObjectPane && !Input";
+
 /// Moves the cursor to the next row.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
@@ -236,8 +243,10 @@ pub(crate) struct Quit;
 /// panes.
 pub(crate) fn bind_keys(cx: &mut App) {
     let workspace = Some(WORKSPACE_CONTEXT);
-    let list = Some(DASHBOARD_CONTEXT);
-    let pane = Some(PANE_CONTEXT);
+    // Not while typing in a field inside them (the pane's comment field):
+    // its letters, arrows and Escape are the field's.
+    let list = Some(DASHBOARD_KEYS);
+    let pane = Some(PANE_KEYS);
     cx.bind_keys((1..=9).map(|number| {
         KeyBinding::new(
             &format!("secondary-{number}"),

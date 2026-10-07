@@ -26,6 +26,13 @@ pub(crate) trait SelectableRow {
 
     /// The row's key; `None` for headers.
     fn key(&self) -> Option<&Self::Key>;
+
+    /// Whether marks (`x`, shift, ctrl-a) take the row: the cursor stops
+    /// on rows that don't (a group's band), but bulk actions never see
+    /// them.
+    fn markable(&self) -> bool {
+        true
+    }
 }
 
 /// A list's rows plus an index from key to row, built on first use (only
@@ -68,11 +75,6 @@ impl<R: SelectableRow> Rows<R> {
     /// Number of rows, group headers included.
     pub(crate) fn len(&self) -> usize {
         self.rows.len()
-    }
-
-    /// Row `index`.
-    pub(crate) fn get(&self, index: usize) -> Option<&R> {
-        self.rows.get(index)
     }
 
     /// The key of row `index`; `None` for headers and out of range.
@@ -126,10 +128,16 @@ impl<R: SelectableRow> Rows<R> {
         }
     }
 
-    /// The keys in rows `from..=to` (either order).
+    /// The keys of markable rows in `from..=to` (either order).
     fn keys_between(&self, from: usize, to: usize) -> impl Iterator<Item = &R::Key> {
         let (start, end) = if from <= to { (from, to) } else { (to, from) };
-        (start..=end.min(self.len().saturating_sub(1))).filter_map(|row| self.key(row))
+        (start..=end.min(self.len().saturating_sub(1))).filter_map(|row| self.markable_key(row))
+    }
+
+    /// The key of row `index` if marks take it.
+    fn markable_key(&self, index: usize) -> Option<&R::Key> {
+        let row = self.rows.get(index)?;
+        if row.markable() { row.key() } else { None }
     }
 }
 
@@ -352,10 +360,28 @@ impl<R: SelectableRow> ListSelection<R> {
         let Some(position) = Position::at(&self.rows, index) else {
             return false;
         };
-        if !self.marked.remove(&position.key) {
+        if self.rows.markable_key(index).is_some() && !self.marked.remove(&position.key) {
             self.marked.insert(position.key.clone());
         }
         self.place(position);
+        true
+    }
+
+    /// Marks every one of `keys`, or, when they all are marked, none of
+    /// them (`x` on a group's band: its entries). Returns whether any
+    /// mark changed.
+    pub(crate) fn toggle_marks(&mut self, keys: &[R::Key]) -> bool {
+        if keys.is_empty() {
+            return false;
+        }
+        self.base = None;
+        if keys.iter().all(|key| self.marked.contains(key)) {
+            for key in keys {
+                self.marked.remove(key);
+            }
+        } else {
+            self.marked.extend(keys.iter().cloned());
+        }
         true
     }
 
@@ -372,7 +398,7 @@ impl<R: SelectableRow> ListSelection<R> {
     pub(crate) fn mark_all(&mut self) {
         self.base = None;
         self.marked = (0..self.rows.len())
-            .filter_map(|row| self.rows.key(row).cloned())
+            .filter_map(|row| self.rows.markable_key(row).cloned())
             .collect();
     }
 

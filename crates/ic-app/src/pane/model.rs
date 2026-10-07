@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use ic_core::snapshot::Snapshot;
 use ic_model::{
-    CheckInfo, CheckableState, Comment, CommentKind, Features, Host, Notified, ObjectKey, Service,
-    ServiceState, Timestamp, Vars,
+    CheckInfo, CheckableState, Features, Host, Notified, ObjectKey, Service, ServiceState,
+    Timestamp, Vars,
 };
 use ic_ui_kit::TreeLine;
 use serde_json::Value;
@@ -367,46 +367,6 @@ pub(crate) fn group_names(
         .join(", ")
 }
 
-/// A comment or acknowledgement as the pane lists it (downtimes have
-/// their banner and section, `crate::downtimes`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Note {
-    /// `#` for comments, `✓` for acknowledgements, `~` for flapping notes.
-    pub(crate) marker: &'static str,
-    /// Who wrote it.
-    pub(crate) author: String,
-    /// Faint details after the author: when, expiry.
-    pub(crate) meta: Vec<String>,
-    /// The text.
-    pub(crate) body: String,
-    /// The full name, to remove it.
-    pub(crate) name: String,
-}
-
-/// The pane's view of a comment.
-pub(crate) fn comment_note(comment: &Comment, now: Timestamp) -> Note {
-    let marker = match comment.kind {
-        CommentKind::User => "#",
-        CommentKind::Acknowledgement => "✓",
-        CommentKind::Downtime => "↓",
-        CommentKind::Flapping => "~",
-    };
-    let mut meta = vec![format::clock(comment.entry_time, now)];
-    if comment.kind == CommentKind::Acknowledgement {
-        meta.insert(0, "acknowledged".to_owned());
-    }
-    if let Some(expiry) = comment.expire_time.and_then(Timestamp::non_zero) {
-        meta.push(format!("expires {}", format::clock(expiry, now)));
-    }
-    Note {
-        marker,
-        author: comment.author.clone(),
-        meta,
-        body: comment.text.clone(),
-        name: comment.name.clone(),
-    }
-}
-
 /// The host's parents and children from the dependencies.
 pub(crate) fn host_relations(snapshot: &Snapshot, host: &Host) -> (Vec<ObjectKey>, Vec<ObjectKey>) {
     let key = host.key();
@@ -597,10 +557,6 @@ mod tests {
 
     fn now() -> Timestamp {
         Timestamp::from_unix_seconds(NOW)
-    }
-
-    fn ago(seconds: f64) -> Timestamp {
-        Timestamp::from_unix_seconds(NOW - seconds)
     }
 
     #[test]
@@ -828,24 +784,6 @@ mod tests {
         let last = lines.last().unwrap();
         assert!(last.value.ends_with("more lines"));
         assert!(last.summary);
-    }
-
-    #[test]
-    fn notes_for_comments_and_acks() {
-        let comment = Comment {
-            name: "h!s!1".to_owned(),
-            object: ObjectKey::service("h", "s"),
-            author: "m.keller".to_owned(),
-            text: "renewal in progress".to_owned(),
-            kind: CommentKind::Acknowledgement,
-            entry_time: ago(60.),
-            expire_time: None,
-            persistent: false,
-        };
-        let note = comment_note(&comment, now());
-        assert_eq!(note.marker, "✓");
-        assert_eq!(note.meta[0], "acknowledged");
-        assert_eq!(note.body, "renewal in progress");
     }
 
     #[test]

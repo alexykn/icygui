@@ -62,6 +62,7 @@ gpui_kit_assets::icon_assets!(
         ChartBar,
         Activity,
         GripVertical,
+        Users,
     ]
 );
 

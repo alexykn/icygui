@@ -162,7 +162,8 @@ fn lists_are_tabs_before_the_objects_and_never_shown_with_one() {
     let mut state = AppState::fixture(now());
     let host = ObjectKey::host("db-prod-03");
     state.open_tab(host.clone());
-    assert!(state.open_list(ListKind::Acknowledged));
+    assert!(state.open_list(ListKind::Downtimes));
+    assert!(state.open_list(ListKind::Handling));
     assert!(state.open_list(ListKind::Downtimes));
     assert!(
         !state.open_list(ListKind::Downtimes),
@@ -170,14 +171,12 @@ fn lists_are_tabs_before_the_objects_and_never_shown_with_one() {
     );
     assert_eq!(
         state.lists(),
-        [ListKind::Downtimes, ListKind::Acknowledged],
+        [ListKind::Handling, ListKind::Downtimes],
         "in sidebar order"
     );
     assert_eq!(state.active_list(), Some(ListKind::Downtimes));
     assert_eq!(state.active_tab(), None, "one thing is shown");
     // ctrl-tab: the dashboard, the lists, then the tabs.
-    assert!(state.cycle_tab(true));
-    assert_eq!(state.active_list(), Some(ListKind::Acknowledged));
     assert!(state.cycle_tab(true));
     assert_eq!(state.active_tab(), Some(&host));
     assert_eq!(state.active_list(), None);
@@ -186,11 +185,18 @@ fn lists_are_tabs_before_the_objects_and_never_shown_with_one() {
     assert!(state.cycle_tab(false));
     assert_eq!(state.active_tab(), Some(&host));
     // Closing the list shown goes back to the dashboard.
-    assert!(state.open_list(ListKind::Acknowledged));
-    assert!(state.close_list(ListKind::Acknowledged));
-    assert!(!state.close_list(ListKind::Acknowledged));
+    assert!(state.open_list(ListKind::Handling));
+    assert!(state.close_list(ListKind::Handling));
+    assert!(!state.close_list(ListKind::Handling));
     assert_eq!(state.active_list(), None);
     assert_eq!(state.lists(), [ListKind::Downtimes]);
+    // The palette's *acknowledged*: handling on its chip.
+    assert!(state.open_list_on(ListKind::Handling, crate::lists::model::Chip::Acknowledged));
+    assert_eq!(
+        state.list_options(ListKind::Handling).chip.as_deref(),
+        Some("acknowledged")
+    );
+    assert!(state.close_list(ListKind::Handling));
     // Selecting a dashboard shows it instead.
     assert!(state.open_list(ListKind::Downtimes));
     let selected = state.selected().unwrap().clone();
@@ -376,8 +382,8 @@ fn a_saved_selection_that_no_longer_exists_falls_back_to_the_first_dashboard() {
     assert_eq!(state.tabs(), [ObjectKey::service("host", "svc")]);
     assert_eq!(
         state.lists(),
-        [ListKind::Acknowledged],
-        "unknown list ids are ignored"
+        [ListKind::Handling],
+        "unknown list ids are ignored; stage 2's acknowledged list opens handling"
     );
     assert_eq!(state.active_list(), None, "it starts on the dashboard");
     assert!(

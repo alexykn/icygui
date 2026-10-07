@@ -351,89 +351,6 @@ where
         .collect()
 }
 
-/// One of a pane's other downtimes (the ones the banner doesn't show).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Other {
-    /// Its full name, to remove it.
-    pub(crate) name: String,
-    /// From the config: a lock, and it can't be removed.
-    pub(crate) config: bool,
-    /// `flexible, 1h · window tonight 22:00 → 06:00 · not started`.
-    pub(crate) line: String,
-    /// Who set it.
-    pub(crate) author: String,
-    /// When (`13:57`), or `config`.
-    pub(crate) entered: String,
-    /// Why.
-    pub(crate) comment: String,
-}
-
-/// `object`'s downtimes other than the banner's, by start time.
-pub(crate) fn others(snapshot: &Snapshot, object: &ObjectKey, now: Timestamp) -> Vec<Other> {
-    others_in(snapshot, object, now, &Local)
-}
-
-/// [`others`] in time zone `zone`.
-pub(crate) fn others_in<Tz>(
-    snapshot: &Snapshot,
-    object: &ObjectKey,
-    now: Timestamp,
-    zone: &Tz,
-) -> Vec<Other>
-where
-    Tz: TimeZone,
-    Tz::Offset: Display,
-{
-    let own = of(snapshot, object);
-    let shown = primary(own, now).map(|downtime| downtime.name.as_str());
-    own.iter()
-        .filter(|downtime| Some(downtime.name.as_str()) != shown)
-        .filter(|downtime| downtime.phase(now) != DowntimePhase::Over)
-        .map(|downtime| {
-            let phase = downtime.phase(now);
-            let kind = if downtime.fixed {
-                "fixed".to_owned()
-            } else {
-                format!("flexible, {}", duration(downtime.duration))
-            };
-            let window = window_in(downtime.start_time, downtime.end_time, now, zone);
-            let mut parts = vec![
-                kind,
-                if downtime.fixed {
-                    window
-                } else {
-                    format!("window {window}")
-                },
-            ];
-            match phase {
-                DowntimePhase::InEffect => parts.push(format!(
-                    "{} left",
-                    left(
-                        downtime
-                            .effective_end()
-                            .unwrap_or(downtime.end_time)
-                            .remaining_from(now)
-                    )
-                )),
-                DowntimePhase::Waiting => parts.push("not started".to_owned()),
-                DowntimePhase::Upcoming if !downtime.fixed => parts.push("not started".to_owned()),
-                DowntimePhase::Upcoming | DowntimePhase::Over => {}
-            }
-            if downtime.config_owned {
-                parts.push(from_config(downtime));
-            }
-            Other {
-                name: downtime.name.clone(),
-                config: downtime.config_owned,
-                line: parts.join(" · "),
-                author: downtime.author.clone(),
-                entered: entered(downtime, now, zone),
-                comment: downtime.comment.clone(),
-            }
-        })
-        .collect()
-}
-
 /// The marker on a service's host line when its host is in a downtime
 /// that doesn't cover the service (scheduled without `all_services`): as
 /// in Icinga Web, the service isn't in downtime, but its pane says the
@@ -1262,7 +1179,6 @@ mod tests {
         );
         assert!((banner.progress - 0.4).abs() < 0.01);
         assert!(banner.more.is_empty());
-        assert!(others_in(&snapshot, &object, now(), &Utc).is_empty());
     }
 
     #[test]
@@ -1428,18 +1344,6 @@ mod tests {
                 "Sat 06:00, from config"
             ]
         );
-        let others = others_in(&snapshot, &switch, now(), &Utc);
-        assert_eq!(others.len(), 2);
-        assert_eq!(
-            others[0].line,
-            "flexible, 1h · window tonight 22:00 → 06:00 · not started"
-        );
-        assert_eq!(
-            others[1].line,
-            "fixed · Sat 10 Oct 06:00 → 10:00 · from config: weekly-patching"
-        );
-        assert!(others[1].config);
-        assert_eq!(others[1].entered, "config");
     }
 
     #[test]

@@ -2,9 +2,10 @@
 //! and the sub-tabs `services · history · vars · config`.
 //!
 //! The title, the actions and the sub-tab strip stay put; everything under
-//! them scrolls, including the host's comments and downtimes (at the top of
-//! the services tab), so a host with many notes can't push its services out
-//! of reach.
+//! them scrolls, including the host's thread (topic 14: its
+//! acknowledgement, downtimes and comments, with a field to add one; at
+//! the top of the services tab), so a host with a long thread can't push
+//! its services out of reach.
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
@@ -19,7 +20,7 @@ use ic_ui_kit::{
     Theme, Tooltip, TreeTable, px,
 };
 
-use super::service::{full_output, links_table, notes};
+use super::service::{full_output, links_table};
 use super::{
     HostTab, ObjectPane, PaneMode, TAB_CONTENT_WIDTH, TITLE_GROUP, action_buttons, copy_button,
     model, scroll_area,
@@ -70,24 +71,19 @@ pub(super) fn render(
         .child(tabs);
     let content = match pane.host_tab {
         HostTab::Services => {
-            // Comments, then the downtimes the banner doesn't show, above
-            // the services (topic 01).
-            let block = |content: AnyElement| {
+            // The host's thread above its services (topic 14).
+            let thread = super::thread::section(pane, snapshot, &key, now, cx).map(|thread| {
                 div()
                     .px(theme.metrics.pane_inset)
                     .py(px(16.))
                     .border_b_1()
                     .border_color(theme.colors.border_row)
-                    .child(content)
-            };
-            let notes = notes(pane, snapshot, &key, now, cx)
-                .into_iter()
-                .chain(super::downtime::others(pane, snapshot, &key, now, cx))
-                .map(block);
+                    .child(thread)
+            });
             div()
                 .flex()
                 .flex_col()
-                .children(notes)
+                .children(thread)
                 .child(services_tab(pane, &services, host, now, cx))
                 .into_any_element()
         }

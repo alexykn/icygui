@@ -1161,7 +1161,7 @@ impl Session {
                 ObjectKey::Host { name } => state.snapshot().hosts.contains_key(name),
                 ObjectKey::Service { key } => state.snapshot().services.contains_key(key),
             },
-            OpenAtStart::List(_) => !state.snapshot().services.is_empty(),
+            OpenAtStart::List { .. } => !state.snapshot().services.is_empty(),
         };
         if !ready {
             return;
@@ -1181,8 +1181,18 @@ impl Session {
                     cx.notify();
                 }
             }),
-            OpenAtStart::List(kind) => self.state.update(cx, |state, cx| {
-                if state.open_list(kind) {
+            OpenAtStart::List { kind, chip, mode } => self.state.update(cx, |state, cx| {
+                if let Some(mode) = mode {
+                    let mut options =
+                        crate::lists::model::Options::saved(kind, &state.list_options(kind));
+                    options.pick_mode(mode);
+                    state.set_list_options(kind, options.to_saved(kind));
+                }
+                let changed = match chip {
+                    Some(chip) => state.open_list_on(kind, chip),
+                    None => state.open_list(kind),
+                };
+                if changed {
                     cx.notify();
                 }
             }),

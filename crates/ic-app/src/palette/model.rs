@@ -115,9 +115,9 @@ pub(crate) enum PaletteCommand {
     Override(OverrideChange, Vec<ObjectKey>),
     /// Open the notification centre (NOTE-05).
     OpenNotifications,
-    /// Open a list of every downtime, comment or acknowledged problem as
-    /// a tab (topic 07).
-    OpenList(ListKind),
+    /// Open the handling or downtimes view as a tab (topic 14), on a chip
+    /// (*acknowledged* opens handling on its acknowledged chip).
+    OpenList(ListKind, Option<crate::lists::model::Chip>),
     /// Mark every notification read.
     MarkNotificationsRead,
     /// Open the settings (`secondary-,`), on this tab.
@@ -976,28 +976,44 @@ fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem>
     items
 }
 
-/// The lists of every downtime, comment and acknowledged problem (topic
-/// 07), each opening as a tab: `Downtimes  every downtime · 10`.
+/// The handling and downtimes views (topic 14), each opening as a tab:
+/// `Handling  who is handling what · 20`; *acknowledged* and *comments*
+/// open handling on that chip (there are no separate lists for them).
 fn list_commands(state: &AppState, now: Timestamp) -> Vec<PaletteItem> {
+    use crate::lists::model::Chip;
     let snapshot = state.snapshot();
-    ListKind::ALL
-        .into_iter()
-        .map(|kind| {
-            let count = crate::lists::model::count(kind, snapshot, now);
-            let (label, what) = match kind {
-                ListKind::Downtimes => ("Downtimes", "every downtime"),
-                ListKind::Comments => ("Comments", "every comment"),
-                ListKind::Acknowledged => ("Acknowledged", "every acknowledged problem"),
-            };
-            command(
-                label,
-                format!("{what} · {count}"),
-                None,
-                kind.icon(),
-                PaletteCommand::OpenList(kind),
-            )
-        })
-        .collect()
+    let handled = crate::lists::model::count(ListKind::Handling, snapshot, now);
+    let in_effect = crate::lists::model::count(ListKind::Downtimes, snapshot, now);
+    vec![
+        command(
+            "Handling",
+            format!("who is handling what · {handled}"),
+            None,
+            ListKind::Handling.icon(),
+            PaletteCommand::OpenList(ListKind::Handling, Some(Chip::All)),
+        ),
+        command(
+            "Downtimes",
+            format!("in effect and upcoming · {in_effect} in effect"),
+            None,
+            ListKind::Downtimes.icon(),
+            PaletteCommand::OpenList(ListKind::Downtimes, None),
+        ),
+        command(
+            "Acknowledged",
+            "handling, acknowledged problems".to_owned(),
+            None,
+            IconName::Check,
+            PaletteCommand::OpenList(ListKind::Handling, Some(Chip::Acknowledged)),
+        ),
+        command(
+            "Comments",
+            "handling, comments".to_owned(),
+            None,
+            IconName::MessageSquare,
+            PaletteCommand::OpenList(ListKind::Handling, Some(Chip::Comments)),
+        ),
+    ]
 }
 
 /// The actions on the focused objects, with their keys, then copying

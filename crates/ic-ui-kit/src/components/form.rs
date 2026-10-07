@@ -468,6 +468,7 @@ const CHIP_PADDING: f32 = 8.;
 pub struct Chip {
     id: ElementId,
     label: SharedString,
+    leading: Option<AnyElement>,
     selected: bool,
     filled: bool,
     marked: bool,
@@ -481,6 +482,7 @@ impl Chip {
         Self {
             id: id.into(),
             label: label.into(),
+            leading: None,
             selected: false,
             filled: false,
             marked: false,
@@ -494,6 +496,13 @@ impl Chip {
     /// the lists, filled, its text bright. Its size doesn't change.
     pub fn filled(mut self, filled: bool) -> Self {
         self.filled = filled;
+        self
+    }
+
+    /// Puts a small mark before the label (a filter chip's kind: a state
+    /// dot, a check, an icon), 6px from it.
+    pub fn leading(mut self, leading: impl IntoElement) -> Self {
+        self.leading = Some(leading.into_any_element());
         self
     }
 
@@ -579,6 +588,10 @@ impl RenderOnce for Chip {
                 colors.text_muted
             })
             .whitespace_nowrap()
+            .when_some(self.leading, |chip, leading| {
+                chip.gap(px(6.))
+                    .child(div().flex().flex_none().items_center().child(leading))
+            })
             .child(self.label)
             .when(self.disabled, |chip| chip.opacity(0.5))
             .when(enabled, |chip| {

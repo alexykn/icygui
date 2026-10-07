@@ -27,6 +27,7 @@ use super::fuzzy::{Match, Query};
 use crate::actions::ObjectAction;
 use crate::app_state::AppState;
 use crate::app_state::environments::url_summary;
+use crate::lists::ListKind;
 use crate::notifications::{MuteChoice, OverrideChange, PauseChoice};
 use crate::settings::SettingsPage;
 use crate::sidebar::Dot;
@@ -114,6 +115,9 @@ pub(crate) enum PaletteCommand {
     Override(OverrideChange, Vec<ObjectKey>),
     /// Open the notification centre (NOTE-05).
     OpenNotifications,
+    /// Open a list of every downtime, comment or acknowledged problem as
+    /// a tab (topic 07).
+    OpenList(ListKind),
     /// Mark every notification read.
     MarkNotificationsRead,
     /// Open the settings (`secondary-,`), on this tab.
@@ -641,8 +645,12 @@ fn action_label(action: &ObjectAction) -> &'static str {
         ObjectAction::CheckNow => "Check now",
         ObjectAction::AddComment => "Add comment",
         ObjectAction::RemoveAcknowledgement => "Remove acknowledgement",
-        ObjectAction::RemoveComment(_) => "Remove comment",
-        ObjectAction::RemoveDowntime(_) => "Remove downtime",
+        ObjectAction::RemoveComments(names) if names.len() > 1 => "Remove comments",
+        ObjectAction::RemoveComments(_) => "Remove comment",
+        ObjectAction::RemoveNamedDowntimes(names) if names.len() > 1 => "Remove downtimes",
+        ObjectAction::RemoveDowntime(_) | ObjectAction::RemoveNamedDowntimes(_) => {
+            "Remove downtime"
+        }
         ObjectAction::RemoveDowntimes => "Remove downtimes",
         ObjectAction::SubmitCheckResult => "Submit check result",
         ObjectAction::RunCommand => "Run command",
@@ -934,6 +942,10 @@ fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem>
     items.extend(more_actions);
     items.extend(override_commands(state, focus, now));
     items.extend(pause_commands(state, now, has_environment));
+    // A name away (`downtimes`), after what the empty query offers.
+    if has_environment {
+        items.extend(list_commands(state, now));
+    }
     items.push(command(
         "Toggle sidebar",
         String::new(),
@@ -962,6 +974,30 @@ fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem>
         ));
     }
     items
+}
+
+/// The lists of every downtime, comment and acknowledged problem (topic
+/// 07), each opening as a tab: `Downtimes  every downtime · 10`.
+fn list_commands(state: &AppState, now: Timestamp) -> Vec<PaletteItem> {
+    let snapshot = state.snapshot();
+    ListKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let count = crate::lists::model::count(kind, snapshot, now);
+            let (label, what) = match kind {
+                ListKind::Downtimes => ("Downtimes", "every downtime"),
+                ListKind::Comments => ("Comments", "every comment"),
+                ListKind::Acknowledged => ("Acknowledged", "every acknowledged problem"),
+            };
+            command(
+                label,
+                format!("{what} · {count}"),
+                None,
+                kind.icon(),
+                PaletteCommand::OpenList(kind),
+            )
+        })
+        .collect()
 }
 
 /// The actions on the focused objects, with their keys, then copying

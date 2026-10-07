@@ -37,19 +37,19 @@ pub(crate) enum HeaderMenu {
 /// the menu's own trigger, the trigger's click must not open it again, so
 /// the press that closed a menu is remembered.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct HeaderMenus {
+pub(crate) struct HeaderMenus {
     open: Option<HeaderMenu>,
     dismissed: Option<(HeaderMenu, Point<Pixels>)>,
 }
 
 impl HeaderMenus {
     /// The open menu.
-    pub(super) fn open(&self) -> Option<HeaderMenu> {
+    pub(crate) fn open(&self) -> Option<HeaderMenu> {
         self.open
     }
 
     /// A click on `menu`'s trigger that went down at `down`.
-    pub(super) fn toggle(&mut self, menu: HeaderMenu, down: Option<Point<Pixels>>) {
+    pub(crate) fn toggle(&mut self, menu: HeaderMenu, down: Option<Point<Pixels>>) {
         let dismissed = self.dismissed.take();
         if down.is_some() && dismissed == down.map(|down| (menu, down)) {
             // This press already closed the menu.
@@ -63,14 +63,14 @@ impl HeaderMenus {
     }
 
     /// A press at `at` outside the open menu.
-    pub(super) fn dismiss(&mut self, at: Point<Pixels>) {
+    pub(crate) fn dismiss(&mut self, at: Point<Pixels>) {
         if let Some(menu) = self.open.take() {
             self.dismissed = Some((menu, at));
         }
     }
 
     /// The open menu closed by itself: a press outside it, or Escape.
-    pub(super) fn dismissed(&mut self, how: Dismissal) {
+    pub(crate) fn dismissed(&mut self, how: Dismissal) {
         match how {
             Dismissal::Press(at) => self.dismiss(at),
             Dismissal::Escape => {
@@ -80,7 +80,7 @@ impl HeaderMenus {
     }
 
     /// Closes the open menu. Returns whether one was open.
-    pub(super) fn close(&mut self) -> bool {
+    pub(crate) fn close(&mut self) -> bool {
         self.dismissed = None;
         self.open.take().is_some()
     }

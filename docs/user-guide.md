@@ -223,6 +223,17 @@ Click a row (or press <kbd>Enter</kbd>) for the **pane** at the right. Its heade
 - The pane's `···` menu holds the less common actions (submit check result, run command, remove downtimes), copies the name, the output, a filter expression or the banner's downtime's name (for another downtime's *triggered by*), and watches or mutes the object. Notes URLs and action URLs open in the browser.
 - **Protected custom variables** show `***` in the vars and in links, never their value: names matching `*pw*`, `*pass*`, `*community*` (Icinga Web's defaults, `community` widened to `snmp_community`), `*secret*`, `*token*`, `*auth_pair*`, `*auth_key*` and `*priv_key*`, ignoring case, at any nesting level. Filters still see the real values.
 
+## Downtimes, comments and acknowledgements
+
+Three lists show every downtime, every comment and every acknowledged problem in the environment, whatever the dashboards show. Open them from the palette (<kbd>⌘K</kbd>, then `downtimes`, `comments` or `acknowledged`); each opens as a tab at the top of the sidebar's *open* section (a small icon, the list's name, the environment and its count; `×` on hover closes it) and is remembered per environment across restarts. They use the dashboards' keys, marks, pane and selection bar, and they come from what icygui already holds from Icinga's event stream: opening them sends no request, and they update as events arrive.
+
+- **Downtimes:** *in effect* and *upcoming* in sections, ending soonest (in effect) and starting soonest (upcoming) first; the header's sort also offers newest, oldest and name. A row has the object's circle (a ring while the downtime is in effect: the object is handled), `service on host` or the host, and the window: fixed or flexible, start → end (a flexible one in effect says since when it started), the author and the comment. The tag at the right has a bar for how much has passed and how long is left (`1h 18m left`), `in 7h 48m`, `by 17:35` for a flexible one still waiting, or `not started`. A host's downtime with all its services is one row, `+ 18 services`: click that (or press <kbd>→</kbd>) to list the services' downtimes under it, <kbd>←</kbd> to fold them again. Downtimes from the config (`ScheduledDowntime`) show a lock and `from config`: they can be marked but not removed (Icinga refuses, and the config brings them back). The summary counts in effect, upcoming, from config and how many are folded into hosts.
+- **Comments:** newest first; the kind (comment or acknowledgement) and its expiry in fixed slots, the author, the time and the text. Downtime and flapping comments (Icinga's own) are hidden; the summary's end shows or hides them.
+- **Acknowledged:** one row per acknowledged problem, newest acknowledgement first; every circle is a ring. The second line has who acknowledged it, when and the comment; the tag says *sticky* and when it expires (`expires Thu 03:41`, `no expiry`). Icinga doesn't keep whether the acknowledgement notified, so the list doesn't show it. The summary counts by state, sticky and expiring.
+- **Only mine** (the header's switch) shows what the environment's *author* set (default: the API user); the summary's end counts what it hides.
+- **Removing:** mark rows (<kbd>x</kbd>, Shift-click, <kbd>⌘A</kbd>) and press <kbd>⌫</kbd> (or the bar's *remove downtimes*, *remove comments*, *remove acknowledgements*). Nothing is sent before you confirm: the dialog lists every target (the box scrolls), grouped by downtime for downtimes (a host's downtime lists the host and each service, which Icinga removes with it), says which problems notify again, what it skips and why (downtimes from the config, acknowledgement and downtime comments: remove the acknowledgement or the downtime instead), and counts what goes on its button (*remove 26 downtimes*). <kbd>Enter</kbd> sends it as one action: downtimes and comments by name, up to 200 names a request, acknowledgements by object. Without the permission the button is disabled and says which one is missing; without permission to read downtimes or comments the list says so. Removing several acknowledgements from a dashboard asks with the same dialog.
+- The bar's *copy names* and `···` → *copy filter expression* copy the marked rows' objects; the header's `···` copies all of them.
+
 ## Keyboard shortcuts
 
 | Keys | Where | What |
@@ -239,12 +250,14 @@ Click a row (or press <kbd>Enter</kbd>) for the **pane** at the right. Its heade
 | <kbd>d</kbd> | list, pane | Schedule downtime |
 | <kbd>r</kbd> | list, pane | Check now |
 | <kbd>c</kbd> | list, pane | Add comment |
+| <kbd>⌫</kbd> | downtimes, comments, acknowledged | Remove the marked rows' downtimes, comments or acknowledgements (asks first) |
+| <kbd>→</kbd>, <kbd>←</kbd> | downtimes | List a host's services' downtimes under it, fold them again |
 | <kbd>⌘K</kbd> | anywhere | Command palette |
 | <kbd>⌘N</kbd> | anywhere | New dashboard |
 | <kbd>⌘1</kbd> … <kbd>⌘9</kbd> | anywhere | Select dashboard 1 to 9 |
 | <kbd>⌘B</kbd> | anywhere | Show or hide the sidebar |
 | <kbd>Ctrl Tab</kbd>, <kbd>Ctrl Shift Tab</kbd> | anywhere | Next / previous tab |
-| <kbd>⌘W</kbd> | anywhere | Close the tab |
+| <kbd>⌘W</kbd> | anywhere | Close the tab (or the list) |
 | <kbd>⌘,</kbd> | anywhere | Settings |
 | <kbd>⌘⇧E</kbd>, then <kbd>↑</kbd> <kbd>↓</kbd> | settings | Move through the categories (<kbd>Enter</kbd> to the page's first control) |
 | <kbd>⌘F</kbd> | settings | Search the settings |
@@ -263,7 +276,7 @@ Click a row (or press <kbd>Enter</kbd>) for the **pane** at the right. Its heade
 
 The action keys act on the marked rows if there are any, else on the pane's object, else on the row under the cursor (the pane's buttons show no keys while rows are marked).
 
-**The command palette** (<kbd>⌘K</kbd>) searches hosts, services, dashboards and commands: switching environments, new dashboard and group, import and export, reload from Icinga, pause and resume notifications, the notification centre and settings, and the actions on the current object. Every row starts with a mark: an object's state dot for an action on it (`● Acknowledge · postgres-replication  on db-prod-03 · critical`), a stack in the worst state's colour for an action on several, a dashboard's dot, or a small icon for other commands. The current object's actions (the pane's object, else the marked rows or the row under the cursor) come first, with their keys (`a`, `d`, `r`, `c`). Start a query with a verb to act on what it finds: `ack db-prod-03`, `dt web`, `check mq-prod`, `comment …` (also `acknowledge`, `downtime`, `recheck`, `note`). The current object comes first if it matches, then problems; <kbd>⌘Enter</kbd> (the *all N matches* row) opens the action's dialog listing every match, a check too: nothing is sent before you confirm.
+**The command palette** (<kbd>⌘K</kbd>) searches hosts, services, dashboards and commands: switching environments, new dashboard and group, import and export, reload from Icinga, pause and resume notifications, the notification centre and settings, the [downtime, comment and acknowledged lists](#downtimes-comments-and-acknowledgements), and the actions on the current object. Every row starts with a mark: an object's state dot for an action on it (`● Acknowledge · postgres-replication  on db-prod-03 · critical`), a stack in the worst state's colour for an action on several, a dashboard's dot, or a small icon for other commands. The current object's actions (the pane's object, else the marked rows or the row under the cursor) come first, with their keys (`a`, `d`, `r`, `c`). Start a query with a verb to act on what it finds: `ack db-prod-03`, `dt web`, `check mq-prod`, `comment …` (also `acknowledge`, `downtime`, `recheck`, `note`). The current object comes first if it matches, then problems; <kbd>⌘Enter</kbd> (the *all N matches* row) opens the action's dialog listing every match, a check too: nothing is sent before you confirm.
 
 ## Actions
 
@@ -274,7 +287,7 @@ All actions are runtime operations through Icinga's `/v1/actions`. icygui never 
 | **Acknowledge** (<kbd>a</kbd>) | Comment; sticky (stays until OK, through other problem states); persistent (keep the comment after the acknowledgement ends); expiry (1h, 4h, 1d, 08:00 tomorrow, or a time). Icinga is never asked to send notifications for it. *Remove acknowledgement* on acknowledged objects |
 | **Schedule downtime** (<kbd>d</kbd>) | For a host, *all services* (on by default, Icinga's `all_services`) sits at the top, right above the box that lists what it targets: the host and each of its services (the box scrolls); off, the box lists the host alone. The title and the button count them (`k8s-node-04 and its 23 services`, *schedule 24 downtimes*). Then: comment; start and end with presets (30m, 1h, 2h, 4h, 8h, 1d, 1w, 08:00 tomorrow); fixed, or flexible with a duration; child hosts (none, triggered, non-triggered); a triggering downtime, picked from the current downtimes of the objects, their hosts and those hosts' parents (or any downtime's name, which a pane's `···` menu copies). **Removing** a downtime (the banner's *remove downtime*, an other downtime's `×`, *remove downtimes* for the selection) always asks first, listing every downtime it removes (a host's with all its services lists the host and each service) and counting them on the button; for a service in its host's downtime it asks whether to remove it for *this service only* or *the host and its 23 services*. It says which problems notify again once their downtimes are gone, and skips downtimes from the config (Icinga refuses to remove them) |
 | **Check now** (<kbd>r</kbd>) | Forced, at once. More than 20 objects ask first |
-| **Add comment** (<kbd>c</kbd>) | Comment and an optional expiry. Remove comments from the pane |
+| **Add comment** (<kbd>c</kbd>) | Comment and an optional expiry. Remove comments from the pane, or many at once from the [comments list](#downtimes-comments-and-acknowledgements) |
 | **Submit check result** | State, output, performance data (passive results) |
 | **Run command** | Check or event command, endpoint, macros, TTL; after a confirmation that shows what will run (needs Icinga 2.13+) |
 

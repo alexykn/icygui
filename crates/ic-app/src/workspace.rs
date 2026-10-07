@@ -54,6 +54,8 @@ use crate::editor::{DashboardEditor, EditorEvent, EditorTarget};
 use crate::environments::{
     CertificateEvent, CertificateReview, EditorMode, EnvironmentEditor, EnvironmentEditorEvent,
 };
+use crate::lists::dialog::RemovalDialog;
+use crate::lists::{ListKind, RecordList, RecordListEvent};
 use crate::operate::dialog::{ActionDialog, DialogEvent, DialogKind};
 use crate::operate::forms::{self, describe_objects};
 use crate::operate::{ActionSpec, CHECK_CONFIRM_ABOVE};
@@ -121,6 +123,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
     crate::palette::bind_keys(cx);
     crate::operate::dialog::bind_keys(cx);
     crate::settings::bind_keys(cx);
+    crate::lists::view::bind_keys(cx);
+    crate::lists::dialog::bind_keys(cx);
 }
 
 /// What the main area shows.
@@ -128,6 +132,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
 enum Shown {
     Dashboard(Option<DashboardRef>),
     Tab(ObjectKey),
+    List(ListKind),
 }
 
 /// An object open as a tab.
@@ -219,6 +224,8 @@ enum OpenModal {
     Confirm(Confirmation),
     Path(PathPrompt),
     About,
+    /// Removing from a list (topic 07), listing every target.
+    Removal(Held<RemovalDialog>),
 }
 
 /// Which modal is open, for tests.
@@ -239,6 +246,8 @@ pub(crate) enum ModalKind {
     Path,
     /// The about dialog.
     About,
+    /// Removing from a list.
+    Removal(ListKind),
 }
 
 /// The window's content.
@@ -247,6 +256,9 @@ pub(crate) struct Workspace {
     sidebar: Entity<Sidebar>,
     dashboard: Entity<DashboardView>,
     tabs: HashMap<ObjectKey, TabPane>,
+    /// The lists open as tabs (topic 07), each with its own selection,
+    /// scroll position and pane.
+    lists: HashMap<ListKind, Held<RecordList>>,
     editor: Option<OpenEditor>,
     /// Changes of an editor that closed because something else was shown:
     /// editing the same dashboard again continues with them.
@@ -378,6 +390,7 @@ impl Workspace {
             sidebar,
             dashboard,
             tabs: HashMap::new(),
+            lists: HashMap::new(),
             editor: None,
             kept_draft: None,
             drafts_elsewhere: HashMap::new(),
@@ -552,7 +565,23 @@ impl Workspace {
             OpenModal::Confirm(confirmation) => ModalKind::Confirm(Box::new(confirmation.clone())),
             OpenModal::Path(_) => ModalKind::Path,
             OpenModal::About => ModalKind::About,
+            OpenModal::Removal(dialog) => ModalKind::Removal(dialog.view.read(cx).kind()),
         })
+    }
+
+    /// The open removal confirmation of a list.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn removal_dialog(&self) -> Option<&Entity<RemovalDialog>> {
+        match &self.modal {
+            Some(OpenModal::Removal(dialog)) => Some(&dialog.view),
+            _ => None,
+        }
+    }
+
+    /// The list `kind`'s view, while it is open.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn list(&self, kind: ListKind) -> Option<&Entity<RecordList>> {
+        self.lists.get(&kind).map(|list| &list.view)
     }
 
     /// The settings panel, while open.
@@ -612,6 +641,11 @@ impl Workspace {
         {
             tab.view.update(cx, |_, cx| cx.notify());
         }
+        if let Shown::List(kind) = &self.shown
+            && let Some(list) = self.lists.get(kind)
+        {
+            list.view.update(cx, |_, cx| cx.notify());
+        }
         cx.notify();
     }
 
@@ -635,14 +669,38 @@ impl Workspace {
         }
         let state = self.state.read(cx);
         let open: Vec<ObjectKey> = state.tabs().to_vec();
-        let shown = match state.active_tab() {
-            Some(key) => Shown::Tab(key.clone()),
-            None => Shown::Dashboard(state.selected().cloned()),
+        let open_lists: Vec<ListKind> = state.lists().to_vec();
+        let shown = match (state.active_tab(), state.active_list()) {
+            (Some(key), _) => Shown::Tab(key.clone()),
+            (None, Some(kind)) => Shown::List(kind),
+            (None, None) => Shown::Dashboard(state.selected().cloned()),
         };
         let title = title_of(state);
         if title != self.title {
             window.set_window_title(&title);
             self.title = title;
+        }
+        self.lists.retain(|kind, _| open_lists.contains(kind));
+        for kind in open_lists {
+            if !self.lists.contains_key(&kind) {
+                let state = self.state.clone();
+                let sidebar_open = self.sidebar_open;
+                let view = cx.new(|cx| {
+                    let mut list = RecordList::new(state, kind, cx);
+                    list.set_sidebar_open(sidebar_open, cx);
+                    list
+                });
+                let events = cx.subscribe_in(
+                    &view,
+                    window,
+                    |this, _, event: &RecordListEvent, window, cx| match event {
+                        RecordListEvent::Remove(removal) => {
+                            this.open_list_removal(removal.clone(), window, cx);
+                        }
+                    },
+                );
+                self.lists.insert(kind, Held::new(view, events));
+            }
         }
         self.tabs.retain(|key, _| open.contains(key));
         for key in open {
@@ -697,6 +755,9 @@ impl Workspace {
         if let Some(editor) = self.editor.take() {
             self.keep_changes(&editor, previous.as_deref(), cx);
         }
+        // A list's marks and pane belong to the environment they were made
+        // in; the new one's lists start afresh.
+        self.lists.clear();
         if let Some(draft) = self.kept_draft.take()
             && let Some(previous) = previous
         {
@@ -817,6 +878,10 @@ impl Workspace {
                 OpenModal::Confirm(_) | OpenModal::About => {
                     (self.modal_focus.clone(), self.modal_focus.clone())
                 }
+                OpenModal::Removal(dialog) => {
+                    let handle = dialog.view.focus_handle(cx);
+                    (handle.clone(), handle)
+                }
             }
         } else if let Some(settings) = &self.settings {
             (
@@ -838,6 +903,10 @@ impl Workspace {
                 Shown::Tab(key) => self.tabs.get(key).map_or_else(
                     || self.dashboard.focus_handle(cx),
                     |tab| tab.view.focus_handle(cx),
+                ),
+                Shown::List(kind) => self.lists.get(kind).map_or_else(
+                    || self.dashboard.focus_handle(cx),
+                    |list| list.view.focus_handle(cx),
                 ),
                 Shown::Dashboard(_) => self.dashboard.focus_handle(cx),
             };
@@ -903,6 +972,14 @@ impl Workspace {
     }
 
     fn close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(kind) = self.state.read(cx).active_list() {
+            self.state.update(cx, |state, cx| {
+                if state.close_list(kind) {
+                    cx.notify();
+                }
+            });
+            return;
+        }
         let Some(active) = self.state.read(cx).active_tab().cloned() else {
             cx.propagate();
             return;
@@ -922,6 +999,10 @@ impl Workspace {
         for tab in self.tabs.values() {
             tab.view
                 .update(cx, |pane, cx| pane.set_sidebar_open(open, cx));
+        }
+        for list in self.lists.values() {
+            list.view
+                .update(cx, |list, cx| list.set_sidebar_open(open, cx));
         }
         if let Some(editor) = &self.editor {
             editor
@@ -1032,6 +1113,11 @@ impl Workspace {
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let targets = match &self.shown {
             Shown::Tab(key) => vec![key.clone()],
+            Shown::List(kind) => self
+                .lists
+                .get(kind)
+                .map(|list| list.view.update(cx, RecordList::action_targets))
+                .unwrap_or_default(),
             Shown::Dashboard(_) if self.editor.is_none() => {
                 self.dashboard.update(cx, DashboardView::action_targets)
             }
@@ -1055,6 +1141,7 @@ impl Workspace {
     }
 
     /// Carries out what was chosen in the palette.
+    #[expect(clippy::too_many_lines, reason = "one arm per palette command")]
     fn run_command(
         &mut self,
         command: PaletteCommand,
@@ -1069,18 +1156,27 @@ impl Workspace {
                     cx.notify();
                 }
             }),
-            PaletteCommand::Act(action, targets) if targets.is_empty() => {
-                let tab = match &self.shown {
-                    Shown::Tab(key) => Some(key.clone()),
-                    Shown::Dashboard(_) => None,
-                };
-                match tab {
-                    Some(key) => self.request(action, vec![key], cx),
-                    None => self
-                        .dashboard
-                        .update(cx, |dashboard, cx| dashboard.run_action(action, cx)),
+            PaletteCommand::Act(action, targets) if targets.is_empty() => match &self.shown {
+                Shown::Tab(key) => self.request(action, vec![key.clone()], cx),
+                Shown::List(kind) => {
+                    let targets = self
+                        .lists
+                        .get(kind)
+                        .map(|list| list.view.update(cx, RecordList::action_targets))
+                        .unwrap_or_default();
+                    if !targets.is_empty() {
+                        self.request(action, targets, cx);
+                    }
                 }
-            }
+                Shown::Dashboard(_) => self
+                    .dashboard
+                    .update(cx, |dashboard, cx| dashboard.run_action(action, cx)),
+            },
+            PaletteCommand::OpenList(kind) => self.state.update(cx, |state, cx| {
+                if state.open_list(kind) {
+                    cx.notify();
+                }
+            }),
             PaletteCommand::Act(action, targets) => self.act_on_named(action, targets, window, cx),
             PaletteCommand::Copy { what, text } => self.copy(what, text, cx),
             PaletteCommand::Reload => self.state.update(cx, |state, cx| {
@@ -1269,6 +1365,20 @@ impl Workspace {
         {
             return;
         }
+        // So does removing several acknowledgements, listing each one with
+        // who set it, sticky and expiry (topic 07).
+        if elsewhere.is_none()
+            && action == actions::ObjectAction::RemoveAcknowledgement
+            && eligible.targets.len() > 1
+        {
+            let removal = crate::lists::removal::acknowledgements(
+                &snapshot,
+                &eligible.targets,
+                Timestamp::now(),
+            );
+            self.open_list_removal(removal, window, cx);
+            return;
+        }
         // Objects a palette query named loosely are always listed first.
         let dialog = if review {
             DialogKind::for_review(&action)
@@ -1361,6 +1471,26 @@ impl Workspace {
             },
         );
         self.open_modal(OpenModal::Action(Held::new(dialog, events)), window, cx);
+    }
+
+    /// Opens the confirmation that lists every target of a removal from a
+    /// list (or of removing several acknowledgements).
+    fn open_list_removal(
+        &mut self,
+        removal: crate::lists::removal::BulkRemoval,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.state.clone();
+        let dialog = cx.new(|cx| RemovalDialog::new(state, removal, cx));
+        let events = cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, event: &DialogEvent, window, cx| match event {
+                DialogEvent::Close => this.close_modal(window, cx),
+            },
+        );
+        self.open_modal(OpenModal::Removal(Held::new(dialog, events)), window, cx);
     }
 
     /// Sends `spec`; a refusal shows as a toast.
@@ -2350,6 +2480,11 @@ impl Workspace {
                 Self::render_path_prompt(prompt, cx),
             ),
             OpenModal::About => (460., ModalPlacement::Center, self.render_about(cx)),
+            OpenModal::Removal(dialog) => (
+                dialog.view.read(cx).width(),
+                ModalPlacement::Center,
+                dialog.view.clone().into_any_element(),
+            ),
         };
         Some(
             div()
@@ -2543,6 +2678,10 @@ impl Render for Workspace {
                     .tabs
                     .get(key)
                     .map(|tab| tab.view.clone().into_any_element()),
+                Shown::List(kind) => self
+                    .lists
+                    .get(kind)
+                    .map(|list| list.view.clone().into_any_element()),
                 Shown::Dashboard(_) => None,
             }
             .unwrap_or_else(|| self.dashboard.clone().into_any_element())
@@ -2551,10 +2690,16 @@ impl Render for Workspace {
         let settings = self.render_settings(cx);
         let modal_open = self.modal.is_some() || self.settings.is_some();
         // Above the list's selection bar while rows are marked.
-        let bar = matches!(self.shown, Shown::Dashboard(_))
-            && self.editor.is_none()
+        let bar = self.editor.is_none()
             && self.onboarding.is_none()
-            && self.dashboard.read(cx).has_marks(cx);
+            && match &self.shown {
+                Shown::Dashboard(_) => self.dashboard.read(cx).has_marks(cx),
+                Shown::List(kind) => self
+                    .lists
+                    .get(kind)
+                    .is_some_and(|list| list.view.read(cx).has_marks()),
+                Shown::Tab(_) => false,
+            };
         let toasts = crate::operate::toasts::render(
             &self.state,
             if bar {
@@ -2609,9 +2754,9 @@ impl Render for Workspace {
 }
 
 /// The question to ask before sending `spec`, if it needs one: checking
-/// many objects at once (a burst of work for the satellites), removing
-/// several acknowledgements. (Removing downtimes has its own dialog, which
-/// lists every downtime it removes.)
+/// many objects at once (a burst of work for the satellites). (Removing
+/// downtimes, and several acknowledgements, have their own dialogs, which
+/// list every target.)
 pub(crate) fn confirmation_for(
     spec: &ActionSpec,
     eligible: &forms::Eligible,
@@ -2630,15 +2775,6 @@ pub(crate) fn confirmation_for(
             ),
             "check now",
             false,
-        ),
-        actions::ObjectAction::RemoveAcknowledgement if spec.objects.len() > 1 => (
-            format!("Remove the acknowledgement of {what}?"),
-            format!(
-                "Their problems count as unhandled again and notify as configured; the \
-                 acknowledgement comments go too.{skipped}"
-            ),
-            "remove acknowledgements",
-            true,
         ),
         _ => return None,
     };

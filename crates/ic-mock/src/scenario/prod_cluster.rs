@@ -568,12 +568,13 @@ pub fn prod_cluster() -> Scenario {
         hours(2) + mins(4),
         None,
     );
-    b.acknowledge(
+    b.acknowledge_until(
         &ObjectKey::service("web-edge-02", "http-tls"),
         "m.keller",
-        "renewal in progress",
-        mins(15),
-        false,
+        "renewal ordered, new cert expected tomorrow (CHG-4459)",
+        hours(2) + mins(10),
+        true,
+        Some(hours(21) + mins(48)),
     );
     b.problem(
         "lb-prod-02",
@@ -619,8 +620,8 @@ pub fn prod_cluster() -> Scenario {
     let end = b.later(hours(1));
     b.downtime(
         ObjectKey::service("cache-02", "redis-memory"),
-        "s.weber",
-        "Memory upgrade on cache-02",
+        "j.berg",
+        "maxmemory raised; restart once the memory upgrade on cache-02 is done",
         start,
         end,
         true,
@@ -897,6 +898,7 @@ pub fn prod_cluster() -> Scenario {
     );
 
     downtimes_in_the_panes(&mut b);
+    the_lists(&mut b);
 
     // Objects the demo should keep showing.
     let mut pinned: Vec<ObjectKey> = [
@@ -921,6 +923,14 @@ pub fn prod_cluster() -> Scenario {
     // in the frames they were set up for.
     pinned.push(ObjectKey::service("db-prod-05", "pg-locks"));
     pinned.push(ObjectKey::service("db-prod-05", "pg-bloat"));
+    // The lists' acknowledged problems (topic 07) stay as they are.
+    for (host, service) in [
+        ("kafka-01", "kafka-consumer-lag"),
+        ("k8s-node-18", "ntp-offset"),
+        ("nfs-02", "disk /srv"),
+    ] {
+        pinned.push(ObjectKey::service(host, service));
+    }
     for (host, _) in &failed {
         pinned.push(ObjectKey::host(host));
     }
@@ -1075,6 +1085,138 @@ fn downtimes_in_the_panes(b: &mut Builder) {
     );
     bmc.entry = Some(b.ago(mins(17)));
     b.downtime_with(bmc);
+}
+
+/// What the lists of topic 07 (`design/v1/07-comments-downtimes-lists.html`)
+/// show besides the downtimes above: comments by several people (one
+/// expiring), acknowledgements sticky or not, with an expiry or none, and
+/// two more downtimes to come (one with every service of its host, one from
+/// the config).
+fn the_lists(b: &mut Builder) {
+    the_lists_acknowledgements(b);
+    the_lists_comments_and_downtimes(b);
+}
+
+/// The acknowledged list's problems (topic 07, frame 7f).
+fn the_lists_acknowledgements(b: &mut Builder) {
+    b.problem(
+        "db-prod-01",
+        "pg-autovacuum",
+        ServiceState::Critical,
+        "POSTGRES_AUTOVACUUM CRITICAL - orders: autovacuum running for 58 min",
+        &["autovacuum_running=3480s;1800;3000"],
+        hours(1),
+        None,
+    );
+    b.acknowledge_until(
+        &ObjectKey::service("db-prod-01", "pg-autovacuum"),
+        "dba-oncall",
+        "vacuum running on orders, about 30 minutes",
+        hours(1),
+        false,
+        Some(mins(48)),
+    );
+    b.acknowledge_until(
+        &ObjectKey::service("backup-01", "borg-last-run"),
+        "dba-oncall",
+        "lock from the migration test, clears after Thursday",
+        mins(42),
+        true,
+        Some(hours(17) + mins(48)),
+    );
+    b.acknowledge(
+        &ObjectKey::service("kafka-01", "kafka-consumer-lag"),
+        "m.keller",
+        "consumer group rebalancing after the deploy",
+        mins(47),
+        false,
+    );
+    b.acknowledge_until(
+        &ObjectKey::service("k8s-node-18", "ntp-offset"),
+        "j.berg",
+        "chrony re-sync with the node reboot tonight",
+        hours(1) + mins(42),
+        true,
+        Some(hours(8) + mins(48)),
+    );
+    b.problem(
+        "nfs-02",
+        "disk /srv",
+        ServiceState::Critical,
+        "DISK CRITICAL - /srv 96% used (31 GiB free)",
+        &["'/srv'=769GiB;640;720;0;800"],
+        hours(3),
+        None,
+    );
+    b.acknowledge(
+        &ObjectKey::service("nfs-02", "disk /srv"),
+        "j.berg",
+        "cleanup job running, 30 GiB to go",
+        hours(2) + mins(52),
+        false,
+    );
+    b.acknowledge_until(
+        &ObjectKey::service("vpn-gw-01", "cert-expiry"),
+        "m.keller",
+        "new certificate arrives Friday; leave this until then",
+        hours(21) + mins(32),
+        true,
+        Some(hours(45) + mins(48)),
+    );
+}
+
+/// The comment list's comments and the downtimes still to come (topic 07,
+/// frames 7a and 7d).
+fn the_lists_comments_and_downtimes(b: &mut Builder) {
+    b.comment(
+        ObjectKey::service("vpn-gw-01", "cert-expiry"),
+        "m.keller",
+        "new certificate arrives Friday; leave this warning until then",
+        hours(21) + mins(32),
+        Some(hours(45) + mins(48)),
+    );
+    b.comment(
+        ObjectKey::service("mq-prod-01", "rabbitmq-queue"),
+        "m.keller",
+        "consumer deploy rolled back, queue should drain within 20 min",
+        mins(3),
+        None,
+    );
+    b.comment(
+        ObjectKey::service("k8s-node-04", "kubelet"),
+        "j.berg",
+        "node not drained yet, looking at containerd logs",
+        mins(2),
+        None,
+    );
+    b.comment(
+        ObjectKey::host("backup-01"),
+        "dba-oncall",
+        "repository moves to backup-02 on Thursday night, see CHG-4480",
+        hours(52) + mins(58),
+        None,
+    );
+    let migration = ScenarioDowntime {
+        entry: Some(b.ago(mins(35))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("backup-01"),
+            "j.berg",
+            "borg repository migration to backup-02",
+            b.later(hours(10) + mins(48)),
+            b.later(hours(12) + mins(48)),
+        )
+    };
+    host_with_services(b, "backup-01", &migration);
+    b.downtime_with(ScenarioDowntime {
+        schedule: Some("weekly-patching"),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("sw-core-ams-01"),
+            "icingaadmin",
+            "Weekly patch window for the core switches.",
+            b.later(hours(63) + mins(48)),
+            b.later(hours(67) + mins(48)),
+        )
+    });
 }
 
 /// A downtime on `host` with `all_services`: the host's, and one per

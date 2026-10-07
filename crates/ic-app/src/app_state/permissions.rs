@@ -7,6 +7,7 @@ use ic_config::ObjectKind;
 use ic_core::ApiInfo;
 
 use crate::actions::ObjectAction;
+use crate::lists::ListKind;
 
 /// The permission an action needs (`GET /v1` lists the user's).
 pub(crate) fn action_permission(action: &ObjectAction) -> &'static str {
@@ -14,12 +15,12 @@ pub(crate) fn action_permission(action: &ObjectAction) -> &'static str {
         ObjectAction::Acknowledge => "actions/acknowledge-problem",
         ObjectAction::RemoveAcknowledgement => "actions/remove-acknowledgement",
         ObjectAction::ScheduleDowntime => "actions/schedule-downtime",
-        ObjectAction::RemoveDowntimes | ObjectAction::RemoveDowntime(_) => {
-            "actions/remove-downtime"
-        }
+        ObjectAction::RemoveDowntimes
+        | ObjectAction::RemoveDowntime(_)
+        | ObjectAction::RemoveNamedDowntimes(_) => "actions/remove-downtime",
         ObjectAction::CheckNow => "actions/reschedule-check",
         ObjectAction::AddComment => "actions/add-comment",
-        ObjectAction::RemoveComment(_) => "actions/remove-comment",
+        ObjectAction::RemoveComments(_) => "actions/remove-comment",
         ObjectAction::SubmitCheckResult => "actions/process-check-result",
         ObjectAction::RunCommand => "actions/execute-command",
     }
@@ -31,10 +32,12 @@ fn action_verb(action: &ObjectAction) -> &'static str {
         ObjectAction::Acknowledge => "acknowledge problems",
         ObjectAction::RemoveAcknowledgement => "remove acknowledgements",
         ObjectAction::ScheduleDowntime => "schedule downtimes",
-        ObjectAction::RemoveDowntimes | ObjectAction::RemoveDowntime(_) => "remove downtimes",
+        ObjectAction::RemoveDowntimes
+        | ObjectAction::RemoveDowntime(_)
+        | ObjectAction::RemoveNamedDowntimes(_) => "remove downtimes",
         ObjectAction::CheckNow => "reschedule checks",
         ObjectAction::AddComment => "add comments",
-        ObjectAction::RemoveComment(_) => "remove comments",
+        ObjectAction::RemoveComments(_) => "remove comments",
         ObjectAction::SubmitCheckResult => "submit check results",
         ObjectAction::RunCommand => "run commands",
     }
@@ -65,6 +68,25 @@ pub(crate) fn query_denial(info: Option<&ApiInfo>, kind: ObjectKind) -> Option<S
         format!(
             "The API user {} may not read {what} (needs {permission}).",
             info.user
+        )
+    })
+}
+
+/// Why the user may not read what list `kind` shows (downtimes, comments),
+/// or `None` if it may. The acknowledged list reads hosts and services,
+/// which the dashboards already need.
+pub(crate) fn list_denial(info: Option<&ApiInfo>, kind: ListKind) -> Option<String> {
+    let info = info?;
+    let permission = match kind {
+        ListKind::Downtimes => "objects/query/Downtime",
+        ListKind::Comments => "objects/query/Comment",
+        ListKind::Acknowledged => return None,
+    };
+    (!info.allows(permission)).then(|| {
+        format!(
+            "The API user {} may not read {} (needs {permission}).",
+            info.user,
+            kind.title()
         )
     })
 }
@@ -112,8 +134,9 @@ mod tests {
             ObjectAction::ScheduleDowntime,
             ObjectAction::CheckNow,
             ObjectAction::AddComment,
-            ObjectAction::RemoveComment("c".to_owned()),
+            ObjectAction::RemoveComments(vec!["c".to_owned()]),
             ObjectAction::RemoveDowntime("d".to_owned()),
+            ObjectAction::RemoveNamedDowntimes(vec!["d".to_owned()]),
             ObjectAction::RemoveDowntimes,
             ObjectAction::SubmitCheckResult,
             ObjectAction::RunCommand,

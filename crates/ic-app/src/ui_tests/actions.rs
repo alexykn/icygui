@@ -21,7 +21,7 @@ use crate::pane::{ObjectPane, PaneMenu};
 use crate::workspace::{Confirmed, ModalKind};
 
 /// Attaches a recording core (the fixture is connected but has none).
-fn record(app: &Harness, cx: &mut App) -> Recorder {
+pub(super) fn record(app: &Harness, cx: &mut App) -> Recorder {
     let recorder = Recorder::default();
     app.state
         .update(cx, |state, _| state.set_core(Box::new(recorder.clone())));
@@ -54,7 +54,7 @@ fn type_into(app: &Harness, cx: &mut App, field: FormField, text: &str) {
 }
 
 /// Asks for `action` on `targets`, as a key or a button does.
-fn request(app: &Harness, cx: &mut App, action: ObjectAction, targets: Vec<ObjectKey>) {
+pub(super) fn request(app: &Harness, cx: &mut App, action: ObjectAction, targets: Vec<ObjectKey>) {
     app.state.update(cx, |state, cx| {
         let _ = state.request(crate::actions::ActionRequest {
             action,
@@ -66,7 +66,7 @@ fn request(app: &Harness, cx: &mut App, action: ObjectAction, targets: Vec<Objec
     app.draw(cx);
 }
 
-fn toasts(app: &Harness, cx: &App) -> Vec<(ToastTone, String, Vec<String>)> {
+pub(super) fn toasts(app: &Harness, cx: &App) -> Vec<(ToastTone, String, Vec<String>)> {
     app.state
         .read(cx)
         .toasts()
@@ -503,11 +503,14 @@ fn acks_and_comments_go_at_once_downtimes_list_what_goes() {
         request(
             app,
             cx,
-            ObjectAction::RemoveComment(comment.clone()),
+            ObjectAction::RemoveComments(vec![comment.clone()]),
             vec![object],
         );
         assert_eq!(modal(app, cx), None);
-        assert_eq!(recorder.actions()[1].1, ActionTarget::Comment(comment));
+        assert_eq!(
+            recorder.actions()[1].1,
+            ActionTarget::Comments(vec![comment])
+        );
 
         // Downtimes always ask, listing every downtime that goes (topic
         // 01): every downtime of an object...
@@ -564,14 +567,14 @@ fn acks_and_comments_go_at_once_downtimes_list_what_goes() {
         app.keys(cx, "enter");
         let actions = recorder.actions();
         assert_eq!(actions.len(), 4);
-        assert_eq!(actions[3].1, ActionTarget::Downtime(name));
+        assert_eq!(actions[3].1, ActionTarget::Downtimes(vec![name]));
         assert_eq!(actions[3].2, Action::RemoveAllDowntimes);
     });
 }
 
 /// Gives edge-fra-04's services the children Icinga makes for a host
 /// downtime with `all services`; the host's downtime's name.
-fn host_downtime_with_its_services(app: &Harness, cx: &mut App) -> String {
+pub(super) fn host_downtime_with_its_services(app: &Harness, cx: &mut App) -> String {
     let host = ObjectKey::host("edge-fra-04");
     let mut parent = String::new();
     app.state.update(cx, |state, cx| {
@@ -702,11 +705,12 @@ fn every_downtime_case_renders_in_the_panes_and_tabs() {
         );
         app.keys(cx, "enter");
         let actions = recorder.actions();
-        assert!(!actions.is_empty());
+        assert_eq!(actions.len(), 1, "one request for every name: {actions:?}");
         assert!(
             actions.iter().all(|(_, target, action)| {
                 *action == Action::RemoveAllDowntimes
-                    && matches!(target, ActionTarget::Downtime(name) if name != "edge-fra-04!weekly")
+                    && matches!(target, ActionTarget::Downtimes(names)
+                        if !names.is_empty() && !names.iter().any(|name| name == "edge-fra-04!weekly"))
             }),
             "{actions:?}"
         );
@@ -763,7 +767,7 @@ fn a_services_downtime_from_its_host_is_removed_whole_or_alone() {
         app.keys(cx, "enter");
         let actions = recorder.actions();
         assert_eq!(actions.len(), 1, "{actions:?}");
-        assert_eq!(actions[0].1, ActionTarget::Downtime(child.clone()));
+        assert_eq!(actions[0].1, ActionTarget::Downtimes(vec![child.clone()]));
 
         // The whole: the host's by name, Icinga removes its children.
         request(
@@ -775,7 +779,7 @@ fn a_services_downtime_from_its_host_is_removed_whole_or_alone() {
         app.keys(cx, "enter");
         let actions = recorder.actions();
         assert_eq!(actions.len(), 2, "{actions:?}");
-        assert_eq!(actions[1].1, ActionTarget::Downtime(parent));
+        assert_eq!(actions[1].1, ActionTarget::Downtimes(vec![parent]));
         assert_eq!(actions[1].2, Action::RemoveAllDowntimes);
     });
 }

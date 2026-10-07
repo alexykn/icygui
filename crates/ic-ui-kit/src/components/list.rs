@@ -174,6 +174,8 @@ pub struct ListRow {
     context: Option<(SharedString, SharedString)>,
     detail: Option<SharedString>,
     tag: Option<SharedString>,
+    trailing: Option<AnyElement>,
+    after_title: Option<AnyElement>,
     flag: Option<SharedString>,
     emphasis: RowEmphasis,
     header: bool,
@@ -192,6 +194,8 @@ impl ListRow {
             context: None,
             detail: None,
             tag: None,
+            trailing: None,
+            after_title: None,
             flag: None,
             emphasis: RowEmphasis::None,
             header: false,
@@ -244,6 +248,22 @@ impl ListRow {
     /// The right-aligned tag (`ack m.keller`, `downtime`, `flapping`).
     pub fn tag(mut self, tag: impl Into<SharedString>) -> Self {
         self.tag = Some(tag.into());
+        self
+    }
+
+    /// An element in the tag's place, for tags with more than words: the
+    /// downtime list's progress line and time left in fixed slots. It
+    /// replaces [`ListRow::tag`]; give it fixed widths, so every row's
+    /// trailing parts line up.
+    pub fn trailing(mut self, element: impl IntoElement) -> Self {
+        self.trailing = Some(element.into_any_element());
+        self
+    }
+
+    /// An element right after the title on its line (`+ 18 services`):
+    /// it never shrinks; the title is cut off first.
+    pub fn after_title(mut self, element: impl IntoElement) -> Self {
+        self.after_title = Some(element.into_any_element());
         self
     }
 
@@ -309,6 +329,8 @@ impl fmt::Debug for ListRow {
             .field("time", &self.state.as_ref().map(|(_, time)| time))
             .field("detail", &self.detail)
             .field("tag", &self.tag)
+            .field("trailing", &self.trailing.is_some())
+            .field("after_title", &self.after_title.is_some())
             .field("flag", &self.flag)
             .field("emphasis", &self.emphasis)
             .field("header", &self.header)
@@ -343,7 +365,18 @@ impl RenderOnce for ListRow {
             Some((circle, time)) => (Some(circle.caption(time).into_any_element()), None),
             None => (self.leading, None),
         };
-        let trailing = trailing(self.flag, self.tag, compact, time, theme);
+        let trailing = trailing(self.flag, self.tag, self.trailing, compact, time, theme);
+        let title_line = match self.after_title {
+            Some(after) => div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .min_w_0()
+                .text_size(theme.text.row)
+                .child(div().min_w_0().truncate().child(title))
+                .child(div().flex_none().child(after)),
+            None => div().truncate().text_size(theme.text.row).child(title),
+        };
         div()
             .id(self.id)
             .relative()
@@ -391,7 +424,7 @@ impl RenderOnce for ListRow {
                     .flex_1()
                     .min_w_0()
                     .gap(px(4.))
-                    .child(div().truncate().text_size(theme.text.row).child(title))
+                    .child(title_line)
                     .when_some(self.detail.filter(|_| !compact), |column, detail| {
                         column.child(
                             div()
@@ -409,12 +442,13 @@ impl RenderOnce for ListRow {
     }
 }
 
-/// What a row shows at its right end: the `late` flag, the tag, and in
-/// `compact` rows the `time` in its fixed slot, empty or not, so every
-/// row's tag ends at the same x.
+/// What a row shows at its right end: the `late` flag, the tag (or an
+/// element in its place), and in `compact` rows the `time` in its fixed
+/// slot, empty or not, so every row's tag ends at the same x.
 fn trailing(
     flag: Option<SharedString>,
     tag: Option<SharedString>,
+    element: Option<AnyElement>,
     compact: bool,
     time: Option<SharedString>,
     theme: &Theme,
@@ -428,16 +462,29 @@ fn trailing(
             .child(flag)
             .into_any_element()
     });
-    let tag = tag.map(|tag| {
-        div()
-            .flex_none()
-            .max_w(px(220.))
-            .truncate()
-            .text_size(theme.text.label)
-            .text_color(colors.text_faint)
-            .child(tag)
-            .into_any_element()
-    });
+    let tag = match element {
+        Some(element) => Some(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .text_size(theme.text.label)
+                .text_color(colors.text_faint)
+                .whitespace_nowrap()
+                .child(element)
+                .into_any_element(),
+        ),
+        None => tag.map(|tag| {
+            div()
+                .flex_none()
+                .max_w(px(220.))
+                .truncate()
+                .text_size(theme.text.label)
+                .text_color(colors.text_faint)
+                .child(tag)
+                .into_any_element()
+        }),
+    };
     let time = compact.then(|| {
         div()
             .flex_none()

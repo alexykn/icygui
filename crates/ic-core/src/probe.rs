@@ -390,7 +390,7 @@ mod tests {
             .iter()
             .map(|action| action.api_name().to_owned())
             .collect();
-        // A comment target (`ActionTarget::Comment`) removes the comment.
+        // A comment target (`ActionTarget::Comments`) removes the comments.
         sent.insert("remove-comment".to_owned());
         assert_eq!(listed("actions/"), sent);
 

@@ -1891,27 +1891,43 @@ fn listed_targets(eligible: &Eligible, form: &Form, snapshot: &Snapshot) -> Vec<
     }
 }
 
-/// What a removal sends: one `remove-downtime` per downtime by name (its
-/// children go with it), or for every downtime of objects.
-fn removal_specs(removal: &Removal) -> Vec<ActionSpec> {
-    removal
-        .scope()
-        .send
-        .iter()
-        .map(|send| match send {
-            Send::One { name, objects } => ActionSpec {
-                kind: ObjectAction::RemoveDowntime(name.clone()),
-                action: ic_model::Action::RemoveAllDowntimes,
-                target: ActionTarget::Downtime(name.clone()),
-                objects: objects.clone(),
-            },
-            Send::AllOf(objects) => ActionSpec::for_objects(
+/// What a removal sends: `remove-downtime` for every downtime of objects,
+/// and one `remove-downtime` for the downtimes it names (their children go
+/// with them; Icinga takes the names in batches).
+pub(crate) fn removal_specs(removal: &Removal) -> Vec<ActionSpec> {
+    let mut specs = Vec::new();
+    let mut names = Vec::new();
+    let mut objects = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for send in &removal.scope().send {
+        match send {
+            Send::One {
+                name,
+                objects: changed,
+            } => {
+                names.push(name.clone());
+                for object in changed {
+                    if seen.insert(object.clone()) {
+                        objects.push(object.clone());
+                    }
+                }
+            }
+            Send::AllOf(changed) => specs.push(ActionSpec::for_objects(
                 ObjectAction::RemoveDowntimes,
                 ic_model::Action::RemoveAllDowntimes,
-                objects.clone(),
-            ),
-        })
-        .collect()
+                changed.clone(),
+            )),
+        }
+    }
+    if !names.is_empty() {
+        specs.push(ActionSpec {
+            kind: ObjectAction::RemoveNamedDowntimes(names.clone()),
+            action: ic_model::Action::RemoveAllDowntimes,
+            target: ActionTarget::Downtimes(names),
+            objects,
+        });
+    }
+    specs
 }
 
 /// An object's state for its dot.

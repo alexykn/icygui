@@ -105,10 +105,12 @@ enum Settle {
     /// More downtimes than before.
     DowntimesAbove(usize),
     NoDowntimes,
-    DowntimeGone(String),
+    /// None of these downtimes of the object is left.
+    DowntimesGone(Vec<String>),
     /// More comments than before.
     CommentsAbove(usize),
-    CommentGone(String),
+    /// None of these comments of the object is left.
+    CommentsGone(Vec<String>),
     /// Nothing to see: the answer is enough.
     Answered,
 }
@@ -130,9 +132,12 @@ struct Mark {
 struct Running {
     kind: ObjectAction,
     objects: Vec<ObjectKey>,
-    /// It targets a downtime or comment by name: Icinga's failures name
-    /// that, not the object.
+    /// It targets downtimes or comments by name: Icinga's failures name
+    /// those, not the objects.
     by_name: bool,
+    /// For removals by name: each downtime's or comment's object, by its
+    /// name, to say which object a failure is about.
+    names: HashMap<String, ObjectKey>,
     toast: u64,
     /// It went to another environment than the one on screen (its name):
     /// no markers or failures on the rows, the toasts name it.
@@ -151,12 +156,42 @@ pub(crate) struct Tracker {
 
 /// The words for an action in toasts: in progress, done, to do.
 struct Verbs {
-    progressive: &'static str,
-    past: &'static str,
-    infinitive: &'static str,
+    progressive: String,
+    past: String,
+    infinitive: String,
+}
+
+impl Verbs {
+    fn new(progressive: &str, past: &str, infinitive: &str) -> Self {
+        Self {
+            progressive: progressive.to_owned(),
+            past: past.to_owned(),
+            infinitive: infinitive.to_owned(),
+        }
+    }
+}
+
+/// How many downtimes or comments a removal by name removes, when it
+/// removes several: its toasts count them (`Removing 3 comments of 3
+/// services`).
+fn named_count(kind: &ObjectAction) -> Option<(usize, &'static str)> {
+    match kind {
+        ObjectAction::RemoveComments(names) if names.len() > 1 => Some((names.len(), "comments")),
+        ObjectAction::RemoveNamedDowntimes(names) if names.len() > 1 => {
+            Some((names.len(), "downtimes"))
+        }
+        _ => None,
+    }
 }
 
 fn verbs(kind: &ObjectAction) -> Verbs {
+    if let Some((count, noun)) = named_count(kind) {
+        return Verbs {
+            progressive: format!("Removing {count} {noun} of"),
+            past: format!("Removed {count} {noun} of"),
+            infinitive: format!("remove {count} {noun} of"),
+        };
+    }
     let (progressive, past, infinitive) = match kind {
         ObjectAction::Acknowledge => ("Acknowledging", "Acknowledged", "acknowledge"),
         ObjectAction::RemoveAcknowledgement => (
@@ -174,7 +209,7 @@ fn verbs(kind: &ObjectAction) -> Verbs {
             "Removed the downtimes of",
             "remove the downtimes of",
         ),
-        ObjectAction::RemoveDowntime(_) => (
+        ObjectAction::RemoveDowntime(_) | ObjectAction::RemoveNamedDowntimes(_) => (
             "Removing a downtime of",
             "Removed a downtime of",
             "remove a downtime of",
@@ -189,7 +224,7 @@ fn verbs(kind: &ObjectAction) -> Verbs {
             "Added a comment to",
             "add a comment to",
         ),
-        ObjectAction::RemoveComment(_) => (
+        ObjectAction::RemoveComments(_) => (
             "Removing a comment of",
             "Removed a comment of",
             "remove a comment of",
@@ -205,11 +240,7 @@ fn verbs(kind: &ObjectAction) -> Verbs {
             "start the command on",
         ),
     };
-    Verbs {
-        progressive,
-        past,
-        infinitive,
-    }
+    Verbs::new(progressive, past, infinitive)
 }
 
 /// The marker rows and panes show while `kind` is in flight.
@@ -218,10 +249,12 @@ pub(crate) fn mark_label(kind: &ObjectAction) -> &'static str {
         ObjectAction::Acknowledge => "ack pending…",
         ObjectAction::RemoveAcknowledgement => "removing ack…",
         ObjectAction::ScheduleDowntime => "downtime pending…",
-        ObjectAction::RemoveDowntimes | ObjectAction::RemoveDowntime(_) => "removing downtime…",
+        ObjectAction::RemoveDowntimes
+        | ObjectAction::RemoveDowntime(_)
+        | ObjectAction::RemoveNamedDowntimes(_) => "removing downtime…",
         ObjectAction::CheckNow => "checking…",
         ObjectAction::AddComment => "comment pending…",
-        ObjectAction::RemoveComment(_) => "removing comment…",
+        ObjectAction::RemoveComments(_) => "removing comment…",
         ObjectAction::SubmitCheckResult => "result pending…",
         ObjectAction::RunCommand => "command running…",
     }
@@ -259,12 +292,17 @@ impl Settle {
             ObjectAction::RemoveAcknowledgement => Self::NotAcknowledged,
             ObjectAction::ScheduleDowntime => Self::DowntimesAbove(downtimes(snapshot, object)),
             ObjectAction::RemoveDowntimes => Self::NoDowntimes,
-            ObjectAction::RemoveDowntime(name) => Self::DowntimeGone(name.clone()),
+            ObjectAction::RemoveDowntime(name) => Self::DowntimesGone(vec![name.clone()]),
+            ObjectAction::RemoveNamedDowntimes(names) => {
+                Self::DowntimesGone(names_of(snapshot.downtimes.get(object), names, |d| &d.name))
+            }
             ObjectAction::CheckNow | ObjectAction::SubmitCheckResult => {
                 Self::CheckedAfter(last_check(snapshot, object))
             }
             ObjectAction::AddComment => Self::CommentsAbove(comments(snapshot, object)),
-            ObjectAction::RemoveComment(name) => Self::CommentGone(name.clone()),
+            ObjectAction::RemoveComments(names) => {
+                Self::CommentsGone(names_of(snapshot.comments.get(object), names, |c| &c.name))
+            }
             ObjectAction::RunCommand => Self::Answered,
         }
     }
@@ -282,17 +320,62 @@ impl Settle {
             },
             Self::DowntimesAbove(before) => downtimes(snapshot, object) > *before,
             Self::NoDowntimes => downtimes(snapshot, object) == 0,
-            Self::DowntimeGone(name) => snapshot
+            Self::DowntimesGone(names) => snapshot
                 .downtimes
                 .get(object)
-                .is_none_or(|list| list.iter().all(|downtime| &downtime.name != name)),
+                .is_none_or(|list| list.iter().all(|downtime| !names.contains(&downtime.name))),
             Self::CommentsAbove(before) => comments(snapshot, object) > *before,
-            Self::CommentGone(name) => snapshot
+            Self::CommentsGone(names) => snapshot
                 .comments
                 .get(object)
-                .is_none_or(|list| list.iter().all(|comment| &comment.name != name)),
+                .is_none_or(|list| list.iter().all(|comment| !names.contains(&comment.name))),
             Self::Answered => true,
         }
+    }
+}
+
+/// Which of `names` belong to the object whose downtimes or comments are
+/// `list` (`name` reads an entry's name): what its marker waits to see go.
+fn names_of<T>(
+    list: Option<&Vec<T>>,
+    names: &[String],
+    name: impl Fn(&T) -> &String,
+) -> Vec<String> {
+    let Some(list) = list else {
+        return Vec::new();
+    };
+    names
+        .iter()
+        .filter(|wanted| list.iter().any(|entry| name(entry) == *wanted))
+        .cloned()
+        .collect()
+}
+
+/// The object of each downtime or comment a removal by name targets, by
+/// its name.
+fn objects_by_name(target: &ActionTarget, snapshot: &Snapshot) -> HashMap<String, ObjectKey> {
+    let wanted: std::collections::HashSet<&str> = match target {
+        ActionTarget::Objects(_) => return HashMap::new(),
+        ActionTarget::Downtimes(names) | ActionTarget::Comments(names) => {
+            names.iter().map(String::as_str).collect()
+        }
+    };
+    match target {
+        ActionTarget::Objects(_) => HashMap::new(),
+        ActionTarget::Downtimes(_) => snapshot
+            .downtimes
+            .values()
+            .flatten()
+            .filter(|downtime| wanted.contains(downtime.name.as_str()))
+            .map(|downtime| (downtime.name.clone(), downtime.object.clone()))
+            .collect(),
+        ActionTarget::Comments(_) => snapshot
+            .comments
+            .values()
+            .flatten()
+            .filter(|comment| wanted.contains(comment.name.as_str()))
+            .map(|comment| (comment.name.clone(), comment.object.clone()))
+            .collect(),
     }
 }
 
@@ -361,6 +444,7 @@ impl Tracker {
                 kind: spec.kind.clone(),
                 objects: spec.objects.clone(),
                 by_name: !matches!(spec.target, ActionTarget::Objects(_)),
+                names: objects_by_name(&spec.target, snapshot),
                 toast,
                 elsewhere: None,
             },
@@ -389,6 +473,7 @@ impl Tracker {
                 kind: spec.kind.clone(),
                 objects: spec.objects.clone(),
                 by_name: !matches!(spec.target, ActionTarget::Objects(_)),
+                names: HashMap::new(),
                 toast,
                 elsewhere: Some(environment.to_owned()),
             },
@@ -398,6 +483,10 @@ impl Tracker {
     /// Takes the core's answer to action `id`: failed objects lose their
     /// marker and remember why; the others keep it until a snapshot shows
     /// the change (or a while passes). The toast says how it went.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one outcome per kind of result, each its toast"
+    )]
     pub(crate) fn finish(
         &mut self,
         id: u64,
@@ -422,11 +511,17 @@ impl Tracker {
             }
         } else {
             for (name, reason) in &outcome.failed {
-                let object = if running.by_name {
-                    running.objects.first().cloned()
-                } else {
-                    parse_object(name).filter(|object| running.objects.contains(object))
-                };
+                let object =
+                    if running.by_name {
+                        running.names.get(name).cloned().or_else(|| {
+                            match running.objects.as_slice() {
+                                [only] => Some(only.clone()),
+                                _ => None,
+                            }
+                        })
+                    } else {
+                        parse_object(name).filter(|object| running.objects.contains(object))
+                    };
                 failed.push((object, name.clone(), reason.clone()));
             }
         }
@@ -474,6 +569,12 @@ impl Tracker {
                 (
                     ToastTone::Failed,
                     format!("Couldn't {} {what}", words.infinitive),
+                    lines,
+                )
+            } else if let Some((count, noun)) = named_count(&running.kind) {
+                (
+                    ToastTone::Partial,
+                    format!("Removed {} of {count} {noun}", outcome.ok),
                     lines,
                 )
             } else {
@@ -820,9 +921,9 @@ mod tests {
         );
         snapshot.comments = Arc::new(comments);
         let removal = ActionSpec {
-            kind: ObjectAction::RemoveComment("db-01!disk!c1".to_owned()),
+            kind: ObjectAction::RemoveComments(vec!["db-01!disk!c1".to_owned()]),
             action: Action::RemoveAllDowntimes,
-            target: ActionTarget::Comment("db-01!disk!c1".to_owned()),
+            target: ActionTarget::Comments(vec!["db-01!disk!c1".to_owned()]),
             objects: vec![disk()],
         };
         tracker.start(6, &removal, &snapshot, t0);
@@ -843,6 +944,74 @@ mod tests {
             toast.lines,
             ["disk on db-01: Cannot remove non-existent comment object."]
         );
+    }
+
+    fn user_comment(object: ObjectKey, name: &str) -> Comment {
+        Comment {
+            name: name.to_owned(),
+            object,
+            author: "a".to_owned(),
+            text: "t".to_owned(),
+            kind: CommentKind::User,
+            entry_time: Timestamp::from_unix_seconds(1.),
+            expire_time: None,
+            persistent: false,
+        }
+    }
+
+    #[test]
+    fn removals_of_many_names_count_them_and_map_failures_to_objects() {
+        let mut tracker = Tracker::default();
+        let t0 = Instant::now();
+        let mut before = snapshot(false, 100.);
+        let mut comments = BTreeMap::new();
+        comments.insert(disk(), vec![user_comment(disk(), "db-01!disk!c1")]);
+        comments.insert(
+            load(),
+            vec![
+                user_comment(load(), "db-01!load!c2"),
+                user_comment(load(), "db-01!load!keep"),
+            ],
+        );
+        before.comments = Arc::new(comments);
+        let names = vec!["db-01!disk!c1".to_owned(), "db-01!load!c2".to_owned()];
+        let removal = ActionSpec {
+            kind: ObjectAction::RemoveComments(names.clone()),
+            action: Action::RemoveAllDowntimes,
+            target: ActionTarget::Comments(names),
+            objects: vec![disk(), load()],
+        };
+        tracker.start(7, &removal, &before, t0);
+        assert_eq!(
+            tracker.toasts().next().unwrap().title,
+            "Removing 2 comments of 2 services…"
+        );
+        let outcome = ActionOutcome {
+            ok: 1,
+            failed: vec![(
+                "db-01!load!c2".to_owned(),
+                "Icinga is reloading.".to_owned(),
+            )],
+            error: None,
+        };
+        tracker.finish(7, &outcome, &before, t0);
+        assert!(
+            tracker.failure(&load()).is_some(),
+            "the failed name's object"
+        );
+        assert!(tracker.failure(&disk()).is_none());
+        let toast = tracker.toasts().next().unwrap();
+        assert_eq!(toast.tone, ToastTone::Partial);
+        assert_eq!(toast.title, "Removed 1 of 2 comments");
+        assert_eq!(toast.lines, ["load on db-01: Icinga is reloading."]);
+        // The marker waits for its own comment only, not the one kept.
+        assert_eq!(tracker.label(&disk()), Some("removing comment…"));
+        let mut after = before.clone();
+        let mut comments = (*after.comments).clone();
+        comments.remove(&disk());
+        after.comments = Arc::new(comments);
+        tracker.settle(&after, t0);
+        assert_eq!(tracker.label(&disk()), None);
     }
 
     #[test]

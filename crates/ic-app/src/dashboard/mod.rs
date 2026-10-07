@@ -15,8 +15,7 @@ pub(crate) mod rows;
 pub(crate) mod selection;
 
 pub(crate) use self::bulk::SELECTION_BAR_HEIGHT;
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use self::header::HeaderMenu;
+pub(crate) use self::header::{HeaderMenu, HeaderMenus};
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -37,7 +36,6 @@ use ic_ui_kit::{
     Metrics, RowEmphasis, Scrollbar, StateCircle, Theme, px,
 };
 
-use self::header::HeaderMenus;
 use self::selection::ListSelection;
 use crate::actions::{
     Acknowledge, ActionRequest, AddComment, CheckNow, DASHBOARD_CONTEXT, Dismiss,

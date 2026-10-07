@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::actions::{self, Batch, TargetKind};
+use crate::actions::{self, Batch};
 use crate::budget::RequestBudget;
 use crate::detail::{Cluster, Detail, Fetched, FetchedNotifications};
 use crate::error::ApiError;
@@ -681,10 +681,12 @@ impl Client {
     /// child options, which Icinga multiplies). `author` is sent for
     /// acknowledgements, downtimes, comments and removals.
     ///
-    /// A [`ActionTarget::Downtime`] removes that downtime and a
-    /// [`ActionTarget::Comment`] removes that comment; both only with
-    /// [`Action::RemoveAllDowntimes`] (the model has no separate "remove
-    /// comment" action).
+    /// [`ActionTarget::Downtimes`] removes those downtimes and
+    /// [`ActionTarget::Comments`] those comments, by name, in batches of
+    /// [`NAMES_PER_REQUEST`] (`"downtimes": [...]`, `"comments": [...]`);
+    /// both only with [`Action::RemoveAllDowntimes`] (the model has no
+    /// separate "remove comment" action). A name that no longer exists
+    /// gets a 404 result, as an object does.
     ///
     /// Per-object failures (`code >= 400`) are returned as results, not as
     /// errors, whatever HTTP status Icinga derives from them (it answers a
@@ -794,7 +796,7 @@ impl Client {
                     if let [name] = names.as_slice() {
                         tracing::debug!(%name, action = batch.endpoint, "action target no longer exists");
                         run.fail([name.clone()], 404, &message);
-                    } else if matches!(batch.kind, TargetKind::Host | TargetKind::Service) {
+                    } else {
                         let (first, second) = names.split_at(names.len() / 2);
                         pending.push(second.to_vec());
                         pending.push(first.to_vec());

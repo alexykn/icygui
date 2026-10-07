@@ -6,9 +6,11 @@ use std::collections::BTreeMap;
 
 use ic_config::{DashboardGroup, Environment};
 use ic_core::snapshot::{DashboardResult, Snapshot, Summary};
-use ic_model::{CheckableState, ObjectKey};
+use ic_model::{CheckableState, ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::ObjectMark;
+
+use crate::lists::ListKind;
 
 /// A dashboard's or an object's state dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +119,35 @@ pub(crate) struct OpenTab {
     pub(crate) active: bool,
 }
 
+/// A list of every downtime, comment or acknowledged problem open as a
+/// tab, in the sidebar's "open" section (topic 07).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OpenList {
+    /// Which list.
+    pub(crate) kind: ListKind,
+    /// How many it lists.
+    pub(crate) count: usize,
+    /// Whether it's the tab shown.
+    pub(crate) active: bool,
+}
+
+/// The "open" section's list rows, in sidebar order.
+pub(crate) fn open_lists(
+    lists: &[ListKind],
+    active: Option<ListKind>,
+    snapshot: &Snapshot,
+    now: Timestamp,
+) -> Vec<OpenList> {
+    lists
+        .iter()
+        .map(|kind| OpenList {
+            kind: *kind,
+            count: crate::lists::model::count(*kind, snapshot, now),
+            active: active == Some(*kind),
+        })
+        .collect()
+}
+
 /// The "open" section's rows.
 pub(crate) fn open_tabs(
     tabs: &[ObjectKey],
@@ -221,7 +252,7 @@ pub(crate) fn groups<'a>(
 
 #[cfg(test)]
 mod tests {
-    use ic_model::{HostState, ServiceState, Timestamp};
+    use ic_model::{HostState, ServiceState};
 
     use super::*;
     use crate::fixture;

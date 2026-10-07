@@ -482,6 +482,36 @@ impl Builder {
         });
     }
 
+    /// Acknowledges a problem until `expires_in` from now (sticky or not),
+    /// with its acknowledgement comment, which expires with it.
+    pub(crate) fn acknowledge_until(
+        &mut self,
+        object: &ObjectKey,
+        author: &str,
+        text: &str,
+        ago: Duration,
+        sticky: bool,
+        expires_in: Option<Duration>,
+    ) {
+        self.acknowledge(object, author, text, ago, sticky);
+        let expiry = expires_in.map(|expires_in| self.later(expires_in));
+        match object {
+            ObjectKey::Host { name } => {
+                if let Some(host) = self.scenario.hosts.iter_mut().find(|h| &h.name == name) {
+                    host.check.acknowledgement_expiry = expiry;
+                }
+            }
+            ObjectKey::Service { key } => {
+                if let Some(service) = self.service_mut(key.host.as_str(), &key.name) {
+                    service.check.acknowledgement_expiry = expiry;
+                }
+            }
+        }
+        if let Some(comment) = self.scenario.comments.last_mut() {
+            comment.expire_time = expiry;
+        }
+    }
+
     /// Acknowledges a problem and adds its acknowledgement comment.
     pub(crate) fn acknowledge(
         &mut self,

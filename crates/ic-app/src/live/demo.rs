@@ -564,7 +564,9 @@ fn environment(id: &str, name: &str, groups: Vec<DashboardGroup>) -> Environment
             username: USER.to_owned(),
         },
         tls: TlsConfig::default(),
-        author: Some("demo".to_owned()),
+        // The person the demo plays, as the mock-ups draw them: their
+        // downtimes and comments are *mine* in the lists (topic 07).
+        author: Some("j.berg".to_owned()),
         groups,
         notifications: NotificationSettings::default(),
     }

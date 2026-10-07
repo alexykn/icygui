@@ -493,8 +493,10 @@ mod tests {
     #[test]
     fn prod_cluster_matches_the_design_summary() {
         let summary = prod_cluster().summary();
+        // The design's 12, plus topic 07's acknowledged problems
+        // (pg-autovacuum, disk /srv).
         assert!(
-            (11..=14).contains(&summary.services_critical),
+            (11..=16).contains(&summary.services_critical),
             "{summary:?}"
         );
         assert!((27..=31).contains(&summary.services_warning), "{summary:?}");

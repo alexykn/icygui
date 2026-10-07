@@ -533,6 +533,39 @@ async fn real_icinga_objects_by_name_with_missing_names() {
     assert_eq!(fetched.missing, gone);
 }
 
+/// Removing downtimes and comments by name sends their names as lists
+/// (`"downtimes": [...]`, `"comments": [...]`); Icinga resolves them in
+/// `FilterUtility::GetFilterTargets`, the same for queries and actions.
+/// Checked read-only with a query: a list holding an unknown name is "No
+/// objects found." (were the key not recognised, Icinga would answer with
+/// every object of the type, and a removal would remove them all).
+#[tokio::test]
+async fn real_icinga_resolves_downtime_and_comment_name_lists() {
+    let Some(contract) = fixture().await else {
+        return;
+    };
+    let raw = contract.raw();
+    for (plural, key) in [("downtimes", "downtimes"), ("comments", "comments")] {
+        let answer = raw
+            .query(
+                plural,
+                &json!({ key: ["icygui-contract-no-such-host!icygui-no-such-name"] }),
+            )
+            .await;
+        assert_eq!(
+            answer.status,
+            404,
+            "{plural}: {}",
+            String::from_utf8_lossy(&answer.body)
+        );
+        assert!(
+            String::from_utf8_lossy(&answer.body).contains("No objects found"),
+            "{plural}: {}",
+            String::from_utf8_lossy(&answer.body)
+        );
+    }
+}
+
 /// Icinga's own `Notification` objects (the default `conf.d` notifies
 /// `icingaadmins` about every host and service): the whole list, by name
 /// with unknown names, and the read-only `viewer`'s missing permission.

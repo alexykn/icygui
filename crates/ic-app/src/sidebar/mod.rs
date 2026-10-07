@@ -48,7 +48,7 @@ pub(crate) use self::menus::new_key;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use self::menus::switcher_rows;
 pub(crate) use self::model::Dot;
-use self::model::{OpenTab, SidebarGroup, SidebarItem};
+use self::model::{OpenList, OpenTab, SidebarGroup, SidebarItem};
 
 /// What the sidebar asks the workspace to do: open an editor, a dialog
 /// or a file prompt, or switch environments.
@@ -376,7 +376,9 @@ impl Sidebar {
             return empty_note("No dashboards yet", None, &theme, cx);
         };
         // While a tab is shown, no dashboard is highlighted.
-        let selected = state.selected().filter(|_| state.active_tab().is_none());
+        let selected = state
+            .selected()
+            .filter(|_| state.active_tab().is_none() && state.active_list().is_none());
         let groups = model::groups(
             environment,
             &state.snapshot().dashboards,
@@ -384,7 +386,14 @@ impl Sidebar {
             &self.query,
         );
         let tabs = model::open_tabs(state.tabs(), state.active_tab(), state.snapshot());
-        if groups.is_empty() && tabs.is_empty() {
+        let lists = model::open_lists(
+            state.lists(),
+            state.active_list(),
+            state.snapshot(),
+            Timestamp::now(),
+        );
+        let environment_name = environment.name.clone();
+        if groups.is_empty() && tabs.is_empty() && lists.is_empty() {
             return if self.query.trim().is_empty() {
                 empty_note("No dashboards yet", Some("new dashboard"), &theme, cx)
             } else {
@@ -396,8 +405,14 @@ impl Sidebar {
             .iter()
             .map(|group| self.render_group(group, count, &theme, cx))
             .collect();
-        if !tabs.is_empty() {
-            rows.push(Self::render_open_tabs(&tabs, &theme, cx));
+        if !tabs.is_empty() || !lists.is_empty() {
+            rows.push(Self::render_open_tabs(
+                &lists,
+                &tabs,
+                &environment_name,
+                &theme,
+                cx,
+            ));
         }
         div()
             .id("sidebar-groups")
@@ -410,10 +425,18 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// The "open" section: objects opened as tabs ("↗ open as tab").
-    fn render_open_tabs(tabs: &[OpenTab], theme: &Theme, cx: &Context<Self>) -> AnyElement {
+    /// The "open" section: the lists of every downtime, comment and
+    /// acknowledged problem (topic 07), then objects opened as tabs ("↗
+    /// open as tab").
+    fn render_open_tabs(
+        lists: &[OpenList],
+        tabs: &[OpenTab],
+        environment: &str,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let colors = theme.colors;
-        let active = tabs.iter().any(|tab| tab.active);
+        let active = tabs.iter().any(|tab| tab.active) || lists.iter().any(|list| list.active);
         let header = div()
             .id("open-tabs")
             .group("sidebar-open-tabs")
@@ -467,7 +490,136 @@ impl Sidebar {
             .flex_none()
             .pb(px(6.))
             .child(header)
+            .children(
+                lists
+                    .iter()
+                    .map(|list| Self::render_list(list, environment, theme, cx)),
+            )
             .children(tabs.iter().map(|tab| Self::render_tab(tab, theme, cx)))
+            .into_any_element()
+    }
+
+    /// A list open as a tab: its icon in the mark slot, its name with the
+    /// environment's, and its count; `×` in the count's place on hover.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the row as drawn, with its hover close button"
+    )]
+    fn render_list(
+        list: &OpenList,
+        environment: &str,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let metrics = theme.metrics;
+        let kind = list.kind;
+        let id = SharedString::from(format!("list-tab-{}", kind.id()));
+        let group = SharedString::from(format!("list-row-{}", kind.id()));
+        div()
+            .id(id.clone())
+            .group(group.clone())
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(12.))
+            .h(metrics.item_row_height)
+            .pl(px(14.))
+            .pr(metrics.sidebar_padding - GlyphButton::reach())
+            .cursor_pointer()
+            .when(list.active, |row| row.bg(colors.item_active))
+            .when(!list.active, |row| {
+                row.hover(|style| style.bg(colors.item_hover))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .justify_center()
+                    .w(metrics.sidebar_dot)
+                    .child(
+                        Icon::new(kind.icon())
+                            .size(px(11.))
+                            .color(colors.text_faint),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(6.))
+                    .text_size(theme.text.row)
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(if list.active {
+                                colors.text_emphasis
+                            } else {
+                                colors.text_secondary
+                            })
+                            .child(kind.title()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(colors.text_faint)
+                            .child(environment.to_owned()),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_end()
+                    .min_w(px(22.))
+                    .child(
+                        div()
+                            .group_hover(group.clone(), gpui::Styled::invisible)
+                            .pr(GlyphButton::reach())
+                            .text_size(theme.text.label)
+                            .text_color(colors.text_muted)
+                            .child(list.count.to_string()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .right_0()
+                            .invisible()
+                            .group_hover(group, gpui::Styled::visible)
+                            .child(
+                                IconButton::new(
+                                    SharedString::from(format!("close-{id}")),
+                                    IconName::Close,
+                                )
+                                .size(px(20.))
+                                .icon_size(px(12.))
+                                .color(colors.text_muted)
+                                .tooltip(Tooltip::new("Close list"))
+                                .on_click(cx.listener(
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        this.state.update(cx, |state, cx| {
+                                            if state.close_list(kind) {
+                                                cx.notify();
+                                            }
+                                        });
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.state.update(cx, |state, cx| {
+                    if state.open_list(kind) {
+                        cx.notify();
+                    }
+                });
+            }))
             .into_any_element()
     }
 

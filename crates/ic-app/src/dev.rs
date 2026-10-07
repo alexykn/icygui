@@ -22,7 +22,8 @@
 //!   postgres-replication, screen 2b), `host` (its host db-prod-03 beside
 //!   the list, screen 2c), `tab` (postgres-replication as a tab), or an
 //!   object name (`db-prod-03`, `db-prod-03!postgres-replication`, or
-//!   `tab:<name>` for a tab).
+//!   `tab:<name>` for a tab), or a list of topic 07 as a tab
+//!   (`list:downtimes`, `list:comments`, `list:acknowledged`).
 //! - `ICYGUI_DEMO_APPEARANCE=light,compact,clock` starts with these
 //!   appearance settings, comma separated: a theme (`system`, `dark`,
 //!   `light`), an interface size (`small`, `default`, `large`), a row
@@ -32,6 +33,7 @@
 use ic_config::{Appearance, InterfaceSize, ListTimes, RowDensity, ThemeChoice};
 use ic_model::ObjectKey;
 
+use crate::lists::ListKind;
 use crate::live::demo::DemoFault;
 
 /// The demo's scenario.
@@ -66,6 +68,8 @@ pub(crate) enum OpenAtStart {
     },
     /// Open the object as a tab.
     Tab(ObjectKey),
+    /// Open a list of every downtime, comment or acknowledged problem.
+    List(ListKind),
 }
 
 /// The switches that are set.
@@ -211,10 +215,15 @@ fn parse_open(value: &str) -> Option<OpenAtStart> {
             pane: ObjectKey::host("db-prod-03"),
         }),
         "tab" => Some(OpenAtStart::Tab(replication())),
-        other => match other.strip_prefix("tab:") {
-            Some(name) => object(name).map(OpenAtStart::Tab),
-            None => object(other).map(OpenAtStart::Object),
-        },
+        other => {
+            if let Some(id) = other.strip_prefix("list:") {
+                return ListKind::from_id(id).map(OpenAtStart::List);
+            }
+            match other.strip_prefix("tab:") {
+                Some(name) => object(name).map(OpenAtStart::Tab),
+                None => object(other).map(OpenAtStart::Object),
+            }
+        }
     }
 }
 
@@ -276,6 +285,11 @@ mod tests {
             parse(&[(OPEN_ENV, "tab")]).open,
             Some(OpenAtStart::Tab(replication()))
         );
+        assert_eq!(
+            parse(&[(OPEN_ENV, "list:acknowledged")]).open,
+            Some(OpenAtStart::List(ListKind::Acknowledged))
+        );
+        assert_eq!(parse(&[(OPEN_ENV, "list:nonsense")]).open, None);
     }
 
     #[test]

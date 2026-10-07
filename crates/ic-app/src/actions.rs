@@ -286,10 +286,15 @@ pub(crate) enum ObjectAction {
     CheckNow,
     /// Open the comment dialog.
     AddComment,
-    /// Remove one comment, by its full name.
-    RemoveComment(String),
-    /// Remove one downtime, by its full name.
+    /// Remove these comments, by their full names (one request for all
+    /// of them).
+    RemoveComments(Vec<String>),
+    /// Remove one downtime, by its full name: asks first, listing every
+    /// downtime that goes with it (topic 01).
     RemoveDowntime(String),
+    /// Remove these downtimes, by their full names, as listed and
+    /// confirmed (their children go with them; one request for all).
+    RemoveNamedDowntimes(Vec<String>),
     /// Open the dialog for a passive check result.
     SubmitCheckResult,
     /// Open the dialog to run a check or event command.
@@ -306,8 +311,10 @@ impl ObjectAction {
             Self::RemoveDowntimes => "remove downtimes",
             Self::CheckNow => "check now",
             Self::AddComment => "add comment",
-            Self::RemoveComment(_) => "remove comment",
-            Self::RemoveDowntime(_) => "remove downtime",
+            Self::RemoveComments(names) if names.len() > 1 => "remove comments",
+            Self::RemoveComments(_) => "remove comment",
+            Self::RemoveNamedDowntimes(names) if names.len() > 1 => "remove downtimes",
+            Self::RemoveDowntime(_) | Self::RemoveNamedDowntimes(_) => "remove downtime",
             Self::SubmitCheckResult => "submit check result",
             Self::RunCommand => "run command",
         }

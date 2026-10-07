@@ -22,6 +22,7 @@ mod environments;
 mod fixture;
 mod format;
 mod keymap;
+mod lists;
 mod live;
 mod logging;
 mod menu_state;

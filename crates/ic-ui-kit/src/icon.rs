@@ -72,6 +72,8 @@ pub enum IconName {
     Lock,
     /// `maximize-2`: the window maximise control.
     Maximize,
+    /// A speech bubble: comments.
+    MessageSquare,
     /// `minus`: the window minimise control.
     Minus,
     /// `panel-left`: show or hide the sidebar.
@@ -104,7 +106,7 @@ pub enum IconName {
 
 impl IconName {
     /// Every icon, for tests and asset listings.
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 45] = [
         Self::ArrowDown,
         Self::ArrowLeft,
         Self::ArrowLeftRight,
@@ -135,6 +137,7 @@ impl IconName {
         Self::Loader,
         Self::Lock,
         Self::Maximize,
+        Self::MessageSquare,
         Self::Minus,
         Self::PanelLeft,
         Self::Pause,
@@ -191,6 +194,7 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::Loader => Self::LoaderCircle,
             IconName::Lock => Self::Lock,
             IconName::Maximize => Self::Maximize2,
+            IconName::MessageSquare => Self::MessageSquare,
             IconName::Minus => Self::Minus,
             IconName::PanelLeft => Self::PanelLeft,
             IconName::Pause => Self::Pause,

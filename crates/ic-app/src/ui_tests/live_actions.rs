@@ -213,7 +213,7 @@ async fn comment(app: &Harness, cx: &AsyncApp, control: &MockControl) {
         request(
             app,
             cx,
-            ObjectAction::RemoveComment(comment.clone()),
+            ObjectAction::RemoveComments(vec![comment.clone()]),
             vec![object.clone()],
         );
     });

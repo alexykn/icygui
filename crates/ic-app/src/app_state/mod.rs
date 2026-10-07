@@ -55,6 +55,7 @@ pub(crate) use self::operations::NOT_CONNECTED;
 use crate::actions::{ActionRequest, ObjectAction};
 #[cfg(test)]
 use crate::fixture::{self, FixtureOptions};
+use crate::lists::ListKind;
 use crate::operate::tracker::Tracker;
 use crate::persist::{Persistence, SaveReport};
 
@@ -192,6 +193,12 @@ pub(crate) struct AppState {
     tabs: Vec<ObjectKey>,
     /// The tab shown instead of the selected dashboard.
     active_tab: Option<ObjectKey>,
+    /// The lists of every downtime, comment and acknowledged problem open
+    /// as tabs (topic 07), in sidebar order (which is [`ListKind::ALL`]'s).
+    lists: Vec<ListKind>,
+    /// The list shown instead of the selected dashboard (never together
+    /// with `active_tab`).
+    active_list: Option<ListKind>,
     /// When this client started recording events (the history tab's
     /// "recorded locally since …").
     started_at: Timestamp,
@@ -256,6 +263,8 @@ impl AppState {
             selected: None,
             tabs: Vec::new(),
             active_tab: None,
+            lists: Vec::new(),
+            active_list: None,
             started_at: now,
             mode,
             persistence: None,
@@ -353,6 +362,8 @@ impl AppState {
             self.selected = None;
             self.tabs.clear();
             self.active_tab = None;
+            self.lists.clear();
+            self.active_list = None;
             return;
         };
         let saved = self.ui.environment(&id);
@@ -367,6 +378,14 @@ impl AppState {
             .take(MAX_TABS)
             .collect();
         self.active_tab = None;
+        self.lists = saved
+            .lists
+            .iter()
+            .filter_map(|id| ListKind::from_id(id))
+            .collect();
+        self.lists.sort();
+        self.lists.dedup();
+        self.active_list = None;
     }
 
     /// The first dashboard in sidebar order.
@@ -534,6 +553,17 @@ impl AppState {
         permissions::query_denial(self.engine.permissions.as_ref(), kind)
     }
 
+    /// Why the user may not read what list `kind` shows, if it may not.
+    pub(crate) fn list_denial(&self, kind: ListKind) -> Option<String> {
+        permissions::list_denial(self.engine.permissions.as_ref(), kind)
+    }
+
+    /// The active environment's author (*only mine*): its `author`, else
+    /// the API user; empty without either.
+    pub(crate) fn author(&self) -> &str {
+        self.environment().map_or("", Environment::author_name)
+    }
+
     /// Whether the user may read who Icinga notified (`None`: unknown yet).
     pub(crate) fn can_read_notifications(&self) -> Option<bool> {
         permissions::can_read_notifications(self.engine.permissions.as_ref())
@@ -660,9 +690,12 @@ impl AppState {
         if self.dashboard(&reference).is_none() {
             return false;
         }
-        let changed = self.selected.as_ref() != Some(&reference) || self.active_tab.is_some();
+        let changed = self.selected.as_ref() != Some(&reference)
+            || self.active_tab.is_some()
+            || self.active_list.is_some();
         self.selected = Some(reference);
         self.active_tab = None;
+        self.active_list = None;
         if changed {
             self.remember_environment_ui();
         }
@@ -766,6 +799,7 @@ impl AppState {
         };
         let state = EnvironmentUiState {
             tabs: self.tabs.iter().map(ObjectKey::full_name).collect(),
+            lists: self.lists.iter().map(|kind| kind.id().to_owned()).collect(),
             selected: self.selected.clone(),
         };
         if self.ui.set_environment(&id, state) {
@@ -808,8 +842,9 @@ impl AppState {
         } else if !self.tabs.contains(&key) {
             return false;
         }
-        let shown = self.active_tab.as_ref() != Some(&key);
+        let shown = self.active_tab.as_ref() != Some(&key) || self.active_list.is_some();
         self.active_tab = Some(key);
+        self.active_list = None;
         added || shown
     }
 
@@ -819,37 +854,92 @@ impl AppState {
             return false;
         }
         self.active_tab = Some(key.clone());
+        self.active_list = None;
         true
     }
 
-    /// Shows the selected dashboard instead of the active tab, which stays
-    /// open. Returns whether a tab was shown.
+    /// The lists open as tabs, in sidebar order.
+    pub(crate) fn lists(&self) -> &[ListKind] {
+        &self.lists
+    }
+
+    /// The list shown instead of the dashboard, if any.
+    pub(crate) fn active_list(&self) -> Option<ListKind> {
+        self.active_list
+    }
+
+    /// Opens the list `kind` as a tab (unless it is one already) and shows
+    /// it. Returns whether anything changed.
+    pub(crate) fn open_list(&mut self, kind: ListKind) -> bool {
+        let added = !self.lists.contains(&kind);
+        if added {
+            self.lists.push(kind);
+            self.lists.sort();
+            self.remember_environment_ui();
+        }
+        let shown = self.active_list != Some(kind);
+        self.active_list = Some(kind);
+        self.active_tab = None;
+        added || shown
+    }
+
+    /// Closes the list `kind`; closing the shown one goes back to the
+    /// dashboard. Returns whether it was open.
+    pub(crate) fn close_list(&mut self, kind: ListKind) -> bool {
+        if self.active_list == Some(kind) {
+            self.active_list = None;
+        }
+        let before = self.lists.len();
+        self.lists.retain(|open| *open != kind);
+        let closed = self.lists.len() != before;
+        if closed {
+            self.remember_environment_ui();
+        }
+        closed
+    }
+
+    /// Shows the selected dashboard instead of the active tab or list,
+    /// which stays open. Returns whether a tab or list was shown.
     pub(crate) fn show_dashboard(&mut self) -> bool {
-        self.active_tab.take().is_some()
+        let tab = self.active_tab.take().is_some();
+        let list = self.active_list.take().is_some();
+        tab || list
     }
 
     /// Shows the next open tab (`forward`) or the previous one, cycling
-    /// through the dashboard and the tabs in sidebar order: after the last
-    /// tab comes the dashboard. Returns whether anything changed.
+    /// through the dashboard, the lists and the tabs in sidebar order:
+    /// after the last tab comes the dashboard. Returns whether anything
+    /// changed.
     pub(crate) fn cycle_tab(&mut self, forward: bool) -> bool {
-        if self.tabs.is_empty() {
+        if self.tabs.is_empty() && self.lists.is_empty() {
             return false;
         }
-        // 0 is the dashboard, n the n-th tab.
-        let stops = self.tabs.len() + 1;
-        let current = self
-            .active_tab
-            .as_ref()
-            .and_then(|active| self.tabs.iter().position(|tab| tab == active))
-            .map_or(0, |index| index + 1);
+        // 0 is the dashboard, then the lists, then the tabs.
+        let lists = self.lists.len();
+        let stops = lists + self.tabs.len() + 1;
+        let current = if let Some(list) = self.active_list {
+            self.lists
+                .iter()
+                .position(|open| *open == list)
+                .map_or(0, |index| index + 1)
+        } else {
+            self.active_tab
+                .as_ref()
+                .and_then(|active| self.tabs.iter().position(|tab| tab == active))
+                .map_or(0, |index| index + 1 + lists)
+        };
         let next = if forward {
             (current + 1) % stops
         } else {
             (current + stops - 1) % stops
         };
         match next.checked_sub(1) {
+            Some(index) if index < lists => {
+                let kind = self.lists[index];
+                self.open_list(kind)
+            }
             Some(index) => {
-                let key = self.tabs[index].clone();
+                let key = self.tabs[index - lists].clone();
                 self.activate_tab(&key)
             }
             None => self.show_dashboard(),
@@ -871,11 +961,13 @@ impl AppState {
         closed
     }
 
-    /// Closes every tab.
+    /// Closes every tab and list.
     pub(crate) fn close_all_tabs(&mut self) -> bool {
         self.active_tab = None;
-        let had_tabs = !self.tabs.is_empty();
+        self.active_list = None;
+        let had_tabs = !self.tabs.is_empty() || !self.lists.is_empty();
         self.tabs.clear();
+        self.lists.clear();
         if had_tabs {
             self.remember_environment_ui();
         }

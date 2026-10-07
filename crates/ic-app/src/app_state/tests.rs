@@ -9,6 +9,7 @@ use ic_rules::{NotificationIntent, Tone as IntentTone};
 
 use super::testing::Recorder;
 use super::*;
+use crate::lists::ListKind;
 use crate::persist::Persistence;
 
 fn now() -> Timestamp {
@@ -154,6 +155,49 @@ fn tabs_cycle_through_the_dashboard() {
     assert!(state.show_dashboard());
     assert!(!state.show_dashboard(), "already shown");
     assert_eq!(state.tabs(), [a, b], "the tabs stay open");
+}
+
+#[test]
+fn lists_are_tabs_before_the_objects_and_never_shown_with_one() {
+    let mut state = AppState::fixture(now());
+    let host = ObjectKey::host("db-prod-03");
+    state.open_tab(host.clone());
+    assert!(state.open_list(ListKind::Acknowledged));
+    assert!(state.open_list(ListKind::Downtimes));
+    assert!(
+        !state.open_list(ListKind::Downtimes),
+        "open and shown already"
+    );
+    assert_eq!(
+        state.lists(),
+        [ListKind::Downtimes, ListKind::Acknowledged],
+        "in sidebar order"
+    );
+    assert_eq!(state.active_list(), Some(ListKind::Downtimes));
+    assert_eq!(state.active_tab(), None, "one thing is shown");
+    // ctrl-tab: the dashboard, the lists, then the tabs.
+    assert!(state.cycle_tab(true));
+    assert_eq!(state.active_list(), Some(ListKind::Acknowledged));
+    assert!(state.cycle_tab(true));
+    assert_eq!(state.active_tab(), Some(&host));
+    assert_eq!(state.active_list(), None);
+    assert!(state.cycle_tab(true));
+    assert_eq!((state.active_tab(), state.active_list()), (None, None));
+    assert!(state.cycle_tab(false));
+    assert_eq!(state.active_tab(), Some(&host));
+    // Closing the list shown goes back to the dashboard.
+    assert!(state.open_list(ListKind::Acknowledged));
+    assert!(state.close_list(ListKind::Acknowledged));
+    assert!(!state.close_list(ListKind::Acknowledged));
+    assert_eq!(state.active_list(), None);
+    assert_eq!(state.lists(), [ListKind::Downtimes]);
+    // Selecting a dashboard shows it instead.
+    assert!(state.open_list(ListKind::Downtimes));
+    let selected = state.selected().unwrap().clone();
+    assert!(state.select(selected));
+    assert_eq!(state.active_list(), None);
+    assert!(state.close_all_tabs());
+    assert!(state.lists().is_empty() && state.tabs().is_empty());
 }
 
 #[test]
@@ -312,6 +356,7 @@ fn a_saved_selection_that_no_longer_exists_falls_back_to_the_first_dashboard() {
         fixture::ENVIRONMENT_ID,
         EnvironmentUiState {
             tabs: vec!["host!svc".to_owned(), "bad!".to_owned()],
+            lists: vec!["acknowledged".to_owned(), "nonsense".to_owned()],
             selected: Some(reference("gone", "gone")),
         },
     );
@@ -319,12 +364,19 @@ fn a_saved_selection_that_no_longer_exists_falls_back_to_the_first_dashboard() {
         "deleted-environment",
         EnvironmentUiState {
             tabs: vec!["x".to_owned()],
+            lists: Vec::new(),
             selected: None,
         },
     );
     let state = AppState::live(fixture::build(now()).config, ui, now());
     assert_eq!(state.selected(), Some(&reference("overview", "overview")));
     assert_eq!(state.tabs(), [ObjectKey::service("host", "svc")]);
+    assert_eq!(
+        state.lists(),
+        [ListKind::Acknowledged],
+        "unknown list ids are ignored"
+    );
+    assert_eq!(state.active_list(), None, "it starts on the dashboard");
     assert!(
         !state
             .ui_state()

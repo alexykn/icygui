@@ -40,6 +40,7 @@ gpui_kit_assets::icon_assets!(
         LoaderCircle,
         Lock,
         Maximize2,
+        MessageSquare,
         Minus,
         PanelLeft,
         Pause,

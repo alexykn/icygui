@@ -400,7 +400,7 @@ pub(super) fn notes(
             entry = entry.child(remove(
                 format!("remove-comment-{}", note.name),
                 "Remove comment",
-                ObjectAction::RemoveComment(note.name.clone()),
+                ObjectAction::RemoveComments(vec![note.name.clone()]),
             ));
         }
         column = column.child(div().group(NOTE_GROUP).child(entry));

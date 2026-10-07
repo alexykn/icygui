@@ -1147,6 +1147,7 @@ impl Session {
                 ObjectKey::Host { name } => state.snapshot().hosts.contains_key(name),
                 ObjectKey::Service { key } => state.snapshot().services.contains_key(key),
             },
+            OpenAtStart::List(_) => !state.snapshot().services.is_empty(),
         };
         if !ready {
             return;
@@ -1163,6 +1164,11 @@ impl Session {
             }
             OpenAtStart::Tab(key) => self.state.update(cx, |state, cx| {
                 if state.open_tab(key) {
+                    cx.notify();
+                }
+            }),
+            OpenAtStart::List(kind) => self.state.update(cx, |state, cx| {
+                if state.open_list(kind) {
                     cx.notify();
                 }
             }),

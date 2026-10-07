@@ -109,7 +109,11 @@ impl DashboardView {
                         .relative()
                         .flex_none()
                         .mr(px(4.))
-                        .min_w(theme.text.small * (COUNT_SLOT_CHARS * ic_ui_kit::CHAR_WIDTH))
+                        // Rounded up: the font's advance is a hair over 0.6em.
+                        .min_w(
+                            (theme.text.small * (COUNT_SLOT_CHARS * ic_ui_kit::CHAR_WIDTH)).ceil()
+                                + px(1.),
+                        )
                         .text_color(colors.accent_text)
                         .child(format!("{} selected", marked.len()))
                         .map(|count| {

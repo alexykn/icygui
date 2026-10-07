@@ -717,7 +717,7 @@ async fn comments_and_downtimes_are_removed_by_the_names_actions_return() {
     let removed = client
         .run_action(
             &Action::RemoveAllDowntimes,
-            &ActionTarget::Comment(comment.clone()),
+            &ActionTarget::Comments(vec![comment.clone()]),
             "alice",
         )
         .await
@@ -747,12 +747,24 @@ async fn comments_and_downtimes_are_removed_by_the_names_actions_return() {
     let removed = client
         .run_action(
             &Action::RemoveAllDowntimes,
-            &ActionTarget::Downtime(downtime.clone()),
+            &ActionTarget::Downtimes(vec!["no-such-host!gone".to_owned(), downtime.clone()]),
             "alice",
         )
         .await
         .unwrap();
-    assert!(removed[0].is_success(), "{removed:?}");
+    // The vanished name is isolated (a 404 for it); the other goes.
+    assert_eq!(removed.len(), 2, "{removed:?}");
+    let gone = removed
+        .iter()
+        .find(|result| result.target.as_deref() == Some("no-such-host!gone"))
+        .unwrap();
+    assert_eq!(gone.code, 404);
+    assert!(
+        removed.iter().any(
+            |result| result.target.as_deref() == Some(downtime.as_str()) && result.is_success()
+        ),
+        "{removed:?}"
+    );
     assert!(!control.downtimes().iter().any(|d| d.name == downtime));
 }
 

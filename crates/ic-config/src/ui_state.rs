@@ -100,6 +100,11 @@ impl UiState {
                 .tabs
                 .retain(|tab| !tab.trim().is_empty() && seen.insert(tab.clone()));
             state.tabs.truncate(MAX_TABS);
+            let mut seen = std::collections::BTreeSet::new();
+            state
+                .lists
+                .retain(|list| !list.trim().is_empty() && seen.insert(list.clone()));
+            state.lists.truncate(MAX_TABS);
         }
     }
 }
@@ -111,6 +116,10 @@ pub struct EnvironmentUiState {
     /// Objects open as tabs ("↗ open as tab"), in sidebar order, by full
     /// name (`db-prod-03`, `db-prod-03!postgres-replication`).
     pub tabs: Vec<String>,
+    /// The lists of every downtime, comment and acknowledged problem open
+    /// as tabs (v1, topic 07), by id (`downtimes`, `comments`,
+    /// `acknowledged`); the app ignores ids it doesn't know.
+    pub lists: Vec<String>,
     /// The dashboard shown last.
     pub selected: Option<DashboardRef>,
 }
@@ -273,6 +282,7 @@ mod tests {
                     "db-prod-03!postgres-replication".to_owned(),
                     "db-prod-03".to_owned(),
                 ],
+                lists: vec!["downtimes".to_owned(), "acknowledged".to_owned()],
                 selected: Some(reference("g", "d")),
             },
         ));
@@ -309,12 +319,13 @@ mod tests {
             store.path(),
             "version = 1\n\
              [window]\nx = 0.0\ny = 0.0\nwidth = 0.0\nheight = 900.0\n\
-             [environments.e]\ntabs = [\"a\", \"b\", \" \", \"a\"]\n",
+             [environments.e]\ntabs = [\"a\", \"b\", \" \", \"a\"]\nlists = [\"comments\", \"comments\", \"\"]\n",
         )
         .unwrap();
         let state = store.load().unwrap();
         assert_eq!(state.window, None);
         assert_eq!(state.environment("e").tabs, ["a", "b"]);
+        assert_eq!(state.environment("e").lists, ["comments"]);
 
         let mut huge = UiState::default();
         huge.environments.insert(
@@ -322,6 +333,7 @@ mod tests {
             EnvironmentUiState {
                 tabs: (0..200).map(|index| format!("host-{index}")).collect(),
                 selected: None,
+                lists: Vec::new(),
             },
         );
         store.save(&huge).unwrap();
@@ -380,6 +392,7 @@ mod tests {
         let tabs = EnvironmentUiState {
             tabs: vec!["h".to_owned()],
             selected: None,
+            lists: Vec::new(),
         };
         assert!(state.set_environment("a", tabs.clone()));
         assert!(!state.set_environment("a", tabs.clone()), "unchanged");

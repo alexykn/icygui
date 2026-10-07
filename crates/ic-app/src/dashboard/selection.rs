@@ -2,31 +2,81 @@
 //! is open), the rows marked for bulk actions, and the anchor that shift
 //! selection extends from.
 //!
-//! Everything is keyed by [`ObjectKey`], so a new snapshot that reorders,
-//! adds or removes rows keeps the selection on the same objects
-//! ([`ListSelection::update_rows`]). When the cursor's object leaves the
-//! list, the cursor detaches instead of jumping to a neighbour the user
+//! Everything is keyed by the row's key ([`ObjectKey`] in a dashboard, a
+//! downtime's or comment's name in the lists of topic 07), so a new
+//! snapshot that reorders, adds or removes rows keeps the selection on the
+//! same rows ([`ListSelection::update_rows`]). When the cursor's row leaves
+//! the list, the cursor detaches instead of jumping to a neighbour the user
 //! never picked: no row is highlighted and action keys have no target,
 //! while `j`/`k` carry on from where it was. Pure and free of GPUI, so it's
 //! tested directly.
 
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::hash::Hash;
 use std::sync::Arc;
 
 use ic_core::snapshot::DashboardRow;
 use ic_model::ObjectKey;
 
-/// A dashboard's rows plus an index from object to row, built on first use
-/// (only reconciling a moved cursor needs it).
-#[derive(Debug, Default)]
-pub(crate) struct Rows {
-    rows: Arc<Vec<DashboardRow>>,
-    index: OnceCell<HashMap<ObjectKey, usize>>,
+/// A row a [`ListSelection`] can select: one with a key, or a header
+/// between them that the cursor skips.
+pub(crate) trait SelectableRow {
+    /// What identifies the row across snapshots.
+    type Key: Clone + Eq + Hash + fmt::Debug;
+
+    /// The row's key; `None` for headers.
+    fn key(&self) -> Option<&Self::Key>;
+
+    /// A header's label; `None` for rows with a key.
+    fn header_label(&self) -> Option<&str>;
 }
 
-impl Rows {
-    pub(crate) fn new(rows: Arc<Vec<DashboardRow>>) -> Self {
+impl SelectableRow for DashboardRow {
+    type Key = ObjectKey;
+
+    fn key(&self) -> Option<&ObjectKey> {
+        match self {
+            Self::Object(key) => Some(key),
+            Self::Group { .. } => None,
+        }
+    }
+
+    fn header_label(&self) -> Option<&str> {
+        match self {
+            Self::Group { label, .. } => Some(label),
+            Self::Object(_) => None,
+        }
+    }
+}
+
+/// A list's rows plus an index from key to row, built on first use (only
+/// reconciling a moved cursor needs it).
+pub(crate) struct Rows<R: SelectableRow = DashboardRow> {
+    rows: Arc<Vec<R>>,
+    index: OnceCell<HashMap<R::Key, usize>>,
+}
+
+impl<R: SelectableRow> fmt::Debug for Rows<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Rows")
+            .field("rows", &self.rows.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: SelectableRow> Default for Rows<R> {
+    fn default() -> Self {
+        Self {
+            rows: Arc::new(Vec::new()),
+            index: OnceCell::new(),
+        }
+    }
+}
+
+impl<R: SelectableRow> Rows<R> {
+    pub(crate) fn new(rows: Arc<Vec<R>>) -> Self {
         Self {
             rows,
             index: OnceCell::new(),
@@ -34,7 +84,7 @@ impl Rows {
     }
 
     /// Whether these are exactly `rows` (the same evaluation result).
-    pub(crate) fn is(&self, rows: &Arc<Vec<DashboardRow>>) -> bool {
+    pub(crate) fn is(&self, rows: &Arc<Vec<R>>) -> bool {
         Arc::ptr_eq(&self.rows, rows)
     }
 
@@ -44,25 +94,22 @@ impl Rows {
     }
 
     /// Row `index`.
-    pub(crate) fn get(&self, index: usize) -> Option<&DashboardRow> {
+    pub(crate) fn get(&self, index: usize) -> Option<&R> {
         self.rows.get(index)
     }
 
-    /// The object in row `index`; `None` for group headers and out of range.
-    pub(crate) fn key(&self, index: usize) -> Option<&ObjectKey> {
-        match self.rows.get(index)? {
-            DashboardRow::Object(key) => Some(key),
-            DashboardRow::Group { .. } => None,
-        }
+    /// The key of row `index`; `None` for headers and out of range.
+    pub(crate) fn key(&self, index: usize) -> Option<&R::Key> {
+        self.rows.get(index)?.key()
     }
 
     /// The first row showing `key`.
-    pub(crate) fn position(&self, key: &ObjectKey) -> Option<usize> {
+    pub(crate) fn position(&self, key: &R::Key) -> Option<usize> {
         self.index
             .get_or_init(|| {
                 let mut index = HashMap::with_capacity(self.rows.len());
                 for (position, row) in self.rows.iter().enumerate() {
-                    if let DashboardRow::Object(key) = row {
+                    if let Some(key) = row.key() {
                         index.entry(key.clone()).or_insert(position);
                     }
                 }
@@ -94,7 +141,7 @@ impl Rows {
     /// The row showing `key`: `index` if it still does (an object listed
     /// under several groups keeps the row that was clicked), else its first
     /// row.
-    pub(crate) fn locate(&self, index: usize, key: &ObjectKey) -> Option<usize> {
+    pub(crate) fn locate(&self, index: usize, key: &R::Key) -> Option<usize> {
         if self.key(index) == Some(key) {
             Some(index)
         } else {
@@ -106,68 +153,90 @@ impl Rows {
     /// header at or above it.
     pub(crate) fn group_of(&self, index: usize) -> Option<&str> {
         let last = index.min(self.len().checked_sub(1)?);
-        self.rows[..=last].iter().rev().find_map(|row| match row {
-            DashboardRow::Group { label, .. } => Some(label.as_str()),
-            DashboardRow::Object(_) => None,
-        })
+        self.rows[..=last]
+            .iter()
+            .rev()
+            .find_map(SelectableRow::header_label)
     }
 
-    /// Object keys in rows `from..=to` (either order).
-    fn keys_between(&self, from: usize, to: usize) -> impl Iterator<Item = &ObjectKey> {
+    /// The keys in rows `from..=to` (either order).
+    fn keys_between(&self, from: usize, to: usize) -> impl Iterator<Item = &R::Key> {
         let (start, end) = if from <= to { (from, to) } else { (to, from) };
         (start..=end.min(self.len().saturating_sub(1))).filter_map(|row| self.key(row))
     }
 }
 
-/// A row position that remembers which object it was on.
+/// A row position that remembers which row it was on.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Position {
-    key: ObjectKey,
+struct Position<K> {
+    key: K,
     index: usize,
 }
 
-impl Position {
-    fn at(rows: &Rows, index: usize) -> Option<Self> {
+impl<K: Clone + Eq + Hash + fmt::Debug> Position<K> {
+    fn at<R: SelectableRow<Key = K>>(rows: &Rows<R>, index: usize) -> Option<Self> {
         Some(Self {
             key: rows.key(index)?.clone(),
             index,
         })
     }
 
-    /// The same object in `rows`, if it's still listed.
-    fn find(&self, rows: &Rows) -> Option<Self> {
+    /// The same row in `rows`, if it's still listed.
+    fn find<R: SelectableRow<Key = K>>(&self, rows: &Rows<R>) -> Option<Self> {
         Some(Self {
             key: self.key.clone(),
             index: rows.locate(self.index, &self.key)?,
         })
     }
 
-    /// The same object in `rows`; the row nearest to the old position if the
-    /// object left the list.
-    fn follow(&self, rows: &Rows) -> Option<Self> {
+    /// The same row in `rows`; the row nearest to the old position if it
+    /// left the list.
+    fn follow<R: SelectableRow<Key = K>>(&self, rows: &Rows<R>) -> Option<Self> {
         self.find(rows)
             .or_else(|| Self::at(rows, rows.object_near(self.index)?))
     }
 }
 
-/// The selection state of one dashboard list.
-#[derive(Debug, Default)]
-pub(crate) struct ListSelection {
-    rows: Rows,
-    cursor: Option<Position>,
-    /// Where a detached cursor was (its object left the list): moving
+/// The selection state of one list.
+pub(crate) struct ListSelection<R: SelectableRow = DashboardRow> {
+    rows: Rows<R>,
+    cursor: Option<Position<R::Key>>,
+    /// Where a detached cursor was (its row left the list): moving
     /// carries on from this row.
     detached: Option<usize>,
     /// Where shift selection extends from.
-    anchor: Option<Position>,
+    anchor: Option<Position<R::Key>>,
     /// Marks from before the current shift extension, kept as it grows and
     /// shrinks.
-    base: Option<HashSet<ObjectKey>>,
-    marked: HashSet<ObjectKey>,
+    base: Option<HashSet<R::Key>>,
+    marked: HashSet<R::Key>,
 }
 
-impl ListSelection {
-    pub(crate) fn new(rows: Arc<Vec<DashboardRow>>) -> Self {
+impl<R: SelectableRow> fmt::Debug for ListSelection<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ListSelection")
+            .field("rows", &self.rows)
+            .field("cursor", &self.cursor)
+            .field("marked", &self.marked.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: SelectableRow> Default for ListSelection<R> {
+    fn default() -> Self {
+        Self {
+            rows: Rows::default(),
+            cursor: None,
+            detached: None,
+            anchor: None,
+            base: None,
+            marked: HashSet::new(),
+        }
+    }
+}
+
+impl<R: SelectableRow> ListSelection<R> {
+    pub(crate) fn new(rows: Arc<Vec<R>>) -> Self {
         Self {
             rows: Rows::new(rows),
             ..Self::default()
@@ -175,7 +244,7 @@ impl ListSelection {
     }
 
     /// The rows the selection refers to.
-    pub(crate) fn rows(&self) -> &Rows {
+    pub(crate) fn rows(&self) -> &Rows<R> {
         &self.rows
     }
 
@@ -185,7 +254,7 @@ impl ListSelection {
     /// moving resumes there); the anchor moves to the nearest row. Marks of
     /// objects that left are dropped, so a bulk action never hits rows the
     /// user can't see. Returns whether the rows changed.
-    pub(crate) fn update_rows(&mut self, rows: &Arc<Vec<DashboardRow>>) -> bool {
+    pub(crate) fn update_rows(&mut self, rows: &Arc<Vec<R>>) -> bool {
         if self.rows.is(rows) {
             return false;
         }
@@ -213,8 +282,8 @@ impl ListSelection {
         self.cursor.as_ref().map(|cursor| cursor.index)
     }
 
-    /// The object under the cursor.
-    pub(crate) fn cursor_key(&self) -> Option<&ObjectKey> {
+    /// The row under the cursor.
+    pub(crate) fn cursor_key(&self) -> Option<&R::Key> {
         self.cursor.as_ref().map(|cursor| &cursor.key)
     }
 
@@ -230,7 +299,7 @@ impl ListSelection {
     }
 
     /// Puts the cursor on `key`'s first row, keeping the marks.
-    pub(crate) fn select_key(&mut self, key: &ObjectKey) -> bool {
+    pub(crate) fn select_key(&mut self, key: &R::Key) -> bool {
         let Some(position) = self
             .rows
             .position(key)
@@ -348,7 +417,7 @@ impl ListSelection {
     }
 
     /// Whether `key` is marked.
-    pub(crate) fn is_marked(&self, key: &ObjectKey) -> bool {
+    pub(crate) fn is_marked(&self, key: &R::Key) -> bool {
         self.marked.contains(key)
     }
 
@@ -358,7 +427,7 @@ impl ListSelection {
     }
 
     /// The marked objects in row order.
-    pub(crate) fn marked_keys(&self) -> Vec<ObjectKey> {
+    pub(crate) fn marked_keys(&self) -> Vec<R::Key> {
         if self.marked.is_empty() {
             return Vec::new();
         }
@@ -372,7 +441,7 @@ impl ListSelection {
 
     /// Moves the cursor and the anchor to `position`; the next shift
     /// extension starts from the marks as they are now.
-    fn place(&mut self, position: Position) {
+    fn place(&mut self, position: Position<R::Key>) {
         self.anchor = Some(position.clone());
         self.cursor = Some(position);
         self.detached = None;

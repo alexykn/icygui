@@ -53,7 +53,8 @@ use ic_ui_kit::{
 };
 
 use self::files::LogSummary;
-#[cfg(test)]
+// Only the UI tests read it, and they run on Linux only.
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) use self::files::OPENED;
 use self::keyboard::{
     CONTROL_CONTEXT, ControlActivate, ControlNext, ControlPrevious, Region, Stop,

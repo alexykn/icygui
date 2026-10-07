@@ -62,7 +62,7 @@ per frame, plus `-zoom` crops of the details.
 | 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
 | 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
-| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+15 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
+| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+16 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
 
 ---
 
@@ -1306,15 +1306,20 @@ icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
   setting, in the editor's dashboard fields under name and group (above
   *notifications*, topic 12), so it is also set in the new-dashboard flow,
   which opens the same editor (14-r5-f).
-  - A small dropdown (132px), **state** (the coloured dot of the worst
+  - A small dropdown (the rest of the name column), **state** (the coloured dot of the worst
     problem) or **icon**. With no problem view on the dashboard, *state* is
     greyed out with its reason on a second line, *no problem view on this
     dashboard* (14-r5-g).
   - Left of it, a **rounded square the height of a field** (30px plus the
-    border, like a colour swatch) **previews the mark**. The square and the
-    dropdown share their top, bottom and height and sit 12px apart (the gap
-    between side-by-side fields); the dot (10px) or icon (16px) is centred
-    exactly in the square (`-row-zoom` crops of e, f, g, dark and light).
+    border, like a colour swatch) **previews the mark**. The row sits on the
+    inspector's two-column grid: the square's left edge is the name field's,
+    and square, 12px gap and dropdown span exactly the name column (the
+    dropdown ends where the name field ends); the hint on the label line is
+    right-aligned with the group field, as on the other label rows. The
+    square and the dropdown share their top, bottom and height; the dot
+    (10px) or icon (16px) is centred exactly in the square. The name row,
+    the mark row and *views* are 12px apart, the inspector's field spacing
+    (`-row-zoom` crops of a, e, f, g, dark and light).
     With *state* it shows the dot and is **not clickable: no hover
     highlight** (14-r5-e: the pointer, drawn just beside the square so the
     alignment shows, has passed over it and nothing lit up). With *icon* it is a button with the normal hover

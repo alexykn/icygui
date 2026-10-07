@@ -773,11 +773,14 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .row.cmp { height: 20px; padding: 6px 18px; }
 .row.cmp .lead { flex-direction: row; justify-content: center; }
 .row.cmp .tag .since { font-size: 11.5px; color: var(--t-faint); }
-/* the sidebar mark field (topic 14): the swatch, then a fixed-width select */
+/* the sidebar mark field (topic 14): the swatch, then the dropdown, together the name column */
 /* the swatch and the dropdown: the same top, bottom and height (a field's
  * 30px plus the border), the fields' 12px gap; the mark centred in the swatch */
 .mfield { display: flex; align-items: center; gap: 12px; }
 .mfield .mswatch > * { flex: none; display: block; }
+.mfield { min-width: 0; }
+.mfield .msel { flex: 1; min-width: 0; display: flex; }   /* the dropdown fills the rest of the name column */
+.mfield .msel .select { flex: 1; min-width: 0; }
 .mswatch.dis { cursor: default; }
 .mpick .g.res { align-content: start; }
 .mpick .empty { font-size: 11.5px; color: var(--t-faint); padding: 4px 2px; }

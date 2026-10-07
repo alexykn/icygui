@@ -228,6 +228,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .row .tag { font-size: 11.5px; color: var(--t-faint); text-align: right; white-space: nowrap; display: flex; gap: 10px; align-items: center; }
 .row .late { color: var(--warn); }
 .row.ghdr { background: var(--row-header); border-bottom-color: var(--bd-header); }
+.row.ghdr.marked { background: var(--row-marked); }
 .row.indent { padding-left: 30px; }
 .crow { display: grid; grid-template-columns: 22px minmax(0,1fr) auto; gap: 14px; align-items: center; padding: 9px 24px; border-bottom: 1px solid var(--bd-row); }
 .crow .n { font-size: 13px; color: var(--t-strong); }
@@ -568,3 +569,17 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .sighelp { position: absolute; z-index: 30; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 6px 18px var(--shadow-strong); font-size: 12.5px; color: var(--t-sec); white-space: nowrap; display: flex; flex-direction: column; gap: 4px; }
 .sighelp .cur { color: var(--t-strong); text-decoration: underline; text-underline-offset: 3px; }
 .sighelp .d { font-size: 11.5px; color: var(--t-faint); white-space: normal; max-width: 360px; line-height: 1.45; }
+
+/* ---- NEW v1: palette multi-select (topic 10) ------------------------- */
+/* One rounded outline per block of selected rows: the block wraps the
+ * rows and draws the outline over them, so selecting never moves a row. */
+.blk { position: relative; display: flex; flex-direction: column; flex: none; border-radius: 6px; background: var(--row-marked); }
+.blk::after { content: ''; position: absolute; inset: 0; border: 1px solid var(--accent); border-radius: 6px; pointer-events: none; }
+.blk .prow { border-radius: 0; }
+.blk .prow.sel { border-radius: 6px; background: var(--el-hover); }
+.blk.preview { background: transparent; }
+.blk.preview::after { border-style: dashed; }
+.prow.hov { background: var(--row-hover); }
+.pal-foot .cnt { color: var(--accent); }
+.pal-foot .k { color: var(--t-muted); }
+.ptr { position: absolute; z-index: 70; width: 0; height: 0; }

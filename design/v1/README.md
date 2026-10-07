@@ -522,3 +522,89 @@ hover help; 9g a parse error.
 1. Syntax colouring in the filter field: wanted, or keep it monochrome like
    the plugin output?
 2. Fuzzy (drawn: `r` matches `backup_retention`) or prefix-only matching?
+
+---
+
+## 10 Palette multi-select (ships in v1, designed to be built)
+
+**Shows** (`10-palette-multiselect.html`, the palette frames with zoomed
+crops): 10a no selection; 10b one block (shift-↓ twice); 10c several blocks
+(ctrl-click); 10d ctrl-a; 10e the cursor on *all N matches*; 10f the one
+bulk dialog; 10g hosts selected without a verb; 10h the combined multi-host
+view; 10i pinned as a tab, and *save as dashboard*.
+
+**Behaviour**
+
+- **What can be selected:** object rows only, meaning hosts, services, and a
+  verb query's action rows (`Acknowledge · postgres-replication`). Commands,
+  dashboards, environments and the *all N matches* row are skipped by
+  shift-↑↓ and ignore ctrl-click.
+- **Keys and clicks:** shift-↑/↓ extends or shrinks the selection from the
+  anchor (the row where it started) to the cursor. ctrl-click (⌘-click)
+  toggles a row and moves the cursor there; shift-click selects the range from
+  the anchor. ctrl-a (⌘A) selects every match. Esc clears the selection; a
+  second Esc closes the palette. Editing the query clears the selection. A
+  plain ↑↓ moves the cursor and keeps the selection.
+- **Enter:** with a selection and a verb query, it opens ONE dialog for every
+  selected object (today's action dialog). With a selection and no verb, it
+  opens the combined view; Tab opens it as a tab directly. Without a
+  selection, Enter runs the cursor row as today, and ctrl-↵ runs the verb on
+  all matches as today.
+- **Verb queries list every match** (today: the best 4 services and 2
+  hosts). The list scrolls inside the palette's 420px. *All N matches* moves
+  to the top of the section, so it is always in view.
+- **The all-matches row lists what it counts:** with the cursor on it, the
+  rows it counts get a dashed outline (a preview, not a selection; no
+  counter).
+
+**Drawing**
+
+- **One rounded outline per block** of contiguous selected rows: the block
+  has the lists' marked tint (`row_marked`) and a 1px accent outline with the
+  rows' 6px radius. The outline is drawn as an overlay above the rows, so the
+  cursor row can't cover it. Rows inside a block lose their own corners.
+- **The cursor inside a block** keeps a row background of its own
+  (`element_hover`, lighter and neutral), so it stands out from the blue
+  tint. Outside a block it is the selected-row background, as today.
+- **Nothing moves:** the block wraps the rows without adding size; section
+  labels break a block in two; there is never a check column.
+- **Footer:** `3 selected` in the accent (the selection bar's counter), then
+  what Enter does (`↵ acknowledge all 3`, `↵ open together`), then
+  `ctrl-a select all 7`, then `esc clear` at the right. Without a selection
+  it shows the keys as today, plus `shift-↑↓ select`.
+
+**The bulk dialog (10f):** today's action dialog. The title counts the
+targets (`Acknowledge · 7 services`), and the target box lists **every**
+object with its state dot (it scrolls; it no longer stops at five with `+ N
+more`). Skipped objects are listed with the reason, as today. The send button
+counts (`acknowledge 7`).
+
+**The combined view (10h):** in the main area, like a dashboard. The header
+reads `3 hosts · db-prod-01, db-prod-02, db-prod-03`, then `↗ pin as tab`,
+*save as dashboard* and `×` (back to the dashboard). The summary bar counts
+the services by state and ends with `3 hosts · 63 services`. Each host is a
+summary row (the grouped list's header band, with its state, address,
+uptime and output, and service counts at the right), followed by its problem
+services (indented list rows) and `+ N more ok` (folded OK services, as in
+the host pane). A selected service shows under its host. The host rows arrive
+**marked**, so the selection bar acts on the hosts at once. Acknowledge is
+disabled while the hosts are up (the tooltip says to mark their problems).
+Downtime offers `all services`. Everything else is the normal list: x, shift,
+ctrl-a, Enter for the pane.
+
+**Pin and save (10i):** `↗ pin as tab` adds the view to the sidebar's `open`
+section (worst-state dot, `3 hosts db-prod-01, …`), where it survives
+restarts. Its slot in the header stays empty, so nothing moves. *save as
+dashboard* asks for a name and a group, and whether to keep **these 3
+hosts** (`host.name in [...]`) or **the query** (`match("db-prod*",
+host.name)`). The result is a grouped list by host, editable later.
+
+**Open questions**
+
+1. Should a typed query keep the selection, so you can search more and add to
+   it (an "add more" flow)? Drawn: editing the query clears it, which is
+   simpler and predictable.
+2. When the combined view opens, should the host rows arrive marked (drawn),
+   or unmarked so the bar only appears once you mark something?
+3. Should the combined view also work for a selection of services only
+   (drawn: yes, grouped by host)?

@@ -332,12 +332,29 @@ Status markers: ✅ done · ⏳ in progress · ☐ not started.
 
 ### 4.2 After rc1 (v1)
 
-- **M7:** multi-view dashboards, the host-group grid, the full cluster health view (zones, endpoints, latency, work queues), the light theme with follow-system (UI-02); from §2.2 and §5, not in rc1: own list views for comments and downtimes with bulk removal, and the read-only users, user groups and commands in the Config tab (with the `objects/query/{User,UserGroup,CheckCommand}` permissions they need).
-- **Fixes from the production trial**, including the macOS desktop integration (notifications, the menu-bar item, the tray, close to tray, quiet mode's window visibility), which so far is only compiled and unit-tested in CI and has never run on a real Mac.
-- **To confirm with the user in the trial:** on macOS (and X11 without a compositor) a window that other windows cover completely for half a minute counts as hidden and goes quiet (GPUI can't tell it from minimised there; §4.1 step 2, docs/spikes.md's Mac checklist).
+**Can start now** (independent of the trial):
+
+- **M7, without multi-view dashboards:** the host-group grid, the full cluster health view (zones, endpoints, latency, work queues), the light theme (chosen in the settings below; UI-02); own list views for comments and downtimes with bulk removal (from §2.2 and §5, not in rc1).
+- **A settings window in the style of Zed's**, replacing today's two-tab settings dialog: a navigation list with search on the left, one row per setting on the right (name, a one-line description, the control right-aligned: switch, dropdown or segmented control), "edit in settings file" at the top right; in the app's design. Kept small. Contents (proposed, the user confirms): **General** (keep running in the tray, start at login, quiet mode when hidden); **Appearance** (theme: follow system, dark or light; interface size; row density: comfortable or compact; times in lists: relative or clock); **Notifications** (today's notification settings, plus whether desktop notifications show the plugin output, for shared screens and the lock screen); **Icinga** (reconcile, event log retention, the environments with their editors); **Keymap** (the shortcuts, searchable, and the keymap file); **Advanced** (log level, open the log and config folders). Shown to the user as real screenshots before it counts as done.
 - **Filter autocomplete** in the dashboard editor (and other filter fields), in the style of Zed: completions from the parser at the cursor and from the live data (attributes with descriptions after `host.` and `service.`, the custom variable names that exist after `vars.`, ranked by how often they occur, the values in use inside strings, host group, service group and service names, functions with their signatures, state constants); fuzzy matching; Tab or Enter to accept, Ctrl-Space to open; hover help; the parse error underlined at its position.
-- **Palette multi-select:** Shift+arrows extend the selection, Cmd/Ctrl+A selects all matches, Cmd/Ctrl+click toggles rows; the selection is drawn as one rounded outline per block, with a counter in the palette footer ("3 selected · ↵ acknowledge all"); Enter with a verb opens one bulk dialog for the selection, Enter without a verb opens a combined view of the selected hosts like Icinga Web's (a summary row per host, their services grouped by host, the bulk action bar; pinnable as a tab or savable as a dashboard). The "all N matches" row lists every object it counts. Decided after the user has tried the current palette at work.
-- **Ideas offered, not yet decided:** sharing a dashboard through the clipboard; team dashboard groups that follow a shared file or URL read-only; loading the services in by-name batches from a key list kept from the previous run, to cap every answer's size and maybe the master's memory peak (docs/performance.md, *Proposed, not built*; to be measured first).
+- **Sharing dashboards through the clipboard, in YAML:** copy a dashboard or a group as YAML text (from its menu and the palette) and paste it into another icygui to import it, with the same preview and conflict handling as a file import. The sharing format becomes YAML instead of TOML, for the clipboard and the exported file alike (`format: icygui-dashboards`, `version`); import still reads the TOML files rc1 exported. The settings file stays TOML.
+
+**Waits for a design mock-up first** (the user wants these designed carefully; not now):
+
+- **Multi-view dashboards** (M7).
+- **The palette's bulk dialog and combined multi-host view:** Enter with a verb opens one bulk dialog for the selection, Enter without a verb opens a combined view of the selected hosts like Icinga Web's (a summary row per host, their services grouped by host, the bulk action bar; pinnable as a tab or savable as a dashboard).
+
+**After the production trial:**
+
+- **Fixes from the trial**, including the macOS desktop integration (notifications, the menu-bar item, the tray, close to tray, quiet mode's window visibility), which so far is only compiled and unit-tested in CI and has never run on a real Mac.
+- **To confirm with the user in the trial:** on macOS (and X11 without a compositor) a window that other windows cover completely for half a minute counts as hidden and goes quiet (GPUI can't tell it from minimised there; §4.1 step 2, docs/spikes.md's Mac checklist).
+- **Palette multi-select** (decided after the user has tried the current palette at work): Shift+arrows extend the selection, Cmd/Ctrl+A selects all matches, Cmd/Ctrl+click toggles rows; the selection is drawn as one rounded outline per block, with a counter in the palette footer ("3 selected · ↵ acknowledge all"); the "all N matches" row lists every object it counts. Its bulk dialog and combined view wait for the mock-up above.
+
+**To decide:** read-only users, user groups and check commands in the host pane's config tab and the service pane's check section (who Icinga would notify, with addresses and periods; the command line a check runs); needs `objects/query/{User,UserGroup,CheckCommand}` beyond today's least-privilege list.
+
+**Ideas, not yet decided:** loading the services in by-name batches from a key list kept from the previous run, to cap every answer's size and maybe the master's memory peak (docs/performance.md, *Proposed, not built*; to be measured first).
+
+**Decided against:** team dashboard groups that follow a shared file or URL.
 
 ### 4.3 Product rules (standing decisions)
 

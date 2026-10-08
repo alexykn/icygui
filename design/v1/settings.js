@@ -193,9 +193,10 @@ function settingsNav({ page = 'general', search = '', section = 0 }) {
   return html;
 }
 
-function settingsWindow({ page = 'general', search = '', part = 0, section = 0, title, subtitle, appearance = {} } = {}) {
+// body: a page's content drawn by the caller (topic 16: an environment's page)
+function settingsWindow({ page = 'general', search = '', part = 0, section = 0, title, subtitle, appearance = {}, body: bodyHtml = '' } = {}) {
   const pages = { general: pageGeneral, appearance: () => pageAppearance(appearance), notifications: () => pageNotifications(part), icinga: pageIcinga, keymap: pageKeymap, advanced: pageAdvanced };
-  const body = search ? pageSearch() : pages[page]();
+  const body = bodyHtml || (search ? pageSearch() : pages[page]());
   const subtitles = { general: 'for icygui on this computer', appearance: 'for icygui on this computer', notifications: 'for prod-cluster · on this computer only', icinga: 'for icygui on this computer', keymap: 'keymap.toml', advanced: 'for icygui on this computer' };
   const head = search
     ? `<span class="title">4 settings</span><span class="subtitle">match “quiet”</span>`

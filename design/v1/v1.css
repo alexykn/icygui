@@ -400,7 +400,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .toast .ti { font-size: 12.5px; color: var(--t-strong); }
 .toast .tl2 { font-size: 12px; color: var(--t-muted); }
 .toast .tx { margin-left: auto; color: var(--t-faint); }
-.banner { position: relative; display: flex; align-items: center; gap: 12px; min-height: 36px; padding: 8px 18px 8px 20px; background: var(--tint, var(--warn-tint)); border-bottom: 1px solid var(--bd-header); }
+.banner { position: relative; display: flex; align-items: center; gap: 12px; min-height: 36px; padding: 8px 18px 6.4px 20px;  /* text sits 9.1px from the top and the bottom edge */ background: var(--tint, var(--warn-tint)); border-bottom: 1px solid var(--bd-header); }
 .banner::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--tone, var(--warn)); }
 
 /* ---- callouts on the canvas (annotations, never part of the app) ---- */
@@ -824,3 +824,31 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .morerow.cmp { height: 26px; }
 .morerow.hnote { color: var(--t-faint); font-style: normal; }
 .mfield .msel .selwrap { flex: 1; }
+
+/* ---- topic 16: the heartbeat row on the cluster health page. Fixed slots:
+ * dot, label, the object (dimmed), the status word slot sized for its
+ * longest value ("not found"), the age slot; nothing moves between states. */
+.hbrow { display: flex; align-items: center; gap: 12px; height: 36px; padding: 0 18px; border-bottom: 1px solid var(--bd-header); font-size: 12px; color: var(--t-muted); white-space: nowrap; flex: none; }
+.hbrow .hl { color: var(--t-sec); width: 9ch; flex: none; }
+.hbrow .ho { color: var(--t-faint); width: 26ch; flex: none; overflow: hidden; text-overflow: ellipsis; }
+.hbrow .hs2 { width: 18ch; flex: none; }
+.hbrow .ha { width: 8ch; flex: none; text-align: right; color: var(--t-sec); }
+/* ---- topic 17: commenting in the handling view: pending, the field, the error */
+.te.pending .hd, .te.pending .tx { opacity: .5; }
+.te .cfield { display: block; min-height: 20px; padding: 6px 10px; margin-top: 4px; border-radius: 6px; border: 1px solid var(--accent); background: var(--code-bg); font-size: 12.5px; line-height: 1.5; color: var(--t); white-space: pre-wrap; }
+.te .cerr { color: var(--crit-text); font-size: 12px; margin-top: 4px; }
+
+/* ---- topic 16 (NEW): the status bar, full width at the window's bottom,
+ * Zed-like: 26px, 14px symbols in 22px buttons, a 6px state dot on a symbol */
+.win.sbar { grid-template-rows: minmax(0, 1fr) 26px; }
+.win.sbar > .sb { grid-row: 1; } .win.sbar > .col { grid-row: 1; }
+.statusbar { grid-column: 1 / -1; grid-row: 2; display: flex; align-items: center; gap: 4px; height: 26px; padding: 0 6px; border-top: 1px solid var(--bd-split); background: var(--sb-bg); color: var(--t-sec); font-size: 11px; box-sizing: border-box; position: relative; }
+.statusbar .stb { width: 22px; height: 20px; color: var(--t-muted); }
+.statusbar .stb.sel { background: var(--el-hover); color: var(--t); }
+.statusbar .status { display: flex; align-items: center; gap: 5px; height: 20px; padding: 0 4px; border-radius: 4px; white-space: nowrap; margin: 0 2px; }
+.statusbar .status.open { background: var(--el-hover); }
+.statusbar .status .env { color: var(--t-sec); font-weight: 500; }
+.statusbar .status .chev { margin-left: -2px; }
+.statusbar .badge { top: 0; right: -3px; }
+.statusbar .sdot { position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; box-shadow: 0 0 0 1.5px var(--sb-bg); background: var(--pend); }
+.statusbar .sdot.ok { background: var(--ok); } .statusbar .sdot.warn { background: var(--warn); } .statusbar .sdot.crit { background: var(--crit); }

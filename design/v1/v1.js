@@ -66,7 +66,7 @@ function trafficLights(off = false) {
 // slots: reserve the fixed slot for the notification-times mark (topic 12)
 // after each group's name and before each dashboard's count; g.mark and an
 // item's 5th field fill it.
-function sidebar({ activeGroup = 'overview', activeItem = 'overview', groups = SIDEBAR_GROUPS, foot = {}, after = '', before = '', search = '', slots = false } = {}) {
+function sidebar({ activeGroup = 'overview', activeItem = 'overview', groups = SIDEBAR_GROUPS, foot = {}, after = '', before = '', search = '', slots = false, noFoot = false } = {}) {
   let html = `<div class="sb">
     <div class="sb-top">${trafficLights(foot.inactive)}<span class="vdiv"></span><span class="muted">${icon('search', 13)}</span>
       <span class="sb-search">${search || 'Search dashboards…'}</span></div>${before}`;
@@ -82,7 +82,7 @@ function sidebar({ activeGroup = 'overview', activeItem = 'overview', groups = S
     html += `</div>`;
   }
   html += after;
-  html += `<div style="flex:1"></div>${sidebarFoot(foot)}</div>`;
+  html += `<div style="flex:1"></div>${noFoot ? '' : sidebarFoot(foot)}</div>`;
   return html;
 }
 
@@ -209,6 +209,9 @@ function anchorMenus() {
     const frame = tp.closest('[data-shot]'); const trig = frame && frame.querySelector(tp.dataset.anchor);
     if (!trig) { console.error('tooltip anchor not found: ' + tp.dataset.anchor); return; }
     const op = tp.offsetParent.getBoundingClientRect(), t = trig.getBoundingClientRect(), r = tp.getBoundingClientRect();
+    if (tp.dataset.side === 'top') { // above the trigger, right edges aligned (a status bar symbol)
+      tp.style.left = Math.round(t.right - r.width - op.left) + 'px'; tp.style.top = Math.round(t.top - 6 - r.height - op.top) + 'px'; return;
+    }
     const left = tp.dataset.side === 'left' ? t.left - 8 - r.width : t.right + 8;
     tp.style.left = Math.round(left - op.left) + 'px'; tp.style.top = Math.round(t.top + (t.height - r.height) / 2 - op.top) + 'px';
   });
@@ -251,8 +254,28 @@ function shot(id, name, label, html, { theme = 'dark', w = 1440, h = 900, crops 
 }
 
 // Window: sidebar + main content.
+// statusBar (topic 16, NEW): the footer becomes a slim full-width status bar
+// across the window's bottom (Zed-like): { foot, diag, log, hov } where diag is
+// the active engine's state ('ok' | 'warn' | 'crit') and hov the hovered symbol
 function appWindow(main, sb = {}) {
+  if (sb.statusBar) return `<div class="win sbar">${sidebar({ ...sb, noFoot: true })}<div class="col" style="min-height:0">${main}</div>${statusBar(sb.statusBar === true ? {} : sb.statusBar, sb.foot)}</div>`;
   return `<div class="win">${sidebar(sb)}<div class="col" style="min-height:0">${main}</div></div>`;
+}
+// LEFT as today's footer (sidebar toggle, history, the environment switcher,
+// +); RIGHT small symbols with tooltips, a state dot where it matters: the
+// active environment's diagnostics (dot = engine state), the app log; room
+// for later ones
+function statusBar({ diag = 'ok', hov = '', diagOpen = false, logOpen = false } = {}, foot = {}) {
+  const { badge, open, env = 'prod-cluster', node = 'master-01', age = '0s', health = 'ok', bell } = foot;
+  const sym = (ic, name, { st = '', on = false, h = false } = {}) => `<span class="ibtn stb${on || h ? ' sel' : ''}" data-sym="${name}">${icon(ic, 14)}${st && st !== 'ok' ? `<span class="sdot ${st}"></span>` : st ? `<span class="sdot ok"></span>` : ''}</span>`;
+  return `<div class="statusbar">
+    <span class="ibtn stb">${icon('panel-left', 14)}</span>
+    <span class="ibtn stb">${icon(bell ? 'bell-off' : 'clock', 14)}${badge ? `<span class="badge">${badge}</span>` : ''}</span>
+    <span class="status${open ? ' open' : ''}">${dot(health, 'd6')}<span class="env">${env}</span><span class="faint">${node}</span><span class="faint">${age}</span><span class="faint chev">${icon('chevron-down', 10)}</span></span>
+    <span class="ibtn stb">${icon('plus', 14)}</span>
+    <span class="grow"></span>
+    ${sym('gauge', 'diagnostics', { st: diag, on: diagOpen, h: hov === 'diagnostics' })}${sym('scroll-text', 'log', { on: logOpen, h: hov === 'log' })}
+  </div>`;
 }
 
 // ---- the downtime banner (topic 01) ------------------------------------
@@ -273,8 +296,9 @@ function dte({ ic = 'calendar-clock', d1, au, meta = '', body, hov }) {
 // and events (the same views without a filter, round 5) and cluster health, each with its mark in the dot slot and its count in the
 // count slot (health: the cluster's state dot, no count).
 const sbIconSlot = (ic) => `<span class="faint" style="width:8px;display:flex;justify-content:center">${icon(ic, 11)}</span>`;
-const clusterSection = ({ active = '', health = 'ok' } = {}) => `<div class="sb-group" style="padding:0 0 6px;margin-bottom:6px;border-bottom:1px solid var(--bd-header)">
-  <div class="sb-gh"><span class="name">cluster</span><span class="faint" style="font-size:12px">prod-cluster</span></div>
+// env: the environment the section belongs to
+const clusterSection = ({ active = '', health = 'ok', env = 'prod-cluster' } = {}) => `<div class="sb-group" style="padding:0 0 6px;margin-bottom:6px;border-bottom:1px solid var(--bd-header)">
+  <div class="sb-gh"><span class="name">cluster</span><span class="faint" style="font-size:12px">${env}</span></div>
   <div class="sb-item${active === 'handling' ? ' active' : ''}">${sbIconSlot('users')}<span class="label">handling</span><span class="count">20</span></div>
   <div class="sb-item${active === 'downtimes' ? ' active' : ''}">${sbIconSlot('calendar-clock')}<span class="label">downtimes</span><span class="count">5</span></div>
   <div class="sb-item${active === 'events' ? ' active' : ''}">${sbIconSlot('activity')}<span class="label">events</span><span class="count"></span></div>
@@ -285,8 +309,8 @@ const clusterGroups = (on = 'both') => [SIDEBAR_GROUPS[0], platformGroup(on), SI
 // a group's own entries carry an icon in the mark slot instead of a state dot
 const sbWithIcons = (html) => html.replace(/<span class="dot ic-([a-z-]+) *"><\/span>/g, (m, n) => sbIconSlot(n));
 // the main window with the cluster section and the round-3 groups
-const clusterWindow = (main, { cluster = '', health = 'ok', activeGroup = '', activeItem = '', on = 'none', menuOn = false, foot = {} } = {}) => sbWithIcons(appWindow(main, {
-  groups: clusterGroups(on).map((g) => (menuOn && g.name === 'platform' ? { ...g, menu: true } : g)), activeGroup, activeItem, foot, before: clusterSection({ active: cluster, health }) }));
+const clusterWindow = (main, { cluster = '', health = 'ok', activeGroup = '', activeItem = '', on = 'none', menuOn = false, foot = {}, env = 'prod-cluster', statusBar = null } = {}) => sbWithIcons(appWindow(main, {
+  groups: clusterGroups(on).map((g) => (menuOn && g.name === 'platform' ? { ...g, menu: true } : g)), activeGroup, activeItem, foot, statusBar, before: clusterSection({ active: cluster, health, env }) }));
 
 // ---- host bands: ONE component for every host-with-services view ----------
 // 10h/10j/10k/10l (a service list grouped by host, the combined view) and 15

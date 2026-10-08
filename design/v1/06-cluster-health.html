@@ -1,71 +1,12 @@
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>icygui v1 · 06 cluster health</title>
-<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="views.js"></script></head>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="views.js"></script><script src="health.js"></script></head>
 <body class="canvas">
 <div class="topic-head"><span class="topic-id">06</span><span class="topic-name">Cluster health: is the monitoring itself healthy?</span></div>
 <p class="topic-intro">A page per environment, like Icinga Web's monitoring health. It has the zones with their endpoints (connected, last message, version, traffic), the node icygui is connected to (marked with the selected-row background), Icinga's numbers from <b>/v1/status</b> (checks per minute, latency, execution time, pending checks, work queues, connections, uptime), and Icinga's global switches, read-only.
 It opens from <i>health</i> in the sidebar's fixed <i>cluster</i> section (topic 14), from a <i>cluster health</i> item under the nodes in the footer switcher, and from the palette, so it stays one click away. Its data comes from the 30-second status poll icygui already makes, plus the endpoints and zones it already loads, so it adds no requests while the page is closed. The small trend lines are the last 30 minutes of those polls, kept in memory.</p>
 <div class="shots"></div>
 <script>
-function spark(points, w = 132, h = 22, color = 'var(--t-faint)', last = 'var(--accent)') {
-  const max = Math.max(...points), min = Math.min(...points);
-  const xs = points.map((_, i) => (i / (points.length - 1)) * (w - 4) + 2);
-  const ys = points.map((p) => h - 3 - ((p - min) / (max - min || 1)) * (h - 6));
-  const path = xs.map((x, i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
-  const n = xs.length - 1;
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><path d="${path}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><path d="M${xs[n - 1].toFixed(1)},${ys[n - 1].toFixed(1)} L${xs[n].toFixed(1)},${ys[n].toFixed(1)}" stroke="${last}" stroke-width="2" stroke-linecap="round"/><circle cx="${xs[n].toFixed(1)}" cy="${ys[n].toFixed(1)}" r="2.5" fill="${last}"/></svg>`;
-}
-function kpi(label, value, sub, points, { cls = '', last, span = 1 } = {}) {
-  return `<div class="kpi"${span > 1 ? ` style="grid-column:span ${span}"` : ''}><span class="lb">${label}</span><span class="v ${cls}">${value}</span><span class="ks">${sub}</span>${points ? spark(points, 132, 22, 'var(--t-faint)', last) : '<svg width="132" height="22"></svg>'}</div>`;
-}
-const er = (st, name, zoneTxt, ver, last, traffic, status, { sel, mine } = {}) =>
-  `<div class="er${sel ? ' sel' : ''}">${dot(st, 'd7')}<span><span class="strong">${name}</span></span><span class="muted">${zoneTxt}</span><span class="sec">${ver}</span><span class="sec">${last}</span><span class="muted">${traffic}</span><span class="${st === 'crit' ? 'c-crit' : 'muted'}">${status}</span></div>`;
-const zr = (st, name, txt) => `<div class="zr">${dot(st, 'd7')}<span class="zn">${name}</span><span>${txt}</span></div>`;
-
-function healthPage({ broken = false } = {}) {
-  const head = `<div class="hbar"><span class="title">cluster health</span><span class="subtitle">prod-cluster · seen from master-01</span><span class="grow"></span>
-    <span class="quiet">updated 12s ago · every 30s</span><span class="glyph">···</span></div>`;
-  const sum = broken
-    ? summary([['ok', 3, 'connected'], ['crit', 1, 'not connected']], 'Icinga r2.14.3-1 · up 41d 6h')
-    : summary([['ok', 4, 'connected'], ['pend', 0, 'not connected']], 'Icinga r2.14.3-1 · up 41d 6h');
-  const banner = broken ? `<div class="banner" style="--tone:var(--crit);--tint:var(--crit-tint)"><span class="c-crit">${icon('triangle-alert', 14)}</span><div class="col" style="gap:2px;min-width:0">
-      <span style="font-size:12.5px;color:var(--t-strong)">sat-fra-01 has not been connected for 3m 12s: zone fra’s results are stale.</span>
-      <span class="trunc" style="font-size:12px;color:var(--t-muted)">1,204 checks of 214 hosts in zone fra are late; the relay queue for fra is growing (18,402 messages).</span></div><span class="grow"></span><span class="acc" style="font-size:12px;white-space:nowrap">show the late checks</span></div>` : '';
-  const zonesHdr = viewHeader({ name: 'zones and endpoints', display: 'list', filter: '3 zones · 4 endpoints · 2 global zones', counts: broken ? [['ok', 3], ['crit', 1]] : [['ok', 4]], sort: '', more: false });
-  const table = `<div class="etab">
-    <div class="er h"><span></span><span>endpoint</span><span>zone</span><span>version</span><span>last message</span><span>messages in / out</span><span>status</span></div>
-    ${zr('ok', 'master', 'top level · 2 endpoints · checks shared between them')}
-    ${er('ok', 'master-01', 'master', 'r2.14.3-1', '0s ago', '412/s · 388/s', 'connected · this node', { sel: true, mine: true })}
-    ${er('ok', 'master-02', 'master', 'r2.14.3-1', '0s ago', '398/s · 405/s', 'connected')}
-    ${zr('ok', 'ams', 'parent master · 1 endpoint · 188 hosts')}
-    ${er('ok', 'sat-ams-01', 'ams', 'r2.14.3-1', '1s ago', '201/s · 12/s', 'connected')}
-    ${zr(broken ? 'crit' : 'ok', 'fra', 'parent master · 1 endpoint · 214 hosts')}
-    ${broken ? er('crit', 'sat-fra-01', 'fra', 'r2.14.2-1', '3m 12s ago', '0/s · 0/s', 'not connected · retrying') : er('ok', 'sat-fra-01', 'fra', 'r2.14.2-1', '0s ago', '187/s · 9/s', 'connected · older version')}
-    <div class="zr" style="background:transparent;border-bottom:0;height:32px"><span class="faint">${icon('layers', 12)}</span><span>global zones: global-templates, director-global (config only, no endpoints)</span></div>
-  </div>`;
-  const checksHdr = viewHeader({ name: 'checks', display: 'tiles', filter: 'last minute, from /v1/status', sort: '', more: false });
-  const lat = broken ? [4, 4, 5, 4, 4, 5, 4, 4, 5, 9, 31, 64] : [4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4, 4];
-  const kpisChecks = `<div class="kpis">
-    ${kpi('active checks / min', broken ? '2,104' : '3,283', broken ? 'of 3,516 objects' : 'of 3,516 objects', broken ? [3270, 3290, 3281, 3275, 3288, 3279, 3284, 3280, 3277, 3012, 2390, 2104] : [3270, 3290, 3281, 3275, 3288, 3279, 3284, 3280, 3277, 3286, 3279, 3283], broken ? { cls: 'v-warn', last: 'var(--warn)' } : {})}
-    ${kpi('passive checks / min', '212', '31 senders', [208, 214, 209, 212, 210, 215, 211, 209, 213, 210, 212, 212])}
-    ${kpi('average latency', broken ? '0.064s' : '0.004s', broken ? 'max 4.81s' : 'max 0.92s', lat, broken ? { cls: 'v-warn', last: 'var(--warn)' } : {})}
-    ${kpi('average execution', '1.32s', 'max 9.81s', [1.3, 1.28, 1.35, 1.31, 1.29, 1.33, 1.34, 1.3, 1.32, 1.31, 1.33, 1.32])}
-    ${kpi('pending', '3', '3 services', null)}
-    ${kpi(broken ? 'late' : 'late', broken ? '1,204' : '0', broken ? 'all in zone fra' : 'overdue checks', broken ? [0, 0, 0, 0, 0, 0, 0, 0, 0, 160, 720, 1204] : null, broken ? { cls: 'v-bad', last: 'var(--crit)' } : {})}
-  </div>`;
-  const qHdr = viewHeader({ name: 'queues and connections', display: 'tiles', filter: 'ApiListener, JsonRpc', sort: '', more: false });
-  const kpisQ = `<div class="kpis">
-    ${kpi('API work queue', '0', '412 items/s', [0, 1, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0])}
-    ${kpi('relay queue', broken ? '18,402' : '0', broken ? 'for fra, growing' : 'for other zones', broken ? [0, 0, 0, 0, 0, 0, 0, 0, 0, 2100, 9800, 18402] : [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0], broken ? { cls: 'v-bad', last: 'var(--crit)' } : {})}
-    ${kpi('cluster connections', broken ? '3 of 4' : '4 of 4', 'JSON-RPC endpoints', null, broken ? { cls: 'v-bad' } : {})}
-    ${kpi('HTTP clients', '4', 'API sessions', null)}
-        ${kpi('uptime', '41d 6h', 'since Wed 26 Aug 08:14, the r2.14.3 upgrade', null, { span: 2 })}
-  </div>`;
-  const flagsHdr = viewHeader({ name: 'Icinga’s global switches', display: 'list', filter: 'read-only: icygui never changes them', sort: '', more: false });
-  const fl = (on, t) => `<span>${dot(on ? 'ok' : 'warn', 'd6')}${t} <span class="${on ? 'faint' : 'c-warn'}">${on ? 'on' : 'off'}</span></span>`;
-  const flags = `<div class="flags">${fl(1, 'notifications')}${fl(1, 'active host checks')}${fl(1, 'active service checks')}${fl(1, 'event handlers')}${fl(1, 'flap detection')}${fl(broken ? 0 : 1, 'performance data')}</div>`;
-  return head + sum + banner + zonesHdr + table + checksHdr + kpisChecks + qHdr + kpisQ + flagsHdr + flags;
-}
 
 // 6a: where it lives: the footer switcher
 const switcher = menu([], { x: 54, y: 352, w: 320, style: 'padding:4px' }).replace('<div class="menu"', '<div class="menu" id="sw"');

@@ -193,10 +193,17 @@ const LAYOUTS = [
     ['downtimes', 'calendar-clock', { display: 'downtimes' }],
   ]],
 ];
+// BUILT-IN PAGES (topic 16): the health page and the diagnostics page are
+// built-in dashboards whose views are their own kinds, found ONLY there. The
+// editor is the same one, parameterised by the kinds a page allows: a normal
+// dashboard offers LAYOUTS, the health page HEALTH_KINDS, diagnostics DIAG_KINDS.
+const HEALTH_KINDS = [['health', [['zones and endpoints', 'network'], ['checks', 'gauge'], ['queues and connections', 'plug'], ['global switches', 'toggle-left']]]];
+const DIAG_KINDS = [['diagnostics', [['engine', 'chart-bar'], ['log', 'scroll-text']]]];
+const kindItems = (kinds) => kinds.flatMap(([sec, ls], i) => [...(i ? ['-'] : []), { section: sec }, ...ls.map(([n, ic]) => ({ label: n, ic }))]);
 const LAYOUT_ICON = Object.fromEntries(LAYOUTS.flatMap(([, ls]) => ls.map(([n, ic]) => [n, ic])));
 // the layouts as dropdown items: sections, icon and name
 const layoutItems = () => LAYOUTS.flatMap(([sec, ls], i) => [...(i ? ['-'] : []), { section: sec }, ...ls.map(([n, ic]) => ({ label: n, ic }))]);
 // the display field open (a select): the layouts, the current one ticked
 const layoutSelect = ({ current, focus = '' }) => selectOpen(`<span style="display:flex;align-items:center;gap:8px">${icon(LAYOUT_ICON[current], 13)}${current}</span>`, layoutItems(), { current, focus });
 // "add view" (an action menu anchored to the pressed add view row): the same items
-const layoutMenu = ({ focus = '', anchor = '.vadd.open' } = {}) => menu(layoutItems().map((it) => (it === '-' ? it : it.section ? it.section : { ...it, hov: it.label === focus })), { anchor });
+const layoutMenu = ({ focus = '', anchor = '.vadd.open', kinds = null } = {}) => menu((kinds ? kindItems(kinds) : layoutItems()).map((it) => (it === '-' ? it : it.section ? it.section : { ...it, hov: it.label === focus })), { anchor });

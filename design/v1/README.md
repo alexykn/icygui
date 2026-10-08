@@ -64,6 +64,8 @@ per frame, plus `-zoom` crops of the details.
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
 | 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+16 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
 | 15 | Host lists with services; group lists; layouts | `15-host-list-with-services.html` | 12 (+1 compare, +10 zooms, +12 light) | drawn for review |
+| 16 | Knowing when icygui is blind: no live data, heartbeat, health alerts, diagnostics | `16-live-data.html` (+ `health.js`, shared with 06) | 23 (+12 zooms, +12 light) | drawn for review; 17 and the health alerts approved |
+| 17 | Comments written in the handling view | `17-handling-comments.html` | 6 (+4 zooms, +5 light) | approved |
 
 ---
 
@@ -1886,4 +1888,152 @@ pane narrowed to the group. The marking frame is 15m.
 - Not redrawn here: 04's *add view* (4d) and 14-r5-b still show the kinds
   list; the layouts list replaces it when built. 04's *grouped list* display
   is the layout *services by host* (display list, group by host).
+
+---
+
+## 16 Knowing when icygui is blind
+
+**Status: drawn for review** (user, 2026-10-08; PLAN.md §4.2, *Knowing when
+icygui is blind*, items A, B, E, F, G).
+
+**Shows** (`16-live-data.html`): 16a the cluster health page with the
+heartbeat row; 16a2 the heartbeat's five states stacked; 16a3 Icinga health
+alerts at the top of the page; 16b Settings → icinga → an environment, the
+*trouble alerts* group; 16b2 a heartbeat object not found; 16c the no-live-data,
+heartbeat-lost and recovery notifications (Linux dunst, macOS); 16c2 health
+alerts as notifications; 16d a blind environment's banner and footer (16f is
+its footer crop); 16e the tray's blind look and menu; 16g diagnostics
+(prod, healthy), 16g2 a stuck engine (staging), 16g3 three log lines selected,
+16g4 the log's scope *all* with its `···` open; 16h save diagnostics; 16i
+the restarted-after-a-crash notification; 16j the health page's `···` with
+*edit page*; 16k the health page in the editor (and light); 16l its *add view*;
+16g5 the app's diagnostics; 16n the status bar (and zooms of its ends),
+16o hover on its diagnostics symbol, 16p a stuck engine's red dot. The
+diagnostics header's subtitle is just the environment's name.
+
+**Decisions**
+
+- **On topic 06's approved page** (`health.js`, shared by 06 and 16; 06
+  renders byte-identical): nothing of 06 changes; 16 adds two things.
+- **Heartbeat row (16a, 16a2):** one 36px row directly under the summary
+  line, at its height and left edge: dot
+  (green on time, yellow one interval late, red dead, grey off or not
+  found), *heartbeat*, the object dimmed, the state word, the age, the
+  interval and policy faint, *settings*. Each part has a fixed slot sized
+  for its longest value, so nothing moves between states.
+- **Health alerts (16a3), in 06's banner (one system):** one block in the
+  worst alert's tone under the heartbeat row: the worst in full (first line,
+  detail line, an action such as *show the late checks*), the others one
+  line each under it, worst first, *since* in a fixed slot. The tiles show
+  the same story (active checks 0, late 3,516, 2 of 4 connections). A cleared alert **just goes** (its raise and clear stay in the log
+  and the notification centre; a recovery notification says it is fine).
+- **Trouble alerts always notify at the OS level, no opt-out** (user,
+  2026-10-08): no live data, a dead heartbeat, Icinga health alerts and a
+  failing engine; only a pause holds them back. The environment's *trouble
+  alerts* group (16b): **policy** *notify* | *persistent* (a plain select),
+  *no live data* shown as always on, the heartbeat switch with its object
+  (the result of the one query on save inline, in a fixed slot: *found ·
+  every 30s* / *not found*, 16b2) and its interval (empty = the object's,
+  shown as the placeholder). No per-kind switches. One help line.
+- **Notifications (16c, 16c2, 16g4):** title = environment + what happened,
+  body = since when and why; one per outage and one on recovery. The
+  heartbeat-lost and no-checks ones at critical urgency.
+- **Blind page (16d, 16f):** the existing connection banner, warning tone:
+  *no live data for 3m — states may be outdated*, reason on line two,
+  *retry now*. Rows unchanged. The footer puts *no data 3m* where the age
+  was, warning colour, dot yellow.
+- **Tray (16e):** a new *blind* look: the core hollow, the orbit broken, in
+  grey, the node in the warning colour at the same size and place as the
+  other looks' blue node; it wins over any state colour. The
+  menu lists each environment with its age (*no data 3m*, *live 2s*).
+- **Diagnostics: a page built like a two-view dashboard** (user,
+  2026-10-08: "probably dashboard with view"; the floating-window and
+  extra-column drafts are dropped). Reached from *diagnostics* in each
+  environment's sidebar cluster section, under *health* (its dot = the
+  engine's state). Page header: *diagnostics*, the environment, *restart
+  engine* in the action slot. A stuck engine gets 06's banner (*engine
+  stuck · restarted 1 of 3*, the detail, *show its log lines*).
+  - **View *engine*:** the health markers as 06's tiles (`kpi()` from
+    `health.js`): connection, last event, engine tick, last evaluation,
+    queues (with sparklines; a steady value draws a flat line), request
+    budget, last status poll, last reconcile, event log lag, up. Their states
+    are counted in the view header; a stuck tick is red.
+  - **View *log*, the focus:** event-style rows, one line each at a
+    comfortable height: time, the level as a coloured word (ERROR red, WARN
+    yellow, INFO default), the environment (scope *all* only; *app* for the
+    app's own lines), the message. The view header: the scope switch *this
+    environment* | *all*, level chips with counts in digit slots (error,
+    warn, info on by default; debug), search, follow; *open log folder*,
+    *save diagnostics* and *copy all shown* in its `···`. Rows select like
+    any list (click, shift, ctrl/cmd, ctrl-a; the selected-row background);
+    the shared selection bar reads *3 lines* · *copy* (ctrl-c, plain text)
+    · *clear*. The log stays sparse (the logging concept).
+- **Save diagnostics (16h):** lists what goes in (logs, versions, settings
+  without secrets, connection states) and the *replace host names* switch.
+
+- **The health page is a built-in dashboard** (user, 2026-10-08), and so is
+  diagnostics. Every environment gets 06's approved layout by default, with
+  no editor needed: the pinned alert block and heartbeat row, then
+  *zones and endpoints*, *checks*, *queues and connections*, *global
+  switches* in 06's order (the IcingaDB tile only when that feature is on).
+  Its `···` has **edit page** (16j), which opens **the same dashboard
+  editor** (one abstraction, parameterised by the kinds a page allows; the
+  approved inspector layout, 16k): the name is built in; the pinned parts are
+  **locked rows** (a lock in the handle's slot, *pinned*); each health view
+  has its handle and an on/off switch; a tiles view picks which tiles it
+  shows; *add view* lists only the health kinds (16l); the editor's `···`
+  has **reset to default**. The diagnostics page's editor offers only
+  *engine* and *log*. **These kinds live on their built-in pages only**: a
+  normal dashboard's *add view* never lists them (`HEALTH_KINDS`,
+  `DIAG_KINDS` in `views.js`, outside `LAYOUTS`).
+- **Vertical rhythm:** every banner's text sits 9.1px from its top and its
+  bottom edge (`.banner` in `v1.css`: padding-bottom 6.4px; 06 and 03 differ
+  only by that, the banner 1.6px shorter); the alert block likewise (9px).
+- **The status bar** (user, 2026-10-08, Zed as the reference; 16n–16p): the
+  footer under the sidebar becomes a slim **full-width bar across the
+  window's bottom, 26px** (the 40px top bar stays). Left, as before: the
+  sidebar toggle, history, the environment switcher (dot, environment, node,
+  age or *no data 3m*), *+*. Right: small symbols (14px in 22px buttons,
+  hover background, a tooltip above, right edges aligned), each with a 6px
+  state dot where it matters: **diagnostics** of the active environment's
+  engine (dot = engine state; red when stuck, 16p) and the **app log**; room
+  for later ones to their left. `statusBar` in `v1.js` (`appWindow(…, {
+  statusBar })`); page 16 draws it everywhere, the other topics keep the old
+  footer until they are redrawn.
+- **Diagnostics are reached from the bar, not the sidebar:** the cluster
+  section's *diagnostics* entry is gone. The diagnostics symbol opens the
+  active environment's page (16g, the symbol pressed); the log symbol opens
+  **the app's page** (16g5): it belongs to no environment (nothing in the
+  cluster section highlighted), its header reads *diagnostics · app* with no
+  *restart engine*, its tiles are the app's markers (UI thread, engines
+  running 3 of 3, memory, settings writes, the notifier), and its log is the
+  whole log, scope *all* fixed, each line naming its environment or *app*.
+- **Log day separators:** the log view breaks the days like the event
+  stream (*Wed 7 Oct*, *Thu 8 Oct*), times in order.
+
+## 17 Comments written in the handling view
+
+**Status: drawn for review** (user, 2026-10-08; PLAN.md §4.2, *Comment from
+the handling view*).
+
+**Shows** (`17-handling-comments.html`): 17a hover, *+ comment*; 17b the
+field open in place; 17c pending; 17d refused with retry; 17e in a stacked
+handling view; 17f without the add-comment permission.
+
+**Decisions**
+
+- ***+ comment* lives in the thread's last entry row** (user, 2026-10-08):
+  on hover or with `c` the last entry takes the hover background and shows
+  *+ comment* and the `c` key in its time slot at the right. No extra row
+  and no extra height, so nothing moves. Collapsed threads offer nothing;
+  without the permission it never appears (17f).
+- **The field opens as the thread's next entry** (17b): the comment mark,
+  below the entry that showed it: the configured author and *now*, the
+  pane's comment field (one
+  component), and one faint line of keys (↵ send, shift-↵ new line, esc
+  cancel). Only the open field grows the thread.
+- **Pending** (17c): dimmed, *sending…* in the time slot, until the event
+  stream confirms it; then normal, and the thread rises under *latest
+  activity*. **Refused** (17d): the text stays, the mark and one reason line
+  in the critical colour, *retry* · *discard* in the time slot.
 

@@ -843,6 +843,7 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .win.sbar { grid-template-rows: minmax(0, 1fr) 26px; }
 .win.sbar > .sb { grid-row: 1; } .win.sbar > .col { grid-row: 1; }
 .statusbar { grid-column: 1 / -1; grid-row: 2; display: flex; align-items: center; gap: 4px; height: 26px; padding: 0 6px; border-top: 1px solid var(--bd-split); background: var(--sb-bg); color: var(--t-sec); font-size: 11px; box-sizing: border-box; position: relative; }
+.statusbar::before { content: ""; position: absolute; left: 299px; top: 0; bottom: 0; width: 1px; background: var(--bd-split); } /* the sidebar's right edge runs on through the bar (user) */
 .statusbar .stb { width: 22px; height: 20px; color: var(--t-muted); }
 .statusbar .stb.sel { background: var(--el-hover); color: var(--t); }
 .statusbar .status { display: flex; align-items: center; gap: 5px; height: 20px; padding: 0 4px; border-radius: 4px; white-space: nowrap; margin: 0 2px; }

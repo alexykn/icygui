@@ -69,6 +69,8 @@ per frame, plus `-zoom` crops of the details.
 
 ## Rules that span the topics
 
+- **Stacked view headers keep their chips inline** (user, 2026-10-07): count chips, the timeline | list switch and the sort stay in the view header when stacked; only secondary settings (only mine, rows, collapse, edit view) go in its `···`. This overrides any frame that moves chips into `···`.
+
 These come from the review and PLAN.md §4.3, and hold in every frame.
 
 - **Hollow circle = handled.** An object whose downtime is in effect counts

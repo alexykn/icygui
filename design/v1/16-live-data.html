@@ -42,6 +42,10 @@
 .lgr { display: grid; grid-template-columns: 64px 52px minmax(0,1fr); gap: 14px; align-items: center; height: 22px; padding: 7px 18px; border-bottom: 1px solid var(--bd-row); font-size: 12.5px; white-space: nowrap; }
 .lgr.all { grid-template-columns: 64px 52px 104px minmax(0,1fr); }
 .lgr.sel { background: var(--row-sel); }
+.lgr.dbg .lv, .lgr.dbg .m, .lgr.dbg .e { color: var(--t-faint); font-weight: 400; }  /* debug lines: the events' faint words */
+.vh .vctl .chip.dbgc { min-width: calc(11ch + 16px); box-sizing: border-box; }  /* fixed slot: 'debug · off' or 'NN debug' */
+.vh .vctl .chip.dbgc.off { color: var(--t-faint); background: transparent; border-color: var(--bd-row); }
+.sw .swl { display: inline-block; min-width: 11ch; }  /* fixed slot: 'debug' or 'debug · 28m' */
 .lgr .t { font-size: 11.5px; color: var(--t-faint); }
 .lgr .lv { font-weight: 600; font-size: 11.5px; color: var(--t-sec); }
 .lgr .lv.c-crit { color: var(--crit-text); } .lgr .lv.c-warn { color: var(--warn-text); }
@@ -291,10 +295,12 @@ const LOGS = {
   ],
 };
 const LV_CLS = { error: 'c-crit', warn: 'c-warn', info: '', debug: 'faint' };
-const logRow = ([t, lv, env, msg], { sel = false, all = false } = {}) => t === 'day' ? `<div class="lgday">${lv}</div>` : `<div class="lgr${all ? ' all' : ''}${sel ? ' sel' : ''}"><span class="t">${t}</span><span class="lv ${LV_CLS[lv]}">${lv.toUpperCase()}</span>${all ? `<span class="e">${env}</span>` : ''}<span class="m">${msg}</span></div>`;
+const logRow = ([t, lv, env, msg], { sel = false, all = false } = {}) => t === 'day' ? `<div class="lgday">${lv}</div>` : `<div class="lgr${all ? ' all' : ''}${sel ? ' sel' : ''}${lv === 'debug' ? ' dbg' : ''}"><span class="t">${t}</span><span class="lv ${LV_CLS[lv]}">${lv.toUpperCase()}</span>${all ? `<span class="e">${env}</span>` : ''}<span class="m">${msg}</span></div>`;
 // the log view's header: the scope switch, level chips with counts in digit
 // slots (they filter), search, follow; ··· holds open log folder and save diagnostics
-const lvChips = (counts, on = ['error', 'warn', 'info']) => `<span class="fchips">${['error', 'warn', 'info', 'debug'].map((lv, i) => `<span class="chip${on.includes(lv) ? ' sel' : ''}"><span class="cn">${counts[i]}</span>${lv}</span>`).join('')}</span>`;
+const lvChips = (counts, on = ['error', 'warn', 'info'], debug = false) => `<span class="fchips">${['error', 'warn', 'info'].map((lv, i) => `<span class="chip${on.includes(lv) ? ' sel' : ''}"><span class="cn">${counts[i]}</span>${lv}</span>`).join('')}${debug ? `<span class="chip dbgc sel"><span class="cn">${counts[3]}</span>debug</span>` : '<span class="chip dbgc off">debug · off</span>'}</span>`;
+// the debug switch: off 'debug'; on, its time left (it turns itself off after 30 minutes)
+const dbgSwitch = (on) => `<span class="sw${on ? ' on' : ''}"><span class="trk"></span><span class="swl">${on ? 'debug · 28m' : 'debug'}</span></span>`;
 const logControls = (scope, counts) => `<span class="vctl"><span class="seg cmp" style="margin-right:2px">${['this environment', 'all'].map((m) => `<span class="${m === scope ? 'on' : ''}">${m}</span>`).join('')}</span>${lvChips(counts)}<span class="input" style="height:22px;width:120px;font-size:11.5px;box-sizing:border-box;padding:0 8px"><span class="ph">search</span></span>${sw(true, 'follow')}</span>`;
 const STUCK_BANNER = `<div class="banner" style="--tone:var(--crit);--tint:var(--crit-tint)"><span class="c-crit">${icon('triangle-alert', 14)}</span><div class="col" style="gap:2px;min-width:0">
   <span style="font-size:12.5px;color:var(--t-strong)">engine stuck · restarted 1 of 3</span>
@@ -335,13 +341,17 @@ const ALL_LOG = [
   ['02:18:21', 'info', 'prod-cluster', 'reconnected to master-01 after 7 attempts, 4m 12s'],
   ['02:18:21', 'info', 'prod-cluster', 'live again after 4m 12s'],
   ['02:30:02', 'info', 'staging', 'reconciled: 1,280 objects, 0 changed'],
+  ['02:41:02', 'debug', 'staging', 'watchdog: no tick for 24 s', true],
   ['02:41:12', 'error', 'staging', 'engine stuck: no tick for 30 s · restarted (1 of 3)', true],
   ['02:41:13', 'info', 'staging', 'connected to stg-master-01 · full view', true],
+  ['02:41:13', 'debug', 'staging', 'GET /v1/objects/services?… 200 · 1,280 objects · 182 ms', true],
+  ['02:41:14', 'debug', 'staging', 'event applied: CheckResult disk /var on k8s-node-07', true],
+  ['02:41:18', 'debug', 'staging', 'tick: 1,280 objects evaluated · 44 ms', true],
   ['02:41:13', 'info', 'app', 'notification sent: staging engine stuck', true],
 ];
 // the lines a log shows, without day separators left empty
-const pickLog = (keep, stuck) => ALL_LOG.filter((l) => l[0] === 'day' || ((stuck || !l[4]) && keep(l[2]))).filter((l, i, arr) => !(l[0] === 'day' && (i === arr.length - 1 || arr[i + 1][0] === 'day')));
-const lvCounts = (lines) => { const n = (k) => lines.filter((l) => l[1] === k).length; return [n('error'), n('warn'), n('info'), 0]; };
+const pickLog = (keep, stuck, debug = false) => ALL_LOG.filter((l) => l[0] === 'day' || ((stuck || !l[4]) && (debug || l[1] !== 'debug') && keep(l[2]))).filter((l, i, arr) => !(l[0] === 'day' && (i === arr.length - 1 || arr[i + 1][0] === 'day')));
+const lvCounts = (lines) => { const n = (k) => lines.filter((l) => l[1] === k).length; return [n('error'), n('warn'), n('info'), n('debug')]; };
 const SEARCH = `<span class="input" style="height:22px;width:120px;font-size:11.5px;box-sizing:border-box;padding:0 8px"><span class="ph">search</span></span>`;
 const diagHead = (sub) => `<div class="hbar"><span class="title">diagnostics</span><span class="subtitle">${sub}</span><span class="grow"></span><span class="glyph">···</span></div>`;
 const logView = (lines, chips, { all = true, selRows = [] } = {}) => viewHeader({ name: 'log', display: 'stream', ic: 'scroll-text', filter: '', controls: `<span class="vctl">${chips}</span>`, sort: '', focus: true })
@@ -365,30 +375,33 @@ const engItems = (stuck) => [{ label: 'all engines' }, '-', ...ENGINES(stuck).ma
 const engSelect = (env, stuck, open) => `<span class="vctl"><span class="faint">engine</span>${open ? selectOpen(engVal(env, stuck), engItems(stuck), { current: env || 'all engines', focus: 'staging', compact: true }) : select(engVal(env, stuck))}</span>`;
 const engineChip = (env) => `<span class="chip filled" style="gap:6px;height:22px;box-sizing:border-box">engine ${env}<span class="faint" style="display:flex">${icon('x', 11)}</span></span>`;
 // 1. the app's page (the monitor): app + log of the app's own lines
-function appDiagPage({ include = false, stuck = false } = {}) {
-  const lines = pickLog((src) => include || src === 'app', stuck);
+function appDiagPage({ include = false, stuck = false, debug = false } = {}) {
+  const lines = pickLog((src) => include || src === 'app', stuck, debug);
   const appHdr = viewHeader({ name: 'app', display: 'tiles', ic: 'monitor', filter: '', counts: [['ok', 5]], sort: '', more: false });
-  const chips = `${lvChips(lvCounts(lines))}${SEARCH}${sw(include, 'include engines')}${sw(true, 'follow')}`;
+  const chips = `${lvChips(lvCounts(lines), undefined, debug)}${SEARCH}${sw(include, 'include engines')}${dbgSwitch(debug)}${sw(true, 'follow')}`;
   return `<div class="col" style="min-height:0;flex:1;overflow:hidden">${diagHead('app')}${appHdr}<div class="kpis" style="grid-template-columns:repeat(5,minmax(0,1fr))">${APP_TILES.join('')}</div>${logView(lines, chips, { all: include })}</div>`;
 }
 // 2. the engines' page (the gauge): engines + log of engine lines only
-function engDiagPage({ stuck = false, selEnv = '', selOpen = false } = {}) {
-  const lines = pickLog((src) => src !== 'app' && (!selEnv || src === selEnv), stuck);
+function engDiagPage({ stuck = false, selEnv = '', selOpen = false, debug = false } = {}) {
+  const lines = pickLog((src) => src !== 'app' && (!selEnv || src === selEnv), stuck, debug);
   const engHdr = viewHeader({ name: 'engines', display: 'list', ic: 'server', filter: '', counts: stuck ? [['crit', 1], ['warn', 1], ['ok', 1]] : [['warn', 1], ['ok', 2]], controls: engSelect(selEnv, stuck, selOpen), sort: '', more: false });
-  const chips = `${selEnv ? engineChip(selEnv) : ''}${lvChips(lvCounts(lines))}${SEARCH}${sw(true, 'follow')}`;
+  const chips = `${selEnv ? engineChip(selEnv) : ''}${lvChips(lvCounts(lines), undefined, debug)}${SEARCH}${dbgSwitch(debug)}${sw(true, 'follow')}`;
   return `<div class="col" style="min-height:0;flex:1;overflow:hidden">${diagHead('engine')}${engHdr}${engTable(stuck, selEnv)}${logView(lines, chips)}</div>`;
 }
 const diagFrame = (page, { env = 'prod-cluster', stuck = false, gauge = false } = {}) => clusterWindow(`<div class="col" style="min-height:0;height:100%;position:relative">${page}</div>`, { cluster: '', env, foot: { env, node: env === 'staging' ? 'stg-master-01' : 'master-01' }, statusBar: { diag: stuck ? 'crit' : 'ok', diagOpen: gauge, logOpen: !gauge } });
 const appWin = (o = {}) => diagFrame(appDiagPage(o));
 const engWin = (o = {}) => diagFrame(engDiagPage(o), { env: o.active || o.selEnv || 'prod-cluster', stuck: o.stuck, gauge: true });
 shot('16g5', '16-live-g5-diagnostics-app', '<b>diagnostics · app</b>, opened from the status bar’s <b>monitor</b> (pressed). The approved look, two views: <b>app</b>, the app’s tiles, unchanged; <b>log</b>, only the app’s own lines (start, settings, the window, the notifier), with day separators. Its header: level chips with counts, search, the switch <b>include engines</b> (off) and <i>follow</i>. No engines view on this page: the engines have their own (16g6). The page belongs to no environment (nothing in the cluster section highlighted).',
-  appWin());
-shot('16g5-l', '16-live-g5-diagnostics-app-light', '<b>diagnostics · app</b>, light.', appWin(), L);
+  appWin(), { crops: '16-live-g5-log-header-zoom:560,222,880,42' });
+shot('16g5-l', '16-live-g5-diagnostics-app-light', '<b>diagnostics · app</b>, light.', appWin(), { theme: 'light', crops: '16-live-g5-log-header-zoom-light:560,222,880,42' });
 shot('16g9', '16-live-g9-app-include-engines', '<b>include engines on:</b> the full log of everything, in order. The source column appears and names each line’s source, <i>app</i> or the engine’s environment; the level counts follow.',
   appWin({ include: true }));
 shot('16g6', '16-live-g6-engine-staging-stuck', '<b>diagnostics · engine</b>, opened from the status bar’s <b>gauge</b> (pressed, red: staging, the active environment, is stuck). Two views, no app view. <b>engines</b>: the <b>engine</b> select defaults to the active environment’s engine, here staging: its row alone, selected, red (engine tick 34s, <i>stuck · restarted 1 of 3</i>; last event yellow), <b>restart engine</b> at its right, its tiles under it. <b>log</b>: only staging’s lines, behind the chip <b>engine staging ×</b> (× or Esc goes to <i>all engines</i>). Engine lines only, never the app’s.',
   engWin({ stuck: true, selEnv: 'staging' }));
 shot('16g6-l', '16-live-g6-engine-staging-stuck-light', '<b>diagnostics · engine, staging stuck</b>, light.', engWin({ stuck: true, selEnv: 'staging' }), L);
+shot('16g11', '16-live-g11-engine-debug', '<b>debug on, staging chosen.</b> The <b>debug</b> switch next to <i>follow</i> records the chosen engine’s debug lines (with <i>all engines</i>, every engine’s). On, it shows its time left, <b>debug · 28m</b>: it turns itself off after 30 minutes. The <i>debug</i> level chip has its count (off it reads <i>debug · off</i>, greyed, in the same slot). Debug lines sit between the others in the faint colour: <i>watchdog: no tick for 24 s</i>, <i>GET /v1/objects/services?… 200 · 1,280 objects · 182 ms</i>, <i>event applied: CheckResult disk /var on k8s-node-07</i>, <i>tick: 1,280 objects evaluated · 44 ms</i>. Off, the app page’s header (16g5 zoom) reads <i>debug</i> and <i>debug · off</i> in the same slots.',
+  engWin({ stuck: true, selEnv: 'staging', debug: true }), { crops: '16-live-g11-log-header-zoom:560,284,880,42' });
+shot('16g11-l', '16-live-g11-engine-debug-light', '<b>debug on, staging chosen</b>, light.', engWin({ stuck: true, selEnv: 'staging', debug: true }), L);
 shot('16g10', '16-live-g10-engine-all', '<b>all engines.</b> The select set to <i>all engines</i>: the compact rows like 06’s <i>zones and endpoints</i>, one per engine (state dot, environment, stream, node, last event, engine tick, status; lab: <i>running · login refused</i>, yellow). A click on a row chooses that engine. The log holds every engine’s lines, each naming its environment; no app lines, no chip.',
   engWin());
 shot('16g7', '16-live-g7-engine-select-open', '<b>The engine select, open</b> (the dropdown system: it opens from its field, exactly as wide, joined to it, the current value ticked at the right): <i>all engines</i>, then each engine with its state dot and name. prod-cluster, the active environment’s, is current; the keyboard focus is on staging.',

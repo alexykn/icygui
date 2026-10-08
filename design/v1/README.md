@@ -64,7 +64,7 @@ per frame, plus `-zoom` crops of the details.
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
 | 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+16 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
 | 15 | Host lists with services; group lists; layouts | `15-host-list-with-services.html` | 12 (+1 compare, +10 zooms, +12 light) | drawn for review |
-| 16 | Knowing when icygui is blind: no live data, heartbeat, health alerts, diagnostics | `16-live-data.html` (+ `health.js`, shared with 06) | 24 (+14 zooms, +12 light) | drawn for review; 17 and the health alerts approved |
+| 16 | Knowing when icygui is blind: no live data, heartbeat, health alerts, diagnostics | `16-live-data.html` (+ `health.js`, shared with 06) | 25 (+17 zooms, +13 light) | drawn for review; 17 and the health alerts approved |
 | 17 | Comments written in the handling view | `17-handling-comments.html` | 6 (+4 zooms, +5 light) | approved |
 
 ---
@@ -1905,7 +1905,8 @@ alerts as notifications; 16d a blind environment's banner and footer (16f is
 its footer crop); 16e the tray's blind look and menu; 16g5 *diagnostics ·
 app* (and light), 16g9 with *include engines* on; 16g6 *diagnostics · engine*
 with staging chosen and stuck (and light), 16g10 *all engines*, 16g7 the
-engine select open, 16g8 prod-cluster chosen; 16h save diagnostics; 16i the
+engine select open, 16g8 prod-cluster chosen; 16g11 debug on with staging
+chosen (and light, and a header zoom; 16g5's header zoom shows debug off); 16h save diagnostics; 16i the
 restarted-after-a-crash notification; 16j the health page's `···` with
 *edit page*; 16k the health page in the editor (and light); 16l its *add view*;
 16n the status bar (and zooms of its ends), 16o hover on the gauge, 16p a
@@ -1976,6 +1977,15 @@ stuck engine's red dot; 16q the app symbol's candidates (the monitor chosen).
     counts in digit slots, search, follow; *open log folder*, *save
     diagnostics*, *copy all shown* in its `···`. Rows select like any list;
     the shared selection bar reads *3 lines* · *copy* · *clear*.
+  - **Debug switch** (user, 2026-10-08; PLAN *Debug logging switch*):
+    each log header has a **debug** switch next to *follow*. On the app page
+    it records the app's debug lines; on the engine page the chosen engine's
+    (every engine's with *all engines*). Off, the *debug* level chip reads
+    **debug · off**, greyed; on, the switch reads its time left, **debug ·
+    28m** (it turns itself off after 30 minutes), the chip has its count,
+    and debug lines sit between the others in the faint colour (the events'
+    faint words). Both the chip and the switch label have fixed slots, so
+    nothing moves.
   - **Vertical rhythm:** 06's: tiles padded 14/16 under their header, rows
     straight onto the next view header.
 - **Save diagnostics (16h):** lists what goes in (logs, versions, settings

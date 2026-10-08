@@ -198,7 +198,7 @@ const LAYOUTS = [
 // editor is the same one, parameterised by the kinds a page allows: a normal
 // dashboard offers LAYOUTS, the health page HEALTH_KINDS, diagnostics DIAG_KINDS.
 const HEALTH_KINDS = [['health', [['zones and endpoints', 'network'], ['checks', 'gauge'], ['queues and connections', 'plug'], ['global switches', 'toggle-left']]]];
-const DIAG_KINDS = [['diagnostics', [['app', 'monitor'], ['engines', 'cpu'], ['log', 'scroll-text']]]];
+const DIAG_KINDS = [['diagnostics', [['app', 'monitor'], ['engines', 'server'], ['log', 'scroll-text']]]];
 const kindItems = (kinds) => kinds.flatMap(([sec, ls], i) => [...(i ? ['-'] : []), { section: sec }, ...ls.map(([n, ic]) => ({ label: n, ic }))]);
 const LAYOUT_ICON = Object.fromEntries(LAYOUTS.flatMap(([, ls]) => ls.map(([n, ic]) => [n, ic])));
 // the layouts as dropdown items: sections, icon and name

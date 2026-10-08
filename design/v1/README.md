@@ -64,7 +64,7 @@ per frame, plus `-zoom` crops of the details.
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
 | 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+16 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
 | 15 | Host lists with services; group lists; layouts | `15-host-list-with-services.html` | 12 (+1 compare, +10 zooms, +12 light) | drawn for review |
-| 16 | Knowing when icygui is blind: no live data, heartbeat, health alerts, diagnostics | `16-live-data.html` (+ `health.js`, shared with 06) | 23 (+12 zooms, +12 light) | drawn for review; 17 and the health alerts approved |
+| 16 | Knowing when icygui is blind: no live data, heartbeat, health alerts, diagnostics | `16-live-data.html` (+ `health.js`, shared with 06) | 22 (+14 zooms, +12 light) | drawn for review; 17 and the health alerts approved |
 | 17 | Comments written in the handling view | `17-handling-comments.html` | 6 (+4 zooms, +5 light) | approved |
 
 ---

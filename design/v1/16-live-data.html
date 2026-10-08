@@ -333,10 +333,10 @@ function diagPage({ stuck = false, selEnv = '', selRows = [], selOpen = false } 
   const lv = (k) => lines.filter((l) => l[1] === k).length;
   const counts = [lv('error'), lv('warn'), lv('info'), 0];
   const head = `<div class="hbar"><span class="title">diagnostics</span><span class="subtitle">app</span><span class="grow"></span><span class="glyph">···</span></div>`;
-  const appHdr = viewHeader({ name: 'app', display: 'tiles', ic: 'monitor', filter: 'icygui on this computer', counts: [['ok', 5]], sort: '', more: false });
+  const appHdr = viewHeader({ name: 'app', display: 'tiles', ic: 'monitor', filter: '', counts: [['ok', 5]], sort: '', more: false });
   const engHdr = viewHeader({ name: 'engines', display: 'list', ic: 'server', filter: '', counts: stuck ? [['crit', 1], ['warn', 1], ['ok', 1]] : [['warn', 1], ['ok', 2]], controls: engSelect(selEnv, stuck, selOpen), sort: '', more: false });
   const controls = `<span class="vctl">${selEnv ? engineChip(selEnv) : ''}${lvChips(counts)}<span class="input" style="height:22px;width:120px;font-size:11.5px;box-sizing:border-box;padding:0 8px"><span class="ph">search</span></span>${sw(true, 'follow')}</span>`;
-  const logHdr = viewHeader({ name: 'log', display: 'stream', ic: 'scroll-text', filter: selEnv ? '' : 'the whole log', controls, sort: '', focus: true });
+  const logHdr = viewHeader({ name: 'log', display: 'stream', ic: 'scroll-text', filter: '', controls, sort: '', focus: true });
   const body = `<div class="vbody">${lines.map((l, i) => logRow(l, { sel: selRows.includes(i), all: true })).join('')}</div>`;
   const bar = selRows.length ? `<div class="selbar"><span class="n" style="min-width:12ch">${selRows.length} lines</span>${btn('copy', { key: 'ctrl-c', primary: true })}<span class="grow"></span><span class="faint">clear</span>${kh('esc')}</div>` : '';
   return `<div class="col" style="min-height:0;flex:1;overflow:hidden">${head}${appHdr}<div class="kpis" style="grid-template-columns:repeat(5,minmax(0,1fr))">${APP_TILES.join('')}</div>${engHdr}${engTable(stuck, selEnv)}${logHdr}${body}</div>${bar}`;

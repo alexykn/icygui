@@ -34,6 +34,7 @@
 
 mod actions;
 mod fetch;
+mod health;
 mod load;
 mod notify;
 mod publish;
@@ -77,7 +78,7 @@ use sync::Restarts;
 use watchdog::Watchdog;
 
 /// The cluster nodes a status poll asked for, and their states.
-type NodeStates = (Vec<String>, Result<Vec<(String, bool)>, ApiError>);
+type NodeStates = (Vec<String>, Result<Vec<ic_api::EndpointState>, ApiError>);
 
 /// Messages from the engine's background tasks.
 #[derive(Debug)]
@@ -98,12 +99,18 @@ pub(crate) enum Internal {
         load: u64,
         step: LoadStep,
     },
-    /// A status poll's answer, and the cluster nodes' states when they
-    /// were asked for too.
+    /// A status poll's answer, and the cluster nodes' states and the
+    /// cluster health page's requests when they were asked for too.
     Status {
         session: u64,
         result: Result<InstanceStatus, ApiError>,
         nodes: Option<NodeStates>,
+        health: Option<Box<health::Answers>>,
+    },
+    /// The cluster health page's requests, asked for when it opened.
+    Health {
+        session: u64,
+        answers: Box<health::Answers>,
     },
     /// A re-query round's answers.
     Fetched { session: u64, answers: Box<Answers> },
@@ -321,6 +328,8 @@ struct Conn {
     /// When the engine last received stream lines (or the stream opened,
     /// or the session went live).
     last_line: Instant,
+    /// The cluster health page's requests in this session.
+    health: health::Asked,
 }
 
 /// The engine.
@@ -360,6 +369,9 @@ pub(crate) struct Engine {
     /// out every `publish_interval`, else every
     /// `background_publish_interval` unless rule inputs wait.
     active: bool,
+    /// The cluster health page shows this environment
+    /// (`Command::WatchHealth`).
+    health_watch: bool,
     /// The dashboards' state; `None` while an evaluation runs on a
     /// blocking thread.
     dashboards: Option<Box<Dashboards>>,
@@ -532,6 +544,10 @@ enum Wake {
 }
 
 impl Engine {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one line per part of the engine's state"
+    )]
     pub(crate) fn new(
         spec: EnvironmentSpec,
         ports: Ports,
@@ -578,6 +594,7 @@ impl Engine {
             revision: 0,
             last_publish: None,
             active: true,
+            health_watch: false,
             dashboards: Some(Box::new(dashboards)),
             dashboard_results: Arc::default(),
             dashboards_configured: false,
@@ -1105,7 +1122,12 @@ impl Engine {
             kinds,
             quiet,
             last_line: Instant::now(),
+            health: health::Asked::default(),
         });
+        // The listener status and features were another session's node's
+        // (the first status poll sets the interval).
+        self.store
+            .update_health(crate::health::ClusterHealth::forget_node);
         // The stream is continuous from here (lines wait during a load).
         self.continuous_since = Some(Instant::now());
         if self.loaded {
@@ -1209,6 +1231,24 @@ impl Engine {
                 if let Some(status) = &overview.status {
                     // The load reloads anyway.
                     self.restarts.observe(status, Instant::now());
+                    // The trend's first point (topic 06): the status the
+                    // load brought, so the health page has numbers before
+                    // the first poll.
+                    let sample = crate::health::HealthSample::of(
+                        status,
+                        None,
+                        self.watchdog.late().len(),
+                        self.ports.clock.now(),
+                    );
+                    let interval = if self.quiet() {
+                        self.tuning.quiet_status_interval
+                    } else {
+                        self.tuning.status_interval
+                    };
+                    self.store.update_health(|health| {
+                        health.push(sample);
+                        health.interval = interval;
+                    });
                 }
                 self.store.apply_overview(*overview, started);
                 self.store.replace_hosts(hosts, started);
@@ -1535,6 +1575,7 @@ impl Engine {
         let client = conn.client.clone();
         let tx = self.internal_tx.clone();
         let session = self.session;
+        let health = self.health_ask(now);
         self.tasks.spawn(async move {
             let result = client.status().await;
             let nodes = match nodes {
@@ -1544,10 +1585,15 @@ impl Engine {
                 }
                 None => None,
             };
+            let health = match health {
+                Some(ask) => Some(Box::new(health::fetch(&client, ask).await)),
+                None => None,
+            };
             let _ = tx.send(Internal::Status {
                 session,
                 result,
                 nodes,
+                health,
             });
         });
     }
@@ -1608,7 +1654,11 @@ impl Engine {
 
     /// The cluster nodes' states (of the nodes `asked` for) came with a
     /// status poll.
-    fn on_node_states(&mut self, asked: &[String], nodes: Result<Vec<(String, bool)>, ApiError>) {
+    fn on_node_states(
+        &mut self,
+        asked: &[String],
+        nodes: Result<Vec<ic_api::EndpointState>, ApiError>,
+    ) {
         let Some(conn) = &mut self.conn else {
             return;
         };
@@ -1616,9 +1666,12 @@ impl Engine {
             Ok(states) => {
                 let local = conn.node.name.clone();
                 self.store.set_endpoint_states(&states, &local);
+                let now = self.ports.clock.now();
+                self.store
+                    .update_health(|health| health.endpoints_at = Some(now));
                 if asked
                     .iter()
-                    .any(|name| !states.iter().any(|(state, _)| state == name))
+                    .any(|name| !states.iter().any(|state| state.name == *name))
                 {
                     // A node of the list is gone (Icinga then fails the
                     // whole request: none came back): the list is reloaded,
@@ -1641,7 +1694,11 @@ impl Engine {
         }
     }
 
-    fn on_status(&mut self, result: Result<InstanceStatus, ApiError>) {
+    fn on_status(
+        &mut self,
+        result: Result<InstanceStatus, ApiError>,
+        listener: Option<&ic_model::ListenerStatus>,
+    ) {
         let interval = if self.quiet() {
             self.tuning.quiet_status_interval
         } else {
@@ -1667,8 +1724,24 @@ impl Engine {
                 // masters of an HA zone behind a load balancer each have
                 // their own.
                 let restarted = self.restarts.observe(&status, Instant::now());
+                // The trend of the cluster health page (topic 06): every
+                // poll, in memory only.
+                let sample = crate::health::HealthSample::of(
+                    &status,
+                    listener,
+                    self.watchdog.late().len(),
+                    self.ports.clock.now(),
+                );
+                self.store.update_health(|health| {
+                    health.push(sample);
+                    health.interval = interval;
+                });
                 self.store.set_status(status);
                 if let Some(seen) = restarted {
+                    // Its features may have changed with the restart.
+                    if let Some(conn) = &mut self.conn {
+                        conn.health.features_at = None;
+                    }
                     if sync::reload_covers_restart(self.last_load_start, connected, seen) {
                         // A restart of the node behind the stream ended the
                         // stream, and a load since the reconnect brought
@@ -2148,6 +2221,7 @@ impl Engine {
             Command::SetQuiet(quiet) => self.set_quiet(quiet),
             Command::Focus(key) => self.focus(key),
             Command::StartNow => self.start_now(),
+            Command::WatchHealth(watch) => self.watch_health(watch),
         }
     }
 
@@ -2277,11 +2351,19 @@ impl Engine {
                 session,
                 result,
                 nodes,
+                health,
             } if session == self.session => {
                 if let Some((asked, nodes)) = nodes {
                     self.on_node_states(&asked, nodes);
                 }
-                self.on_status(result);
+                let listener = health.and_then(|answers| self.on_health(*answers));
+                self.on_status(result, listener.as_ref());
+            }
+            Internal::Health { session, answers } if session == self.session => {
+                if let Some(conn) = &mut self.conn {
+                    conn.health.in_flight = false;
+                }
+                self.on_health(*answers);
             }
             Internal::Fetched { session, answers } if session == self.session => {
                 self.on_fetched(*answers);
@@ -2324,6 +2406,7 @@ impl Engine {
             | Internal::Probed { .. }
             | Internal::Load { .. }
             | Internal::Status { .. }
+            | Internal::Health { .. }
             | Internal::Fetched { .. }
             | Internal::IcingaNotifications { .. }
             | Internal::StreamOpened { .. }

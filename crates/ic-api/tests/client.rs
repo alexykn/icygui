@@ -750,8 +750,12 @@ async fn endpoint_states_are_asked_for_by_name() {
         pki.issue(SERVER_NAME, &[SERVER_NAME]),
         |request| match request.path.as_str() {
             "/v1/objects/endpoints" => ok_json(&json!({ "results": [
-                { "name": "master-02", "attrs": { "connected": true } },
-                { "name": "sat-ams-01", "attrs": { "connected": false } }
+                { "name": "master-02", "attrs": {
+                    "connected": true, "connecting": false, "icinga_version": 21506,
+                    "last_message_received": 1_791_480_574.5,
+                    "messages_received_per_second": 412.25, "messages_sent_per_second": 388
+                } },
+                { "name": "sat-ams-01", "attrs": { "connected": false, "connecting": true } }
             ]})),
             _ => error_json(404, "nope"),
         },
@@ -763,17 +767,39 @@ async fn endpoint_states_are_asked_for_by_name() {
         .await
         .unwrap();
     assert_eq!(
-        states,
-        [
-            ("master-02".to_owned(), true),
-            ("sat-ams-01".to_owned(), false)
-        ]
+        states
+            .iter()
+            .map(|state| (state.name.as_str(), state.connected))
+            .collect::<Vec<_>>(),
+        [("master-02", true), ("sat-ams-01", false)]
     );
+    let master = states[0].stats;
+    assert_eq!(master.version, 21_506);
+    assert_eq!(
+        master.last_message,
+        ic_model::Timestamp::from_unix_seconds(1_791_480_574.5)
+    );
+    assert!((master.messages_in - 412.25).abs() < f64::EPSILON);
+    assert!((master.messages_out - 388.0).abs() < f64::EPSILON);
+    assert!(!master.connecting);
+    let satellite = states[1].stats;
+    assert_eq!(satellite.version, 0, "missing numbers read as none");
+    assert!(satellite.connecting);
     let requests = server.requests();
     assert_eq!(requests.len(), 1, "one small request");
     let body = requests[0].json();
     assert_eq!(body["endpoints"], json!(names));
-    assert_eq!(body["attrs"], json!(["connected"]));
+    assert_eq!(
+        body["attrs"],
+        json!([
+            "connected",
+            "connecting",
+            "icinga_version",
+            "last_message_received",
+            "messages_received_per_second",
+            "messages_sent_per_second"
+        ])
+    );
 }
 
 /// Answers name-list queries like Icinga: 404 if any name is unknown.

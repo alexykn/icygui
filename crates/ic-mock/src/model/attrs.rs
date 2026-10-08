@@ -28,6 +28,9 @@ pub(crate) enum ObjKind {
     Notification,
     CheckCommand,
     EventCommand,
+    CheckerComponent,
+    NotificationComponent,
+    IcingaDb,
 }
 
 /// A reference to one object.
@@ -279,9 +282,30 @@ const NOTIFICATION_HIDDEN: &[&str] = &[
     "last_notified_state_per_user",
 ];
 const COMMAND: &[&str] = &["arguments", "command", "env", "execute", "timeout", "vars"];
+/// `lib/checker/checkercomponent.ti` (`contract/samples/checkercomponents.json`).
+const CHECKER_COMPONENT: &[&str] = &["concurrent_checks"];
+/// `lib/notification/notificationcomponent.ti`
+/// (`contract/samples/notificationcomponents.json`).
+const NOTIFICATION_COMPONENT: &[&str] = &["enable_ha"];
+/// `lib/icingadb/icingadb.ti`'s configuration (the password is
+/// `no_user_view`).
+const ICINGADB: &[&str] = &[
+    "ca_path",
+    "cert_path",
+    "cipher_list",
+    "connect_timeout",
+    "crl_path",
+    "enable_tls",
+    "host",
+    "insecure_noverify",
+    "key_path",
+    "path",
+    "port",
+    "tls_protocolmin",
+];
 
 impl ObjKind {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::Host,
         Self::Service,
         Self::HostGroup,
@@ -295,6 +319,9 @@ impl ObjKind {
         Self::Notification,
         Self::CheckCommand,
         Self::EventCommand,
+        Self::CheckerComponent,
+        Self::NotificationComponent,
+        Self::IcingaDb,
     ];
 
     pub(crate) fn type_name(self) -> &'static str {
@@ -312,6 +339,9 @@ impl ObjKind {
             Self::Notification => "Notification",
             Self::CheckCommand => "CheckCommand",
             Self::EventCommand => "EventCommand",
+            Self::CheckerComponent => "CheckerComponent",
+            Self::NotificationComponent => "NotificationComponent",
+            Self::IcingaDb => "IcingaDB",
         }
     }
 
@@ -330,6 +360,9 @@ impl ObjKind {
             Self::Notification => "notifications",
             Self::CheckCommand => "checkcommands",
             Self::EventCommand => "eventcommands",
+            Self::CheckerComponent => "checkercomponents",
+            Self::NotificationComponent => "notificationcomponents",
+            Self::IcingaDb => "icingadbs",
         }
     }
 
@@ -364,6 +397,17 @@ impl ObjKind {
             Self::CheckCommand | Self::EventCommand => {
                 CONFIG_OBJECT.iter().chain(COMMAND).copied().collect()
             }
+            Self::CheckerComponent => CONFIG_OBJECT
+                .iter()
+                .chain(CHECKER_COMPONENT)
+                .copied()
+                .collect(),
+            Self::NotificationComponent => CONFIG_OBJECT
+                .iter()
+                .chain(NOTIFICATION_COMPONENT)
+                .copied()
+                .collect(),
+            Self::IcingaDb => CONFIG_OBJECT.iter().chain(ICINGADB).copied().collect(),
         };
         names.sort_unstable();
         names.dedup();
@@ -397,6 +441,7 @@ impl ObjKind {
             Self::Comment => COMMENT_HIDDEN,
             Self::Downtime => &["removed_by"],
             Self::Notification => NOTIFICATION_HIDDEN,
+            Self::IcingaDb => &["password"],
             _ => &[],
         }
     }
@@ -461,7 +506,6 @@ impl ObjKind {
 pub(crate) const EMPTY_TYPES: &[(&str, &str)] = &[
     ("apilisteners", "ApiListener"),
     ("apiusers", "ApiUser"),
-    ("checkercomponents", "CheckerComponent"),
     ("checkresultreaders", "CheckResultReader"),
     ("compatloggers", "CompatLogger"),
     ("elasticsearchwriters", "ElasticsearchWriter"),
@@ -470,7 +514,6 @@ pub(crate) const EMPTY_TYPES: &[(&str, &str)] = &[
     ("gelfwriters", "GelfWriter"),
     ("graphitewriters", "GraphiteWriter"),
     ("icingaapplications", "IcingaApplication"),
-    ("icingadbs", "IcingaDB"),
     ("idomysqlconnections", "IdoMysqlConnection"),
     ("idopgsqlconnections", "IdoPgsqlConnection"),
     ("influxdbwriters", "InfluxdbWriter"),
@@ -478,7 +521,6 @@ pub(crate) const EMPTY_TYPES: &[(&str, &str)] = &[
     ("journaldloggers", "JournaldLogger"),
     ("livestatuslisteners", "LivestatusListener"),
     ("notificationcommands", "NotificationCommand"),
-    ("notificationcomponents", "NotificationComponent"),
     ("opentsdbwriters", "OpenTsdbWriter"),
     ("otlpmetricswriters", "OTLPMetricsWriter"),
     ("perfdatawriters", "PerfdataWriter"),
@@ -553,6 +595,10 @@ impl World {
             ObjKind::Notification => self.notifications.contains_key(name),
             ObjKind::CheckCommand => self.check_commands.contains_key(name),
             ObjKind::EventCommand => self.event_commands.contains_key(name),
+            ObjKind::CheckerComponent | ObjKind::NotificationComponent | ObjKind::IcingaDb => self
+                .features
+                .get(&kind)
+                .is_some_and(|feature| feature.name == name),
         }
     }
 
@@ -572,6 +618,12 @@ impl World {
             ObjKind::Notification => self.notifications.keys().cloned().collect(),
             ObjKind::CheckCommand => self.check_commands.keys().cloned().collect(),
             ObjKind::EventCommand => self.event_commands.keys().cloned().collect(),
+            ObjKind::CheckerComponent | ObjKind::NotificationComponent | ObjKind::IcingaDb => self
+                .features
+                .get(&kind)
+                .map(|feature| feature.name.clone())
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -771,12 +823,19 @@ impl World {
                         "local_log_position" | "remote_log_position" => {
                             num(if e.connected { now - 1.5 } else { 0.0 })
                         }
-                        "last_message_sent" | "last_message_received" => {
-                            num(if e.connected { now - 0.4 } else { 0.0 })
+                        "last_message_sent" | "last_message_received" => num(if e.connected {
+                            now - 0.4
+                        } else {
+                            e.last_message
+                        }),
+                        "messages_received_per_second" => {
+                            num(if e.connected { e.message_rate } else { 0.0 })
                         }
-                        "messages_sent_per_second" | "messages_received_per_second" => {
-                            num(if e.connected { 41.25 } else { 0.0 })
-                        }
+                        "messages_sent_per_second" => num(if e.connected {
+                            (e.message_rate * 0.92).round()
+                        } else {
+                            0.0
+                        }),
                         "bytes_sent_per_second" | "bytes_received_per_second" => {
                             num(if e.connected { 18_432.5 } else { 0.0 })
                         }
@@ -838,6 +897,35 @@ impl World {
                 .event_commands
                 .get(&object.name)
                 .map(|c| command_attr(c, name, "EventCommand")),
+            kind @ (ObjKind::CheckerComponent
+            | ObjKind::NotificationComponent
+            | ObjKind::IcingaDb) => self
+                .features
+                .get(&kind)
+                .filter(|feature| feature.name == object.name)
+                .map(|feature| {
+                    common(
+                        &feature.meta,
+                        name,
+                        &feature.name,
+                        &feature.name,
+                        kind.type_name(),
+                    )
+                    .or_else(|| {
+                        Some(match (kind, name) {
+                            (ObjKind::CheckerComponent, "concurrent_checks") => int(0),
+                            (ObjKind::NotificationComponent, "enable_ha") => Json::Bool(true),
+                            (ObjKind::IcingaDb, "host") => string("127.0.0.1"),
+                            (ObjKind::IcingaDb, "port") => int(6380),
+                            (ObjKind::IcingaDb, "connect_timeout") => num(15.0),
+                            (ObjKind::IcingaDb, "enable_tls" | "insecure_noverify") => {
+                                Json::Bool(false)
+                            }
+                            (ObjKind::IcingaDb, field) if ICINGADB.contains(&field) => string(""),
+                            _ => return None,
+                        })
+                    })
+                }),
         };
         match value {
             None => Ok(None),

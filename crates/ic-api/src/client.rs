@@ -8,7 +8,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use ic_model::{
     Action, ActionTarget, Comment, Dependency, Downtime, Endpoint, EventKind, Host, HostGroup,
-    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, Timestamp, Zone,
+    InstanceStatus, ListenerStatus, NodeFeatures, Notification, ObjectKey, Service, ServiceGroup,
+    Timestamp, Zone,
 };
 use reqwest::header::{ACCEPT, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
@@ -18,7 +19,7 @@ use url::Url;
 
 use crate::actions::{self, Batch};
 use crate::budget::RequestBudget;
-use crate::detail::{Cluster, Detail, Fetched, FetchedNotifications};
+use crate::detail::{Cluster, Detail, EndpointState, Fetched, FetchedNotifications};
 use crate::error::ApiError;
 use crate::events::EventStream;
 use crate::info::ApiInfo;
@@ -26,8 +27,8 @@ use crate::settings::{CONNECT_TIMEOUT, ConnectionSettings, Credentials};
 use crate::tls;
 use crate::wire::{
     self, ActionResultWire, CheckableAttrs, CommentAttrs, DependencyAttrs, DowntimeAttrs,
-    EndpointAttrs, GroupAttrs, InfoResult, NotificationAttrs, QueryResult, Results, StatusResult,
-    ZoneAttrs,
+    EndpointAttrs, FeatureAttrs, GroupAttrs, InfoResult, NotificationAttrs, QueryResult, Results,
+    StatusResult, ZoneAttrs,
 };
 
 /// How many names one targeted query or action request carries. Icinga
@@ -322,6 +323,58 @@ impl Client {
         Ok(wire::node_name(&application))
     }
 
+    /// The node's cluster and API connections and its JSON-RPC queues
+    /// (`/v1/status/ApiListener`): the cluster health page asks for it
+    /// with its status polls while it is open (topic 06). One request,
+    /// taken from the request budget. Its size grows with the zones the
+    /// node talks to directly (an installation whose agents sit right
+    /// under the masters lists every agent's zone).
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::status`].
+    pub async fn listener_status(&self) -> Result<ListenerStatus, ApiError> {
+        self.spend().await;
+        let listener = self.status_entry("ApiListener").await?;
+        Ok(wire::listener_status(&listener))
+    }
+
+    /// Which of the node's checker, notification and `IcingaDB` features
+    /// run (their objects, attribute `paused` only): three small requests,
+    /// each taken from the request budget. A type the API user may not
+    /// read is `None`; any other error fails the whole call.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::hosts`], except `Forbidden`.
+    pub async fn node_features(&self) -> Result<NodeFeatures, ApiError> {
+        let mut features = NodeFeatures::default();
+        for (plural, slot) in [
+            ("checkercomponents", &mut features.checker),
+            ("notificationcomponents", &mut features.notification),
+            ("icingadbs", &mut features.icingadb),
+        ] {
+            self.spend().await;
+            match self
+                .query::<FeatureAttrs>(plural, None, wire::FEATURE_ATTRS)
+                .await
+            {
+                Ok(results) => {
+                    let objects: Vec<FeatureAttrs> = results
+                        .into_iter()
+                        .filter_map(|entry| entry.attrs)
+                        .collect();
+                    *slot = Some(wire::feature_state(&objects));
+                }
+                Err(ApiError::Forbidden(message)) => {
+                    tracing::debug!(%message, plural, "may not read the feature's objects");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(features)
+    }
+
     /// Every zone with its member endpoints, its parent and whether it is
     /// global: the cluster's zone tree (attributes `endpoints`, `global`
     /// and `parent` only).
@@ -520,8 +573,10 @@ impl Client {
 
     /// Whether each of the endpoints `names` is connected to the node the
     /// client talks to (Icinga's `connected`; the node's own endpoint says
-    /// `false`), in one small request per [`NAMES_PER_REQUEST`] names:
-    /// keeps a cluster's node list current between loads. Icinga fails a
+    /// `false`), with its version, last message and message rates (the
+    /// cluster health page's columns), in one small request per
+    /// [`NAMES_PER_REQUEST`] names: keeps a cluster's node list current
+    /// between loads. Icinga fails a
     /// whole request with `404 No objects found.` if one of its names is
     /// unknown; then none of its names comes back (no halving: the caller
     /// reloads the endpoint list instead).
@@ -529,7 +584,7 @@ impl Client {
     /// # Errors
     ///
     /// As [`Client::hosts`].
-    pub async fn endpoint_states(&self, names: &[String]) -> Result<Vec<(String, bool)>, ApiError> {
+    pub async fn endpoint_states(&self, names: &[String]) -> Result<Vec<EndpointState>, ApiError> {
         let answer = self
             .query_names::<EndpointAttrs>(
                 "endpoints",

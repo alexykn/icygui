@@ -89,6 +89,36 @@ pub struct Scenario {
     pub anchor: Option<Timestamp>,
     /// Objects the simulator never changes, so a demo keeps showing them.
     pub pinned: Vec<ObjectKey>,
+    /// The node's features the cluster health page shows (checker and
+    /// notification by default): their objects exist, their status
+    /// functions report them.
+    pub features: ScenarioFeatures,
+    /// Endpoints running another Icinga version than the scenario's
+    /// (`status.version`): endpoint name and version string.
+    pub endpoint_versions: Vec<(String, String)>,
+}
+
+/// Which of the node's features are enabled (each has one object named
+/// like the feature: `checker`, `notification`, `icingadb`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScenarioFeatures {
+    /// The `checker` feature.
+    pub checker: bool,
+    /// The `notification` feature.
+    pub notification: bool,
+    /// The `icingadb` feature.
+    pub icingadb: bool,
+}
+
+impl Default for ScenarioFeatures {
+    /// A master's usual features: checker and notification.
+    fn default() -> Self {
+        Self {
+            checker: true,
+            notification: true,
+            icingadb: false,
+        }
+    }
 }
 
 /// A cluster zone.
@@ -214,8 +244,11 @@ impl Scenario {
                 flap_detection_enabled: true,
                 perfdata_enabled: true,
                 checks_per_minute: 0.0,
+                passive_checks_per_minute: 0.0,
                 avg_latency: 0.0,
+                max_latency: 0.0,
                 avg_execution_time: 0.0,
+                max_execution_time: 0.0,
                 counts: ic_model::ObjectCounts::default(),
             },
             zones: Vec::new(),
@@ -224,6 +257,8 @@ impl Scenario {
             time_base: Timestamp::now(),
             anchor: None,
             pinned: Vec::new(),
+            features: ScenarioFeatures::default(),
+            endpoint_versions: Vec::new(),
         }
     }
 

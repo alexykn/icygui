@@ -370,8 +370,8 @@ fn estate() -> Vec<HostDef> {
     for (name, address, zone) in [
         ("sw-core-ams-01", "10.8.0.2", Some("ams")),
         ("sw-core-ams-02", "10.8.0.3", Some("ams")),
-        ("sw-core-fra-01", "10.9.0.2", None),
-        ("sw-core-fra-02", "10.9.0.3", None),
+        ("sw-core-fra-01", "10.9.0.2", Some("fra")),
+        ("sw-core-fra-02", "10.9.0.3", Some("fra")),
     ] {
         let mut def = host(name, address, "switch", &["network"]);
         def.zone = zone;
@@ -393,17 +393,30 @@ fn estate() -> Vec<HostDef> {
 )]
 pub fn prod_cluster() -> Scenario {
     let mut b = Builder::new("prod-cluster", "master-01", "r2.14.3-1", 2_026);
+    // Two masters sharing the checks, a satellite per site (fra's runs an
+    // older version), and two global zones for configuration only.
     b.scenario.zones = vec![
         Zone::new("master", None),
         Zone::new("ams", Some("master")),
+        Zone::new("fra", Some("master")),
         Zone {
             name: "global-templates".to_owned(),
             parent: None,
             global: true,
         },
+        Zone {
+            name: "director-global".to_owned(),
+            parent: None,
+            global: true,
+        },
     ];
     b.endpoint("master-01", "master", false);
+    b.endpoint("master-02", "master", true);
     b.endpoint("sat-ams-01", "ams", true);
+    b.endpoint("sat-fra-01", "fra", true);
+    b.scenario
+        .endpoint_versions
+        .push(("sat-fra-01".to_owned(), "r2.14.2-1".to_owned()));
     b.scenario.users = vec![
         User::new("dba-oncall", "DBA on-call", "dba-oncall@example.com"),
         User::new(
@@ -423,7 +436,7 @@ pub fn prod_cluster() -> Scenario {
 
     for def in estate() {
         b.zone = def.zone.map(str::to_owned);
-        b.check_source = def.zone.map(|_| "sat-ams-01".to_owned());
+        b.check_source = def.zone.map(|zone| format!("sat-{zone}-01"));
         let mut host_vars = vec![
             ("role", json!(def.role)),
             ("env", json!("prod")),

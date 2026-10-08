@@ -40,7 +40,7 @@ use ic_model::{
 };
 use raw::Raw;
 use secrecy::SecretString;
-use serde_json::json;
+use serde_json::{Value, json};
 
 struct Contract {
     url: Url,
@@ -254,8 +254,19 @@ async fn real_icinga_node_states_and_counts() {
 
     // The node's own endpoint says it isn't connected (to itself): the
     // engine never asks for it, the node it talks to is connected.
-    let states = client.endpoint_states(std::slice::from_ref(&node)).await;
-    assert_eq!(states.unwrap(), [(node.clone(), false)]);
+    let states = client
+        .endpoint_states(std::slice::from_ref(&node))
+        .await
+        .unwrap();
+    assert_eq!(states.len(), 1);
+    assert_eq!(
+        (states[0].name.as_str(), states[0].connected),
+        (node.as_str(), false)
+    );
+    // Every number the cluster health page reads is an attribute Icinga
+    // knows (an unknown one would fail the query); its own endpoint has
+    // none of them set.
+    assert_eq!(states[0].stats, ic_model::EndpointStats::default());
     // A name Icinga doesn't know fails the whole request ("No objects
     // found.", 404), so the client leaves every name of it out.
     let names = [node.clone(), "icygui-no-such-endpoint".to_owned()];
@@ -295,6 +306,69 @@ async fn real_icinga_node_states_and_counts() {
     assert_eq!(usize::try_from(counts.services_pending).unwrap(), pending);
     assert_eq!(usize::try_from(counts.services()).unwrap(), services.len());
     assert_eq!(usize::try_from(counts.hosts()).unwrap(), hosts.len());
+}
+
+/// What the cluster health page reads besides the status poll (topic
+/// 06): the `ApiListener` status entry (its connections and queues: every
+/// field read is there, so none silently reads as 0), the CIB's passive
+/// checks and maxima, and the features by their objects (`paused`, which
+/// every configuration object has). The fixture is one master with the
+/// `checker` and `notification` features and without `icingadb`, which
+/// has no status entry of its own in 2.15 (so its object tells).
+#[tokio::test]
+async fn real_icinga_cluster_health() {
+    let Some(contract) = fixture().await else {
+        return;
+    };
+    let raw = contract.raw();
+    wait_for_first_checks(&raw).await;
+    let listener = raw.get("v1/status/ApiListener").await;
+    assert_eq!(listener.status, 200);
+    let api = listener.json()["results"][0]["status"]["api"].clone();
+    for pointer in [
+        "/http/clients",
+        "/num_endpoints",
+        "/num_conn_endpoints",
+        "/json_rpc/relay_queue_items",
+        "/json_rpc/relay_queue_item_rate",
+        "/json_rpc/sync_queue_items",
+        "/json_rpc/work_queue_item_rate",
+    ] {
+        assert!(
+            api.pointer(pointer).is_some_and(Value::is_number),
+            "{pointer}: {api}"
+        );
+    }
+    assert_eq!(
+        raw.get("v1/status/IcingaDB").await.status,
+        404,
+        "no status entry for IcingaDB"
+    );
+    let client = contract.client();
+    let status = client.listener_status().await.unwrap();
+    assert!(status.http_clients >= 1, "this client: {status:?}");
+    assert_eq!(
+        (status.endpoints, status.connected_endpoints),
+        (0, 0),
+        "a single master talks to no other endpoint"
+    );
+    let features = client.node_features().await.unwrap();
+    assert_eq!(
+        features,
+        ic_model::NodeFeatures {
+            checker: Some(ic_model::FeatureState::Running),
+            notification: Some(ic_model::FeatureState::Running),
+            icingadb: Some(ic_model::FeatureState::Off),
+        }
+    );
+    let instance = client.status().await.unwrap();
+    assert!(instance.max_latency >= instance.avg_latency, "{instance:?}");
+    assert!(
+        instance.max_execution_time >= instance.avg_execution_time,
+        "{instance:?}"
+    );
+    assert!(instance.passive_checks_per_minute >= 0.0);
+    assert_eq!(client.unknown_attributes(), []);
 }
 
 /// Every attribute the client asks for exists: Icinga 2.15 rejects a

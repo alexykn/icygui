@@ -47,6 +47,9 @@ pub(crate) struct EngineSlot {
     /// Whether the engine was told to be quiet (PERF-09; an engine starts
     /// live).
     pub(super) quiet: bool,
+    /// Whether the engine was told the cluster health page shows its
+    /// environment (an engine starts without).
+    pub(super) health: bool,
 }
 
 impl EngineSlot {
@@ -74,6 +77,7 @@ impl EngineSlot {
             hydration: Hydration::default(),
             last_refresh: None,
             quiet: false,
+            health: false,
         }
     }
 
@@ -203,6 +207,7 @@ impl AppState {
         // Commands sent right after the start apply before the first
         // connect: a quiet engine opens its stream quiet.
         self.announce_quiet_to(id);
+        self.announce_health();
         if let Some(until) = pause
             && let Some(slot) = self.slot_mut(id)
         {

@@ -307,6 +307,11 @@ async fn objects_have_the_shape_of_real_icinga() {
         ("dependencies.json", "/v1/objects/dependencies"),
         ("endpoints.json", "/v1/objects/endpoints"),
         ("zones.json", "/v1/objects/zones"),
+        ("checkercomponents.json", "/v1/objects/checkercomponents"),
+        (
+            "notificationcomponents.json",
+            "/v1/objects/notificationcomponents",
+        ),
     ] {
         let body = mock_get(&prod_client, &prod, path, &mut errors).await;
         let shape = Shape::learn(attrs(&sample(file)));
@@ -415,6 +420,24 @@ async fn status_and_info_have_the_shape_of_real_icinga() {
         [&results(&app)[0]["status"]["icingaapplication"]["app"]],
         &mut errors,
     );
+
+    // The ApiListener's connections and queues (the cluster health page).
+    let (_, listener) = json(as_icygui("/v1/status/ApiListener").send().await.unwrap()).await;
+    check_numbers("ApiListener", &listener, &mut errors);
+    let listener_sample = sample("status-apilistener.json");
+    Shape::learn(results(&listener_sample)).check(
+        "ApiListener entry",
+        results(&listener),
+        &mut errors,
+    );
+    for part in ["", "/http", "/json_rpc"] {
+        let path = format!("/status/api{part}");
+        Shape::learn(results(&listener_sample)[0].pointer(&path)).check(
+            &format!("ApiListener api{part}"),
+            results(&listener)[0].pointer(&path),
+            &mut errors,
+        );
+    }
 
     let (_, cib) = json(as_icygui("/v1/status/CIB").send().await.unwrap()).await;
     check_numbers("CIB", &cib, &mut errors);

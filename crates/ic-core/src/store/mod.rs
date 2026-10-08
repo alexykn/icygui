@@ -48,7 +48,7 @@ mod apply;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use ic_api::Detail;
+use ic_api::{Detail, EndpointState};
 use ic_model::{
     CheckInfo, CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
     InstanceStatus, Notification, ObjectCounts, ObjectKey, Service, ServiceGroup, ServiceKey,
@@ -56,6 +56,7 @@ use ic_model::{
 };
 use ic_rules::DashboardRef;
 
+use crate::health::ClusterHealth;
 use crate::snapshot::{DashboardResult, Snapshot};
 use crate::summary::Tally;
 
@@ -147,6 +148,8 @@ pub(crate) struct Store {
     endpoints: Arc<Vec<Endpoint>>,
     zones: Arc<Vec<Zone>>,
     status: Option<Arc<InstanceStatus>>,
+    /// The cluster health page's data (`Snapshot::health`).
+    health: Arc<ClusterHealth>,
     /// Icinga's own `Notification` objects, by host or service, each list
     /// by name.
     icinga_notifications: Arc<BTreeMap<ObjectKey, Arc<[Notification]>>>,
@@ -555,6 +558,7 @@ impl Store {
             endpoints: Arc::clone(&self.endpoints),
             zones: Arc::clone(&self.zones),
             status: self.status.clone(),
+            health: Arc::clone(&self.health),
             icinga_notifications: Arc::clone(&self.icinga_notifications),
             dashboards,
             last_event_at: self.last_event_at,
@@ -896,12 +900,23 @@ impl Store {
 
     /// Sets the endpoints' `connected` as Icinga reported it (by name;
     /// `local`, the node the engine talks to, stays connected: Icinga
-    /// reports its own endpoint as not connected).
-    pub(crate) fn set_endpoint_states(&mut self, states: &[(String, bool)], local: &str) {
+    /// reports its own endpoint as not connected), and keeps their numbers
+    /// for the cluster health page.
+    pub(crate) fn set_endpoint_states(&mut self, states: &[EndpointState], local: &str) {
+        let stats_changed = states
+            .iter()
+            .any(|state| self.health.endpoints.get(&state.name) != Some(&state.stats));
+        if stats_changed {
+            let health = Arc::make_mut(&mut self.health);
+            for state in states {
+                health.endpoints.insert(state.name.clone(), state.stats);
+            }
+            self.changes.any = true;
+        }
         let changed = self.endpoints.iter().any(|endpoint| {
             endpoint.name != local
-                && states.iter().any(|(name, connected)| {
-                    *name == endpoint.name && *connected != endpoint.connected
+                && states.iter().any(|state| {
+                    state.name == endpoint.name && state.connected != endpoint.connected
                 })
         });
         if !changed {
@@ -911,11 +926,21 @@ impl Store {
             if endpoint.name == local {
                 continue;
             }
-            if let Some((_, connected)) = states.iter().find(|(name, _)| *name == endpoint.name) {
-                endpoint.connected = *connected;
+            if let Some(state) = states.iter().find(|state| state.name == endpoint.name) {
+                endpoint.connected = state.connected;
             }
         }
         self.changes.any = true;
+    }
+
+    /// Changes the cluster health page's data (marks the store changed).
+    pub(crate) fn update_health(&mut self, change: impl FnOnce(&mut ClusterHealth)) {
+        let mut health = (*self.health).clone();
+        change(&mut health);
+        if health != *self.health {
+            self.health = Arc::new(health);
+            self.changes.any = true;
+        }
     }
 
     /// The endpoints and zones (for the node list's states).

@@ -639,6 +639,12 @@ impl Workspace {
             .map(|list| &list.view)
     }
 
+    /// The cluster health page.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn health_page(&self) -> &Entity<crate::cluster::HealthPage> {
+        &self.health
+    }
+
     /// What the main area shows: `dashboard`, `tab`, `list` (handling or
     /// downtimes), `events` or `health`.
     #[cfg(all(test, target_os = "linux"))]
@@ -726,6 +732,9 @@ impl Workspace {
         }
         if self.shown == Shown::Events {
             self.events.update(cx, |_, cx| cx.notify());
+        }
+        if self.shown == Shown::Health {
+            self.health.update(cx, |_, cx| cx.notify());
         }
         cx.notify();
     }
@@ -817,6 +826,12 @@ impl Workspace {
                 self.focus_main(window, cx);
             }
         }
+        // The engine on screen asks for what only the health page needs
+        // while it shows (topic 06).
+        let health_page =
+            self.shown == Shown::Health && self.editor.is_none() && self.onboarding.is_none();
+        self.state
+            .update(cx, |state, _| state.set_health_page(health_page));
         self.sync_onboarding(window, cx);
         self.pick_up_request(window, cx);
         cx.notify();
@@ -1304,6 +1319,11 @@ impl Workspace {
                     None => state.open_list(kind),
                 };
                 if changed {
+                    cx.notify();
+                }
+            }),
+            PaletteCommand::ClusterHealth => self.state.update(cx, |state, cx| {
+                if state.show_cluster(ClusterEntry::Health) {
                     cx.notify();
                 }
             }),

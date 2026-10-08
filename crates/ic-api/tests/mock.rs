@@ -182,7 +182,7 @@ async fn nodes_report_their_name_and_the_zone_tree() {
     let zones = client.zones().await.unwrap();
     let zone = |name: &str| zones.iter().find(|zone| zone.name == name).unwrap();
     assert_eq!(zone("master").parent, None);
-    assert_eq!(zone("master").endpoints, ["master-01"]);
+    assert_eq!(zone("master").endpoints, ["master-01", "master-02"]);
     assert!(!zone("master").global);
     assert_eq!(zone("ams").parent.as_deref(), Some("master"));
     assert_eq!(zone("ams").endpoints, ["sat-ams-01"]);
@@ -226,16 +226,24 @@ async fn node_states_and_counts_like_icinga() {
     })
     .await;
     let client = root(&master);
+    let states = client
+        .endpoint_states(&["master-01".to_owned(), "sat-ams-01".to_owned()])
+        .await
+        .unwrap();
     assert_eq!(
-        client
-            .endpoint_states(&["master-01".to_owned(), "sat-ams-01".to_owned()])
-            .await
-            .unwrap(),
-        [
-            ("master-01".to_owned(), false),
-            ("sat-ams-01".to_owned(), true)
-        ]
+        states
+            .iter()
+            .map(|state| (state.name.as_str(), state.connected))
+            .collect::<Vec<_>>(),
+        [("master-01", false), ("sat-ams-01", true)]
     );
+    // Like Icinga: no numbers for the node's own endpoint, the version and
+    // the message traffic of a connected one.
+    assert_eq!(states[0].stats.version, 0);
+    assert!(states[0].stats.messages_in.abs() < f64::EPSILON);
+    assert_eq!(states[1].stats.version, 21_403, "r2.14.3-1");
+    assert!(states[1].stats.messages_in > 0.0);
+    assert!(states[1].stats.last_message.non_zero().is_some());
     let names = [
         "sat-ams-01".to_owned(),
         "icygui-no-such-endpoint".to_owned(),
@@ -256,6 +264,13 @@ async fn node_states_and_counts_like_icinga() {
     assert_eq!(answer.status, 404, "{}", answer.json());
     assert_eq!(answer.json()["status"], "No objects found.");
     assert_eq!(client.endpoint_states(&names).await.unwrap(), []);
+    // The listener status the cluster health page reads, as Icinga writes
+    // it (the master talks to its HA partner and both satellites).
+    let answer = raw.get("v1/status/ApiListener").await;
+    assert_eq!(answer.status, 200);
+    let listener = client.listener_status().await.unwrap();
+    assert_eq!((listener.connected_endpoints, listener.endpoints), (3, 3));
+    assert!(listener.work_queue_rate > 0.0);
 
     // `lab` has a service never checked: counted as unknown.
     let lab = start(MockConfig::with_scenario(scenarios::lab())).await;

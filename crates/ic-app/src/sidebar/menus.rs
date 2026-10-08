@@ -49,8 +49,9 @@ mod budget {
     pub(super) const OUTSIDE: f32 = 50.;
     /// The title, its separator, *Reload* and its separator.
     pub(super) const TOP: f32 = 42. + 9. + ROW + 9.;
-    /// Above the node list: its separator and label.
-    pub(super) const NODES: f32 = 9. + 23.;
+    /// Around the node list: its separator and label, and the *cluster
+    /// health* row under it.
+    pub(super) const NODES: f32 = 9. + 23. + ROW;
     /// Around the environment list: its separator and label, the mute row
     /// (several environments), a separator, *add*, the card's padding and
     /// border.
@@ -486,7 +487,8 @@ impl Sidebar {
                             "cluster-nodes",
                             Self::node_items(nodes, theme),
                             px(height_of(budget.nodes, budget::ROW)),
-                        );
+                        )
+                        .item(Self::cluster_health_item(cx));
                 }
                 let can_reload = !connection.is_starting();
                 menu = menu.separator().item(
@@ -513,6 +515,23 @@ impl Sidebar {
         }
         self.with_switcher(menu, state, now, budget, cx)
             .on_dismiss(Self::dismiss_listener(cx))
+    }
+
+    /// The *cluster health* row under the nodes: the whole picture, the
+    /// cluster health page (topic 06), as *health* in the cluster section.
+    fn cluster_health_item(cx: &Context<Self>) -> MenuItem {
+        MenuItem::new("cluster-health", "cluster health")
+            .icon(IconName::HeartPulse)
+            .key_hint("zones, queues, checks/min")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.menus.close();
+                this.state.update(cx, |state, cx| {
+                    if state.show_cluster(crate::cluster::ClusterEntry::Health) {
+                        cx.notify();
+                    }
+                });
+                cx.notify();
+            }))
     }
 
     /// The cluster's masters and satellites (`node_rows`) as menu rows in

@@ -52,6 +52,7 @@ mod editing;
 mod editor_views;
 mod environments;
 mod every_environment;
+mod health;
 mod lists;
 mod live;
 mod live_actions;

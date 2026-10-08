@@ -87,6 +87,11 @@ pub(crate) enum DemoFault {
     /// `prod-cluster` environment's second URL): a partial view, labelled
     /// as such, while the engine keeps asking the master (ENV-12).
     Partial,
+    /// `satellite-down`: 20 seconds in, `prod-cluster`'s satellite
+    /// `sat-fra-01` drops out of the cluster, so zone `fra` is cut off:
+    /// its checks go late, the relay queue grows, and the cluster health
+    /// page and its sidebar dot turn critical (topic 06).
+    SatelliteDown,
 }
 
 impl DemoFault {
@@ -103,6 +108,7 @@ impl DemoFault {
             "slow" => Some(Self::Slow),
             "frozen" => Some(Self::Frozen),
             "partial" => Some(Self::Partial),
+            "satellite-down" => Some(Self::SatelliteDown),
             _ => None,
         }
     }
@@ -220,7 +226,9 @@ impl DemoServer {
         };
         let others = matches!(
             self.fault,
-            None | Some(DemoFault::Partial | DemoFault::Slow | DemoFault::Frozen)
+            None | Some(
+                DemoFault::Partial | DemoFault::Slow | DemoFault::Frozen | DemoFault::SatelliteDown
+            )
         );
         std::iter::once(master)
             .chain(
@@ -310,8 +318,10 @@ pub(crate) fn start(
     ))
 }
 
-/// The endpoints of `scenario` in a child zone (a zone with a parent):
-/// the satellites.
+/// The first endpoint of `scenario` in a child zone (a zone with a
+/// parent): the satellite the environment lists as its second URL
+/// (`prod-cluster`'s `sat-ams-01`; its other satellite only shows on the
+/// cluster health page).
 fn child_zone_nodes(scenario: &ic_mock::Scenario) -> Vec<String> {
     scenario
         .endpoints
@@ -323,8 +333,12 @@ fn child_zone_nodes(scenario: &ic_mock::Scenario) -> Vec<String> {
                 .any(|zone| zone.name == endpoint.zone && zone.parent.is_some())
         })
         .map(|endpoint| endpoint.name.clone())
+        .take(1)
         .collect()
 }
+
+/// The satellite [`DemoFault::SatelliteDown`] drops.
+const DROPPED_SATELLITE: &str = "sat-fra-01";
 
 /// Runs the mock server (and the satellites' servers) until `stopped`
 /// fires.
@@ -390,6 +404,18 @@ fn serve(
                             tracing::info!("the demo's outage begins");
                             control.fail_next(u32::MAX, 503);
                             control.drop_connections();
+                        });
+                    }
+                    Some(DemoFault::SatelliteDown) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(OUTAGE_AFTER).await;
+                            match control.set_endpoint_connected(DROPPED_SATELLITE, false) {
+                                Ok(()) => tracing::info!("the demo's satellite drops out"),
+                                Err(error) => {
+                                    tracing::warn!(%error, "the demo has no satellite to drop");
+                                }
+                            }
                         });
                     }
                     _ => {}
@@ -1184,6 +1210,10 @@ mod tests {
         );
         assert_eq!(DemoFault::parse("outage"), Some(DemoFault::Outage));
         assert_eq!(DemoFault::parse("frozen"), Some(DemoFault::Frozen));
+        assert_eq!(
+            DemoFault::parse("satellite-down"),
+            Some(DemoFault::SatelliteDown)
+        );
         assert_eq!(
             DemoFault::parse("pin-mismatch"),
             Some(DemoFault::PinMismatch)

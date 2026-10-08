@@ -118,6 +118,8 @@ pub(crate) enum PaletteCommand {
     /// Open the handling or downtimes view as a tab (topic 14), on a chip
     /// (*acknowledged* opens handling on its acknowledged chip).
     OpenList(ListKind, Option<crate::lists::model::Chip>),
+    /// Show the cluster health page (topic 06).
+    ClusterHealth,
     /// Mark every notification read.
     MarkNotificationsRead,
     /// Open the settings (`secondary-,`), on this tab.
@@ -1022,6 +1024,13 @@ fn list_commands(state: &AppState, now: Timestamp) -> Vec<PaletteItem> {
             None,
             IconName::MessageSquare,
             PaletteCommand::OpenList(ListKind::Handling, Some(Chip::Comments)),
+        ),
+        command(
+            "Cluster health",
+            "zones, queues, checks/min".to_owned(),
+            None,
+            IconName::HeartPulse,
+            PaletteCommand::ClusterHealth,
         ),
     ]
 }

@@ -28,5 +28,8 @@ pub use perfdata::{
     Perfdata, PerfdataStatus, Threshold, format_number, parse_perfdata, parse_perfdata_entry,
 };
 pub use state::{HostState, ServiceState, StateType};
-pub use status::{InstanceStatus, ObjectCounts};
+pub use status::{
+    EndpointStats, FeatureState, InstanceStatus, ListenerStatus, NodeFeatures, ObjectCounts,
+    Version,
+};
 pub use time::{Timestamp, format_compact, format_two_units};

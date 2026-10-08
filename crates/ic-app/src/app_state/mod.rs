@@ -178,6 +178,10 @@ pub(crate) enum Hydrated {
 
 /// Application data shared by the views, and the outbound half.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the window, the user and the pages on screen"
+)]
 pub(crate) struct AppState {
     config: Config,
     ui: UiState,
@@ -245,6 +249,9 @@ pub(crate) struct AppState {
     /// Counts the times the environment on screen woke up from quiet mode
     /// (or another came on screen).
     wake: u64,
+    /// The cluster health page is on screen (topic 06): the engine on
+    /// screen asks for what only the page needs while the window shows.
+    health_page: bool,
     /// Evaluates dashboards for the fixture; the core does that itself.
     #[cfg(test)]
     evaluator: Option<fixture::Evaluator>,
@@ -286,6 +293,7 @@ impl AppState {
             window_hidden: false,
             user_present: true,
             wake: 0,
+            health_page: false,
             #[cfg(test)]
             evaluator: None,
             #[cfg(test)]

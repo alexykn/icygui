@@ -38,7 +38,7 @@ mod wire;
 
 pub use budget::RequestBudget;
 pub use client::{ActionResult, Client, NAMES_PER_REQUEST};
-pub use detail::{Cluster, Detail, Fetched, FetchedNotifications};
+pub use detail::{Cluster, Detail, EndpointState, Fetched, FetchedNotifications};
 pub use error::ApiError;
 pub use events::{EventLines, EventStream, parse_event};
 pub use info::ApiInfo;

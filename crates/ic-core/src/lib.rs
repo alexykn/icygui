@@ -48,6 +48,7 @@ mod engine;
 mod error;
 mod event_log;
 mod handle;
+pub mod health;
 pub mod ports;
 mod probe;
 pub mod snapshot;
@@ -64,6 +65,7 @@ pub use dashboards::{evaluate_dashboard, stream_events};
 pub use error::CoreError;
 pub use event_log::{delete_event_log, event_log_path, seed_event_log};
 pub use handle::{CoreHandle, start, start_with_tuning};
+pub use health::{ClusterHealth, HealthSample};
 /// The API user and permissions ([`CoreEvent::Permissions`]) and a server
 /// certificate ([`ConnectionState::TlsFailed`], [`fetch_certificate`]),
 /// re-exported so the UI can name them without depending on `ic-api`.

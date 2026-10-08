@@ -385,7 +385,7 @@ impl Sidebar {
         let groups = model::groups(environment, state.snapshot(), selected, &self.query, now);
         let tabs = model::open_tabs(state.tabs(), state.active_tab(), state.snapshot());
         let cluster_state =
-            crate::cluster::cluster_state(state.snapshot(), state.connection().is_connected());
+            crate::cluster::cluster_state(state.snapshot(), state.connection().is_connected(), now);
         let cluster =
             model::cluster_rows(state.snapshot(), state.active_cluster(), cluster_state, now);
         let environment_name = environment.name.clone();

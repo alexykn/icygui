@@ -5,8 +5,8 @@ use std::collections::VecDeque;
 
 use serde_json::{Map, Value as Json};
 
-use super::World;
 use super::logic::DepType;
+use super::{ObjKind, World};
 use crate::json::{int, num};
 
 /// The status functions of Icinga 2.15's packages, in its (sorted) order.
@@ -93,6 +93,11 @@ impl CheckStats {
     pub(crate) fn checks_last_minute(&self, now: f64) -> u32 {
         self.count(ACTIVE_HOST, now, 60.0) + self.count(ACTIVE_SERVICE, now, 60.0)
     }
+
+    /// Passive host and service check results in the last minute.
+    pub(crate) fn passive_last_minute(&self, now: f64) -> u32 {
+        self.count(PASSIVE_HOST, now, 60.0) + self.count(PASSIVE_SERVICE, now, 60.0)
+    }
 }
 
 fn perfdata_value(label: &str, value: f64) -> Json {
@@ -125,7 +130,7 @@ impl World {
         let (status, perfdata) = match name {
             "ApiListener" => self.api_listener_status(),
             "CIB" => (self.cib_status(), Vec::new()),
-            "CheckerComponent" => {
+            "CheckerComponent" if self.features.contains_key(&ObjKind::CheckerComponent) => {
                 let idle = self
                     .all_checkables()
                     .filter(|c| c.enable_active_checks)
@@ -148,7 +153,9 @@ impl World {
                 )
             }
             "IcingaApplication" => (self.icinga_application_status(), Vec::new()),
-            "NotificationComponent" => {
+            "NotificationComponent"
+                if self.features.contains_key(&ObjKind::NotificationComponent) =>
+            {
                 let mut nodes = Map::new();
                 nodes.insert("notification".into(), int(1));
                 let mut status = Map::new();
@@ -259,13 +266,14 @@ impl World {
             connected.len() as f64,
             not_connected.len() as f64,
         );
+        let (relay_items, relay_rate, work_rate) = self.json_rpc_queues(&identity, &not_connected);
         let mut json_rpc = Map::new();
         json_rpc.insert("anonymous_clients".into(), int(0));
-        json_rpc.insert("relay_queue_item_rate".into(), num(0.0));
-        json_rpc.insert("relay_queue_items".into(), int(0));
+        json_rpc.insert("relay_queue_item_rate".into(), num(relay_rate));
+        json_rpc.insert("relay_queue_items".into(), num(relay_items));
         json_rpc.insert("sync_queue_item_rate".into(), num(0.0));
         json_rpc.insert("sync_queue_items".into(), int(0));
-        json_rpc.insert("work_queue_item_rate".into(), num(0.0));
+        json_rpc.insert("work_queue_item_rate".into(), num(work_rate));
         let mut http = Map::new();
         http.insert("clients".into(), int(1));
         let mut api = Map::new();
@@ -285,14 +293,39 @@ impl World {
             perfdata_value("api_num_endpoints", total_f),
             perfdata_value("api_num_http_clients", 1.0),
             perfdata_value("api_num_json_rpc_anonymous_clients", 0.0),
-            perfdata_value("api_num_json_rpc_relay_queue_item_rate", 0.0),
-            perfdata_value("api_num_json_rpc_relay_queue_items", 0.0),
+            perfdata_value("api_num_json_rpc_relay_queue_item_rate", relay_rate),
+            perfdata_value("api_num_json_rpc_relay_queue_items", relay_items),
             perfdata_value("api_num_json_rpc_sync_queue_item_rate", 0.0),
             perfdata_value("api_num_json_rpc_sync_queue_items", 0.0),
-            perfdata_value("api_num_json_rpc_work_queue_item_rate", 0.0),
+            perfdata_value("api_num_json_rpc_work_queue_item_rate", work_rate),
             perfdata_value("api_num_not_conn_endpoints", not_connected_f),
         ];
         (status, perfdata)
+    }
+
+    /// The JSON-RPC queues: the messages the connected endpoints send are
+    /// the work; while an endpoint the node talks to is gone, messages for
+    /// its zone pile up in the relay queue (96 a second since the first
+    /// one left). Returns the relay queue's items and rate and the work
+    /// queue's rate.
+    fn json_rpc_queues(&self, identity: &str, not_connected: &[Json]) -> (f64, f64, f64) {
+        let now = self.now();
+        let work_rate: f64 = self
+            .endpoints
+            .values()
+            .filter(|e| e.connected && e.name != identity)
+            .map(|e| e.message_rate)
+            .sum();
+        let gone_since = not_connected
+            .iter()
+            .filter_map(|name| self.endpoints.get(name.as_str()?))
+            .map(|e| e.last_message)
+            .filter(|at| *at > 0.0)
+            .reduce(f64::min);
+        match gone_since {
+            Some(since) => (((now - since).max(0.0) * 96.0).floor(), 96.0, work_rate),
+            None => (0.0, work_rate / 4.0, work_rate),
+        }
     }
 
     fn service_check_times(&self) -> CheckTimes {

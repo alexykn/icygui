@@ -46,6 +46,10 @@ pub struct Snapshot {
     pub zones: Arc<Vec<Zone>>,
     /// Instance status; `None` until first fetched.
     pub status: Option<Arc<InstanceStatus>>,
+    /// The cluster health page's data (topic 06): the endpoints' numbers,
+    /// the node's listener status and features, the trend of the status
+    /// polls. The same `Arc` while none of it changes.
+    pub health: Arc<crate::health::ClusterHealth>,
     /// Icinga's own `Notification` objects (who Icinga notified, and when)
     /// by host or service, each list by name. They load in the background
     /// once the problem lists are complete and follow Icinga's

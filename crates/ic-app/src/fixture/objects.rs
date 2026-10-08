@@ -914,8 +914,11 @@ pub(super) fn status(now: Timestamp) -> InstanceStatus {
         flap_detection_enabled: true,
         perfdata_enabled: true,
         checks_per_minute: 1840.,
+        passive_checks_per_minute: 212.,
         avg_latency: 0.004,
+        max_latency: 0.92,
         avg_execution_time: 0.31,
+        max_execution_time: 9.81,
         counts: ic_model::ObjectCounts::default(),
     }
 }

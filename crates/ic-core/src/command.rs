@@ -126,6 +126,15 @@ pub enum Command {
     /// The user is here (the window was shown): a background start's first
     /// load that still waits ([`crate::Start::Background`]) starts now.
     StartNow,
+    /// Whether the cluster health page shows this environment (topic 06;
+    /// the app sends `false` while the window is hidden). While it does and
+    /// the environment isn't quiet, each status poll also asks for the
+    /// node's `ApiListener` status, and the node's features are asked for
+    /// when the page opens and every five minutes after (each request from
+    /// the request budget); the page opening asks for both at once unless
+    /// a poll brought them less than an interval ago. Nothing is asked for
+    /// while no page shows it. [`crate::Snapshot::health`] carries them.
+    WatchHealth(bool),
 }
 
 /// What the engine tells the UI. Received from

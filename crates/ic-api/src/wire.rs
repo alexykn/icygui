@@ -4,14 +4,15 @@
 
 use ic_model::{
     AckKind, CheckInfo, CheckResult, CheckableState, Comment, CommentKind, Dependency, Downtime,
-    Endpoint, Features, Host, HostGroup, HostName, HostState, InstanceStatus, Links, Notification,
-    ObjectCounts, ObjectKey, Perfdata, Service, ServiceGroup, ServiceKey, ServiceState, StateAfter,
-    StateType, Threshold, Timestamp, Vars, Zone, parse_perfdata, parse_perfdata_entry,
+    Endpoint, EndpointStats, FeatureState, Features, Host, HostGroup, HostName, HostState,
+    InstanceStatus, Links, ListenerStatus, Notification, ObjectCounts, ObjectKey, Perfdata,
+    Service, ServiceGroup, ServiceKey, ServiceState, StateAfter, StateType, Threshold, Timestamp,
+    Vars, Zone, parse_perfdata, parse_perfdata_entry,
 };
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::detail::Detail;
+use crate::detail::{Detail, EndpointState};
 use crate::lenient::{FromJson, L, number};
 
 /// `{ "results": [...] }`, the envelope of every non-streaming response.
@@ -676,13 +677,27 @@ pub(crate) struct EndpointAttrs {
     name: L<String>,
     zone: L<String>,
     connected: L<bool>,
+    connecting: L<bool>,
+    icinga_version: L<f64>,
+    last_message_received: L<f64>,
+    messages_received_per_second: L<f64>,
+    messages_sent_per_second: L<f64>,
 }
 
 /// Attributes requested for endpoints.
 pub(crate) const ENDPOINT_ATTRS: &[&str] = &["name", "zone", "connected"];
 
-/// Attributes requested for an endpoint's connection state alone.
-pub(crate) const ENDPOINT_STATE_ATTRS: &[&str] = &["connected"];
+/// Attributes requested for an endpoint's connection state and the
+/// numbers the cluster health page shows (topic 06): a few more numbers
+/// per master or satellite in the same small request.
+pub(crate) const ENDPOINT_STATE_ATTRS: &[&str] = &[
+    "connected",
+    "connecting",
+    "icinga_version",
+    "last_message_received",
+    "messages_received_per_second",
+    "messages_sent_per_second",
+];
 
 impl EndpointAttrs {
     /// Maps an endpoint; `zone_of` finds the zone listing it (an endpoint's
@@ -711,11 +726,33 @@ impl EndpointAttrs {
 }
 
 impl EndpointAttrs {
-    /// An endpoint's name (the query result's) and `connected`, as Icinga
-    /// says it.
-    pub(crate) fn into_state(self, full_name: &str) -> Option<(String, bool)> {
+    /// An endpoint's name (the query result's), `connected` as Icinga
+    /// says it, and its numbers.
+    pub(crate) fn into_state(self, full_name: &str) -> Option<EndpointState> {
         let name = first_non_empty(full_name, &self.name.0)?.to_owned();
-        Some((name, self.connected.0))
+        let version = self.icinga_version.0;
+        Some(EndpointState {
+            name,
+            connected: self.connected.0,
+            stats: EndpointStats {
+                version: if version.is_finite() && version > 0.0 {
+                    // A version number (21506) well inside u32.
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a positive version number clamped to u32"
+                    )]
+                    let version = version.min(f64::from(u32::MAX)) as u32;
+                    version
+                } else {
+                    0
+                },
+                last_message: Timestamp::from_unix_seconds(self.last_message_received.0.max(0.0)),
+                messages_in: self.messages_received_per_second.0.max(0.0),
+                messages_out: self.messages_sent_per_second.0.max(0.0),
+                connecting: self.connecting.0,
+            },
+        })
     }
 }
 
@@ -853,9 +890,68 @@ pub(crate) fn instance_status(application: &Value, cib: &Value) -> InstanceStatu
         flap_detection_enabled: flag("enable_flapping"),
         perfdata_enabled: flag("enable_perfdata"),
         checks_per_minute: stat("active_host_checks_1min") + stat("active_service_checks_1min"),
+        passive_checks_per_minute: stat("passive_host_checks_1min")
+            + stat("passive_service_checks_1min"),
         avg_latency: stat("avg_latency"),
+        max_latency: stat("max_latency"),
         avg_execution_time: stat("avg_execution_time"),
+        max_execution_time: stat("max_execution_time"),
         counts: object_counts(cib),
+    }
+}
+
+/// `/v1/status/ApiListener`'s connections and queues (`status.api`); a
+/// number missing or out of range reads as 0.
+pub(crate) fn listener_status(listener: &Value) -> ListenerStatus {
+    let api = listener.get("api").unwrap_or(&Value::Null);
+    let value = |path: &str| {
+        api.pointer(path)
+            .and_then(number)
+            .filter(|value| *value >= 0.0)
+            .unwrap_or(0.0)
+    };
+    let whole = |path: &str| {
+        // Counts well below 2^32 (the guard keeps the cast exact).
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a finite, non-negative count clamped to u32"
+        )]
+        let count = value(path).min(f64::from(u32::MAX)) as u32;
+        count
+    };
+    ListenerStatus {
+        http_clients: whole("/http/clients"),
+        endpoints: whole("/num_endpoints"),
+        connected_endpoints: whole("/num_conn_endpoints"),
+        relay_queue: value("/json_rpc/relay_queue_items"),
+        relay_rate: value("/json_rpc/relay_queue_item_rate"),
+        sync_queue: value("/json_rpc/sync_queue_items"),
+        work_queue_rate: value("/json_rpc/work_queue_item_rate"),
+    }
+}
+
+/// Attributes of a feature's object (`CheckerComponent`,
+/// `NotificationComponent`, `IcingaDB`): only `paused`, which every
+/// configuration object has.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct FeatureAttrs {
+    paused: L<bool>,
+}
+
+/// Attributes requested for a feature's object.
+pub(crate) const FEATURE_ATTRS: &[&str] = &["paused"];
+
+/// A feature's state from its objects: off without one, running when one
+/// runs here, else paused (another master of the zone runs it).
+pub(crate) fn feature_state(objects: &[FeatureAttrs]) -> FeatureState {
+    if objects.is_empty() {
+        FeatureState::Off
+    } else if objects.iter().any(|object| !object.paused.0) {
+        FeatureState::Running
+    } else {
+        FeatureState::Paused
     }
 }
 

@@ -153,6 +153,9 @@ pub(crate) fn cluster_rows(
                 Some(icon) => Mark::Icon(icon),
                 None => Mark::Dot(match state {
                     ClusterState::Ok => Dot::Ok,
+                    ClusterState::Warning => {
+                        Dot::State(CheckableState::Service(ServiceState::Warning))
+                    }
                     ClusterState::Critical => {
                         Dot::State(CheckableState::Service(ServiceState::Critical))
                     }

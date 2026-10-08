@@ -332,7 +332,16 @@ impl MockControl {
     /// Unknown endpoint.
     pub fn set_endpoint_connected(&self, name: &str, connected: bool) -> Result<(), MockError> {
         let mut world = self.world();
+        let now = world.now();
+        let version = crate::model::version_number(&world.app.version);
         let endpoint = world.endpoints.get_mut(name).ok_or_else(|| unknown(name))?;
+        if endpoint.connected && !connected {
+            // Its last message came just before it went away.
+            endpoint.last_message = now;
+        }
+        if connected && endpoint.icinga_version == 0 {
+            endpoint.icinga_version = version;
+        }
         endpoint.connected = connected;
         Ok(())
     }

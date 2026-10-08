@@ -64,7 +64,7 @@ per frame, plus `-zoom` crops of the details.
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
 | 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+16 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
 | 15 | Host lists with services; group lists; layouts | `15-host-list-with-services.html` | 12 (+1 compare, +10 zooms, +12 light) | drawn for review |
-| 16 | Knowing when icygui is blind: no live data, heartbeat, health alerts, diagnostics | `16-live-data.html` (+ `health.js`, shared with 06) | 22 (+14 zooms, +12 light) | drawn for review; 17 and the health alerts approved |
+| 16 | Knowing when icygui is blind: no live data, heartbeat, health alerts, diagnostics | `16-live-data.html` (+ `health.js`, shared with 06) | 24 (+14 zooms, +12 light) | drawn for review; 17 and the health alerts approved |
 | 17 | Comments written in the handling view | `17-handling-comments.html` | 6 (+4 zooms, +5 light) | approved |
 
 ---
@@ -1902,9 +1902,10 @@ alerts at the top of the page; 16b Settings → icinga → an environment, the
 *trouble alerts* group; 16b2 a heartbeat object not found; 16c the no-live-data,
 heartbeat-lost and recovery notifications (Linux dunst, macOS); 16c2 health
 alerts as notifications; 16d a blind environment's banner and footer (16f is
-its footer crop); 16e the tray's blind look and menu; 16g5 the diagnostics
-page (*all engines*); 16g7 its engine select open; 16g8 prod-cluster chosen;
-16g6 staging chosen, stuck; 16h save diagnostics; 16i the
+its footer crop); 16e the tray's blind look and menu; 16g5 *diagnostics ·
+app* (and light), 16g9 with *include engines* on; 16g6 *diagnostics · engine*
+with staging chosen and stuck (and light), 16g10 *all engines*, 16g7 the
+engine select open, 16g8 prod-cluster chosen; 16h save diagnostics; 16i the
 restarted-after-a-crash notification; 16j the health page's `···` with
 *edit page*; 16k the health page in the editor (and light); 16l its *add view*;
 16n the status bar (and zooms of its ends), 16o hover on the gauge, 16p a
@@ -1945,30 +1946,38 @@ stuck engine's red dot; 16q the app symbol's three candidates.
   grey, the node in the warning colour at the same size and place as the
   other looks' blue node; it wins over any state colour. The
   menu lists each environment with its age (*no data 3m*, *live 2s*).
-- **Diagnostics: one page, the approved app page (16g5) plus an *engines*
-  view** (user, 2026-10-08: "loves" 16g5; "don't massively change it"). It
-  belongs to no environment (nothing in the cluster section highlighted);
-  header *diagnostics · app*. Three views, a built-in dashboard:
-  - **app:** the app's tiles (`kpi()` from `health.js`): UI thread, engines
-    running 3 of 3, memory, settings writes, the notifier.
-  - **engines** (between *app* and *log*): compact rows like 06's *zones and
-    endpoints*, one per engine: state dot, environment, stream, node, last
-    event, engine tick, status (*running · up 18h*, *stuck · restarted 1 of
-    3* red, *running · login refused* yellow). Its header has an **engine**
-    select (the dropdown system, 16g7): *all engines* at the top, then each
-    engine with its state dot and name, no descriptions. *All engines* shows
-    every row; a click on a row chooses that engine. **An engine chosen**
-    (16g8, 16g6): its row alone, selected (the selected-row background),
-    **restart engine** at the row's right, its tiles right under it (last
-    event, engine tick, last evaluation, queues, requests); the log is
-    narrowed by a removable chip, **engine staging ×** (× or Esc clears the
-    chip and sets the select back to *all engines*).
-  - **log, the focus:** the whole log with day separators, event-style rows,
-    one line each: time, the level as a coloured word (ERROR red, WARN
-    yellow, INFO default), the environment or *app*, the message. Level
-    chips with counts in digit slots, search, follow; *open log folder*,
-    *save diagnostics*, *copy all shown* in its `···`. Rows select like any
-    list; the shared selection bar reads *3 lines* · *copy* · *clear*.
+- **Diagnostics: two pages with the approved 16g5 look** (user,
+  2026-10-08). Each header is fixed: *diagnostics · app* and *diagnostics ·
+  engine*, whatever is chosen. Neither belongs to an environment (nothing in
+  the cluster section highlighted). Both are built-in dashboards.
+  - **diagnostics · app** (the monitor; 16g5, 16g9): views **app** (the app's
+    tiles, `kpi()` from `health.js`: UI thread, engines running 3 of 3,
+    memory, settings writes, the notifier) and **log** with only the app's
+    own lines (start, settings, the window, the notifier). The log header has
+    the switch **include engines** (beside *follow*): on, it is the full log
+    of everything in order, and the source column appears naming each line's
+    source (*app* or the environment). No engines view here.
+  - **diagnostics · engine** (the gauge; 16g6, 16g10, 16g7, 16g8): no app
+    view. **engines**: the **engine** select (the dropdown system: *all
+    engines*, then each engine with its state dot, no descriptions) defaults
+    to the active environment's engine. *All engines* shows the compact rows
+    like 06's *zones and endpoints* (state dot, environment, stream, node,
+    last event, engine tick, status: *running · up 18h*, *stuck · restarted
+    1 of 3* red, *running · login refused* yellow); a click on a row chooses
+    it. A chosen engine: its row alone, selected, **restart engine** at the
+    row's right, its tiles right under it (last event, engine tick, last
+    evaluation, queues, requests). **log**: engine lines only, never the
+    app's: every engine's for *all engines*, else the chosen one's behind the
+    chip **engine staging ×** (× or Esc goes back to *all engines*). The
+    source column stays, so nothing moves.
+  - **The log view, on both:** event-style rows with day separators (*Wed 7
+    Oct*), one line each: time, the level as a coloured word (ERROR red,
+    WARN yellow, INFO default), the source, the message. Level chips with
+    counts in digit slots, search, follow; *open log folder*, *save
+    diagnostics*, *copy all shown* in its `···`. Rows select like any list;
+    the shared selection bar reads *3 lines* · *copy* · *clear*.
+  - **Vertical rhythm:** 06's: tiles padded 14/16 under their header, rows
+    straight onto the next view header.
 - **Save diagnostics (16h):** lists what goes in (logs, versions, settings
   without secrets, connection states) and the *replace host names* switch.
 
@@ -1983,7 +1992,7 @@ stuck engine's red dot; 16q the app symbol's three candidates.
   **locked rows** (a lock in the handle's slot, *pinned*); each health view
   has its handle and an on/off switch; a tiles view picks which tiles it
   shows; *add view* lists only the health kinds (16l); the editor's `···`
-  has **reset to default**. The diagnostics page's editor offers only
+  has **reset to default**. The diagnostics pages' editors offer only
   *app*, *engines* and *log*. **These kinds live on their built-in pages only**: a
   normal dashboard's *add view* never lists them (`HEALTH_KINDS`,
   `DIAG_KINDS` in `views.js`, outside `LAYOUTS`).
@@ -2000,9 +2009,10 @@ stuck engine's red dot; 16q the app symbol's three candidates.
   the **gauge**, the active environment's engine (dot = that engine's state;
   red when stuck, 16p; tooltip *prod-cluster engine · running*), and the
   **app symbol**, for now the **monitor** (the same icon as the page's *app*
-  view; it replaced the scroll). Both open the one diagnostics page: the
-  gauge with the active environment's engine chosen (16g8, gauge pressed),
-  the app symbol with *all engines* (16g5, monitor pressed). Room for later
+  view; it replaced the scroll). Each opens its own page: the gauge
+  *diagnostics · engine* with the active environment's engine chosen (16g6,
+  16g8, gauge pressed), the app symbol *diagnostics · app* (16g5, monitor
+  pressed). Room for later
   symbols to their left. `statusBar` in `v1.js` (`appWindow(…, {
   statusBar })`, `appIcon` to swap the app symbol); page 16 draws it
   everywhere, the other topics keep the old footer until they are redrawn.

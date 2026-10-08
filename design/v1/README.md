@@ -1952,7 +1952,7 @@ stuck engine's red dot; 16q the app symbol's candidates (the monitor chosen).
   engine*, whatever is chosen. Neither belongs to an environment (nothing in
   the cluster section highlighted). Both are built-in dashboards.
   - **diagnostics · app** (the monitor; 16g5, 16g9): views **app** (the app's
-    tiles, `kpi()` from `health.js`: UI thread, engines running 3 of 3,
+    tiles, `kpi()` from `health.js`: UI thread, engines (*2 live · 1 failed*, the sub-line naming lab; yellow),
     memory, settings writes, the notifier) and **log** with only the app's
     own lines (start, settings, the window, the notifier). The log header has
     the switch **include engines** (beside *follow*): on, it is the full log

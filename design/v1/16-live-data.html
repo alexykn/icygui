@@ -210,7 +210,7 @@ const LOG = [
   ['08:02:12', 'info', 'staging', 'connected to stg-master-01 · full view'],
   ['08:02:14', 'error', 'lab', 'login refused by lab-icinga (401): check the API user’s password'],
   ['09:40:05', 'info', 'all', 'switched to quiet: the window is hidden'],
-  ['11:17:44', 'info', 'prod-cluster', 'alert raised: zone fra has no connected endpoint'],
+  ['11:17:44', 'warn', 'prod-cluster', 'alert raised: zone fra has no connected endpoint'],
   ['11:20:02', 'info', 'prod-cluster', 'alert cleared: zone fra connected again after 2m 18s'],
   ['13:05:31', 'warn', 'prod-cluster', 'storm on prod-cluster: 37 notifications held in 60 s'],
   ['16:48:10', 'warn', 'staging', 'heartbeat missed, last_check fresh: reconnecting the stream'],
@@ -259,7 +259,7 @@ const LOGS = {
   'prod-cluster': [
     ['day', 'Wed 7 Oct'],
     ['08:02:12', 'info', 'prod-cluster', 'connected to master-01 · full view'],
-    ['11:17:44', 'info', 'prod-cluster', 'alert raised: zone fra has no connected endpoint'],
+    ['11:17:44', 'warn', 'prod-cluster', 'alert raised: zone fra has no connected endpoint'],
     ['11:20:02', 'info', 'prod-cluster', 'alert cleared: zone fra connected again after 2m 18s'],
     ['13:05:31', 'warn', 'prod-cluster', 'storm on prod-cluster: 37 notifications held in 60 s'],
     ['17:30:00', 'info', 'prod-cluster', 'reconciled: 3,516 objects, 2 changed'],
@@ -307,7 +307,7 @@ const STUCK_BANNER = `<div class="banner" style="--tone:var(--crit);--tint:var(-
   <span class="trunc" style="font-size:12px;color:var(--t-muted)">no tick since 02:40:38; the watchdog restarted it at 02:41:12; after 3 restarts in 10 minutes it stays stopped.</span></div><span class="grow"></span><span class="acc" style="font-size:12px;white-space:nowrap">show its log lines</span></div>`;
 const APP_TILES = [
   T('UI thread', '8 ms', 'longest answer', [6, 7, 9, 6, 8, 7, 12, 7, 6, 8, 7, 8]),
-  T('engines running', '3 of 3', 'prod-cluster, staging, lab', null),
+  T('engines', '2 live · 1 failed', 'lab: login refused', null, { cls: 'v-warn' }),
   T('memory', '412 MB', 'resident', [398, 401, 404, 403, 406, 405, 408, 409, 410, 411, 412, 412]),
   T('settings writes', 'ok', 'last 02:10 · settings.toml', null),
   T('notifier', '0 queued', 'desktop notifications', flat(0)),
@@ -325,7 +325,7 @@ const ALL_LOG = [
   ['08:02:12', 'info', 'staging', 'connected to stg-master-01 · full view'],
   ['08:02:14', 'error', 'lab', 'login refused by lab-icinga (401): check the API user’s password'],
   ['09:40:05', 'info', 'app', 'switched to quiet: the window is hidden'],
-  ['11:17:44', 'info', 'prod-cluster', 'alert raised: zone fra has no connected endpoint'],
+  ['11:17:44', 'warn', 'prod-cluster', 'alert raised: zone fra has no connected endpoint'],
   ['11:20:02', 'info', 'prod-cluster', 'alert cleared: zone fra connected again after 2m 18s'],
   ['12:31:50', 'info', 'app', 'window shown'],
   ['13:05:31', 'warn', 'prod-cluster', 'storm: 37 notifications held in 60 s'],
@@ -377,7 +377,7 @@ const engineChip = (env) => `<span class="chip filled" style="gap:6px;height:22p
 // 1. the app's page (the monitor): app + log of the app's own lines
 function appDiagPage({ include = false, stuck = false, debug = false } = {}) {
   const lines = pickLog((src) => include || src === 'app', stuck, debug);
-  const appHdr = viewHeader({ name: 'app', display: 'tiles', ic: 'monitor', filter: '', counts: [['ok', 5]], sort: '', more: false });
+  const appHdr = viewHeader({ name: 'app', display: 'tiles', ic: 'monitor', filter: '', counts: [['warn', 1], ['ok', 4]], sort: '', more: false });
   const chips = `${lvChips(lvCounts(lines), undefined, debug)}${SEARCH}${sw(include, 'include engines')}${dbgSwitch(debug)}${sw(true, 'follow')}`;
   return `<div class="col" style="min-height:0;flex:1;overflow:hidden">${diagHead('app')}${appHdr}<div class="kpis" style="grid-template-columns:repeat(5,minmax(0,1fr))">${APP_TILES.join('')}</div>${logView(lines, chips, { all: include })}</div>`;
 }
@@ -388,7 +388,10 @@ function engDiagPage({ stuck = false, selEnv = '', selOpen = false, debug = fals
   const chips = `${selEnv ? engineChip(selEnv) : ''}${lvChips(lvCounts(lines), undefined, debug)}${SEARCH}${dbgSwitch(debug)}${sw(true, 'follow')}`;
   return `<div class="col" style="min-height:0;flex:1;overflow:hidden">${diagHead('engine')}${engHdr}${engTable(stuck, selEnv)}${logView(lines, chips)}</div>`;
 }
-const diagFrame = (page, { env = 'prod-cluster', stuck = false, gauge = false } = {}) => clusterWindow(`<div class="col" style="min-height:0;height:100%;position:relative">${page}</div>`, { cluster: '', env, foot: { env, node: env === 'staging' ? 'stg-master-01' : 'master-01' }, statusBar: { diag: stuck ? 'crit' : 'ok', diagOpen: gauge, logOpen: !gauge } });
+// no false green: with the active environment's engine stuck, the footer's dot and age, the
+// sidebar's health dot and the gauge all follow the engine
+const STUCK_AGE = '<span class="c-crit">41s</span>';
+const diagFrame = (page, { env = 'prod-cluster', stuck = false, gauge = false } = {}) => clusterWindow(`<div class="col" style="min-height:0;height:100%;position:relative">${page}</div>`, { cluster: '', env, health: stuck ? 'crit' : 'ok', foot: { env, node: env === 'staging' ? 'stg-master-01' : 'master-01', ...(stuck ? { health: 'crit', age: STUCK_AGE } : {}) }, statusBar: { diag: stuck ? 'crit' : 'ok', diagOpen: gauge, logOpen: !gauge } });
 const appWin = (o = {}) => diagFrame(appDiagPage(o));
 const engWin = (o = {}) => diagFrame(engDiagPage(o), { env: o.active || o.selEnv || 'prod-cluster', stuck: o.stuck, gauge: true });
 shot('16g5', '16-live-g5-diagnostics-app', '<b>diagnostics · app</b>, opened from the status bar’s <b>monitor</b> (pressed). The approved look, two views: <b>app</b>, the app’s tiles, unchanged; <b>log</b>, only the app’s own lines (start, settings, the window, the notifier), with day separators. Its header: level chips with counts, search, the switch <b>include engines</b> (off) and <i>follow</i>. No engines view on this page: the engines have their own (16g6). The page belongs to no environment (nothing in the cluster section highlighted).',
@@ -419,8 +422,8 @@ shot('16o', '16-live-o-status-bar-hover', '<b>Hover on the diagnostics symbol</b
   sbFrame({ bar: { hov: 'diagnostics' } }, diagTip), { crops: '16-live-o-zoom:1040,780,400,120' });
 const stuckTip = '<div class="tip" data-anchor=".statusbar [data-sym=\'diagnostics\']" data-side="top" style="left:0;top:0">staging engine · stuck, restarted 1 of 3</div>';
 shot('16p', '16-live-p-status-bar-stuck', '<b>An engine stuck.</b> With staging the active environment and its engine stuck, the gauge carries a <b>red dot</b> (6px, ringed in the bar’s colour, at its top right), and its tooltip says so: <i>staging engine · stuck, restarted 1 of 3</i>. The trouble alert went out as a notification too.',
-  sbFrame({ foot: { env: 'staging', node: 'stg-master-01', age: '0s' }, bar: { diag: 'crit', hov: 'diagnostics' } }, stuckTip), { crops: '16-live-p-zoom:1040,780,400,120' });
-shot('16p-l', '16-live-p-status-bar-stuck-light', '<b>An engine stuck</b>, light.', sbFrame({ foot: { env: 'staging', node: 'stg-master-01', age: '0s' }, bar: { diag: 'crit', hov: 'diagnostics' } }, stuckTip), L);
+  sbFrame({ foot: { env: 'staging', node: 'stg-master-01', health: 'crit', age: '<span class="c-crit">41s</span>' }, bar: { diag: 'crit', hov: 'diagnostics' } }, stuckTip), { crops: '16-live-p-zoom:1040,780,400,120' });
+shot('16p-l', '16-live-p-status-bar-stuck-light', '<b>An engine stuck</b>, light.', sbFrame({ foot: { env: 'staging', node: 'stg-master-01', health: 'crit', age: '<span class="c-crit">41s</span>' }, bar: { diag: 'crit', hov: 'diagnostics' } }, stuckTip), L);
 
 // the app symbol: three candidates for the user, at the gauge's size and weight
 const MARK14 = '<svg viewBox="190 190 644 644" width="14" height="14" style="display:block"><path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round"/><circle cx="512" cy="512" r="150" fill="currentColor"/><circle cx="718.5" cy="305.5" r="74" fill="currentColor"/></svg>';

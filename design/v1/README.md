@@ -1902,14 +1902,13 @@ alerts at the top of the page; 16b Settings → icinga → an environment, the
 *trouble alerts* group; 16b2 a heartbeat object not found; 16c the no-live-data,
 heartbeat-lost and recovery notifications (Linux dunst, macOS); 16c2 health
 alerts as notifications; 16d a blind environment's banner and footer (16f is
-its footer crop); 16e the tray's blind look and menu; 16g diagnostics
-(prod, healthy), 16g2 a stuck engine (staging), 16g3 three log lines selected,
-16g4 the log's scope *all* with its `···` open; 16h save diagnostics; 16i
-the restarted-after-a-crash notification; 16j the health page's `···` with
+its footer crop); 16e the tray's blind look and menu; 16g5 the diagnostics
+page (*all engines*); 16g7 its engine select open; 16g8 prod-cluster chosen;
+16g6 staging chosen, stuck; 16h save diagnostics; 16i the
+restarted-after-a-crash notification; 16j the health page's `···` with
 *edit page*; 16k the health page in the editor (and light); 16l its *add view*;
-16g5 the app's diagnostics; 16n the status bar (and zooms of its ends),
-16o hover on its diagnostics symbol, 16p a stuck engine's red dot. The
-diagnostics header's subtitle is just the environment's name.
+16n the status bar (and zooms of its ends), 16o hover on the gauge, 16p a
+stuck engine's red dot; 16q the app symbol's three candidates.
 
 **Decisions**
 
@@ -1946,28 +1945,30 @@ diagnostics header's subtitle is just the environment's name.
   grey, the node in the warning colour at the same size and place as the
   other looks' blue node; it wins over any state colour. The
   menu lists each environment with its age (*no data 3m*, *live 2s*).
-- **Diagnostics: a page built like a two-view dashboard** (user,
-  2026-10-08: "probably dashboard with view"; the floating-window and
-  extra-column drafts are dropped). Reached from *diagnostics* in each
-  environment's sidebar cluster section, under *health* (its dot = the
-  engine's state). Page header: *diagnostics*, the environment, *restart
-  engine* in the action slot. A stuck engine gets 06's banner (*engine
-  stuck · restarted 1 of 3*, the detail, *show its log lines*).
-  - **View *engine*:** the health markers as 06's tiles (`kpi()` from
-    `health.js`): connection, last event, engine tick, last evaluation,
-    queues (with sparklines; a steady value draws a flat line), request
-    budget, last status poll, last reconcile, event log lag, up. Their states
-    are counted in the view header; a stuck tick is red.
-  - **View *log*, the focus:** event-style rows, one line each at a
-    comfortable height: time, the level as a coloured word (ERROR red, WARN
-    yellow, INFO default), the environment (scope *all* only; *app* for the
-    app's own lines), the message. The view header: the scope switch *this
-    environment* | *all*, level chips with counts in digit slots (error,
-    warn, info on by default; debug), search, follow; *open log folder*,
-    *save diagnostics* and *copy all shown* in its `···`. Rows select like
-    any list (click, shift, ctrl/cmd, ctrl-a; the selected-row background);
-    the shared selection bar reads *3 lines* · *copy* (ctrl-c, plain text)
-    · *clear*. The log stays sparse (the logging concept).
+- **Diagnostics: one page, the approved app page (16g5) plus an *engines*
+  view** (user, 2026-10-08: "loves" 16g5; "don't massively change it"). It
+  belongs to no environment (nothing in the cluster section highlighted);
+  header *diagnostics · app*. Three views, a built-in dashboard:
+  - **app:** the app's tiles (`kpi()` from `health.js`): UI thread, engines
+    running 3 of 3, memory, settings writes, the notifier.
+  - **engines** (between *app* and *log*): compact rows like 06's *zones and
+    endpoints*, one per engine: state dot, environment, stream, node, last
+    event, engine tick, status (*running · up 18h*, *stuck · restarted 1 of
+    3* red, *running · login refused* yellow). Its header has an **engine**
+    select (the dropdown system, 16g7): *all engines* at the top, then each
+    engine with its state dot and name, no descriptions. *All engines* shows
+    every row; a click on a row chooses that engine. **An engine chosen**
+    (16g8, 16g6): its row alone, selected (the selected-row background),
+    **restart engine** at the row's right, its tiles right under it (last
+    event, engine tick, last evaluation, queues, requests); the log is
+    narrowed by a removable chip, **engine staging ×** (× or Esc clears the
+    chip and sets the select back to *all engines*).
+  - **log, the focus:** the whole log with day separators, event-style rows,
+    one line each: time, the level as a coloured word (ERROR red, WARN
+    yellow, INFO default), the environment or *app*, the message. Level
+    chips with counts in digit slots, search, follow; *open log folder*,
+    *save diagnostics*, *copy all shown* in its `···`. Rows select like any
+    list; the shared selection bar reads *3 lines* · *copy* · *clear*.
 - **Save diagnostics (16h):** lists what goes in (logs, versions, settings
   without secrets, connection states) and the *replace host names* switch.
 
@@ -1983,7 +1984,7 @@ diagnostics header's subtitle is just the environment's name.
   has its handle and an on/off switch; a tiles view picks which tiles it
   shows; *add view* lists only the health kinds (16l); the editor's `···`
   has **reset to default**. The diagnostics page's editor offers only
-  *engine* and *log*. **These kinds live on their built-in pages only**: a
+  *app*, *engines* and *log*. **These kinds live on their built-in pages only**: a
   normal dashboard's *add view* never lists them (`HEALTH_KINDS`,
   `DIAG_KINDS` in `views.js`, outside `LAYOUTS`).
 - **Vertical rhythm:** every banner's text sits 9.1px from its top and its
@@ -1995,19 +1996,21 @@ diagnostics header's subtitle is just the environment's name.
   sidebar toggle, history, the environment switcher (dot, environment, node,
   age or *no data 3m*), *+*. Right: small symbols (14px in 22px buttons,
   hover background, a tooltip above, right edges aligned), each with a 6px
-  state dot where it matters: **diagnostics** of the active environment's
-  engine (dot = engine state; red when stuck, 16p) and the **app log**; room
-  for later ones to their left. `statusBar` in `v1.js` (`appWindow(…, {
-  statusBar })`); page 16 draws it everywhere, the other topics keep the old
-  footer until they are redrawn.
+  state dot where it matters. Two symbols, kept both (user, 2026-10-08):
+  the **gauge**, the active environment's engine (dot = that engine's state;
+  red when stuck, 16p; tooltip *prod-cluster engine · running*), and the
+  **app symbol**, for now the **monitor** (the same icon as the page's *app*
+  view; it replaced the scroll). Both open the one diagnostics page: the
+  gauge with the active environment's engine chosen (16g8, gauge pressed),
+  the app symbol with *all engines* (16g5, monitor pressed). Room for later
+  symbols to their left. `statusBar` in `v1.js` (`appWindow(…, {
+  statusBar })`, `appIcon` to swap the app symbol); page 16 draws it
+  everywhere, the other topics keep the old footer until they are redrawn.
+- **The app symbol is the user's pick (16q):** a the monitor, b a small
+  monochrome icygui mark, c a box; each beside the gauge at 14px, same
+  weight and baseline. The monitor is used in every frame until then.
 - **Diagnostics are reached from the bar, not the sidebar:** the cluster
-  section's *diagnostics* entry is gone. The diagnostics symbol opens the
-  active environment's page (16g, the symbol pressed); the log symbol opens
-  **the app's page** (16g5): it belongs to no environment (nothing in the
-  cluster section highlighted), its header reads *diagnostics · app* with no
-  *restart engine*, its tiles are the app's markers (UI thread, engines
-  running 3 of 3, memory, settings writes, the notifier), and its log is the
-  whole log, scope *all* fixed, each line naming its environment or *app*.
+  section's *diagnostics* entry is gone.
 - **Log day separators:** the log view breaks the days like the event
   stream (*Wed 7 Oct*, *Thu 8 Oct*), times in order.
 

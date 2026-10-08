@@ -852,3 +852,8 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .statusbar .badge { top: 0; right: -3px; }
 .statusbar .sdot { position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; box-shadow: 0 0 0 1.5px var(--sb-bg); background: var(--pend); }
 .statusbar .sdot.ok { background: var(--ok); } .statusbar .sdot.warn { background: var(--warn); } .statusbar .sdot.crit { background: var(--crit); }
+/* a select in a view header (topic 16, the engines view): the field at the
+ * header's control height, 24px with its border */
+.vh .selwrap, .vh .select { flex: none; }
+.vh .select { height: 22px; width: 150px; padding: 0 8px; font-size: 12px; gap: 8px; }
+.vh .sellist .mi { height: 24px; font-size: 12px; }

@@ -262,19 +262,21 @@ function appWindow(main, sb = {}) {
   return `<div class="win">${sidebar(sb)}<div class="col" style="min-height:0">${main}</div></div>`;
 }
 // LEFT as today's footer (sidebar toggle, history, the environment switcher,
-// +); RIGHT small symbols with tooltips, a state dot where it matters: the
-// active environment's diagnostics (dot = engine state), the app log; room
-// for later ones
-function statusBar({ diag = 'ok', hov = '', diagOpen = false, logOpen = false } = {}, foot = {}) {
+// +); RIGHT small symbols with tooltips: the active environment's engine
+// (gauge, dot = its state) and the app's diagnostics (monitor, as the page's
+// 'app' view); both open the one
+// diagnostics page (the engine with its row selected, the log with nothing
+// selected); room for later ones
+function statusBar({ diag = 'ok', hov = '', diagOpen = false, logOpen = false, appIcon = '' } = {}, foot = {}) {
   const { badge, open, env = 'prod-cluster', node = 'master-01', age = '0s', health = 'ok', bell } = foot;
-  const sym = (ic, name, { st = '', on = false, h = false } = {}) => `<span class="ibtn stb${on || h ? ' sel' : ''}" data-sym="${name}">${icon(ic, 14)}${st && st !== 'ok' ? `<span class="sdot ${st}"></span>` : st ? `<span class="sdot ok"></span>` : ''}</span>`;
+  const sym = (ic, name, { st = '', on = false, h = false } = {}) => `<span class="ibtn stb${on || h ? ' sel' : ''}" data-sym="${name}">${ic.startsWith('<svg') ? ic : icon(ic, 14)}${st && st !== 'ok' ? `<span class="sdot ${st}"></span>` : st ? `<span class="sdot ok"></span>` : ''}</span>`;
   return `<div class="statusbar">
     <span class="ibtn stb">${icon('panel-left', 14)}</span>
     <span class="ibtn stb">${icon(bell ? 'bell-off' : 'clock', 14)}${badge ? `<span class="badge">${badge}</span>` : ''}</span>
     <span class="status${open ? ' open' : ''}">${dot(health, 'd6')}<span class="env">${env}</span><span class="faint">${node}</span><span class="faint">${age}</span><span class="faint chev">${icon('chevron-down', 10)}</span></span>
     <span class="ibtn stb">${icon('plus', 14)}</span>
     <span class="grow"></span>
-    ${sym('gauge', 'diagnostics', { st: diag, on: diagOpen, h: hov === 'diagnostics' })}${sym('scroll-text', 'log', { on: logOpen, h: hov === 'log' })}
+    ${sym('gauge', 'diagnostics', { st: diag, on: diagOpen, h: hov === 'diagnostics' })}${sym(appIcon || 'monitor', 'app', { on: logOpen, h: hov === 'app' })}
   </div>`;
 }
 

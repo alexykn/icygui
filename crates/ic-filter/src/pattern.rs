@@ -1,11 +1,9 @@
 //! Patterns for `match()`, `regex()` and `cidr_match()`.
 //!
-//! - Globs follow Icinga's `match()` (`third-party/mmatch`): `*` matches any
-//!   run of bytes, `?` exactly one byte, `\*` and `\?` match the character
-//!   itself (any other backslash is literal), ASCII letters match
-//!   case-insensitively, and the whole text must match. Like the C original,
-//!   pattern and text end at the first NUL byte. Globs are translated to
-//!   regular expressions once and matched in linear time.
+//! - Globs follow Icinga's `match()` (`third-party/mmatch`) and are matched by
+//!   `ic_model::Glob`, the one implementation the whole workspace shares
+//!   (its documentation states the semantics: `*`, `?` as one byte, only
+//!   `\*` and `\?` escapes, ASCII-only case folding, NUL ends the text).
 //!
 //!   This was checked against Icinga's C implementation on 800,000 random
 //!   patterns and texts (escapes, case, NUL, line breaks, UTF-8). The only
@@ -35,71 +33,30 @@ use crate::value::preview_str;
 /// can't use unbounded memory.
 const REGEX_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 
-/// A compiled `match()` glob.
+/// A compiled `match()` glob (see `ic_model::Glob` for the semantics).
 #[derive(Debug)]
-pub(crate) struct Glob {
-    regex: Regex,
-}
+pub(crate) struct Glob(ic_model::Glob);
 
 impl Glob {
-    /// Compiles a glob.
+    /// Compiles a glob. Every text is a valid glob, so this cannot fail; it
+    /// returns a `Result` like the other pattern kinds.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "same shape as the other pattern constructors"
+    )]
     pub(crate) fn new(pattern: &str) -> Result<Glob, String> {
-        RegexBuilder::new(&glob_to_regex(pattern))
-            .unicode(false)
-            .case_insensitive(true)
-            .dot_matches_new_line(true)
-            .size_limit(REGEX_SIZE_LIMIT)
-            .build()
-            .map(|regex| Glob { regex })
-            .map_err(|error| format!("glob pattern is too complex: {}", regex_error(&error)))
+        Ok(Glob(ic_model::Glob::new(pattern)))
     }
 
     /// Whether the whole `text` matches.
     pub(crate) fn is_match(&self, text: &str) -> bool {
-        self.regex.is_match(until_nul(text).as_bytes())
+        self.0.is_match(text)
     }
 }
 
 /// C string semantics: the text ends at the first NUL byte.
 fn until_nul(text: &str) -> &str {
     text.find('\0').map_or(text, |end| &text[..end])
-}
-
-/// Translates a glob into an anchored regular expression over bytes (to be
-/// compiled with Unicode disabled and case-insensitively).
-pub(crate) fn glob_to_regex(pattern: &str) -> String {
-    let bytes = until_nul(pattern).as_bytes();
-    let mut out = String::with_capacity(bytes.len() * 2 + 4);
-    out.push_str(r"\A");
-    let mut index = 0;
-    while let Some(&byte) = bytes.get(index) {
-        index += 1;
-        match byte {
-            b'*' => {
-                // Runs of stars collapse; a literal `*` is written as `\x2A`,
-                // so a trailing `.*` always comes from a star.
-                if !out.ends_with(".*") {
-                    out.push_str(".*");
-                }
-            }
-            b'?' => out.push('.'),
-            b'\\' if matches!(bytes.get(index), Some(b'*' | b'?')) => {
-                push_literal(&mut out, bytes[index]);
-                index += 1;
-            }
-            other => push_literal(&mut out, other),
-        }
-    }
-    out.push_str(r"\z");
-    out
-}
-
-fn push_literal(out: &mut String, byte: u8) {
-    if byte.is_ascii_alphanumeric() || byte == b'_' {
-        out.push(char::from(byte));
-    } else {
-        let _ = write!(out, r"\x{byte:02X}");
-    }
 }
 
 /// A compiled `regex()` pattern.
@@ -303,153 +260,13 @@ mod tests {
         Glob::new(pattern).unwrap().is_match(text)
     }
 
-    /// A direct implementation of the glob semantics, used as an oracle.
-    fn oracle(pattern: &[u8], text: &[u8]) -> bool {
-        #[derive(Clone, Copy)]
-        enum Item {
-            Star,
-            One,
-            Byte(u8),
-        }
-        let mut items = Vec::new();
-        let mut index = 0;
-        while index < pattern.len() {
-            let byte = pattern[index];
-            index += 1;
-            items.push(match byte {
-                0 => break,
-                b'*' => Item::Star,
-                b'?' => Item::One,
-                b'\\' if matches!(pattern.get(index), Some(b'*' | b'?')) => {
-                    index += 1;
-                    Item::Byte(pattern[index - 1])
-                }
-                other => Item::Byte(other),
-            });
-        }
-        let text = text.split(|byte| *byte == 0).next().unwrap_or_default();
-        // matches[i][j]: items[i..] matches text[j..].
-        let mut matches = vec![vec![false; text.len() + 1]; items.len() + 1];
-        matches[items.len()][text.len()] = true;
-        for i in (0..items.len()).rev() {
-            for j in (0..=text.len()).rev() {
-                matches[i][j] = match items[i] {
-                    Item::Star => matches[i + 1][j] || (j < text.len() && matches[i][j + 1]),
-                    Item::One => j < text.len() && matches[i + 1][j + 1],
-                    Item::Byte(byte) => {
-                        j < text.len()
-                            && text[j].eq_ignore_ascii_case(&byte)
-                            && matches[i + 1][j + 1]
-                    }
-                };
-            }
-        }
-        matches[0][0]
-    }
-
     #[test]
-    fn icinga_match_test_suite() {
-        // Icinga's own test cases (test/base-match.cpp).
-        assert!(glob("*", "hello"));
-        assert!(!glob("\\**", "hello"));
-        assert!(glob("\\**", "*ello"));
-        assert!(glob("?e*l?", "hello"));
-        assert!(glob("?e*l?", "helo"));
-        assert!(!glob("world", "hello"));
-        assert!(!glob("hee*", "hello"));
-        assert!(glob("he??o", "hello"));
-        assert!(glob("he?", "hel"));
-        assert!(glob("he*", "hello"));
-        assert!(glob("he*o", "heo"));
-        assert!(glob("he**o", "heo"));
-        assert!(glob("he**o", "hello"));
-    }
-
-    #[test]
-    fn glob_semantics() {
-        let cases = [
-            ("", "", true),
-            ("", "a", false),
-            ("*", "", true),
-            ("?", "", false),
-            ("pg_*", "pg_main", true),
-            ("pg_*", "PG_MAIN", true),
-            ("PG_*", "pg_main", true),
-            ("pg_*", "xpg_main", false),
-            ("*prod-sfo*", "db-prod-sfo-657", true),
-            ("*-dev-*", "db-prod-sfo-657", false),
-            ("a*b*c", "aXbYc", true),
-            ("a*b*c", "aXbY", false),
-            ("*.example.com", "web.example.com", true),
-            ("*.example.com", "webXexampleYcom", false),
-            ("a\\*", "a*", true),
-            ("a\\*", "ab", false),
-            ("a\\?", "a?", true),
-            ("a\\?", "ab", false),
-            ("a\\b", "a\\b", true),
-            ("a\\", "a\\", true),
-            ("\\\\*", "\\*", true),
-            ("\\\\*", "\\x", false),
-            ("[ab]", "[ab]", true),
-            ("[ab]", "a", false),
-            ("(a|b)+", "(a|b)+", true),
-            ("^$.", "^$.", true),
-            ("?", "ä", false),
-            ("??", "ä", true),
-            ("ä*", "Ä", false),
-            ("ä*", "äh", true),
-            ("*\n*", "a\nb", true),
-            ("a*", "a\0b", true),
-            ("a\0b", "a", true),
-        ];
-        for (pattern, text, expected) in cases {
-            assert_eq!(
-                glob(pattern, text),
-                expected,
-                "match({pattern:?}, {text:?})"
-            );
-            assert_eq!(
-                oracle(pattern.as_bytes(), text.as_bytes()),
-                expected,
-                "oracle({pattern:?}, {text:?})"
-            );
-        }
-    }
-
-    #[test]
-    fn glob_translation() {
-        assert_eq!(glob_to_regex("pg_*"), r"\Apg_.*\z");
-        assert_eq!(glob_to_regex("a**?"), r"\Aa.*.\z");
-        assert_eq!(glob_to_regex("\\*.x"), r"\A\x2A\x2Ex\z");
-        assert_eq!(glob_to_regex("ä"), r"\A\xC3\xA4\z");
-    }
-
-    #[test]
-    fn glob_matches_oracle_on_generated_cases() {
-        // Deterministic pseudo-random patterns over a small alphabet that
-        // includes every special character.
-        const ALPHABET: &[u8] = b"aAb*?\\.";
-        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
-        let mut next = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        for _ in 0..20_000 {
-            let pattern_len = usize::try_from(next() % 7).unwrap();
-            let text_len = usize::try_from(next() % 7).unwrap();
-            let pick = |value: u64| ALPHABET[usize::try_from(value % 7).unwrap()];
-            let pattern: Vec<u8> = (0..pattern_len).map(|_| pick(next())).collect();
-            let text: Vec<u8> = (0..text_len).map(|_| pick(next())).collect();
-            let pattern = String::from_utf8(pattern).unwrap();
-            let text = String::from_utf8(text).unwrap();
-            assert_eq!(
-                glob(&pattern, &text),
-                oracle(pattern.as_bytes(), text.as_bytes()),
-                "match({pattern:?}, {text:?})"
-            );
-        }
+    fn glob_is_icingas_match() {
+        assert!(glob("PG_*", "pg_main"));
+        assert!(glob("a\\*", "a*"));
+        assert!(!glob("a\\*", "ab"));
+        assert!(glob("??", "ä"));
+        assert!(!glob("ä*", "Ä"));
     }
 
     #[test]

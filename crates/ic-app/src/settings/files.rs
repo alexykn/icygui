@@ -3,7 +3,7 @@
 //! the log and config folders in the file manager, and the advanced page
 //! says how much the logs hold.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gpui::App;
 
@@ -23,21 +23,8 @@ pub(crate) fn open(path: &Path, cx: &App) {
 #[cfg(test)]
 thread_local! {
     /// What [`open`] opened, for tests.
-    pub(crate) static OPENED: std::cell::RefCell<Vec<PathBuf>> =
+    pub(crate) static OPENED: std::cell::RefCell<Vec<std::path::PathBuf>> =
         const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// `path` with the home directory written as `~` (`~/.config/icygui`).
-pub(crate) fn tilde(path: &Path) -> String {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    match home
-        .as_deref()
-        .and_then(|home| path.strip_prefix(home).ok())
-    {
-        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
-    }
 }
 
 /// What the log folder holds: how many log files, how many bytes.
@@ -131,15 +118,5 @@ mod tests {
             LogSummary::of(&dir.path().join("missing")),
             LogSummary::default()
         );
-    }
-
-    #[test]
-    fn the_home_directory_reads_as_a_tilde() {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return;
-        };
-        assert_eq!(tilde(&home.join(".config/icygui")), "~/.config/icygui");
-        assert_eq!(tilde(&home), "~");
-        assert_eq!(tilde(Path::new("/etc/icygui")), "/etc/icygui");
     }
 }

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use ic_config::{GridColour, GroupOrder, GroupSource, View, ViewDisplay};
-use ic_model::{CheckableState, Host, HostName, HostState, ObjectKey, ServiceState};
+use ic_model::{CheckableState, Glob, Host, HostName, HostState, ObjectKey, ServiceState};
 
 use super::board::Board;
 use super::{Data, service_range};
@@ -28,55 +28,20 @@ pub(super) struct Picker {
     each: bool,
 }
 
+/// A host group name or glob from the view, matched like Icinga's
+/// `match()` (`ic_model::Glob`: `*`, `?`, ASCII case ignored), so a plain
+/// name matches that group and a pattern a family of them.
 #[derive(Debug)]
-enum Pattern {
-    Exact(String),
-    Glob(Vec<char>),
-}
+struct Pattern(Glob);
 
 impl Pattern {
     fn new(text: &str) -> Self {
-        let text = text.trim();
-        if text.contains(['*', '?']) {
-            Self::Glob(text.chars().collect())
-        } else {
-            Self::Exact(text.to_owned())
-        }
+        Self(Glob::new(text.trim()))
     }
 
     fn matches(&self, name: &str) -> bool {
-        match self {
-            Self::Exact(exact) => exact == name,
-            Self::Glob(pattern) => glob_matches(pattern, &name.chars().collect::<Vec<_>>()),
-        }
+        self.0.is_match(name)
     }
-}
-
-/// Icinga's `match()` globs: `*` any run of characters, `?` one.
-fn glob_matches(pattern: &[char], text: &[char]) -> bool {
-    let (mut p, mut t) = (0, 0);
-    let mut star: Option<(usize, usize)> = None;
-    while t < text.len() {
-        match pattern.get(p) {
-            Some('*') => {
-                star = Some((p, t));
-                p += 1;
-            }
-            Some(&c) if c == '?' || c == text[t] => {
-                p += 1;
-                t += 1;
-            }
-            _ => match star {
-                Some((star_p, star_t)) => {
-                    p = star_p + 1;
-                    t = star_t + 1;
-                    star = Some((star_p, star_t + 1));
-                }
-                None => return false,
-            },
-        }
-    }
-    pattern[p..].iter().all(|c| *c == '*')
 }
 
 impl Picker {
@@ -520,10 +485,7 @@ mod tests {
     use super::*;
 
     fn glob(pattern: &str, text: &str) -> bool {
-        glob_matches(
-            &pattern.chars().collect::<Vec<_>>(),
-            &text.chars().collect::<Vec<_>>(),
-        )
+        Pattern::new(pattern).matches(text)
     }
 
     #[test]
@@ -537,7 +499,13 @@ mod tests {
         assert!(glob("*a*b*", "xxaxxbxx"));
         assert!(!glob("*a*b", "xxaxxbxx"));
         assert!(glob("*", ""));
-        assert!(!glob("PG-*", "pg-orders"), "case-sensitive, as Icinga");
+        assert!(
+            glob("PG-*", "pg-orders"),
+            "ASCII case is ignored, as Icinga"
+        );
+        assert!(glob(" linux ", "Linux"), "a plain name is a pattern too");
+        assert!(!glob("linux", "linux-hosts"));
+        assert!(glob(r"a\*", "a*"), "\\* is a literal star");
     }
 
     #[test]

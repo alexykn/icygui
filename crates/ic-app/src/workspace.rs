@@ -55,6 +55,7 @@ use crate::editor::{DashboardEditor, EditorEvent, EditorTarget};
 use crate::environments::{
     CertificateEvent, CertificateReview, EditorMode, EnvironmentEditor, EnvironmentEditorEvent,
 };
+use crate::home::expand_home;
 use crate::lists::dialog::RemovalDialog;
 use crate::lists::view::ListSource;
 use crate::lists::{ListKind, RecordList, RecordListEvent};
@@ -2984,14 +2985,6 @@ fn file_stem(name: &str) -> String {
     }
 }
 
-/// A typed path with `~/` meaning the home directory.
-fn expand_home(text: &str) -> PathBuf {
-    match (text.strip_prefix("~/"), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
-        _ => PathBuf::from(text),
-    }
-}
-
 /// A dashboard whose only view is handling or downtimes (topic 14, round
 /// 5): its page is that view's ([`RecordList`]); the kind and the view's
 /// id.
@@ -3039,13 +3032,5 @@ mod tests {
         assert_eq!(file_stem("prod cluster/db"), "prod-cluster-db");
         assert_eq!(file_stem("  "), "dashboards");
         assert_eq!(file_stem("ops_2.0"), "ops_2.0");
-    }
-
-    #[test]
-    fn typed_paths_expand_the_home_directory() {
-        if let Some(home) = std::env::var_os("HOME") {
-            assert_eq!(expand_home("~/x.toml"), PathBuf::from(home).join("x.toml"));
-        }
-        assert_eq!(expand_home("/tmp/x"), PathBuf::from("/tmp/x"));
     }
 }

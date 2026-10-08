@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ic_core::snapshot::Snapshot;
 use ic_model::{
     CheckInfo, CheckableState, Features, Host, Notified, ObjectKey, Service, ServiceState,
-    Timestamp, Vars,
+    Timestamp, Vars, glob_matches,
 };
 use ic_ui_kit::TreeLine;
 use serde_json::Value;
@@ -40,31 +40,9 @@ const PROTECTED_VARS: &[&str] = &[
 
 /// Whether the custom variable (or dictionary key) `name` holds a secret.
 pub(crate) fn is_protected_var(name: &str) -> bool {
-    let name = name.to_lowercase();
     PROTECTED_VARS
         .iter()
-        .any(|pattern| glob_matches(pattern, &name))
-}
-
-/// Whether `text` matches `pattern`, where `*` stands for any characters.
-fn glob_matches(pattern: &str, text: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let first = parts.next().unwrap_or_default();
-    let Some(mut rest) = text.strip_prefix(first) else {
-        return false;
-    };
-    let parts: Vec<&str> = parts.collect();
-    let Some((last, middle)) = parts.split_last() else {
-        // No `*`: the whole text.
-        return rest.is_empty();
-    };
-    for part in middle {
-        match rest.find(part) {
-            Some(at) => rest = &rest[at + part.len()..],
-            None => return false,
-        }
-    }
-    rest.ends_with(last)
+        .any(|pattern| glob_matches(pattern, name))
 }
 
 /// The service pane's subtitle after `on <host>`: `14m · hard 3/3`.
@@ -766,10 +744,7 @@ mod tests {
         for name in ["role", "address", "power_supply", "snmp_version", "keys"] {
             assert!(!is_protected_var(name), "{name}");
         }
-        assert!(glob_matches("a*b*c", "axxbyyc"));
-        assert!(!glob_matches("a*b*c", "axxcyyb"));
-        assert!(glob_matches("exact", "exact"));
-        assert!(!glob_matches("exact", "exactly"));
+        assert!(is_protected_var("DB_PASSWORD"), "ignoring case");
     }
 
     #[test]

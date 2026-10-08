@@ -202,6 +202,26 @@ pub(crate) fn date_time<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<DateTi
 }
 
 #[cfg(test)]
+mod date_time_tests {
+    use chrono::{Timelike, Utc};
+
+    use super::*;
+
+    /// One conversion, rounding down to the second: a time just before a
+    /// minute or a day ends belongs to that minute or day, wherever it is
+    /// shown (the notification centre once rounded to milliseconds and
+    /// moved 23:59:59.9996 into the next day).
+    #[test]
+    fn times_round_down_to_the_second() {
+        let just_before_midnight = Timestamp::from_unix_seconds(86_399.999_6);
+        let time = date_time(just_before_midnight, &Utc).unwrap();
+        assert_eq!((time.hour(), time.minute(), time.second()), (23, 59, 59));
+        assert_eq!(time.date_naive().to_string(), "1970-01-01");
+        assert!(date_time(Timestamp::from_unix_seconds(1e18), &Utc).is_none());
+    }
+}
+
+#[cfg(test)]
 mod expiry_tests {
     use super::*;
 

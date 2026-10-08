@@ -152,6 +152,17 @@ impl ViewMarker {
     }
 }
 
+/// One state of the connection in the three places that name it (see
+/// [`ConnectionStatus::wording`]).
+struct Wording {
+    /// The footer's text after the endpoint.
+    footer: String,
+    /// The tray tooltip's word or two, without times.
+    short: &'static str,
+    /// The connection details: what it is doing and why.
+    detail: String,
+}
+
 /// The connection to the active environment.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ConnectionStatus {
@@ -415,29 +426,7 @@ impl ConnectionStatus {
         let Some(state) = &self.state else {
             return (endpoint, None);
         };
-        let status = match state {
-            // A quiet stream's age says nothing (PERF-09).
-            ConnectionState::Connected { .. } if self.is_quiet() => "quiet".to_owned(),
-            ConnectionState::Connected { since, .. } => format_compact(self.quiet_for(*since, now)),
-            ConnectionState::Connecting { attempt } if *attempt > 1 => {
-                format!("connecting ({attempt})")
-            }
-            ConnectionState::Connecting { .. } => "connecting".to_owned(),
-            ConnectionState::Loading { .. } => "loading".to_owned(),
-            ConnectionState::Reconnecting { retry_at, .. } => {
-                let wait = retry_at.remaining_from(now);
-                if wait.as_secs() == 0 {
-                    "retrying".to_owned()
-                } else {
-                    format!("retry in {}", format_compact(wait))
-                }
-            }
-            ConnectionState::AuthFailed { .. } => "login refused".to_owned(),
-            ConnectionState::TlsFailed { .. } => "not trusted".to_owned(),
-            ConnectionState::MissingSecret => "no password".to_owned(),
-            ConnectionState::Misconfigured { .. } => "invalid settings".to_owned(),
-        };
-        (endpoint, Some(status))
+        (endpoint, Some(self.wording(state, now).footer))
     }
 
     /// The connected node's view when it is short of the whole cluster:
@@ -458,14 +447,7 @@ impl ConnectionStatus {
         }
         match &self.state {
             None => "not connected",
-            Some(ConnectionState::Connected { .. }) => "connected",
-            Some(ConnectionState::Connecting { .. }) => "connecting",
-            Some(ConnectionState::Loading { .. }) => "loading",
-            Some(ConnectionState::Reconnecting { .. }) => "reconnecting",
-            Some(ConnectionState::AuthFailed { .. }) => "login refused",
-            Some(ConnectionState::TlsFailed { .. }) => "certificate not trusted",
-            Some(ConnectionState::MissingSecret) => "no password",
-            Some(ConnectionState::Misconfigured { .. }) => "invalid settings",
+            Some(state) => self.wording(state, Timestamp::now()).short,
         }
     }
 
@@ -483,30 +465,88 @@ impl ConnectionStatus {
         let Some(state) = &self.state else {
             return "no environment".to_owned();
         };
+        self.wording(state, now).detail
+    }
+
+    /// How `state` reads in each place that names it, the one table of
+    /// the connection's words: the footer's short form (it has little
+    /// room, and shortens the endpoint rather than this), the tray's
+    /// tooltip and the connection details. Keeping the three readings of a
+    /// state in one arm is what stops `not trusted` and `certificate not
+    /// trusted`, or `connecting (3)` and `connecting (attempt 3)`, from
+    /// drifting apart.
+    fn wording(&self, state: &ConnectionState, now: Timestamp) -> Wording {
         match state {
-            ConnectionState::Connected { since, .. } => {
-                format!("connected for {}", format_compact(since.elapsed_until(now)))
-            }
-            ConnectionState::Connecting { attempt: 1 } => "connecting".to_owned(),
-            ConnectionState::Connecting { attempt } => format!("connecting (attempt {attempt})"),
-            ConnectionState::Loading { .. } => self
-                .progress()
-                .map_or_else(|| "loading".to_owned(), |progress| progress.text),
+            ConnectionState::Connected { since, .. } => Wording {
+                // A quiet stream's age says nothing (PERF-09).
+                footer: if self.is_quiet() {
+                    "quiet".to_owned()
+                } else {
+                    format_compact(self.quiet_for(*since, now))
+                },
+                short: "connected",
+                detail: format!("connected for {}", format_compact(since.elapsed_until(now))),
+            },
+            ConnectionState::Connecting { attempt } => Wording {
+                footer: if *attempt > 1 {
+                    format!("connecting ({attempt})")
+                } else {
+                    "connecting".to_owned()
+                },
+                short: "connecting",
+                detail: if *attempt > 1 {
+                    format!("connecting (attempt {attempt})")
+                } else {
+                    "connecting".to_owned()
+                },
+            },
+            ConnectionState::Loading { .. } => Wording {
+                footer: "loading".to_owned(),
+                short: "loading",
+                detail: self
+                    .progress()
+                    .map_or_else(|| "loading".to_owned(), |progress| progress.text),
+            },
             ConnectionState::Reconnecting {
                 error,
                 attempt,
                 retry_at,
                 ..
-            } => format!(
-                "retrying in {} (attempt {attempt}): {error}",
-                format_compact(retry_at.remaining_from(now))
-            ),
-            ConnectionState::AuthFailed { message } => format!("login refused: {message}"),
-            ConnectionState::TlsFailed { message, .. } => {
-                format!("certificate not trusted: {message}")
+            } => {
+                let wait = retry_at.remaining_from(now);
+                Wording {
+                    footer: if wait.as_secs() == 0 {
+                        "retrying".to_owned()
+                    } else {
+                        format!("retry in {}", format_compact(wait))
+                    },
+                    short: "reconnecting",
+                    detail: format!(
+                        "retrying in {} (attempt {attempt}): {error}",
+                        format_compact(wait)
+                    ),
+                }
             }
-            ConnectionState::MissingSecret => "no password in the keychain".to_owned(),
-            ConnectionState::Misconfigured { message } => format!("settings can't work: {message}"),
+            ConnectionState::AuthFailed { message } => Wording {
+                footer: "login refused".to_owned(),
+                short: "login refused",
+                detail: format!("login refused: {message}"),
+            },
+            ConnectionState::TlsFailed { message, .. } => Wording {
+                footer: "not trusted".to_owned(),
+                short: "certificate not trusted",
+                detail: format!("certificate not trusted: {message}"),
+            },
+            ConnectionState::MissingSecret => Wording {
+                footer: "no password".to_owned(),
+                short: "no password",
+                detail: "no password in the keychain".to_owned(),
+            },
+            ConnectionState::Misconfigured { message } => Wording {
+                footer: "invalid settings".to_owned(),
+                short: "invalid settings",
+                detail: format!("settings can't work: {message}"),
+            },
         }
     }
 
@@ -878,6 +918,79 @@ mod tests {
         assert_eq!(
             ConnectionStatus::idle().label_parts(at(0.)),
             ("no environment".to_owned(), None)
+        );
+    }
+
+    /// Every state's three readings, side by side: the footer's short
+    /// form, the tray's word and the details. They come from one table
+    /// (`ConnectionStatus::wording`), so a new variant can't get one
+    /// reading and miss another.
+    #[test]
+    fn each_state_reads_the_same_in_the_footer_the_tray_and_the_details() {
+        let readings = |state: ConnectionState| {
+            let mut status = ConnectionStatus::starting("master-01", None);
+            status.on_state(state);
+            (
+                status.label_parts(at(0.)).1.unwrap(),
+                status.short_state().to_owned(),
+                status.describe(at(0.)),
+            )
+        };
+        let reading = |footer: &str, short: &str, detail: &str| {
+            (footer.to_owned(), short.to_owned(), detail.to_owned())
+        };
+        assert_eq!(
+            readings(ConnectionState::Connecting { attempt: 1 }),
+            reading("connecting", "connecting", "connecting")
+        );
+        assert_eq!(
+            readings(ConnectionState::Connecting { attempt: 3 }),
+            reading("connecting (3)", "connecting", "connecting (attempt 3)")
+        );
+        assert_eq!(
+            readings(ConnectionState::Reconnecting {
+                error: "refused".to_owned(),
+                attempt: 4,
+                retry_at: at(12.),
+                untrusted: None,
+            }),
+            reading(
+                "retry in 12s",
+                "reconnecting",
+                "retrying in 12s (attempt 4): refused"
+            )
+        );
+        assert_eq!(
+            readings(ConnectionState::AuthFailed {
+                message: "401".to_owned()
+            }),
+            reading("login refused", "login refused", "login refused: 401")
+        );
+        assert_eq!(
+            readings(ConnectionState::TlsFailed {
+                url: "https://master-01:5665".to_owned(),
+                message: "pin mismatch".to_owned(),
+                certificate: None,
+            }),
+            reading(
+                "not trusted",
+                "certificate not trusted",
+                "certificate not trusted: pin mismatch"
+            )
+        );
+        assert_eq!(
+            readings(ConnectionState::MissingSecret),
+            reading("no password", "no password", "no password in the keychain")
+        );
+        assert_eq!(
+            readings(ConnectionState::Misconfigured {
+                message: "bad url".to_owned()
+            }),
+            reading(
+                "invalid settings",
+                "invalid settings",
+                "settings can't work: bad url"
+            )
         );
     }
 

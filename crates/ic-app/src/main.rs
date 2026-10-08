@@ -23,6 +23,7 @@ mod environments;
 #[cfg(test)]
 mod fixture;
 mod format;
+mod home;
 mod keymap;
 mod lists;
 mod live;

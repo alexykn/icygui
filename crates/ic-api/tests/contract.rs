@@ -566,6 +566,88 @@ async fn real_icinga_resolves_downtime_and_comment_name_lists() {
     }
 }
 
+/// `match()` in Icinga's filter language is the matcher every crate shares
+/// (`ic_model::glob_matches`): ASCII case folds, `?` is one byte, only `\*`
+/// and `\?` escape. Each case is asked of the real Icinga as one by-name
+/// query of a single host (`filter_vars` carry the pattern and the text,
+/// which sidesteps the filter lexer), as the fixture's `root`, because
+/// filter expressions need a permission the `icygui` user lacks on purpose.
+#[tokio::test]
+async fn real_icinga_match_is_the_shared_matcher() {
+    let Some(contract) = fixture().await else {
+        return;
+    };
+    let (Ok(user), Ok(password)) = (
+        std::env::var("ICYGUI_CONTRACT_ADMIN_USER"),
+        std::env::var("ICYGUI_CONTRACT_ADMIN_PASSWORD"),
+    ) else {
+        assert!(
+            std::env::var_os("ICYGUI_CONTRACT_REQUIRED").is_none(),
+            "ICYGUI_CONTRACT_ADMIN_USER and _PASSWORD are required"
+        );
+        return;
+    };
+    let raw = Raw::new(
+        &contract.url,
+        Some(&contract.server_name),
+        &contract.ca_pem,
+        &user,
+        &password,
+    );
+    let hosts = contract.client().hosts().await.unwrap();
+    let host = hosts[0].name.as_str();
+    let cases = [
+        ("ICINGA*", "icinga-master"),
+        ("icinga*", "ICINGA-MASTER"),
+        ("Ä", "ä"),
+        ("ä*", "ä-x"),
+        ("a?c", "aäc"),
+        ("a??c", "aäc"),
+        ("a\\*b", "a*b"),
+        ("a\\*b", "axb"),
+        ("a\\?b", "a?b"),
+        ("a\\\\b", "a\\b"),
+        ("a\\\\b", "a\\\\b"),
+        ("a\\xb", "a\\xb"),
+        ("a\\xb", "axb"),
+        ("a\\", "a\\"),
+        ("a\\", "a"),
+        ("a\\\\*", "a\\*"),
+        ("a\\\\*", "a\\zz"),
+        ("*", ""),
+        ("", ""),
+        ("", "x"),
+        ("a**b", "ab"),
+    ];
+    for (pattern, text) in cases {
+        let answer = raw
+            .query(
+                "hosts",
+                &json!({
+                    "attrs": ["name"],
+                    "filter": "host.name == h && match(p, t)",
+                    "filter_vars": { "h": host, "p": pattern, "t": text },
+                }),
+            )
+            .await;
+        // Icinga answers 200 with no results (or 404 "No objects found")
+        // when the filter is false.
+        let icinga = match answer.status {
+            200 => !answer.json()["results"].as_array().unwrap().is_empty(),
+            404 => false,
+            other => panic!(
+                "match({pattern:?}, {text:?}): {other} {}",
+                String::from_utf8_lossy(&answer.body)
+            ),
+        };
+        assert_eq!(
+            ic_model::glob_matches(pattern, text),
+            icinga,
+            "match({pattern:?}, {text:?}): shared matcher against Icinga"
+        );
+    }
+}
+
 /// Icinga's own `Notification` objects (the default `conf.d` notifies
 /// `icingaadmins` about every host and service): the whole list, by name
 /// with unknown names, and the read-only `viewer`'s missing permission.

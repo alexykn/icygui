@@ -1663,7 +1663,7 @@ pub(crate) fn tally(marks: impl Iterator<Item = ObjectMark>, ok: bool) -> Summar
         *counter += 1;
         if problem {
             summary.unhandled += 1;
-            let rank = state_rank(mark.state);
+            let rank = mark.state.severity_rank();
             if worst.is_none_or(|(worst, _)| rank > worst) {
                 worst = Some((rank, mark.state));
             }
@@ -1671,20 +1671,6 @@ pub(crate) fn tally(marks: impl Iterator<Item = ObjectMark>, ok: bool) -> Summar
     }
     summary.worst_unhandled = worst.map(|(_, state)| state);
     summary
-}
-
-/// How alarming a problem state is, for a band's dot.
-fn state_rank(state: CheckableState) -> u8 {
-    match state {
-        CheckableState::Service(ServiceState::Critical) => 6,
-        CheckableState::Host(HostState::Down) => 5,
-        CheckableState::Host(HostState::Unreachable) => 4,
-        CheckableState::Service(ServiceState::Unknown) => 3,
-        CheckableState::Service(ServiceState::Warning) => 2,
-        CheckableState::Host(HostState::Pending)
-        | CheckableState::Service(ServiceState::Pending) => 1,
-        CheckableState::Host(HostState::Up) | CheckableState::Service(ServiceState::Ok) => 0,
-    }
 }
 
 #[cfg(test)]
@@ -2340,6 +2326,25 @@ mod tests {
             (1, 0),
             "the handled one is left out"
         );
+    }
+
+    #[test]
+    fn the_worst_state_of_a_tally_does_not_depend_on_the_order() {
+        // The same order as the core's summary (`CheckableState::severity_rank`):
+        // a critical service outranks a down host, a down host a warning.
+        let mark = |state| ObjectMark {
+            state,
+            hollow: false,
+        };
+        let critical = CheckableState::Service(ServiceState::Critical);
+        let down = CheckableState::Host(HostState::Down);
+        let warning = CheckableState::Service(ServiceState::Warning);
+        for states in [[critical, down, warning], [warning, down, critical]] {
+            let summary = tally(states.into_iter().map(mark), true);
+            assert_eq!(summary.worst_unhandled, Some(critical));
+        }
+        let summary = tally([warning, down].into_iter().map(mark), true);
+        assert_eq!(summary.worst_unhandled, Some(down));
     }
 
     #[test]

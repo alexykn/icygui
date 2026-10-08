@@ -6,8 +6,11 @@
 //! pause chosen at 05:30 after a night incident ends at 08:00 that
 //! morning, not 26 hours later. Pure, so it is tested without a window.
 
-use chrono::{DateTime, Days, Local, NaiveTime, TimeZone};
+use chrono::{Days, Local, NaiveTime, TimeZone};
+
 use ic_model::Timestamp;
+
+use crate::format::date_time;
 
 /// The local hour at which a pause or mute "until morning" ends.
 const MORNING_HOUR: u32 = 8;
@@ -109,7 +112,7 @@ pub(crate) fn next_morning(now: Timestamp) -> Timestamp {
 /// [`next_morning`] in time zone `zone`.
 fn next_morning_in<Tz: TimeZone>(now: Timestamp, zone: &Tz) -> Timestamp {
     let fallback = later(now, 86_400);
-    let Some(local) = local_time(now, zone) else {
+    let Some(local) = date_time(now, zone) else {
         return fallback;
     };
     let Some(morning) = NaiveTime::from_hms_opt(MORNING_HOUR, 0, 0) else {
@@ -142,7 +145,7 @@ where
     Tz: TimeZone,
     Tz::Offset: std::fmt::Display,
 {
-    let (Some(local_at), Some(local_now)) = (local_time(at, zone), local_time(now, zone)) else {
+    let (Some(local_at), Some(local_now)) = (date_time(at, zone), date_time(now, zone)) else {
         return "—".to_owned();
     };
     let tomorrow = local_now.date_naive().checked_add_days(Days::new(1));
@@ -158,20 +161,6 @@ where
 /// `now` plus `seconds`.
 fn later(now: Timestamp, seconds: u32) -> Timestamp {
     Timestamp::from_unix_seconds(now.as_unix_seconds() + f64::from(seconds))
-}
-
-/// `at` in time zone `zone`, to the second.
-fn local_time<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<DateTime<Tz>> {
-    let seconds = at.as_unix_seconds().floor();
-    if !(-1e15..1e15).contains(&seconds) {
-        return None;
-    }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "checked to be well inside i64's range above"
-    )]
-    let whole = seconds as i64;
-    Some(DateTime::from_timestamp(whole, 0)?.with_timezone(zone))
 }
 
 #[cfg(test)]

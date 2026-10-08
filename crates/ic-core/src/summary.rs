@@ -5,9 +5,12 @@ use ic_model::{CheckableState, Host, HostState, Service, ServiceState};
 
 use crate::snapshot::Summary;
 
-/// Accumulates a [`Summary`] over hosts and services.
+/// Accumulates a [`Summary`] over hosts and services: the one place that
+/// decides how objects count and which problem is the worst (highest
+/// severity, ties to [`CheckableState::severity_rank`]). The demo's fixture
+/// uses it too.
 #[derive(Debug, Default)]
-pub(crate) struct Tally {
+pub struct Tally {
     summary: Summary,
     /// Severity and state of the worst unhandled problem so far.
     worst: Option<(u32, CheckableState)>,
@@ -15,7 +18,7 @@ pub(crate) struct Tally {
 
 impl Tally {
     /// Counts a host.
-    pub(crate) fn add_host(&mut self, host: &Host) {
+    pub fn add_host(&mut self, host: &Host) {
         self.add(
             CheckableState::Host(host.state),
             host.is_handled(),
@@ -25,7 +28,7 @@ impl Tally {
 
     /// Counts a service; `host` decides whether a problem is handled by a
     /// host problem (Icinga's `handled`).
-    pub(crate) fn add_service(&mut self, service: &Service, host: Option<&Host>) {
+    pub fn add_service(&mut self, service: &Service, host: Option<&Host>) {
         let host_problem = host.is_some_and(Host::is_problem);
         self.add(
             CheckableState::Service(service.state),
@@ -36,7 +39,7 @@ impl Tally {
 
     /// Counts an object in `state`; `handled` and `severity` only matter
     /// for problems.
-    pub(crate) fn add(&mut self, state: CheckableState, handled: bool, severity: u32) {
+    pub fn add(&mut self, state: CheckableState, handled: bool, severity: u32) {
         let counter = match state {
             CheckableState::Host(HostState::Up) | CheckableState::Service(ServiceState::Ok) => {
                 &mut self.summary.ok
@@ -64,31 +67,16 @@ impl Tally {
         // Equal severities (a down host and a warning service) go to the
         // redder state, so the dot doesn't depend on the counting order.
         if self.worst.is_none_or(|(worst, worst_state)| {
-            (severity, state_rank(state)) > (worst, state_rank(worst_state))
+            (severity, state.severity_rank()) > (worst, worst_state.severity_rank())
         }) {
             self.worst = Some((severity, state));
         }
     }
 
     /// The summary.
-    pub(crate) fn finish(mut self) -> Summary {
+    pub fn finish(mut self) -> Summary {
         self.summary.worst_unhandled = self.worst.map(|(_, state)| state);
         self.summary
-    }
-}
-
-/// Breaks ties between problems of equal severity: the state whose colour
-/// is the more alarming wins.
-fn state_rank(state: CheckableState) -> u8 {
-    match state {
-        CheckableState::Host(HostState::Down) => 6,
-        CheckableState::Service(ServiceState::Critical) => 5,
-        CheckableState::Host(HostState::Unreachable) => 4,
-        CheckableState::Service(ServiceState::Unknown) => 3,
-        CheckableState::Service(ServiceState::Warning) => 2,
-        CheckableState::Host(HostState::Pending)
-        | CheckableState::Service(ServiceState::Pending) => 1,
-        CheckableState::Host(HostState::Up) | CheckableState::Service(ServiceState::Ok) => 0,
     }
 }
 

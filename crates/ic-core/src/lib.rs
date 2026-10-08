@@ -74,4 +74,5 @@ pub use probe::{
     missing_permissions, test_connection,
 };
 pub use spec::{EnvironmentSpec, Ports, Start, Tuning};
+pub use summary::Tally;
 pub use topology::{ClusterNode, ClusterView, ConnectedNode, NodeState};

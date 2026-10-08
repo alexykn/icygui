@@ -5,6 +5,7 @@
 
 mod action;
 mod event;
+mod glob;
 mod name;
 mod notification;
 mod object;
@@ -16,6 +17,7 @@ mod time;
 
 pub use action::{Action, ActionTarget, ChildOptions, CommandType, DowntimeMode};
 pub use event::{CheckableState, Event, EventKind, ObjectChange, StateAfter};
+pub use glob::{Glob, glob_matches};
 pub use name::{HostName, ObjectKey, ServiceKey};
 pub use notification::{Notification, Notified};
 pub use object::{

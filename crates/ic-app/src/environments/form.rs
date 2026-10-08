@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use ic_config::{ApiUrl, AuthConfig, Environment, MAX_API_URLS, TlsConfig};
 
+use crate::home::expand_home;
+
 /// A field of the form, for placing its problem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum FormField {
@@ -315,18 +317,6 @@ fn optional(text: &str) -> Option<String> {
     Some(text.trim().to_owned()).filter(|text| !text.is_empty())
 }
 
-/// A path as typed, with a leading `~/` (or a lone `~`) meaning the home
-/// directory.
-fn expand_home(text: &str) -> PathBuf {
-    let text = text.trim();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    match (text.strip_prefix("~/"), text == "~", home) {
-        (Some(rest), _, Some(home)) => home.join(rest),
-        (None, true, Some(home)) => home,
-        _ => PathBuf::from(text),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,17 +412,6 @@ mod tests {
             "fingerprints are written canonically"
         );
         assert_eq!(EnvironmentForm::edit(&edited).urls[0].pinned.len(), 95);
-    }
-
-    #[test]
-    fn home_directories_are_expanded() {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return;
-        };
-        assert_eq!(expand_home("~/certs/ca.pem"), home.join("certs/ca.pem"));
-        assert_eq!(expand_home(" ~ "), home);
-        assert_eq!(expand_home("/abs"), PathBuf::from("/abs"));
-        assert_eq!(expand_home("~other/x"), PathBuf::from("~other/x"));
     }
 
     #[test]

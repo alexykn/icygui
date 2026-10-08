@@ -25,7 +25,7 @@ use ic_ui_kit::{
     StateCircle, StateDot, Switch, TextField, Theme, Tooltip, px,
 };
 
-use super::files::{self, tilde};
+use super::files;
 use super::keyboard::{Activate, Region, Step};
 use super::model::{
     RowText, SCOPE_CHOICES, Section, Setting, contains, scope_choice, scope_meaning,
@@ -38,6 +38,7 @@ use super::{
 };
 use crate::app_state::connection::{ConnectionStatus, Health};
 use crate::app_state::{AppState, EngineSlot, NotificationPlan};
+use crate::home::tilde;
 use crate::keymap::{ShortcutRow, bindings_in_effect, shortcut_rows};
 use crate::menu_state::down_position;
 use crate::notifications::{PauseChoice, override_text, pause_label, paused_text};

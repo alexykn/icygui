@@ -3628,6 +3628,7 @@ dependencies = [
 name = "ic-model"
 version = "0.1.0"
 dependencies = [
+ "memchr",
  "serde",
  "serde_json",
 ]

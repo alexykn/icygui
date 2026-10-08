@@ -471,10 +471,11 @@ impl ConnectionStatus {
     /// How `state` reads in each place that names it, the one table of
     /// the connection's words: the footer's short form (it has little
     /// room, and shortens the endpoint rather than this), the tray's
-    /// tooltip and the connection details. Keeping the three readings of a
-    /// state in one arm is what stops `not trusted` and `certificate not
-    /// trusted`, or `connecting (3)` and `connecting (attempt 3)`, from
-    /// drifting apart.
+    /// tooltip and the connection details. The footer's forms are short on
+    /// purpose (`not trusted` for `certificate not trusted`, `connecting
+    /// (3)` for `connecting (attempt 3)`): the footer is narrow and long
+    /// production endpoints already compete for it. Keeping the three
+    /// readings of a state in one arm keeps them from drifting apart.
     fn wording(&self, state: &ConnectionState, now: Timestamp) -> Wording {
         match state {
             ConnectionState::Connected { since, .. } => Wording {
@@ -924,9 +925,12 @@ mod tests {
     /// Every state's three readings, side by side: the footer's short
     /// form, the tray's word and the details. They come from one table
     /// (`ConnectionStatus::wording`), so a new variant can't get one
-    /// reading and miss another.
+    /// reading and miss another. The footer's forms are deliberately
+    /// shorter (`not trusted`, `connecting (3)`): it shows the state after
+    /// the endpoint and shortens the endpoint for it, and its tooltip has
+    /// the details (PLAN 4.2, scout bug 3).
     #[test]
-    fn each_state_reads_the_same_in_the_footer_the_tray_and_the_details() {
+    fn each_state_has_its_footer_tray_and_detail_reading_in_one_table() {
         let readings = |state: ConnectionState| {
             let mut status = ConnectionStatus::starting("master-01", None);
             status.on_state(state);

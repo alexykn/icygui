@@ -2347,6 +2347,57 @@ mod tests {
         assert_eq!(summary.worst_unhandled, Some(down));
     }
 
+    /// The header dots and the core's summaries (sidebar, tray, group
+    /// headers) pick the same worst state for the same objects, in any
+    /// order (review of 025864c: they disagreed on a down host next to an
+    /// unknown service).
+    #[test]
+    fn view_headers_and_the_core_pick_the_same_worst_state() {
+        let problems = [
+            CheckableState::Service(ServiceState::Critical),
+            CheckableState::Host(HostState::Down),
+            CheckableState::Host(HostState::Unreachable),
+            CheckableState::Service(ServiceState::Unknown),
+            CheckableState::Service(ServiceState::Warning),
+        ];
+        // Every pair and every rotation of the full set.
+        let mut sets: Vec<Vec<CheckableState>> = Vec::new();
+        for a in problems {
+            for b in problems {
+                sets.push(vec![a, b]);
+            }
+        }
+        for start in 0..problems.len() {
+            sets.push(
+                problems
+                    .iter()
+                    .cycle()
+                    .skip(start)
+                    .take(5)
+                    .copied()
+                    .collect(),
+            );
+        }
+        for states in sets {
+            let page = tally(
+                states.iter().map(|&state| ObjectMark {
+                    state,
+                    hollow: false,
+                }),
+                true,
+            );
+            let mut core = ic_core::Tally::default();
+            for &state in &states {
+                core.add(state, false);
+            }
+            assert_eq!(
+                page.worst_unhandled,
+                core.finish().worst_unhandled,
+                "{states:?}"
+            );
+        }
+    }
+
     #[test]
     fn tallies_leave_handled_problems_out() {
         let mark = |state, hollow| ObjectMark { state, hollow };

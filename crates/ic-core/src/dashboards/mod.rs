@@ -328,7 +328,7 @@ impl Dashboard {
             (Some(_), Some(_)) => {
                 let mut tally = Tally::default();
                 for counted in self.union.values() {
-                    tally.add(counted.state, counted.handled, counted.severity);
+                    tally.add(counted.state, counted.handled);
                 }
                 tally.finish()
             }

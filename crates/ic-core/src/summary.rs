@@ -6,24 +6,23 @@ use ic_model::{CheckableState, Host, HostState, Service, ServiceState};
 use crate::snapshot::Summary;
 
 /// Accumulates a [`Summary`] over hosts and services: the one place that
-/// decides how objects count and which problem is the worst (highest
-/// severity, ties to [`CheckableState::severity_rank`]). The demo's fixture
+/// decides how objects count. The worst unhandled problem is the one with
+/// the highest [`CheckableState::severity_rank`], the order every dot in
+/// the app follows (the sidebar, the tray, view headers, group headers), so
+/// a down host outranks an unknown service even though Icinga's severity
+/// weighs host and service states on different scales. The demo's fixture
 /// uses it too.
 #[derive(Debug, Default)]
 pub struct Tally {
     summary: Summary,
-    /// Severity and state of the worst unhandled problem so far.
-    worst: Option<(u32, CheckableState)>,
+    /// The worst unhandled problem so far.
+    worst: Option<CheckableState>,
 }
 
 impl Tally {
     /// Counts a host.
     pub fn add_host(&mut self, host: &Host) {
-        self.add(
-            CheckableState::Host(host.state),
-            host.is_handled(),
-            host.severity(),
-        );
+        self.add(CheckableState::Host(host.state), host.is_handled());
     }
 
     /// Counts a service; `host` decides whether a problem is handled by a
@@ -33,13 +32,11 @@ impl Tally {
         self.add(
             CheckableState::Service(service.state),
             service.is_handled(host_problem),
-            service.severity(),
         );
     }
 
-    /// Counts an object in `state`; `handled` and `severity` only matter
-    /// for problems.
-    pub fn add(&mut self, state: CheckableState, handled: bool, severity: u32) {
+    /// Counts an object in `state`; `handled` only matters for problems.
+    pub fn add(&mut self, state: CheckableState, handled: bool) {
         let counter = match state {
             CheckableState::Host(HostState::Up) | CheckableState::Service(ServiceState::Ok) => {
                 &mut self.summary.ok
@@ -54,28 +51,27 @@ impl Tally {
         };
         *counter += 1;
         if state.is_problem() {
-            self.problem(handled, severity, state);
+            self.problem(handled, state);
         }
     }
 
-    fn problem(&mut self, handled: bool, severity: u32, state: CheckableState) {
+    fn problem(&mut self, handled: bool, state: CheckableState) {
         if handled {
             self.summary.handled += 1;
             return;
         }
         self.summary.unhandled += 1;
-        // Equal severities (a down host and a warning service) go to the
-        // redder state, so the dot doesn't depend on the counting order.
-        if self.worst.is_none_or(|(worst, worst_state)| {
-            (severity, state.severity_rank()) > (worst, worst_state.severity_rank())
-        }) {
-            self.worst = Some((severity, state));
+        if self
+            .worst
+            .is_none_or(|worst| state.severity_rank() > worst.severity_rank())
+        {
+            self.worst = Some(state);
         }
     }
 
     /// The summary.
     pub fn finish(mut self) -> Summary {
-        self.summary.worst_unhandled = self.worst.map(|(_, state)| state);
+        self.summary.worst_unhandled = self.worst;
         self.summary
     }
 }
@@ -98,25 +94,59 @@ mod tests {
         service
     }
 
+    /// Services (with their host, if any) and the worst state they make.
+    type Case<'h> = (Vec<(Option<&'h Host>, Service)>, CheckableState);
+
+    /// The worst unhandled problem is the reddest state
+    /// ([`CheckableState::severity_rank`]), whatever Icinga's severity says
+    /// and in any counting order (review of 025864c: a down host lost to an
+    /// unknown service, which Icinga weighs 2112 against 2080).
     #[test]
-    fn equal_severities_go_to_the_redder_state() {
-        // A down host and a warning service both weigh 2080.
+    fn the_worst_is_the_reddest_state_in_any_order() {
+        let up = host("up", HostState::Up);
         let down = host("down", HostState::Down);
-        let warning = service("up", ServiceState::Warning);
-        assert_eq!(down.severity(), warning.severity());
-        for down_first in [true, false] {
-            let mut tally = Tally::default();
-            if down_first {
-                tally.add_host(&down);
-                tally.add_service(&warning, None);
-            } else {
-                tally.add_service(&warning, None);
-                tally.add_host(&down);
+        let mut behind_dependency = service("up", ServiceState::Critical);
+        behind_dependency.check.reachable = false;
+        assert!(
+            behind_dependency.severity() < service("up", ServiceState::Warning).severity(),
+            "Icinga weighs a critical behind a failed dependency below a warning"
+        );
+        let cases: [Case<'_>; 3] = [
+            (
+                vec![(None, service("up", ServiceState::Warning))],
+                CheckableState::Host(HostState::Down),
+            ),
+            (
+                vec![(Some(&up), service("up", ServiceState::Unknown))],
+                CheckableState::Host(HostState::Down),
+            ),
+            (
+                vec![
+                    (Some(&up), service("up", ServiceState::Warning)),
+                    (Some(&up), behind_dependency.clone()),
+                ],
+                CheckableState::Service(ServiceState::Critical),
+            ),
+        ];
+        for (index, (services, expected)) in cases.into_iter().enumerate() {
+            let with_down = index < 2;
+            for down_first in [true, false] {
+                let mut tally = Tally::default();
+                if with_down && down_first {
+                    tally.add_host(&down);
+                }
+                for (host, service) in &services {
+                    tally.add_service(service, *host);
+                }
+                if with_down && !down_first {
+                    tally.add_host(&down);
+                }
+                assert_eq!(
+                    tally.finish().worst_unhandled,
+                    Some(expected),
+                    "case {index}"
+                );
             }
-            assert_eq!(
-                tally.finish().worst_unhandled,
-                Some(CheckableState::Host(HostState::Down))
-            );
         }
     }
 
@@ -152,15 +182,14 @@ mod tests {
                 pending: 2,
                 handled: 3,
                 unhandled: 2,
-                // An unhandled down host (32 + 2048) beats an unhandled
-                // warning (32 + 2048 too, but seen later).
+                // An unhandled down host is redder than a warning.
                 worst_unhandled: Some(CheckableState::Host(HostState::Down)),
             }
         );
     }
 
     #[test]
-    fn the_worst_unhandled_state_is_by_severity() {
+    fn critical_is_the_worst_service_state() {
         let up = host("up", HostState::Up);
         let mut tally = Tally::default();
         tally.add_service(&service("up", ServiceState::Warning), Some(&up));

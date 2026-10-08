@@ -39,6 +39,17 @@ impl Dot {
         }
     }
 
+    /// How bad the dot is, for picking the worst of several: an unhandled
+    /// problem first, then the redder state
+    /// ([`CheckableState::severity_rank`], the order every dot follows).
+    pub(crate) fn rank(self) -> (bool, u8) {
+        match self {
+            Self::State(state) => (state.is_problem(), state.severity_rank()),
+            Self::Handled(state) => (false, state.severity_rank()),
+            Self::Ok | Self::Empty => (false, 0),
+        }
+    }
+
     /// Whether it's drawn as a ring.
     pub(crate) fn is_hollow(self) -> bool {
         matches!(self, Self::Handled(_))
@@ -341,6 +352,24 @@ mod tests {
 
     use super::*;
     use crate::fixture;
+
+    /// The palette's stacks pick their dot by this: an unhandled problem
+    /// before a handled one, then the redder state, the order of every
+    /// other dot (a down host before an unknown service, although Icinga's
+    /// severity weighs the unknown higher).
+    #[test]
+    fn dots_rank_unhandled_first_then_by_the_redder_state() {
+        let down = Dot::State(CheckableState::Host(HostState::Down));
+        let unknown = Dot::State(CheckableState::Service(ServiceState::Unknown));
+        let critical = CheckableState::Service(ServiceState::Critical);
+        assert!(down.rank() > unknown.rank());
+        assert!(Dot::State(critical).rank() > down.rank());
+        assert!(
+            Dot::State(CheckableState::Service(ServiceState::Warning)).rank()
+                > Dot::Handled(critical).rank()
+        );
+        assert!(Dot::Handled(critical).rank() > Dot::Ok.rank());
+    }
 
     fn now() -> Timestamp {
         Timestamp::from_unix_seconds(1_790_000_000.)

@@ -321,7 +321,7 @@ fn a_dashboard_counts_each_object_of_its_views_once_but_not_its_streams() {
     assert_eq!(summary.ok, db.ok + hosts.ok);
     assert_eq!(summary.unhandled, db.unhandled + hosts.unhandled);
     assert_eq!(summary.handled, db.handled + hosts.handled);
-    // db-1!disk (warning) and db-2 (down) weigh the same: the redder wins.
+    // db-1!disk (warning) and db-2 (down): the redder wins.
     assert_eq!(
         summary.worst_unhandled,
         Some(CheckableState::Host(HostState::Down))
@@ -364,22 +364,28 @@ fn grids_colour_hosts_by_their_worst_problem() {
     let dashboards = evaluate(&[("worst", vec![grid()]), ("host", vec![host_only])], &data);
     let worst = &dashboard(&dashboards, "worst").views[0];
     let cells = grid_of(worst);
-    // Worst first: both have a down host (red), and web's worst problem
-    // (the unknown) outweighs db's.
+    // Worst first: both have one down host (red) as their worst problem
+    // (the reddest state decides, not Icinga's severity, which weighs web's
+    // unknown above a down host), so they go by name.
     assert_eq!(
         grid_names(cells),
-        ["web: db-2 down web-1 unknown", "db: db-1 warning db-2 down",]
+        ["db: db-1 warning db-2 down", "web: db-2 down web-1 unknown"]
     );
     assert_eq!(cells.hosts, 3, "lone is in no host group");
-    assert_eq!(cells.groups[0].label, "Web servers");
-    let db_1 = &cells.groups[1].cells[0];
+    assert_eq!(cells.groups[1].label, "Web servers");
+    assert_eq!(
+        cells.groups[1].counts.worst_unhandled,
+        Some(CheckableState::Host(HostState::Down)),
+        "the down host, not the unknown service"
+    );
+    let db_1 = &cells.groups[0].cells[0];
     assert_eq!(db_1.worst_service.as_deref(), Some("disk"));
     assert_eq!(db_1.problems, 1, "the acknowledged pg doesn't count");
     // A down host's square is the host's: its services are handled by it.
-    let db_2 = &cells.groups[1].cells[1];
+    let db_2 = &cells.groups[0].cells[1];
     assert_eq!(db_2.worst_service, None);
     // The group headers count the squares that aren't handled.
-    let db = cells.groups[1].counts;
+    let db = cells.groups[0].counts;
     assert_eq!((db.warning, db.down, db.unhandled), (1, 1, 2));
     assert_eq!(
         db.worst_unhandled,

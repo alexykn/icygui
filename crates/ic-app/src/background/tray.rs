@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use gpui::{App, Entity, Global, Subscription, Task};
-use ic_model::Timestamp;
+use ic_model::{CheckableState, Timestamp};
 use ic_platform::tray::{Tray, TrayCommand, TrayTone};
 
 use crate::app_state::AppState;
@@ -38,24 +38,16 @@ pub(crate) struct TrayView {
     pub(crate) paused: Option<String>,
 }
 
-/// How bad a tint is, for the worst across environments: critical and
-/// down, then unknown and unreachable, then warning (Icinga Web's order).
-fn rank(tone: TrayTone) -> u8 {
-    match tone {
-        TrayTone::Critical => 3,
-        TrayTone::Unknown => 2,
-        TrayTone::Warning => 1,
-        TrayTone::Ok => 0,
-    }
-}
-
 /// What the tray shows for `state` at `now` (BG-02, A4): every
 /// environment runs, so the tint is the worst unhandled state among all
 /// of them, and the tooltip has a line (two when connected) per
 /// environment, which says when its node sees only part of the cluster.
 pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
     let environments = state.environments();
-    let mut tone: Option<TrayTone> = None;
+    // The worst unhandled state of the connected environments, by the one
+    // order every dot follows (`CheckableState::severity_rank`); `Some(None)`
+    // when some are connected and nothing is unhandled.
+    let mut worst: Option<Option<CheckableState>> = None;
     let mut lines = Vec::new();
     for environment in environments {
         let demo = if state.is_demo_environment_id(&environment.id) {
@@ -71,11 +63,17 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
         let connection = slot.connection();
         let connected = connection.is_connected();
         let overall = &slot.snapshot().overall;
-        if connected
-            && let Some(worst) = TrayTone::for_worst_unhandled(overall.worst_unhandled)
-            && tone.is_none_or(|current| rank(worst) > rank(current))
-        {
-            tone = Some(worst);
+        if connected {
+            let current = worst.flatten();
+            worst = Some(match (current, overall.worst_unhandled) {
+                (Some(current), Some(state))
+                    if state.severity_rank() <= current.severity_rank() =>
+                {
+                    Some(current)
+                }
+                (current, None) => current,
+                (_, state) => state,
+            });
         }
         let muted = if environments.len() > 1
             && state
@@ -138,7 +136,7 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
         lines.push(format!("notifications paused until {until}"));
     }
     TrayView {
-        tone,
+        tone: worst.and_then(TrayTone::for_worst_unhandled),
         tooltip: lines.join("\n"),
         environments: environments
             .iter()
@@ -396,9 +394,7 @@ mod tests {
         let mut overall = ic_core::snapshot::Summary {
             warning: 1,
             unhandled: 1,
-            worst_unhandled: Some(ic_model::CheckableState::Service(
-                ic_model::ServiceState::Warning,
-            )),
+            worst_unhandled: Some(CheckableState::Service(ic_model::ServiceState::Warning)),
             ..ic_core::snapshot::Summary::default()
         };
         state.apply_from(

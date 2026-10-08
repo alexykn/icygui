@@ -407,11 +407,12 @@ impl PaletteIndex {
         let hosts = all_matches(&self.hosts, rest, rank);
         let count = services.len() + hosts.len();
         if count > 1 {
-            // The mark takes the worst state among them.
+            // The mark takes the worst state among them (the redder
+            // unhandled state, as every dot; Icinga's severity among equals).
             let worst = services
                 .iter()
                 .chain(&hosts)
-                .max_by_key(|candidate| candidate.severity)
+                .max_by_key(|candidate| (candidate.item.dot.map(Dot::rank), candidate.severity))
                 .and_then(|candidate| candidate.item.dot);
             let objects = |candidates: Vec<&Candidate>| -> Vec<ObjectKey> {
                 candidates
@@ -827,7 +828,7 @@ fn focus_target(state: &AppState, focus: &Focus) -> Option<Target> {
             let worst = many
                 .iter()
                 .map(row)
-                .max_by_key(|(_, severity)| *severity)
+                .max_by_key(|(item, severity)| (item.dot.map(Dot::rank), *severity))
                 .and_then(|(item, _)| item.dot)
                 .unwrap_or(Dot::Empty);
             Some(Target {

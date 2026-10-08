@@ -28,19 +28,31 @@ pub(super) struct Picker {
     each: bool,
 }
 
-/// A host group name or glob from the view, matched like Icinga's
-/// `match()` (`ic_model::Glob`: `*`, `?`, ASCII case ignored), so a plain
-/// name matches that group and a pattern a family of them.
+/// A host group from the view: a name picked as a chip matches exactly
+/// that group (Icinga object names are case-sensitive, so `linux` and
+/// `Linux` can both exist), a pattern with `*` or `?` matches a family of
+/// them like Icinga's `match()` (`ic_model::Glob`, ASCII case ignored).
 #[derive(Debug)]
-struct Pattern(Glob);
+enum Pattern {
+    Exact(String),
+    Glob(Glob),
+}
 
 impl Pattern {
     fn new(text: &str) -> Self {
-        Self(Glob::new(text.trim()))
+        let text = text.trim();
+        if text.contains(['*', '?']) {
+            Self::Glob(Glob::new(text))
+        } else {
+            Self::Exact(text.to_owned())
+        }
     }
 
     fn matches(&self, name: &str) -> bool {
-        self.0.is_match(name)
+        match self {
+            Self::Exact(exact) => exact == name,
+            Self::Glob(glob) => glob.is_match(name),
+        }
     }
 }
 
@@ -140,8 +152,15 @@ fn labels(data: &Data, by: GroupSource) -> HashMap<&str, &str> {
 }
 
 /// How bad a problem is, for picking a square's state and ordering
-/// groups: unhandled problems before handled ones, then Icinga's severity.
-type Rank = (bool, u32);
+/// groups: unhandled problems before handled ones, then the redder state
+/// ([`CheckableState::severity_rank`], the order of every dot), then
+/// Icinga's severity among equal states.
+type Rank = (bool, u8, u32);
+
+/// The [`Rank`] of an object in `state`.
+fn rank(unhandled_problem: bool, state: CheckableState, severity: u32) -> Rank {
+    (unhandled_problem, state.severity_rank(), severity)
+}
 
 /// A grid with its counts.
 pub(super) struct BuiltGrid {
@@ -199,7 +218,7 @@ pub(super) fn grid(board: &Board, picker: &Picker, data: &Data) -> BuiltGrid {
         if cell.handled {
             handled += 1;
         } else {
-            counts.add(cell.state, false, rank.1);
+            counts.add(cell.state, false);
         }
         for group in in_groups {
             let label = labels
@@ -213,11 +232,11 @@ pub(super) fn grid(board: &Board, picker: &Picker, data: &Data) -> BuiltGrid {
                         ..GridGroup::default()
                     },
                     Tally::default(),
-                    (false, 0),
+                    (false, 0, 0),
                 )
             });
             if !cell.handled {
-                tally.add(cell.state, false, rank.1);
+                tally.add(cell.state, false);
             }
             *worst = (*worst).max(rank);
             entry.cells.push(cell.clone());
@@ -226,7 +245,7 @@ pub(super) fn grid(board: &Board, picker: &Picker, data: &Data) -> BuiltGrid {
     let mut groups: Vec<(GridGroup, GroupRank)> = groups
         .into_values()
         .map(|(mut group, tally, worst)| {
-            group.counts = by_colour(tally.finish());
+            group.counts = tally.finish();
             let rank = group_rank(&group.counts, worst);
             (group, rank)
         })
@@ -268,37 +287,6 @@ fn group_rank(counts: &Summary, worst: Rank) -> GroupRank {
     (colour, count, worst)
 }
 
-/// A group's unhandled `counts` with the dot of its reddest count (down,
-/// critical, unreachable, unknown, warning), so the dot always matches the
-/// coloured numbers beside it. Icinga's severity ranks a problem on an
-/// unreachable host below an unhandled warning, which the sidebar keeps,
-/// but a group header shows its counts in state colours.
-fn by_colour(mut counts: Summary) -> Summary {
-    counts.worst_unhandled = [
-        (counts.down, CheckableState::Host(HostState::Down)),
-        (
-            counts.critical,
-            CheckableState::Service(ServiceState::Critical),
-        ),
-        (
-            counts.unreachable,
-            CheckableState::Host(HostState::Unreachable),
-        ),
-        (
-            counts.unknown,
-            CheckableState::Service(ServiceState::Unknown),
-        ),
-        (
-            counts.warning,
-            CheckableState::Service(ServiceState::Warning),
-        ),
-    ]
-    .into_iter()
-    .find(|&(count, _)| count > 0)
-    .map(|(_, state)| state);
-    counts
-}
-
 /// Orders groups worst first ([`GroupRank`], then by label) or by label.
 fn sort_groups<G>(groups: &mut [(G, GroupRank)], order: GroupOrder, label: impl Fn(&G) -> &str) {
     groups.sort_by(|(a, a_rank), (b, b_rank)| {
@@ -335,12 +323,16 @@ fn cell_of(host: &Host, services: &[&Arc<ic_model::Service>]) -> (GridCell, Rank
                 problems: u32::from(!host_handled),
                 worst_service: None,
             },
-            (!host_handled, host.severity()),
+            rank(
+                !host_handled,
+                CheckableState::Host(host.state),
+                host.severity(),
+            ),
         );
     }
     let mut problems = 0;
     let mut best: (Rank, CheckableState, bool, Option<Arc<str>>) = (
-        (false, host.severity()),
+        rank(false, CheckableState::Host(host.state), host.severity()),
         CheckableState::Host(host.state),
         false,
         None,
@@ -351,17 +343,21 @@ fn cell_of(host: &Host, services: &[&Arc<ic_model::Service>]) -> (GridCell, Rank
         if problem && !handled {
             problems += 1;
         }
-        let rank = (problem && !handled, service.severity());
-        if rank > best.0 {
+        let service_rank = rank(
+            problem && !handled,
+            CheckableState::Service(service.state),
+            service.severity(),
+        );
+        if service_rank > best.0 {
             best = (
-                rank,
+                service_rank,
                 CheckableState::Service(service.state),
                 problem && handled,
                 (service.state != ServiceState::Ok).then(|| Arc::clone(&service.key.name)),
             );
         }
     }
-    let (rank, state, handled_problem, worst_service) = best;
+    let (best_rank, state, handled_problem, worst_service) = best;
     // Nothing wrong: hollow when the host is in downtime (a hollow green
     // square).
     let handled = if state.is_problem() {
@@ -377,7 +373,7 @@ fn cell_of(host: &Host, services: &[&Arc<ic_model::Service>]) -> (GridCell, Rank
             problems,
             worst_service,
         },
-        rank,
+        best_rank,
     )
 }
 
@@ -434,7 +430,7 @@ pub(super) fn tiles(board: &Board, picker: &Picker, data: &Data) -> BuiltTiles {
                             },
                             tally: Tally::default(),
                             unhandled: Tally::default(),
-                            worst: (false, 0),
+                            worst: (false, 0, 0),
                         });
                         tiles.len() - 1
                     });
@@ -444,29 +440,27 @@ pub(super) fn tiles(board: &Board, picker: &Picker, data: &Data) -> BuiltTiles {
                 .collect();
             host_tiles.insert(name, indices);
         }
-        summary.add(facts.state, facts.handled, facts.severity);
+        summary.add(facts.state, facts.handled);
         if facts.handled {
             handled += 1;
         } else {
-            counts.add(facts.state, false, facts.severity);
+            counts.add(facts.state, false);
         }
-        let rank = (facts.problem && !facts.handled, facts.severity);
+        let object_rank = rank(facts.problem && !facts.handled, facts.state, facts.severity);
         for &index in host_tiles.get(name).into_iter().flatten() {
             let building = &mut tiles[index];
-            building
-                .tally
-                .add(facts.state, facts.handled, facts.severity);
+            building.tally.add(facts.state, facts.handled);
             if !(facts.problem && facts.handled) {
-                building.unhandled.add(facts.state, false, facts.severity);
+                building.unhandled.add(facts.state, false);
             }
-            building.worst = building.worst.max(rank);
+            building.worst = building.worst.max(object_rank);
         }
     }
     let mut tiles: Vec<(Tile, GroupRank)> = tiles
         .into_iter()
         .map(|mut building| {
             building.tile.summary = building.tally.finish();
-            building.tile.counts = by_colour(building.unhandled.finish());
+            building.tile.counts = building.unhandled.finish();
             let rank = group_rank(&building.tile.counts, building.worst);
             (building.tile, rank)
         })
@@ -503,7 +497,15 @@ mod tests {
             glob("PG-*", "pg-orders"),
             "ASCII case is ignored, as Icinga"
         );
-        assert!(glob(" linux ", "Linux"), "a plain name is a pattern too");
+        assert!(glob(" linux ", "linux"), "a picked name is trimmed");
+        assert!(
+            !glob("linux", "Linux"),
+            "a picked name is that group only (review of 025864c)"
+        );
+        assert!(
+            glob("linux*", "Linux-hosts"),
+            "a pattern ignores ASCII case"
+        );
         assert!(!glob("linux", "linux-hosts"));
         assert!(glob(r"a\*", "a*"), "\\* is a literal star");
     }

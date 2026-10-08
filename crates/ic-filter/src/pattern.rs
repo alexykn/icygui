@@ -4,6 +4,8 @@
 //!   `ic_model::Glob`, the one implementation the whole workspace shares
 //!   (its documentation states the semantics: `*`, `?` as one byte, only
 //!   `\*` and `\?` escapes, ASCII-only case folding, NUL ends the text).
+//!   Matching is linear in the text; the one exception (a `?` run longer
+//!   than 64 bytes) is charged to the evaluation's budget.
 //!
 //!   This was checked against Icinga's C implementation on 800,000 random
 //!   patterns and texts (escapes, case, NUL, line breaks, UTF-8). The only
@@ -51,6 +53,12 @@ impl Glob {
     /// Whether the whole `text` matches.
     pub(crate) fn is_match(&self, text: &str) -> bool {
         self.0.is_match(text)
+    }
+
+    /// The comparisons matching `text_len` bytes may take beyond the
+    /// linear passes, to be charged to the evaluation's budget.
+    pub(crate) fn extra_steps(&self, text_len: usize) -> usize {
+        self.0.extra_steps(text_len)
     }
 }
 

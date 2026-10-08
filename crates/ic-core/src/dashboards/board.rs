@@ -891,13 +891,13 @@ impl Board {
         let mut handled = 0_u32;
         let mask = mask(self.hidden);
         for facts in self.members.values() {
-            all.add(facts.state, facts.handled, facts.severity);
+            all.add(facts.state, facts.handled);
             if self.view.problems_only && !facts.problem {
                 continue;
             }
             // The header's numbers count every state, the chip or not.
             if !facts.handled {
-                counts.add(facts.state, false, facts.severity);
+                counts.add(facts.state, false);
             }
             // What shows and hides is what the state chip lets through.
             if !self.in_chip(facts) {
@@ -910,7 +910,7 @@ impl Board {
                     continue;
                 }
             }
-            shown.add(facts.state, facts.handled, facts.severity);
+            shown.add(facts.state, facts.handled);
         }
         ListCounts {
             summary: all.finish(),

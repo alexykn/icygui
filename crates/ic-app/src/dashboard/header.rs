@@ -1080,7 +1080,7 @@ impl DashboardView {
                 let options = crate::lists::model::Options::of_view(kind, view.threads);
                 (
                     self.thread_sort_trigger(view, kind, HeaderMenu::ViewSort(index), cx),
-                    options.sort(kind).label(kind, options.chip).chars().count(),
+                    options.sort_slot_chars(kind),
                 )
             }
             ViewDisplay::EventStream => (
@@ -1348,7 +1348,7 @@ pub(super) fn sort_word(
 }
 
 /// The width of `chars` characters of the header's small text.
-pub(super) fn small_chars(theme: &ic_ui_kit::Theme, chars: usize) -> Pixels {
+pub(crate) fn small_chars(theme: &ic_ui_kit::Theme, chars: usize) -> Pixels {
     #[expect(clippy::cast_precision_loss, reason = "a short slot")]
     let chars = chars as f32;
     (theme.text.small * (chars * ic_ui_kit::CHAR_WIDTH)).ceil()

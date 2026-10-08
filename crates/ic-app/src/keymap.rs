@@ -354,6 +354,8 @@ const CATALOGUE: &[(&str, &[&str])] = &[
     ("next view, previous view", &["NextView", "PreviousView"]),
     ("only mine", &["ToggleOnlyMine"]),
     ("next sort", &["NextSort"]),
+    ("next chip, previous chip", &["NextChip", "PreviousChip"]),
+    ("timeline or list", &["ToggleTimeline"]),
     (
         "show or hide downtime and flapping comments",
         &["ToggleSystemComments"],

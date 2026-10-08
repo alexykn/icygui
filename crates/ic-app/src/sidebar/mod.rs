@@ -1358,7 +1358,7 @@ impl Render for Sidebar {
 
 /// A row's mark in its fixed slot: a state dot, or an icon (faint and
 /// neutral, so colour keeps meaning state).
-fn mark(mark: Mark, theme: &Theme) -> AnyElement {
+pub(crate) fn mark(mark: Mark, theme: &Theme) -> AnyElement {
     let slot = div()
         .flex()
         .flex_none()

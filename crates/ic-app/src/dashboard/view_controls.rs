@@ -423,8 +423,13 @@ impl DashboardView {
             HeaderMenu::ViewSort(index) => SharedString::from(format!("view-sort-{index}")),
             _ => SharedString::from("sort-trigger"),
         };
+        // Sized for both modes' words: the mode switch never moves what
+        // sits left of the sort.
         div()
+            .flex()
             .flex_none()
+            .justify_end()
+            .w(small_chars(cx.theme(), options.sort_slot_chars(kind)))
             .child(sort_word(id, label, open, menu, cx))
             .into_any_element()
     }

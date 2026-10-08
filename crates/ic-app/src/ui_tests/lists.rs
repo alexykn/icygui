@@ -826,6 +826,58 @@ fn a_views_choices_go_by_keyboard_and_are_kept() {
     });
 }
 
+/// The chips and the timeline go by keyboard too (`f`, `shift-f`, `v`),
+/// kept like a click; `⌫` on a band with nothing marked says what to do.
+#[test]
+fn chips_and_the_timeline_go_by_keyboard() {
+    run(FixtureOptions::default(), |app, cx| {
+        let options = |view: &Entity<RecordList>, cx: &App| view.read(cx).current_options(cx);
+        let downtimes = open(app, cx, ListKind::Downtimes);
+        app.click(cx, line_position(&downtimes, cx, 1), Modifiers::default());
+        app.keys(cx, "escape");
+        app.keys(cx, "v");
+        assert_eq!(options(&downtimes, cx).mode, Mode::List);
+        let saved = app.state.read(cx).list_options(ListKind::Downtimes);
+        assert_eq!(saved.mode.as_deref(), Some("list"));
+        app.keys(cx, "v");
+        assert_eq!(options(&downtimes, cx).mode, Mode::Timeline);
+        app.keys(cx, "f");
+        assert_eq!(options(&downtimes, cx).chip, Chip::InEffect);
+        app.keys(cx, "shift-f shift-f");
+        assert_eq!(
+            options(&downtimes, cx).chip,
+            Chip::FromConfig,
+            "round the start"
+        );
+        let saved = app.state.read(cx).list_options(ListKind::Downtimes);
+        assert_eq!(saved.chip.as_deref(), Some("from-config"));
+
+        let handling = open(app, cx, ListKind::Handling);
+        app.click(cx, line_position(&handling, cx, 1), Modifiers::default());
+        app.keys(cx, "escape");
+        app.keys(cx, "f v");
+        assert_eq!(options(&handling, cx).chip, Chip::Acknowledged);
+        assert_eq!(
+            options(&handling, cx).mode,
+            Mode::Timeline,
+            "handling is a list"
+        );
+
+        // `⌫` on a band, nothing marked: no dialog, a word on what to do.
+        app.keys(cx, "shift-f");
+        let lines = lines(&handling, cx);
+        let band = lines
+            .iter()
+            .position(|line| matches!(line, Line::Band { .. }))
+            .expect("a band");
+        app.click(cx, line_position(&handling, cx, band), Modifiers::default());
+        app.keys(cx, "escape backspace");
+        assert_eq!(modal(app, cx), None);
+        let (_, title, _) = toasts(app, cx).pop().expect("a message");
+        assert!(title.starts_with("Nothing to remove here"), "{title}");
+    });
+}
+
 #[test]
 fn the_pane_shows_the_thread_and_adds_a_comment() {
     run(FixtureOptions::default(), |app, cx| {

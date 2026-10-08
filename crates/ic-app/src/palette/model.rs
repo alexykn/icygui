@@ -986,7 +986,7 @@ fn list_commands(state: &AppState, now: Timestamp) -> Vec<PaletteItem> {
         crate::lists::model::count(
             kind,
             snapshot,
-            crate::lists::threads::Scope::All,
+            None,
             ic_config::DowntimeKinds::default(),
             now,
         )

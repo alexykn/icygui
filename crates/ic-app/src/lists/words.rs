@@ -416,8 +416,13 @@ pub(crate) enum Bar {
         /// Where it starts and ends on the axis (fractions, clamped).
         from: f32,
         to: f32,
-        /// How much has passed.
-        progress: f32,
+        /// Where the elapsed part ends: now, on the axis (a fraction of
+        /// the axis, not of the downtime, so it meets the now line however
+        /// much of the downtime lies off the axis).
+        elapsed: f32,
+        /// It began before the axis: when, above the bar's left end
+        /// (`← since Tue 22:00`).
+        since: Option<String>,
     },
     /// Still to come: a faint track.
     Upcoming {
@@ -477,7 +482,13 @@ where
         DowntimePhase::InEffect => Bar::InEffect {
             from: at(start),
             to: at(end),
-            progress: downtime.progress(now),
+            elapsed: at(now.as_unix_seconds()).clamp(at(start), at(end)),
+            since: (start < axis.start).then(|| {
+                format!(
+                    "← since {}",
+                    short_when(Timestamp::from_unix_seconds(start), now, zone)
+                )
+            }),
         },
         _ if !downtime.fixed && downtime.trigger_time.is_none() => Bar::Flexible {
             from: at(downtime.start_time.as_unix_seconds()),
@@ -500,6 +511,56 @@ mod tests {
     /// Wednesday 7 October 2026, 14:12 UTC: the mock-ups' clock.
     fn now() -> Timestamp {
         Timestamp::from_unix_seconds(1_791_382_320.)
+    }
+
+    /// A fixed downtime in effect, from `start` to `end` minutes from now.
+    fn in_effect(start: f64, end: f64) -> Downtime {
+        let at =
+            |minutes: f64| Timestamp::from_unix_seconds(now().as_unix_seconds() + minutes * 60.);
+        Downtime {
+            name: "db-01!work".to_owned(),
+            object: ObjectKey::host("db-01"),
+            author: "ana".to_owned(),
+            comment: "work".to_owned(),
+            start_time: at(start),
+            end_time: at(end),
+            fixed: true,
+            duration: 0.,
+            entry_time: at(start),
+            trigger_time: None,
+            triggered_by: None,
+            parent: None,
+            in_effect: true,
+            config_owned: false,
+            schedule: None,
+        }
+    }
+
+    /// The elapsed part ends at the now line, whatever lies off the axis.
+    #[test]
+    fn the_elapsed_part_ends_at_the_now_line() {
+        let axis = axis_in(now(), &Utc);
+        let elapsed = |downtime: &Downtime| match bar_in(downtime, &axis, now(), &Utc) {
+            Bar::InEffect {
+                from,
+                elapsed,
+                since,
+                ..
+            } => (from, elapsed, since),
+            other => panic!("{other:?}"),
+        };
+        // 08:12 to 20:12: began before the axis (noon).
+        let (from, end, since) = elapsed(&in_effect(-360., 360.));
+        assert!(from.abs() < 0.001);
+        assert!((end - axis.now).abs() < 0.01, "{end} vs {}", axis.now);
+        assert_eq!(since.as_deref(), Some("← since 08:12"));
+        // 14:00 today to 14:00 tomorrow: ends after the axis.
+        let (_, end, since) = elapsed(&in_effect(-12., 24. * 60. - 12.));
+        assert!((end - axis.now).abs() < 0.01, "{end} vs {}", axis.now);
+        assert_eq!(since, None);
+        // 13:12 to 15:12: inside the axis.
+        let (_, end, _) = elapsed(&in_effect(-60., 60.));
+        assert!((end - axis.now).abs() < 0.01, "{end} vs {}", axis.now);
     }
 
     #[test]

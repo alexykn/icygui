@@ -16,7 +16,9 @@
 //! stays until another chip or mode is picked; the header always shows the
 //! sort in effect.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::TimeZone;
@@ -430,6 +432,47 @@ impl Options {
         self.sort = None;
     }
 
+    /// Picks the chip after (`forward`) or before the one picked (`f`,
+    /// `shift-f`), round the ends.
+    pub(crate) fn step_chip(&mut self, kind: ListKind, forward: bool) {
+        let chips = kind.chips();
+        let index = chips
+            .iter()
+            .position(|chip| *chip == self.chip)
+            .unwrap_or(0);
+        let next = if forward {
+            (index + 1) % chips.len()
+        } else {
+            (index + chips.len() - 1) % chips.len()
+        };
+        self.pick_chip(chips[next]);
+    }
+
+    /// Switches the downtimes view between the timeline and the list
+    /// (`v`); handling has only the list.
+    pub(crate) fn toggle_mode(&mut self, kind: ListKind) {
+        if kind == ListKind::Downtimes {
+            self.pick_mode(match self.mode {
+                Mode::Timeline => Mode::List,
+                Mode::List => Mode::Timeline,
+            });
+        }
+    }
+
+    /// The sort's word slot, in characters: the word in effect, and in a
+    /// downtimes view also the other mode's word with the same chip, so
+    /// switching between the timeline and the list never moves the
+    /// switch or the chips left of the sort (PLAN 4.3).
+    pub(crate) fn sort_slot_chars(&self, kind: ListKind) -> usize {
+        let current = self.sort(kind).label(kind, self.chip).chars().count();
+        if kind != ListKind::Downtimes {
+            return current;
+        }
+        let mut other = self.clone();
+        other.toggle_mode(kind);
+        current.max(other.sort(kind).label(kind, other.chip).chars().count())
+    }
+
     /// The next sort `kind` offers after the one in effect (`s`).
     pub(crate) fn next_sort(&self, kind: ListKind) -> SortChoice {
         let sorts = kind.sorts();
@@ -441,20 +484,114 @@ impl Options {
     }
 }
 
-/// How many the sidebar and the palette count of the objects in `scope`:
-/// handling the objects being handled, downtimes those in effect now (a
-/// host's with its services counts once) of the kinds `shows` lets
+/// How many the sidebar and the palette count of `members` (`None`: every
+/// object): handling the objects being handled, downtimes those in effect
+/// now (a host's with its services counts once) of the kinds `shows` lets
 /// through.
+///
+/// The sidebar asks on every render (snapshots, hovers, the clock), so
+/// the answers are kept until the snapshot's maps, the members or the
+/// minute change ([`CountKey`]): a render with nothing new scans nothing.
 pub(crate) fn count(
     kind: ListKind,
     snapshot: &Snapshot,
-    scope: super::threads::Scope<'_>,
+    members: Option<&Arc<BTreeSet<ObjectKey>>>,
     shows: ic_config::DowntimeKinds,
     now: Timestamp,
 ) -> usize {
-    match kind {
-        ListKind::Handling => super::threads::handled_objects(snapshot, scope, now),
-        ListKind::Downtimes => super::threads::downtimes_in_effect(snapshot, scope, shows, now),
+    #[expect(clippy::cast_possible_truncation, reason = "minutes since 1970")]
+    let minute = (now.as_unix_seconds() / 60.).floor() as i64;
+    let key = CountKey {
+        kind,
+        shows,
+        minute,
+        members: members.cloned(),
+        hosts: Arc::clone(&snapshot.hosts),
+        services: Arc::clone(&snapshot.services),
+        comments: Arc::clone(&snapshot.comments),
+        downtimes: Arc::clone(&snapshot.downtimes),
+    };
+    COUNTS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        // A new snapshot (or another environment's): start over.
+        if cache
+            .first()
+            .is_some_and(|(first, _)| !first.same_maps(&key))
+        {
+            cache.clear();
+        }
+        if let Some((_, count)) = cache.iter().find(|(kept, _)| *kept == key) {
+            return *count;
+        }
+        let scope = match members {
+            Some(members) => super::threads::Scope::Members(members),
+            None => super::threads::Scope::All,
+        };
+        let count = match kind {
+            ListKind::Handling => super::threads::handled_objects(snapshot, scope, now),
+            ListKind::Downtimes => super::threads::downtimes_in_effect(snapshot, scope, shows, now),
+        };
+        #[cfg(test)]
+        COMPUTED.with(|computed| computed.set(computed.get() + 1));
+        if cache.len() >= COUNTS_KEPT {
+            cache.remove(0);
+        }
+        cache.push((key, count));
+        count
+    })
+}
+
+/// How many counts are kept: the cluster's two and a few dozen
+/// dashboards'.
+const COUNTS_KEPT: usize = 128;
+
+thread_local! {
+    /// The counts asked for since the snapshot's maps last changed.
+    static COUNTS: std::cell::RefCell<Vec<(CountKey, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many counts were worked out (not taken from [`COUNTS`]).
+    static COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// What a count was worked out from. The maps and members are held (not
+/// their addresses: a freed map's address can come back with other
+/// contents) and compared by pointer.
+struct CountKey {
+    kind: ListKind,
+    shows: ic_config::DowntimeKinds,
+    minute: i64,
+    members: Option<Arc<BTreeSet<ObjectKey>>>,
+    hosts: Arc<BTreeMap<ic_model::HostName, Arc<ic_model::Host>>>,
+    services: Arc<BTreeMap<ic_model::ServiceKey, Arc<ic_model::Service>>>,
+    comments: Arc<BTreeMap<ObjectKey, Vec<Comment>>>,
+    downtimes: Arc<BTreeMap<ObjectKey, Vec<ic_model::Downtime>>>,
+}
+
+impl CountKey {
+    /// From the same snapshot maps and minute.
+    fn same_maps(&self, other: &Self) -> bool {
+        self.minute == other.minute
+            && Arc::ptr_eq(&self.hosts, &other.hosts)
+            && Arc::ptr_eq(&self.services, &other.services)
+            && Arc::ptr_eq(&self.comments, &other.comments)
+            && Arc::ptr_eq(&self.downtimes, &other.downtimes)
+    }
+}
+
+impl PartialEq for CountKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.shows == other.shows
+            && self.same_maps(other)
+            && match (&self.members, &other.members) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
     }
 }
 
@@ -609,6 +746,66 @@ mod tests {
         assert!(!same_day(at(60. * 10.), now(), &Utc));
         assert_eq!(length(5_400.), "1h 30m");
         assert_eq!(first_line("  one\ntwo"), "one");
+    }
+
+    /// A render with nothing new scans nothing: the count is kept until
+    /// the snapshot's maps, the members or the minute change.
+    #[test]
+    fn counts_are_kept_until_their_inputs_change() {
+        let computed = || COMPUTED.with(std::cell::Cell::get);
+        let snapshot = Snapshot::default();
+        let shows = ic_config::DowntimeKinds::default();
+        let start = computed();
+        count(ListKind::Handling, &snapshot, None, shows, now());
+        count(ListKind::Handling, &snapshot, None, shows, now());
+        count(ListKind::Handling, &snapshot, None, shows, at(0.5));
+        assert_eq!(computed() - start, 1, "the same inputs: worked out once");
+        count(ListKind::Downtimes, &snapshot, None, shows, now());
+        let members = Arc::new(BTreeSet::new());
+        count(ListKind::Handling, &snapshot, Some(&members), shows, now());
+        count(ListKind::Handling, &snapshot, Some(&members), shows, now());
+        assert_eq!(computed() - start, 3, "another kind, other members");
+        count(ListKind::Handling, &snapshot, None, shows, at(1.));
+        let next = Snapshot {
+            downtimes: Arc::new(BTreeMap::new()),
+            ..snapshot.clone()
+        };
+        count(ListKind::Handling, &next, None, shows, at(1.));
+        assert_eq!(computed() - start, 5, "the next minute, a new snapshot");
+    }
+
+    #[test]
+    fn chips_and_mode_step_by_key() {
+        let mut options = Options {
+            sort: Some(SortChoice::Author),
+            ..Options::default()
+        };
+        options.step_chip(ListKind::Handling, true);
+        assert_eq!(options.chip, Chip::Acknowledged);
+        assert_eq!(options.sort, None, "the chip brings its own sort");
+        options.step_chip(ListKind::Handling, false);
+        options.step_chip(ListKind::Handling, false);
+        assert_eq!(options.chip, Chip::Comments, "round the start");
+        options.toggle_mode(ListKind::Handling);
+        assert_eq!(options.mode, Mode::Timeline, "handling has only the list");
+        options.toggle_mode(ListKind::Downtimes);
+        assert_eq!(options.mode, Mode::List);
+        options.toggle_mode(ListKind::Downtimes);
+        assert_eq!(options.mode, Mode::Timeline);
+    }
+
+    #[test]
+    fn the_downtimes_sort_slot_fits_both_modes() {
+        let widest = "ends, then starts soonest ↑".chars().count();
+        let mut options = Options::default();
+        assert_eq!(options.sort_slot_chars(ListKind::Downtimes), widest);
+        options.pick_mode(Mode::List);
+        assert_eq!(options.sort_slot_chars(ListKind::Downtimes), widest);
+        // Handling: the word in effect.
+        assert_eq!(
+            Options::default().sort_slot_chars(ListKind::Handling),
+            "latest activity ↓".chars().count()
+        );
     }
 
     #[test]

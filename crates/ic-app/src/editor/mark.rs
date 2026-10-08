@@ -413,6 +413,27 @@ impl DashboardEditor {
         let colors = theme.colors;
         let query = self.copy_search.read(cx).value().to_string();
         let sources = self.copy_sources(&query, cx);
+        // A dashboard's row shows its sidebar mark; a view's its kind.
+        let state = self.state.read(cx);
+        let now = ic_model::Timestamp::now();
+        let sidebar_mark = |reference: &ic_rules::DashboardRef| {
+            let dashboard = state
+                .groups()
+                .iter()
+                .find(|group| group.id == reference.group_id)?
+                .dashboards
+                .iter()
+                .find(|dashboard| dashboard.id == reference.dashboard_id)?;
+            Some(
+                crate::sidebar::model::mark_and_count(
+                    dashboard,
+                    state.result(reference),
+                    state.snapshot(),
+                    now,
+                )
+                .0,
+            )
+        };
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut section = None;
         for (index, source) in sources.into_iter().enumerate() {
@@ -433,6 +454,13 @@ impl DashboardEditor {
                 );
             }
             let filter = source.filter.clone();
+            let lead = match source.dashboard.as_ref().and_then(&sidebar_mark) {
+                Some(mark) => crate::sidebar::mark(mark, theme),
+                None => Icon::new(display_icon(source.display))
+                    .size(px(13.))
+                    .color(colors.text_muted)
+                    .into_any_element(),
+            };
             rows.push(
                 div()
                     .id(ElementId::NamedInteger("copy-source".into(), index as u64))
@@ -443,11 +471,13 @@ impl DashboardEditor {
                     .cursor_pointer()
                     .hover(|style| style.bg(colors.element_hover))
                     .child(
-                        div().flex_none().pt(px(2.)).child(
-                            Icon::new(display_icon(source.display))
-                                .size(px(13.))
-                                .color(colors.text_muted),
-                        ),
+                        div()
+                            .flex()
+                            .flex_none()
+                            .justify_center()
+                            .w(px(13.))
+                            .pt(px(2.))
+                            .child(lead),
                     )
                     .child(
                         div()

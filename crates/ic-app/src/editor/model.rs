@@ -280,6 +280,8 @@ pub(crate) struct CopySource {
     pub(crate) detail: String,
     /// The view's display (its icon).
     pub(crate) display: ViewDisplay,
+    /// A dashboard's (one view): which, so its row shows its sidebar mark.
+    pub(crate) dashboard: Option<DashboardRef>,
     /// The filter copied.
     pub(crate) filter: String,
 }
@@ -314,6 +316,7 @@ pub(crate) fn copy_sources(
                         title: format!("{} › {}", dashboard.name, view_name(view)),
                         detail: group.name.clone(),
                         display: view.display,
+                        dashboard: None,
                         filter: filter.to_owned(),
                     }
                 } else {
@@ -322,6 +325,10 @@ pub(crate) fn copy_sources(
                         title: dashboard.name.clone(),
                         detail: format!("{} · {}", group.name, display_name(view.display)),
                         display: view.display,
+                        dashboard: Some(DashboardRef {
+                            group_id: group.id.clone(),
+                            dashboard_id: dashboard.id.clone(),
+                        }),
                         filter: filter.to_owned(),
                     }
                 };
@@ -353,6 +360,13 @@ pub(crate) fn pickable_icons(query: &str) -> Vec<ic_ui_kit::IconName> {
         .filter(|icon| icon.is_pickable())
         .filter(|icon| query.is_empty() || icon.lucide_name().contains(&query))
         .collect()
+}
+
+/// Whether a dashboard of `views` has the notifications row: only
+/// problem views notify, so one of handling, downtimes or events views
+/// alone has none (README, topic 14 round 5).
+pub(crate) fn notifies(views: &[View]) -> bool {
+    views.iter().any(View::counts_problems)
 }
 
 /// How many objects a summary counts (every filter match, before
@@ -442,17 +456,20 @@ pub(crate) fn status_text(view: &View, result: &ViewResult, threads: Option<usiz
         ),
         ViewBody::List(_) if empty && view.problems_only => {
             // An empty filter is every object (topic 14, round 5): of
-            // them, the problems the list is about.
-            let summary = &result.summary;
-            let problems = summary.critical
-                + summary.warning
-                + summary.unknown
-                + summary.down
-                + summary.unreachable;
-            format!(
+            // them, the problems the list shows, the number its row and
+            // the summary bar give (handled ones the view hides aside).
+            let shown = &result.shown;
+            let problems =
+                shown.critical + shown.warning + shown.unknown + shown.down + shown.unreachable;
+            let text = format!(
                 "empty: every object · {}",
                 counted(problems as usize, "problem", "problems")
-            )
+            );
+            if result.handled > 0 {
+                format!("{text}, {} handled", result.handled)
+            } else {
+                text
+            }
         }
         ViewBody::List(_) => {
             let prefix = if empty {
@@ -722,6 +739,23 @@ mod tests {
     }
 
     #[test]
+    fn only_problem_views_bring_the_notifications_row() {
+        let of = |display| View {
+            display,
+            ..View::default()
+        };
+        assert!(!notifies(&[
+            of(ViewDisplay::Handling),
+            of(ViewDisplay::Downtimes)
+        ]));
+        assert!(!notifies(&[of(ViewDisplay::EventStream)]));
+        assert!(notifies(&[
+            of(ViewDisplay::Handling),
+            of(ViewDisplay::List)
+        ]));
+    }
+
+    #[test]
     fn the_status_says_what_the_filter_matches() {
         let summary = Summary {
             ok: 9,
@@ -753,8 +787,33 @@ mod tests {
         );
         assert_eq!(
             status_text(&View::default(), &list, None),
-            "empty: every object · 2 problems",
+            "empty: every object · 2 problems, 2 handled",
             "an empty filter is every object; of them, the problems"
+        );
+        // Handled problems the view hides aren't among the problems: the
+        // number is the row's `N matches` and the summary bar's.
+        let hiding = ViewResult {
+            summary: Summary {
+                critical: 5,
+                warning: 3,
+                ..Summary::default()
+            },
+            shown: Summary {
+                critical: 2,
+                warning: 1,
+                ..Summary::default()
+            },
+            handled: 5,
+            hidden: 5,
+            ..list.clone()
+        };
+        assert_eq!(
+            status_text(&View::default(), &hiding, None),
+            "empty: every object · 3 problems, 5 handled"
+        );
+        assert_eq!(
+            shows_text(Some(&hiding), Timestamp::from_unix_seconds(0.)).0,
+            "3 matches"
         );
         let everything = View {
             problems_only: false,

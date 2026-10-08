@@ -169,7 +169,11 @@ impl DashboardEditor {
                 )),
             ))
             .child(self.views_field(cx))
-            .child(self.notifications_field(cx))
+            // Only problem views notify: a dashboard of handling,
+            // downtimes or events views has no notifications row.
+            .when(model::notifies(&self.draft.views), |body| {
+                body.child(self.notifications_field(cx))
+            })
             .child(
                 div()
                     .flex_none()
@@ -482,7 +486,7 @@ impl DashboardEditor {
         Some(crate::lists::model::count(
             kind,
             state.snapshot(),
-            crate::lists::threads::Scope::Members(members),
+            Some(members),
             view.threads.shows,
             Timestamp::now(),
         ))

@@ -107,10 +107,31 @@ pub(crate) struct ToggleOnlyMine;
 #[action(namespace = icygui)]
 pub(crate) struct NextSort;
 
+/// Picks the next chip (`f`): in a view of its own, or the stacked
+/// handling or downtimes view holding the cursor.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct NextChip;
+
+/// Picks the previous chip (`shift-f`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct PreviousChip;
+
+/// Switches a downtimes view between the timeline and the list (`v`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct ToggleTimeline;
+
 /// Registers the views' own keys; the dashboard list's keys apply too.
 pub(crate) fn bind_keys(cx: &mut App) {
     let list = Some(LIST_KEYS);
+    // A view of its own and a dashboard's stacked views alike.
+    let views = Some(crate::actions::DASHBOARD_KEYS);
     cx.bind_keys([
+        KeyBinding::new("f", NextChip, views),
+        KeyBinding::new("shift-f", PreviousChip, views),
+        KeyBinding::new("v", ToggleTimeline, views),
         KeyBinding::new("m", ToggleOnlyMine, list),
         KeyBinding::new("s", NextSort, list),
         KeyBinding::new("backspace", RemoveSelected, list),
@@ -971,6 +992,17 @@ impl RecordList {
         self.sync(cx);
         let targets = self.targets();
         if targets.is_empty() {
+            // On a band or a section: say how to pick what to remove.
+            if self.selection.cursor_key().is_some() {
+                self.state.update(cx, |state, cx| {
+                    state.inform(
+                        "Nothing to remove here: put the cursor on an entry, or mark entries with x"
+                            .to_owned(),
+                        None,
+                    );
+                    cx.notify();
+                });
+            }
             return;
         }
         let mut downtimes = Vec::new();
@@ -1210,6 +1242,23 @@ impl RecordList {
     fn next_sort(&mut self, _: &NextSort, _: &mut Window, cx: &mut Context<Self>) {
         let kind = self.kind;
         self.set_options(|options| options.sort = Some(options.next_sort(kind)), cx);
+    }
+
+    fn next_chip(&mut self, _: &NextChip, _: &mut Window, cx: &mut Context<Self>) {
+        let kind = self.kind;
+        self.set_options(|options| options.step_chip(kind, true), cx);
+    }
+
+    fn previous_chip(&mut self, _: &PreviousChip, _: &mut Window, cx: &mut Context<Self>) {
+        let kind = self.kind;
+        self.set_options(|options| options.step_chip(kind, false), cx);
+    }
+
+    fn toggle_timeline(&mut self, _: &ToggleTimeline, _: &mut Window, cx: &mut Context<Self>) {
+        let kind = self.kind;
+        if kind == ListKind::Downtimes {
+            self.set_options(|options| options.toggle_mode(kind), cx);
+        }
     }
 
     fn copy(&self, what: &str, text: String, cx: &mut Context<Self>) {
@@ -1513,12 +1562,14 @@ impl RecordList {
             theme,
         ));
         controls.push(self.sort_trigger(&options, cx));
-        controls.push(self.options_trigger(cx));
+        controls.push(self.options_trigger(roomy, cx));
         controls
     }
 
     /// The sort, sized to its word (the view header's rule: a new sort is
-    /// the user's own change, so what sits left of it may move then).
+    /// the user's own change, so what sits left of it may move then); a
+    /// downtimes view's slot fits both modes' words, so the `timeline |
+    /// list` switch never moves itself.
     fn sort_trigger(&self, options: &Options, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -1529,6 +1580,11 @@ impl RecordList {
             .relative()
             .flex()
             .flex_none()
+            .justify_end()
+            .w(crate::dashboard::header::small_chars(
+                theme,
+                options.sort_slot_chars(self.kind),
+            ))
             .child(
                 div()
                     .id("list-sort-trigger")
@@ -1561,7 +1617,9 @@ impl RecordList {
             .into_any_element()
     }
 
-    fn options_trigger(&self, cx: &Context<Self>) -> AnyElement {
+    /// `···`; `roomy`: the header draws *only mine*, so the menu leaves
+    /// it out.
+    fn options_trigger(&self, roomy: bool, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let open = self.menus.open() == Some(HeaderMenu::Options);
         let trigger = GlyphButton::new("list-options", "···")
@@ -1582,12 +1640,12 @@ impl RecordList {
                 trigger.tooltip(Tooltip::new("View options"))
             })
             .when(open, |trigger| {
-                trigger.child(Popover::new(self.options_menu(cx)).align_right())
+                trigger.child(Popover::new(self.options_menu(roomy, cx)).align_right())
             })
             .into_any_element()
     }
 
-    fn options_menu(&self, cx: &Context<Self>) -> Menu {
+    fn options_menu(&self, roomy: bool, cx: &Context<Self>) -> Menu {
         let state = self.state.read(cx);
         let options = self.shown_options();
         let denial = state.only_mine_denial(self.kind);
@@ -1611,16 +1669,20 @@ impl RecordList {
                 )
                 .separator();
         }
+        if !roomy {
+            // Only where the header has no room for its switch.
+            menu = menu
+                .item(
+                    MenuItem::new("list-only-mine", "only mine")
+                        .checked(only_mine)
+                        .disabled(denial.is_some())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.set_options(|options| options.only_mine = !only_mine, cx);
+                        })),
+                )
+                .separator();
+        }
         menu.item(
-            MenuItem::new("list-only-mine", "only mine")
-                .checked(only_mine)
-                .disabled(denial.is_some())
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.set_options(|options| options.only_mine = !only_mine, cx);
-                })),
-        )
-        .separator()
-        .item(
             MenuItem::new("list-fold-all", "fold every object").on_click(cx.listener(
                 |this, _: &ClickEvent, _, cx| {
                     this.fold_all(true, cx);
@@ -2334,6 +2396,9 @@ impl Render for RecordList {
             .on_action(cx.listener(Self::fold))
             .on_action(cx.listener(Self::toggle_only_mine))
             .on_action(cx.listener(Self::next_sort))
+            .on_action(cx.listener(Self::next_chip))
+            .on_action(cx.listener(Self::previous_chip))
+            .on_action(cx.listener(Self::toggle_timeline))
             .on_action(cx.listener(Self::acknowledge))
             .on_action(cx.listener(Self::schedule_downtime))
             .on_action(cx.listener(Self::check_now))
@@ -2493,11 +2558,21 @@ pub(crate) fn thread_chip(
 ) -> gpui::Stateful<gpui::Div> {
     let colors = theme.colors;
     let word = chip.label(kind);
-    let (text, widest) = match (count, narrow) {
-        (Some(count), true) => (count.to_string(), "999".to_owned()),
-        (Some(count), false) => (format!("{count} {word}"), format!("999 {word}")),
-        (None, _) => (word.to_owned(), word.to_owned()),
+    let widest = match (count, narrow) {
+        (Some(_), true) => "999".to_owned(),
+        (Some(_), false) => format!("999 {word}"),
+        (None, _) => word.to_owned(),
     };
+    // The count in a 3-digit slot, right-aligned after the mark: the spare
+    // room sits between the mark and the number, never at the chip's end.
+    let count_slot = count.map(|count| {
+        div()
+            .flex_none()
+            .w(draw::chars(theme.text.label, 3.))
+            .text_right()
+            .child(count.to_string())
+    });
+    let word_part = (count.is_none() || !narrow).then_some(word);
     let mark = chip_mark(chip, theme);
     let width = ic_ui_kit::chip_width(&widest, theme.text.label)
         + if mark.is_some() { px(11. + 6.) } else { px(0.) };
@@ -2534,7 +2609,8 @@ pub(crate) fn thread_chip(
             })
         })
         .children(mark.map(|mark| div().flex().flex_none().items_center().child(mark)))
-        .child(text)
+        .children(count_slot)
+        .children(word_part)
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             window.prevent_default();
             cx.stop_propagation();
@@ -3079,13 +3155,21 @@ pub(crate) fn thread_band(
             theme,
         ))
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(theme.text.small)
-                .text_color(colors.text_faint)
-                .child(out),
+            // The output gives way first, and goes rather than shrink to
+            // a lone `…`.
+            draw::unless_narrow(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.text.small)
+                    .text_color(colors.text_faint)
+                    .child(out),
+                draw::chars(theme.text.small, draw::FEWEST_CHARS + 1.),
+                px(18.),
+            )
+            // The spacer's line in the output's size: one baseline.
+            .text_size(theme.text.small)
+            .flex_1(),
         )
         .when(!band.timeline && !slot.is_empty(), |line| {
             line.child(

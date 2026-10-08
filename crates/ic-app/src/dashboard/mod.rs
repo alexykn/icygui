@@ -1407,6 +1407,66 @@ impl DashboardView {
 
     /// Tab / shift-Tab: the cursor to the next (previous) view's first row,
     /// or its header when it shows none (collapsed).
+    /// `f`, `shift-f`, `v` on a stacked handling or downtimes view: change
+    /// the chip or the mode of the view holding the cursor, as a click on
+    /// its header does.
+    fn step_thread_view(
+        &mut self,
+        change: fn(&mut crate::lists::model::Options, crate::lists::model::ListKind),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(reference) = self.sync(cx) else {
+            return;
+        };
+        let target = self.pages.get(&reference).and_then(|ui| {
+            let index = ui.focused_view()?;
+            let view = ui.page.views.get(index)?;
+            Some((view.id.to_string(), view.thread.as_ref()?.kind))
+        });
+        let Some((view_id, kind)) = target else {
+            cx.propagate();
+            return;
+        };
+        self.change_view(
+            &reference,
+            &view_id,
+            move |view| {
+                let mut options = crate::lists::model::Options::of_view(kind, view.threads);
+                change(&mut options, kind);
+                view.threads = options.to_view();
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn next_chip(
+        &mut self,
+        _: &crate::lists::view::NextChip,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_thread_view(|options, kind| options.step_chip(kind, true), cx);
+    }
+
+    fn previous_chip(
+        &mut self,
+        _: &crate::lists::view::PreviousChip,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_thread_view(|options, kind| options.step_chip(kind, false), cx);
+    }
+
+    fn toggle_timeline(
+        &mut self,
+        _: &crate::lists::view::ToggleTimeline,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_thread_view(crate::lists::model::Options::toggle_mode, cx);
+    }
+
     fn next_view(&mut self, _: &NextView, _: &mut Window, cx: &mut Context<Self>) {
         self.jump_view(true, cx);
     }
@@ -2019,6 +2079,9 @@ impl Render for DashboardView {
             .on_action(cx.listener(Self::fold))
             .on_action(cx.listener(Self::unfold))
             .on_action(cx.listener(Self::next_view))
+            .on_action(cx.listener(Self::next_chip))
+            .on_action(cx.listener(Self::previous_chip))
+            .on_action(cx.listener(Self::toggle_timeline))
             .on_action(cx.listener(Self::previous_view))
             .on_action(cx.listener(Self::acknowledge))
             .on_action(cx.listener(Self::schedule_downtime))

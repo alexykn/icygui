@@ -251,12 +251,15 @@ pub(crate) fn entry(text: &EntryText, look: &Look, compact: bool, theme: &Theme)
             header.child(div().flex_none().child(text.at.clone()))
         })
         .when(!text.meta.is_empty(), |header| {
+            // Left out, not cut to a lone `…`, when only a few
+            // characters fit.
             header.child(
-                div()
-                    .flex_shrink(SHRINK_META)
-                    .min_w_0()
-                    .truncate()
-                    .child(text.meta.clone()),
+                unless_narrow(
+                    div().min_w_0().truncate().child(text.meta.clone()),
+                    chars(theme.text.small, FEWEST_CHARS + 1.),
+                    px(18.),
+                )
+                .flex_shrink(SHRINK_META),
             )
         });
     let words = div()
@@ -355,6 +358,30 @@ pub(crate) fn tag(text: &EntryText, pending: Option<&'static str>, theme: &Theme
         )
 }
 
+/// `child` (a truncating run) where at least `min` of it fits, else
+/// nothing: never a lone `…`. The run wraps behind a zero-width first item
+/// onto a second line, which the one-line box hides.
+pub(crate) fn unless_narrow(child: Div, min: Pixels, line: Pixels) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_baseline()
+        .min_w_0()
+        .h(line)
+        .overflow_hidden()
+        .child(
+            div()
+                .flex_none()
+                .w(px(0.))
+                .overflow_hidden()
+                .child("\u{200b}"),
+        )
+        .child(child.min_w(min).max_w_full())
+}
+
+/// The fewest characters of output or details worth showing.
+pub(crate) const FEWEST_CHARS: f32 = 4.;
+
 /// A 56px progress line: the track, and the part passed in `color`.
 pub(crate) fn progress(fraction: f32, color: Hsla, theme: &Theme) -> Div {
     div()
@@ -363,11 +390,18 @@ pub(crate) fn progress(fraction: f32, color: Hsla, theme: &Theme) -> Div {
         .h(px(3.))
         .rounded(px(2.))
         .overflow_hidden()
-        .bg(theme.colors.border_header)
+        .bg(track_color(theme))
         .child(div().h_full().w(relative(fraction.clamp(0., 1.))).bg(color))
 }
 
-/// A light section label: `in effect · 5  ·  ending soonest first`.
+/// A progress track: the faint text colour at low alpha, which shows on
+/// every row background (hovered, selected, marked) in both themes, where
+/// a border colour sinks into the selection.
+fn track_color(theme: &Theme) -> Hsla {
+    theme.colors.text_faint.opacity(0.35)
+}
+
+/// A light section label: `in effect · 5 · ending soonest first`.
 pub(crate) fn section(section: Section, count: usize, detail: &str, theme: &Theme) -> Div {
     let colors = theme.colors;
     div()
@@ -395,13 +429,26 @@ pub(crate) fn section(section: Section, count: usize, detail: &str, theme: &Them
                 ),
         )
         .child(
+            // The title and the detail as one run: one space each side of
+            // the `·`, as between the title and its count.
             div()
-                .flex_none()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors.text_secondary)
-                .child(section.title(count)),
+                .flex()
+                .min_w_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.text_secondary)
+                        .child(section.title(count)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("\u{a0}· {detail}")),
+                ),
         )
-        .child(div().min_w_0().truncate().child(format!("·  {detail}")))
 }
 
 /// The chevron at a band's or a fold's left (at the x of the view
@@ -451,24 +498,44 @@ pub(crate) fn bar(bar: &Bar, width: Pixels, theme: &Theme) -> Div {
     let span = |from: f32, to: f32| (x(to) - x(from)).max(px(6.));
     let lane = div().relative().flex_none().w(width).h_full();
     match bar {
-        Bar::InEffect { from, to, progress } => lane.child(
-            div()
-                .absolute()
-                .top(relative(0.5))
-                .mt(px(-1.))
-                .left(x(*from))
-                .w(span(*from, *to))
-                .h(px(3.))
-                .rounded(px(2.))
-                .overflow_hidden()
-                .bg(colors.border_header)
-                .child(
+        Bar::InEffect {
+            from,
+            to,
+            elapsed,
+            since,
+        } => lane
+            .child(
+                div()
+                    .absolute()
+                    .top(relative(0.5))
+                    .mt(px(-1.))
+                    .left(x(*from))
+                    .w(span(*from, *to))
+                    .h(px(3.))
+                    .rounded(px(2.))
+                    .overflow_hidden()
+                    .bg(track_color(theme))
+                    // The elapsed part ends at the now line.
+                    .child(
+                        div()
+                            .h_full()
+                            .w((x(*elapsed) - x(*from)).max(px(0.)))
+                            .bg(colors.accent),
+                    ),
+            )
+            .when_some(since.clone(), |lane, since| {
+                // Began before the axis: say when, over its left end.
+                lane.child(
                     div()
-                        .h_full()
-                        .w(relative(progress.clamp(0., 1.)))
-                        .bg(colors.accent),
-                ),
-        ),
+                        .absolute()
+                        .top(px(3.))
+                        .left(x(*from))
+                        .whitespace_nowrap()
+                        .text_size(px(10.5))
+                        .text_color(colors.text_faint)
+                        .child(since),
+                )
+            }),
         Bar::Upcoming { from, to } => lane.child(
             div()
                 .absolute()

@@ -12,7 +12,6 @@ use ic_ui_kit::{IconName, ObjectMark};
 
 use crate::cluster::{ClusterEntry, ClusterState};
 use crate::lists::ListKind;
-use crate::lists::threads::Scope;
 
 /// A dashboard's or an object's state dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,7 +133,7 @@ pub(crate) fn cluster_rows(
                 crate::lists::model::count(
                     kind,
                     snapshot,
-                    Scope::All,
+                    None,
                     ic_config::DowntimeKinds::default(),
                     now,
                 )
@@ -197,13 +196,8 @@ pub(crate) fn mark_and_count(
         first.and_then(|view| {
             let kind = ListKind::of_display(view.display)?;
             let members = result?.view(&view.id)?.members()?;
-            let count = crate::lists::model::count(
-                kind,
-                snapshot,
-                Scope::Members(members),
-                view.threads.shows,
-                now,
-            );
+            let count =
+                crate::lists::model::count(kind, snapshot, Some(members), view.threads.shows, now);
             u32::try_from(count).ok().filter(|count| *count > 0)
         })
     };

@@ -1909,7 +1909,7 @@ engine select open, 16g8 prod-cluster chosen; 16h save diagnostics; 16i the
 restarted-after-a-crash notification; 16j the health page's `···` with
 *edit page*; 16k the health page in the editor (and light); 16l its *add view*;
 16n the status bar (and zooms of its ends), 16o hover on the gauge, 16p a
-stuck engine's red dot; 16q the app symbol's three candidates.
+stuck engine's red dot; 16q the app symbol's candidates (the monitor chosen).
 
 **Decisions**
 
@@ -2008,7 +2008,7 @@ stuck engine's red dot; 16q the app symbol's three candidates.
   state dot where it matters. Two symbols, kept both (user, 2026-10-08):
   the **gauge**, the active environment's engine (dot = that engine's state;
   red when stuck, 16p; tooltip *prod-cluster engine · running*), and the
-  **app symbol**, for now the **monitor** (the same icon as the page's *app*
+  **app symbol**, the **monitor** (chosen by the user; the same icon as the page's *app*
   view; it replaced the scroll). Each opens its own page: the gauge
   *diagnostics · engine* with the active environment's engine chosen (16g6,
   16g8, gauge pressed), the app symbol *diagnostics · app* (16g5, monitor
@@ -2016,9 +2016,9 @@ stuck engine's red dot; 16q the app symbol's three candidates.
   symbols to their left. `statusBar` in `v1.js` (`appWindow(…, {
   statusBar })`, `appIcon` to swap the app symbol); page 16 draws it
   everywhere, the other topics keep the old footer until they are redrawn.
-- **The app symbol is the user's pick (16q):** a the monitor, b a small
-  monochrome icygui mark, c a box; each beside the gauge at 14px, same
-  weight and baseline. The monitor is used in every frame until then.
+- **App symbol: the monitor, chosen** (user, 2026-10-08). 16q stays as the
+  record of the comparison (a monitor, b a small icygui mark, c a box, each
+  beside the gauge at 14px); b and c are dropped.
 - **Diagnostics are reached from the bar, not the sidebar:** the cluster
   section's *diagnostics* entry is gone.
 - **Log day separators:** the log view breaks the days like the event

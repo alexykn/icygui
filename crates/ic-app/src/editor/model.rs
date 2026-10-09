@@ -280,6 +280,10 @@ pub(crate) struct CopySource {
     pub(crate) detail: String,
     /// The view's display (its icon).
     pub(crate) display: ViewDisplay,
+    /// Whether the view lists hosts or services (what its filter counts).
+    pub(crate) object_kind: ObjectKind,
+    /// Its group's name.
+    pub(crate) group: String,
     /// A dashboard's (one view): which, so its row shows its sidebar mark.
     pub(crate) dashboard: Option<DashboardRef>,
     /// The filter copied.
@@ -316,6 +320,8 @@ pub(crate) fn copy_sources(
                         title: format!("{} › {}", dashboard.name, view_name(view)),
                         detail: group.name.clone(),
                         display: view.display,
+                        object_kind: view.object_kind,
+                        group: group.name.clone(),
                         dashboard: None,
                         filter: filter.to_owned(),
                     }
@@ -325,6 +331,8 @@ pub(crate) fn copy_sources(
                         title: dashboard.name.clone(),
                         detail: format!("{} · {}", group.name, display_name(view.display)),
                         display: view.display,
+                        object_kind: view.object_kind,
+                        group: group.name.clone(),
                         dashboard: Some(DashboardRef {
                             group_id: group.id.clone(),
                             dashboard_id: dashboard.id.clone(),
@@ -348,6 +356,63 @@ pub(crate) fn copy_sources(
     }
     dashboards.extend(views);
     dashboards
+}
+
+/// What *copy filter from…*'s preview card says the source is: `a
+/// handling dashboard in voip`, `a list view in databases`.
+pub(crate) fn copy_source_kind(source: &CopySource) -> String {
+    let what = match source.section {
+        CopySection::Dashboards => "dashboard",
+        CopySection::Views => "view",
+    };
+    let display = display_name(source.display);
+    let article = if display.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("{article} {display} {what} in {}", source.group)
+}
+
+/// How many objects `filter` matches on `snapshot` at `now`, counted as
+/// a view of `kind` shown as `display` counts them: a list or grouped list
+/// its hosts or its services, the other kinds both (an empty filter
+/// matches everything). `None` when the filter doesn't parse. Evaluated
+/// here, on the snapshot icygui holds: no request.
+pub(crate) fn count_matches(
+    snapshot: &ic_core::snapshot::Snapshot,
+    filter: &str,
+    display: ViewDisplay,
+    kind: ObjectKind,
+    now: Timestamp,
+) -> Option<usize> {
+    let parsed = ic_filter::Filter::parse(filter).ok()?;
+    let test = |scope: &dyn ic_filter::Scope| parsed.is_empty() || parsed.matches_at(scope, now);
+    let (hosts, services) = match display {
+        ViewDisplay::List | ViewDisplay::GroupedList => {
+            (kind == ObjectKind::Hosts, kind == ObjectKind::Services)
+        }
+        _ => (true, true),
+    };
+    let mut count = 0;
+    if hosts {
+        count += snapshot
+            .hosts
+            .values()
+            .filter(|host| test(&ic_filter::HostScope { host }))
+            .count();
+    }
+    if services {
+        count += snapshot
+            .services
+            .iter()
+            .filter(|(key, service)| {
+                let host = snapshot.host_of(key).map(std::sync::Arc::as_ref);
+                test(&ic_filter::ServiceScope { service, host })
+            })
+            .count();
+    }
+    Some(count)
 }
 
 /// The icons the sidebar mark's picker offers for `query` (any case, by

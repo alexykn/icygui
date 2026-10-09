@@ -218,7 +218,9 @@ impl DashboardView {
                 .child(self.group_order_trigger(view, menu, cx))
                 .when(open, |trigger| {
                     trigger.child(
-                        Popover::new(Self::group_order_menu(reference, view, cx)).align_right(),
+                        Popover::new(Self::group_order_menu(reference, view, cx))
+                            .align_right()
+                            .outset(GlyphButton::reach(), px(0.)),
                     )
                 })
                 .into_any_element(),
@@ -232,7 +234,8 @@ impl DashboardView {
                     .when(open, |trigger| {
                         trigger.child(
                             Popover::new(Self::thread_sort_menu(reference, view, kind, cx))
-                                .align_right(),
+                                .align_right()
+                                .outset(GlyphButton::reach(), px(0.)),
                         )
                     })
                     .into_any_element()
@@ -311,14 +314,17 @@ impl DashboardView {
             // A view's sort menu hangs from its header's right edge
             // ([`Self::view_sort_menu`]).
             .when(open && !in_view, |trigger| {
-                trigger
-                    .child(Popover::new(Self::sort_menu(reference, view, menu, cx)).align_right())
+                trigger.child(
+                    Popover::new(Self::sort_menu(reference, view, cx))
+                        .align_right()
+                        .outset(GlyphButton::reach(), px(0.)),
+                )
             })
             .into_any_element()
     }
 
     /// The open sort (or group order) menu of view `index`, hung from its
-    /// header's right edge (4b).
+    /// sort in the view header (4b).
     fn view_sort_menu(
         &self,
         reference: &DashboardRef,
@@ -333,7 +339,7 @@ impl DashboardView {
         }
         match view.display {
             ViewDisplay::List | ViewDisplay::GroupedList => {
-                Some(Self::sort_menu(reference, view, menu, cx))
+                Some(Self::sort_menu(reference, view, cx))
             }
             ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => {
                 Some(Self::group_order_menu(reference, view, cx))
@@ -346,12 +352,7 @@ impl DashboardView {
         }
     }
 
-    fn sort_menu(
-        reference: &DashboardRef,
-        view: &View,
-        menu: HeaderMenu,
-        cx: &Context<Self>,
-    ) -> Menu {
+    fn sort_menu(reference: &DashboardRef, view: &View, cx: &Context<Self>) -> Menu {
         let keys = [
             (SortKey::Severity, "severity"),
             (SortKey::LastStateChange, "last state change"),
@@ -376,10 +377,7 @@ impl DashboardView {
                     cx.notify();
                 }))
         };
-        let mut built = Menu::new("sort-menu").label(match menu {
-            HeaderMenu::ViewSort(_) => "sort this view by",
-            _ => "sort by",
-        });
+        let mut built = Menu::new("sort-menu").label("sort by");
         for (key, label) in keys {
             let sort = Sort {
                 key,
@@ -441,7 +439,11 @@ impl DashboardView {
                 trigger.tooltip(Tooltip::new("Dashboard options"))
             })
             .when(open, |trigger| {
-                trigger.child(Popover::new(self.view_menu(reference, view, None, cx)).align_right())
+                trigger.child(
+                    Popover::new(self.view_menu(reference, view, None, cx))
+                        .align_right()
+                        .outset(GlyphButton::reach(), px(0.)),
+                )
             })
             .into_any_element()
     }
@@ -909,7 +911,11 @@ impl DashboardView {
                 trigger.tooltip(Tooltip::new("Dashboard options"))
             })
             .when(open, |trigger| {
-                trigger.child(Popover::new(menu).align_right())
+                trigger.child(
+                    Popover::new(menu)
+                        .align_right()
+                        .outset(GlyphButton::reach(), px(0.)),
+                )
             })
             .into_any_element()
     }
@@ -1161,9 +1167,21 @@ impl DashboardView {
             .children(handled.map(|(slot, _)| div().flex_none().mr(px(16.)).child(slot)))
             .children(mode_switch.map(|switch| div().flex_none().mr(px(10.)).child(switch)))
             .children(middle)
-            .child(div().flex().flex_none().ml(px(16.)).child(sort))
+            // The sort's menu hangs from it, right-aligned (4b).
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .ml(px(16.))
+                    .child(sort)
+                    .children(self.view_sort_menu(reference, view, index, cx).map(|menu| {
+                        Popover::new(menu)
+                            .align_right()
+                            .outset(GlyphButton::reach(), px(0.))
+                    })),
+            )
             .child(div().flex_none().ml(px(10.)).child(more));
-        let sort_menu = self.view_sort_menu(reference, view, index, cx);
         let click_stop = stop.clone();
         div()
             .id(SharedString::from(format!("view-header:{}", view.id)))
@@ -1213,8 +1231,6 @@ impl DashboardView {
             .children(filter)
             .children(spacer)
             .child(right_side)
-            // A view's sort menu hangs from the header's right edge (4b).
-            .children(sort_menu.map(|menu| Popover::new(menu).align_right().gap(px(0.))))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.click_stop(&click_stop, event.modifiers(), window, cx);
             }))
@@ -1222,7 +1238,7 @@ impl DashboardView {
     }
 
     /// A grid's or tiles' group order (`worst first`, `name ↑`); its menu
-    /// hangs from the header ([`Self::view_sort_menu`]).
+    /// hangs from it ([`Self::view_sort_menu`]).
     fn group_order_trigger(&self, view: &View, menu: HeaderMenu, cx: &Context<Self>) -> AnyElement {
         use ic_config::GroupOrder;
         let open = self.menus.open() == Some(menu);
@@ -1261,7 +1277,7 @@ impl DashboardView {
                 }))
         };
         Menu::new("group-order-menu")
-            .label("order the groups")
+            .label("order")
             .item(item("order-worst", "worst first", GroupOrder::WorstFirst))
             .item(item("order-name", "by name", GroupOrder::Name))
             .on_dismiss(Self::dismiss_listener(cx))
@@ -1298,7 +1314,11 @@ impl DashboardView {
             } else {
                 trigger.tooltip(Tooltip::new("View options"))
             })
-            .children(content.map(|menu| Popover::new(menu).align_right()))
+            .children(content.map(|menu| {
+                Popover::new(menu)
+                    .align_right()
+                    .outset(GlyphButton::reach(), px(0.))
+            }))
             .into_any_element()
     }
 }

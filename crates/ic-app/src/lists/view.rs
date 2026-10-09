@@ -1586,12 +1586,24 @@ impl RecordList {
                 options.sort_slot_chars(self.kind),
             ))
             .child(
+                // Drawn pressed while its menu is open, as every menu's
+                // trigger; the background reaches past the word without
+                // moving it.
                 div()
                     .id("list-sort-trigger")
+                    .px(GlyphButton::reach())
+                    .mx(-GlyphButton::reach())
+                    .py(px(2.))
+                    .rounded(theme.metrics.small_radius)
+                    .when(open, |word| word.bg(colors.element_hover))
                     .text_size(theme.text.small)
-                    .text_color(if open { colors.text } else { colors.text_muted })
+                    .text_color(if open {
+                        colors.text_strong
+                    } else {
+                        colors.text_muted
+                    })
                     .cursor_pointer()
-                    .hover(|style| style.text_color(colors.text))
+                    .hover(|style| style.text_color(colors.text_strong))
                     .child(label)
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
@@ -1611,8 +1623,11 @@ impl RecordList {
                             })),
                     );
                 }
-                trigger
-                    .child(Popover::new(menu.on_dismiss(Self::dismiss_listener(cx))).align_right())
+                trigger.child(
+                    Popover::new(menu.on_dismiss(Self::dismiss_listener(cx)))
+                        .align_right()
+                        .outset(GlyphButton::reach(), px(0.)),
+                )
             })
             .into_any_element()
     }
@@ -1640,7 +1655,11 @@ impl RecordList {
                 trigger.tooltip(Tooltip::new("View options"))
             })
             .when(open, |trigger| {
-                trigger.child(Popover::new(self.options_menu(roomy, cx)).align_right())
+                trigger.child(
+                    Popover::new(self.options_menu(roomy, cx))
+                        .align_right()
+                        .outset(GlyphButton::reach(), px(0.)),
+                )
             })
             .into_any_element()
     }

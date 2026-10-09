@@ -363,11 +363,9 @@ fn dashboards_are_duplicated_moved_muted_and_deleted_from_their_menu() {
             sidebar.read(cx).open_menu(),
             Some(&SidebarMenu::Dashboard(moved.clone()))
         );
-        // The menu is kept inside the window: low in the sidebar, it moves
-        // up, its last item 8px above the window's bottom edge.
-        let delete = dashboard_menu_item(lab_row, 407.);
-        let delete = point(delete.x, delete.y.min(px(900. - 8. - 4. - 14.)));
-        app.click(cx, delete, Modifiers::default());
+        // Low in the sidebar the menu opens upward; the keyboard reaches its
+        // last item (End) and chooses it (Enter).
+        app.keys(cx, "end enter");
         assert!(matches!(
             app.workspace.read(cx).modal(cx),
             Some(ModalKind::Confirm(confirmation)) if confirmation.action == Confirmed::Dashboard(moved.clone())

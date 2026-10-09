@@ -18,7 +18,7 @@ use ic_model::Timestamp;
 use ic_rules::ScopeSetting;
 use ic_ui_kit::{
     ActiveTheme as _, Chip, Field, FieldTone, GlyphButton, Icon, IconName, Link, Menu, MenuItem,
-    Metrics, Popover, Segmented, Switch, TextArea, TextField, Tooltip, px,
+    Metrics, Popover, Segmented, Select, Switch, TextArea, TextField, Tooltip, px,
 };
 
 use super::{DashboardEditor, EditorEvent, EditorMenu, INSPECTOR_WIDTH, PREVIEW_DEBOUNCE, model};
@@ -213,12 +213,17 @@ impl DashboardEditor {
         let add = div()
             .relative()
             .child(
+                // A row as wide as the views, its text on their inset;
+                // drawn pressed while its menu is open.
                 div()
                     .id("editor-add-view")
                     .flex()
                     .items_center()
                     .gap(px(8.))
                     .h(px(28.))
+                    .px(px(11.))
+                    .rounded(theme.metrics.code_radius)
+                    .when(open, |row| row.bg(colors.element_hover))
                     .text_size(theme.text.small)
                     .text_color(if open { colors.text } else { colors.text_muted })
                     .when(!full, |row| {
@@ -393,7 +398,6 @@ impl DashboardEditor {
         let count = self.draft.views.len();
         let collapsed = view.collapsed;
         Menu::new("view-row-menu")
-            .min_width(px(220.))
             .item(
                 MenuItem::new("view-move-up", "move up")
                     .key_hint(move_hint(true))
@@ -447,7 +451,7 @@ impl DashboardEditor {
     /// *add view* (4d, 14-r5-b): every kind, in sections (lists,
     /// overviews, activity), each its icon and name.
     fn add_view_menu(cx: &Context<Self>) -> Menu {
-        let mut menu = Menu::new("add-view-menu").min_width(px(240.));
+        let mut menu = Menu::new("add-view-menu");
         for (position, (section, displays)) in model::DISPLAY_SECTIONS.iter().enumerate() {
             if position > 0 {
                 menu = menu.separator();
@@ -728,7 +732,7 @@ impl DashboardEditor {
             Some(display_icon(view.display)),
             model::display_name(view.display).to_owned(),
             || {
-                let mut menu = Menu::new("editor-display-menu").min_width(px(240.));
+                let mut menu = Menu::new("editor-display-menu");
                 for (position, (section, displays)) in model::DISPLAY_SECTIONS.iter().enumerate() {
                     if position > 0 {
                         menu = menu.separator();
@@ -741,7 +745,7 @@ impl DashboardEditor {
                                 model::display_name(display),
                             )
                             .icon(display_icon(display))
-                            .selected(view.display == display)
+                            .checked(view.display == display)
                             .on_click(cx.listener(
                                 move |this, _: &ClickEvent, _, cx| {
                                     this.menus.close();
@@ -1114,7 +1118,7 @@ impl DashboardEditor {
     }
 
     fn sort_menu(view: &View, cx: &Context<Self>) -> Menu {
-        let mut menu = Menu::new("editor-sort-menu").min_width(px(200.));
+        let mut menu = Menu::new("editor-sort-menu");
         for key in [
             SortKey::Severity,
             SortKey::LastStateChange,
@@ -1212,8 +1216,8 @@ impl DashboardEditor {
             )
     }
 
-    /// A dropdown trigger showing `value` (after `icon`), with `menu` under
-    /// it while open.
+    /// A select showing `value` (after `icon`), its list (`build`) opening
+    /// from it while open (the one dropdown system).
     pub(super) fn dropdown(
         &self,
         id: &'static str,
@@ -1223,52 +1227,22 @@ impl DashboardEditor {
         build: impl FnOnce() -> Menu,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
-        let colors = theme.colors;
         let open = self.menus.is_open(menu);
         let toggled = menu.clone();
-        div()
-            .relative()
-            .child(
-                div()
-                    .id(id)
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(theme.metrics.field_height)
-                    .px(px(10.))
-                    .rounded(theme.metrics.code_radius)
-                    .border_1()
-                    .border_color(if open {
-                        colors.accent
-                    } else {
-                        colors.border_header
-                    })
-                    .bg(colors.code_background)
-                    .text_size(theme.text.body)
-                    .cursor_pointer()
-                    .when_some(icon, |trigger, icon| {
-                        trigger.child(Icon::new(icon).size(px(13.)).color(colors.text_muted))
-                    })
-                    .child(div().flex_1().min_w_0().truncate().child(value))
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .size(px(12.))
-                            .color(colors.text_faint),
-                    )
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        this.menus.toggle(toggled.clone(), down_position(event));
-                        cx.notify();
-                    })),
-            )
-            .when(open, |slot| slot.child(Popover::new(build())))
+        Select::new(id, value)
+            .when_some(icon, Select::icon)
+            .open(open)
+            .when(open, |select| select.menu(build()))
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                this.menus.toggle(toggled.clone(), down_position(event));
+                cx.notify();
+            }))
             .into_any_element()
     }
 
     fn group_menu(&self, cx: &Context<Self>) -> Menu {
         let state = self.state.read(cx);
-        let mut menu = Menu::new("editor-group-menu").min_width(px(240.));
+        let mut menu = Menu::new("editor-group-menu");
         for group in state.groups() {
             let id = group.id.clone();
             menu = menu.item(

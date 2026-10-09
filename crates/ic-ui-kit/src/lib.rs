@@ -24,12 +24,12 @@ pub use assets::Assets;
 pub use components::{
     Banner, BannerTone, Button, ButtonColors, ButtonVariant, CHIP_HEIGHT, Chip, CircleSize,
     CodeBlock, CompactRow, DialogBody, Dismissable, Dismissal, Divider, DividerColor, EmptyState,
-    Field, FieldTone, GlyphButton, IconButton, ItemAction, KeyHint, KvTable, Link, LinkStyle,
-    ListRow, Menu, MenuItem, Modal, ModalPlacement, NoteEntry, ObjectMark, Paint, PaneBanner,
-    PaneBannerTone, PaneHeader, PerfdataRow, PerfdataTable, Popover, ProgressBar, RowEmphasis,
-    SectionLabel, Segmented, StateCircle, StateDot, SubTabs, SummaryBar, SummaryItem, Switch,
-    TOAST_WIDTH, TextArea, TextField, Toast, ToastTone, Tooltip, TreeLine, TreeTable, chip_width,
-    sub_tab_gap, sub_tab_width,
+    Field, FieldTone, FloatKind, GlyphButton, IconButton, ItemAction, KeyHint, KvTable, Link,
+    LinkStyle, ListRow, Menu, MenuItem, Modal, ModalPlacement, NoteEntry, ObjectMark, Paint,
+    PaneBanner, PaneBannerTone, PaneHeader, PerfdataRow, PerfdataTable, Placed, Popover,
+    ProgressBar, RowEmphasis, SectionLabel, Segmented, Select, StateCircle, StateDot, SubTabs,
+    SummaryBar, SummaryItem, Switch, TOAST_WIDTH, TextArea, TextField, Toast, ToastTone, Tooltip,
+    TooltipPlacement, TreeLine, TreeTable, chip_width, last_placed, sub_tab_gap, sub_tab_width,
 };
 pub use fonts::FontError;
 pub use icon::{Icon, IconName};

@@ -135,6 +135,9 @@ pub(crate) struct Sidebar {
     /// their controls).
     viewport: Pixels,
     rename: Option<Rename>,
+    /// A dashboard being created, shown as a selected row under its group
+    /// while its editor is open.
+    provisional: Option<model::Provisional>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -172,6 +175,7 @@ impl Sidebar {
             mute_target: None,
             viewport: crate::WINDOW_SIZE.height,
             rename: None,
+            provisional: None,
             _subscriptions: subscriptions,
         }
     }
@@ -377,12 +381,21 @@ impl Sidebar {
             return empty_note("No dashboards yet", None, &theme, cx);
         };
         let now = Timestamp::now();
-        // While a tab or a cluster entry is shown, no dashboard is
-        // highlighted.
-        let selected = state
-            .selected()
-            .filter(|_| state.active_tab().is_none() && state.active_cluster().is_none());
-        let groups = model::groups(environment, state.snapshot(), selected, &self.query, now);
+        // While a tab or a cluster entry is shown, or a new dashboard is
+        // being made (its provisional row is the selected one), no
+        // dashboard is highlighted.
+        let selected = state.selected().filter(|_| {
+            state.active_tab().is_none()
+                && state.active_cluster().is_none()
+                && self.provisional.is_none()
+        });
+        let mut groups = model::groups(environment, state.snapshot(), selected, &self.query, now);
+        // The group a new dashboard goes into holds the selected row.
+        if let Some(provisional) = &self.provisional {
+            for group in &mut groups {
+                group.active |= group.group.id == provisional.group_id;
+            }
+        }
         let tabs = model::open_tabs(state.tabs(), state.active_tab(), state.snapshot());
         let cluster_state =
             crate::cluster::cluster_state(state.snapshot(), state.connection().is_connected(), now);
@@ -690,6 +703,59 @@ impl Sidebar {
                     .items
                     .iter()
                     .map(|item| self.render_item(item, theme, cx)),
+            )
+            .children(
+                self.provisional
+                    .as_ref()
+                    .filter(|provisional| provisional.group_id == group.group.id)
+                    .map(|provisional| Self::render_provisional(provisional, theme)),
+            )
+            .into_any_element()
+    }
+
+    /// Shows `provisional` (a dashboard being created) under its group, or
+    /// nothing; redraws only when that changes.
+    pub(crate) fn set_provisional(
+        &mut self,
+        provisional: Option<model::Provisional>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.provisional != provisional {
+            self.provisional = provisional;
+            cx.notify();
+        }
+    }
+
+    /// The dashboard being created that the sidebar shows (UI tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn provisional(&self) -> Option<&model::Provisional> {
+        self.provisional.as_ref()
+    }
+
+    /// The row of a dashboard being created (14-r5-a): as a dashboard's,
+    /// selected, with the draft's mark and name; it is the editor's, so
+    /// it has no count, no `···` and no click of its own.
+    fn render_provisional(provisional: &model::Provisional, theme: &Theme) -> AnyElement {
+        let colors = theme.colors;
+        div()
+            .id("dashboard-provisional")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(12.))
+            .h(theme.metrics.item_row_height)
+            .pl(px(14.))
+            .pr(theme.metrics.sidebar_padding)
+            .bg(colors.item_active)
+            .child(mark(provisional.mark, theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.text.row)
+                    .text_color(colors.text_emphasis)
+                    .child(SharedString::from(provisional.name.clone())),
             )
             .into_any_element()
     }
@@ -1284,12 +1350,7 @@ impl Sidebar {
                         add.tooltip(Tooltip::new("New dashboard or group").key(new_key()))
                     })
                     .when(footer_open, |slot| {
-                        slot.child(
-                            Popover::new(self.footer_menu(cx))
-                                .above()
-                                .align_right()
-                                .gap(px(8.)),
-                        )
+                        slot.child(Popover::new(self.footer_menu(cx)).above().align_right())
                     }),
             )
     }

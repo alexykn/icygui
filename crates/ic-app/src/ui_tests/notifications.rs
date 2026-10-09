@@ -225,10 +225,7 @@ fn objects_are_watched_and_muted_from_the_pane_and_the_palette() {
         // The pane's menu offers watching, other mutes and unmuting.
         let pane = app.dashboard(cx).read(cx).pane(cx).unwrap();
         let labels = pane.update(cx, |pane, cx| pane.more_menu_labels(None, cx));
-        assert!(
-            labels.contains(&"watch: always notify".to_owned()),
-            "{labels:?}"
-        );
+        assert!(labels.contains(&"watch".to_owned()), "{labels:?}");
         assert!(labels.contains(&"unmute".to_owned()), "{labels:?}");
 
         palette_run(cx, "watch");

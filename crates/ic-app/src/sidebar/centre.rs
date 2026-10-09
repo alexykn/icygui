@@ -646,18 +646,14 @@ impl Sidebar {
                     })),
             )
             .when(open, |trigger| {
-                trigger.child(
-                    Popover::new(Self::scope_overflow(items, cx))
-                        .above()
-                        .gap(px(6.)),
-                )
+                trigger.child(Popover::new(Self::scope_overflow(items, cx)).above())
             })
             .into_any_element()
     }
 
     /// The scopes that didn't fit, as a menu.
     fn scope_overflow(items: Vec<(Scope, String, bool)>, cx: &Context<Self>) -> Menu {
-        let mut menu = Menu::new("centre-scope-overflow").min_width(px(160.));
+        let mut menu = Menu::new("centre-scope-overflow");
         for (index, (scope, name, unread)) in items.into_iter().enumerate() {
             menu = menu.item(
                 MenuItem::new(("centre-scope-hidden", index), name)

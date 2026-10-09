@@ -177,6 +177,8 @@ struct OpenEditor {
     view: Entity<DashboardEditor>,
     opened_over: Shown,
     _events: Subscription,
+    /// Keeps the sidebar's provisional row (a new dashboard's) current.
+    _changes: Subscription,
 }
 
 /// What a confirmation carries out.
@@ -814,6 +816,7 @@ impl Workspace {
             .is_some_and(|editor| editor.opened_over != shown)
             && let Some(editor) = self.editor.take()
         {
+            self.sync_provisional(cx);
             self.keep_changes(&editor, None, cx);
         }
         if shown != self.shown {
@@ -889,6 +892,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(editor) = self.editor.take() {
+            self.sync_provisional(cx);
             self.keep_changes(&editor, previous.as_deref(), cx);
         }
         // A list's marks and pane belong to the environment they were made
@@ -1875,6 +1879,17 @@ impl Workspace {
         }
     }
 
+    /// Shows a new dashboard's provisional row in the sidebar while its
+    /// editor is open, and takes it away after.
+    fn sync_provisional(&self, cx: &mut Context<Self>) {
+        let provisional = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.view.read(cx).provisional());
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_provisional(provisional, cx));
+    }
+
     /// Opens the dashboard editor in the main area.
     fn open_editor(
         &mut self,
@@ -1935,6 +1950,7 @@ impl Workspace {
                 |this, _, event: &EditorEvent, window, cx| match event {
                     EditorEvent::Closed => {
                         this.editor = None;
+                        this.sync_provisional(cx);
                         this.focus_main(window, cx);
                         cx.notify();
                     }
@@ -1944,11 +1960,14 @@ impl Workspace {
                     }
                 },
             );
+        let changes = cx.observe(&view, |this, _, cx| this.sync_provisional(cx));
         self.editor = Some(OpenEditor {
             view,
             opened_over: self.shown.clone(),
             _events: events,
+            _changes: changes,
         });
+        self.sync_provisional(cx);
         self.focus_main(window, cx);
         cx.notify();
     }
@@ -2101,6 +2120,7 @@ impl Workspace {
             Confirmed::Action(spec) => self.submit(spec, cx),
             Confirmed::DiscardEdits => {
                 self.editor = None;
+                self.sync_provisional(cx);
             }
             Confirmed::DiscardEnvironmentEdits => {
                 self.behind_close = None;
@@ -2108,6 +2128,7 @@ impl Workspace {
             Confirmed::CloseWindow => {
                 self.behind_close = None;
                 self.editor = None;
+                self.sync_provisional(cx);
                 self.kept_draft = None;
                 self.drafts_elsewhere.clear();
                 window.remove_window();
@@ -2128,6 +2149,7 @@ impl Workspace {
                     .is_some_and(|editor| *editor.view.read(cx).target() == edited)
                 {
                     self.editor = None;
+                    self.sync_provisional(cx);
                 }
                 if self
                     .kept_draft
@@ -2153,6 +2175,7 @@ impl Workspace {
                 };
                 if deleted {
                     self.editor = None;
+                    self.sync_provisional(cx);
                     self.drafts_elsewhere.remove(&id);
                 }
             }
@@ -2832,6 +2855,8 @@ pub(crate) fn close_window(window: &mut Window, cx: &mut App) {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A closed editor's provisional row goes with it.
+        self.sync_provisional(cx);
         if let Some(problem) = self.state.read(cx).config_problem().cloned() {
             return div()
                 .id("workspace")

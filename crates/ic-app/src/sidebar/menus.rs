@@ -120,7 +120,7 @@ fn height_of(count: usize, height: f32) -> f32 {
 const SCOPE_SETTINGS: [(&str, &str, ScopeSetting); 3] = [
     ("inherit", "inherit", ScopeSetting::Inherit),
     ("on", "on", ScopeSetting::On),
-    ("off", "off (muted)", ScopeSetting::Off),
+    ("off", "off", ScopeSetting::Off),
 ];
 
 impl Sidebar {
@@ -435,7 +435,7 @@ impl Sidebar {
             state.environments().len(),
             nodes.len(),
         );
-        let mut menu = Menu::new("connection-details").width(px(width));
+        let mut menu = Menu::new("connection-details").status_popover(px(width));
         match state.environment() {
             Some(environment) => {
                 let title = if state.is_demo_environment() {

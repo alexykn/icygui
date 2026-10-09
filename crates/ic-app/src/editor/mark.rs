@@ -6,14 +6,14 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, div, prelude::FluentBuilder as _,
+    Keystroke, MouseButton, ParentElement as _, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
 };
 use ic_config::{EffectiveMark, RowDensity, SidebarMark, View, ViewDisplay};
 use ic_model::{CheckableState, ServiceState};
 use ic_ui_kit::{
-    ActiveTheme as _, Chip, Field, FieldTone, Icon, IconName, Menu, MenuItem, Popover, Segmented,
-    StateDot, TextField, Tooltip, px,
+    ActiveTheme as _, Chip, Dismissable, Field, FieldTone, Icon, IconName, Menu, MenuItem, Popover,
+    Segmented, StateDot, TextField, Tooltip, TooltipPlacement, px,
 };
 
 use super::model::{self, CopySection};
@@ -23,13 +23,15 @@ use crate::lists::model::{ListKind, Mode, Options};
 use crate::menu_state::down_position;
 
 /// The icon picker's grid: columns, and rows before it scrolls.
-const PICKER_COLUMNS: usize = 8;
+pub(super) const PICKER_COLUMNS: usize = 8;
 const PICKER_ROWS: usize = 5;
 /// A cell of the picker's grid.
 const PICKER_CELL: f32 = 34.;
 /// *copy filter from…*'s width, and its list's height before it scrolls.
 const COPY_WIDTH: f32 = 440.;
 const COPY_LIST_HEIGHT: f32 = 340.;
+/// The width of *copy filter from…*'s preview card.
+const COPY_PREVIEW_WIDTH: f32 = 260.;
 
 /// What the sidebar mark dropdown says: `state` or `icon`.
 fn mark_word(mark: EffectiveMark<'_>) -> &'static str {
@@ -55,6 +57,18 @@ impl DashboardEditor {
         (mark, problems)
     }
 
+    /// The mark the sidebar row will show: the worst state's dot of the
+    /// latest evaluation, or the icon.
+    pub(super) fn sidebar_mark(&self) -> crate::sidebar::model::Mark {
+        use crate::sidebar::model::{Dot, Mark};
+        match self.effective_mark().0 {
+            EffectiveMark::State => Mark::Dot(Dot::from_summary(
+                self.evaluated.as_ref().map(|(_, result)| &result.summary),
+            )),
+            EffectiveMark::Icon(_) | EffectiveMark::KindIcon => Mark::Icon(self.mark_icon()),
+        }
+    }
+
     /// The icon the mark shows: the one picked, else the first view's
     /// kind's.
     fn mark_icon(&self) -> IconName {
@@ -71,8 +85,9 @@ impl DashboardEditor {
 
     /// `sidebar mark` (14-r5-e, f, g): the square previewing the mark (with
     /// *icon*, a click opens the picker under it; with *state* it is no
-    /// button), and the dropdown filling the column. *state* is greyed out,
-    /// its reason in the tooltip, without a problem view.
+    /// button), and the select filling the column. *state* is greyed out
+    /// without a problem view, its reason in a tooltip left of the list
+    /// (so it never covers the *icon* row).
     #[expect(
         clippy::too_many_lines,
         reason = "one field, its parts in reading order"
@@ -115,22 +130,25 @@ impl DashboardEditor {
             } else {
                 colors.border_header
             })
-            .bg(colors.code_background)
+            .bg(if picker_open {
+                colors.element_hover
+            } else {
+                colors.code_background
+            })
             .child(content)
             .when(icon_mark, |swatch| {
                 swatch
                     .cursor_pointer()
                     .hover(|style| style.bg(colors.element_hover))
-                    .tooltip(Tooltip::text("Pick the icon"))
+                    .when(!picker_open, |swatch| {
+                        swatch.tooltip(Tooltip::text("Pick the icon"))
+                    })
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
                         this.menus
                             .toggle(EditorMenu::IconPicker, down_position(event));
                         if this.menus.is_open(&EditorMenu::IconPicker) {
-                            this.icon_search.update(cx, |input, cx| {
-                                input.set_value("", window, cx);
-                                input.focus(window, cx);
-                            });
+                            this.start_icon_picker(window, cx);
                         }
                         cx.notify();
                     }))
@@ -154,7 +172,10 @@ impl DashboardEditor {
                             .checked(!icon_mark)
                             .disabled(!problems)
                             .when(!problems, |item| {
-                                item.tooltip(Tooltip::new("no problem view on this dashboard"))
+                                item.tooltip(
+                                    Tooltip::new("no problem view on this dashboard")
+                                        .placement(TooltipPlacement::Left),
+                                )
                             })
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.menus.close();
@@ -174,10 +195,7 @@ impl DashboardEditor {
                                 }
                                 // Picking *icon* goes on to the icon.
                                 this.menus.open(EditorMenu::IconPicker);
-                                this.icon_search.update(cx, |input, cx| {
-                                    input.set_value("", window, cx);
-                                    input.focus(window, cx);
-                                });
+                                this.start_icon_picker(window, cx);
                                 cx.notify();
                             })),
                     )
@@ -195,9 +213,61 @@ impl DashboardEditor {
         )
     }
 
-    /// The icon picker (14-r5-f): a search field with the count, the
-    /// recent icons, the icons found (eight a row, five rows before it
-    /// scrolls) and a footer with the current icon's name and the keys.
+    /// Opens the icon picker: an empty search with the keyboard in it,
+    /// the cursor on the current icon.
+    fn start_icon_picker(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        self.icon_search.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        let current = self.mark_icon();
+        self.icon_cursor = model::pickable_icons("")
+            .iter()
+            .position(|icon| *icon == current)
+            .or(Some(0));
+        if let Some(cursor) = self.icon_cursor {
+            self.icon_scroll.scroll_to_item(cursor / PICKER_COLUMNS);
+        }
+    }
+
+    /// A key while the icon picker is open: the arrows move the cursor
+    /// over the icons found (a row is eight), Enter chooses the one under
+    /// it. Returns whether the key was used.
+    fn icon_picker_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
+        let query = self.icon_search.read(cx).value().to_string();
+        let found = model::pickable_icons(&query);
+        if found.is_empty() {
+            return false;
+        }
+        let last = found.len() - 1;
+        let at = self.icon_cursor.unwrap_or(0).min(last);
+        let moved = match keystroke.key.as_str() {
+            "left" => at.saturating_sub(1),
+            "right" => (at + 1).min(last),
+            "up" => at.checked_sub(PICKER_COLUMNS).unwrap_or(at),
+            "down" => {
+                if at + PICKER_COLUMNS <= last {
+                    at + PICKER_COLUMNS
+                } else {
+                    at
+                }
+            }
+            "enter" => {
+                self.pick_icon(found[at], cx);
+                return true;
+            }
+            _ => return false,
+        };
+        self.icon_cursor = Some(moved);
+        self.icon_scroll.scroll_to_item(moved / PICKER_COLUMNS);
+        cx.notify();
+        true
+    }
+
+    /// The icon picker (14-r5-f): a search field with the magnifier and
+    /// the count inside it, the recent icons, the icons found (eight a row,
+    /// five rows before it scrolls) and a footer naming the icon under the
+    /// cursor, with the keys.
     #[expect(
         clippy::too_many_lines,
         reason = "one popover, its parts in reading order"
@@ -208,6 +278,10 @@ impl DashboardEditor {
         let query = self.icon_search.read(cx).value().to_string();
         let found = model::pickable_icons(&query);
         let total = model::pickable_icons("").len();
+        let cursor = self
+            .icon_cursor
+            .filter(|cursor| *cursor < found.len())
+            .or_else(|| (!found.is_empty()).then_some(0));
         let current = match &self.draft.mark {
             SidebarMark::Icon(name) => IconName::from_lucide_name(name),
             SidebarMark::Auto | SidebarMark::State => None,
@@ -221,7 +295,7 @@ impl DashboardEditor {
             .filter(|icon| icon.is_pickable())
             .take(PICKER_COLUMNS)
             .collect();
-        let cell = |section: &str, icon: IconName| {
+        let cell = |section: &str, icon: IconName, under_cursor: bool| {
             let selected = current == Some(icon);
             div()
                 .id(ElementId::Name(
@@ -239,11 +313,10 @@ impl DashboardEditor {
                 } else {
                     gpui::transparent_black()
                 })
-                .when(selected, |cell| cell.bg(colors.row_selected))
+                .when(under_cursor, |cell| cell.bg(colors.element_hover))
                 .cursor_pointer()
                 .hover(|style| style.bg(colors.element_hover))
                 .child(Icon::new(icon).size(px(16.)).color(colors.text))
-                .tooltip(Tooltip::text(icon.lucide_name()))
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.pick_icon(icon, cx);
@@ -262,12 +335,28 @@ impl DashboardEditor {
         let grid_width = px(PICKER_CELL * PICKER_COLUMNS as f32);
         #[expect(clippy::cast_precision_loss, reason = "a handful of rows")]
         let grid_height = px(PICKER_CELL * PICKER_ROWS as f32);
-        let name = current.map_or_else(
+        // The footer names the icon under the cursor (else the current).
+        let name = cursor.and_then(|cursor| found.get(cursor)).map_or_else(
             || self.mark_icon().lucide_name().to_owned(),
             |icon| icon.lucide_name().to_owned(),
         );
-        div()
+        let rows: Vec<AnyElement> = found
+            .chunks(PICKER_COLUMNS)
+            .enumerate()
+            .map(|(row, icons)| {
+                div()
+                    .flex()
+                    .flex_none()
+                    .w(grid_width)
+                    .children(icons.iter().enumerate().map(|(column, icon)| {
+                        cell("all", *icon, cursor == Some(row * PICKER_COLUMNS + column))
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let card = div()
             .id("icon-picker")
+            .occlude()
             .flex()
             .flex_col()
             .w(grid_width + px(2. * 11. + 2.))
@@ -280,35 +369,22 @@ impl DashboardEditor {
             .shadow_lg()
             .font_family(theme.font_family.clone())
             .text_size(theme.text.small)
-            .on_mouse_down_out(cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                this.menus.dismiss(event.position);
-                cx.notify();
-            }))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(TextField::new(&self.icon_search).bordered(true)),
+                TextField::new(&self.icon_search)
+                    .bordered(true)
+                    .leading(
+                        Icon::new(IconName::Search)
+                            .size(px(14.))
+                            .color(colors.text_muted),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(theme.text.label)
-                            .text_color(colors.text_faint)
-                            .child(format!("{} of {total}", found.len())),
-                    ),
+                    .trailing(format!("{} of {total}", found.len())),
             )
-            .when(!recent.is_empty() && query.trim().is_empty(), |picker| {
+            .when(!recent.is_empty(), |picker| {
                 picker.child(label("recent")).child(
                     div()
                         .flex()
                         .w(grid_width)
-                        .children(recent.iter().map(|icon| cell("recent", *icon))),
+                        .children(recent.iter().map(|icon| cell("recent", *icon, false))),
                 )
             })
             .child(label(if query.trim().is_empty() {
@@ -319,16 +395,13 @@ impl DashboardEditor {
             .child(
                 div()
                     .id("icon-grid")
+                    .flex()
+                    .flex_col()
                     .w(grid_width)
                     .h(grid_height)
                     .overflow_y_scroll()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .w(grid_width)
-                            .children(found.iter().map(|icon| cell("all", *icon))),
-                    ),
+                    .track_scroll(&self.icon_scroll)
+                    .children(rows),
             )
             .child(
                 div()
@@ -341,69 +414,148 @@ impl DashboardEditor {
                     .border_color(colors.border_header)
                     .text_size(theme.text.label)
                     .text_color(colors.text_faint)
-                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(colors.text)
+                            .child(name),
+                    )
+                    .child("↑↓←→ move")
                     .child("↵ choose")
                     .child("esc"),
-            )
+            );
+        let editor = cx.entity().downgrade();
+        Dismissable::new("icon-picker-popup", card, Self::dismiss_listener(cx))
+            .on_key(move |keystroke, _, cx| {
+                editor
+                    .update(cx, |this, cx| this.icon_picker_key(keystroke, cx))
+                    .unwrap_or(false)
+            })
             .into_any_element()
     }
 
     /// The filter field's *copy filter from…* button (top right inside the
-    /// field), with its popover while open.
+    /// field, drawn pressed while open), with its popover.
     pub(super) fn copy_filter_button(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let colors = theme.colors;
         let open = self.menus.is_open(&EditorMenu::CopyFilter);
+        let button = div()
+            .id("editor-copy-filter")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(22.))
+            .rounded(theme.metrics.small_radius)
+            .when(open, |button| button.bg(colors.element_hover))
+            .cursor_pointer()
+            .hover(|style| style.bg(colors.element_hover))
+            .child(Icon::new(IconName::Copy).size(px(13.)).color(if open {
+                colors.text
+            } else {
+                colors.text_muted
+            }))
+            .when(!open, |button| {
+                button.tooltip(Tooltip::text("Copy filter from another dashboard or view"))
+            })
+            .on_mouse_down(MouseButton::Left, |_, window, _| {
+                window.prevent_default();
+            })
+            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                this.menus
+                    .toggle(EditorMenu::CopyFilter, down_position(event));
+                if this.menus.is_open(&EditorMenu::CopyFilter) {
+                    this.copy_search.update(cx, |input, cx| {
+                        input.set_value("", window, cx);
+                        input.focus(window, cx);
+                    });
+                    this.set_copy_cursor(None, cx);
+                }
+                cx.notify();
+            }));
         div()
             .absolute()
             .top(px(6.))
             .right(px(6.))
-            .child(
-                div()
-                    .relative()
-                    .child(
-                        div()
-                            .id("editor-copy-filter")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(22.))
-                            .rounded(theme.metrics.small_radius)
-                            .when(open, |button| button.bg(colors.element_hover))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(colors.element_hover))
-                            .child(Icon::new(IconName::Copy).size(px(13.)).color(if open {
-                                colors.text
-                            } else {
-                                colors.text_muted
-                            }))
-                            .tooltip(Tooltip::text("Copy filter from another dashboard or view"))
-                            .on_mouse_down(MouseButton::Left, |_, window, _| {
-                                window.prevent_default();
-                            })
-                            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                                this.menus
-                                    .toggle(EditorMenu::CopyFilter, down_position(event));
-                                if this.menus.is_open(&EditorMenu::CopyFilter) {
-                                    this.copy_search.update(cx, |input, cx| {
-                                        input.set_value("", window, cx);
-                                        input.focus(window, cx);
-                                    });
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .when(open, |slot| {
-                        slot.child(Popover::new(self.copy_filter_list(cx)).align_right())
-                    }),
-            )
+            .child(div().relative().child(button).when(open, |slot| {
+                slot.child(Popover::new(self.copy_filter_list(cx)).align_right())
+            }))
             .into_any_element()
     }
 
-    /// *copy filter from…* (14-r4-e): a search, the other dashboards' and
-    /// views' filters (each its name, where it is, and the filter), and
-    /// the keys. Choosing one fills the field; the field's undo takes it
-    /// back.
+    /// Moves *copy filter from…*'s cursor to `index` (of the filters found
+    /// for the search) and counts what that filter matches here, for the
+    /// preview card (once per filter: on this environment's snapshot, no
+    /// request).
+    pub(super) fn set_copy_cursor(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        self.copy_cursor = index;
+        let Some(index) = index else {
+            return;
+        };
+        let query = self.copy_search.read(cx).value().to_string();
+        let Some(source) = self.copy_sources(&query, cx).into_iter().nth(index) else {
+            return;
+        };
+        if self
+            .copy_preview
+            .as_ref()
+            .is_some_and(|(filter, _)| *filter == source.filter)
+        {
+            return;
+        }
+        let snapshot = self.state.read(cx).snapshot().clone();
+        let count = model::count_matches(
+            &snapshot,
+            &source.filter,
+            source.display,
+            source.object_kind,
+            ic_model::Timestamp::now(),
+        );
+        self.copy_preview = count.map(|count| (source.filter, count));
+    }
+
+    /// A key while *copy filter from…* is open: ↑ ↓ move the cursor over
+    /// the filters found, Enter copies the one under it (else the first).
+    /// Returns whether the key was used.
+    fn copy_filter_key(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let query = self.copy_search.read(cx).value().to_string();
+        let sources = self.copy_sources(&query, cx);
+        if sources.is_empty() {
+            return false;
+        }
+        let last = sources.len() - 1;
+        let moved = match (keystroke.key.as_str(), self.copy_cursor) {
+            ("down", None) => 0,
+            ("down", Some(at)) => (at + 1).min(last),
+            ("up", None) => last,
+            ("up", Some(at)) => at.saturating_sub(1),
+            ("enter", at) => {
+                let filter = sources[at.unwrap_or(0).min(last)].filter.clone();
+                self.copy_filter(&filter, window, cx);
+                return true;
+            }
+            _ => return false,
+        };
+        self.set_copy_cursor(Some(moved), cx);
+        // Two section labels at most come before a row.
+        self.copy_scroll.scroll_to_item(moved + 2);
+        cx.notify();
+        true
+    }
+
+    /// *copy filter from…* (14-r4-e): a search with its magnifier, the
+    /// other dashboards' and views' filters (each its sidebar mark or its
+    /// kind's icon, its name, where it is, and the filter), and the keys.
+    /// The row under the cursor shows a preview card left of the list:
+    /// what it is, its filter, and how many objects it matches here.
+    /// Choosing one fills the field; the field's undo takes it back.
     #[expect(
         clippy::too_many_lines,
         reason = "one popover, its parts in reading order"
@@ -413,6 +565,7 @@ impl DashboardEditor {
         let colors = theme.colors;
         let query = self.copy_search.read(cx).value().to_string();
         let sources = self.copy_sources(&query, cx);
+        let cursor = self.copy_cursor.filter(|cursor| *cursor < sources.len());
         // A dashboard's row shows its sidebar mark; a view's its kind.
         let state = self.state.read(cx);
         let now = ic_model::Timestamp::now();
@@ -453,6 +606,8 @@ impl DashboardEditor {
                         .into_any_element(),
                 );
             }
+            let under_cursor = cursor == Some(index);
+            let preview = under_cursor.then(|| self.copy_preview_card(&source, cx));
             let filter = source.filter.clone();
             let lead = match source.dashboard.as_ref().and_then(&sidebar_mark) {
                 Some(mark) => crate::sidebar::mark(mark, theme),
@@ -464,12 +619,13 @@ impl DashboardEditor {
             rows.push(
                 div()
                     .id(ElementId::NamedInteger("copy-source".into(), index as u64))
+                    .relative()
                     .flex()
                     .gap(px(10.))
                     .px(px(11.))
                     .py(px(6.))
                     .cursor_pointer()
-                    .hover(|style| style.bg(colors.element_hover))
+                    .when(under_cursor, |row| row.bg(colors.element_hover))
                     .child(
                         div()
                             .flex()
@@ -513,6 +669,13 @@ impl DashboardEditor {
                                     .child(source.filter),
                             ),
                     )
+                    .children(preview)
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered && this.copy_cursor != Some(index) {
+                            this.set_copy_cursor(Some(index), cx);
+                            cx.notify();
+                        }
+                    }))
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.copy_filter(&filter, window, cx);
@@ -521,8 +684,9 @@ impl DashboardEditor {
             );
         }
         let empty = rows.is_empty();
-        div()
+        let card = div()
             .id("copy-filter")
+            .occlude()
             .flex()
             .flex_col()
             .w(px(COPY_WIDTH))
@@ -533,22 +697,32 @@ impl DashboardEditor {
             .shadow_lg()
             .font_family(theme.font_family.clone())
             .text_size(theme.text.small)
-            .on_mouse_down_out(cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                this.menus.dismiss(event.position);
-                cx.notify();
-            }))
             .child(
                 div()
-                    .p(px(8.))
+                    .flex()
+                    .items_center()
+                    .h(px(36.))
+                    .px(px(11.))
                     .border_b_1()
                     .border_color(colors.border_header)
-                    .child(TextField::new(&self.copy_search).bordered(true)),
+                    .child(
+                        TextField::new(&self.copy_search)
+                            .text_size(theme.text.body)
+                            .leading(
+                                Icon::new(IconName::Search)
+                                    .size(px(13.))
+                                    .color(colors.text_muted),
+                            ),
+                    ),
             )
             .child(
                 div()
                     .id("copy-filter-list")
+                    .flex()
+                    .flex_col()
                     .max_h(px(COPY_LIST_HEIGHT))
                     .overflow_y_scroll()
+                    .track_scroll(&self.copy_scroll)
                     .pb(px(4.))
                     .children(rows)
                     .when(empty, |list| {
@@ -576,8 +750,69 @@ impl DashboardEditor {
                     .child(super::undo_hint())
                     .child(div().flex_1())
                     .child("esc"),
-            )
+            );
+        let editor = cx.entity().downgrade();
+        Dismissable::new("copy-filter-popup", card, Self::dismiss_listener(cx))
+            .on_key(move |keystroke, window, cx| {
+                editor
+                    .update(cx, |this, cx| this.copy_filter_key(keystroke, window, cx))
+                    .unwrap_or(false)
+            })
             .into_any_element()
+    }
+
+    /// The preview card beside the row under *copy filter from…*'s cursor
+    /// (14-r4-e): its name, what it is, its filter, and how many objects
+    /// that matches here.
+    fn copy_preview_card(&self, source: &model::CopySource, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let count = self
+            .copy_preview
+            .as_ref()
+            .filter(|(filter, _)| *filter == source.filter)
+            .map(|(_, count)| *count);
+        let card = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(px(8.))
+            .w(px(COPY_PREVIEW_WIDTH))
+            .p(px(11.))
+            .rounded(theme.metrics.code_radius)
+            .border_1()
+            .border_color(colors.border_window)
+            .bg(colors.element_background)
+            .shadow_lg()
+            .font_family(theme.font_family.clone())
+            .text_size(theme.text.small)
+            .child(
+                div()
+                    .truncate()
+                    .text_size(theme.text.body)
+                    .text_color(colors.text_strong)
+                    .child(source.title.clone()),
+            )
+            .child(
+                div()
+                    .text_color(colors.text_faint)
+                    .child(model::copy_source_kind(source)),
+            )
+            .child(
+                div()
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(theme.metrics.small_radius)
+                    .bg(colors.code_background)
+                    .text_color(colors.text_code)
+                    .child(source.filter.clone()),
+            )
+            .child(div().text_color(colors.text).child(match count {
+                Some(1) => "here: matches 1 object".to_owned(),
+                Some(count) => format!("here: matches {count} objects"),
+                None => "here: the filter doesn't parse".to_owned(),
+            }));
+        Popover::new(card).left().gap(px(12.)).into_any_element()
     }
 
     /// A list-like view's `rows` (14-r5-b): as in settings (naming the
@@ -677,45 +912,36 @@ impl DashboardEditor {
                 .child(Self::shows_field(view, cx)),
         };
         let sort = options.sort(kind);
-        body.child(
-            Field::new("sort")
-                .status("the header's sort", FieldTone::Neutral)
-                .control(self.dropdown(
-                    "editor-thread-sort",
-                    &EditorMenu::ThreadSort,
-                    None,
-                    sort.menu_label(kind).to_owned(),
-                    || {
-                        let mut menu = Menu::new("editor-thread-sort-menu");
-                        for &choice in kind.sorts() {
-                            menu = menu.item(
-                                MenuItem::new(
-                                    SharedString::from(format!("editor-{}", choice.id())),
-                                    choice.menu_label(kind),
-                                )
-                                .checked(choice == sort)
-                                .on_click(cx.listener(
-                                    move |this, _: &ClickEvent, _, cx| {
-                                        this.menus.close();
-                                        this.change_selected(
-                                            std::time::Duration::ZERO,
-                                            cx,
-                                            |view| {
-                                                let mut options =
-                                                    Options::of_view(kind, view.threads);
-                                                options.sort = Some(choice);
-                                                view.threads = options.to_view();
-                                            },
-                                        );
-                                    },
-                                )),
-                            );
-                        }
-                        menu.on_dismiss(Self::dismiss_listener(cx))
-                    },
-                    cx,
-                )),
-        )
+        body.child(Field::new("sort").control(self.dropdown(
+            "editor-thread-sort",
+            &EditorMenu::ThreadSort,
+            None,
+            sort.menu_label(kind).to_owned(),
+            || {
+                let mut menu = Menu::new("editor-thread-sort-menu");
+                for &choice in kind.sorts() {
+                    menu = menu.item(
+                        MenuItem::new(
+                            SharedString::from(format!("editor-{}", choice.id())),
+                            choice.menu_label(kind),
+                        )
+                        .checked(choice == sort)
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
+                                this.menus.close();
+                                this.change_selected(std::time::Duration::ZERO, cx, |view| {
+                                    let mut options = Options::of_view(kind, view.threads);
+                                    options.sort = Some(choice);
+                                    view.threads = options.to_view();
+                                });
+                            },
+                        )),
+                    );
+                }
+                menu.on_dismiss(Self::dismiss_listener(cx))
+            },
+            cx,
+        )))
         .child(self.rows_field(view, cx))
         .child(
             div()

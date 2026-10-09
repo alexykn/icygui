@@ -13,15 +13,14 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, Focusable as _, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-    Styled as _, div, prelude::FluentBuilder as _,
+    IntoElement, ParentElement as _, SharedString, Styled as _, div, prelude::FluentBuilder as _,
 };
 use ic_config::{Appearance, General, InterfaceSize, ListTimes, LogLevel, RowDensity, ThemeChoice};
 use ic_core::snapshot::Summary;
 use ic_model::{CheckableState, ObjectKey, Timestamp};
 use ic_rules::{ObjectMode, Rule, ScopeSetting};
 use ic_ui_kit::{
-    Button, Chip, Icon, IconButton, IconName, ListRow, Menu, MenuItem, Popover, Segmented,
+    Button, Chip, Icon, IconButton, IconName, ListRow, Menu, MenuItem, Segmented, Select,
     StateCircle, StateDot, Switch, TextField, Theme, Tooltip, px,
 };
 
@@ -1014,10 +1013,17 @@ impl SettingsPanel {
                     .map(|environment| environment.id.clone())
                     .collect();
                 let current = self.environment.clone();
+                // The page's environment's health dot, as on its row.
+                let dot = facts
+                    .environments
+                    .iter()
+                    .find(|environment| current.as_deref() == Some(environment.id.as_str()))
+                    .map(|environment| crate::sidebar::health_color(environment.health, theme));
                 self.dropdown(
                     "settings-environment",
                     SettingsMenu::Environment,
                     facts.environment_name.clone().unwrap_or_default(),
+                    dot,
                     ENVIRONMENT_DROPDOWN,
                     self.environment_menu(theme, facts, cx),
                     Rc::new(move |this, forward, window, cx| {
@@ -1181,6 +1187,7 @@ impl SettingsPanel {
                     "settings-log-level",
                     SettingsMenu::LogLevel,
                     level.as_str().to_owned(),
+                    None,
                     LOG_LEVEL_DROPDOWN,
                     Self::log_level_menu(facts, cx),
                     Rc::new(move |this, forward, _, cx| {
@@ -1490,9 +1497,9 @@ impl SettingsPanel {
         )
     }
 
-    /// A dropdown in the dashboard editor's style showing `value`, with
-    /// `menu` under it while open; Tab reaches it, Space or Enter opens
-    /// it, ← → `step` to the neighbouring choice.
+    /// A select showing `value` (after `dot`), its list (`menu`) opening
+    /// from it; Tab reaches it, Space or Enter opens it, ← → `step` to the
+    /// neighbouring choice.
     #[expect(
         clippy::too_many_arguments,
         reason = "a trigger and its menu; splitting it would only scatter them"
@@ -1502,49 +1509,24 @@ impl SettingsPanel {
         id: &'static str,
         which: SettingsMenu,
         value: String,
+        dot: Option<gpui::Hsla>,
         width: f32,
         menu: Menu,
         step: Step,
         theme: &Theme,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let open = self.menus.is_open(&which);
-        let trigger = div()
-            .relative()
-            .flex_none()
-            .w(px(width + FIELD_FRAME))
-            .child(
-                div()
-                    .id(id)
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(theme.metrics.field_height)
-                    .px(px(10.))
-                    .rounded(theme.metrics.code_radius)
-                    .border_1()
-                    .border_color(if open {
-                        colors.accent
-                    } else {
-                        colors.border_header
-                    })
-                    .bg(colors.code_background)
-                    .text_size(theme.text.row)
-                    .cursor_pointer()
-                    .child(div().flex_1().min_w_0().truncate().child(value))
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .size(px(12.))
-                            .color(colors.text_faint),
-                    )
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        this.menus.toggle(which, down_position(event));
-                        cx.notify();
-                    })),
-            )
-            .when(open, |slot| slot.child(Popover::new(menu)));
+        let trigger = div().flex_none().w(px(width + FIELD_FRAME)).child(
+            Select::new(id, value)
+                .when_some(dot, Select::dot)
+                .open(open)
+                .when(open, |select| select.menu(menu))
+                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                    this.menus.toggle(which, down_position(event));
+                    cx.notify();
+                })),
+        );
         self.focusable(
             id,
             trigger,
@@ -1570,8 +1552,7 @@ impl SettingsPanel {
     /// The environments, each with its health dot; the page's one has the
     /// selected-row background.
     fn environment_menu(&self, theme: &Theme, facts: &Facts, cx: &Context<Self>) -> Menu {
-        let mut menu = Menu::new("settings-environment-menu")
-            .min_width(px(ENVIRONMENT_DROPDOWN + FIELD_FRAME));
+        let mut menu = Menu::new("settings-environment-menu");
         for environment in &facts.environments {
             let id = environment.id.clone();
             menu = menu.item(
@@ -1580,7 +1561,7 @@ impl SettingsPanel {
                     environment.name.clone(),
                 )
                 .dot(crate::sidebar::health_color(environment.health, theme))
-                .selected(self.environment.as_deref() == Some(environment.id.as_str()))
+                .checked(self.environment.as_deref() == Some(environment.id.as_str()))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.menus.close();
                     this.choose_environment(&id, window, cx);
@@ -1593,15 +1574,14 @@ impl SettingsPanel {
     /// The log levels, quietest first; the one in effect has the
     /// selected-row background.
     fn log_level_menu(facts: &Facts, cx: &Context<Self>) -> Menu {
-        let mut menu =
-            Menu::new("settings-log-level-menu").min_width(px(LOG_LEVEL_DROPDOWN + FIELD_FRAME));
+        let mut menu = Menu::new("settings-log-level-menu");
         for level in LogLevel::ALL {
             menu = menu.item(
                 MenuItem::new(
                     ElementId::Name(format!("settings-log-level-{}", level.as_str()).into()),
                     level.as_str(),
                 )
-                .selected(facts.general.log_level == level)
+                .checked(facts.general.log_level == level)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.menus.close();
                     this.change_general(cx, |general| general.log_level = level);

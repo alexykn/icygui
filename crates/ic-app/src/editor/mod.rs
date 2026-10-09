@@ -37,8 +37,8 @@ use std::time::Duration;
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
-    prelude::FluentBuilder as _,
+    ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, Subscription, Task,
+    Window, div, prelude::FluentBuilder as _,
 };
 use ic_config::{View, ViewDisplay};
 use ic_core::snapshot::DashboardResult;
@@ -235,6 +235,18 @@ pub(crate) struct DashboardEditor {
     icon_search: Entity<InputState>,
     /// *copy filter from…*'s search.
     copy_search: Entity<InputState>,
+    /// The icon picker's keyboard cursor: an index into the icons found.
+    icon_cursor: Option<usize>,
+    /// The icon picker's grid, scrolled to keep the cursor in sight.
+    icon_scroll: ScrollHandle,
+    /// *copy filter from…*'s cursor (the row under the pointer or moved
+    /// to with the arrows): an index into the filters found.
+    copy_cursor: Option<usize>,
+    /// The preview card's count for the row under the cursor: the filter
+    /// and how many objects it matches on this environment's snapshot.
+    copy_preview: Option<(String, usize)>,
+    /// *copy filter from…*'s list, scrolled to keep the cursor in sight.
+    copy_scroll: ScrollHandle,
     /// The preview of a dashboard whose only view is handling or
     /// downtimes: that view's own page, as the dashboard shows it (with
     /// the subscription to its changes of the view).
@@ -335,6 +347,11 @@ impl DashboardEditor {
             custom_var,
             icon_search,
             copy_search,
+            icon_cursor: None,
+            icon_scroll: ScrollHandle::new(),
+            copy_cursor: None,
+            copy_preview: None,
+            copy_scroll: ScrollHandle::new(),
             threads_preview: None,
             evaluated: None,
             unavailable: false,
@@ -427,35 +444,28 @@ impl DashboardEditor {
                     DashboardEvent::Edit(_) | DashboardEvent::EditView(..) => {}
                 },
             ),
+            // Enter and the arrows reach the pickers first (their
+            // popovers' keys): a search only narrows what they show.
             cx.subscribe_in(
                 &inputs.icon_search,
                 window,
-                |this: &mut Self, input, event: &InputEvent, _, cx| match event {
-                    InputEvent::Change => cx.notify(),
-                    InputEvent::PressEnter { .. } => {
-                        // The first icon found.
-                        let query = input.read(cx).value().to_string();
-                        if let Some(icon) = model::pickable_icons(&query).first() {
-                            this.pick_icon(*icon, cx);
-                        }
+                |this: &mut Self, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        // The cursor starts on the first icon found.
+                        this.icon_cursor = Some(0);
+                        this.icon_scroll.scroll_to_item(0);
+                        cx.notify();
                     }
-                    InputEvent::Focus | InputEvent::Blur => {}
                 },
             ),
             cx.subscribe_in(
                 &inputs.copy_search,
                 window,
-                |this: &mut Self, input, event: &InputEvent, window, cx| match event {
-                    InputEvent::Change => cx.notify(),
-                    InputEvent::PressEnter { .. } => {
-                        // The first filter found.
-                        let query = input.read(cx).value().to_string();
-                        let first = this.copy_sources(&query, cx).into_iter().next();
-                        if let Some(source) = first {
-                            this.copy_filter(&source.filter, window, cx);
-                        }
+                |this: &mut Self, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.set_copy_cursor(None, cx);
+                        cx.notify();
                     }
-                    InputEvent::Focus | InputEvent::Blur => {}
                 },
             ),
             // Its menus and controls show in the editor's header.
@@ -878,6 +888,26 @@ impl DashboardEditor {
             list
         };
         list.update(cx, |list, cx| list.set_preview(view, members, cx));
+    }
+
+    /// While a new dashboard is made, its provisional sidebar row: the
+    /// group it goes into, its name and its mark (14-r5-a); `None` while an
+    /// existing dashboard is edited.
+    pub(crate) fn provisional(&self) -> Option<crate::sidebar::model::Provisional> {
+        if self.target != EditorTarget::New {
+            return None;
+        }
+        let name = self.draft.name.trim();
+        let name = if name.is_empty() {
+            crate::app_state::editing::NEW_DASHBOARD_NAME
+        } else {
+            name
+        };
+        Some(crate::sidebar::model::Provisional {
+            group_id: self.draft.group_id.clone(),
+            name: name.to_owned(),
+            mark: self.sidebar_mark(),
+        })
     }
 
     /// The sidebar mark's icon picker chose `icon`.
@@ -1308,6 +1338,16 @@ impl DashboardEditor {
     /// What *copy filter from…* offers for `query`.
     pub(crate) fn copy_sources_for_test(&self, query: &str, cx: &App) -> Vec<model::CopySource> {
         self.copy_sources(query, cx)
+    }
+
+    /// The icon picker's keyboard cursor.
+    pub(crate) fn icon_cursor(&self) -> Option<usize> {
+        self.icon_cursor
+    }
+
+    /// *copy filter from…*'s cursor and its preview's count.
+    pub(crate) fn copy_cursor(&self) -> (Option<usize>, Option<&(String, usize)>) {
+        (self.copy_cursor, self.copy_preview.as_ref())
     }
 }
 

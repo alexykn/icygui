@@ -1245,16 +1245,11 @@ fn override_items(mut menu: Menu, pane: &ObjectPane, cx: &Context<ObjectPane>) -
     };
     menu = menu.separator().label("notifications");
     if current != Some(ObjectMode::Watch) {
-        menu = menu.item(
-            change(
-                "pane-watch",
-                "watch: always notify".to_owned(),
-                OverrideChange::Watch,
-            )
-            .tooltip(Tooltip::new(
-                "Notify with the environment's rule even when no dashboard does",
-            )),
-        );
+        menu = menu.item(change(
+            "pane-watch",
+            "watch".to_owned(),
+            OverrideChange::Watch,
+        ));
     }
     for (index, choice) in MuteChoice::ALL.into_iter().enumerate() {
         menu = menu.item(change(

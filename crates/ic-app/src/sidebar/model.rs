@@ -96,6 +96,19 @@ pub(crate) enum Mark {
     Icon(IconName),
 }
 
+/// A dashboard being created (14-r5-a): while its editor is open, a
+/// provisional row under the group it goes into, selected, with the
+/// draft's name and mark.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Provisional {
+    /// The group it goes into.
+    pub(crate) group_id: String,
+    /// The draft's name.
+    pub(crate) name: String,
+    /// The draft's mark.
+    pub(crate) mark: Mark,
+}
+
 /// One dashboard row.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SidebarItem<'a> {

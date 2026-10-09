@@ -36,6 +36,8 @@ pub enum IconName {
     ChevronDown,
     /// `chevron-right`: a collapsed group.
     ChevronRight,
+    /// `chevron-up`: an open select's field.
+    ChevronUp,
     /// `clock`: the notification centre.
     Clock,
     /// `x`: close a pane, the window close control.
@@ -222,7 +224,7 @@ pub enum IconName {
 
 impl IconName {
     /// Every icon, for tests and asset listings.
-    pub const ALL: [Self; 103] = [
+    pub const ALL: [Self; 104] = [
         Self::ArrowDown,
         Self::ArrowLeft,
         Self::ArrowLeftRight,
@@ -235,6 +237,7 @@ impl IconName {
         Self::CheckCheck,
         Self::ChevronDown,
         Self::ChevronRight,
+        Self::ChevronUp,
         Self::Clock,
         Self::Close,
         Self::Copy,
@@ -352,6 +355,7 @@ impl IconName {
             Self::CheckCheck => "check-check",
             Self::ChevronDown => "chevron-down",
             Self::ChevronRight => "chevron-right",
+            Self::ChevronUp => "chevron-up",
             Self::Clock => "clock",
             Self::Close => "x",
             Self::Copy => "copy",
@@ -462,6 +466,7 @@ impl IconName {
                 | Self::CheckCheck
                 | Self::ChevronDown
                 | Self::ChevronRight
+                | Self::ChevronUp
                 | Self::Close
                 | Self::Copy
                 | Self::Ellipsis
@@ -511,6 +516,7 @@ impl From<IconName> for gpui_kit_assets::IconName {
             IconName::CheckCheck => Self::CheckCheck,
             IconName::ChevronDown => Self::ChevronDown,
             IconName::ChevronRight => Self::ChevronRight,
+            IconName::ChevronUp => Self::ChevronUp,
             IconName::Clock => Self::Clock,
             IconName::Close => Self::X,
             IconName::Copy => Self::Copy,

@@ -732,7 +732,7 @@ pub struct Metrics {
     pub row_leading: Pixels,
     /// Extra indent of the rows under a group header.
     pub row_indent: Pixels,
-    /// Items in popup menus.
+    /// Items in menus and selects' lists (28px, 24px in compact density).
     pub menu_item_height: Pixels,
     /// Action buttons.
     pub button_height: Pixels,
@@ -786,19 +786,23 @@ impl Metrics {
     /// A compact list row's content height at 100 %.
     pub const COMPACT_ROW: f32 = 32.;
 
+    /// A menu item's height at 100 % in compact density.
+    pub const COMPACT_MENU_ITEM: f32 = 24.;
+
     /// The outer height of a bar with content height `height` and a rule.
     #[must_use]
     pub fn with_rule(height: Pixels) -> Pixels {
         height + Self::RULE
     }
 
-    /// These (already scaled) sizes with list rows `density` tall at
-    /// `scale`.
+    /// These (already scaled) sizes with list rows (and menu items)
+    /// `density` tall at `scale`.
     #[must_use]
     pub fn with_density(self, scale: f32, density: Density) -> Self {
         let rows = Self::default().scaled(scale, density);
         Self {
             row_height: rows.row_height,
+            menu_item_height: rows.menu_item_height,
             ..self
         }
     }
@@ -812,6 +816,11 @@ impl Metrics {
         let row_height = match density {
             Density::Comfortable => self.row_height,
             Density::Compact => px(Self::COMPACT_ROW),
+        };
+        // Menu and select items follow the row density (28px, 24px).
+        let menu_item_height = match density {
+            Density::Comfortable => self.menu_item_height,
+            Density::Compact => px(Self::COMPACT_MENU_ITEM),
         };
         Self {
             sidebar_width: length(self.sidebar_width),
@@ -830,7 +839,7 @@ impl Metrics {
             row_height: length(row_height),
             row_leading: length(self.row_leading),
             row_indent: length(self.row_indent),
-            menu_item_height: length(self.menu_item_height),
+            menu_item_height: length(menu_item_height),
             button_height: length(self.button_height),
             button_radius: length(self.button_radius),
             icon_button: length(self.icon_button),

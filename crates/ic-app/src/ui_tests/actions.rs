@@ -1170,7 +1170,7 @@ fn the_panes_menu_offers_the_other_actions_and_copying() {
                 "submit check result",
                 "run command",
                 // Watching and muting (NOTE-02).
-                "watch: always notify",
+                "watch",
                 "mute for 1 hour",
                 "mute for 4 hours",
                 morning.as_str(),

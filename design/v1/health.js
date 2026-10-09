@@ -68,7 +68,7 @@ function healthPage({ broken = false, heartbeat = '', alerts = null, stopped = f
     ${kpi('HTTP clients', '4', 'API sessions', null)}
         ${kpi('uptime', '41d 6h', 'since Wed 26 Aug 08:14, the r2.14.3 upgrade', null, { span: 2 })}
   </div>`;
-  const flagsHdr = viewHeader({ picked: pick === 'Icinga’s global switches', name: 'Icinga’s global switches', display: 'list', filter: 'read-only: icygui never changes them', sort: '', more: false });
+  const flagsHdr = viewHeader({ picked: pick === 'Icinga’s global switches', name: 'Icinga’s global switches', display: 'list', filter: 'read-only', sort: '', more: false });
   const fl = (on, t) => `<span>${dot(on ? 'ok' : 'warn', 'd6')}${t} <span class="${on ? 'faint' : 'c-warn'}">${on ? 'on' : 'off'}</span></span>`;
   const flags = `<div class="flags">${fl(1, 'notifications')}${fl(1, 'active host checks')}${fl(1, 'active service checks')}${fl(1, 'event handlers')}${fl(1, 'flap detection')}${fl(broken ? 0 : 1, 'performance data')}</div>`;
   const views = [['zones and endpoints', zonesHdr + table], ['checks', checksHdr + kpisChecks], ['queues and connections', qHdr + kpisQ], ['Icinga’s global switches', flagsHdr + flags]];

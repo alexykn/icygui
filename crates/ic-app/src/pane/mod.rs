@@ -189,9 +189,10 @@ pub(crate) struct ObjectPane {
     /// Rows are marked in the list beside the pane: the action keys act on
     /// them, not on this object, so the buttons show no key hints.
     keys_elsewhere: bool,
-    /// The thread's `add a comment` field (made at the first render), and
-    /// the object what is typed in it is for.
-    comment_input: Option<Entity<ic_ui_kit::input::InputState>>,
+    /// The thread's `add a comment` field (made at the first render; the
+    /// same field the handling view's threads open, topic 17), and the
+    /// object what is typed in it is for.
+    comment_input: Option<Entity<crate::comments::field::CommentField>>,
     comment_events: Option<Subscription>,
     comment_object: Option<ObjectKey>,
     /// Why the last comment couldn't be sent.
@@ -682,10 +683,10 @@ impl Render for ObjectPane {
         if self.comment_object.as_ref() != Some(&self.object) {
             self.comment_object = Some(self.object.clone());
             self.comment_error = None;
-            if let Some(input) = self.comment_input.clone()
-                && !input.read(cx).value().is_empty()
+            if let Some(field) = self.comment_input.clone()
+                && !field.read(cx).value(cx).is_empty()
             {
-                input.update(cx, |input, cx| input.set_value("", window, cx));
+                field.update(cx, |field, cx| field.set_value("", window, cx));
             }
         }
         let theme = cx.theme().clone();

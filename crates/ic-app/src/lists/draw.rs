@@ -214,8 +214,8 @@ pub(crate) struct Extras {
     /// Slot B holds this instead of its words (`retry · discard`).
     pub(crate) slot_b: Option<AnyElement>,
     /// Slot B swaps its words for this while the line (hover group
-    /// `group`) is hovered, or always when `shown`: *+ comment* `c`.
-    pub(crate) slot_b_hover: Option<(SharedString, AnyElement, bool)>,
+    /// `group`) is hovered: *+ comment* `c`.
+    pub(crate) slot_b_hover: Option<(SharedString, AnyElement)>,
     /// A line under the text (a refusal's reason).
     pub(crate) note: Option<AnyElement>,
     /// The mark's colour (a refused comment's is critical).
@@ -382,7 +382,7 @@ pub(crate) fn entry_with(
                 .child(mark),
         )
         .child(div().flex_1().min_w_0().child(body))
-        .child(tag_with(
+        .child(tag(
             text,
             look.pending,
             theme,
@@ -408,18 +408,14 @@ fn note_line(note: AnyElement, theme: &Theme) -> Div {
 pub(crate) const NOTE_LINE: f32 = 22.;
 
 /// The tag's two fixed slots: A (`sticky`, or the progress line) and B
-/// (the expiry, the time left, when it starts).
-pub(crate) fn tag(text: &EntryText, pending: Option<&'static str>, theme: &Theme) -> Div {
-    tag_with(text, pending, theme, None, None)
-}
-
-/// [`tag`] with slot B's own content, or its hover swap (see [`Extras`]).
-fn tag_with(
+/// (the expiry, the time left, when it starts), or slot B's own content
+/// or its hover swap (see [`Extras`]).
+fn tag(
     text: &EntryText,
     pending: Option<&'static str>,
     theme: &Theme,
     slot_b: Option<AnyElement>,
-    slot_b_hover: Option<(SharedString, AnyElement, bool)>,
+    slot_b_hover: Option<(SharedString, AnyElement)>,
 ) -> Div {
     let colors = theme.colors;
     let slot_a: AnyElement = match text.slot_a {
@@ -463,10 +459,9 @@ fn tag_with(
             match slot_b_hover {
                 // The words give way to the hover's content in the same
                 // slot: nothing moves.
-                Some((group, hover, shown)) => slot
+                Some((group, hover)) => slot
                     .child(
                         div()
-                            .when(shown, gpui::Styled::invisible)
                             .group_hover(group.clone(), gpui::Styled::invisible)
                             .child(own),
                     )
@@ -478,7 +473,7 @@ fn tag_with(
                             .h_full()
                             .flex()
                             .items_center()
-                            .when(!shown, gpui::Styled::invisible)
+                            .invisible()
                             .group_hover(group, gpui::Styled::visible)
                             .child(hover),
                     ),

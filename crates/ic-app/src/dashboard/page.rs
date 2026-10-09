@@ -298,6 +298,22 @@ pub(crate) struct PageInput<'a> {
     /// (*only mine*) and the clock.
     pub(crate) author: &'a str,
     pub(crate) now: Timestamp,
+    /// What topic 17 adds to the handling views' threads.
+    pub(crate) comments: &'a StackedComments,
+}
+
+/// What topic 17 adds to a page's handling views: the comments sent from a
+/// handling view that the snapshot doesn't show yet (or that were
+/// refused), and the comment field open in one of its threads.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct StackedComments {
+    /// The drafts: object, draft id, refused; oldest first.
+    pub(crate) drafts: Vec<(ObjectKey, u64, bool)>,
+    /// The open field: the view (by id) and the object of its thread.
+    pub(crate) composer: Option<(Id, ObjectKey)>,
+    /// How tall the open field was last drawn (it grows with what is
+    /// typed); `None`: not drawn yet.
+    pub(crate) composer_height: Option<Pixels>,
 }
 
 /// Item heights at each row density: the page's, and the threads' lines.
@@ -1280,6 +1296,7 @@ impl Page {
         let Some(sizes) = input.line_sizes_of(view) else {
             return;
         };
+        let sizes = sizes.with_composer(input.comments.composer_height);
         let options = Options::of_view(kind, view.threads);
         let mode = match kind {
             ListKind::Handling => Mode::List,
@@ -1294,7 +1311,7 @@ impl Page {
                 .collect()
         });
         let scope = threads::Scope::Members(filtered.as_ref().unwrap_or(members));
-        let listing = threads::build(
+        let mut listing = threads::build(
             kind,
             input.snapshot,
             scope,
@@ -1303,6 +1320,20 @@ impl Page {
             &input.folds.threads(&view.id),
             input.now,
         );
+        if kind == ListKind::Handling {
+            let comments = input.comments;
+            threads::place_comments(
+                &mut listing,
+                &threads::CommentLines {
+                    drafts: comments.drafts.clone(),
+                    composer: comments
+                        .composer
+                        .as_ref()
+                        .filter(|(composer_view, _)| **composer_view == *view.id)
+                        .map(|(_, object)| object.clone()),
+                },
+            );
+        }
         if listing.lines.is_empty() {
             // Nothing being handled here: the header says so.
             page.state = ViewState::Empty;
@@ -1793,6 +1824,7 @@ mod tests {
             density: RowDensity::Comfortable,
             author: "",
             now: Timestamp::from_unix_seconds(0.),
+            comments: &StackedComments::default(),
         })
     }
 
@@ -2088,6 +2120,7 @@ mod tests {
             density: RowDensity::Comfortable,
             author: "",
             now: Timestamp::from_unix_seconds(0.),
+            comments: &StackedComments::default(),
         });
         assert_eq!(kinds(&page), ["header", "row 2", "row 3"]);
         assert_eq!(page.views[0].counts.critical, 1);
@@ -2124,6 +2157,7 @@ mod tests {
             density: RowDensity::Comfortable,
             author: "",
             now: Timestamp::from_unix_seconds(0.),
+            comments: &StackedComments::default(),
         })
     }
 

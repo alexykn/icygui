@@ -302,9 +302,10 @@ impl Line {
             | Self::More {
                 key: MoreKey::Thread(object),
                 ..
-            } => Some(object),
+            }
+            | Self::Draft { object, .. }
+            | Self::Composer { object } => Some(object),
             Self::Entry { entry, .. } => Some(&entry.object),
-            Self::Draft { object, .. } | Self::Composer { object } => Some(object),
             Self::Fold { parent, .. } => Some(&parent.0),
             Self::Section { .. } | Self::Axis | Self::More { .. } => None,
         }

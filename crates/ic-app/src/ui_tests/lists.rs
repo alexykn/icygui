@@ -913,10 +913,10 @@ fn the_pane_shows_the_thread_and_adds_a_comment() {
         // path, by the environment's author. The list's and the pane's
         // letters are the field's while it has the keyboard.
         app.keys(cx, "c d a r k");
-        assert_eq!(field.read(cx).value(), "dark");
+        assert_eq!(field.read(cx).value(cx), "dark");
         assert_eq!(modal(app, cx), None, "no dialog from the letters");
         app.keys(cx, "j x m s enter");
-        assert_eq!(field.read(cx).value(), "", "cleared once sent");
+        assert_eq!(field.read(cx).value(cx), "", "cleared once sent");
         assert!(!focused(app, cx), "the keyboard back on the view");
         let actions = recorder.actions();
         assert_eq!(actions.len(), 1, "{actions:?}");

@@ -92,11 +92,6 @@ impl CommentField {
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
-
-    /// Whether the field has the keyboard.
-    pub(crate) fn is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.input.focus_handle(cx).is_focused(window)
-    }
 }
 
 impl Render for CommentField {

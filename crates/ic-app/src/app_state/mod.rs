@@ -24,6 +24,7 @@ pub(crate) mod environments;
 pub(crate) mod hydration;
 mod notifications;
 mod operations;
+mod comments;
 pub(crate) mod permissions;
 mod presence;
 pub(crate) mod settings_file;
@@ -236,6 +237,9 @@ pub(crate) struct AppState {
     last_denial: Option<String>,
     /// The actions sent: markers, failures, toasts.
     tracker: Tracker,
+    /// The comments sent from handling views until the event stream shows
+    /// them, or refused (topic 17).
+    drafts: crate::comments::drafts::Drafts,
     /// The id of the last action sent (ids are never reused, not even
     /// across environments).
     last_action_id: u64,
@@ -288,6 +292,7 @@ impl AppState {
             last_request: None,
             last_denial: None,
             tracker: Tracker::default(),
+            drafts: crate::comments::drafts::Drafts::default(),
             last_action_id: 0,
             // A window opens at start unless `start_hidden` says otherwise.
             window_hidden: false,
@@ -1129,6 +1134,7 @@ impl AppState {
         self.engine.connection.on_snapshot(&snapshot);
         self.engine.snapshot = snapshot;
         self.tracker.settle(&self.engine.snapshot, Instant::now());
+        self.settle_drafts(Instant::now());
     }
 
     /// Reloads from Icinga (or connects now after a failure). Ignored while

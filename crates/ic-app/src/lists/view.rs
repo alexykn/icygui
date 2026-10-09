@@ -2558,6 +2558,8 @@ pub(crate) fn thread_line(
             .into_any_element()
         }
         Line::More { hidden, .. } => more_line(*hidden, emphasis, theme).into_any_element(),
+        // Drawn by the view, which holds the field and the drafts.
+        Line::Draft { .. } | Line::Composer { .. } => div().into_any_element(),
     }
 }
 

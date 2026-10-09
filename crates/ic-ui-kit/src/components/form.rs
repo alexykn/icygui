@@ -655,8 +655,10 @@ impl RenderOnce for Chip {
 #[must_use = "a text area does nothing unless rendered"]
 pub struct TextArea {
     state: Entity<TextareaState>,
-    height: Pixels,
+    /// `None`: as tall as the state's rows (a growing field).
+    height: Option<Pixels>,
     invalid: bool,
+    prose: bool,
 }
 
 impl TextArea {
@@ -664,14 +666,25 @@ impl TextArea {
     pub fn new(state: &Entity<TextareaState>) -> Self {
         Self {
             state: state.clone(),
-            height: px(96.),
+            height: Some(px(96.)),
             invalid: false,
+            prose: false,
         }
     }
 
     /// Sets the height of the text (the frame adds its padding).
     pub fn height(mut self, height: Pixels) -> Self {
-        self.height = height;
+        self.height = Some(height);
+        self
+    }
+
+    /// Text people write to each other (a comment), not code: the body
+    /// size in the text colour, 6px above and below it and 10px beside it
+    /// (a framed field's inset), as tall as the state's rows (make the
+    /// state with `auto_grow` to grow with what is typed).
+    pub fn prose(mut self) -> Self {
+        self.prose = true;
+        self.height = None;
         self
     }
 
@@ -688,20 +701,28 @@ impl RenderOnce for TextArea {
         let theme = cx.theme();
         let colors = theme.colors;
         let border = field_border(theme, focused, self.invalid);
+        let text = Textarea::new(&self.state).appearance(false).text_size(if self.prose {
+            theme.text.body
+        } else {
+            theme.text.small
+        });
+        let text = match self.height {
+            Some(height) => text.h(height),
+            None => text,
+        };
         div()
-            .px(px(4.))
-            .py(px(4.))
+            .px(px(if self.prose { 10. } else { 4. }))
+            .py(px(if self.prose { 6. } else { 4. }))
             .rounded(theme.metrics.code_radius)
             .border_1()
             .border_color(border)
             .bg(colors.code_background)
-            .text_color(colors.text_code)
-            .child(
-                Textarea::new(&self.state)
-                    .appearance(false)
-                    .h(self.height)
-                    .text_size(theme.text.small),
-            )
+            .text_color(if self.prose {
+                colors.text
+            } else {
+                colors.text_code
+            })
+            .child(text)
     }
 }
 

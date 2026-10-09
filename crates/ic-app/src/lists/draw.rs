@@ -9,7 +9,7 @@
 //! changed time or expiry moves nothing.
 
 use gpui::{
-    AnyElement, Div, FontWeight, Hsla, IntoElement, ParentElement as _, Pixels, SharedString,
+    AnyElement, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, SharedString,
     Styled as _, div, prelude::FluentBuilder as _, relative,
 };
 use ic_ui_kit::{CHAR_WIDTH, Density, Icon, IconName, Metrics, ObjectMark, StateDot, Theme, px};
@@ -29,7 +29,7 @@ pub(crate) const SLOT_A: f32 = 56.;
 /// Slot B, in characters: `expires 23:00, in 8h 48m`.
 pub(crate) const SLOT_B_CHARS: f32 = 25.;
 /// Between the tag's slots.
-const SLOT_GAP: f32 = 10.;
+pub(crate) const SLOT_GAP: f32 = 10.;
 /// The timeline's right column (`2h 03m left`).
 pub(crate) const RIGHT_COLUMN: f32 = 92.;
 /// The timeline's axis at most, and at least.
@@ -59,7 +59,15 @@ pub(crate) struct Sizes {
     pub(crate) item: Pixels,
     /// Compact rows: one line per entry.
     pub(crate) compact: bool,
+    /// The open comment field with its rule (topic 17): as tall as it was
+    /// last drawn (it grows with what is typed), [`COMPOSER_HEIGHT`] until
+    /// then.
+    pub(crate) composer: Pixels,
 }
+
+/// The open comment field's height before it is first drawn: its header
+/// line, a one-line field and its keys, with the rule.
+pub(crate) const COMPOSER_HEIGHT: f32 = 100.;
 
 impl Sizes {
     /// The sizes in `theme`.
@@ -74,7 +82,17 @@ impl Sizes {
             timeline: Metrics::with_rule(if compact { px(32.) } else { px(44.) }),
             item: Metrics::with_rule(metrics.item_row_height),
             compact,
+            composer: px(COMPOSER_HEIGHT),
         }
+    }
+
+    /// These sizes with the open comment field `height` tall (as last
+    /// drawn; `None`: not drawn yet).
+    pub(crate) fn with_composer(mut self, height: Option<Pixels>) -> Self {
+        if let Some(height) = height.filter(|height| *height > px(0.)) {
+            self.composer = height;
+        }
+        self
     }
 
     /// The height of `line` in `mode`.
@@ -88,6 +106,11 @@ impl Sizes {
                 Mode::List => self.entry,
             },
             Line::Fold { .. } | Line::Service { .. } | Line::More { .. } => self.item,
+            // An entry, with its reason under it when refused.
+            Line::Draft { refused, .. } => {
+                self.entry + if *refused { px(NOTE_LINE) } else { px(0.) }
+            }
+            Line::Composer { .. } => self.composer,
         }
     }
 }
@@ -179,11 +202,40 @@ const SHRINK_AUTHOR: f32 = 1.;
 /// An entry: the kind's icon (or the object's dot), the header line (the
 /// kind, the author, the time, the details), the text, and the tag's two
 /// slots. The caller adds the background, the rule and the clicks.
+pub(crate) fn entry(text: &EntryText, look: &Look, compact: bool, theme: &Theme) -> Div {
+    entry_with(text, look, compact, theme, Extras::default())
+}
+
+/// What an entry of topic 17 adds to [`entry`]: a comment on its way or
+/// refused, and the thread's last entry with *+ comment* in its time
+/// slot.
+#[derive(Default)]
+pub(crate) struct Extras {
+    /// Slot B holds this instead of its words (`retry · discard`).
+    pub(crate) slot_b: Option<AnyElement>,
+    /// Slot B swaps its words for this while the line (hover group
+    /// `group`) is hovered, or always when `shown`: *+ comment* `c`.
+    pub(crate) slot_b_hover: Option<(SharedString, AnyElement, bool)>,
+    /// A line under the text (a refusal's reason).
+    pub(crate) note: Option<AnyElement>,
+    /// The mark's colour (a refused comment's is critical).
+    pub(crate) mark_color: Option<Hsla>,
+    /// The header and the text dimmed (a comment on its way).
+    pub(crate) dimmed: bool,
+}
+
+/// [`entry`] with topic 17's additions.
 #[expect(
     clippy::too_many_lines,
     reason = "one entry as drawn: its mark, its header line in order of giving way, its text"
 )]
-pub(crate) fn entry(text: &EntryText, look: &Look, compact: bool, theme: &Theme) -> Div {
+pub(crate) fn entry_with(
+    text: &EntryText,
+    look: &Look,
+    compact: bool,
+    theme: &Theme,
+    extras: Extras,
+) -> Div {
     let colors = theme.colors;
     let mark_column = if look.pane {
         PANE_MARK_COLUMN
@@ -194,11 +246,11 @@ pub(crate) fn entry(text: &EntryText, look: &Look, compact: bool, theme: &Theme)
         Some((mark, _, _)) => StateDot::mark(*mark).size(px(9.)).into_any_element(),
         None => Icon::new(text.icon)
             .size(px(13.))
-            .color(if text.accent {
+            .color(extras.mark_color.unwrap_or(if text.accent {
                 colors.accent_text
             } else {
                 colors.text_faint
-            })
+            }))
             .into_any_element(),
     };
     let kind = text.kind.map(|kind| {
@@ -270,13 +322,27 @@ pub(crate) fn entry(text: &EntryText, look: &Look, compact: bool, theme: &Theme)
             colors.text
         })
         .child(text.text.clone());
+    let dimmed = extras.dimmed;
+    let header = header.when(dimmed, |header| header.opacity(0.5));
+    let words = words.when(dimmed, |words| words.opacity(0.5));
+    let note = extras.note;
     let body = if compact && !look.pane {
-        // One line: the header, then the text cut off.
-        header.child(words.min_w_0().truncate().text_color(if look.faint_text {
+        // One line: the header, then the text cut off (and the note under
+        // it).
+        let line = header.child(words.min_w_0().truncate().text_color(if look.faint_text {
             colors.text_faint
         } else {
             colors.text_muted
-        }))
+        }));
+        match note {
+            Some(note) => div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .child(line)
+                .child(note_line(note, theme)),
+            None => line,
+        }
     } else {
         let words = if look.pane {
             words.line_height(relative(1.5))
@@ -299,6 +365,7 @@ pub(crate) fn entry(text: &EntryText, look: &Look, compact: bool, theme: &Theme)
                     })
                     .child(words),
             )
+            .when_some(note, |body, note| body.child(note_line(note, theme)))
     };
     div()
         .flex()
@@ -315,12 +382,45 @@ pub(crate) fn entry(text: &EntryText, look: &Look, compact: bool, theme: &Theme)
                 .child(mark),
         )
         .child(div().flex_1().min_w_0().child(body))
-        .child(tag(text, look.pending, theme))
+        .child(tag_with(
+            text,
+            look.pending,
+            theme,
+            extras.slot_b,
+            extras.slot_b_hover,
+        ))
 }
+
+/// The line under an entry's text: a refusal's reason, in the critical
+/// colour.
+fn note_line(note: AnyElement, theme: &Theme) -> Div {
+    div()
+        .mt(px(4.))
+        .h(px(NOTE_LINE - 4.))
+        .min_w_0()
+        .truncate()
+        .text_size(theme.text.small)
+        .text_color(theme.states.text.critical)
+        .child(note)
+}
+
+/// The height a note adds under an entry (its 4px gap included).
+pub(crate) const NOTE_LINE: f32 = 22.;
 
 /// The tag's two fixed slots: A (`sticky`, or the progress line) and B
 /// (the expiry, the time left, when it starts).
 pub(crate) fn tag(text: &EntryText, pending: Option<&'static str>, theme: &Theme) -> Div {
+    tag_with(text, pending, theme, None, None)
+}
+
+/// [`tag`] with slot B's own content, or its hover swap (see [`Extras`]).
+fn tag_with(
+    text: &EntryText,
+    pending: Option<&'static str>,
+    theme: &Theme,
+    slot_b: Option<AnyElement>,
+    slot_b_hover: Option<(SharedString, AnyElement, bool)>,
+) -> Div {
     let colors = theme.colors;
     let slot_a: AnyElement = match text.slot_a {
         SlotA::Empty => div().into_any_element(),
@@ -348,14 +448,43 @@ pub(crate) fn tag(text: &EntryText, pending: Option<&'static str>, theme: &Theme
                 .w(px(SLOT_A))
                 .child(slot_a),
         )
-        .child(
-            div()
+        .child({
+            let slot = div()
+                .relative()
+                .flex()
                 .flex_none()
+                .justify_end()
                 .w(chars(theme.text.label, SLOT_B_CHARS))
-                .text_right()
-                .text_color(color)
-                .child(words),
-        )
+                .text_color(color);
+            let own = match slot_b {
+                Some(element) => element,
+                None => div().child(words).into_any_element(),
+            };
+            match slot_b_hover {
+                // The words give way to the hover's content in the same
+                // slot: nothing moves.
+                Some((group, hover, shown)) => slot
+                    .child(
+                        div()
+                            .when(shown, gpui::Styled::invisible)
+                            .group_hover(group.clone(), gpui::Styled::invisible)
+                            .child(own),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .when(!shown, gpui::Styled::invisible)
+                            .group_hover(group, gpui::Styled::visible)
+                            .child(hover),
+                    ),
+                None => slot.child(own),
+            }
+        })
 }
 
 /// `child` (a truncating run) where at least `min` of it fits, else

@@ -64,7 +64,7 @@ per frame, plus `-zoom` crops of the details.
 | 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
 | 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+16 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
 | 15 | Host lists with services; group lists; layouts | `15-host-list-with-services.html` | 12 (+1 compare, +10 zooms, +12 light) | drawn for review |
-| 16 | Knowing when icygui is blind: no live data, heartbeat, health alerts, diagnostics | `16-live-data.html` (+ `health.js`, shared with 06) | 25 (+17 zooms, +13 light) | drawn for review; 17 and the health alerts approved |
+| 16 | Knowing when icygui is blind: no live data, heartbeat, health alerts, diagnostics | `16-live-data.html` (+ `health.js`, shared with 06) | 30 (+22 zooms, +16 light) | drawn for review; 17 and the health alerts approved |
 | 17 | Comments written in the handling view | `17-handling-comments.html` | 6 (+4 zooms, +5 light) | approved |
 
 ---
@@ -1893,13 +1893,20 @@ pane narrowed to the group. The marking frame is 15m.
 
 ## 16 Knowing when icygui is blind
 
-**Status: drawn for review** (user, 2026-10-08; PLAN.md §4.2, *Knowing when
-icygui is blind*, items A, B, E, F, G).
+**Status: approved** (user, 2026-10-08), except **heartbeats per zone and per
+endpoint (B3), drawn for review** (user, 2026-10-09; 16a, 16a2, 16a3, 16b,
+16b2, 16b3, 16r–16u redrawn or new; PLAN.md §4.2, items A, B, B2, B3, E, F, G).
 
-**Shows** (`16-live-data.html`): 16a the cluster health page with the
-heartbeat row; 16a2 the heartbeat's five states stacked; 16a3 Icinga health
-alerts at the top of the page; 16b Settings → icinga → an environment, the
-*trouble alerts* group; 16b2 a heartbeat object not found; 16c the no-live-data,
+**Shows** (`16-live-data.html`): 16a the cluster health page with a
+heartbeat slot on every row of *zones and endpoints* and the summary row
+(and light); 16a2 the summary row's states stacked (and light); 16a3 Icinga
+health alerts with every beat dead; 16r (a) master-02's pinned beat dead with
+Icinga's reason (and light); 16s (b) zone fra runs no checks, sat-fra-01
+connected; 16t (c) sat-fra-01 down and its beat lost as one line; 16u (d) a
+disappeared heartbeat (and light); 16b Settings → icinga → an environment,
+*trouble alerts* with heartbeats found by custom variable (and light); 16b3 a
+disappeared heartbeat with *confirm removal*; 16b2 the list mode with a typo
+not found (and light); 16c the no-live-data,
 heartbeat-lost and recovery notifications (Linux dunst, macOS); 16c2 health
 alerts as notifications; 16d a blind environment's banner and footer (16f is
 its footer crop); 16e the tray's blind look and menu; 16g5 *diagnostics ·
@@ -1916,26 +1923,58 @@ stuck engine's red dot; 16q the app symbol's candidates (the monitor chosen).
 
 - **On topic 06's approved page** (`health.js`, shared by 06 and 16; 06
   renders byte-identical): nothing of 06 changes; 16 adds two things.
-- **Heartbeat row (16a, 16a2):** one 36px row directly under the summary
-  line, at its height and left edge: dot
-  (green on time, yellow one interval late, red dead, grey off or not
-  found), *heartbeat*, the object dimmed, the state word, the age, the
-  interval and policy faint, *settings*. Each part has a fixed slot sized
-  for its longest value, so nothing moves between states.
-- **Health alerts (16a3), in 06's banner (one system):** one block in the
-  worst alert's tone under the heartbeat row: the worst in full (first line,
-  detail line, an action such as *show the late checks*), the others one
-  line each under it, worst first, *since* in a fixed slot. The tiles show
-  the same story (active checks 0, late 3,516, 2 of 4 connections). A cleared alert **just goes** (its raise and clear stay in the log
-  and the notification centre; a recovery notification says it is fine).
+- **Heartbeats per zone and per endpoint (B3; 16a, 16a2):** sample
+  topology: zone master (HA: master-01, master-02), ams (sat-ams-01), fra
+  (HA: sat-fra-01, sat-fra-02); six heartbeats: one pinned per master, one
+  per satellite zone, one pinned per satellite in the HA zone fra (any zone
+  with more than one endpoint pins one per endpoint).
+  - **Zones and endpoints** gets a **heartbeat** column at the right: dot +
+    the age of the last OK beat, colour = state (green on time, yellow late
+    or disappeared, red dead), 104px wide on every row (`.hbc`), empty where
+    a row has no beat, so zone rows (flex) and endpoint rows (grid) line up
+    and nothing moves. A zone's beat sits on its zone row, a pinned beat on
+    its endpoint row. `beatsTable` in `health.js` (`healthPage({ beats })`;
+    06 renders byte-identical without it).
+  - **The heartbeat row is the summary** (`hbSummary`): fixed slots for dot,
+    *heartbeats*/*heartbeat*, the subject, the state word, the age; *notify*
+    and *settings* at the right. All fine: *heartbeats 6 of 6 · on time*;
+    else the worst by name (*heartbeat ams · 1 interval late · 48s*,
+    *heartbeat fra · dead · last 02:11*); a disappeared beat is counted
+    (*heartbeats 5 of 6 · fra disappeared*), never *5 of 5*; grey *off* and
+    *none found*.
+- **Health alerts (16a3, 16r–16u), in 06's banner (one system):** one block
+  in the worst alert's tone under the summary row: the worst in full (first
+  line, detail line, an action), the others one line each, worst first,
+  *since* in a fixed slot. A cleared alert **just goes** (its raise and
+  clear stay in the log and the notification centre). With heartbeats:
+  - (a) a non-OK beat is dead with Icinga's output: *heartbeat master-02
+    dead: Remote Icinga instance 'master-02' is not connected* (16r), one
+    alert for the cause.
+  - (b) a zone whose beat stopped while an endpoint is connected: *zone fra
+    runs no checks (sat-fra-01 connected)* (16s; here sat-fra-02 went down
+    first, its own one line under it).
+  - (c) an endpoint down and its beat lost is **one** line: *zone fra:
+    sat-fra-01 disconnected, heartbeat lost* (16t, 16a3), never two.
+  - (d) *heartbeat fra disappeared since 14:02*, warning tone, *settings* to
+    confirm (16u).
 - **Trouble alerts always notify at the OS level, no opt-out** (user,
-  2026-10-08): no live data, a dead heartbeat, Icinga health alerts and a
-  failing engine; only a pause holds them back. The environment's *trouble
-  alerts* group (16b): **policy** *notify* | *persistent* (a plain select),
-  *no live data* shown as always on, the heartbeat switch with its object
-  (the result of the one query on save inline, in a fixed slot: *found ·
-  every 30s* / *not found*, 16b2) and its interval (empty = the object's,
-  shown as the placeholder). No per-kind switches. One help line.
+  2026-10-08): no live data, a dead or disappeared heartbeat, Icinga health
+  alerts and a failing engine; only a pause holds them back. The
+  environment's *trouble alerts* group (16b): **policy** *notify* |
+  *persistent* (a plain select), *no live data* shown as always on, and
+  **heartbeats**: *find by custom variable* | *list*.
+  - *find by custom variable* (default): the variable's name
+    (*icygui_heartbeat*) with the result in a fixed slot (*found 6*), and
+    under it every match: what it proves (master-01, zone ams, sat-fra-01),
+    its *host!service* dimmed, its interval (from the object; each beat keeps
+    its own time budget), its last beat.
+  - A heartbeat discovery no longer finds keeps its row, yellow,
+    *disappeared since 14:02*, with **confirm removal** (16b3); the result
+    reads *found 5 · 1 disappeared*.
+  - *list* (16b2): *host!service* entries, each with what it proves and its
+    interval in a fixed slot, × to remove, *add*; a typo shows *not found* at
+    once, the field keeping the focus.
+  - One help line. No per-kind switches.
 - **Notifications (16c, 16c2, 16g4):** title = environment + what happened,
   body = since when and why; one per outage and one on recovery. The
   heartbeat-lost and no-checks ones at critical urgency.

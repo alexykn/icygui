@@ -25,10 +25,10 @@ const zr = (st, name, txt) => `<div class="zr">${dot(st, 'd7')}<span class="zn">
 // below. pick: the view selected in the editor (its header marked); off: views
 // switched off; menuOn: the page's ··· pressed; only: one view's header and
 // body (a health kind added to another dashboard).
-function healthPage({ broken = false, heartbeat = '', alerts = null, stopped = false, master2 = false, pick = '', off = [], menuOn = false, only = '' } = {}) {
+function healthPage({ broken = false, heartbeat = '', alerts = null, stopped = false, master2 = false, pick = '', off = [], menuOn = false, only = '', beats = null } = {}) {
   const head = `<div class="hbar"><span class="title">cluster health</span><span class="subtitle">prod-cluster · seen from master-01</span><span class="grow"></span>
     <span class="quiet">updated 12s ago · every 30s</span><span class="glyph">···</span></div>`;
-  const sum = master2
+  const sum = beats ? summary(beats.sum, 'Icinga r2.14.3-1 · up 41d 6h') : master2
     ? summary([['ok', 2, 'connected'], ['crit', 2, 'not connected']], 'Icinga r2.14.3-1 · up 41d 6h')
     : broken
     ? summary([['ok', 3, 'connected'], ['crit', 1, 'not connected']], 'Icinga r2.14.3-1 · up 41d 6h')
@@ -36,9 +36,9 @@ function healthPage({ broken = false, heartbeat = '', alerts = null, stopped = f
   const banner = broken ? `<div class="banner" style="--tone:var(--crit);--tint:var(--crit-tint)"><span class="c-crit">${icon('triangle-alert', 14)}</span><div class="col" style="gap:2px;min-width:0">
       <span style="font-size:12.5px;color:var(--t-strong)">sat-fra-01 has not been connected for 3m 12s: zone fra’s results are stale.</span>
       <span class="trunc" style="font-size:12px;color:var(--t-muted)">1,204 checks of 214 hosts in zone fra are late; the relay queue for fra is growing (18,402 messages).</span></div><span class="grow"></span><span class="acc" style="font-size:12px;white-space:nowrap">show the late checks</span></div>` : '';
-  const top = (heartbeat ? heartbeatRow(heartbeat) : '') + (alerts ? alertBlock(alerts) : banner);
-  const zonesHdr = viewHeader({ picked: pick === 'zones and endpoints', name: 'zones and endpoints', display: 'list', filter: '3 zones · 4 endpoints · 2 global zones', counts: master2 ? [['ok', 2], ['crit', 2]] : broken ? [['ok', 3], ['crit', 1]] : [['ok', 4]], sort: '', more: false });
-  const table = `<div class="etab">
+  const top = beats ? hbSummary(beats.hb) + (alerts ? alertBlock(alerts) : '') : (heartbeat ? heartbeatRow(heartbeat) : '') + (alerts ? alertBlock(alerts) : banner);
+  const zonesHdr = viewHeader({ picked: pick === 'zones and endpoints', name: 'zones and endpoints', display: 'list', filter: beats ? '3 zones · 5 endpoints · 2 global zones' : '3 zones · 4 endpoints · 2 global zones', counts: beats ? beats.counts : master2 ? [['ok', 2], ['crit', 2]] : broken ? [['ok', 3], ['crit', 1]] : [['ok', 4]], sort: '', more: false });
+  const table = beats ? beatsTable(beats.zones) : `<div class="etab">
     <div class="er h"><span></span><span>endpoint</span><span>zone</span><span>version</span><span>last message</span><span>messages in / out</span><span>status</span></div>
     ${zr('ok', 'master', 'top level · 2 endpoints · checks shared between them')}
     ${er('ok', 'master-01', 'master', 'r2.14.3-1', '0s ago', '412/s · 388/s', 'connected · this node', { sel: true, mine: true })}
@@ -50,20 +50,21 @@ function healthPage({ broken = false, heartbeat = '', alerts = null, stopped = f
     <div class="zr" style="background:transparent;border-bottom:0;height:32px"><span class="faint">${icon('layers', 12)}</span><span>global zones: global-templates, director-global (config only, no endpoints)</span></div>
   </div>`;
   const checksHdr = viewHeader({ picked: pick === 'checks', name: 'checks', display: 'tiles', filter: 'last minute, from /v1/status', sort: '', more: false });
-  const lat = broken ? [4, 4, 5, 4, 4, 5, 4, 4, 5, 9, 31, 64] : [4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4, 4];
+  const bz = broken || !!(beats && beats.lateZone);
+  const lat = bz ? [4, 4, 5, 4, 4, 5, 4, 4, 5, 9, 31, 64] : [4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4, 4];
   const kpisChecks = `<div class="kpis">
-    ${stopped ? kpi('active checks / min', '0', 'none since 02:11', [3270, 3290, 3281, 3275, 3288, 3279, 3284, 3280, 3277, 1410, 0, 0], { cls: 'v-bad', last: 'var(--crit)' }) : kpi('active checks / min', broken ? '2,104' : '3,283', broken ? 'of 3,516 objects' : 'of 3,516 objects', broken ? [3270, 3290, 3281, 3275, 3288, 3279, 3284, 3280, 3277, 3012, 2390, 2104] : [3270, 3290, 3281, 3275, 3288, 3279, 3284, 3280, 3277, 3286, 3279, 3283], broken ? { cls: 'v-warn', last: 'var(--warn)' } : {})}
+    ${stopped ? kpi('active checks / min', '0', 'none since 02:11', [3270, 3290, 3281, 3275, 3288, 3279, 3284, 3280, 3277, 1410, 0, 0], { cls: 'v-bad', last: 'var(--crit)' }) : kpi('active checks / min', bz ? '2,104' : '3,283', bz ? 'of 3,516 objects' : 'of 3,516 objects', bz ? [3270, 3290, 3281, 3275, 3288, 3279, 3284, 3280, 3277, 3012, 2390, 2104] : [3270, 3290, 3281, 3275, 3288, 3279, 3284, 3280, 3277, 3286, 3279, 3283], bz ? { cls: 'v-warn', last: 'var(--warn)' } : {})}
     ${kpi('passive checks / min', '212', '31 senders', [208, 214, 209, 212, 210, 215, 211, 209, 213, 210, 212, 212])}
-    ${kpi('average latency', broken ? '0.064s' : '0.004s', broken ? 'max 4.81s' : 'max 0.92s', lat, broken ? { cls: 'v-warn', last: 'var(--warn)' } : {})}
+    ${kpi('average latency', bz ? '0.064s' : '0.004s', bz ? 'max 4.81s' : 'max 0.92s', lat, bz ? { cls: 'v-warn', last: 'var(--warn)' } : {})}
     ${kpi('average execution', '1.32s', 'max 9.81s', [1.3, 1.28, 1.35, 1.31, 1.29, 1.33, 1.34, 1.3, 1.32, 1.31, 1.33, 1.32])}
     ${kpi('pending', '3', '3 services', null)}
-    ${stopped ? kpi('late', '3,516', 'every check, rising', [0, 0, 0, 0, 0, 0, 0, 0, 0, 160, 1980, 3516], { cls: 'v-bad', last: 'var(--crit)' }) : kpi(broken ? 'late' : 'late', broken ? '1,204' : '0', broken ? 'all in zone fra' : 'overdue checks', broken ? [0, 0, 0, 0, 0, 0, 0, 0, 0, 160, 720, 1204] : null, broken ? { cls: 'v-bad', last: 'var(--crit)' } : {})}
+    ${stopped ? kpi('late', '3,516', 'every check, rising', [0, 0, 0, 0, 0, 0, 0, 0, 0, 160, 1980, 3516], { cls: 'v-bad', last: 'var(--crit)' }) : kpi(bz ? 'late' : 'late', bz ? '1,204' : '0', bz ? 'all in zone fra' : 'overdue checks', bz ? [0, 0, 0, 0, 0, 0, 0, 0, 0, 160, 720, 1204] : null, bz ? { cls: 'v-bad', last: 'var(--crit)' } : {})}
   </div>`;
   const qHdr = viewHeader({ picked: pick === 'queues and connections', name: 'queues and connections', display: 'tiles', filter: 'ApiListener, JsonRpc', sort: '', more: false });
   const kpisQ = `<div class="kpis">
     ${kpi('API work queue', '0', '412 items/s', [0, 1, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0])}
     ${kpi('relay queue', broken ? '18,402' : '0', broken ? 'for fra, growing' : 'for other zones', broken ? [0, 0, 0, 0, 0, 0, 0, 0, 0, 2100, 9800, 18402] : [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0], broken ? { cls: 'v-bad', last: 'var(--crit)' } : {})}
-    ${master2 ? kpi('cluster connections', '2 of 4', 'JSON-RPC endpoints', null, { cls: 'v-bad' }) : kpi('cluster connections', broken ? '3 of 4' : '4 of 4', 'JSON-RPC endpoints', null, broken ? { cls: 'v-bad' } : {})}
+    ${beats && beats.conn ? kpi('cluster connections', beats.conn[0], 'JSON-RPC endpoints', null, beats.conn[1] ? { cls: 'v-bad' } : {}) : master2 ? kpi('cluster connections', '2 of 4', 'JSON-RPC endpoints', null, { cls: 'v-bad' }) : kpi('cluster connections', broken ? '3 of 4' : '4 of 4', 'JSON-RPC endpoints', null, broken ? { cls: 'v-bad' } : {})}
     ${kpi('HTTP clients', '4', 'API sessions', null)}
         ${kpi('uptime', '41d 6h', 'since Wed 26 Aug 08:14, the r2.14.3 upgrade', null, { span: 2 })}
   </div>`;
@@ -98,3 +99,18 @@ function alertBlock(list) {
   const more = rest.map(([tone, t, , , s]) => `<div style="display:flex;align-items:center;gap:12px;height:26px;border-top:1px solid var(--bd-row)"><span class="c-${tone}" style="display:flex">${icon('triangle-alert', 14)}</span><span style="font-size:12.5px;color:var(--t)">${t}</span><span class="grow"></span>${since(s)}</div>`).join('');
   return `<div class="banner" style="--tone:var(--${w[0]});--tint:var(--${w[0]}-tint);display:block;flex:none;padding-top:9px;padding-bottom:3px">${first}${more ? `<div style="margin-top:8px">${more}</div>` : ''}</div>`;
 }
+
+// ---- B3: heartbeats per zone and per endpoint (topic 16) ---------------------
+// a heartbeat slot: [state, age] (the age of the last OK beat; the colour is the
+// state), or null for a row without a heartbeat (the slot stays, empty)
+const beatCell = (b) => (b ? `<span class="hbc">${dot(b[0], 'd7')}<span class="${b[0] === 'crit' ? 'c-crit' : b[0] === 'warn' ? 'c-warn' : 'sec'}">${b[1]}</span></span>` : '<span class="hbc"></span>');
+// zones: [[st, name, text, beat, endpoints]], an endpoint: [st, name, zone, version, last, traffic, status, beat, { sel }]
+const beatsTable = (zones) => `<div class="etab hbt">
+    <div class="er h"><span></span><span>endpoint</span><span>zone</span><span>version</span><span>last message</span><span>messages in / out</span><span>status</span><span>heartbeat</span></div>
+    ${zones.map(([st, name, txt, beat, eps]) => `<div class="zr">${dot(st, 'd7')}<span class="zn">${name}</span><span>${txt}</span><span class="grow"></span>${beatCell(beat)}</div>`
+      + eps.map(([est, en, ez, ver, last, traffic, status, eb, o = {}]) => `<div class="er${o.sel ? ' sel' : ''}">${dot(est, 'd7')}<span><span class="strong">${en}</span></span><span class="muted">${ez}</span><span class="sec">${ver}</span><span class="sec">${last}</span><span class="muted">${traffic}</span><span class="${est === 'crit' ? 'c-crit' : 'muted'}">${status}</span>${beatCell(eb)}</div>`).join('')).join('')}
+    <div class="zr" style="background:transparent;border-bottom:0;height:32px"><span class="faint">${icon('layers', 12)}</span><span>global zones: global-templates, director-global (config only, no endpoints)</span></div>
+  </div>`;
+// the heartbeat row becomes the summary of every beat: [st, label, subject, word, age]
+// ('heartbeats', '6 of 6', 'on time'), or the worst ('heartbeat', 'fra', 'dead · last 02:11')
+const hbSummary = ([st, label, subj, word, age = '']) => `<div class="hbrow hbsum"><span style="display:flex;align-items:center;gap:7px;flex:none">${dot(st, 'd9')}<span class="hl">${label}</span></span><span class="hsj">${subj}</span><span class="hs2 ${st === 'crit' ? 'c-crit' : st === 'warn' ? 'c-warn' : ''}">${word}</span><span class="ha">${age}</span><span class="grow"></span><span class="faint">${st === 'pend' ? '' : 'notify'}</span><span class="acc">settings</span></div>`;

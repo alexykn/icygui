@@ -857,3 +857,20 @@ body.canvas { background: #0f1113; color: #d6d8da; font: 12.5px/20px 'IBM Plex M
 .vh .selwrap, .vh .select { flex: none; }
 .vh .select { height: 22px; width: 150px; padding: 0 8px; font-size: 12px; gap: 8px; }
 .vh .sellist .mi { height: 24px; font-size: 12px; }
+
+/* heartbeats per zone and per endpoint (topic 16, B3): a heartbeat slot at
+ * the right of every row of zones and endpoints (dot + age), fixed width, so
+ * zone rows (flex) and endpoint rows (grid) line up and nothing moves */
+.etab.hbt .er { grid-template-columns: 14px minmax(0, 1.2fr) minmax(0, .8fr) minmax(0, .8fr) minmax(0, .9fr) minmax(0, 1.1fr) minmax(0, 1.6fr) 104px; }
+.hbc { display: flex; align-items: center; gap: 7px; width: 104px; flex: none; font-size: 12px; white-space: nowrap; }
+.hbrow.hbsum .hl { width: 10ch; }
+.hbrow .hsj { color: var(--t-sec); width: 11ch; flex: none; }
+/* settings: the found heartbeats under the variable field */
+.hblist { padding: 0 0 10px 20px; }
+.hblist .hr { display: grid; grid-template-columns: 8px 84px minmax(0, 1fr) 40px 250px; gap: 12px; align-items: center; height: 30px; border-top: 1px solid var(--bd-row); font-size: 12px; white-space: nowrap; }
+.hblist .hr.h { height: 26px; color: var(--t-faint); font-size: 11.5px; border-top: 0; }
+.hblist .hr > * { overflow: hidden; text-overflow: ellipsis; }
+.hblist .hr .r { text-align: right; justify-self: end; display: flex; align-items: center; gap: 12px; }
+.hblist .hr .wide { grid-column: span 2; justify-self: end; display: flex; align-items: center; gap: 12px; }
+.hblist .le { display: flex; align-items: center; gap: 10px; height: 40px; border-top: 1px solid var(--bd-row); font-size: 12px; }
+.hblist .le:first-child { border-top: 0; }

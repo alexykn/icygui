@@ -66,28 +66,88 @@
 <div class="shots"></div>
 <script>
 const L = { theme: 'light' };
-// ---- a. the heartbeat and the health alerts, ON topic 06's page (health.js) -------------------
+// ---- a. heartbeats and the health alerts, ON topic 06's page (health.js) ----------------------
+// B3 (user, 2026-10-09): one heartbeat per zone that runs checks, and one per
+// endpoint in any HA zone (pinned with command_endpoint). prod-cluster: zone
+// master (HA: master-01, master-02, beats pinned per master), zone ams
+// (sat-ams-01, a zone beat), zone fra (HA: sat-fra-01, sat-fra-02, a zone beat
+// and one per satellite): six heartbeats. A beat slot: [state, age of the
+// last OK beat]; null = no heartbeat on that row.
+const EP = {
+  m1: (b = ['ok', '8s']) => ['ok', 'master-01', 'master', 'r2.14.3-1', '0s ago', '412/s · 388/s', 'connected · this node', b, { sel: true }],
+  m2: (b = ['ok', '14s']) => ['ok', 'master-02', 'master', 'r2.14.3-1', '0s ago', '398/s · 405/s', 'connected', b],
+  m2down: (b = ['crit', '6m 40s']) => ['crit', 'master-02', 'master', 'r2.14.3-1', '6m 40s ago', '0/s · 0/s', 'not connected · retrying', b],
+  ams: () => ['ok', 'sat-ams-01', 'ams', 'r2.14.3-1', '1s ago', '201/s · 12/s', 'connected', null],
+  f1: (b = ['ok', '11s']) => ['ok', 'sat-fra-01', 'fra', 'r2.14.2-1', '0s ago', '104/s · 5/s', 'connected · older version', b],
+  f1down: (b = ['crit', '4m 02s']) => ['crit', 'sat-fra-01', 'fra', 'r2.14.2-1', '4m 02s ago', '0/s · 0/s', 'not connected · retrying', b],
+  f2: (b = ['ok', '26s']) => ['ok', 'sat-fra-02', 'fra', 'r2.14.3-1', '0s ago', '93/s · 4/s', 'connected', b],
+  f2down: (b = ['crit', '6m 02s']) => ['crit', 'sat-fra-02', 'fra', 'r2.14.3-1', '6m 02s ago', '0/s · 0/s', 'not connected · retrying', b],
+};
+const ZN = {
+  master: (eps) => ['ok', 'master', 'top level · 2 endpoints · checks shared between them', null, eps],
+  ams: (b = ['ok', '21s']) => ['ok', 'ams', 'parent master · 1 endpoint · 188 hosts', b, [EP.ams()]],
+  fra: (eps, b = ['ok', '3s'], st = 'ok') => [st, 'fra', 'parent master · 2 endpoints · 214 hosts · checks shared between them', b, eps],
+};
+const S5 = [['ok', 5, 'connected'], ['pend', 0, 'not connected']];
+const S41 = [['ok', 4, 'connected'], ['crit', 1, 'not connected']];
+const BEATS = {
+  ok: { sum: S5, counts: [['ok', 5]], hb: ['ok', 'heartbeats', '6 of 6', 'on time'],
+    zones: [ZN.master([EP.m1(), EP.m2()]), ZN.ams(), ZN.fra([EP.f1(), EP.f2()])] },
+  // (a) master-02 down: its pinned beat came back UNKNOWN from Icinga: dead, with the reason
+  m2: { sum: S41, counts: [['ok', 4], ['crit', 1]], conn: ['3 of 4', 1], hb: ['crit', 'heartbeat', 'master-02', 'dead · last 02:14'],
+    zones: [ZN.master([EP.m1(), EP.m2down()]), ZN.ams(), ZN.fra([EP.f1(), EP.f2()])] },
+  // (b) sat-fra-02 went down; sat-fra-01 is connected but runs nothing: the zone beat and its own stopped
+  fraStuck: { sum: S41, counts: [['ok', 4], ['crit', 1]], conn: ['3 of 4', 1], lateZone: true, hb: ['crit', 'heartbeat', 'fra', 'dead · last 02:31'],
+    zones: [ZN.master([EP.m1(), EP.m2()]), ZN.ams(), ZN.fra([EP.f1(['crit', '4m 10s']), EP.f2down()], ['crit', '4m 10s'], 'crit')] },
+  // (c) sat-fra-01 disconnected and its beat lost: one alert; sat-fra-02 carries the zone
+  f1: { sum: S41, counts: [['ok', 4], ['crit', 1]], conn: ['3 of 4', 1], hb: ['crit', 'heartbeat', 'sat-fra-01', 'dead · last 02:31'],
+    zones: [ZN.master([EP.m1(), EP.m2()]), ZN.ams(), ZN.fra([EP.f1down(), EP.f2()], ['ok', '7s'])] },
+  // (d) the zone fra beat disappeared from discovery: a finding, counted, never '5 of 5'
+  gone: { sum: S5, counts: [['ok', 5]], hb: ['warn', 'heartbeats', '5 of 6', 'fra disappeared'],
+    zones: [ZN.master([EP.m1(), EP.m2()]), ZN.ams(), ZN.fra([EP.f1(), EP.f2()], ['warn', 'disappeared'])] },
+  // Icinga runs no checks: every beat stopped at 02:11
+  stopped: { sum: [['ok', 3, 'connected'], ['crit', 2, 'not connected']], counts: [['ok', 3], ['crit', 2]], conn: ['2 of 4', 1], hb: ['crit', 'heartbeats', '0 of 6', 'dead · last 02:11'],
+    zones: [ZN.master([EP.m1(['crit', '6m 12s']), EP.m2down(['crit', '6m 12s'])]), ZN.ams(['crit', '6m 12s']), ZN.fra([EP.f1down(['crit', '6m 12s']), EP.f2(['crit', '6m 12s'])], ['crit', '6m 12s'], 'crit')] },
+};
 const ALERTS = [
-  ['crit', 'Icinga runs no checks: none since 02:11.', 'active checks fell from 3,283 a minute to 0; all 3,516 checks are late, and the heartbeat stopped at 02:11.', 'show the late checks', 'since 02:11'],
-  ['crit', 'master-02 disconnected', '', '', 'since 02:14'],
-  ['crit', 'sat-fra-01 not connected: zone fra has no endpoint', '', '', 'since 02:14'],
+  ['crit', 'Icinga runs no checks: none since 02:11.', 'active checks fell from 3,283 a minute to 0; all 3,516 checks are late, and every heartbeat stopped at 02:11.', 'show the late checks', 'since 02:11'],
+  ['crit', 'master-02 disconnected, heartbeat lost', '', '', 'since 02:14'],
+  ['crit', 'zone fra: sat-fra-01 disconnected, heartbeat lost', '', '', 'since 02:14'],
 ];
+const A_M2 = [['crit', 'heartbeat master-02 dead: Remote Icinga instance ‘master-02’ is not connected', 'Icinga’s result for the check pinned to master-02 (UNKNOWN); master-01 runs every master check.', 'show master-02', 'since 02:14']];
+const A_FRA = [
+  ['crit', 'zone fra runs no checks (sat-fra-01 connected)', 'sat-fra-01 answers, but its beat and the zone beat stopped at 02:31; 1,204 checks in zone fra are late.', 'show the late checks', 'since 02:31'],
+  ['crit', 'zone fra: sat-fra-02 disconnected, heartbeat lost', '', '', 'since 02:29'],
+];
+const A_F1 = [['crit', 'zone fra: sat-fra-01 disconnected, heartbeat lost', 'sat-fra-02 runs zone fra’s checks alone; the zone fra beat is on time.', 'show sat-fra-01', 'since 02:31']];
+const A_GONE = [['warn', 'heartbeat fra disappeared since 14:02', 'discovery no longer finds icygui-hb-fra!beat; zone fra is unwatched until it is back or removed.', 'settings', 'since 14:02']];
 const healthWin = (o, health = 'ok') => clusterWindow(`<div class="col" style="min-height:0;overflow:hidden">${healthPage(o)}</div>`, { cluster: 'health', health, statusBar: {} });
-shot('16a', '16-live-a-health-heartbeat', '<b>The heartbeat on the cluster health page.</b> Topic 06’s approved page, unchanged, with one row added directly under the summary line, at its height and left edge: the dot (green on time), <i>heartbeat</i>, the object dimmed (<i>icygui-heartbeat!beat</i>), the state word, the age, then the interval and the policy faint and a <i>settings</i> link at the right. Every part has a fixed slot sized for its longest value, so nothing moves between states (16a2). The heartbeat object itself is left out of every list, count, rule and notification. The page code is shared with 06 (<code>health.js</code>).',
-  healthWin({ heartbeat: 'ok' }), { crops: '16-live-a-zoom:300,40,1140,150' });
-shot('16a-l', '16-live-a-health-heartbeat-light', '<b>The heartbeat on the cluster health page</b>, light.', healthWin({ heartbeat: 'ok' }), L);
-const variants = () => `<div class="col" style="background:var(--win-bg);height:100%">${summary([['ok', 4, 'connected'], ['pend', 0, 'not connected']], 'Icinga r2.14.3-1 · up 41d 6h')}${['ok', 'late', 'dead', 'off', 'missing'].map(heartbeatRow).join('')}</div>`;
-shot('16a2', '16-live-a2-heartbeat-states', '<b>The five states, under the summary line, stacked to show the slots line up.</b> From the top: on time (12s), one interval late (48s), dead (Icinga stopped running checks: the last beat 02:11, 6m 12s ago), off (no object set), and the object not found (a typo or a deleted object; the save showed it at once, 16b2). Grey means icygui is not watching a beat; it never claims health it can’t see.',
-  variants(), { w: 1140, h: 216 });
-shot('16a2-l', '16-live-a2-heartbeat-states-light', '<b>The five states</b>, light.', variants(), { w: 1140, h: 216, theme: 'light' });
-shot('16a3', '16-live-a3-health-alerts', '<b>Icinga health alerts (E), in 06’s banner.</b> 06’s degraded page (sat-fra-01 down), now with Icinga running no checks and master-02 disconnected. The alerts and 06’s banner are one system: one block in the worst alert’s tone, the worst in full (its first line, a detail line, an action at the right: <i>show the late checks</i>), the others one line each under it, worst first, with <i>since</i> in a fixed slot. The heartbeat row says the same from icygui’s side (dead, last 02:11). The tiles show it: active checks fell to 0, late rose to 3,516, the relay queue for fra grows, 2 of 4 cluster connections. A cleared alert just goes (its raise and clear stay in the log and the notification centre). Each alert was raised after the 2-minute grace period.',
-  healthWin({ broken: true, master2: true, stopped: true, heartbeat: 'dead', alerts: ALERTS }, 'crit'), { h: 1000, crops: '16-live-a3-zoom:300,40,1140,330' });
-shot('16a3-l', '16-live-a3-health-alerts-light', '<b>Icinga health alerts</b>, light.', healthWin({ broken: true, master2: true, stopped: true, heartbeat: 'dead', alerts: ALERTS }, 'crit'), { theme: 'light', h: 1000 });
+shot('16a', '16-live-a-health-heartbeat', '<b>Heartbeats per zone and per endpoint on the cluster health page.</b> Topic 06’s approved page; <i>zones and endpoints</i> gets a <b>heartbeat</b> slot at the right of every row (dot + the age of the last beat, fixed width, empty where there is no beat): a zone’s beat on its zone row (ams, fra), a pinned beat on its endpoint row (master-01, master-02; sat-fra-01, sat-fra-02 in the HA zone fra). The heartbeat row under the health line is now their summary: <b>heartbeats 6 of 6 · on time</b>. Zone fra is HA here (two satellites), so the page counts 5 endpoints.',
+  healthWin({ beats: BEATS.ok }), { crops: '16-live-a-zoom:300,40,1140,330' });
+shot('16a-l', '16-live-a-health-heartbeat-light', '<b>Heartbeats per zone and per endpoint</b>, light.', healthWin({ beats: BEATS.ok }), L);
+const SUMS = [['ok', 'heartbeats', '6 of 6', 'on time'], ['warn', 'heartbeat', 'ams', '1 interval late', '48s'], ['crit', 'heartbeat', 'fra', 'dead · last 02:11'], ['crit', 'heartbeat', 'master-02', 'dead · last 02:14'], ['warn', 'heartbeats', '5 of 6', 'fra disappeared'], ['pend', 'heartbeats', '', 'off'], ['pend', 'heartbeats', '', 'none found']];
+const variants = () => `<div class="col" style="background:var(--win-bg);height:100%">${summary(S5, 'Icinga r2.14.3-1 · up 41d 6h')}${SUMS.map(hbSummary).join('')}</div>`;
+shot('16a2', '16-live-a2-heartbeat-states', '<b>The summary row’s states, stacked to show the slots line up.</b> All on time (<i>heartbeats 6 of 6</i>); otherwise the worst beat by name: one interval late (ams, 48s), dead (fra, the last beat 02:11), dead with Icinga’s reason (master-02, 16r); a disappeared beat is counted, never dropped (<i>5 of 6 · fra disappeared</i>); off; and none found (the custom variable matches nothing). Grey means icygui is not watching a beat.',
+  variants(), { w: 1140, h: 300 });
+shot('16a2-l', '16-live-a2-heartbeat-states-light', '<b>The summary row’s states</b>, light.', variants(), { w: 1140, h: 300, theme: 'light' });
+shot('16a3', '16-live-a3-health-alerts', '<b>Icinga health alerts (E), in 06’s banner.</b> Icinga runs no checks, master-02 and sat-fra-01 are disconnected. One block in the worst alert’s tone, the worst in full (first line, detail, an action), the others one line each, worst first, <i>since</i> in a fixed slot. An endpoint that is down and whose beat is lost is <b>one</b> line (<i>zone fra: sat-fra-01 disconnected, heartbeat lost</i>), never two. Every beat is dead (<i>heartbeats 0 of 6 · dead · last 02:11</i>), each heartbeat slot red; the tiles show it (active checks 0, late 3,516, 2 of 4 connections).',
+  healthWin({ stopped: true, beats: BEATS.stopped, alerts: ALERTS }, 'crit'), { h: 1000, crops: '16-live-a3-zoom:300,40,1140,330' });
+shot('16a3-l', '16-live-a3-health-alerts-light', '<b>Icinga health alerts</b>, light.', healthWin({ stopped: true, beats: BEATS.stopped, alerts: ALERTS }, 'crit'), { theme: 'light', h: 1000 });
+shot('16r', '16-live-r-master-beat-dead', '<b>(a) master-02’s pinned beat is dead, with Icinga’s reason.</b> master-02 is disconnected; the check pinned to it with <i>command_endpoint</i> doesn’t go silent, Icinga answers it UNKNOWN, and any non-OK beat is dead with its output in the alert: <i>heartbeat master-02 dead: Remote Icinga instance ‘master-02’ is not connected</i>. One alert for the one cause. Its row: red, heartbeat 6m 40s; master-01 and the zone beats stay green (master-01 runs every master check). Summary: <i>heartbeat master-02 · dead · last 02:14</i>.',
+  healthWin({ beats: BEATS.m2, alerts: A_M2 }, 'crit'), { crops: '16-live-r-zoom:300,40,1140,400' });
+shot('16r-l', '16-live-r-master-beat-dead-light', '<b>(a) master-02’s pinned beat dead</b>, light.', healthWin({ beats: BEATS.m2, alerts: A_M2 }, 'crit'), L);
+shot('16s', '16-live-s-zone-runs-no-checks', '<b>(b) zone fra runs no checks, sat-fra-01 connected.</b> sat-fra-02 went down at 02:29 (one line: <i>zone fra: sat-fra-02 disconnected, heartbeat lost</i>); sat-fra-01 should carry the zone and is connected, but the zone fra beat and its own stopped at 02:31: <i>zone fra runs no checks (sat-fra-01 connected)</i>, the worst, in full. Zone fra’s row is red with its beat 4m 10s; the tiles show 1,204 late checks, all in zone fra. Summary: <i>heartbeat fra · dead · last 02:31</i>.',
+  healthWin({ beats: BEATS.fraStuck, alerts: A_FRA }, 'crit'), { crops: '16-live-s-zoom:300,40,1140,430' });
+shot('16t', '16-live-t-endpoint-down-beat-lost', '<b>(c) sat-fra-01 disconnected and its beat lost: one alert line</b>, <i>zone fra: sat-fra-01 disconnected, heartbeat lost</i>, never an endpoint alert and a heartbeat alert for one cause. sat-fra-02 runs the zone alone: the zone fra beat stays green (7s), sat-fra-01’s slot red (4m 02s).',
+  healthWin({ beats: BEATS.f1, alerts: A_F1 }, 'crit'), { crops: '16-live-t-zoom:300,40,1140,400' });
+shot('16u', '16-live-u-beat-disappeared', '<b>(d) A heartbeat that disappeared.</b> Discovery no longer finds the zone fra beat (deleted, renamed, a bad deploy, a lost permission): a finding, not a smaller count. The alert block says <i>heartbeat fra disappeared since 14:02</i> in the warning tone, with <i>settings</i> to confirm its removal; the summary counts it, <i>heartbeats 5 of 6 · fra disappeared</i>; zone fra’s slot reads <i>disappeared</i>, yellow. It notifies under the trouble policy until the removal is confirmed (16b3).',
+  healthWin({ beats: BEATS.gone, alerts: A_GONE }, 'warn'), { crops: '16-live-u-zoom:300,40,1140,400' });
+shot('16u-l', '16-live-u-beat-disappeared-light', '<b>(d) A heartbeat that disappeared</b>, light.', healthWin({ beats: BEATS.gone, alerts: A_GONE }, 'warn'), L);
 
 // ---- the health page as a built-in dashboard: edit page --------------------------------------
 const healthMore = menu([{ label: 'edit page', ic: 'pencil', hov: true }, { label: 'open as tab', ic: 'arrow-up-right' }], { anchor: '.hbar .glyph.sel', align: 'right' });
 shot('16j', '16-live-j-health-menu', '<b>The health page is a built-in dashboard.</b> Every environment gets exactly 06’s approved layout by default, without opening any editor: the pinned alert block and heartbeat row, then four views of the health kinds in 06’s order, <i>zones and endpoints</i>, <i>checks</i>, <i>queues and connections</i>, <i>global switches</i> (the IcingaDB tile only when that feature is on). Its <i>···</i> (pressed) has <b>edit page</b>, which opens the same dashboard editor as every dashboard (16k).',
-  clusterWindow(`<div class="col" style="min-height:0;overflow:hidden;position:relative">${healthPage({ heartbeat: 'ok', menuOn: true })}${healthMore}</div>`, { cluster: 'health', statusBar: {} }));
+  clusterWindow(`<div class="col" style="min-height:0;overflow:hidden;position:relative">${healthPage({ beats: BEATS.ok, menuOn: true })}${healthMore}</div>`, { cluster: 'health', statusBar: {} }));
 // the editor on the health page
 const lockRow = (n, ic) => `<div class="vrow" style="color:var(--t-muted)"><span class="grip">${icon('lock', 13)}</span><span class="vi">${icon(ic, 13)}</span><span class="vn">${n}</span><span class="vm">pinned</span></div>`;
 const hvRow = (n, ic, m, { sel = false, on = true } = {}) => `<div class="vrow${sel ? ' sel' : ''}"${on ? '' : ' style="opacity:.5"'}><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon(ic, 13)}</span><span class="vn">${n}</span><span class="vm">${m}</span>${sw(on)}</div>`;
@@ -97,8 +157,8 @@ const healthInspector = `<div class="pane" style="background:var(--win-bg)">
   <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
     <div class="field"><div class="lab">name<span class="st faint">built in</span></div><span class="input" style="color:var(--t-muted)">cluster health</span></div>
     <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px">
-      ${lockRow('alerts', 'triangle-alert')}${lockRow('heartbeat', 'heart-pulse')}
-      ${hvRow('zones and endpoints', 'network', '4 endpoints')}${hvRow('checks', 'gauge', '6 tiles', { sel: true })}${hvRow('queues and connections', 'plug', '5 tiles')}${hvRow('global switches', 'toggle-left', 'off', { on: false })}</div>
+      ${lockRow('alerts', 'triangle-alert')}${lockRow('heartbeats', 'heart-pulse')}
+      ${hvRow('zones and endpoints', 'network', '5 endpoints')}${hvRow('checks', 'gauge', '6 tiles', { sel: true })}${hvRow('queues and connections', 'plug', '5 tiles')}${hvRow('global switches', 'toggle-left', 'off', { on: false })}</div>
       <div class="vadd">${icon('plus', 13)}add view</div></div>
     <div style="height:1px;flex:none;background:var(--bd-header);margin:0 -18px"></div>
     ${viewNameField('checks', 'view 2 of 4')}
@@ -108,35 +168,54 @@ const healthInspector = `<div class="pane" style="background:var(--win-bg)">
   </div></div>`;
 const healthEditorHeader = `<div class="hbar"><span class="title">cluster health</span><span class="acc" style="font-size:12px">editing · prod-cluster</span><span class="grow"></span><span class="glyph sel" style="margin-right:6px">···</span>${btn('discard', { key: 'esc' })}${btn('save', { key: 'ctrl-s', primary: true })}</div>`;
 const resetMenu = menu([{ label: 'reset to default', ic: 'refresh-cw', hov: true }], { anchor: '.hbar .glyph.sel', align: 'right' });
-const healthEditor = `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${healthEditorHeader}<div class="col narrowk" style="min-height:0;overflow:hidden">${healthPage({ heartbeat: 'ok', pick: 'checks', off: ['Icinga’s global switches'] }).replace(/^[\s\S]*?<\/div>/, '')}</div></div>${healthInspector}${resetMenu}</div>`;
+const healthEditor = `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${healthEditorHeader}<div class="col narrowk" style="min-height:0;overflow:hidden">${healthPage({ beats: BEATS.ok, pick: 'checks', off: ['Icinga’s global switches'] }).replace(/^[\s\S]*?<\/div>/, '')}</div></div>${healthInspector}${resetMenu}</div>`;
 shot('16k', '16-live-k-health-editor', '<b>Editing the health page.</b> The same editor as every dashboard, in the approved inspector layout. The name is built in. In the views list the pinned parts come first as <b>locked rows</b> (a lock in the handle’s slot, <i>pinned</i>): the alert block and the heartbeat row can’t be moved or removed. The four health views follow, each with its handle and a <b>switch</b>: <i>global switches</i> is switched off here (dimmed, gone from the preview). <i>checks</i> is selected (its header marked in the preview): its settings pick <b>which tiles</b> it shows (IcingaDB writes is off: the feature is off). <i>add view</i> lists only the health kinds on this page. The editor’s <i>···</i> (pressed) has <b>reset to default</b>, which brings back 06’s layout.',
   clusterWindow(healthEditor, { cluster: 'health', statusBar: {} }), { crops: '16-live-k-inspector-zoom:1068,0,372,900' });
 shot('16k-l', '16-live-k-health-editor-light', '<b>Editing the health page</b>, light.', clusterWindow(healthEditor, { cluster: 'health', statusBar: {} }), L);
 
 // the health page's editor: add view lists only the health kinds
-const healthEditorAdd = `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${healthEditorHeader.replace('<span class="glyph sel" style="margin-right:6px">', '<span class="glyph" style="margin-right:6px">')}<div class="col narrowk" style="min-height:0;overflow:hidden">${healthPage({ heartbeat: 'ok', pick: 'checks', off: ['Icinga’s global switches'] }).replace(/^[\s\S]*?<\/div>/, '')}</div></div>${healthInspector.replace('<div class="vadd">', '<div class="vadd open">')}${layoutMenu({ kinds: HEALTH_KINDS, focus: 'global switches' })}</div>`;
+const healthEditorAdd = `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${healthEditorHeader.replace('<span class="glyph sel" style="margin-right:6px">', '<span class="glyph" style="margin-right:6px">')}<div class="col narrowk" style="min-height:0;overflow:hidden">${healthPage({ beats: BEATS.ok, pick: 'checks', off: ['Icinga’s global switches'] }).replace(/^[\s\S]*?<\/div>/, '')}</div></div>${healthInspector.replace('<div class="vadd">', '<div class="vadd open">')}${layoutMenu({ kinds: HEALTH_KINDS, focus: 'global switches' })}</div>`;
 shot('16l', '16-live-l-health-add-view', '<b><i>add view</i> on the health page.</b> The editor is the same abstraction for every dashboard, parameterised by the kinds a page allows: on the health page <i>add view</i> lists only the <b>health kinds</b> (zones and endpoints, checks, queues and connections, global switches); on the diagnostics page only <i>app</i>, <i>engines</i> and <i>log</i>. These kinds live on their built-in pages only: a normal dashboard’s <i>add view</i> never lists them (15g). Adding a kind that is switched off just switches it back on.',
   clusterWindow(healthEditorAdd, { cluster: 'health', statusBar: {} }));
 
-// ---- b. settings: the environment's heartbeat group ------------------------------------------
-// one group for everything that says icygui or Icinga is in trouble: ONE
-// policy for no live data, the heartbeat and the health alerts; a switch per
-// alert kind (all on); the heartbeat's object and interval
-const envBody = ({ obj = 'icygui-heartbeat!beat', found = true } = {}) => ssec('connection') +
+// ---- b. settings: the environment's trouble alerts, heartbeats found by discovery (B3) --------
+// heartbeats: 'find by custom variable' (default icygui_heartbeat) lists every
+// match with what it proves, its object, interval and last beat; 'list' takes
+// host!service entries for setups that can't add a variable. A heartbeat
+// discovery no longer finds stays as a row until its removal is confirmed.
+const FOUND = [
+  ['ok', 'master-01', 'icygui-hb-master-01!beat', '30s', '8s'],
+  ['ok', 'master-02', 'icygui-hb-master-02!beat', '30s', '14s'],
+  ['ok', 'zone ams', 'icygui-hb-ams!beat', '30s', '21s'],
+  ['ok', 'zone fra', 'icygui-hb-fra!beat', '30s', '3s'],
+  ['ok', 'sat-fra-01', 'icygui-hb-sat-fra-01!beat', '30s', '11s'],
+  ['ok', 'sat-fra-02', 'icygui-hb-sat-fra-02!beat', '60s', '26s'],
+];
+const foundRow = ([st, what, obj, iv, age], gone) => gone
+  ? `<div class="hr">${dot('warn', 'd7')}<span class="strong">${what}</span><span class="faint">${obj}</span><span class="wide"><span class="c-warn">disappeared since 14:02</span>${btn('confirm removal', { sm: true })}</span></div>`
+  : `<div class="hr">${dot(st, 'd7')}<span class="strong">${what}</span><span class="faint">${obj}</span><span class="muted">${iv}</span><span class="r sec">${age}</span></div>`;
+const foundList = (gone) => `<div class="hblist"><div class="hr h"><span></span><span>proves</span><span>object</span><span>every</span><span class="r">last beat</span></div>${FOUND.map((f) => foundRow(f, gone && f[1] === 'zone fra')).join('')}</div>`;
+const listEntry = (obj, res, { bad = false, focus = false } = {}) => `<div class="le">${inp(obj, 300, { focus, bad })}<span class="${bad ? 'c-crit' : 'muted'}" style="width:24ch">${res}</span><span class="grow"></span><span class="faint" style="display:flex">${icon('x', 13)}</span></div>`;
+const listBody = `<div class="hblist" style="border-top:1px solid var(--bd-row);padding-top:4px">${listEntry('icygui-hb-master-01!beat', 'master-01 · every 30s')}${listEntry('icygui-hb-master-02!beat', 'master-02 · every 30s')}${listEntry('icygui-hb-ams!beet', 'not found', { bad: true, focus: true })}<div class="le"><span class="acc" style="display:flex;align-items:center;gap:6px">${icon('plus', 13)}add</span></div></div>`;
+const envBody = ({ mode = 'find', gone = false } = {}) => ssec('connection') +
   srow('URLs', '', `<span class="muted" style="font-size:12px">master-01.prod.example.com:5665, master-02…</span>`) +
   ssec('trouble alerts') +
   srow('policy', '', select('notify', 160)) +
   srow('no live data', '', `<span class="faint" style="font-size:12px">always on</span>`) +
-  srow('heartbeat', '', sw(true)) +
-  srow('object', '', `${inp(obj, 240, { focus: !found })}<span class="${found ? 'c-ok' : 'c-crit'}" style="font-size:12px;width:20ch">${found ? 'found · every 30s' : 'not found'}</span>`, { sub: true }) +
-  srow('interval', '', `${inp('<span class="ph">30s</span>', 80)}<span class="faint" style="font-size:12px;width:20ch">from the object</span>`, { sub: true }) +
-  `<div class="ds muted" style="font-size:12px;padding:10px 0 12px;line-height:1.5">Trouble alerts always notify; only a pause holds them back.</div>`;
+  srow('heartbeats', '', seg(['find by custom variable', 'list'], mode === 'find' ? 0 : 1)) +
+  (mode === 'find'
+    ? srow('variable', '', `${inp('icygui_heartbeat', 200)}<span class="${gone ? 'c-warn' : 'c-ok'}" style="font-size:12px;width:24ch;white-space:nowrap">${gone ? 'found 5 · 1 disappeared' : 'found 6'}</span>`, { sub: true }) + foundList(gone)
+    : listBody) +
+  `<div class="ds muted" style="font-size:12px;padding:10px 0 12px;line-height:1.5;border-top:1px solid var(--bd-row)">Trouble alerts always notify; only a pause holds them back.</div>`;
 const envSettings = (o) => settingsWindow({ page: 'icinga', section: 2, title: 'prod-cluster', subtitle: 'environment · on this computer', body: envBody(o) });
-shot('16b', '16-live-b-settings', '<b>Settings → icinga → an environment: trouble alerts.</b> Trouble alerts (no live data, a dead heartbeat, Icinga health alerts, a failing engine) <b>always notify at the OS level, with no opt-out</b>; only a pause of that environment (or all) holds them back. So the group has one choice, the <b>policy</b>: <i>notify</i> (the default) or <i>persistent</i> (stays until resolved), a plain select with no descriptions. <i>no live data</i> shows as always on. The <b>heartbeat</b> switch, its <b>object</b> as <i>host!service</i> with the result of the one query run on save inline in a fixed slot (<i>found · every 30s</i>), and its <b>interval</b> (empty = the object’s <i>check_interval</i>, shown as the placeholder). One help line.',
-  envSettings(), { w: 1080, h: 760 });
-shot('16b-l', '16-live-b-settings-light', '<b>The heartbeat group</b>, light.', envSettings(), { w: 1080, h: 760, theme: 'light' });
-shot('16b2', '16-live-b2-not-found', '<b>A typo shows at once.</b> The save queried <i>icygui-hearbeat!beat</i>: <i>not found</i>, in the same slot, in the critical text colour, and the field keeps the focus. The health page shows the grey <i>not found</i> state (16a2) until it is fixed.',
-  envSettings({ obj: 'icygui-hearbeat!beat', found: false }), { w: 1080, h: 760, crops: '16-live-b2-zoom:300,240,780,220' });
+shot('16b', '16-live-b-settings', '<b>Settings → icinga → an environment: trouble alerts, heartbeats by discovery.</b> <b>policy</b> <i>notify</i> | <i>persistent</i>; <i>no live data</i> always on. <b>heartbeats</b>: <i>find by custom variable</i> (the default) with the variable’s name, <i>icygui_heartbeat</i>, and the result in a fixed slot (<i>found 6</i>). Under it every match: what it proves (master-01, master-02, zone ams, zone fra, sat-fra-01, sat-fra-02), its <i>host!service</i> dimmed, its interval (read from the object; each beat keeps its own time budget) and its last beat. One help line.',
+  envSettings(), { w: 1080, h: 820 });
+shot('16b-l', '16-live-b-settings-light', '<b>Trouble alerts, heartbeats by discovery</b>, light.', envSettings(), { w: 1080, h: 820, theme: 'light' });
+shot('16b3', '16-live-b3-disappeared', '<b>A heartbeat disappeared.</b> The zone fra beat is no longer found: its row stays, yellow, <i>disappeared since 14:02</i>, with <b>confirm removal</b> at its right; the result slot reads <i>found 5 · 1 disappeared</i>. Until it is confirmed (or the beat is back) it counts on the health page (16u) and notifies under the trouble policy.',
+  envSettings({ gone: true }), { w: 1080, h: 820, crops: '16-live-b3-zoom:300,380,780,330' });
+shot('16b2', '16-live-b2-list', '<b>The list mode</b>, for setups that can’t add a variable: <i>host!service</i> entries, each with what it proves and its interval in a fixed slot, × to remove, <i>add</i> under them. A typo shows at once: <i>icygui-hb-ams!beet</i> is <i>not found</i>, in the critical text colour, and the field keeps the focus.',
+  envSettings({ mode: 'list' }), { w: 1080, h: 820, crops: '16-live-b2-zoom:300,380,780,240' });
+shot('16b2-l', '16-live-b2-list-light', '<b>The list mode</b>, light.', envSettings({ mode: 'list' }), { w: 1080, h: 820, theme: 'light' });
 
 // ---- c. the desktop notifications ------------------------------------------------------------
 const MARK = (s) => `<svg viewBox="100 100 824 824" width="${s}" height="${s}"><defs><linearGradient id="og${s}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffb35c"/><stop offset="1" stop-color="#f2862f"/></linearGradient></defs><rect x="100" y="100" width="824" height="824" rx="185" fill="#1c1f22"/><path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" fill="none" stroke="url(#og${s})" stroke-width="30" stroke-linecap="round"/><circle cx="512" cy="512" r="178" fill="url(#og${s})"/><circle cx="718.5" cy="305.5" r="44" fill="#74ade8"/></svg>`;

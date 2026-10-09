@@ -276,6 +276,21 @@ pub(crate) enum Line {
         /// How many wait behind it (0: all show).
         hidden: usize,
     },
+    /// A comment sent from the view, until the event stream shows it, or
+    /// refused (topic 17): its draft, by id.
+    Draft {
+        /// The object it is on.
+        object: ObjectKey,
+        /// The draft's id ([`crate::comments::drafts::Draft`]).
+        id: u64,
+        /// Refused: its reason shows under it.
+        refused: bool,
+    },
+    /// The comment field, open as the thread's next entry (topic 17).
+    Composer {
+        /// The object the comment is for.
+        object: ObjectKey,
+    },
 }
 
 impl Line {
@@ -287,7 +302,9 @@ impl Line {
             | Self::More {
                 key: MoreKey::Thread(object),
                 ..
-            } => Some(object),
+            }
+            | Self::Draft { object, .. }
+            | Self::Composer { object } => Some(object),
             Self::Entry { entry, .. } => Some(&entry.object),
             Self::Fold { parent, .. } => Some(&parent.0),
             Self::Section { .. } | Self::Axis | Self::More { .. } => None,
@@ -386,6 +403,113 @@ impl Listing {
     pub(crate) fn line(&self, index: usize) -> Option<&Line> {
         self.lines.get(index).map(|keyed| &keyed.line)
     }
+
+    /// Whether line `index` is its thread's last entry (in a list: where
+    /// *+ comment* shows, topic 17). Folds and paging rows after it don't
+    /// count; a single row (the downtimes list) is no thread.
+    pub(crate) fn is_last_entry(&self, index: usize) -> bool {
+        let Some(Line::Entry { single: false, .. }) = self.line(index) else {
+            return false;
+        };
+        // The thread runs to the next band or section.
+        self.lines[index + 1..]
+            .iter()
+            .map(|keyed| &keyed.line)
+            .take_while(|line| {
+                !matches!(line, Line::Band { .. } | Line::Section { .. } | Line::Axis)
+            })
+            .all(|line| !matches!(line, Line::Entry { .. }))
+    }
+}
+
+/// What topic 17 adds to a handling view's threads: the comments sent from
+/// it that the snapshot doesn't show yet (or that were refused), and the
+/// open comment field.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CommentLines {
+    /// The drafts: object, id, refused; oldest first.
+    pub(crate) drafts: Vec<(ObjectKey, u64, bool)>,
+    /// The object whose thread has the field open.
+    pub(crate) composer: Option<ObjectKey>,
+}
+
+impl CommentLines {
+    /// Nothing to add.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.drafts.is_empty() && self.composer.is_none()
+    }
+}
+
+/// Puts `comments` into `listing`'s threads: after each thread's last
+/// entry and what belongs to it (an open fold), before its paging row, its
+/// drafts in the order they were sent, then the open field. A thread
+/// folded to its band, or not in the listing, gets nothing. Keyless lines:
+/// the cursor never stops on them.
+pub(crate) fn place_comments(listing: &mut Listing, comments: &CommentLines) {
+    if comments.is_empty() {
+        return;
+    }
+    let lines = &listing.lines;
+    // Where each object's thread takes its additions: after its last line
+    // but a paging row.
+    let mut after: HashMap<&ObjectKey, usize> = HashMap::new();
+    let mut current: Option<&ObjectKey> = None;
+    for (index, keyed) in lines.iter().enumerate() {
+        match &keyed.line {
+            Line::Band {
+                object, collapsed, ..
+            } => current = (!*collapsed).then_some(object),
+            Line::Entry {
+                entry,
+                single: false,
+                ..
+            } if current == Some(&entry.object) => {
+                after.insert(&entry.object, index);
+            }
+            Line::Fold { parent, .. } | Line::Service { parent, .. }
+                if current == Some(&parent.0) =>
+            {
+                after.insert(&parent.0, index);
+            }
+            Line::Section { .. } | Line::Axis => current = None,
+            _ => {}
+        }
+    }
+    let mut extra: BTreeMap<usize, Vec<Keyed>> = BTreeMap::new();
+    for (object, id, refused) in &comments.drafts {
+        if let Some(index) = after.get(object) {
+            extra.entry(*index).or_default().push(Keyed {
+                line: Line::Draft {
+                    object: object.clone(),
+                    id: *id,
+                    refused: *refused,
+                },
+                key: None,
+            });
+        }
+    }
+    if let Some(object) = &comments.composer
+        && let Some(index) = after.get(object)
+    {
+        extra.entry(*index).or_default().push(Keyed {
+            line: Line::Composer {
+                object: object.clone(),
+            },
+            key: None,
+        });
+    }
+    if extra.is_empty() {
+        return;
+    }
+    let count = extra.values().map(Vec::len).sum::<usize>();
+    let mut placed = Vec::with_capacity(lines.len() + count);
+    for (index, keyed) in lines.iter().enumerate() {
+        placed.push(keyed.clone());
+        if let Some(added) = extra.remove(&index) {
+            placed.extend(added);
+        }
+    }
+    listing.lines = Arc::new(placed);
 }
 
 /// A downtime still running or to come (not over).
@@ -1604,8 +1728,111 @@ mod tests {
                 }
                 Line::Service { object, .. } => format!("    {}", object.full_name()),
                 Line::More { hidden, .. } => format!("  more {hidden}"),
+                Line::Draft { id, refused, .. } => {
+                    format!("  draft {id}{}", if *refused { " refused" } else { "" })
+                }
+                Line::Composer { object } => format!("  field {}", object.full_name()),
             })
             .collect()
+    }
+
+    #[test]
+    fn comments_go_after_a_threads_last_line_and_never_into_a_folded_one() {
+        let world = World::new();
+        let postgres = ObjectKey::service("db-prod-03", "postgres-replication");
+        let switch = ObjectKey::host("sw-core-ams-02");
+        let elsewhere = ObjectKey::host("nowhere-01");
+        let mut listing = world.build(ListKind::Handling, &Options::default());
+        let before = sketch(&listing);
+        // The last entry of a thread offers *+ comment*; earlier ones and
+        // bands don't.
+        let band = before
+            .iter()
+            .position(|line| line.starts_with("[db-prod-03!postgres-replication]"))
+            .unwrap();
+        assert!(!listing.is_last_entry(band));
+        assert!(!listing.is_last_entry(band + 1));
+        assert!(listing.is_last_entry(band + 4), "{before:#?}");
+        place_comments(
+            &mut listing,
+            &CommentLines {
+                drafts: vec![
+                    (postgres.clone(), 1, false),
+                    (switch.clone(), 2, true),
+                    (elsewhere.clone(), 3, false),
+                    (postgres.clone(), 4, true),
+                ],
+                composer: Some(postgres.clone()),
+            },
+        );
+        let after = sketch(&listing);
+        assert_eq!(
+            after[band + 5..band + 8],
+            [
+                "  draft 1",
+                "  draft 4 refused",
+                "  field db-prod-03!postgres-replication"
+            ],
+            "after the thread's last entry, in the order sent, then the field"
+        );
+        // The switch's thread (a host's downtime with its services folded):
+        // its draft comes at its end.
+        let switch_band = after
+            .iter()
+            .position(|line| line.starts_with("[sw-core-ams-02]"))
+            .unwrap();
+        let draft = after
+            .iter()
+            .position(|line| line == "  draft 2 refused")
+            .unwrap();
+        assert!(draft > switch_band);
+        assert!(
+            after[switch_band + 1..draft]
+                .iter()
+                .all(|line| !line.starts_with('[')),
+            "inside its own thread: {after:#?}"
+        );
+        assert!(
+            after
+                .get(draft + 1)
+                .is_none_or(|line| line.starts_with('[') || line.starts_with("##")),
+            "at the thread's end: {after:#?}"
+        );
+        // An object without a thread here gets nothing; the added lines
+        // have no keys, so the cursor never stops on them.
+        assert!(!after.iter().any(|line| line == "  draft 3"));
+        assert_eq!(after.len(), before.len() + 4);
+        assert!(
+            listing
+                .lines
+                .iter()
+                .filter(|keyed| matches!(keyed.line, Line::Draft { .. } | Line::Composer { .. }))
+                .all(|keyed| keyed.key.is_none())
+        );
+
+        // A folded thread offers nothing and gets nothing.
+        let folds = Folds {
+            collapsed: std::iter::once(postgres.clone()).collect(),
+            ..Folds::default()
+        };
+        let mut folded = build(
+            ListKind::Handling,
+            &world.snapshot,
+            Scope::All,
+            "m.keller",
+            &Options::default(),
+            &folds,
+            now(),
+        );
+        let count = folded.lines.len();
+        place_comments(
+            &mut folded,
+            &CommentLines {
+                drafts: vec![(postgres.clone(), 1, false)],
+                composer: Some(postgres),
+            },
+        );
+        assert_eq!(folded.lines.len(), count);
     }
 
     #[test]

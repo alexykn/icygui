@@ -14,6 +14,7 @@ mod banner;
 mod chrome;
 mod cli;
 mod cluster;
+mod comments;
 mod controls;
 mod dashboard;
 mod dev;

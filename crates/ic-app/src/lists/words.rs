@@ -78,6 +78,23 @@ pub(crate) fn entry_text(snapshot: &Snapshot, entry: &Entry, now: Timestamp) -> 
     entry_text_in(snapshot, entry, now, &Local)
 }
 
+/// The words of a comment sent from a handling view that the snapshot
+/// doesn't show yet (topic 17): as a comment's, its time when it was sent.
+pub(crate) fn draft_text(draft: &crate::comments::drafts::Draft, now: Timestamp) -> EntryText {
+    EntryText {
+        icon: IconName::MessageSquare,
+        kind: None,
+        accent: false,
+        author: draft.author.clone(),
+        at: day_clock(draft.at, now, &Local),
+        meta: String::new(),
+        text: first_line(&draft.text).to_owned(),
+        slot_a: SlotA::Empty,
+        slot_b: String::new(),
+        tone: Tone::Faint,
+    }
+}
+
 /// The record of a downtime entry.
 pub(crate) fn downtime_of<'a>(snapshot: &'a Snapshot, entry: &Entry) -> Option<&'a Downtime> {
     match entry.record {

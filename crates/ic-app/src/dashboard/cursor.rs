@@ -354,6 +354,7 @@ mod tests {
             density: ic_config::RowDensity::Comfortable,
             author: "",
             now: ic_model::Timestamp::from_unix_seconds(0.),
+            comments: &crate::dashboard::page::StackedComments::default(),
         })
     }
 

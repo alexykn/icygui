@@ -1287,6 +1287,7 @@ impl DashboardView {
         use crate::lists::model::Mode;
         use crate::lists::threads::{ItemKey, Line};
         use crate::lists::view::{self as lists, BandLine, ThreadLineInput};
+        let line_index = line;
         let Some(page_view) = page.views.get(view) else {
             return div().into_any_element();
         };
@@ -1315,6 +1316,34 @@ impl DashboardView {
             Some(stop) => RowEmphasis::new(cursor == Some(stop), false),
             None => RowEmphasis::None,
         };
+        // Topic 17: the open comment field, and the comments on their way
+        // or refused.
+        match &keyed.line {
+            Line::Composer { object } => {
+                return match &self.composer {
+                    Some(open)
+                        if open.dashboard == *reference
+                            && open.view == page_view.id
+                            && open.composer.object == *object =>
+                    {
+                        crate::comments::lines::composer_line(
+                            state.author(),
+                            &open.composer,
+                            cx.entity_id(),
+                            &theme,
+                        )
+                    }
+                    _ => div().into_any_element(),
+                };
+            }
+            Line::Draft { id, .. } => {
+                return match state.comment_draft(*id) {
+                    Some(draft) => lists::draft_element(&self.state, draft, now, &theme),
+                    None => div().into_any_element(),
+                };
+            }
+            _ => {}
+        }
         let element = match &keyed.line {
             Line::Band {
                 object,
@@ -1357,6 +1386,28 @@ impl DashboardView {
                 let pending = line
                     .entry()
                     .and_then(|entry| lists::entry_pending(state, entry));
+                // A thread's last entry offers *+ comment* on hover.
+                let plus = (thread.kind == crate::lists::model::ListKind::Handling
+                    && self.may_comment(cx)
+                    && thread.listing.is_last_entry(line_index))
+                .then(|| line.object().cloned())
+                .flatten()
+                .map(|object| {
+                    let (reference, view) = (reference.clone(), page_view.id.clone());
+                    crate::comments::lines::plus_comment(
+                        format!("plus-comment:{view}:{}", object.full_name()),
+                        &theme,
+                        cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_stacked_composer(
+                                &reference,
+                                &view,
+                                object.clone(),
+                                window,
+                                cx,
+                            );
+                        }),
+                    )
+                });
                 let element = lists::thread_line(
                     &ThreadLineInput {
                         snapshot,
@@ -1370,6 +1421,7 @@ impl DashboardView {
                     line,
                     emphasis,
                     pending,
+                    plus,
                 );
                 match stop.clone() {
                     Some(stop) => div()

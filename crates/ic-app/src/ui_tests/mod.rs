@@ -48,6 +48,7 @@ use crate::workspace::{self, ToggleSidebar, Workspace};
 mod actions;
 mod appearance;
 mod background;
+mod comments;
 mod dropdowns;
 mod editing;
 mod editor_views;

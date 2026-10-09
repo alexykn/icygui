@@ -10,7 +10,8 @@
 //! - `ICYGUI_DEMO_FAULT` shows a connection failure on purpose: `offline`,
 //!   `auth`, `tls`, `pin-mismatch`, `missing-secret`, `misconfigured`, `outage` (lost
 //!   after 20 s), `slow` (every answer takes 0.9 s) or `frozen` (Icinga
-//!   stops checking: checks become late).
+//!   stops checking: checks become late) or `no-comments` (the API user
+//!   may do everything but add comments).
 //! - `ICYGUI_DEMO_STORM=20` starts a problem storm every 20 seconds
 //!   instead of every 5 minutes (24 services fail: a few notifications,
 //!   the rest silent, then a summary), for the notification centre.

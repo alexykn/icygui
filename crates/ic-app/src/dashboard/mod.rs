@@ -21,6 +21,7 @@
 //! a click anywhere else on the band opens the host in the pane.
 
 pub(crate) mod bulk;
+mod comments;
 pub(crate) mod cursor;
 pub(crate) mod draw;
 pub(crate) mod header;
@@ -167,6 +168,8 @@ struct Built {
     /// The editor's preview: its evaluation's revision (0 on a dashboard,
     /// whose evaluation comes with the snapshot).
     preview: u64,
+    /// What topic 17 added to the handling views' threads.
+    comments: page::StackedComments,
 }
 
 /// A dashboard's page state.
@@ -380,6 +383,8 @@ pub(crate) struct DashboardView {
     preview: Option<(PreviewPage, u64)>,
     /// As the cluster section's events: the one view and its events.
     events: Option<EventsPage>,
+    /// The comment field open in a stacked handling view (topic 17).
+    composer: Option<comments::StackedComposer>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -412,6 +417,7 @@ impl DashboardView {
             reveal: None,
             preview: None,
             events: None,
+            composer: None,
             _subscriptions: subscriptions,
         }
     }
@@ -794,6 +800,11 @@ impl DashboardView {
         let minute = (now.as_unix_seconds() / 60.).floor() as i64;
         // Handling and downtimes follow the clock (phases, times left).
         let clocked = views.iter().any(|view| view.display.is_threads());
+        let has_handling = views.iter().any(|view| {
+            crate::lists::model::ListKind::of_display(view.display)
+                == Some(crate::lists::model::ListKind::Handling)
+        });
+        let comments = self.stacked_comments(&reference, has_handling, cx);
         let width = self.width;
         let ui = self
             .pages
@@ -812,6 +823,7 @@ impl DashboardView {
                 && (!clocked || built.minute == minute)
                 && built.denied == denied
                 && built.preview == revision
+                && built.comments == comments
         });
         if !fresh {
             let page = Page::build(&PageInput {
@@ -828,6 +840,7 @@ impl DashboardView {
                 density,
                 author: &author,
                 now,
+                comments: &comments,
             });
             if ui.selection.marked_count() > 0 {
                 let listed: HashSet<ObjectKey> = page
@@ -853,6 +866,7 @@ impl DashboardView {
                 minute,
                 denied,
                 preview: revision,
+                comments,
             });
         }
         let settling = state.rows_settling();
@@ -1643,7 +1657,12 @@ impl DashboardView {
         self.request(ObjectAction::CheckNow, cx);
     }
 
-    fn add_comment(&mut self, _: &AddComment, _: &mut Window, cx: &mut Context<Self>) {
+    /// `c`: in a stacked handling view, the comment field below the
+    /// cursor's thread (topic 17); elsewhere the comment dialog.
+    fn add_comment(&mut self, _: &AddComment, window: &mut Window, cx: &mut Context<Self>) {
+        if self.comment_at_cursor(window, cx) {
+            return;
+        }
         self.request(ObjectAction::AddComment, cx);
     }
 
@@ -2544,6 +2563,23 @@ impl DashboardView {
     /// The page's group filter.
     pub(crate) fn group_filter(&self, cx: &App) -> Option<GroupFilter> {
         self.current(cx)?.filter.clone()
+    }
+
+    /// The comment field open in a stacked handling view (topic 17): the
+    /// view's id, the object, the field.
+    pub(crate) fn stacked_composer(
+        &self,
+    ) -> Option<(
+        String,
+        ObjectKey,
+        Entity<crate::comments::field::CommentField>,
+    )> {
+        let open = self.composer.as_ref()?;
+        Some((
+            open.view.to_string(),
+            open.composer.object.clone(),
+            open.composer.field.clone(),
+        ))
     }
 }
 

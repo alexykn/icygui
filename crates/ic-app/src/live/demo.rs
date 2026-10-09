@@ -53,6 +53,19 @@ const STORM_EVERY: u64 = 300;
 
 /// When the [`DemoFault::Outage`] begins.
 const OUTAGE_AFTER: Duration = Duration::from_secs(20);
+/// The API user's permissions with [`DemoFault::NoComments`]: everything
+/// but adding comments.
+const NO_COMMENTS: &[&str] = &[
+    "objects/query/*",
+    "events/*",
+    "status/*",
+    "actions/acknowledge-problem",
+    "actions/remove-acknowledgement",
+    "actions/schedule-downtime",
+    "actions/remove-downtime",
+    "actions/reschedule-check",
+    "actions/remove-comment",
+];
 /// The latency of every answer with [`DemoFault::Slow`].
 const SLOW_LATENCY: Duration = Duration::from_millis(900);
 
@@ -92,6 +105,9 @@ pub(crate) enum DemoFault {
     /// its checks go late, the relay queue grows, and the cluster health
     /// page and its sidebar dot turn critical (topic 06).
     SatelliteDown,
+    /// `no-comments`: the API user may do everything but add comments, so
+    /// nothing offers to write one (topic 17, frame 17f).
+    NoComments,
 }
 
 impl DemoFault {
@@ -109,6 +125,7 @@ impl DemoFault {
             "frozen" => Some(Self::Frozen),
             "partial" => Some(Self::Partial),
             "satellite-down" => Some(Self::SatelliteDown),
+            "no-comments" => Some(Self::NoComments),
             _ => None,
         }
     }
@@ -227,7 +244,11 @@ impl DemoServer {
         let others = matches!(
             self.fault,
             None | Some(
-                DemoFault::Partial | DemoFault::Slow | DemoFault::Frozen | DemoFault::SatelliteDown
+                DemoFault::Partial
+                    | DemoFault::Slow
+                    | DemoFault::Frozen
+                    | DemoFault::SatelliteDown
+                    | DemoFault::NoComments
             )
         );
         std::iter::once(master)
@@ -273,8 +294,13 @@ pub(crate) fn start(
         scenarios::prod_cluster()
     });
     let password = demo_password();
+    let permissions: &[&str] = if options.fault == Some(DemoFault::NoComments) {
+        NO_COMMENTS
+    } else {
+        &["*"]
+    };
     let config = MockConfig {
-        users: vec![MockUser::new(USER, &password, &["*"])],
+        users: vec![MockUser::new(USER, &password, permissions)],
         simulation: SimulationConfig {
             enabled: true,
             seed: options.seed,

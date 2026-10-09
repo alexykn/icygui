@@ -56,6 +56,8 @@ use crate::actions::{
 use crate::app_state::AppState;
 use crate::banner;
 use crate::chrome::{Controls, WindowDrag};
+use crate::comments::field::CommentFieldEvent;
+use crate::comments::lines::{self as comment_lines, Composer, LAST_ENTRY_GROUP};
 use crate::dashboard::selection::{ListSelection, SelectableRow as _};
 use crate::dashboard::{HeaderMenu, HeaderMenus, SplitLayout, ViewChange};
 use crate::menu_state::down_position;
@@ -199,6 +201,9 @@ struct Inputs {
     author: String,
     /// The minute: phases and times left change with the clock.
     minute: i64,
+    /// The comments sent from the view that the snapshot doesn't show yet,
+    /// and the open comment field (topic 17).
+    comment_lines: threads::CommentLines,
 }
 
 impl PartialEq for Inputs {
@@ -218,6 +223,7 @@ impl PartialEq for Inputs {
             && self.folds == other.folds
             && self.author == other.author
             && self.minute == other.minute
+            && self.comment_lines == other.comment_lines
     }
 }
 
@@ -274,6 +280,8 @@ pub(crate) struct RecordList {
     drag: WindowDrag,
     /// The lines built in the last frame.
     visible: Range<usize>,
+    /// The comment field open in a thread (topic 17).
+    composer: Option<Composer>,
     /// Where the selection bar's buttons start, as last drawn, for tests.
     #[cfg(test)]
     pub(crate) selection_buttons_x: Rc<std::cell::Cell<Option<Pixels>>>,
@@ -312,6 +320,7 @@ impl RecordList {
             sidebar_open: true,
             drag: WindowDrag::default(),
             visible: 0..0,
+            composer: None,
             #[cfg(test)]
             selection_buttons_x: Rc::default(),
             _subscriptions: subscriptions,
@@ -542,6 +551,7 @@ impl RecordList {
             folds: self.folds.clone(),
             author: state.author().to_owned(),
             minute,
+            comment_lines: self.comment_lines(cx),
         };
         if self
             .built
@@ -552,7 +562,7 @@ impl RecordList {
                 Some(members) => threads::Scope::Members(members),
                 None => threads::Scope::All,
             };
-            let listing = threads::build(
+            let mut listing = threads::build(
                 self.kind,
                 snapshot,
                 scope,
@@ -561,12 +571,17 @@ impl RecordList {
                 &self.folds,
                 now,
             );
+            threads::place_comments(&mut listing, &inputs.comment_lines);
             self.selection.update_rows(&listing.lines);
             self.built = Some((inputs, listing));
         }
         // The heights follow the theme (interface size) and the view's
-        // row density.
-        let sizes = Sizes::of(&self.line_theme(cx));
+        // row density; the open comment field is as tall as it drew.
+        let sizes = Sizes::of(&self.line_theme(cx)).with_composer(
+            self.composer
+                .as_ref()
+                .and_then(|composer| composer.height.get()),
+        );
         let mode = self.mode(&options);
         let Some((_, listing)) = &self.built else {
             return;
@@ -870,18 +885,160 @@ impl RecordList {
         self.request(ObjectAction::CheckNow, cx);
     }
 
-    /// `c`: the pane's comment field when its thread shows, else the
-    /// comment dialog.
+    /// `c`: the pane's comment field when the pane is open and shows its
+    /// thread (its field says `(c)`); else, in the handling view, the
+    /// comment field below the cursor's thread (topic 17; nothing without
+    /// the add-comment permission); else the comment dialog.
     fn add_comment(&mut self, _: &AddComment, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selection.marked_count() == 0
-            && let Some(pane) = &self.pane
+        if self.selection.marked_count() > 0 {
+            return;
+        }
+        if let Some(pane) = &self.pane
             && pane
                 .view
                 .update(cx, |pane, cx| pane.focus_comment_field(window, cx))
         {
             return;
         }
+        if self.offers_comments(cx).is_some()
+            && let Some(object) = self.comment_target(cx)
+            && self.has_thread(&object)
+        {
+            if self.offers_comments(cx) == Some(true) {
+                self.open_composer(object, window, cx);
+            }
+            return;
+        }
         self.request(ObjectAction::AddComment, cx);
+    }
+
+    // --- Comments written in the view (topic 17) -----------------------
+
+    /// Whether the view's threads offer *+ comment*: `None` where they
+    /// never do (the downtimes view, the editor's preview), `Some(false)`
+    /// without the add-comment permission (nothing shows and `c` does
+    /// nothing), `Some(true)` otherwise.
+    fn offers_comments(&self, cx: &App) -> Option<bool> {
+        if self.kind != ListKind::Handling || self.source == ListSource::Preview {
+            return None;
+        }
+        let state = self.state.read(cx);
+        Some(
+            state.environment().is_some()
+                && state.action_denial(&ObjectAction::AddComment).is_none(),
+        )
+    }
+
+    /// What topic 17 adds to the threads: the comments sent that the
+    /// snapshot doesn't show yet, and the open field.
+    fn comment_lines(&self, cx: &App) -> threads::CommentLines {
+        if self.offers_comments(cx).is_none() {
+            return threads::CommentLines::default();
+        }
+        threads::CommentLines {
+            drafts: self
+                .state
+                .read(cx)
+                .comment_drafts()
+                .into_iter()
+                .map(|draft| (draft.object.clone(), draft.id, draft.refusal().is_some()))
+                .collect(),
+            composer: self
+                .composer
+                .as_ref()
+                .map(|composer| composer.object.clone()),
+        }
+    }
+
+    /// The thread `c` writes in: the cursor's (a fold's or a paging row's
+    /// too: the band above it).
+    fn comment_target(&mut self, cx: &mut Context<Self>) -> Option<ObjectKey> {
+        self.sync(cx);
+        self.selection
+            .cursor()
+            .and_then(|index| self.band_of(index))
+            .and_then(|band| self.line(band))
+            .and_then(Line::object)
+            .cloned()
+    }
+
+    /// Whether `object` has a thread (a band) in the view.
+    fn has_thread(&self, object: &ObjectKey) -> bool {
+        self.listing().is_some_and(|listing| {
+            listing.lines.iter().any(
+                |keyed| matches!(&keyed.line, Line::Band { object: band, .. } if band == object),
+            )
+        })
+    }
+
+    /// Opens the comment field below `object`'s thread (unfolding it) and
+    /// puts the keyboard in it; one field per view, so another thread's
+    /// closes.
+    fn open_composer(&mut self, object: ObjectKey, window: &mut Window, cx: &mut Context<Self>) {
+        if self.offers_comments(cx) != Some(true) {
+            return;
+        }
+        self.menus.close();
+        self.folds.collapsed.remove(&object);
+        match &self.composer {
+            Some(composer) if composer.object == object => {
+                composer
+                    .field
+                    .update(cx, |field, cx| field.focus(window, cx));
+            }
+            _ => {
+                let id = format!("handling-comment-field:{}", object.full_name());
+                self.composer = Some(Composer::open(
+                    object,
+                    id,
+                    window,
+                    cx,
+                    |this: &mut Self, event, window, cx| match event {
+                        CommentFieldEvent::Send(text) => {
+                            let text = text.clone();
+                            this.send_composer(&text, window, cx);
+                        }
+                        CommentFieldEvent::Cancel => this.close_composer(window, cx),
+                    },
+                ));
+            }
+        }
+        // The field in view.
+        self.sync(cx);
+        if let Some(index) = self.listing().and_then(|listing| {
+            listing
+                .lines
+                .iter()
+                .position(|keyed| matches!(keyed.line, Line::Composer { .. }))
+        }) {
+            self.reveal(index);
+        }
+        cx.notify();
+    }
+
+    /// Closes the comment field (Escape), its text with it; the keyboard
+    /// goes back to the view.
+    fn close_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.composer.take().is_some() {
+            window.focus(&self.focus_handle, cx);
+            cx.notify();
+        }
+    }
+
+    /// Enter in the comment field: sends `text` through the action path
+    /// as a comment on the field's object; it shows dimmed as `sending…`
+    /// until the event stream brings it (or with the reason it was
+    /// refused).
+    fn send_composer(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(composer) = self.composer.take() else {
+            return;
+        };
+        self.state.update(cx, |state, cx| {
+            state.send_comment(&composer.object, text);
+            cx.notify();
+        });
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
     }
 
     /// An object action's key: on the pane's object, else the cursor's.
@@ -2053,7 +2210,35 @@ impl RecordList {
                 now,
                 cx,
             ),
+            Line::Composer { object } => {
+                return match &self.composer {
+                    Some(composer) if composer.object == *object => {
+                        let author = self.state.read(cx).author().to_owned();
+                        comment_lines::composer_line(&author, composer, cx.entity_id(), &theme)
+                    }
+                    _ => div().into_any_element(),
+                };
+            }
+            Line::Draft { id, .. } => {
+                return match self.state.read(cx).comment_draft(*id) {
+                    Some(draft) => draft_element(&self.state, draft, now, &theme),
+                    None => div().into_any_element(),
+                };
+            }
             line => {
+                // A thread's last entry offers *+ comment* on hover.
+                let plus = (self.offers_comments(cx) == Some(true) && listing.is_last_entry(index))
+                    .then(|| line.object().cloned())
+                    .flatten()
+                    .map(|object| {
+                        comment_lines::plus_comment(
+                            format!("plus-comment:{}", object.full_name()),
+                            &theme,
+                            cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.open_composer(object.clone(), window, cx);
+                            }),
+                        )
+                    });
                 let state = self.state.read(cx);
                 let pending = line.entry().and_then(|entry| entry_pending(state, entry));
                 thread_line(
@@ -2069,6 +2254,7 @@ impl RecordList {
                     line,
                     emphasis,
                     pending,
+                    plus,
                 )
             }
         };
@@ -2448,6 +2634,36 @@ impl Render for RecordList {
     }
 }
 
+/// A comment sent from a handling view, on its way or refused (topic 17;
+/// [`comment_lines::draft_line`]): its *retry* and *discard* go to
+/// `state`. Here and in a dashboard's stacked view.
+pub(crate) fn draft_element(
+    state: &Entity<AppState>,
+    draft: &crate::comments::drafts::Draft,
+    now: Timestamp,
+    theme: &Theme,
+) -> AnyElement {
+    let (retry, discard) = (state.clone(), state.clone());
+    let id = draft.id;
+    comment_lines::draft_line(
+        draft,
+        now,
+        theme,
+        move |_, _, cx| {
+            retry.update(cx, |state, cx| {
+                state.retry_comment(id);
+                cx.notify();
+            });
+        },
+        move |_, _, cx| {
+            discard.update(cx, |state, cx| {
+                state.discard_comment(id);
+                cx.notify();
+            });
+        },
+    )
+}
+
 /// A chip's mark: handling's ✓, the accent dot of *in effect*, the faint
 /// dot of *upcoming*, the speech bubble, the lock.
 pub(crate) fn chip_mark(chip: Chip, theme: &Theme) -> Option<AnyElement> {
@@ -2491,12 +2707,15 @@ pub(crate) struct ThreadLineInput<'a> {
 
 /// A line of a handling or downtimes view, but a band ([`thread_band`],
 /// whose clicks the caller sets): a section's heading, the axis, an entry,
-/// a fold, a service in it, a paging row. No click of its own.
+/// a fold, a service in it, a paging row. No click of its own. `plus` is
+/// the *+ comment* a thread's last entry shows in its time slot on hover
+/// (topic 17; [`crate::comments::lines::plus_comment`]).
 pub(crate) fn thread_line(
     input: &ThreadLineInput<'_>,
     line: &Line,
     emphasis: RowEmphasis,
     pending: Option<&'static str>,
+    plus: Option<AnyElement>,
 ) -> AnyElement {
     let theme = input.theme;
     match line {
@@ -2507,7 +2726,9 @@ pub(crate) fn thread_line(
             Some(axis) => axis_line(axis, input.axis_width, theme).into_any_element(),
             None => div().into_any_element(),
         },
-        Line::Band { .. } => div().into_any_element(),
+        // A band is drawn by its view ([`thread_band`]); the comment field
+        // and the comments on their way by the view holding them.
+        Line::Band { .. } | Line::Draft { .. } | Line::Composer { .. } => div().into_any_element(),
         Line::Entry {
             entry,
             reply,
@@ -2526,9 +2747,9 @@ pub(crate) fn thread_line(
             None => list_entry(
                 input.snapshot,
                 entry,
-                *reply,
-                *single,
+                (*reply, *single),
                 pending,
+                plus,
                 emphasis,
                 input.now,
                 theme,
@@ -2659,14 +2880,16 @@ fn emphasised(line: gpui::Div, emphasis: RowEmphasis, theme: &Theme) -> gpui::Di
 }
 
 /// An entry in the handling view or the downtimes list (a single
-/// downtime: band and entry in one row).
+/// downtime: band and entry in one row); `(reply, single)` as the line
+/// says. A thread's last entry may show `plus` (*+ comment*) in its time
+/// slot while hovered.
 #[expect(clippy::too_many_arguments, reason = "an entry and how it shows")]
 fn list_entry(
     snapshot: &ic_core::snapshot::Snapshot,
     entry: &threads::Entry,
-    reply: bool,
-    single: bool,
+    (reply, single): (bool, bool),
     pending: Option<&'static str>,
+    plus: Option<AnyElement>,
     emphasis: RowEmphasis,
     now: Timestamp,
     theme: &Theme,
@@ -2692,7 +2915,12 @@ fn list_entry(
         pending,
         ..Look::default()
     };
-    let body = draw::entry(&text, &look, compact, theme);
+    let hover = plus.is_some();
+    let extras = draw::Extras {
+        slot_b_hover: plus.map(|plus| (SharedString::from(LAST_ENTRY_GROUP), plus)),
+        ..draw::Extras::default()
+    };
+    let body = draw::entry_with(&text, &look, compact, theme, extras);
     let line = div()
         .size_full()
         .px(theme.metrics.list_padding)
@@ -2700,6 +2928,7 @@ fn list_entry(
         .when(!compact, |line| line.pt(px(9.)))
         .border_b_1()
         .border_color(theme.colors.border_row)
+        .when(hover, |line| line.group(LAST_ENTRY_GROUP))
         .child(body);
     emphasised(line, emphasis, theme).into_any_element()
 }
@@ -3245,6 +3474,15 @@ fn char_count(text: &str) -> f32 {
 /// Accessors for the UI tests (`ui_tests`, Linux only).
 #[cfg(all(test, target_os = "linux"))]
 impl RecordList {
+    /// The comment field open in a thread (topic 17): its object and the
+    /// field.
+    pub(crate) fn composer(
+        &self,
+    ) -> Option<(ObjectKey, Entity<crate::comments::field::CommentField>)> {
+        let composer = self.composer.as_ref()?;
+        Some((composer.object.clone(), composer.field.clone()))
+    }
+
     /// The lines as built for the current snapshot.
     pub(crate) fn lines(&self) -> Vec<Line> {
         self.listing()
@@ -3308,5 +3546,11 @@ impl RecordList {
     pub(crate) fn line_middle(&self, index: usize) -> Option<Pixels> {
         let layout = self.layout.as_ref()?;
         Some((layout.top(index) + layout.top(index + 1)) / 2.)
+    }
+
+    /// How tall line `index` is laid out.
+    pub(crate) fn line_height(&self, index: usize) -> Option<Pixels> {
+        let layout = self.layout.as_ref()?;
+        (index < layout.lines.len()).then(|| layout.top(index + 1) - layout.top(index))
     }
 }

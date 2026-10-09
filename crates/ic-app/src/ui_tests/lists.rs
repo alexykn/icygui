@@ -30,7 +30,7 @@ use crate::palette::PaletteCommand;
 use crate::workspace::ModalKind;
 
 /// Opens `kind`'s view (as the palette does) and returns it.
-fn open(app: &Harness, cx: &mut App, kind: ListKind) -> Entity<RecordList> {
+pub(super) fn open(app: &Harness, cx: &mut App, kind: ListKind) -> Entity<RecordList> {
     app.state.update(cx, |state, cx| {
         state.open_list(kind);
         cx.notify();
@@ -59,14 +59,14 @@ fn removal_dialog(app: &Harness, cx: &App) -> Entity<RemovalDialog> {
         .expect("a removal dialog")
 }
 
-fn lines(view: &Entity<RecordList>, cx: &App) -> Vec<Line> {
+pub(super) fn lines(view: &Entity<RecordList>, cx: &App) -> Vec<Line> {
     view.read(cx).lines()
 }
 
 /// The line `index`'s middle on screen, away from the chevron (the view
 /// scrolled to the top): below the header and the chips bar, right of
 /// the 300px sidebar.
-fn line_position(view: &Entity<RecordList>, cx: &App, index: usize) -> Point<Pixels> {
+pub(super) fn line_position(view: &Entity<RecordList>, cx: &App, index: usize) -> Point<Pixels> {
     let metrics = ic_ui_kit::Theme::dark().metrics;
     let top =
         Metrics::with_rule(metrics.header_height) + Metrics::with_rule(metrics.summary_bar_height);
@@ -80,7 +80,7 @@ fn chevron_position(view: &Entity<RecordList>, cx: &App, index: usize) -> Point<
 }
 
 /// Where `object`'s band is.
-fn band_of(lines: &[Line], object: &ObjectKey) -> Option<usize> {
+pub(super) fn band_of(lines: &[Line], object: &ObjectKey) -> Option<usize> {
     lines
         .iter()
         .position(|line| matches!(line, Line::Band { object: band, .. } if band == object))
@@ -893,7 +893,9 @@ fn the_pane_shows_the_thread_and_adds_a_comment() {
         assert_eq!(pane.read(cx).object(), &replication());
         let field = pane.read(cx).comment_input().expect("the comment field");
 
-        // `c` puts the keyboard in the field; Escape gives it back.
+        // `c` puts the keyboard in the field (the pane's, while it is open;
+        // the thread's own otherwise: `ui_tests::comments`); Escape gives
+        // it back.
         app.keys(cx, "c");
         let focused = |app: &Harness, cx: &mut App| {
             app.in_window(cx, |window, cx| {
@@ -913,10 +915,10 @@ fn the_pane_shows_the_thread_and_adds_a_comment() {
         // path, by the environment's author. The list's and the pane's
         // letters are the field's while it has the keyboard.
         app.keys(cx, "c d a r k");
-        assert_eq!(field.read(cx).value(), "dark");
+        assert_eq!(field.read(cx).value(cx), "dark");
         assert_eq!(modal(app, cx), None, "no dialog from the letters");
         app.keys(cx, "j x m s enter");
-        assert_eq!(field.read(cx).value(), "", "cleared once sent");
+        assert_eq!(field.read(cx).value(cx), "", "cleared once sent");
         assert!(!focused(app, cx), "the keyboard back on the view");
         let actions = recorder.actions();
         assert_eq!(actions.len(), 1, "{actions:?}");

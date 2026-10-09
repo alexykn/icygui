@@ -2,7 +2,8 @@
 //! *handling* section with the same entries as the handling view, oldest
 //! first like a chat (its acknowledgement, its downtimes, its free-standing
 //! comments), and a field to add a comment that goes through the action
-//! path every comment takes (permissions, the pending marker, toasts).
+//! path every comment takes (permissions, the pending marker, toasts): the
+//! comment field the handling view's threads open too (topic 17).
 //!
 //! The downtime the banner above shows keeps its place in the thread but
 //! doesn't repeat its text (`the downtime in the banner above`). A
@@ -17,12 +18,11 @@ use gpui::{
 };
 use ic_core::snapshot::Snapshot;
 use ic_model::{Action, ObjectKey, Timestamp};
-use ic_ui_kit::{
-    ActiveTheme as _, Button, IconButton, IconName, SectionLabel, TextField, Tooltip, px,
-};
+use ic_ui_kit::{ActiveTheme as _, Button, IconButton, IconName, SectionLabel, Tooltip, px};
 
 use super::ObjectPane;
 use crate::actions::ObjectAction;
+use crate::comments::field::{CommentField, CommentFieldEvent};
 use crate::lists::draw::{self, Look};
 use crate::lists::threads::{self, EntryKey};
 use crate::lists::words;
@@ -184,6 +184,8 @@ fn remove_button(
 }
 
 /// `add a comment (c)` and `comment ↵`; without the permission, why not.
+/// The field is the comment field the handling view's threads open too
+/// (topic 17): Enter sends, Shift+Enter starts a new line.
 fn comment_field(pane: &ObjectPane, cx: &Context<ObjectPane>) -> AnyElement {
     let theme = cx.theme();
     let colors = theme.colors;
@@ -195,7 +197,7 @@ fn comment_field(pane: &ObjectPane, cx: &Context<ObjectPane>) -> AnyElement {
             .child(denial)
             .into_any_element();
     }
-    let Some(input) = &pane.comment_input else {
+    let Some(field) = &pane.comment_input else {
         return div().into_any_element();
     };
     div()
@@ -208,14 +210,7 @@ fn comment_field(pane: &ObjectPane, cx: &Context<ObjectPane>) -> AnyElement {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(
-                    div()
-                        .id("pane-comment-field")
-                        .flex_1()
-                        .min_w_0()
-                        .on_action(cx.listener(ObjectPane::on_comment_escape))
-                        .child(TextField::new(input).bordered(true)),
-                )
+                .child(div().flex_1().min_w_0().child(field.clone()))
                 .child(
                     Button::new("pane-comment-send", "comment")
                         .key_hint("↵")
@@ -243,19 +238,17 @@ impl ObjectPane {
         if self.comment_input.is_some() {
             return;
         }
-        let input = cx.new(|cx| {
-            ic_ui_kit::input::InputState::new(window, cx).placeholder("add a comment (c)")
-        });
+        let field =
+            cx.new(|cx| CommentField::new("pane-comment-field", "add a comment (c)", window, cx));
         let events = cx.subscribe_in(
-            &input,
+            &field,
             window,
-            |pane: &mut Self, _, event: &ic_ui_kit::input::InputEvent, window, cx| {
-                if matches!(event, ic_ui_kit::input::InputEvent::PressEnter { .. }) {
-                    pane.send_comment(window, cx);
-                }
+            |pane: &mut Self, _, event: &CommentFieldEvent, window, cx| match event {
+                CommentFieldEvent::Send(_) => pane.send_comment(window, cx),
+                CommentFieldEvent::Cancel => pane.on_comment_escape(window, cx),
             },
         );
-        self.comment_input = Some(input);
+        self.comment_input = Some(field);
         self.comment_events = Some(events);
     }
 
@@ -272,28 +265,23 @@ impl ObjectPane {
             state.action_denial(&ObjectAction::AddComment).is_none()
                 && !threads::thread_of(snapshot, &self.object, Timestamp::now()).is_empty()
         };
-        let Some(input) = self.comment_input.clone().filter(|_| shows) else {
+        let Some(field) = self.comment_input.clone().filter(|_| shows) else {
             return false;
         };
-        input.update(cx, |input, cx| input.focus(window, cx));
+        field.update(cx, |field, cx| field.focus(window, cx));
         true
     }
 
     /// Escape in the field: clears what is typed, else gives the keyboard
     /// back to the list.
-    fn on_comment_escape(
-        &mut self,
-        _: &ic_ui_kit::input::Escape,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(input) = self.comment_input.clone() else {
+    fn on_comment_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(field) = self.comment_input.clone() else {
             return;
         };
-        if input.read(cx).value().is_empty() {
+        if field.read(cx).value(cx).is_empty() {
             self.give_back_focus(window, cx);
         } else {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
+            field.update(cx, |field, cx| field.set_value("", window, cx));
         }
         self.comment_error = None;
         cx.notify();
@@ -302,10 +290,10 @@ impl ObjectPane {
     /// Adds what is typed as a comment on the shown object, through the
     /// action path (by the environment's author, like the dialog's).
     pub(crate) fn send_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(input) = self.comment_input.clone() else {
+        let Some(field) = self.comment_input.clone() else {
             return;
         };
-        let text = input.read(cx).value().trim().to_owned();
+        let text = field.read(cx).value(cx).trim().to_owned();
         if text.is_empty() {
             return;
         }
@@ -325,7 +313,7 @@ impl ObjectPane {
         match sent {
             Ok(_) => {
                 self.comment_error = None;
-                input.update(cx, |input, cx| input.set_value("", window, cx));
+                field.update(cx, |field, cx| field.set_value("", window, cx));
                 self.give_back_focus(window, cx);
             }
             Err(error) => self.comment_error = Some(error),
@@ -347,7 +335,7 @@ impl ObjectPane {
 #[cfg(all(test, target_os = "linux"))]
 impl ObjectPane {
     /// The comment field, once the pane has drawn it.
-    pub(crate) fn comment_input(&self) -> Option<gpui::Entity<ic_ui_kit::input::InputState>> {
+    pub(crate) fn comment_input(&self) -> Option<gpui::Entity<CommentField>> {
         self.comment_input.clone()
     }
 }

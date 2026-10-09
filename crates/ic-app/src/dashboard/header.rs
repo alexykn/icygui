@@ -224,6 +224,11 @@ impl DashboardView {
                     )
                 })
                 .into_any_element(),
+            // The cluster health page's kinds never show on a dashboard.
+            ViewDisplay::ZonesAndEndpoints
+            | ViewDisplay::Checks
+            | ViewDisplay::QueuesAndConnections
+            | ViewDisplay::GlobalSwitches => div().into_any_element(),
             ViewDisplay::Handling | ViewDisplay::Downtimes => {
                 let kind = crate::lists::model::ListKind::of_display(view.display)
                     .unwrap_or(crate::lists::model::ListKind::Handling);
@@ -348,7 +353,11 @@ impl DashboardView {
                 crate::lists::model::ListKind::of_display(view.display)
                     .map(|kind| Self::thread_sort_menu(reference, view, kind, cx))
             }
-            ViewDisplay::EventStream => None,
+            ViewDisplay::EventStream
+            | ViewDisplay::ZonesAndEndpoints
+            | ViewDisplay::Checks
+            | ViewDisplay::QueuesAndConnections
+            | ViewDisplay::GlobalSwitches => None,
         }
     }
 
@@ -564,6 +573,10 @@ impl DashboardView {
                     .item(copy_filter)
             }
             ViewDisplay::SummaryTiles | ViewDisplay::EventStream => menu.item(copy_filter),
+            ViewDisplay::ZonesAndEndpoints
+            | ViewDisplay::Checks
+            | ViewDisplay::QueuesAndConnections
+            | ViewDisplay::GlobalSwitches => menu,
             ViewDisplay::Handling | ViewDisplay::Downtimes => {
                 let kind = crate::lists::model::ListKind::of_display(view.display)
                     .unwrap_or(crate::lists::model::ListKind::Handling);
@@ -1097,6 +1110,10 @@ impl DashboardView {
                     .into_any_element(),
                 "newest first".len(),
             ),
+            ViewDisplay::ZonesAndEndpoints
+            | ViewDisplay::Checks
+            | ViewDisplay::QueuesAndConnections
+            | ViewDisplay::GlobalSwitches => (div().into_any_element(), 0),
         };
         // What the left side needs at least: the padding, chevron, icon and
         // name with their gaps.
@@ -1413,6 +1430,10 @@ pub(crate) fn display_icon(display: ic_config::ViewDisplay) -> IconName {
         ViewDisplay::EventStream => IconName::Activity,
         ViewDisplay::Handling => IconName::Users,
         ViewDisplay::Downtimes => IconName::CalendarClock,
+        ViewDisplay::ZonesAndEndpoints => IconName::Network,
+        ViewDisplay::Checks => IconName::Gauge,
+        ViewDisplay::QueuesAndConnections => IconName::Plug,
+        ViewDisplay::GlobalSwitches => IconName::ToggleLeft,
     }
 }
 

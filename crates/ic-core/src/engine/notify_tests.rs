@@ -766,6 +766,7 @@ fn memberships_come_from_the_dashboards_and_rules_from_the_environment() {
         service_groups: snapshot.service_groups.clone(),
         now: t(0.0),
         events: Arc::default(),
+        excluded: Arc::default(),
     };
     let changes = crate::store::Changes {
         all: true,

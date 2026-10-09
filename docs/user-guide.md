@@ -84,7 +84,7 @@ object ApiUser "icygui" {
 Reload Icinga afterwards (`systemctl reload icinga2`).
 
 - This is everything icygui uses except `actions/execute-command`, which is left out on purpose (*Run command* below): with this list, *test connection* reports all the permissions icygui needs and lists run command's as the opt-in one it lacks.
-- icygui never sends `filter` expressions in its requests (it addresses hosts and services by name), so it needs no `filter-expression` permission, which Icinga 2.17 requires by default for requests that carry a filter.
+- icygui addresses hosts and services by name and sends one `filter` expression only: the [heartbeats](#heartbeats)' on a quiet event stream. That needs the `filter-expression` permission, which Icinga 2.17 requires by default for requests that carry a filter. It is optional: without it, icygui reads the heartbeats' last check once per interval while the environment is quiet (one small request each), and everything else works the same. To grant it, add `"filter-expression"` to the list.
 - Permissions restricted with a `filter` in the `ApiUser` work too: icygui then shows and acts on only the objects the user may see.
 - **Read-only:** leave out the `actions/*` lines. Action buttons are then disabled, and hovering one says which permission is missing.
 - **Run command is opt-in, and it is remote code execution.** `actions/execute-command` runs a check or event command on an endpoint, and icygui's *run command* sends whatever macros you type. With a command such as the ITL's `by_ssh` (its `by_ssh_command` is free text), or any command with a free-form argument, whoever holds this API user's password can run arbitrary commands as the `icinga` user on every agent and satellite the master reaches, and that password sits in the keychain of every on-call laptop. Without the permission, *run command* is disabled and says which permission is missing. If you do need it:
@@ -274,18 +274,119 @@ Both group by object, the way a host with its services is grouped on a dashboard
 
 The sidebar's **cluster** section ends with **health** (also in the footer's switcher, under the nodes, and in the palette: `cluster health`): one page per environment that says whether Icinga itself is well, as the node icygui is connected to sees it.
 
-- **The header** names the node (`seen from master-01`) and how fresh the numbers are (`updated 12s ago · every 30s`; `quiet: every 5 min` while the environment is quiet).
+- **The header** names the node (`seen from master-01`) and how fresh the numbers are (`updated 12s ago · every 30s`; `quiet: every 5 min` while the environment is quiet). Its `···` has *edit page*.
 - **The health line:** how many endpoints are connected and not, then Icinga's version and uptime.
-- **A banner** only when something is wrong: a zone whose endpoints are all gone (critical: `sat-fra-01 has not been connected for 4m: zone fra’s results are stale.`, with how many of its checks are late and whether the relay queue grows; *show the late checks* lists them, most overdue first, and a click opens one), else an endpoint down whose zone still has another (a warning: its checks run there, without a spare).
-- **Zones:** the masters' and satellites' zones, top-level first, each with its endpoints: its state (`connected · this node` for the one icygui talks to, `connected · no message` when it sent nothing for a minute, `connected · older version`, `not connected`, `not connected · retrying` while Icinga tries to reach it, `not seen from here` for a node further away), the time since its last message, its messages a second in and out and its Icinga version. Global zones are listed by name (they carry configuration only).
+- **The heartbeat row** (pinned): `heartbeats 6 of 6 · on time`, or what is wrong (`heartbeat ams · 1 interval late · 48s`, `heartbeat fra · dead · last 02:11`, `fra disappeared`), `off` or `none found` without [heartbeats](#heartbeats); the policy (`notify` or `persistent`) and *settings* (the environment's trouble alerts) at the right.
+- **The alert block** (pinned), only while [trouble alerts](#trouble-alerts) are raised: the worst in full (what it means, a link such as *show the late checks* or *show master-02*, since when), the others one line each.
+- **Zones:** the masters' and satellites' zones, top-level first, each with its endpoints: its state (`connected · this node` for the one icygui talks to, `connected · no message` when it sent nothing for a minute, `connected · older version`, `not connected`, `not connected · retrying` while Icinga tries to reach it, `not seen from here` for a node further away), the time since its last message, its messages a second in and out, its Icinga version, and in the *heartbeat* column its beat's age (a zone's beat on the zone's line, a pinned beat on its endpoint's). Global zones are listed by name (they carry configuration only).
 - **Checks:** active and passive checks a minute, average latency and execution time, pending and late objects, each with its trend over the last 30 minutes.
 - **Queues and connections:** the API work queue (messages processed a second; Icinga 2.15 reports no queue length), the relay queue (messages waiting for other zones), cluster connections, HTTP clients, IcingaDB (only when the node runs the feature: `on`, or `paused` while the other master writes) and uptime.
-- **Switches:** Icinga's global switches (notifications, active checks, event handlers, flap detection, performance data), read-only, and the node's features (checker, notification, IcingaDB).
+- **Icinga's global switches** (notifications, active checks, event handlers, flap detection, performance data), read-only, and the node's features (checker, notification, IcingaDB).
 - **Sections fold** with a click on their heading.
 
-**What turns a value orange or red** (and only then; the sidebar's dot follows the same rules, except the switches, which are settings, not health): an endpoint down (red), a connected endpoint silent for a minute (orange), late checks (orange; red from 1 % of the checks or while a zone is cut off), active checks a minute down by a quarter against the last 30 minutes (red at none), latency five times its usual and over 50 ms or over a second (orange; red over ten seconds), a relay queue that grew over the last three polls (orange; red beyond 10 000 messages).
+**Edit page** (the header's `···`) opens the page in the dashboard editor, as a built-in dashboard: its views are the page's kinds only (zones and endpoints, checks, queues and connections, global switches; a dashboard of the sidebar never offers them, and the page offers nothing else), one of each. Drag them (or <kbd>alt</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd>) into another order, switch one off (it stays listed, dimmed: *add view* switches it on again), rename it, pick the tiles of the checks and the queues (the IcingaDB tile only while Icinga runs the feature) and their trend lines. The alerts and the heartbeat row stay pinned at the top and can't be moved or switched off: trouble stays in sight. *Reset to default* in the editor's `···` brings back the original layout; *save* applies it for this environment (the settings file leaves the page out while it is the default).
 
-**What it costs Icinga:** the trends are kept in memory from the status poll icygui makes anyway (every 30 seconds, every 5 minutes while quiet), so they start empty when icygui starts. The endpoints' numbers come with that poll too. The queues and the node's features need requests of their own (`/v1/status/ApiListener` with each status poll, the three feature objects when the page opens and every 5 minutes); icygui makes them only while the page is on screen in a window that isn't hidden, never for a quiet environment, and within the request budget. The page never asks Icinga for anything when you click on it. Until the first answer the tiles say `while the page is open`.
+**What turns a value orange or red** (and only then; the sidebar's dot follows the same rules, except the switches, which are settings, not health): an endpoint down (red), a connected endpoint silent for a minute (orange), late checks (orange; red from 1 % of the checks or while a zone is cut off), active checks a minute down by a quarter against the last 30 minutes (red at none), latency five times its usual and over 50 ms or over a second (orange; red over ten seconds), a relay queue that grew over the last three polls (orange; red beyond 10 000 messages), a raised trouble alert, and no live data (orange: the states shown may be outdated).
+
+**What it costs Icinga:** the trends are kept in memory from the status poll icygui makes anyway (every 30 seconds, every 5 minutes while quiet), so they start empty when icygui starts. The endpoints' numbers come with that poll too. The queues and the node's features need requests of their own (`/v1/status/ApiListener`, and the three feature objects): with each status poll while the page is on screen in a window that isn't hidden, else every 5 minutes for the trouble alerts, never more often, and always within the request budget. The page never asks Icinga for anything when you click on it.
+
+## Trouble alerts
+
+Monitoring that silently stopped looks exactly like a quiet night. Trouble alerts are about Icinga and icygui themselves, not about your hosts, and they **always notify**, at the OS level, whatever the notification rules, mutes, storm control or quiet hours say. Only an explicit pause (or muting the environment) holds them back, and the pause says so (`paused until 08:00, trouble alerts too`). Each is one desktop notification when it is raised and one when it clears; a log line goes with each (a warning when raised, info when it clears).
+
+- **No live data:** for more than 2 minutes, for any reason (the event stream stalled or lost results, the connection is lost, the login is refused, the certificate isn't trusted, the engine stopped answering). The notification names the environment, the reason and since when (`no live data from prod-cluster · since 02:14 · event stream stalled`); *live again* follows when data flows. Meanwhile every page of that environment has the banner `no live data for 3m — states may be outdated`, the footer says `no data 3m` in the warning colour, the sidebar's health dot and the switcher turn orange (red once the engine stopped answering for a minute), and the tray icon takes its blind look (a dashed grey orbit, a hollow core): nothing claims all is well while icygui can't know.
+- **Icinga health**, each after 2 minutes, raised and cleared: an endpoint disconnected; a zone without a connected endpoint (its checks don't run); no checks running (the [heartbeats](#heartbeats) stopped and Icinga's own last check times say so); the checker or notification feature off; IcingaDB paused (only where the feature is enabled); the relay or work queue growing; a master restarted (once, as information). An endpoint that is down and the beat pinned to it make **one** line (`master-02 disconnected, heartbeat lost`).
+
+**Policy** (Settings → icinga → environments → the environment's name → *trouble alerts*): *notify* (an ordinary desktop notification) or *persistent* (it stays on screen until you close it, with critical urgency; it is closed for you when the alert clears). There are no switches per kind: an alert you could switch off is one you'd miss the day it matters. On macOS notifications can't be made persistent or closed by the app; they behave like *notify*.
+
+A click on a trouble alert in the notification centre opens the environment's cluster health page.
+
+### Heartbeats
+
+Heartbeats prove, end to end, that Icinga runs checks and that their results reach your laptop. A heartbeat is an always-OK check (the ITL's `dummy`) that runs every 30 seconds in a zone, or pinned to one endpoint of an HA zone with `command_endpoint`. icygui watches their results on the event stream (no polling): when one doesn't arrive in time it asks Icinga once (a single small REST query) for its last check:
+
+- a **fresh** last check means the results didn't reach icygui: it reconnects its stream (after a 5 second second look), and alerts only if that doesn't heal it;
+- an **old** last check means Icinga stopped running checks there: an alert, `zone fra runs no checks` or `Icinga runs no checks` when every beat stopped;
+- a **failing** query is a connection problem, handled as any other (reconnect, and *no live data* after 2 minutes);
+- a beat that comes back **not OK** is dead, with Icinga's own words as the reason (`Remote Icinga instance 'master-02' is not connected to 'master-01'` for a beat pinned to a disconnected master).
+
+After a reconnect, a wake-up from sleep or an Icinga reload, beats get two intervals of grace. Timing alone never alerts: each beat's deadline is its interval plus an allowance learned from its last 50 arrivals (at least 5 seconds, at most half the interval); see [docs/performance.md](performance.md#heartbeats) for the measurements behind these numbers.
+
+**Finding them** (Settings → icinga → environments → the environment → *heartbeats*): *find by custom variable* (`icygui_heartbeat` by default: every service whose variable is set and not false, 0 or empty), or *list* them by `host!service`. The settings show what each proves (`zone ams`, `master-01`), its object, its interval and the age of its last beat; a listed name Icinga doesn't know says *not found*. A beat icygui knew that disappears from Icinga (deleted, renamed, variable removed) stays a finding (`heartbeat fra disappeared since 14:02`) until you *confirm removal*; changing the settings themselves forgets the beats they no longer ask for. Heartbeats are left out of every list, count, dashboard, rule and notification: they are icygui's own checks. The interval can be overridden for every beat in the settings file (`[environments.trouble.heartbeats] interval_secs = 60`, at least 10) for a check whose interval icygui can't read.
+
+**Setting them up in Icinga.** Put these on the configuration master under `zones.d/`; objects take their zone from the directory they are in. One host per zone, and a beat per zone (and per endpoint in an HA zone):
+
+```
+// zones.d/fra/icygui-heartbeat.conf: zone fra's beat
+object Host "icygui-hb-fra" {
+  check_command = "dummy"
+  check_interval = 5m
+  vars.dummy_state = 0
+}
+
+object Service "beat" {
+  host_name = "icygui-hb-fra"
+  check_command = "dummy"
+  check_interval = 30s
+  retry_interval = 30s
+  max_check_attempts = 1
+  enable_notifications = false
+  vars.dummy_state = 0
+  vars.dummy_text = "icygui heartbeat"
+  vars.icygui_heartbeat = true
+}
+```
+
+In an HA zone the checks are shared between its endpoints, so a zone's beat only proves that one of them runs checks. Pin one beat to each endpoint to see each:
+
+```
+// zones.d/master/icygui-heartbeat.conf: one beat per master
+object Host "icygui-hb-master" {
+  check_command = "dummy"
+  check_interval = 5m
+  vars.dummy_state = 0
+}
+
+apply Service "beat-" for (endpoint in [ "master-01", "master-02" ]) {  // the zone's endpoints
+  check_command = "dummy"
+  command_endpoint = endpoint
+  check_interval = 30s
+  retry_interval = 30s
+  max_check_attempts = 1
+  enable_notifications = false
+  vars.dummy_state = 0
+  vars.icygui_heartbeat = true
+  assign where host.name == "icygui-hb-master"
+}
+```
+
+With many satellite zones, one apply rule in a global zone gives each `icygui-hb-<zone>` host its beat (create the hosts in each zone's directory as above):
+
+```
+// zones.d/global-templates/icygui-heartbeat.conf
+apply Service "beat" {
+  check_command = "dummy"
+  check_interval = 30s
+  retry_interval = 30s
+  max_check_attempts = 1
+  enable_notifications = false
+  vars.dummy_state = 0
+  vars.icygui_heartbeat = true
+  assign where match("icygui-hb-*", host.name)
+}
+```
+
+- **Intervals:** 30 seconds is a good default (an alert follows a stopped checker within about three minutes: the beat's deadline, the query, the 2-minute grace); 10 seconds at the least; 60 seconds for very large or busy masters. A beat costs Icinga one `dummy` check per interval, nothing else.
+- **The API user** needs no permission beyond the [usual list](#the-api-user): the beats are services it reads like any other. `filter-expression` (optional) lets a quiet event stream carry them; without it icygui reads their last check once per interval while quiet.
+- **Keep Icinga's `cluster-zone` checks** (the ITL's `cluster-zone` command, on the parent, for each child zone) next to the heartbeats: they alert through Icinga's own notifications even while nobody runs icygui. A heartbeat tells something else: that checks run and that their results reach you.
+- **What a heartbeat can't tell:** that every other check runs (one check hanging on a plugin, an agent missing a command); anything about agents' zones unless you give them beats too; whether Icinga's own notifications (mail, chat) go out; whether IcingaDB or Icinga Web are up. It proves that the zone's (or the endpoint's) checker runs and that the cluster carries results to the node icygui is connected to.
+
+### What icygui can't see
+
+- Nodes the connected node doesn't see (a satellite icygui talks to sees only its zone: the page then says `partial view`), and what happens between Icinga and its agents beyond what the endpoints report.
+- Whether Icinga's own notifications reach people: icygui shows whom Icinga notified and when (the panes), not whether the mail arrived.
+- The length of the API work queue on Icinga 2.15 (it reports a rate only), and the database behind IcingaDB.
+- Anything while your laptop sleeps: on wake-up icygui reconnects, catches up, and gives the beats two intervals before judging them.
 
 ## Keyboard shortcuts
 
@@ -412,7 +513,7 @@ Platform notes: on macOS, notifications come from the app bundle (allow them in 
 ## In the background
 
 - **Closing the window** keeps icygui running in the tray (Linux) or the menu bar (macOS), still connected to every environment and notifying for each (Settings → general → *keep running in the tray*, on by default). Where no tray icon can be shown (stock GNOME without the AppIndicator extension), closing the window quits, and the settings say so. With unsaved work in the window (dashboard editor changes, also those kept in another environment, environment editor changes, text typed in an action dialog) it asks first.
-- **The tray icon** is the logo mark tinted with the worst unhandled state across all environments; its tooltip has a line per environment with its connection (`partial view: zone ams` while on a satellite, *muted* when muted on its own) and its counts; its menu has *Open*, *Pause notifications* (every environment), the environments and *Quit*. Choosing another environment there switches like the footer does.
+- **The tray icon** is the logo mark tinted with the worst unhandled state across all environments, or its blind look (a dashed grey orbit around a hollow core, the node yellow) while an environment has had [no live data](#trouble-alerts) for a while: then no state is claimed. Its tooltip has a line per environment with its connection (`partial view: zone ams` while on a satellite, *muted* when muted on its own, `no live data`) and its counts; its menu has *Open*, every environment with its status (`prod-cluster · no data 3m`, `staging · live`; choosing another one switches like the footer does), *Pause notifications* (every environment) and *Quit*.
 - **Start at login** (Settings → general) starts icygui in the background, without a window, with every environment connected in [quiet mode](#quiet-mode) (a launch agent on macOS, an XDG autostart entry on Linux). If no tray shows its icon within 20 seconds (a panel that starts after icygui gets that long), the window opens instead.
 - **One instance:** starting icygui again brings the running one's window forward.
 - **Quit** from the tray, the app menu or <kbd>⌘Q</kbd>.

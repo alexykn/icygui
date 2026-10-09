@@ -10,11 +10,12 @@ use ic_ui_kit::IconName;
 
 use crate::lists::ListKind;
 
+pub(crate) mod beats;
 pub(crate) mod health;
 mod page;
 mod spark;
 
-pub(crate) use page::HealthPage;
+pub(crate) use page::{HealthPage, HealthPageEvent, Preview as HealthPreview};
 
 /// An entry of the cluster section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

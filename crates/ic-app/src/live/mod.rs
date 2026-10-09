@@ -364,7 +364,8 @@ impl Session {
     /// it goes to that environment's engine, whichever is active by then.
     fn post(&mut self, raised: &Raised, cx: &mut Context<Self>) {
         let intent = &raised.intent;
-        let (acknowledge, name, prefix, output) = {
+        let trouble = ic_core::trouble::is_trouble_id(&intent.id);
+        let (acknowledge, name, prefix, output, persistent) = {
             let state = self.state.read(cx);
             let Some(environment) = state.environment_by_id(&raised.environment) else {
                 tracing::debug!(id = %intent.id, "a notification of a removed environment was dropped");
@@ -373,9 +374,12 @@ impl Session {
             let acknowledge = state
                 .action_denial_in(&raised.environment, &ObjectAction::Acknowledge)
                 .is_none();
-            let prefix = (state.environments().len() > 1).then(|| environment.name.clone());
+            // A trouble alert names its environment already.
+            let prefix =
+                (state.environments().len() > 1 && !trouble).then(|| environment.name.clone());
             let output = state.config().general.show_plugin_output;
-            (acknowledge, environment.name.clone(), prefix, output)
+            let persistent = environment.trouble.policy == ic_config::TroublePolicy::Persistent;
+            (acknowledge, environment.name.clone(), prefix, output, persistent)
         };
         if let Some(object) = &intent.object {
             self.targets.push_front(Target {
@@ -388,6 +392,9 @@ impl Session {
         let mut posted = desktop::posted(intent, &name, acknowledge, output);
         if let Some(name) = prefix {
             posted.title = desktop::prefixed_title(&posted.title, &name);
+        }
+        if trouble {
+            posted = desktop::trouble(posted, intent, persistent);
         }
         self.desktop.show(posted, cx);
     }

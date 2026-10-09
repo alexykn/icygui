@@ -107,10 +107,17 @@ impl DashboardEditor {
                 div()
                     .text_size(theme.text.small)
                     .text_color(colors.text_faint)
-                    .child(if count == 1 {
-                        "1 view".to_owned()
-                    } else {
-                        format!("{count} views")
+                    .child({
+                        let views = if count == 1 {
+                            "1 view".to_owned()
+                        } else {
+                            format!("{count} views")
+                        };
+                        if self.edits_health() {
+                            format!("built in · {views}")
+                        } else {
+                            views
+                        }
                     }),
             );
         let controls = crate::chrome::Controls::of(window, cx);
@@ -143,6 +150,16 @@ impl DashboardEditor {
         let view = self.selected_view();
         let index = self.selected_index();
         let count = self.draft.views.len();
+        let health = self.edits_health();
+        // A built-in page's name is fixed; it has no group, mark or
+        // notifications of its own (16k).
+        let name = if health {
+            Field::new("name")
+                .status("built in", FieldTone::Neutral)
+                .control(fixed_field(ic_config::HealthPage::TITLE, cx))
+        } else {
+            Field::new("name").control(TextField::new(&self.name).bordered(true))
+        };
         // The inspector's layout (README §04): the name full width, then
         // the sidebar mark beside the group, the views, and under a rule
         // the selected view's settings, its name first.
@@ -156,22 +173,24 @@ impl DashboardEditor {
             .py(px(PADDING_Y))
             .px(px(PADDING_X))
             .overflow_y_scroll()
-            .child(Field::new("name").control(TextField::new(&self.name).bordered(true)))
-            .child(pair(
-                self.mark_field(cx),
-                Field::new("group").control(self.dropdown(
-                    "editor-group",
-                    &EditorMenu::Group,
-                    None,
-                    group_name,
-                    || self.group_menu(cx),
-                    cx,
-                )),
-            ))
+            .child(name)
+            .when(!health, |body| {
+                body.child(pair(
+                    self.mark_field(cx),
+                    Field::new("group").control(self.dropdown(
+                        "editor-group",
+                        &EditorMenu::Group,
+                        None,
+                        group_name,
+                        || self.group_menu(cx),
+                        cx,
+                    )),
+                ))
+            })
             .child(self.views_field(cx))
             // Only problem views notify: a dashboard of handling,
             // downtimes or events views has no notifications row.
-            .when(model::notifies(&self.draft.views), |body| {
+            .when(!health && model::notifies(&self.draft.views), |body| {
                 body.child(self.notifications_field(cx))
             })
             .child(
@@ -192,7 +211,283 @@ impl DashboardEditor {
             ViewDisplay::SummaryTiles => self.tiles_settings(body, view, cx),
             ViewDisplay::EventStream => self.stream_settings(body, view, cx),
             ViewDisplay::Handling | ViewDisplay::Downtimes => self.threads_settings(body, view, cx),
+            ViewDisplay::ZonesAndEndpoints
+            | ViewDisplay::Checks
+            | ViewDisplay::QueuesAndConnections
+            | ViewDisplay::GlobalSwitches => self.health_settings(body, view, cx),
         }
+    }
+
+    /// A view of the cluster health page's: its display, and for the tile
+    /// views which tiles show and their trend lines (16k).
+    fn health_settings(&self, body: Stateful<Div>, view: &View, cx: &Context<Self>) -> Stateful<Div> {
+        let tiles = view.display.health_tiles();
+        let body = body.child(self.health_display_field(view, cx));
+        if tiles.is_empty() {
+            return body;
+        }
+        let available = self.health_facts(cx).tiles;
+        let chips = tiles.iter().map(|&tile| {
+            // A tile Icinga has nothing for now (`IcingaDB` while the
+            // feature is off) can't be picked: the page wouldn't show it.
+            let present = available.contains(&tile);
+            let chip = Chip::new(
+                ElementId::Name(format!("health-tile-chip:{tile:?}").into()),
+                tile.label(),
+            )
+            .selected(present && view.health.shows(tile))
+            .disabled(!present)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.change_selected(std::time::Duration::ZERO, cx, |view| {
+                    let hidden = &mut view.health.hidden_tiles;
+                    if let Some(index) = hidden.iter().position(|hidden| *hidden == tile) {
+                        hidden.remove(index);
+                    } else {
+                        hidden.push(tile);
+                        hidden.sort();
+                    }
+                });
+            }));
+            if present {
+                chip.into_any_element()
+            } else {
+                div()
+                    .id(ElementId::Name(format!("health-tile-off:{tile:?}").into()))
+                    .child(chip)
+                    .tooltip(Tooltip::text(format!(
+                        "Shows while Icinga reports {} enabled",
+                        tile.label()
+                    )))
+                    .into_any_element()
+            }
+        });
+        body.child(
+            Field::new("tiles").control(div().flex().flex_wrap().gap(px(6.)).children(chips)),
+        )
+        .child(
+            Field::new("show").control(
+                Switch::new("editor-health-sparklines", view.health.sparklines)
+                    .label("sparklines")
+                    .on_change(cx.listener(|this, on: &bool, _, cx| {
+                        let on = *on;
+                        this.change_selected(std::time::Duration::ZERO, cx, |view| {
+                            view.health.sparklines = on;
+                        });
+                    })),
+            ),
+        )
+    }
+
+    /// A health view's `display`: the health kinds, each with its icon; a
+    /// kind another view of the page shows can't be picked (one view per
+    /// kind).
+    fn health_display_field(&self, view: &View, cx: &Context<Self>) -> Field {
+        Field::new("display").control(self.dropdown(
+            "editor-display",
+            &EditorMenu::Display,
+            Some(display_icon(view.display)),
+            model::display_name(view.display).to_owned(),
+            || {
+                let mut menu = Menu::new("editor-display-menu").label("health");
+                for (display, free) in model::health_displays(&self.draft.views, &view.id) {
+                    menu = menu.item(
+                        MenuItem::new(
+                            ElementId::Name(format!("editor-display-{display:?}").into()),
+                            model::display_name(display),
+                        )
+                        .icon(display_icon(display))
+                        .checked(view.display == display)
+                        .disabled(!free)
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
+                                this.menus.close();
+                                this.change_selected(std::time::Duration::ZERO, cx, |view| {
+                                    view.display = display;
+                                });
+                            },
+                        )),
+                    );
+                }
+                menu.on_dismiss(Self::dismiss_listener(cx))
+            },
+            cx,
+        ))
+    }
+
+    /// What the health page has on this environment now, for the views
+    /// list's counts and the tile chips.
+    fn health_facts(&self, cx: &Context<Self>) -> HealthFacts {
+        let state = self.state.read(cx);
+        let report = crate::cluster::health::report(
+            state.snapshot(),
+            state.connection().is_connected(),
+            Timestamp::now(),
+        );
+        HealthFacts {
+            endpoints: report.connected + report.not_connected,
+            tiles: report
+                .checks
+                .iter()
+                .chain(&report.queues)
+                .filter_map(|tile| tile.kind)
+                .collect(),
+            switches: report.switches.len(),
+        }
+    }
+
+    /// The health page's pinned parts at the top of its views list: the
+    /// alert block and the heartbeat row, locked (trouble stays visible).
+    fn pinned_row(id: &'static str, icon: IconName, name: &'static str, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .h(px(VIEW_ROW_HEIGHT))
+            .pl(px(10.))
+            .pr(px(8.))
+            .whitespace_nowrap()
+            .text_size(theme.text.body)
+            .child(
+                Icon::new(IconName::Lock)
+                    .size(px(13.))
+                    .color(colors.text_faint),
+            )
+            .child(Icon::new(icon).size(px(13.)).color(colors.text_muted))
+            .child(div().min_w_0().truncate().text_color(colors.text).child(name))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(theme.text.small)
+                    .text_color(colors.text_faint)
+                    .child("pinned"),
+            )
+            .tooltip(Tooltip::text("Pinned to the top of the page: trouble stays in sight"))
+            .into_any_element()
+    }
+
+    /// A row of the health page's views list (16k): the handle, the
+    /// kind's icon, the name, what it shows (or `off`) and its switch. A
+    /// click selects it; dragging it moves it.
+    fn health_view_row(
+        &self,
+        index: usize,
+        view: &View,
+        facts: &HealthFacts,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let selected = view.id == self.selected;
+        let off = view.health.off;
+        let id = view.id.clone();
+        let name = model::view_name(view);
+        let shows = model::health_shows(view, facts.endpoints, &facts.tiles, facts.switches);
+        let dragged = DraggedView {
+            index,
+            name: name.clone().into(),
+            display: view.display,
+        };
+        let switched = id.clone();
+        div()
+            .id(ElementId::Name(format!("view-row:{}", view.id).into()))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .h(px(VIEW_ROW_HEIGHT))
+            .pl(px(10.))
+            .pr(px(8.))
+            .rounded(theme.metrics.code_radius)
+            .when(selected, |row| row.bg(colors.row_selected))
+            .when(!selected, |row| row.hover(|style| style.bg(colors.element_hover)))
+            .cursor_pointer()
+            .whitespace_nowrap()
+            .text_size(theme.text.body)
+            .child(
+                div().flex_none().cursor_grab().child(
+                    Icon::new(IconName::GripVertical)
+                        .size(px(13.))
+                        .color(colors.text_faint),
+                ),
+            )
+            .child(
+                Icon::new(display_icon(view.display))
+                    .size(px(13.))
+                    .color(if off { colors.text_faint } else { colors.text_muted }),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(if off {
+                        colors.text_faint
+                    } else if selected {
+                        colors.text_strong
+                    } else {
+                        colors.text
+                    })
+                    .child(name),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(theme.text.small)
+                    .text_color(colors.text_faint)
+                    .child(shows),
+            )
+            .child(
+                div().flex_none().child(
+                    Switch::new(
+                        ElementId::Name(format!("view-row-switch:{}", view.id).into()),
+                        !off,
+                    )
+                    .on_change(cx.listener(move |this, on: &bool, _, cx| {
+                        let on = *on;
+                        if let Some(index) = this.index_of(&switched) {
+                            this.change_view_at(index, std::time::Duration::ZERO, cx, |view| {
+                                view.health.off = !on;
+                            });
+                        }
+                    })),
+                ),
+            )
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                if this.selected != id {
+                    this.select(id.clone(), cx);
+                }
+            }))
+            .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+            .drag_over::<DraggedView>(move |style, _, _, _| style.bg(colors.accent_tint_strong))
+            .on_drop(cx.listener(move |this, dragged: &DraggedView, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                this.move_view(dragged.index, index, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// The health page's *add view* (16l): its kinds only; one it has
+    /// already is switched on and selected.
+    fn add_health_view_menu(cx: &Context<Self>) -> Menu {
+        let mut menu = Menu::new("add-view-menu").label("health");
+        for display in ViewDisplay::HEALTH {
+            menu = menu.item(
+                MenuItem::new(
+                    ElementId::Name(format!("add-view-{display:?}").into()),
+                    model::display_name(display),
+                )
+                .icon(display_icon(display))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.add_view(display, cx);
+                })),
+            );
+        }
+        menu.on_dismiss(Self::dismiss_listener(cx))
     }
 
     // --- The views list --------------------------------------------------
@@ -201,13 +496,30 @@ impl DashboardEditor {
     fn views_field(&self, cx: &Context<Self>) -> Field {
         let theme = cx.theme();
         let colors = theme.colors;
-        let rows: Vec<AnyElement> = self
-            .draft
-            .views
-            .iter()
-            .enumerate()
-            .map(|(index, view)| self.view_row(index, view, cx))
-            .collect();
+        let health = self.edits_health();
+        let rows: Vec<AnyElement> = if health {
+            let facts = self.health_facts(cx);
+            [
+                Self::pinned_row("health-pinned-alerts", IconName::TriangleAlert, "alerts", cx),
+                Self::pinned_row("health-pinned-beats", IconName::HeartPulse, "heartbeats", cx),
+            ]
+            .into_iter()
+            .chain(
+                self.draft
+                    .views
+                    .iter()
+                    .enumerate()
+                    .map(|(index, view)| self.health_view_row(index, view, &facts, cx)),
+            )
+            .collect()
+        } else {
+            self.draft
+                .views
+                .iter()
+                .enumerate()
+                .map(|(index, view)| self.view_row(index, view, cx))
+                .collect()
+        };
         let full = self.draft.views.len() >= ic_config::MAX_VIEWS;
         let open = self.menus.is_open(&EditorMenu::AddView);
         let add = div()
@@ -248,7 +560,11 @@ impl DashboardEditor {
                     }),
             )
             .when(open, |slot| {
-                slot.child(Popover::new(Self::add_view_menu(cx)))
+                slot.child(Popover::new(if health {
+                    Self::add_health_view_menu(cx)
+                } else {
+                    Self::add_view_menu(cx)
+                }))
             });
         Field::new("views")
             .status(reorder_hint(), FieldTone::Neutral)
@@ -1178,7 +1494,7 @@ impl DashboardEditor {
         let colors = theme.colors;
         let reference = match &self.target {
             super::EditorTarget::Existing(reference) => Some(reference.clone()),
-            super::EditorTarget::New => None,
+            super::EditorTarget::New | super::EditorTarget::Health => None,
         };
         div()
             .flex()
@@ -1271,6 +1587,32 @@ impl DashboardEditor {
     }
 }
 
+/// What the health page has on the environment now: its endpoints, the
+/// tiles Icinga has numbers for, its global switches.
+struct HealthFacts {
+    endpoints: usize,
+    tiles: Vec<ic_config::HealthTile>,
+    switches: usize,
+}
+
+/// A field's box showing `text` that can't be changed (a built-in page's
+/// name).
+fn fixed_field(text: &'static str, cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_center()
+        .h(theme.metrics.field_height)
+        .px(px(10.))
+        .rounded(theme.metrics.code_radius)
+        .border_1()
+        .border_color(theme.colors.border_header)
+        .bg(theme.colors.code_background)
+        .text_size(theme.text.body)
+        .text_color(theme.colors.text_muted)
+        .child(text)
+}
+
 /// Two fields side by side, sharing the width (12px apart).
 fn pair(left: Field, right: Field) -> Div {
     div()
@@ -1323,6 +1665,10 @@ pub(super) fn filter_placeholder(display: ViewDisplay) -> &'static str {
         ViewDisplay::HostGroupGrid => "empty: every host of those groups",
         ViewDisplay::SummaryTiles => "empty: every object of those groups",
         ViewDisplay::EventStream => "empty: every host and service",
+        ViewDisplay::ZonesAndEndpoints
+        | ViewDisplay::Checks
+        | ViewDisplay::QueuesAndConnections
+        | ViewDisplay::GlobalSwitches => "",
     }
 }
 

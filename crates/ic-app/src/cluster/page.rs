@@ -1,63 +1,77 @@
-//! The cluster health page (topic 06): one page per environment, reached
-//! from *health* in the sidebar's cluster section, the footer switcher's
-//! *cluster health* row and the palette. Its header, the health line
-//! (endpoints connected and not, Icinga's version and uptime), a banner
-//! while a zone is cut off, then four sections that fold: the zones with
-//! their endpoints, the checks, the queues and connections, and Icinga's
-//! global switches with the node's features. What it shows is worked out
-//! in [`super::health`]; this module only draws it.
+//! The cluster health page (topic 06; PLAN.md §4.2 H): one page per
+//! environment, reached from *health* in the sidebar's cluster section,
+//! the footer switcher's *cluster health* row and the palette. Its header
+//! (its `···`: *edit page*), the health line (endpoints connected and not,
+//! Icinga's version and uptime), then the pinned parts: the heartbeat row
+//! and the alert block (the worst trouble alert in full, the others one
+//! line each). Then its views, a built-in dashboard's (the environment's
+//! `health_page`, edited in the dashboard editor): the zones with their
+//! endpoints and heartbeats, the checks, the queues and connections,
+//! Icinga's global switches; each folds. What it shows is worked out in
+//! [`super::health`] and [`super::beats`]; this module only draws it.
+//!
+//! The editor shows the page as its preview (the draft's views instead of
+//! the saved ones, without the header): a click on a view's header selects
+//! the view in the inspector.
 
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _,
 };
+use ic_config::{HealthPage as HealthLayout, View, ViewDisplay};
 use ic_core::NodeState;
+use ic_core::trouble::AlertAction;
 use ic_model::{FeatureState, ObjectKey, Timestamp, format_compact};
 use ic_ui_kit::{
-    ActiveTheme as _, Banner, BannerTone, EmptyState, Icon, IconName, Link, Metrics, ObjectMark,
-    PaneHeader, StateDot, Theme, px,
+    ActiveTheme as _, BannerTone, Dismissal, EmptyState, GlyphButton, Icon, IconName, Link, Menu,
+    MenuItem, Metrics, ObjectMark, PaneHeader, Popover, StateDot, Theme, Tooltip, px,
 };
 
-use super::health::{EndpointRow, HealthBanner, Report, Tile, Tone, ZoneGroup, count_text, report};
+use super::beats::{AlertLine, BeatCell, BeatRow, BeatTone};
+use super::health::{EndpointRow, Report, Tile, Tone, ZoneGroup, count_text, report};
 use super::spark;
 use crate::app_state::AppState;
 use crate::chrome::{Controls, WindowDrag};
+use crate::menu_state::{OpenMenu, down_position};
 use crate::workspace::sidebar_reopen;
 
 /// The late checks the banner's fold shows before `+ N more` (the hosts'
 /// paging rule).
 const LATE_PREVIEW: usize = 7;
 
-/// The page's foldable sections.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Section {
-    Zones,
-    Checks,
-    Queues,
-    Switches,
+/// What the page tells the workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HealthPageEvent {
+    /// *edit page* in its `···`: the dashboard editor, on this page.
+    Edit,
+    /// The heartbeat row's *settings*: the environment's trouble alerts.
+    Settings,
+    /// A view's header clicked in the editor's preview: select it there.
+    Pick(String),
 }
 
-impl Section {
-    fn index(self) -> usize {
-        match self {
-            Self::Zones => 0,
-            Self::Checks => 1,
-            Self::Queues => 2,
-            Self::Switches => 3,
-        }
-    }
+/// The page's popup menus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageMenu {
+    /// The header's `···`.
+    Options,
+}
 
-    fn id(self) -> &'static str {
-        match self {
-            Self::Zones => "health-zones",
-            Self::Checks => "health-checks",
-            Self::Queues => "health-queues",
-            Self::Switches => "health-switches",
-        }
-    }
+/// What the editor shows in its preview: the draft's views, and the one
+/// selected in the inspector (its header marked).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Preview {
+    pub(crate) views: Vec<View>,
+    pub(crate) picked: Option<String>,
+}
+
+/// The id of a view's section header.
+fn section_id(display: ViewDisplay) -> SharedString {
+    SharedString::from(format!("health-{}", HealthLayout::id_of(display)))
 }
 
 /// The cluster section's *health* page.
@@ -66,13 +80,18 @@ pub(crate) struct HealthPage {
     sidebar_open: bool,
     drag: WindowDrag,
     focus_handle: gpui::FocusHandle,
-    /// The folded sections.
-    folded: [bool; 4],
-    /// The banner's late checks are shown, and all of them.
+    /// The folded views, by kind.
+    folded: Vec<ViewDisplay>,
+    /// The worst alert's late checks are shown, and all of them.
     late_open: bool,
     late_all: bool,
+    menus: OpenMenu<PageMenu>,
+    /// The editor's preview, when the page is one.
+    preview: Option<Preview>,
     _subscription: Subscription,
 }
+
+impl EventEmitter<HealthPageEvent> for HealthPage {}
 
 impl HealthPage {
     pub(crate) fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -82,11 +101,51 @@ impl HealthPage {
             sidebar_open: true,
             drag: WindowDrag::default(),
             focus_handle: cx.focus_handle(),
-            folded: [false; 4],
+            folded: Vec::new(),
             late_open: false,
             late_all: false,
+            menus: OpenMenu::default(),
+            preview: None,
             _subscription: subscription,
         }
+    }
+
+    /// The page as the editor's preview of `preview`.
+    pub(crate) fn preview(
+        state: Entity<AppState>,
+        preview: Preview,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            preview: Some(preview),
+            ..Self::new(state, cx)
+        }
+    }
+
+    /// The editor's draft changed.
+    pub(crate) fn set_preview(&mut self, preview: Preview, cx: &mut Context<Self>) {
+        if self.preview.as_ref() != Some(&preview) {
+            self.preview = Some(preview);
+            cx.notify();
+        }
+    }
+
+    /// The views the page shows, in order: the preview's or the
+    /// environment's (switched-off ones left out).
+    pub(crate) fn views(&self, cx: &gpui::App) -> Vec<View> {
+        let views = match &self.preview {
+            Some(preview) => preview.views.clone(),
+            None => self
+                .state
+                .read(cx)
+                .environment()
+                .map(|environment| environment.health_page.views.clone())
+                .unwrap_or_else(|| HealthLayout::default().views),
+        };
+        views
+            .into_iter()
+            .filter(|view| view.display.is_health() && !view.health.off)
+            .collect()
     }
 
     /// Tells the page whether the sidebar is shown (the header then needs
@@ -98,15 +157,18 @@ impl HealthPage {
         }
     }
 
-    /// Whether `section` is folded.
-    fn is_folded(&self, section: Section) -> bool {
-        self.folded[section.index()]
+    /// Whether the view of `display` is folded.
+    fn is_folded(&self, display: ViewDisplay) -> bool {
+        self.folded.contains(&display)
     }
 
-    /// Folds or unfolds `section`.
-    fn toggle(&mut self, section: Section, cx: &mut Context<Self>) {
-        let folded = &mut self.folded[section.index()];
-        *folded = !*folded;
+    /// Folds or unfolds the view of `display`.
+    fn toggle(&mut self, display: ViewDisplay, cx: &mut Context<Self>) {
+        if let Some(index) = self.folded.iter().position(|folded| *folded == display) {
+            self.folded.remove(index);
+        } else {
+            self.folded.push(display);
+        }
         cx.notify();
     }
 
@@ -150,7 +212,8 @@ impl HealthPage {
                     .text_size(theme.text.small)
                     .text_color(colors.text_faint)
                     .child(updated_text(report, now)),
-            );
+            )
+            .child(self.options_trigger(cx));
         if !self.sidebar_open {
             header = header.leading(sidebar_reopen(controls, theme));
         }
@@ -209,35 +272,254 @@ impl HealthPage {
             .into_any_element()
     }
 
-    /// The banner while a zone is cut off (or an endpoint is down), with
-    /// *show the late checks* when its zone has some.
-    fn render_banner(&self, banner: &HealthBanner, cx: &Context<Self>) -> AnyElement {
-        let tone = match banner.tone {
+    /// The header's `···`: *edit page* (the dashboard editor on this
+    /// page).
+    fn options_trigger(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let open = self.menus.is_open(&PageMenu::Options);
+        let trigger = GlyphButton::new("health-options", "···")
+            .text_size(px(13.))
+            .bleed()
+            .color(theme.colors.text_muted)
+            .selected(open)
+            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                this.menus.toggle(PageMenu::Options, down_position(event));
+                cx.notify();
+            }));
+        let menu = Menu::new("health-options-menu")
+            .item(
+                MenuItem::new("health-edit-page", "edit page")
+                    .icon(IconName::Pencil)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.menus.close();
+                        cx.emit(HealthPageEvent::Edit);
+                        cx.notify();
+                    })),
+            )
+            .on_dismiss(cx.listener(|this, dismissal: &Dismissal, _, cx| {
+                this.menus.dismissed(*dismissal);
+                cx.notify();
+            }));
+        div()
+            .relative()
+            .flex_none()
+            .ml(px(10.))
+            .child(if open {
+                trigger
+            } else {
+                trigger.tooltip(Tooltip::new("Page options"))
+            })
+            .when(open, |trigger| {
+                trigger.child(
+                    Popover::new(menu)
+                        .align_right()
+                        .outset(GlyphButton::reach(), px(0.)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The heartbeat row (16a2), pinned under the health line: the beats'
+    /// dot, `heartbeats 6 of 6` in fixed slots, what they do (and a late
+    /// beat's age), and at the right the trouble policy and *settings*.
+    fn render_beat_row(&self, row: &BeatRow, policy: &'static str, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let text = |tone: Tone| match tone {
+            Tone::Critical => theme.states.text.critical,
+            Tone::Warning => theme.states.text.warning,
+            Tone::Normal => colors.text_muted,
+        };
+        let slot = |chars: f32| (theme.text.small * (ic_ui_kit::CHAR_WIDTH * chars)).ceil();
+        let preview = self.preview.is_some();
+        div()
+            .id("health-beats")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(7.))
+            .h(Metrics::with_rule(theme.metrics.summary_bar_height))
+            .px(theme.metrics.list_padding)
+            .border_b_1()
+            .border_color(colors.border_header)
+            .text_size(theme.text.small)
+            .text_color(colors.text_secondary)
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .child(StateDot::with_color(beat_color(row.tone, theme)).size(theme.metrics.summary_dot))
+            .child(div().flex_none().w(slot(10.)).child(row.label))
+            .child(div().flex_none().w(slot(12.)).truncate().child(row.subject.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(text(row.tone.text()))
+                    .child(row.status.clone()),
+            )
+            .children(row.age.clone().map(|age| {
+                div()
+                    .flex_none()
+                    .ml(px(24.))
+                    .text_color(colors.text_secondary)
+                    .child(age)
+            }))
+            .child(div().flex_1().min_w_0())
+            .when(row.watched, |line| {
+                line.child(div().flex_none().text_color(colors.text_faint).child(policy))
+            })
+            .child(
+                Link::new("health-beats-settings", "settings").on_click(cx.listener(
+                    move |_, _: &ClickEvent, _, cx| {
+                        if !preview {
+                            cx.emit(HealthPageEvent::Settings);
+                        }
+                    },
+                )),
+            )
+            .into_any_element()
+    }
+
+    /// The alert block (16a3), pinned under the heartbeat row: the worst
+    /// alert in full (its title, what it means, its link and since when),
+    /// the others one line each; the worst one's tone tints it.
+    fn render_alerts(&self, alerts: &[AlertLine], cx: &Context<Self>) -> Option<AnyElement> {
+        let worst = alerts.first()?;
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let tone = match worst.tone {
             Tone::Critical => BannerTone::Critical,
             Tone::Warning | Tone::Normal => BannerTone::Warning,
         };
-        let mut element =
-            Banner::new("health-banner", tone, banner.title.clone()).detail(banner.detail.clone());
-        if banner.late_zone.is_some() {
-            element = element.child(
-                Link::new(
-                    "health-late",
-                    if self.late_open {
-                        "hide the late checks"
-                    } else {
-                        "show the late checks"
-                    },
+        let icon = |line: &AlertLine| {
+            let color = match line.tone {
+                Tone::Critical => theme.states.fill.critical,
+                Tone::Warning | Tone::Normal => theme.states.fill.warning,
+            };
+            div()
+                .flex()
+                .flex_none()
+                .justify_center()
+                .w(px(16.))
+                .child(Icon::new(IconName::TriangleAlert).size(theme.metrics.icon).color(color))
+        };
+        let since = |line: &AlertLine| {
+            div()
+                .flex_none()
+                .text_size(theme.text.small)
+                .text_color(colors.text_muted)
+                .child(line.since.clone())
+        };
+        let link = worst.link.clone().map(|(words, action)| {
+            Link::new("health-alert-link", if matches!(action, AlertAction::LateChecks { .. }) && self.late_open {
+                "hide the late checks".to_owned()
+            } else {
+                words
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.alert_action(&action, cx);
+            }))
+        });
+        let first = div()
+            .id("health-alert-0")
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .min_h(px(44.))
+            .py(px(8.))
+            .child(icon(worst))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(theme.text.body)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.text_strong)
+                            .child(worst.title.clone()),
+                    )
+                    .when(!worst.detail.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .truncate()
+                                .text_size(theme.text.small)
+                                .text_color(colors.text_muted)
+                                .child(worst.detail.clone()),
+                        )
+                    }),
+            )
+            .children(link.map(|link| div().flex_none().text_size(theme.text.small).child(link)))
+            .child(since(worst));
+        let others = alerts.iter().enumerate().skip(1).map(|(index, line)| {
+            div()
+                .id(("health-alert", index))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .h(px(30.))
+                .child(icon(line))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(theme.text.body)
+                        .text_color(colors.text_strong)
+                        .child(line.title.clone()),
                 )
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.late_open = !this.late_open;
-                    cx.notify();
-                })),
-            );
-        }
-        element.into_any_element()
+                .child(since(line))
+        });
+        Some(
+            div()
+                .id("health-alerts")
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .pl(theme.metrics.list_padding)
+                .pr(theme.metrics.list_padding)
+                .pb(px(if alerts.len() > 1 { 6. } else { 0. }))
+                .bg(tone.tint(theme))
+                .border_b_1()
+                .border_color(colors.border_header)
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.))
+                        .bg(tone.color(theme)),
+                )
+                .child(first)
+                .children(others)
+                .into_any_element(),
+        )
     }
 
-    /// The cut-off zone's late checks under the banner, most overdue first:
+    /// What the worst alert's link does.
+    fn alert_action(&mut self, action: &AlertAction, cx: &mut Context<Self>) {
+        if self.preview.is_some() {
+            return;
+        }
+        match action {
+            AlertAction::LateChecks { .. } => {
+                self.late_open = !self.late_open;
+                cx.notify();
+            }
+            AlertAction::ShowNode(_) => {
+                // The node's row is in the zones view: unfold it.
+                self.folded.retain(|display| *display != ViewDisplay::ZonesAndEndpoints);
+                cx.notify();
+            }
+            AlertAction::Settings => cx.emit(HealthPageEvent::Settings),
+        }
+    }
+
+    /// The worst alert's late checks under the block, most overdue first:
     /// seven, then `+ N more` (all of them, `− show fewer`). A click opens
     /// one as a tab.
     fn render_late(
@@ -303,7 +585,7 @@ impl HealthPage {
         )
     }
 
-    /// One late check under the banner: its mark, `service on host`, how
+    /// One late check under the alert block: its mark, `service on host`, how
     /// late it is; a click opens it as a tab.
     fn late_row(
         index: usize,
@@ -378,22 +660,37 @@ impl HealthPage {
             .into_any_element()
     }
 
-    /// A section's 36px header (as a stacked view's): the fold chevron,
-    /// the icon, the name, what it shows (faint), and anything at the right.
+    /// A view's 36px header (as a stacked view's): the fold chevron, the
+    /// icon, the name, what it shows (faint), and anything at the right.
+    /// In the editor's preview the selected view's header is marked, and a
+    /// click selects a view.
     fn render_section_header(
         &self,
-        section: Section,
-        icon: IconName,
-        name: &'static str,
+        view: &View,
+        first: bool,
         about: String,
         right: Option<AnyElement>,
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
         let colors = theme.colors;
-        let folded = self.is_folded(section);
+        let display = view.display;
+        let folded = self.is_folded(display);
+        let picked = self
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.picked.as_deref())
+            == Some(view.id.as_str());
+        let name = if view.name.trim().is_empty() {
+            section_name(display).to_owned()
+        } else {
+            view.name.trim().to_owned()
+        };
+        let id = view.id.clone();
+        let in_preview = self.preview.is_some();
         div()
-            .id(section.id())
+            .id(section_id(display))
+            .relative()
             .flex()
             .flex_none()
             .items_center()
@@ -401,14 +698,29 @@ impl HealthPage {
             .h(Metrics::with_rule(theme.metrics.summary_bar_height))
             .pl(px(14.))
             .pr(theme.metrics.list_padding)
-            .bg(colors.pane_background)
+            .bg(if picked {
+                colors.row_selected
+            } else {
+                colors.pane_background
+            })
             .border_b_1()
             .border_color(colors.border_header)
-            .when(section != Section::Zones, gpui::Styled::border_t_1)
+            .when(!first, gpui::Styled::border_t_1)
             .whitespace_nowrap()
             .text_size(theme.text.small)
             .text_color(colors.text_muted)
             .cursor_pointer()
+            .when(picked, |header| {
+                header.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.))
+                        .bg(colors.accent),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -426,7 +738,7 @@ impl HealthPage {
                         .color(colors.text_faint),
                     ),
             )
-            .child(Icon::new(icon).size(px(13.)).color(colors.text_muted))
+            .child(Icon::new(section_icon(display)).size(px(13.)).color(colors.text_muted))
             .child(
                 div()
                     .flex_none()
@@ -444,76 +756,98 @@ impl HealthPage {
                     .child(about),
             )
             .children(right)
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle(section, cx)))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if in_preview {
+                    cx.emit(HealthPageEvent::Pick(id.clone()));
+                } else {
+                    this.toggle(display, cx);
+                }
+            }))
             .into_any_element()
     }
 
-    /// The four sections, each a header and (unless folded) its body.
-    fn render_sections(&self, report: &Report, cx: &Context<Self>) -> Vec<AnyElement> {
+    /// The page's views, each a header and (unless folded) its body.
+    fn render_sections(&self, report: &Report, views: &[View], cx: &Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme();
-        let counts = zone_counts(report, theme);
-        let zones_about = format!(
-            "{} · {} · {}",
-            plural(report.zones.len(), "zone", "zones"),
-            plural(
-                report.zones.iter().map(|zone| zone.endpoints.len()).sum(),
-                "endpoint",
-                "endpoints"
-            ),
-            plural(report.global_zones.len(), "global zone", "global zones")
-        );
+        // The editor's preview is narrower: three tiles a row (16k).
+        let columns = if self.preview.is_some() { 3 } else { 6 };
         let mut body: Vec<AnyElement> = Vec::new();
-        body.push(self.render_section_header(
-            Section::Zones,
-            IconName::List,
-            "zones and endpoints",
-            zones_about,
-            Some(counts),
-            cx,
-        ));
-        if !self.is_folded(Section::Zones) {
-            body.push(Self::render_zones(report, cx.theme()));
-        }
-        body.push(self.render_section_header(
-            Section::Checks,
-            IconName::ChartBar,
-            "checks",
-            "last minute, from /v1/status".to_owned(),
-            None,
-            cx,
-        ));
-        if !self.is_folded(Section::Checks) {
-            body.push(Self::render_tiles(
-                "health-check-tiles",
-                &report.checks,
-                cx.theme(),
-            ));
-        }
-        body.push(self.render_section_header(
-            Section::Queues,
-            IconName::ChartBar,
-            "queues and connections",
-            "ApiListener, JsonRpc".to_owned(),
-            None,
-            cx,
-        ));
-        if !self.is_folded(Section::Queues) {
-            body.push(Self::render_tiles(
-                "health-queue-tiles",
-                &report.queues,
-                cx.theme(),
-            ));
-        }
-        body.push(self.render_section_header(
-            Section::Switches,
-            IconName::List,
-            "Icinga’s global switches",
-            "read-only: icygui never changes them".to_owned(),
-            None,
-            cx,
-        ));
-        if !self.is_folded(Section::Switches) {
-            body.push(Self::render_switches(report, cx.theme()));
+        for (index, view) in views.iter().enumerate() {
+            let first = index == 0;
+            let folded = self.is_folded(view.display);
+            match view.display {
+                ViewDisplay::ZonesAndEndpoints => {
+                    let about = format!(
+                        "{} · {} · {}",
+                        plural(report.zones.len(), "zone", "zones"),
+                        plural(
+                            report.zones.iter().map(|zone| zone.endpoints.len()).sum(),
+                            "endpoint",
+                            "endpoints"
+                        ),
+                        plural(report.global_zones.len(), "global zone", "global zones")
+                    );
+                    body.push(self.render_section_header(
+                        view,
+                        first,
+                        about,
+                        Some(zone_counts(report, theme)),
+                        cx,
+                    ));
+                    if !folded {
+                        body.push(Self::render_zones(report, theme));
+                    }
+                }
+                ViewDisplay::Checks => {
+                    body.push(self.render_section_header(
+                        view,
+                        first,
+                        "last minute, from /v1/status".to_owned(),
+                        None,
+                        cx,
+                    ));
+                    if !folded {
+                        body.push(Self::render_tiles(
+                            "health-check-tiles",
+                            &report.checks,
+                            view,
+                            columns,
+                            theme,
+                        ));
+                    }
+                }
+                ViewDisplay::QueuesAndConnections => {
+                    body.push(self.render_section_header(
+                        view,
+                        first,
+                        "ApiListener, JsonRpc".to_owned(),
+                        None,
+                        cx,
+                    ));
+                    if !folded {
+                        body.push(Self::render_tiles(
+                            "health-queue-tiles",
+                            &report.queues,
+                            view,
+                            columns,
+                            theme,
+                        ));
+                    }
+                }
+                ViewDisplay::GlobalSwitches => {
+                    body.push(self.render_section_header(
+                        view,
+                        first,
+                        "read-only".to_owned(),
+                        None,
+                        cx,
+                    ));
+                    if !folded {
+                        body.push(Self::render_switches(report, cx.theme()));
+                    }
+                }
+                _ => {}
+            }
         }
         body
     }
@@ -532,6 +866,12 @@ impl HealthPage {
             ]
             .map(|text| cell(text, colors.text_faint)),
             None,
+            Some(
+                div()
+                    .text_color(colors.text_faint)
+                    .child("heartbeat")
+                    .into_any_element(),
+            ),
             false,
             px(28.),
             theme.text.label,
@@ -575,18 +915,31 @@ impl HealthPage {
             .into_any_element()
     }
 
-    /// A line of stat tiles: six columns, a wide tile spanning two.
-    fn render_tiles(id: &'static str, tiles: &[Tile], theme: &Theme) -> AnyElement {
+    /// A line of stat tiles: six columns, a wide tile spanning two; only
+    /// the tiles `view` shows, with or without their trend lines.
+    fn render_tiles(
+        id: &'static str,
+        tiles: &[Tile],
+        view: &View,
+        columns: u16,
+        theme: &Theme,
+    ) -> AnyElement {
+        let sparklines = view.health.sparklines;
         div()
             .id(id)
             .grid()
-            .grid_cols(6)
+            .grid_cols(columns)
             .gap(px(12.))
             .flex_none()
             .pt(px(14.))
             .pb(px(16.))
             .px(theme.metrics.list_padding)
-            .children(tiles.iter().map(|tile| render_tile(tile, theme)))
+            .children(
+                tiles
+                    .iter()
+                    .filter(|tile| tile.kind.is_none_or(|kind| view.health.shows(kind)))
+                    .map(|tile| render_tile(tile, sparklines, theme)),
+            )
             .into_any_element()
     }
 
@@ -675,11 +1028,22 @@ impl Render for HealthPage {
         let state = self.state.read(cx);
         let snapshot = state.snapshot().clone();
         let report = report(&snapshot, state.connection().is_connected(), now);
+        let policy = state
+            .environment()
+            .map_or("notify", |environment| environment.trouble.policy.label());
         if report.late.is_empty() {
             self.late_open = false;
             self.late_all = false;
         }
-        let header = self.render_header(&report, controls, now, cx);
+        let preview = self.preview.is_some();
+        // The editor's preview has the editor's header; the page shows the
+        // connection's banners as every page does (16d).
+        let header = (!preview).then(|| self.render_header(&report, controls, now, cx));
+        let banners = if preview {
+            Vec::new()
+        } else {
+            crate::banner::banners(&self.state, now, true, cx)
+        };
         let theme = cx.theme();
         let colors = theme.colors;
         if report.zones.is_empty() {
@@ -691,7 +1055,8 @@ impl Render for HealthPage {
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .child(header)
+                .children(header)
+                .children(banners)
                 .child(
                     EmptyState::new("No cluster nodes yet")
                         .leading(
@@ -706,12 +1071,11 @@ impl Render for HealthPage {
                 );
         }
         let health_line = Self::render_health_line(&report, theme);
-        let banner = report
-            .banner
-            .as_ref()
-            .map(|banner| self.render_banner(banner, cx));
+        let beats = self.render_beat_row(&report.beats, policy, cx);
+        let alerts = self.render_alerts(&report.alerts, cx);
         let late = self.render_late(&report, now, cx);
-        let body = self.render_sections(&report, cx);
+        let views = self.views(cx);
+        let body = self.render_sections(&report, &views, cx);
         div()
             .id("health-page")
             .track_focus(&self.focus_handle)
@@ -720,9 +1084,11 @@ impl Render for HealthPage {
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(header)
+            .children(header)
+            .children(banners)
             .child(health_line)
-            .children(banner)
+            .child(beats)
+            .children(alerts)
             .child(
                 div()
                     .id("health-body")
@@ -832,6 +1198,7 @@ const COLUMNS: [f32; 6] = [1.2, 0.8, 0.8, 0.9, 1.1, 1.6];
 fn table_row(
     cells: [Cell; 6],
     dot: Option<Hsla>,
+    beat: Option<AnyElement>,
     selected: bool,
     height: gpui::Pixels,
     size: gpui::Pixels,
@@ -869,7 +1236,64 @@ fn table_row(
                 .text_color(cell.color)
                 .child(cell.text)
         }))
+        .child(beat_slot(beat))
         .into_any_element()
+}
+
+/// The table's *heartbeat* column: a fixed slot at the right of every
+/// line (a zone's band too), empty without a beat.
+fn beat_slot(beat: Option<AnyElement>) -> AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .w(px(BEAT_COLUMN))
+        .children(beat)
+        .into_any_element()
+}
+
+/// The *heartbeat* column's width.
+const BEAT_COLUMN: f32 = 104.;
+
+/// A beat's dot and age (`● 8s`, `● disappeared`).
+fn beat_element(beat: &BeatCell, theme: &Theme) -> AnyElement {
+    let text = match beat.tone {
+        BeatTone::Critical => theme.states.text.critical,
+        BeatTone::Warning => theme.states.text.warning,
+        BeatTone::Ok | BeatTone::Off => theme.colors.text_secondary,
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .min_w_0()
+        .child(StateDot::with_color(beat_color(beat.tone, theme)).size(px(6.)))
+        .child(div().truncate().text_color(text).child(beat.text.clone()))
+        .into_any_element()
+}
+
+/// A beat's dot colour.
+fn beat_color(tone: BeatTone, theme: &Theme) -> Hsla {
+    tone.fill(theme)
+}
+
+/// A view's title on the page.
+fn section_name(display: ViewDisplay) -> &'static str {
+    match display {
+        ViewDisplay::ZonesAndEndpoints => "zones and endpoints",
+        ViewDisplay::Checks => "checks",
+        ViewDisplay::QueuesAndConnections => "queues and connections",
+        ViewDisplay::GlobalSwitches => "Icinga’s global switches",
+        _ => "",
+    }
+}
+
+/// A view's icon on the page.
+fn section_icon(display: ViewDisplay) -> IconName {
+    match display {
+        ViewDisplay::ZonesAndEndpoints | ViewDisplay::GlobalSwitches => IconName::List,
+        _ => IconName::ChartBar,
+    }
 }
 
 /// A zone's band: its worst endpoint's dot, the name, its line.
@@ -904,7 +1328,12 @@ fn zone_row(zone: &ZoneGroup, theme: &Theme) -> AnyElement {
                 .text_color(colors.text_strong)
                 .child(zone.name.clone()),
         )
-        .child(div().min_w_0().truncate().child(zone.detail.clone()))
+        .child(div().flex_1().min_w_0().truncate().child(zone.detail.clone()))
+        .child(beat_slot(
+            zone.beat
+                .as_ref()
+                .map(|beat| beat_element(beat, theme)),
+        ))
         .into_any_element()
 }
 
@@ -927,6 +1356,7 @@ fn endpoint_row(row: &EndpointRow, theme: &Theme) -> AnyElement {
             cell(row.status.clone(), status),
         ],
         Some(node_color(row.state, theme)),
+        row.beat.as_ref().map(|beat| beat_element(beat, theme)),
         row.this_node,
         px(34.),
         theme.text.body,
@@ -946,17 +1376,19 @@ fn node_color(state: NodeState, theme: &Theme) -> Hsla {
 /// One stat tile: label, value (in the warning or critical text colour
 /// when wrong), what it counts, and its trend (a blank of the same height
 /// without one, so every tile of a line is as tall).
-fn render_tile(tile: &Tile, theme: &Theme) -> AnyElement {
+fn render_tile(tile: &Tile, sparklines: bool, theme: &Theme) -> AnyElement {
     let colors = theme.colors;
     let (value, last) = match tile.tone {
         Tone::Critical => (theme.states.text.critical, theme.states.fill.critical),
         Tone::Warning => (theme.states.text.warning, theme.states.fill.warning),
         Tone::Normal => (colors.text_strong, colors.accent),
     };
-    let trend: AnyElement = if tile.trend.len() >= 2 {
-        spark::sparkline(&tile.trend, colors.text_faint, last).into_any_element()
+    let trend: Option<AnyElement> = if !sparklines {
+        None
+    } else if tile.trend.len() >= 2 {
+        Some(spark::sparkline(&tile.trend, colors.text_faint, last).into_any_element())
     } else {
-        div().h(px(spark::HEIGHT)).into_any_element()
+        Some(div().h(px(spark::HEIGHT)).into_any_element())
     };
     div()
         .flex()
@@ -992,7 +1424,7 @@ fn render_tile(tile: &Tile, theme: &Theme) -> AnyElement {
                 .text_color(colors.text_muted)
                 .child(tile.detail.clone()),
         )
-        .child(trend)
+        .children(trend)
         .into_any_element()
 }
 

@@ -9,6 +9,8 @@
 //!   side by side;
 //! - `dashboards`: dashboard evaluation and previews;
 //! - `freshness`: the freshness watchdog, hydration and reconcile;
+//! - `heartbeats`: heartbeats and trouble alerts (no live data, Icinga
+//!   health alerts);
 //! - `gentle`: failing reloads, `Refresh` presses, hidden objects, refused
 //!   kinds and stalled streams cost Icinga little;
 //! - `notifications`: rule inputs, the rule engine and the notifier;
@@ -34,6 +36,7 @@ mod event_log;
 mod events;
 mod freshness;
 mod gentle;
+mod heartbeats;
 mod notifications;
 mod notified;
 mod probe;

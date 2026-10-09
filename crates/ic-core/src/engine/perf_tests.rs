@@ -288,6 +288,7 @@ fn data_of(store: &Store) -> Data {
         service_groups: Arc::clone(store.service_groups()),
         now: Timestamp::now(),
         events: Arc::default(),
+        excluded: Arc::default(),
     }
 }
 

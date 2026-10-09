@@ -98,6 +98,15 @@ pub struct Snapshot {
     /// shows them for the whole environment ([`crate::stream_events`]).
     /// The same `Arc` while no event is added.
     pub events: Arc<Vec<LogEntry>>,
+    /// The heartbeat services ([`crate::heartbeat`]): left out of lists,
+    /// counts, rules and notifications (they are in `services`, for the
+    /// health page and the settings).
+    pub excluded: Arc<BTreeSet<ServiceKey>>,
+    /// The heartbeats and where each stands.
+    pub heartbeats: Arc<crate::heartbeat::Heartbeats>,
+    /// The raised trouble alerts, and since when the environment is blind
+    /// ([`crate::trouble`]).
+    pub trouble: Arc<crate::trouble::Trouble>,
 }
 
 impl Snapshot {

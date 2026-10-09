@@ -108,6 +108,17 @@ pub(crate) enum DemoFault {
     /// `no-comments`: the API user may do everything but add comments, so
     /// nothing offers to write one (topic 17, frame 17f).
     NoComments,
+    /// `master-down`: 20 seconds in, the second master `master-02`
+    /// disconnects: its pinned heartbeat comes back UNKNOWN with Icinga's
+    /// words, and the endpoint and its beat make one alert (16t).
+    MasterDown,
+    /// `checks-stopped`: 20 seconds in, the simulated Icinga stops running
+    /// checks, as a hung checker does: the heartbeats stop and the REST
+    /// query finds them old, *Icinga runs no checks* (16s).
+    ChecksStopped,
+    /// `beat-gone`: 20 seconds in, zone `fra`'s heartbeat is deleted from
+    /// the configuration: a finding until its removal is confirmed (16u).
+    BeatGone,
 }
 
 impl DemoFault {
@@ -126,6 +137,9 @@ impl DemoFault {
             "partial" => Some(Self::Partial),
             "satellite-down" => Some(Self::SatelliteDown),
             "no-comments" => Some(Self::NoComments),
+            "master-down" => Some(Self::MasterDown),
+            "checks-stopped" => Some(Self::ChecksStopped),
+            "beat-gone" => Some(Self::BeatGone),
             _ => None,
         }
     }
@@ -293,6 +307,13 @@ pub(crate) fn start(
         tracing::warn!(scenario = %options.scenario, known = ?scenarios::NAMES, "unknown demo scenario; using prod-cluster");
         scenarios::prod_cluster()
     });
+    // `prod-cluster` has heartbeats, as the user guide sets them up: one
+    // per zone, and one per endpoint of its masters' HA zone (topic 16).
+    let scenario = if scenario.name == DEFAULT_SCENARIO {
+        scenario.with_heartbeats(HEARTBEAT_EVERY)
+    } else {
+        scenario
+    };
     let password = demo_password();
     let permissions: &[&str] = if options.fault == Some(DemoFault::NoComments) {
         NO_COMMENTS
@@ -365,6 +386,10 @@ fn child_zone_nodes(scenario: &ic_mock::Scenario) -> Vec<String> {
 
 /// The satellite [`DemoFault::SatelliteDown`] drops.
 const DROPPED_SATELLITE: &str = "sat-fra-01";
+/// The master [`DemoFault::MasterDown`] drops.
+const DROPPED_MASTER: &str = "master-02";
+/// How often the demo's heartbeats run (seconds).
+const HEARTBEAT_EVERY: f64 = 30.0;
 
 /// Runs the mock server (and the satellites' servers) until `stopped`
 /// fires.
@@ -432,15 +457,38 @@ fn serve(
                             control.drop_connections();
                         });
                     }
-                    Some(DemoFault::SatelliteDown) => {
+                    Some(fault @ (DemoFault::SatelliteDown | DemoFault::MasterDown)) => {
+                        let control = control.clone();
+                        let node = if fault == DemoFault::MasterDown {
+                            DROPPED_MASTER
+                        } else {
+                            DROPPED_SATELLITE
+                        };
+                        tokio::spawn(async move {
+                            tokio::time::sleep(OUTAGE_AFTER).await;
+                            match control.set_endpoint_connected(node, false) {
+                                Ok(()) => tracing::info!(%node, "a demo node drops out"),
+                                Err(error) => {
+                                    tracing::warn!(%error, "the demo has no such node to drop");
+                                }
+                            }
+                        });
+                    }
+                    Some(DemoFault::ChecksStopped) => {
                         let control = control.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(OUTAGE_AFTER).await;
-                            match control.set_endpoint_connected(DROPPED_SATELLITE, false) {
-                                Ok(()) => tracing::info!("the demo's satellite drops out"),
-                                Err(error) => {
-                                    tracing::warn!(%error, "the demo has no satellite to drop");
-                                }
+                            tracing::info!("the demo's Icinga stops running checks");
+                            control.stop_checks();
+                        });
+                    }
+                    Some(DemoFault::BeatGone) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(OUTAGE_AFTER).await;
+                            match control.remove_service("icygui-hb-fra", "beat") {
+                                Ok(()) => tracing::info!("the demo's fra heartbeat is deleted"),
+                                Err(error) => tracing::warn!(%error, "no fra heartbeat to delete"),
                             }
                         });
                     }
@@ -623,6 +671,7 @@ fn environment(id: &str, name: &str, groups: Vec<DashboardGroup>) -> Environment
         author: Some("j.berg".to_owned()),
         groups,
         notifications: NotificationSettings::default(),
+        ..Environment::default()
     }
 }
 

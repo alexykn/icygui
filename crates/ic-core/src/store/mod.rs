@@ -187,6 +187,9 @@ pub(crate) struct Store {
     /// While recording: objects answers brought that the store neither
     /// held nor hid (see [`Store::track_appeared`]).
     appeared: Option<Vec<ObjectKey>>,
+    /// The heartbeat objects (`Snapshot::excluded`): left out of lists,
+    /// counts, rules and notifications.
+    excluded: Arc<BTreeSet<ServiceKey>>,
 }
 
 impl Store {
@@ -569,6 +572,9 @@ impl Store {
             quiet: false,
             updating: Arc::default(),
             events: Arc::default(),
+            excluded: Arc::clone(&self.excluded),
+            heartbeats: Arc::default(),
+            trouble: Arc::default(),
         }
     }
 
@@ -581,6 +587,9 @@ impl Store {
         // Services are sorted by host: each host is looked up once.
         let mut current: Option<(&HostName, Option<&Host>)> = None;
         for service in self.services.values() {
+            if self.excluded.contains(&service.key) {
+                continue;
+            }
             let host = match current {
                 Some((name, host)) if *name == service.key.host => host,
                 _ => {
@@ -931,6 +940,36 @@ impl Store {
             }
         }
         self.changes.any = true;
+    }
+
+    /// The heartbeat objects, left out of lists, counts, rules and
+    /// notifications.
+    pub(crate) fn excluded(&self) -> &Arc<BTreeSet<ServiceKey>> {
+        &self.excluded
+    }
+
+    /// Whether `key` is a heartbeat object.
+    pub(crate) fn is_excluded(&self, key: &ObjectKey) -> bool {
+        key.as_service()
+            .is_some_and(|service| self.excluded.contains(service))
+    }
+
+    /// Sets the heartbeat objects; those that join or leave the set are
+    /// marked changed, so the dashboards take them out (or back in).
+    pub(crate) fn set_excluded(&mut self, excluded: BTreeSet<ServiceKey>) {
+        if *self.excluded == excluded {
+            return;
+        }
+        for key in excluded.symmetric_difference(&self.excluded) {
+            self.changes.objects.insert(ObjectKey::from(key.clone()));
+        }
+        self.excluded = Arc::new(excluded);
+        self.changes.any = true;
+    }
+
+    /// The cluster health page's data.
+    pub(crate) fn health(&self) -> &ClusterHealth {
+        &self.health
     }
 
     /// Changes the cluster health page's data (marks the store changed).

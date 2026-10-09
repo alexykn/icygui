@@ -44,6 +44,9 @@ impl Engine {
             || self.notify.has_pending()
             || self.updating_changed
             || self.mode_changed
+            || self.beats.changed
+            || self.beats.news
+            || self.trouble.news
             || self.streams_wait()
     }
 
@@ -107,8 +110,11 @@ impl Engine {
         // The stream's mode, the objects being updated and new events are
         // news of their own: such a snapshot goes out even if nothing else
         // changed.
+        self.refresh_beats();
         let news = std::mem::take(&mut self.updating_changed)
             | std::mem::take(&mut self.mode_changed)
+            | std::mem::take(&mut self.beats.news)
+            | std::mem::take(&mut self.trouble.news)
             | new_events;
         let refresh_time = self.time_dependent && self.time_refreshed.elapsed() >= TIME_REFRESH;
         let events = new_events && dashboards.has_streams();
@@ -121,6 +127,8 @@ impl Engine {
         snapshot.quiet = self.stream_quiet();
         snapshot.updating = Arc::clone(&self.updating);
         snapshot.events = Arc::clone(&self.recent_events);
+        snapshot.heartbeats = Arc::clone(self.beats.published());
+        snapshot.trouble = Arc::clone(self.trouble.published());
         let evaluate = reconfigured
             || resumed
             || events
@@ -149,6 +157,7 @@ impl Engine {
             service_groups: Arc::clone(&snapshot.service_groups),
             now: self.evaluation_time(),
             events: Arc::clone(&self.recent_events),
+            excluded: Arc::clone(&snapshot.excluded),
         };
         let tx = self.internal_tx.clone();
         let cancel = Arc::clone(&self.cancel);
@@ -238,6 +247,7 @@ impl Engine {
             service_groups: Arc::clone(self.store.service_groups()),
             now: self.evaluation_time(),
             events: Arc::clone(&self.recent_events),
+            excluded: Arc::clone(self.store.excluded()),
         }
     }
 

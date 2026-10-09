@@ -190,6 +190,12 @@ pub struct Tuning {
     pub start_delay_per_thousand: Duration,
     /// … but at most this (90 s).
     pub start_delay_max: Duration,
+    /// The heartbeats' time budget ([`crate::heartbeat::Timing`]).
+    pub heartbeat: crate::heartbeat::Timing,
+    /// How long a trouble condition (no live data, an Icinga health
+    /// alert) must hold before it is raised ([`crate::trouble::GRACE`],
+    /// 2 minutes).
+    pub trouble_grace: Duration,
     /// With several URLs, how long logging in at one and finding out its
     /// node (`GET /v1`, the node's name, the zones) may take while other
     /// URLs remain to try, and in a probe (8 s): a node that accepts
@@ -232,6 +238,8 @@ impl Default for Tuning {
             request_burst: 10,
             start_delay_per_thousand: Duration::from_secs(3),
             start_delay_max: Duration::from_secs(90),
+            heartbeat: crate::heartbeat::Timing::default(),
+            trouble_grace: crate::trouble::GRACE,
         }
     }
 }

@@ -76,7 +76,8 @@ pub use config::{MockConfig, MockTls, MockUser, NumberFormat, SimulationConfig, 
 pub use control::{EventStreamStats, MockControl, RecordedRequest};
 pub use error::MockError;
 pub use scenario::{
-    Notification, Scenario, ScenarioFeatures, Summary, User, Zone, raw_check_result,
+    HEARTBEAT_VARIABLE, Notification, Scenario, ScenarioFeatures, Summary, User, Zone,
+    raw_check_result,
 };
 pub use server::MockServer;
 pub use tls::{TlsMaterial, format_fingerprint};

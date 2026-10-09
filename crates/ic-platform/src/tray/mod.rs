@@ -97,6 +97,18 @@ impl TrayTone {
     }
 }
 
+/// What the tray icon shows: a state's tint, or the blind look (a dashed
+/// grey orbit around a hollow core, the node yellow) while an
+/// environment has had no live data for a while: its states may be
+/// outdated, so the icon claims none of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TrayLook {
+    /// Tinted with this tone (`None`: grey).
+    State(Option<TrayTone>),
+    /// No live data.
+    Blind,
+}
+
 /// What the user chose in the tray.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TrayCommand {
@@ -150,7 +162,7 @@ impl Tray {
         install_event_handlers();
 
         let image =
-            icon::tray_icon(None).map_err(|error| PlatformError::Tray(error.to_string()))?;
+            icon::tray_icon(TrayLook::State(None)).map_err(|error| PlatformError::Tray(error.to_string()))?;
         // Linux hosts show the title as the tooltip's heading; macOS would
         // draw it as text next to the icon in the menu bar.
         let (title, tooltip) = if cfg!(target_os = "macos") {
@@ -187,7 +199,7 @@ impl Tray {
             commands: Cell::new(Some(receiver)),
             state: RefCell::new(state),
             entries: RefCell::new(entries),
-            shown: Cell::new(Shown::Tone(None)),
+            shown: Cell::new(Shown::Look(TrayLook::State(None))),
             tooltip: RefCell::new(tooltip),
         })
     }
@@ -207,8 +219,13 @@ impl Tray {
     /// 5 warning`. Unchanged values are not sent to the OS again, so this
     /// can be called for every snapshot. Failures are logged.
     pub fn set_state(&self, worst: Option<TrayTone>, tooltip: &str) {
-        if self.shown.get() != Shown::Tone(worst) {
-            let shown = icon::tray_icon(worst)
+        self.set_look(TrayLook::State(worst), tooltip);
+    }
+
+    /// [`Tray::set_state`] for any look, the blind one too.
+    pub fn set_look(&self, look: TrayLook, tooltip: &str) {
+        if self.shown.get() != Shown::Look(look) {
+            let shown = icon::tray_icon(look)
                 .map_err(|error| error.to_string())
                 .and_then(|image| {
                     self.icon
@@ -216,7 +233,7 @@ impl Tray {
                         .map_err(|error| error.to_string())
                 });
             match shown {
-                Ok(()) => self.shown.set(Shown::Tone(worst)),
+                Ok(()) => self.shown.set(Shown::Look(look)),
                 Err(error) => {
                     self.shown.set(Shown::Unknown);
                     tracing::warn!(%error, "cannot update the tray icon");
@@ -234,7 +251,7 @@ impl Tray {
     }
 
     /// Lists the environments, as `(id, name)` pairs in display order, in
-    /// the Environment submenu; `active` is marked `✓` (and can't be
+    /// the menu's environment lines; `active` is marked `✓` (and can't be
     /// chosen again). Choosing another one sends
     /// [`TrayCommand::SwitchEnvironment`] and changes nothing in the menu
     /// by itself, so a switch that is refused or fails leaves the mark on
@@ -245,6 +262,13 @@ impl Tray {
             state.environments = environments.to_vec();
             state.active = active.map(str::to_owned);
         });
+    }
+
+    /// What each environment's line says after its name, as `(id,
+    /// status)` (`live`, `no data 3m`). Keep it coarse: a changed status
+    /// rebuilds the menu, which closes it on macOS.
+    pub fn set_environment_statuses(&self, statuses: &[(String, String)]) {
+        self.update_menu(|state| state.statuses = statuses.to_vec());
     }
 
     /// Shows `Paused until …` (with this text) and `Resume notifications`
@@ -325,8 +349,8 @@ fn tooltip_text(text: &str) -> String {
 enum Shown {
     /// Unknown: the last update failed, so the next one is sent again.
     Unknown,
-    /// This tone (`None`: grey).
-    Tone(Option<TrayTone>),
+    /// This look.
+    Look(TrayLook),
 }
 
 /// Where tray events go: the command channel of the live [`Tray`].
@@ -512,22 +536,25 @@ mod tests {
                 .unwrap_or_else(|| panic!("no submenu {text:?}"))
         };
 
-        let environments_before = menu::tests::rendered::shown(&submenu("Environment"));
+        let environment_lines = |items: &[MenuItemKindSnapshot]| -> Vec<String> {
+            menu::tests::rendered::shown(items)
+                .into_iter()
+                .filter(|line| line.contains("prod") || line.contains("staging"))
+                .collect()
+        };
+        let environments_before = environment_lines(&items);
         activate(&items, "Open icygui");
         activate(&items, "Resume notifications");
         activate(&submenu("Pause notifications"), "For 30 minutes");
         activate(&submenu("Pause notifications"), "Until 08:00");
-        activate(&submenu("Environment"), "\u{2003}staging");
+        activate(&items, "\u{2003}staging");
         activate(&items, "Paused until 18:30");
         activate(&items, "Quit icygui");
         on_icon_event(&click(MouseButton::Left, MouseButtonState::Up));
 
         // A click changes nothing in the menu by itself: if the app refuses
         // the switch, the mark stays on the active environment.
-        assert_eq!(
-            menu::tests::rendered::shown(&submenu("Environment")),
-            environments_before
-        );
+        assert_eq!(environment_lines(&items), environments_before);
         assert_eq!(
             environments_before,
             ["✓ prod (off)", "\u{2003}staging"],

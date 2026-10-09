@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::model::{Config, Dashboard, Environment};
+use crate::view::View;
 
 /// The namespace of ids derived from settings content (UUID v5).
 ///
@@ -55,6 +56,10 @@ impl Config {
     /// when its entry's name or first URL does, or an identical entry
     /// before it comes or goes; so a password stored under a derived
     /// environment id is never offered to another cluster.
+    ///
+    /// It also keeps the view kinds where they belong (counted in the
+    /// result): the cluster health page's kinds on that page only, one view
+    /// per kind with its kind's id ([`crate::HealthPage::repair`]).
     pub fn repair_ids(&mut self) -> usize {
         let mut changed = 0;
         let mut environment_ids = Scope::new(self.environments.iter().map(|e| e.id.as_str()));
@@ -72,9 +77,38 @@ impl Config {
         }
         for environment in &mut self.environments {
             changed += repair_group_and_dashboard_ids(environment);
+            changed += repair_view_kinds(environment);
         }
         changed
     }
+}
+
+/// [`Config::repair_ids`] for the view kinds of one environment: the
+/// health kinds belong to its cluster health page only (a dashboard's view
+/// of one, written by hand, is dropped; a dashboard left without views
+/// gets the default list), and the page keeps only those
+/// ([`HealthPage::repair`]).
+fn repair_view_kinds(environment: &mut Environment) -> usize {
+    let mut changed = environment.health_page.repair();
+    for dashboard in environment
+        .groups
+        .iter_mut()
+        .flat_map(|group| group.dashboards.iter_mut())
+    {
+        let before = dashboard.views.len();
+        dashboard.views.retain(|view| !view.display.is_health());
+        let dropped = before - dashboard.views.len();
+        if dropped > 0 {
+            changed += dropped;
+            if dashboard.views.is_empty() {
+                dashboard.views.push(View {
+                    id: format!("{}-view", dashboard.id),
+                    ..View::default()
+                });
+            }
+        }
+    }
+    changed
 }
 
 /// [`Config::repair_ids`] for the groups and dashboards of one environment,

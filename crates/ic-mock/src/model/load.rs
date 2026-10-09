@@ -149,6 +149,21 @@ impl World {
             pinned: scenario.pinned.iter().map(ObjectKey::full_name).collect(),
             sim: SimState::default(),
             reschedule_delay: options.reschedule_delay,
+            // The first beats a moment apart, at once.
+            realtime: scenario
+                .realtime
+                .iter()
+                .enumerate()
+                .map(|(index, object)| {
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "a few hundred objects at most"
+                    )]
+                    let offset = index as f64 * 0.05;
+                    (object.full_name(), now + offset)
+                })
+                .collect(),
+            checks_stopped: false,
         };
 
         let mut line = 1;

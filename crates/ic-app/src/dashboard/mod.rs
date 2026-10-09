@@ -100,7 +100,13 @@ pub(crate) fn primary_result<'a>(
 fn view_denial(state: &AppState, view: &View) -> Option<String> {
     use ic_config::ViewDisplay;
     match view.display {
-        ViewDisplay::EventStream | ViewDisplay::Handling | ViewDisplay::Downtimes => None,
+        ViewDisplay::EventStream
+        | ViewDisplay::Handling
+        | ViewDisplay::Downtimes
+        | ViewDisplay::ZonesAndEndpoints
+        | ViewDisplay::Checks
+        | ViewDisplay::QueuesAndConnections
+        | ViewDisplay::GlobalSwitches => None,
         ViewDisplay::HostGroupGrid => state.query_denial(ObjectKind::Hosts),
         ViewDisplay::List | ViewDisplay::GroupedList | ViewDisplay::SummaryTiles => {
             state.query_denial(view.object_kind)

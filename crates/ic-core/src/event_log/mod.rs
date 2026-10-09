@@ -28,7 +28,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use futures::channel::oneshot;
-use ic_model::{ObjectKey, Timestamp};
+use ic_model::{ObjectKey, ServiceKey, Timestamp};
 use ic_rules::NotificationIntent;
 
 use crate::command::{LogEntry, NotificationRecord};
@@ -126,7 +126,23 @@ enum Job {
     MarkOneRead(String),
     HistoryStart(oneshot::Sender<Option<Timestamp>>),
     Prune(Timestamp),
+    Heartbeats(Box<dyn FnOnce(Vec<RememberedBeat>) + Send>),
+    RememberHeartbeats(Vec<RememberedBeat>),
+    ForgetHeartbeat(ServiceKey),
     Stop(mpsc::Sender<()>),
+}
+
+/// A heartbeat icygui has seen (PLAN.md §4.2 B3): remembered so that one
+/// discovery no longer finds is a finding (*disappeared*) until the user
+/// confirms its removal, across restarts.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RememberedBeat {
+    /// The service.
+    pub(crate) key: ServiceKey,
+    /// What it proved (`zone fra`, `master-01`), for its line while gone.
+    pub(crate) proves: String,
+    /// Since when discovery no longer finds it (`None`: found).
+    pub(crate) missing_since: Option<Timestamp>,
 }
 
 /// The engine's handle on the log's thread. Every call returns at once;
@@ -249,6 +265,26 @@ impl EventLog {
     /// Deletes what happened before `before`.
     pub(crate) fn prune(&self, before: Timestamp) {
         let _ = self.send(Job::Prune(before));
+    }
+
+    /// Calls `reply` (on the log's thread) with the heartbeats remembered
+    /// (none without a log).
+    pub(crate) fn heartbeats(&self, reply: Box<dyn FnOnce(Vec<RememberedBeat>) + Send>) {
+        if let Err(Job::Heartbeats(reply)) = self.send(Job::Heartbeats(reply)) {
+            reply(Vec::new());
+        }
+    }
+
+    /// Remembers heartbeats (or what changed about them).
+    pub(crate) fn remember_heartbeats(&self, beats: Vec<RememberedBeat>) {
+        if !beats.is_empty() {
+            let _ = self.send(Job::RememberHeartbeats(beats));
+        }
+    }
+
+    /// Forgets a heartbeat (its removal was confirmed).
+    pub(crate) fn forget_heartbeat(&self, key: ServiceKey) {
+        let _ = self.send(Job::ForgetHeartbeat(key));
     }
 
     /// Lets the thread finish what it was given, waiting at most `timeout`
@@ -421,6 +457,23 @@ fn handle(database: Option<&mut Database>, job: Job) {
         }
         Job::HistoryStart(reply) => {
             let _ = reply.send(read(database, "the event log", Database::history_start));
+        }
+        Job::Heartbeats(reply) => {
+            reply(read(database, "the heartbeats", Database::heartbeats));
+        }
+        Job::RememberHeartbeats(beats) => {
+            if let Some(database) = database
+                && let Err(error) = database.remember_heartbeats(&beats)
+            {
+                tracing::warn!(%error, "couldn't remember the heartbeats");
+            }
+        }
+        Job::ForgetHeartbeat(key) => {
+            if let Some(database) = database
+                && let Err(error) = database.forget_heartbeat(&key)
+            {
+                tracing::warn!(%error, "couldn't forget a heartbeat");
+            }
         }
         Job::Prune(before) => {
             if let Some(database) = database {

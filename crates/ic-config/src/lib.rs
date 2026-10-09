@@ -25,6 +25,7 @@ mod environment;
 mod error;
 mod files;
 mod fingerprint;
+mod health_page;
 mod keymap;
 mod merge;
 mod migrate;
@@ -32,6 +33,7 @@ mod model;
 mod paths;
 mod share;
 mod store;
+mod trouble;
 mod ui_state;
 mod validate;
 mod view;
@@ -40,6 +42,7 @@ pub use config::new_id;
 pub use environment::default_groups;
 pub use error::ConfigError;
 pub use fingerprint::{format_fingerprint, parse_fingerprint};
+pub use health_page::HealthPage;
 pub use keymap::{KEYMAP_TEMPLATE, Keymap, KeymapAction, KeymapBinding, parse_keymap, read_keymap};
 pub use merge::merge_edit;
 pub use migrate::migrate;
@@ -51,6 +54,10 @@ pub use model::{
 pub use paths::Paths;
 pub use share::{export_groups, import_groups};
 pub use store::ConfigStore;
+pub use trouble::{
+    DEFAULT_HEARTBEAT_VARIABLE, HeartbeatMode, HeartbeatSettings, MIN_HEARTBEAT_INTERVAL_SECS,
+    Trouble, TroublePolicy,
+};
 pub use ui_state::{
     EnvironmentUiState, ListOptionsState, MAX_RECENT_ICONS, MAX_TABS, StateStore, UI_STATE_VERSION,
     UiState, WindowState,
@@ -58,7 +65,8 @@ pub use ui_state::{
 pub use validate::{MIN_EVENT_LOG_RETENTION_HOURS, MIN_RECONCILE_INTERVAL_SECS, ValidationIssue};
 pub use view::{
     DowntimeKinds, DowntimesMode, GridCells, GridColour, GridOptions, GroupBy, GroupOrder,
-    GroupSource, HandledMode, HandledSetting, HideHandled, MAX_VIEWS, ObjectKind, STREAM_LINES,
+    GroupSource, HandledMode, HandledSetting, HealthOptions, HealthTile, HideHandled, MAX_VIEWS,
+    ObjectKind, STREAM_LINES,
     Sort, SortKey, StateChip, StreamEvents, StreamOptions, ThreadChip, ThreadOptions, ThreadSort,
     View, ViewDisplay, ViewGroups,
 };

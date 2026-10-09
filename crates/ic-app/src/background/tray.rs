@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use gpui::{App, Entity, Global, Subscription, Task};
 use ic_model::{CheckableState, Timestamp};
-use ic_platform::tray::{Tray, TrayCommand, TrayTone};
+use ic_platform::tray::{Tray, TrayCommand, TrayLook, TrayTone};
 
 use crate::app_state::AppState;
 use crate::notifications::when;
@@ -32,6 +32,13 @@ pub(crate) struct TrayView {
     pub(crate) tooltip: String,
     /// The environments to switch to, `(id, name)`.
     pub(crate) environments: Vec<(String, String)>,
+    /// What each one's menu line says after its name, `(id, status)`:
+    /// `live`, `no data 3m`, `connecting` (16e).
+    pub(crate) statuses: Vec<(String, String)>,
+    /// An environment has had no live data for a while (or its engine
+    /// stopped answering): the icon takes the blind look, whatever the
+    /// states say, since they may be outdated (no false green).
+    pub(crate) blind: bool,
     /// The active one.
     pub(crate) active: Option<String>,
     /// Until when notifications are paused, as the menu says it.
@@ -49,6 +56,8 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
     // when some are connected and nothing is unhandled.
     let mut worst: Option<Option<CheckableState>> = None;
     let mut lines = Vec::new();
+    let mut statuses = Vec::new();
+    let mut blind = false;
     for environment in environments {
         let demo = if state.is_demo_environment_id(&environment.id) {
             " (demo)"
@@ -58,10 +67,21 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
         let Some(slot) = state.slot(&environment.id) else {
             // Its engine hasn't started yet.
             lines.push(format!("{}{demo} · connecting", environment.name));
+            statuses.push((environment.id.clone(), "connecting".to_owned()));
             continue;
         };
         let connection = slot.connection();
         let connected = connection.is_connected();
+        let no_data = connection.no_data_for(now);
+        blind |= no_data.is_some();
+        statuses.push((
+            environment.id.clone(),
+            match no_data {
+                Some(age) => menu_age(age),
+                None if connected => "live".to_owned(),
+                None => connection.short_state().to_owned(),
+            },
+        ));
         let overall = &slot.snapshot().overall;
         if connected {
             let current = worst.flatten();
@@ -133,7 +153,9 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
         .filter(|until| *until > now)
         .map(|until| when(until, now));
     if let Some(until) = &paused {
-        lines.push(format!("notifications paused until {until}"));
+        lines.push(format!(
+            "notifications paused until {until}, trouble alerts too"
+        ));
     }
     TrayView {
         tone: worst.and_then(TrayTone::for_worst_unhandled),
@@ -142,8 +164,22 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
             .iter()
             .map(|environment| (environment.id.clone(), environment.name.clone()))
             .collect(),
+        statuses,
+        blind,
         active: state.active_environment_id().map(str::to_owned),
         paused,
+    }
+}
+
+/// How long an environment has had no live data, as its menu line says
+/// it: in whole minutes (`no data 3m`), so the menu (rebuilt when a line
+/// changes, which closes it on macOS) changes at most once a minute.
+fn menu_age(age: Duration) -> String {
+    let minutes = age.as_secs() / 60;
+    if minutes == 0 {
+        "no data".to_owned()
+    } else {
+        crate::app_state::connection::no_data(Duration::from_secs(minutes * 60))
     }
 }
 
@@ -259,10 +295,16 @@ fn sync(state: &Entity<AppState>, cx: &mut App) {
     if shown.view.as_ref() == Some(&view) {
         return;
     }
-    shown.tray.set_state(view.tone, &view.tooltip);
+    let look = if view.blind {
+        TrayLook::Blind
+    } else {
+        TrayLook::State(view.tone)
+    };
+    shown.tray.set_look(look, &view.tooltip);
     shown
         .tray
         .set_environments(&view.environments, view.active.as_deref());
+    shown.tray.set_environment_statuses(&view.statuses);
     shown.tray.set_paused(view.paused.clone());
     shown.view = Some(view);
 }
@@ -340,7 +382,7 @@ mod tests {
         let view = tray_view(&state, now());
         assert!(view.paused.is_some());
         assert!(view.tooltip.ends_with(&format!(
-            "notifications paused until {}",
+            "notifications paused until {}, trouble alerts too",
             view.paused.clone().unwrap()
         )));
 
@@ -428,6 +470,34 @@ mod tests {
             "{}",
             view.tooltip
         );
+    }
+
+    #[test]
+    fn no_live_data_turns_the_tray_blind_and_its_line_says_since_when() {
+        let mut state = AppState::fixture(now());
+        let id = state.active_environment_id().unwrap().to_owned();
+        let view = tray_view(&state, now());
+        assert!(!view.blind);
+        assert_eq!(view.statuses, [(id.clone(), "live".to_owned())]);
+        // The engine says live data stopped 3 minutes ago: the icon claims
+        // no state (its states may be outdated), the menu says how long.
+        let since = Timestamp::from_unix_seconds(now().as_unix_seconds() - 185.0);
+        state.set_snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+            trouble: std::sync::Arc::new(ic_core::trouble::Trouble {
+                alerts: Vec::new(),
+                blind: Some(ic_core::trouble::Blind {
+                    since,
+                    reason: "event stream stalled".to_owned(),
+                }),
+            }),
+            ..(**state.snapshot()).clone()
+        }));
+        let view = tray_view(&state, now());
+        assert!(view.blind);
+        assert_eq!(view.statuses, [(id, "no data 3m".to_owned())]);
+        assert!(view.tooltip.contains("no live data"), "{}", view.tooltip);
+        assert_eq!(menu_age(Duration::from_secs(40)), "no data");
+        assert_eq!(menu_age(Duration::from_secs(61 * 60)), "no data 1h");
     }
 
     #[test]

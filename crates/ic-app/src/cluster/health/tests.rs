@@ -196,7 +196,8 @@ fn a_healthy_cluster_reads_like_the_mock_up() {
     assert_eq!((report.connected, report.not_connected), (4, 0));
     assert_eq!(report.instance, "Icinga r2.14.3-1 · up 41d 6h");
     assert_eq!(report.seen_from.as_deref(), Some("master-01"));
-    assert_eq!(report.banner, None);
+    assert!(report.alerts.is_empty());
+    assert_eq!(report.beats.tone, super::super::beats::BeatTone::Off, "no heartbeats");
     let zones: Vec<(&str, &str)> = report
         .zones
         .iter()
@@ -264,7 +265,21 @@ fn a_healthy_cluster_reads_like_the_mock_up() {
 
 #[test]
 fn a_satellite_gone_cuts_its_zone_off() {
-    let snapshot = degraded(&["sw-core-fra-01", "sw-core-fra-02"]);
+    let mut snapshot = degraded(&["sw-core-fra-01", "sw-core-fra-02"]);
+    // The engine's alert for it (ic-core's trouble assessment).
+    snapshot.trouble = Arc::new(ic_core::trouble::Trouble {
+        alerts: vec![ic_core::trouble::Alert {
+            key: "zone:fra".to_owned(),
+            tone: ic_core::trouble::AlertTone::Critical,
+            title: "zone fra: sat-fra-01 disconnected".to_owned(),
+            detail: "Zone fra’s results are stale; 2 checks in zone fra are late.".to_owned(),
+            action: Some(ic_core::trouble::AlertAction::LateChecks {
+                zone: Some("fra".to_owned()),
+            }),
+            since: at(192.0),
+        }],
+        blind: None,
+    });
     let report = report(&snapshot, true, now());
     assert_eq!(report.state, ClusterState::Critical);
     assert_eq!(assess(&snapshot, true, now()), ClusterState::Critical);
@@ -275,18 +290,14 @@ fn a_satellite_gone_cuts_its_zone_off() {
     assert_eq!(fra.endpoints[0].tone, Tone::Critical);
     assert_eq!(fra.endpoints[0].last_message, "3m 12s ago");
     assert_eq!(fra.endpoints[0].traffic, "0/s · 0/s");
-    let banner = report.banner.as_ref().unwrap();
-    assert_eq!(banner.tone, Tone::Critical);
+    let alert = &report.alerts[0];
+    assert_eq!(alert.tone, Tone::Critical);
+    assert_eq!(alert.title, "zone fra: sat-fra-01 disconnected");
     assert_eq!(
-        banner.title,
-        "sat-fra-01 has not been connected for 3m 12s: zone fra’s results are stale."
+        alert.link.as_ref().map(|(words, _)| words.as_str()),
+        Some("show the late checks")
     );
-    assert_eq!(
-        banner.detail,
-        "2 checks of 2 hosts in zone fra are late; the relay queue is growing (18,402 messages)."
-    );
-    assert_eq!(banner.late_zone.as_deref(), Some("fra"));
-    assert_eq!(report.late.len(), 2);
+    assert_eq!(report.late.len(), 2, "the alert's zone's late checks");
     let late = &report.checks[5];
     assert_eq!(late.tone, Tone::Critical, "a zone is cut off");
     assert_eq!(late.detail, "all in zone fra");
@@ -303,10 +314,9 @@ fn a_master_gone_from_an_ha_pair_warns_without_cutting_off() {
     endpoints[1].connected = false;
     snapshot.endpoints = Arc::new(endpoints);
     let report = report(&snapshot, true, now());
-    let banner = report.banner.unwrap();
-    assert_eq!(banner.tone, Tone::Warning);
-    assert!(banner.title.starts_with("master-02 has not been connected"));
-    assert_eq!(banner.late_zone, None);
+    // The engine raises its alert after the grace; until then the page
+    // shows the endpoint's row only.
+    assert!(report.alerts.is_empty());
     assert!(report.late.is_empty());
     // The endpoint is down all the same: the sidebar's dot is critical.
     assert_eq!(report.state, ClusterState::Critical);

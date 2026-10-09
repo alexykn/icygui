@@ -710,7 +710,7 @@ impl Sidebar {
                         .line_height(px(CHIP_HEIGHT))
                         .text_color(theme.states.text.warning)
                         .child(format!(
-                            "{}: shown silently",
+                            "{}, trouble alerts too: shown silently",
                             paused_text(environments, until, now)
                         )),
                 )
@@ -727,7 +727,10 @@ impl Sidebar {
                 .into_any_element();
         }
         if let Some((id, name, until)) = muted {
-            let text = format!("{name} muted until {}: shown silently", when(until, now));
+            let text = format!(
+                "{name} muted until {}, trouble alerts too: shown silently",
+                when(until, now)
+            );
             return row
                 .child(
                     div()
@@ -1091,6 +1094,10 @@ impl Sidebar {
                 environment: environment.to_owned(),
                 object: object.clone(),
             });
+        } else if ic_core::trouble::is_trouble_id(id) {
+            // A trouble alert is about the cluster: its health page.
+            self.menus.close();
+            cx.emit(SidebarEvent::OpenHealthIn(environment.to_owned()));
         }
         cx.notify();
     }

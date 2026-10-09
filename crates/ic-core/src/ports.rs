@@ -78,6 +78,20 @@ impl Clock for SystemClock {
     }
 }
 
+/// `at` as a local time of day (`02:14`), in the system's time zone: how
+/// trouble alerts say when something began.
+pub(crate) fn clock_time(at: Timestamp) -> String {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "milliseconds since 1970 fit an i64"
+    )]
+    let millis = (at.as_unix_seconds() * 1_000.0).round() as i64;
+    jiff::Timestamp::from_millisecond(millis).map_or_else(
+        |_| String::new(),
+        |time| time.to_zoned(jiff::tz::TimeZone::system()).strftime("%H:%M").to_string(),
+    )
+}
+
 /// Weekday (Monday = 0) and minute of the day of a zoned time.
 fn local_time(time: &jiff::Zoned) -> LocalTime {
     let weekday = u8::try_from(time.weekday().to_monday_zero_offset()).unwrap_or(0);

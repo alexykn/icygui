@@ -82,6 +82,11 @@ struct Args {
     /// (Icinga before 2.17 by default).
     #[arg(long)]
     no_filter_permission: bool,
+    /// Add icygui heartbeats (`vars.icygui_heartbeat`) checked every
+    /// SECONDS seconds in real time: one per zone of masters and
+    /// satellites, and one pinned to each endpoint of a zone with more.
+    #[arg(long, value_name = "SECONDS")]
+    heartbeats: Option<f64>,
 }
 
 /// One environment to serve.
@@ -383,8 +388,14 @@ async fn run(args: Args) -> Result<(), String> {
     };
     let mut servers = Vec::new();
     for env in &envs {
-        let scenario = scenarios::by_name(&env.name, args.seed)
+        let mut scenario = scenarios::by_name(&env.name, args.seed)
             .ok_or_else(|| format!("unknown environment '{}'", env.name))?;
+        if let Some(interval) = args.heartbeats {
+            if !(interval.is_finite() && interval >= 1.0) {
+                return Err("--heartbeats must be at least 1 second".to_owned());
+            }
+            scenario = scenario.with_heartbeats(interval);
+        }
         let tls = material_for(
             dir,
             args.tls,

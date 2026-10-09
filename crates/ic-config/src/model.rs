@@ -12,6 +12,8 @@ use ic_rules::{NotificationSettings, ScopeSetting};
 use serde::de::{self, MapAccess, Visitor, value::MapAccessDeserializer};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::health_page::HealthPage;
+use crate::trouble::Trouble;
 use crate::view::{HideHandled, View};
 
 /// Current config file format version. Version 2 replaced an environment's
@@ -254,6 +256,15 @@ pub struct Environment {
     pub groups: Vec<DashboardGroup>,
     /// Notification rules.
     pub notifications: NotificationSettings,
+    /// Trouble alerts: how they notify and which heartbeats prove that
+    /// Icinga runs its checks (topic 16). Left out of the file while
+    /// default.
+    #[serde(skip_serializing_if = "Trouble::is_default")]
+    pub trouble: Trouble,
+    /// The cluster health page, a built-in dashboard (topic 16): topic 06's
+    /// layout until it is edited, and left out of the file until then.
+    #[serde(skip_serializing_if = "HealthPage::is_default")]
+    pub health_page: HealthPage,
 }
 
 /// How to authenticate against the API.

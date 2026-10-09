@@ -803,3 +803,125 @@ fn saved_files_are_private() {
     assert_eq!(mode(&store.backup_path()), 0o600);
     assert_eq!(mode(&dir.path().join("icygui")), 0o700);
 }
+
+/// Files from before topic 16 (format version 4 without `trouble` or
+/// `health_page`) load with the trouble alerts' defaults and the approved
+/// layout of the cluster health page, and a save leaves both out while
+/// they are unchanged, so a later version's defaults still apply.
+#[test]
+fn environments_from_before_the_health_page_get_its_default_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = format!(
+        r#"
+version = 4
+active_environment = "{PROD_ID}"
+
+[[environments]]
+id = "{PROD_ID}"
+name = "prod-cluster"
+urls = ["https://master-01.example.com:5665"]
+auth = {{ kind = "basic", username = "icygui" }}
+"#
+    );
+    let store = store_with(dir.path(), &file);
+    let config = store.load().unwrap();
+    let environment = &config.environments[0];
+    assert_eq!(environment.health_page, ic_config::HealthPage::default());
+    let kinds: Vec<ic_config::ViewDisplay> = environment
+        .health_page
+        .views
+        .iter()
+        .map(|view| view.display)
+        .collect();
+    assert_eq!(kinds, ic_config::ViewDisplay::HEALTH);
+    assert_eq!(environment.trouble, ic_config::Trouble::default());
+    assert_eq!(
+        environment.trouble.heartbeats.variable_name(),
+        "icygui_heartbeat"
+    );
+    assert!(config.validate().is_empty(), "{:?}", config.validate());
+    store.save(&config).unwrap();
+    let saved = fs::read_to_string(store.path()).unwrap();
+    assert!(!saved.contains("health_page"), "{saved}");
+    assert!(!saved.contains("trouble"), "{saved}");
+    assert_eq!(store.load().unwrap(), config);
+}
+
+/// An edited health page and trouble settings are written and read back;
+/// a hand-edited page keeps only the health kinds, once each, and a
+/// sidebar dashboard loses a health view written into it by hand.
+#[test]
+fn edited_health_pages_round_trip_and_hand_edits_are_repaired() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = format!(
+        r#"
+version = 4
+
+[[environments]]
+id = "{PROD_ID}"
+name = "prod-cluster"
+urls = ["https://master-01.example.com:5665"]
+auth = {{ kind = "basic", username = "icygui" }}
+
+[environments.trouble]
+policy = "persistent"
+
+[environments.trouble.heartbeats]
+mode = "list"
+list = ["icygui-hb-master-01!beat"]
+
+[[environments.health_page.views]]
+display = "global_switches"
+
+[[environments.health_page.views]]
+display = "checks"
+health = {{ hidden_tiles = ["pending"], sparklines = false }}
+
+[[environments.health_page.views]]
+display = "list"
+
+[[environments.health_page.views]]
+display = "checks"
+
+[[environments.groups]]
+id = "{GROUP_ID}"
+name = "databases"
+
+[[environments.groups.dashboards]]
+id = "{DASHBOARD_ID}"
+name = "replication"
+
+[[environments.groups.dashboards.views]]
+display = "zones_and_endpoints"
+"#
+    );
+    let store = store_with(dir.path(), &file);
+    let config = store.load().unwrap();
+    let environment = &config.environments[0];
+    assert_eq!(environment.trouble.policy, ic_config::TroublePolicy::Persistent);
+    assert_eq!(
+        environment.trouble.heartbeats.mode,
+        ic_config::HeartbeatMode::List
+    );
+    let page = &environment.health_page;
+    let kinds: Vec<(&str, ic_config::ViewDisplay)> = page
+        .views
+        .iter()
+        .map(|view| (view.id.as_str(), view.display))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("switches", ic_config::ViewDisplay::GlobalSwitches),
+            ("checks", ic_config::ViewDisplay::Checks)
+        ]
+    );
+    assert!(!page.views[1].health.sparklines);
+    assert!(!page.views[1].health.shows(ic_config::HealthTile::Pending));
+    let dashboard = environment.dashboard(GROUP_ID, DASHBOARD_ID).unwrap();
+    assert_eq!(dashboard.views.len(), 1);
+    assert_eq!(dashboard.views[0].display, ic_config::ViewDisplay::List);
+    assert!(config.validate().is_empty(), "{:?}", config.validate());
+    store.save(&config).unwrap();
+    assert_eq!(store.load().unwrap(), config);
+}

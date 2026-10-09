@@ -137,7 +137,8 @@ impl World {
         let speed = config.speed.max(0.001);
         let objects: Vec<(String, f64, f64)> = self
             .all_checkables()
-            .filter(|c| c.enable_active_checks)
+            // Real-time checks (heartbeats) run on their own clock.
+            .filter(|c| c.enable_active_checks && !self.realtime.contains_key(&c.full_name()))
             .map(|c| (c.full_name(), c.check_interval, c.next_check))
             .collect();
         for (object, interval, next_check) in objects {
@@ -230,7 +231,11 @@ impl World {
             .filter(|s| (s.state_raw != 0) == problem)
             .filter(|s| self.hosts.get(&s.host_name).is_some_and(|h| h.state() == 0))
             .map(super::model::Checkable::full_name)
-            .filter(|name| !self.pinned.contains(name) && !self.sim.targets.contains_key(name))
+            .filter(|name| {
+                !self.pinned.contains(name)
+                    && !self.sim.targets.contains_key(name)
+                    && !self.realtime.contains_key(name)
+            })
             .collect()
     }
 
@@ -474,7 +479,7 @@ impl World {
     )]
     fn sim_check(&mut self, object: &str) -> Option<u64> {
         let checkable = self.checkable(object)?;
-        if !checkable.enable_active_checks {
+        if !checkable.enable_active_checks || self.realtime.contains_key(object) {
             return None;
         }
         let globally_enabled = if checkable.is_service() {

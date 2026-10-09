@@ -44,16 +44,19 @@ use ic_config::{View, ViewDisplay};
 use ic_core::snapshot::DashboardResult;
 use ic_rules::DashboardRef;
 use ic_ui_kit::input::{Escape, InputEvent, InputState, TextareaState};
-use ic_ui_kit::{ActiveTheme as _, Button, Metrics, Theme, px};
+use ic_ui_kit::{
+    ActiveTheme as _, Button, GlyphButton, IconName, Menu, MenuItem, Metrics, Popover, Theme, px,
+};
 
 pub(crate) use self::model::EditorTarget;
 use crate::app_state::AppState;
 use crate::app_state::editing::DashboardDraft;
 use crate::chrome::{Controls, WindowDrag};
+use crate::cluster::{HealthPage, HealthPageEvent, HealthPreview};
 use crate::dashboard::{DashboardEvent, DashboardView, PreviewPage};
 use crate::lists::model::ListKind;
 use crate::lists::view::{ListSource, RecordList, RecordListEvent};
-use crate::menu_state::OpenMenu;
+use crate::menu_state::{OpenMenu, down_position};
 use crate::workspace::sidebar_reopen;
 
 /// Key context of the dashboard editor.
@@ -145,6 +148,8 @@ enum EditorMenu {
     Rows,
     /// A handling or downtimes view's sort.
     ThreadSort,
+    /// The cluster health page's `···` in the header: *reset to default*.
+    PageOptions,
 }
 
 /// The editor's text fields: the dashboard's name, and the selected
@@ -257,6 +262,9 @@ pub(crate) struct DashboardEditor {
     unavailable: bool,
     /// The preview: the dashboard page, showing the draft.
     preview: Entity<DashboardView>,
+    /// The cluster health page showing the draft, while that page is
+    /// edited ([`EditorTarget::Health`]): its views need no evaluation.
+    health_preview: Option<Entity<HealthPage>>,
     preview_task: Option<Task<()>>,
     menus: OpenMenu<EditorMenu>,
     focus_handle: FocusHandle,
@@ -310,7 +318,32 @@ impl DashboardEditor {
                 cx,
             )
         });
-        let subscriptions = Self::subscribe(&inputs, &preview, &state, window, cx);
+        let mut subscriptions = Self::subscribe(&inputs, &preview, &state, window, cx);
+        let health_preview = (target == EditorTarget::Health).then(|| {
+            let page = cx.new(|cx| {
+                HealthPage::preview(
+                    state.clone(),
+                    HealthPreview {
+                        views: draft.views.clone(),
+                        picked: Some(selected.clone()),
+                    },
+                    cx,
+                )
+            });
+            subscriptions.push(cx.subscribe_in(
+                &page,
+                window,
+                |this: &mut Self, _, event: &HealthPageEvent, window, cx| {
+                    if let HealthPageEvent::Pick(id) = event {
+                        if this.selected != *id {
+                            this.select_and(id.clone(), false, cx);
+                        }
+                        window.focus(&this.focus_handle, cx);
+                    }
+                },
+            ));
+            page
+        });
         let Inputs {
             name,
             view_name,
@@ -356,6 +389,7 @@ impl DashboardEditor {
             evaluated: None,
             unavailable: false,
             preview,
+            health_preview,
             preview_task: None,
             menus: OpenMenu::default(),
             focus_handle: cx.focus_handle(),
@@ -480,7 +514,7 @@ impl DashboardEditor {
     pub(crate) fn default_focus(&self, cx: &App) -> FocusHandle {
         match self.target {
             EditorTarget::New => self.name.focus_handle(cx),
-            EditorTarget::Existing(_) => self.focus_handle.clone(),
+            EditorTarget::Existing(_) | EditorTarget::Health => self.focus_handle.clone(),
         }
     }
 
@@ -553,7 +587,40 @@ impl DashboardEditor {
         self.refill = true;
         self.preview
             .update(cx, |preview, cx| preview.pick(Some(id), reveal, cx));
+        self.sync_health_preview(cx);
         cx.notify();
+    }
+
+    /// Whether the cluster health page is edited.
+    pub(crate) fn edits_health(&self) -> bool {
+        self.target == EditorTarget::Health
+    }
+
+    /// The health page's preview shows the draft's views and marks the
+    /// selected one.
+    fn sync_health_preview(&self, cx: &mut Context<Self>) {
+        if let Some(page) = &self.health_preview {
+            let preview = HealthPreview {
+                views: self.draft.views.clone(),
+                picked: Some(self.selected.clone()),
+            };
+            page.update(cx, |page, cx| page.set_preview(preview, cx));
+        }
+    }
+
+    /// *reset to default* (the health page's `···`): the approved layout
+    /// back in the draft (saved with *save*; *discard* keeps what was).
+    fn reset_health_page(&mut self, cx: &mut Context<Self>) {
+        let selected = self.selected_view().display;
+        self.change_views(cx, |views| {
+            *views = ic_config::HealthPage::default().views;
+            Some(
+                views
+                    .iter()
+                    .position(|view| view.display == selected)
+                    .unwrap_or(0),
+            )
+        });
     }
 
     /// Selects the view `delta` places down (negative: up) the list.
@@ -677,6 +744,12 @@ impl DashboardEditor {
     /// from its filter.
     fn add_view(&mut self, display: ViewDisplay, cx: &mut Context<Self>) {
         let after = self.selected_index();
+        if self.edits_health() {
+            self.change_views(cx, |views| {
+                model::add_health_view(views, Some(after), display)
+            });
+            return;
+        }
         let filter = self.selected_view().filter.clone();
         self.change_views(cx, |views| {
             model::insert_view(views, Some(after), model::new_view(display, &filter))
@@ -692,6 +765,11 @@ impl DashboardEditor {
     }
 
     fn remove_view(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.edits_health() {
+            // A built-in page's views are switched off, not removed.
+            self.change_view_at(index, Duration::ZERO, cx, |view| view.health.off = true);
+            return;
+        }
         if self
             .checked_error
             .as_ref()
@@ -766,6 +844,14 @@ impl DashboardEditor {
     /// once applies before this returns (a save waiting for the check
     /// goes on when the answer arrives instead).
     fn ask_for_preview(&mut self, delay: Duration, at_once: bool, cx: &mut Context<Self>) {
+        if self.health_preview.is_some() {
+            // The health page's views show the snapshot as it is: nothing
+            // to evaluate, nothing to wait for.
+            self.preview_task = None;
+            self.check = Check::Done;
+            self.sync_health_preview(cx);
+            return;
+        }
         if self.check == Check::Done {
             self.check = Check::Pending;
         }
@@ -911,7 +997,7 @@ impl DashboardEditor {
     }
 
     /// The sidebar mark's icon picker chose `icon`.
-    fn pick_icon(&mut self, icon: ic_ui_kit::IconName, cx: &mut Context<Self>) {
+    fn pick_icon(&mut self, icon: IconName, cx: &mut Context<Self>) {
         self.menus.close();
         self.draft.mark = ic_config::SidebarMark::Icon(icon.lucide_name().to_owned());
         self.save_error = None;
@@ -922,7 +1008,7 @@ impl DashboardEditor {
     fn copy_sources(&self, query: &str, cx: &App) -> Vec<model::CopySource> {
         let editing = match &self.target {
             EditorTarget::Existing(reference) => Some(reference),
-            EditorTarget::New => None,
+            EditorTarget::New | EditorTarget::Health => None,
         };
         model::copy_sources(self.state.read(cx).groups(), editing, query)
     }
@@ -1012,17 +1098,24 @@ impl DashboardEditor {
         let previous = std::mem::replace(&mut self.saved, draft.clone());
         let saved = self.state.update(cx, |state, cx| {
             let saved = match &self.target {
-                EditorTarget::New => state.add_dashboard(draft),
-                EditorTarget::Existing(reference) => state.update_dashboard(reference, draft),
+                EditorTarget::New => state.add_dashboard(draft).is_some(),
+                EditorTarget::Existing(reference) => {
+                    state.update_dashboard(reference, draft).is_some()
+                }
+                EditorTarget::Health => state.save_health_page(draft.views),
             };
             cx.notify();
             saved
         });
-        if saved.is_some() {
+        if saved {
             cx.emit(EditorEvent::Closed);
         } else {
             self.saved = previous;
-            self.save_error = Some("The dashboard or its group no longer exists.".to_owned());
+            self.save_error = Some(if self.edits_health() {
+                "The environment no longer exists.".to_owned()
+            } else {
+                "The dashboard or its group no longer exists.".to_owned()
+            });
             cx.notify();
         }
     }
@@ -1088,7 +1181,15 @@ impl DashboardEditor {
         let title = self.title();
         // With a one-view draft's controls in the header there is no room
         // for the group (14-r5-a, b): the inspector names it.
-        let subtitle = if controls_row.is_some() {
+        let subtitle = if self.edits_health() {
+            let environment = self
+                .state
+                .read(cx)
+                .environment()
+                .map(|environment| environment.name.clone())
+                .unwrap_or_default();
+            format!("editing · {environment}")
+        } else if controls_row.is_some() {
             "editing".to_owned()
         } else {
             let group = self
@@ -1136,18 +1237,67 @@ impl DashboardEditor {
             )
             .child(div().flex_1())
             .children(controls_row)
+            .when(self.edits_health(), |header| {
+                header.child(self.page_options(cx))
+            })
             .child(
                 Button::new("editor-discard", "discard")
                     .key_hint("esc")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.discard(cx))),
             )
             .child(
-                Button::new("editor-save", "save dashboard")
+                Button::new(
+                    "editor-save",
+                    if self.edits_health() {
+                        "save"
+                    } else {
+                        "save dashboard"
+                    },
+                )
                     .primary()
                     .key_hint(save_key())
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save(cx))),
             );
         self.drag.attach(header, controls).into_any_element()
+    }
+
+    /// The health page's `···`: *reset to default*.
+    fn page_options(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let open = self.menus.is_open(&EditorMenu::PageOptions);
+        let menu = Menu::new("health-editor-options")
+            .item(
+                MenuItem::new("health-reset", "reset to default")
+                    .icon(IconName::Refresh)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.menus.close();
+                        this.reset_health_page(cx);
+                    })),
+            )
+            .on_dismiss(Self::dismiss_listener(cx));
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                GlyphButton::new("health-editor-more", "···")
+                    .text_size(px(13.))
+                    .bleed()
+                    .color(theme.colors.text_muted)
+                    .selected(open)
+                    .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                        this.menus
+                            .toggle(EditorMenu::PageOptions, down_position(event));
+                        cx.notify();
+                    })),
+            )
+            .when(open, |slot| {
+                slot.child(
+                    Popover::new(menu)
+                        .align_right()
+                        .outset(GlyphButton::reach(), px(0.)),
+                )
+            })
+            .into_any_element()
     }
 
     /// The preview's width: the main area but the inspector.
@@ -1164,6 +1314,9 @@ impl DashboardEditor {
     /// in for it before the first evaluation.
     fn render_preview(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
+        if let Some(page) = &self.health_preview {
+            return page.clone().into_any_element();
+        }
         if let Some((list, _)) = &self.threads_preview {
             return list.clone().into_any_element();
         }
@@ -1321,7 +1474,7 @@ impl DashboardEditor {
     }
 
     /// The icon picker's choice.
-    pub(crate) fn pick_icon_for_test(&mut self, icon: ic_ui_kit::IconName, cx: &mut Context<Self>) {
+    pub(crate) fn pick_icon_for_test(&mut self, icon: IconName, cx: &mut Context<Self>) {
         self.pick_icon(icon, cx);
     }
 

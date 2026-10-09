@@ -9,6 +9,7 @@
 //! minutes" is still true at startup no matter when the scenario was built.
 
 mod build;
+mod heartbeats;
 mod lab;
 mod large;
 mod prod_cluster;
@@ -21,6 +22,7 @@ use ic_model::{
 
 pub(crate) use build::format_perfdata;
 pub use build::raw_check_result;
+pub use heartbeats::HEARTBEAT_VARIABLE;
 pub use lab::lab;
 pub use large::{large, large_with_hosts};
 pub use prod_cluster::prod_cluster;
@@ -89,6 +91,11 @@ pub struct Scenario {
     pub anchor: Option<Timestamp>,
     /// Objects the simulator never changes, so a demo keeps showing them.
     pub pinned: Vec<ObjectKey>,
+    /// Services the server checks in real time at their `check_interval`,
+    /// whether the simulation runs or not (heartbeats,
+    /// [`Scenario::with_heartbeats`]): OK, or UNKNOWN while the endpoint
+    /// they are pinned to (`command_endpoint`) isn't connected.
+    pub realtime: Vec<ObjectKey>,
     /// The node's features the cluster health page shows (checker and
     /// notification by default): their objects exist, their status
     /// functions report them.
@@ -257,6 +264,7 @@ impl Scenario {
             time_base: Timestamp::now(),
             anchor: None,
             pinned: Vec::new(),
+            realtime: Vec::new(),
             features: ScenarioFeatures::default(),
             endpoint_versions: Vec::new(),
         }
@@ -449,6 +457,7 @@ impl Scenario {
             .notifications
             .retain(|notification| kept(&notification.object));
         scenario.pinned.retain(|object| kept(object));
+        scenario.realtime.retain(|object| kept(object));
         scenario
     }
 

@@ -77,6 +77,7 @@ pub(super) fn data(hosts: Vec<Host>, services: Vec<Service>) -> Data {
         }]),
         now: Timestamp::from_unix_seconds(10_000.0),
         events: Arc::default(),
+        excluded: Arc::default(),
     }
 }
 

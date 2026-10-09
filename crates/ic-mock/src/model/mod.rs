@@ -114,6 +114,11 @@ pub(crate) struct World {
     pub(crate) sim: SimState,
     /// Seconds between `reschedule-check` and the resulting check.
     pub(crate) reschedule_delay: f64,
+    /// Objects checked in real time (`Scenario::realtime`), and when each
+    /// is due next.
+    pub(crate) realtime: BTreeMap<String, f64>,
+    /// No check runs (`MockControl::stop_checks`): the checker hangs.
+    pub(crate) checks_stopped: bool,
 }
 
 /// Wall-clock seconds since the epoch.

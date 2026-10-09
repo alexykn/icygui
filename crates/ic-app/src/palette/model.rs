@@ -739,6 +739,9 @@ fn service_candidates(state: &AppState) -> Vec<Candidate> {
     snapshot
         .services
         .values()
+        // Heartbeats are icygui's own checks: the health page and the
+        // settings show them, not the searches.
+        .filter(|service| !snapshot.excluded.contains(&service.key))
         .map(|service| {
             object_candidate(
                 service_item(snapshot, service),

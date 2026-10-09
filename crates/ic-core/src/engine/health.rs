@@ -3,16 +3,18 @@
 //!
 //! The page reads the status poll the engine already makes and the
 //! endpoints' numbers that come with the cluster nodes' states. Two things
-//! need requests of their own, and only while the page shows this
-//! environment and it isn't quiet (quiet mode and a hidden window change
-//! nothing): the node's `ApiListener` status (its queues and connections,
-//! one request) with each status poll, and the node's features (three
-//! small object queries) when the page opens, every [`FEATURES_INTERVAL`]
-//! and after a restart. Opening the page asks for both at once unless a
-//! poll brought the listener less than a poll interval ago, so toggling
-//! the page never sends more than the polls would. Each request takes a
-//! token from the request budget. A refused one (`Forbidden`) isn't asked
-//! for again in the session.
+//! need requests of their own: the node's `ApiListener` status (its queues
+//! and connections, one request) and the node's features (three small
+//! object queries). While the page shows this environment and it isn't
+//! quiet, the listener comes with each status poll, and the features when
+//! the page opens, every [`FEATURES_INTERVAL`] and after a restart.
+//! Opening the page asks for both at once unless a poll brought the
+//! listener less than a poll interval ago, so toggling the page never
+//! sends more than the polls would. Otherwise the trouble alerts still
+//! need them (a feature turned off, a growing relay queue): both come with
+//! a status poll every [`TROUBLE_INTERVAL`] (PLAN.md §4.2 E2). Each
+//! request takes a token from the request budget. A refused one
+//! (`Forbidden`) isn't asked for again in the session.
 //!
 //! [`Command::WatchHealth`]: crate::Command::WatchHealth
 
@@ -26,6 +28,11 @@ use super::{Engine, Internal, Phase};
 
 /// How often the page asks for the node's features while it is open.
 const FEATURES_INTERVAL: Duration = Duration::from_mins(5);
+
+/// How often the listener status and the features are asked for while no
+/// page shows the environment: the trouble alerts need them (PLAN.md
+/// §4.2 E2).
+const TROUBLE_INTERVAL: Duration = Duration::from_mins(5);
 
 /// What one round of the page's requests asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,15 +123,23 @@ impl Engine {
     }
 
     /// What a round of the page's requests sent now asks for (marking it
-    /// asked), or `None` when the page doesn't show this environment, it
-    /// is quiet, not live, or nothing is due or allowed.
+    /// asked), or `None` when nothing is due or allowed, or the engine
+    /// isn't live. While the page shows this environment (and it isn't
+    /// quiet) the listener comes with every poll; else both every
+    /// [`TROUBLE_INTERVAL`], for the trouble alerts.
     pub(super) fn health_ask(&mut self, now: Instant) -> Option<Ask> {
-        if !self.health_watch || self.quiet() || self.phase != Phase::Live {
+        if self.phase != Phase::Live {
             return None;
         }
+        let watched = self.health_watch && !self.quiet();
         let conn = self.conn.as_mut()?;
         conn.next_status?;
-        let listener = !conn.health.listener_refused;
+        let listener = !conn.health.listener_refused
+            && (watched
+                || conn
+                    .health
+                    .listener_at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= TROUBLE_INTERVAL));
         let features = !conn.health.features_refused
             && conn
                 .health

@@ -1019,10 +1019,11 @@ async fn a_single_node_costs_no_poll_when_it_comes_on_screen() {
     engine.shutdown();
 }
 
-/// The cluster health page (topic 06): its listener status and features
-/// are asked for only while it shows the environment and it isn't quiet,
-/// the listener with the status polls, the features when it opens; the
-/// trend comes from every poll, open or not.
+/// The cluster health page (topic 06): its listener status comes with
+/// every status poll only while it shows the environment and it isn't
+/// quiet, the features when it opens (unless they are recent); else both
+/// every five minutes for the trouble alerts (E2). The trend comes from
+/// every poll, open or not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_health_page_asks_only_while_it_is_open() {
     let cluster = cluster();
@@ -1046,12 +1047,14 @@ async fn the_health_page_asks_only_while_it_is_open() {
             .filter(|request| request.path == path)
             .count()
     };
-    // Closed: the polls build the trend, nothing else is asked.
+    // Closed: the polls build the trend; the trouble alerts' round (E2)
+    // asks for the listener and the features with the first poll, then
+    // not for five minutes.
     engine
         .snapshot(|snapshot| snapshot.health.samples.len() >= 3)
         .await;
-    assert_eq!(count("/v1/status/ApiListener"), 0);
-    assert_eq!(count("/v1/objects/checkercomponents"), 0);
+    assert_eq!(count("/v1/status/ApiListener"), 1);
+    assert_eq!(count("/v1/objects/checkercomponents"), 1);
 
     // Open: the listener and the features at once, then the listener with
     // every poll, the features not again.

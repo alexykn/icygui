@@ -14,6 +14,14 @@ use ic_model::{Timestamp, format_compact};
 /// silent for many minutes).
 pub(crate) const STALE_AFTER_SECS: u64 = 30;
 
+/// An engine that hasn't said it runs ([`ic_core::CoreEvent::Alive`]) for
+/// this long is stale: what it showed last may be outdated (yellow).
+pub(crate) const ENGINE_STALE_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(3 * ic_core::ALIVE_INTERVAL.as_secs());
+
+/// … and for this long, stuck (red).
+pub(crate) const ENGINE_STUCK_AFTER: std::time::Duration = std::time::Duration::from_mins(1);
+
 /// How the footer colours the connection status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Health {
@@ -100,6 +108,9 @@ pub(crate) enum NoticeKind {
     Misconfigured,
     /// The engine itself couldn't start.
     EngineFailed,
+    /// No live data for more than two minutes (PLAN.md §4.2 A): what
+    /// every page shows may be outdated.
+    Blind,
 }
 
 /// How far the initial load has got.
@@ -195,6 +206,12 @@ pub(crate) struct ConnectionStatus {
     engine_stopped: bool,
     /// Icinga's version, once connected.
     version: Option<String>,
+    /// When the engine last said it runs (UI clock): an engine that stops
+    /// saying so is stale, not live (no false green).
+    alive_at: Option<Timestamp>,
+    /// Since when the environment has had no live data, and why, as its
+    /// engine says (after its two minutes' grace).
+    pub(crate) blind: Option<ic_core::trouble::Blind>,
 }
 
 /// What an environment's event stream carries, as the footer counts it.
@@ -227,6 +244,8 @@ impl ConnectionStatus {
             engine_error: None,
             engine_stopped: false,
             version: None,
+            alive_at: None,
+            blind: None,
         }
     }
 
@@ -264,6 +283,11 @@ impl ConnectionStatus {
 
     /// The core published `snapshot`, received at `now`.
     pub(crate) fn on_snapshot_at(&mut self, snapshot: &Snapshot, now: Timestamp) {
+        // A snapshot says the engine runs too.
+        if self.alive_at.is_some() {
+            self.alive_at = Some(now);
+        }
+        self.blind.clone_from(&snapshot.trouble.blind);
         if snapshot.last_event_at.is_some() {
             self.last_event_at = snapshot.last_event_at;
         }
@@ -303,6 +327,32 @@ impl ConnectionStatus {
     /// PERF-09): its silence says nothing about the connection.
     pub(crate) fn is_quiet(&self) -> bool {
         self.stream == Stream::Quiet
+    }
+
+    /// The engine said it runs, at `now` (UI clock).
+    pub(crate) fn on_alive(&mut self, now: Timestamp) {
+        self.alive_at = Some(now);
+    }
+
+    /// How long the engine hasn't said it runs, when that is longer than
+    /// [`ENGINE_STALE_AFTER`] (it said so before).
+    pub(crate) fn engine_silent(&self, now: Timestamp) -> Option<std::time::Duration> {
+        let silent = self.alive_at?.elapsed_until(now);
+        (silent > ENGINE_STALE_AFTER).then_some(silent)
+    }
+
+    /// How long the environment has had no live data, as its engine says
+    /// (`None` while live, or within the grace), or how long its engine
+    /// has been silent: the footer's `no data 3m`, the tray's ages.
+    pub(crate) fn no_data_for(&self, now: Timestamp) -> Option<std::time::Duration> {
+        if self.engine_error.is_some() {
+            return None;
+        }
+        let blind = self.blind.as_ref().map(|blind| blind.since.elapsed_until(now));
+        match (blind, self.engine_silent(now)) {
+            (Some(blind), Some(silent)) => Some(blind.max(silent)),
+            (blind, silent) => blind.or(silent),
+        }
     }
 
     /// The engine couldn't start.
@@ -357,11 +407,28 @@ impl ConnectionStatus {
         ) && self.engine_error.is_none()
     }
 
-    /// The colour class at `now`.
+    /// The colour class at `now`: an engine that stopped saying it runs,
+    /// or an environment without live data, is never green.
     pub(crate) fn health(&self, now: Timestamp) -> Health {
         if self.engine_error.is_some() {
             return Health::Failed;
         }
+        if let Some(silent) = self.engine_silent(now) {
+            return if silent > ENGINE_STUCK_AFTER {
+                Health::Failed
+            } else {
+                Health::Stale
+            };
+        }
+        let health = self.state_health(now);
+        if self.blind.is_some() && health != Health::Failed {
+            return Health::Stale;
+        }
+        health
+    }
+
+    /// The colour class of the connection state alone.
+    fn state_health(&self, now: Timestamp) -> Health {
         match &self.state {
             None => Health::Idle,
             Some(ConnectionState::Connecting { .. } | ConnectionState::Loading { .. }) => {
@@ -423,6 +490,9 @@ impl ConnectionStatus {
         if self.engine_error.is_some() {
             return (endpoint, Some(self.engine_word().to_owned()));
         }
+        if let Some(age) = self.no_data_for(now) {
+            return (endpoint, Some(no_data(age)));
+        }
         let Some(state) = &self.state else {
             return (endpoint, None);
         };
@@ -444,6 +514,12 @@ impl ConnectionStatus {
     pub(crate) fn short_state(&self) -> &'static str {
         if self.engine_error.is_some() {
             return self.engine_word();
+        }
+        if self.engine_silent(Timestamp::now()).is_some() {
+            return "engine not answering";
+        }
+        if self.blind.is_some() {
+            return "no live data";
         }
         match &self.state {
             None => "not connected",
@@ -625,6 +701,59 @@ impl ConnectionStatus {
         }
     }
 
+    /// The notice while the environment has no live data (16d): how long,
+    /// that states may be outdated, why and since when, and what the
+    /// connection does.
+    fn blind_notice(&self, now: Timestamp) -> Option<ConnectionNotice> {
+        let age = self.no_data_for(now)?;
+        let (reason, since) = match &self.blind {
+            Some(blind) => (blind.reason.clone(), Some(blind.since)),
+            None => (
+                "the connection engine isn't answering".to_owned(),
+                self.alive_at,
+            ),
+        };
+        let since = since.map_or_else(String::new, |at| {
+            format!(" since {}", crate::format::list_clock(at, now))
+        });
+        let doing = match &self.state {
+            Some(ConnectionState::Reconnecting { retry_at, .. }) => {
+                let wait = retry_at.remaining_from(now);
+                if wait.as_secs() == 0 {
+                    "; reconnecting".to_owned()
+                } else {
+                    format!("; retrying in {}", format_compact(wait))
+                }
+            }
+            Some(ConnectionState::Connecting { .. } | ConnectionState::Loading { .. }) => {
+                "; reconnecting".to_owned()
+            }
+            _ => String::new(),
+        };
+        let mut actions = vec![NoticeAction::RetryNow];
+        match self.state {
+            Some(
+                ConnectionState::AuthFailed { .. }
+                | ConnectionState::MissingSecret
+                | ConnectionState::Misconfigured { .. },
+            ) => actions.insert(0, NoticeAction::EditEnvironment),
+            Some(ConnectionState::TlsFailed { .. }) => {
+                actions.insert(0, NoticeAction::ReviewCertificate);
+            }
+            _ => {}
+        }
+        Some(ConnectionNotice {
+            kind: NoticeKind::Blind,
+            tone: Tone::Warning,
+            title: format!(
+                "no live data for {} — states may be outdated",
+                format_compact(age)
+            ),
+            detail: Some(format!("{reason}{since}{doing}")),
+            actions,
+        })
+    }
+
     /// The problem to show over the list at `now`, if any.
     pub(crate) fn notice(&self, environment: &str, now: Timestamp) -> Option<ConnectionNotice> {
         if let Some(error) = &self.engine_error {
@@ -640,6 +769,9 @@ impl ConnectionStatus {
                 detail: Some(error.clone()),
                 actions: vec![NoticeAction::RestartEngine],
             });
+        }
+        if let Some(notice) = self.blind_notice(now) {
+            return Some(notice);
         }
         let notice = match self.state.as_ref()? {
             ConnectionState::Reconnecting {
@@ -706,6 +838,12 @@ impl ConnectionStatus {
         };
         Some(notice)
     }
+}
+
+/// `no data 3m`: the footer's and the tray's wording while an environment
+/// has no live data.
+pub(crate) fn no_data(age: std::time::Duration) -> String {
+    format!("no data {}", format_compact(age))
 }
 
 /// A node with the full view, reached at its first URL (tests).

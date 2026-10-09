@@ -101,7 +101,9 @@ fn icon(kind: NoticeKind) -> IconName {
         NoticeKind::Reconnecting => IconName::Unplug,
         NoticeKind::AuthFailed | NoticeKind::MissingSecret => IconName::KeyRound,
         NoticeKind::TlsFailed => IconName::Lock,
-        NoticeKind::Misconfigured | NoticeKind::EngineFailed => IconName::TriangleAlert,
+        NoticeKind::Misconfigured | NoticeKind::EngineFailed | NoticeKind::Blind => {
+            IconName::TriangleAlert
+        }
     }
 }
 

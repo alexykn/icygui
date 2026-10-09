@@ -401,10 +401,91 @@ pub(crate) struct Connected {
     pub(crate) lines: Option<EventLines>,
     /// The stream's event types.
     pub(crate) kinds: Vec<EventKind>,
+    /// Its filter: a quiet stream's naming the heartbeats, whose check
+    /// results it carries ([`StreamWish`]).
+    pub(crate) filter: Option<String>,
     /// It was opened in quiet mode (no check results, PERF-09).
     pub(crate) quiet: bool,
     pub(crate) node: ConnectedNode,
     pub(crate) login: Login,
+}
+
+/// What the next event stream should carry, read whenever one opens (a
+/// connect, a switch between quiet and live): quiet or live, and in quiet
+/// mode the heartbeats' check results by Icinga's stream filter
+/// ([`crate::heartbeat`]). Icinga refuses a filter without the
+/// `filter-expression` permission where it enforces it (2.17 by default):
+/// then [`StreamWish::refused`] is set for good, and quiet streams carry
+/// no check results (the engine reads the heartbeats' last check once per
+/// interval instead).
+#[derive(Debug, Default)]
+pub(crate) struct StreamWish {
+    /// Quiet mode is wanted.
+    pub(crate) quiet: AtomicBool,
+    /// The quiet stream's filter naming the heartbeats (`None`: none).
+    pub(crate) beats: std::sync::Mutex<Option<String>>,
+    /// Icinga refused the filter.
+    pub(crate) refused: AtomicBool,
+}
+
+impl StreamWish {
+    /// The event types and filter a stream for the API user `info` opens
+    /// with now.
+    pub(crate) fn spec(&self, info: &ApiInfo) -> (Vec<EventKind>, Option<String>) {
+        let quiet = self.quiet.load(Ordering::SeqCst);
+        let mut kinds = stream_kinds(info, quiet);
+        if !quiet || self.refused.load(Ordering::SeqCst) || kinds.is_empty() {
+            return (kinds, None);
+        }
+        let check_results = info.allows(&format!("events/{}", EventKind::CheckResult.api_name()));
+        let beats = self
+            .beats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match beats {
+            Some(filter) if check_results => {
+                kinds.push(EventKind::CheckResult);
+                (kinds, Some(filter))
+            }
+            _ => (kinds, None),
+        }
+    }
+}
+
+/// Opens a stream with `kinds` and `filter`; when Icinga refuses the
+/// filter (no `filter-expression` permission), marks it refused in `wish`
+/// and opens it without (and without check results). Returns the lines
+/// and what the stream carries.
+pub(crate) async fn open_wished(
+    client: &Client,
+    kinds: Vec<EventKind>,
+    filter: Option<String>,
+    wish: &StreamWish,
+) -> Result<(EventLines, Vec<EventKind>, Option<String>), ApiError> {
+    let queue = format!("icygui-{}", uuid::Uuid::new_v4());
+    match client
+        .events_filtered(&queue, &kinds, filter.as_deref())
+        .await
+    {
+        Ok(stream) => Ok((stream.into_lines(), kinds, filter)),
+        Err(ApiError::Forbidden(message))
+            if filter.is_some() && message.contains("filter-expression") =>
+        {
+            tracing::info!(
+                "the API user may not filter the event stream (filter-expression): \
+                 heartbeats are read once per interval while quiet"
+            );
+            wish.refused.store(true, Ordering::SeqCst);
+            let kinds: Vec<EventKind> = kinds
+                .into_iter()
+                .filter(|kind| *kind != EventKind::CheckResult)
+                .collect();
+            let lines = open_events(client, &kinds).await?;
+            Ok((lines, kinds, None))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The event types a stream subscribes to: every type the API user may
@@ -454,7 +535,7 @@ pub(crate) async fn connect(
     secrets: Arc<dyn SecretStore>,
     timeouts: (Duration, Duration),
     first: Option<usize>,
-    quiet: Arc<AtomicBool>,
+    wish: Arc<StreamWish>,
 ) -> Result<Connected, Failure> {
     let (action_timeout, identify_timeout) = timeouts;
     let login = Login::read(environment, Password::Store(secrets)).await?;
@@ -497,7 +578,7 @@ pub(crate) async fn connect(
             }
             continue;
         }
-        match open_stream(reached, quiet.load(Ordering::SeqCst)).await {
+        match open_stream(reached, &wish).await {
             Ok(opened) => {
                 return Ok(finish(opened, login, urls, passed_over));
             }
@@ -508,7 +589,7 @@ pub(crate) async fn connect(
         }
     }
     if let Some(reached) = fallback {
-        match open_stream(reached, quiet.load(Ordering::SeqCst)).await {
+        match open_stream(reached, &wish).await {
             Ok(opened) => {
                 return Ok(finish(opened, login, urls, passed_over));
             }
@@ -524,6 +605,7 @@ struct Opened {
     info: ApiInfo,
     lines: Option<EventLines>,
     kinds: Vec<EventKind>,
+    filter: Option<String>,
     quiet: bool,
     node: ConnectedNode,
 }
@@ -541,6 +623,7 @@ fn finish(
         info,
         lines,
         kinds,
+        filter,
         quiet,
         mut node,
     } = opened;
@@ -561,6 +644,7 @@ fn finish(
         info,
         lines,
         kinds,
+        filter,
         quiet,
         node,
         login,
@@ -569,20 +653,24 @@ fn finish(
 
 /// Opens the event stream of a reached node for every event type the API
 /// user may read, without check results when `quiet` (none: no stream).
-async fn open_stream(reached: Reached, quiet: bool) -> Result<Opened, (usize, Failure)> {
+async fn open_stream(reached: Reached, wish: &StreamWish) -> Result<Opened, (usize, Failure)> {
     let Reached { client, info, node } = reached;
-    let kinds = stream_kinds(&info, quiet);
-    let opened = |lines: Option<EventLines>, client: Client, info: ApiInfo, node: ConnectedNode| {
-        let kinds = if lines.is_some() {
-            kinds.clone()
-        } else {
-            Vec::new()
+    let quiet = wish.quiet.load(Ordering::SeqCst);
+    let (kinds, filter) = wish.spec(&info);
+    let opened = |lines: Option<(EventLines, Vec<EventKind>, Option<String>)>,
+                  client: Client,
+                  info: ApiInfo,
+                  node: ConnectedNode| {
+        let (lines, kinds, filter) = match lines {
+            Some((lines, kinds, filter)) => (Some(lines), kinds, filter),
+            None => (None, Vec::new(), None),
         };
         Opened {
             client,
             info,
             lines,
             kinds,
+            filter,
             quiet,
             node,
         }
@@ -601,8 +689,8 @@ async fn open_stream(reached: Reached, quiet: bool) -> Result<Opened, (usize, Fa
             "the API user may read only some event types"
         );
     }
-    match open_events(&client, &kinds).await {
-        Ok(lines) => Ok(opened(Some(lines), client, info, node)),
+    match open_wished(&client, kinds, filter, wish).await {
+        Ok(stream) => Ok(opened(Some(stream), client, info, node)),
         Err(ApiError::Forbidden(message)) => {
             tracing::warn!(%message, "the event stream was refused: no live updates");
             Ok(opened(None, client, info, node))

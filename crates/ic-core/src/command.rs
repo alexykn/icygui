@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures::channel::oneshot;
 use ic_api::{ApiInfo, CertificateInfo};
-use ic_model::{Action, ActionTarget, CheckableState, ObjectKey, StateType, Timestamp};
+use ic_model::{Action, ActionTarget, CheckableState, ObjectKey, ServiceKey, StateType, Timestamp};
 use ic_rules::NotificationIntent;
 
 use crate::snapshot::{DashboardResult, Snapshot};
@@ -134,7 +134,16 @@ pub enum Command {
     /// the request budget); the page opening asks for both at once unless
     /// a poll brought them less than an interval ago. Nothing is asked for
     /// while no page shows it. [`crate::Snapshot::health`] carries them.
+    ///
+    /// While no page shows it, the trouble alerts still need both (a
+    /// growing relay queue, a feature turned off): every five minutes, with
+    /// a status poll, through the request budget.
     WatchHealth(bool),
+    /// The user confirmed in the settings that a heartbeat that
+    /// disappeared ([`crate::heartbeat::BeatState::Disappeared`]) is gone
+    /// for good: it is forgotten, and its finding ends (without a
+    /// notification).
+    ConfirmHeartbeatRemoval(ServiceKey),
 }
 
 /// What the engine tells the UI. Received from
@@ -158,6 +167,11 @@ pub enum CoreEvent {
     Notification(NotificationRecord),
     /// Notifications are paused until this time (`None`: not paused).
     NotificationsPaused(Option<Timestamp>),
+    /// The engine runs (every [`crate::ALIVE_INTERVAL`], whatever else it
+    /// does): the UI takes an environment whose engine stopped saying so
+    /// for stale, not for live (no false green). Carries the engine's
+    /// clock.
+    Alive(Timestamp),
 }
 
 /// The connection's state, for the footer and the connection banner.

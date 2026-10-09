@@ -64,6 +64,7 @@ mod scopes;
 mod settings;
 mod states;
 mod topology;
+mod trouble;
 mod view_kinds;
 mod views;
 

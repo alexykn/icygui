@@ -126,6 +126,8 @@ pub(crate) struct Data {
     /// [`RECENT_EVENTS`]): what event stream views show. A new `Arc` when
     /// they change.
     pub(crate) events: Arc<Vec<LogEntry>>,
+    /// The heartbeat services: no view shows or counts them.
+    pub(crate) excluded: Arc<BTreeSet<ServiceKey>>,
 }
 
 impl Data {
@@ -138,6 +140,7 @@ impl Data {
             service_groups: Arc::clone(&snapshot.service_groups),
             now: snapshot.taken_at,
             events,
+            excluded: Arc::clone(&snapshot.excluded),
         }
     }
 }

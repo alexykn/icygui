@@ -21,9 +21,9 @@
 //!   settings, not health, so they leave the sidebar's dot alone).
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::time::Duration;
 
+use ic_config::HealthTile;
 use ic_core::health::{ClusterHealth, HealthSample};
 use ic_core::snapshot::Snapshot;
 use ic_core::{ClusterNode, NodeState};
@@ -61,8 +61,11 @@ pub(crate) struct Report {
     pub(crate) not_connected: usize,
     /// Its end: `Icinga r2.14.3-1 · up 41d 6h`.
     pub(crate) instance: String,
-    /// What a cut-off zone means for monitoring, if one is.
-    pub(crate) banner: Option<HealthBanner>,
+    /// The heartbeat row (pinned under the health line).
+    pub(crate) beats: super::beats::BeatRow,
+    /// The alert block (pinned under the heartbeat row): the raised
+    /// trouble alerts, worst first.
+    pub(crate) alerts: Vec<super::beats::AlertLine>,
     /// The masters' and satellites' zones, top-level first.
     pub(crate) zones: Vec<ZoneGroup>,
     /// The global zones' names (configuration only).
@@ -74,25 +77,11 @@ pub(crate) struct Report {
     pub(crate) switches: Vec<Switch>,
     /// The connected node's features (empty before the page asked).
     pub(crate) features: Vec<Feature>,
-    /// The late checks of the cut-off zone, for *show the late checks*,
-    /// most overdue first.
+    /// The late checks the worst alert's *show the late checks* lists
+    /// (its zone's, or every one), most overdue first.
     pub(crate) late: Vec<ObjectKey>,
     /// The verdict (the sidebar's dot).
     pub(crate) state: ClusterState,
-}
-
-/// The banner over the zones while a zone is cut off: its endpoints are
-/// all down, so its results don't arrive.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HealthBanner {
-    /// Critical when a zone is cut off; warning when an endpoint is down
-    /// but its zone still has another.
-    pub(crate) tone: Tone,
-    pub(crate) title: String,
-    pub(crate) detail: String,
-    /// The zone whose late checks *show the late checks* lists (none: no
-    /// link).
-    pub(crate) late_zone: Option<String>,
 }
 
 /// A zone and its endpoints.
@@ -105,6 +94,8 @@ pub(crate) struct ZoneGroup {
     /// `parent master · 1 endpoint · 188 hosts`.
     pub(crate) detail: String,
     pub(crate) endpoints: Vec<EndpointRow>,
+    /// The zone's own heartbeat, if it has one.
+    pub(crate) beat: Option<super::beats::BeatCell>,
 }
 
 /// An endpoint's line.
@@ -121,11 +112,15 @@ pub(crate) struct EndpointRow {
     pub(crate) status: String,
     /// The status's colour.
     pub(crate) tone: Tone,
+    /// The heartbeat pinned to it, if it has one.
+    pub(crate) beat: Option<super::beats::BeatCell>,
 }
 
 /// A stat tile: the label, the value, what it counts, and its trend.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Tile {
+    /// Which tile it is (the views pick theirs).
+    pub(crate) kind: Option<HealthTile>,
     pub(crate) label: &'static str,
     pub(crate) value: String,
     pub(crate) detail: String,
@@ -180,17 +175,25 @@ pub(crate) fn report(snapshot: &Snapshot, connected: bool, now: Timestamp) -> Re
         .count();
     let cut_off = cut_off_zones(&zones);
     let late_zone = cut_off.first().cloned();
-    let late = late_in(snapshot, late_zone.as_deref());
+    let late_in_zone = late_in(snapshot, late_zone.as_deref());
     let checks = check_tiles(
         snapshot,
         status,
         health,
         late_zone.as_deref(),
-        &late,
+        &late_in_zone,
         !cut_off.is_empty(),
     );
     let queues = queue_tiles(health, status, now);
-    let banner = banner(&zones, &cut_off, snapshot, health, late.len(), now);
+    let alerts = super::beats::alert_lines(snapshot, now);
+    // The worst alert's late checks: its zone's, or every one.
+    let late = match alerts.first().and_then(|alert| alert.link.as_ref()) {
+        Some((_, ic_core::trouble::AlertAction::LateChecks { zone: Some(zone) })) => {
+            late_in(snapshot, Some(zone))
+        }
+        Some((_, ic_core::trouble::AlertAction::LateChecks { zone: None })) => all_late(snapshot),
+        _ => Vec::new(),
+    };
     let mut global_zones: Vec<String> = snapshot
         .zones
         .iter()
@@ -216,7 +219,8 @@ pub(crate) fn report(snapshot: &Snapshot, connected: bool, now: Timestamp) -> Re
         connected: connected_count,
         not_connected,
         instance,
-        banner,
+        beats: super::beats::row(&snapshot.heartbeats, now),
+        alerts,
         zones,
         global_zones,
         checks,
@@ -251,11 +255,21 @@ pub(crate) fn assess(snapshot: &Snapshot, connected: bool, now: Timestamp) -> Cl
     }
     let health = &snapshot.health;
     let status = snapshot.status.as_deref();
+    // The trouble alerts and the heartbeats count too (no false green).
+    let trouble = match snapshot.trouble.worst() {
+        Some(ic_core::trouble::AlertTone::Critical) => Tone::Critical,
+        Some(ic_core::trouble::AlertTone::Warning) => Tone::Warning,
+        None if snapshot.trouble.blind.is_some() => Tone::Warning,
+        None => Tone::Normal,
+    };
+    let beats = super::beats::row(&snapshot.heartbeats, now).tone.text();
     let tones = [
         late_tone(snapshot.late.len(), status, false),
         active_checks_tone(health),
         latency_tone(health),
         relay_tone(health),
+        trouble,
+        beats,
     ];
     let lagging = nodes.iter().any(|node| lags(snapshot, node, now));
     match tones.iter().max().copied().unwrap_or_default() {
@@ -274,6 +288,8 @@ fn verdict(report: &Report, _now: Timestamp) -> ClusterState {
         .map(|row| row.tone)
         .chain(report.checks.iter().map(|tile| tile.tone))
         .chain(report.queues.iter().map(|tile| tile.tone))
+        .chain(report.alerts.iter().map(|alert| alert.tone))
+        .chain(std::iter::once(report.beats.tone.text()))
         .max()
         .unwrap_or_default();
     match worst {
@@ -361,6 +377,7 @@ fn zone_groups(
                 state: NodeState::Connected,
                 detail: String::new(),
                 endpoints: vec![row],
+                beat: super::beats::zone_cell(&snapshot.heartbeats, &node.zone, now),
             }),
         }
     }
@@ -473,6 +490,7 @@ fn endpoint_row(
         traffic,
         status: status_text,
         tone,
+        beat: super::beats::endpoint_cell(&snapshot.heartbeats, &node.name, now),
     }
 }
 
@@ -525,6 +543,18 @@ fn late_in(snapshot: &Snapshot, zone: Option<&str>) -> Vec<ObjectKey> {
     late.into_iter().map(|(key, _)| key.clone()).collect()
 }
 
+/// Every late check, most overdue first.
+fn all_late(snapshot: &Snapshot) -> Vec<ObjectKey> {
+    let mut late: Vec<(&ObjectKey, Timestamp)> =
+        snapshot.late.iter().map(|(key, due)| (key, *due)).collect();
+    late.sort_by(|a, b| {
+        a.1.as_unix_seconds()
+            .total_cmp(&b.1.as_unix_seconds())
+            .then_with(|| a.0.cmp(b.0))
+    });
+    late.into_iter().map(|(key, _)| key.clone()).collect()
+}
+
 /// The zone a host or service belongs to.
 fn zone_of<'a>(snapshot: &'a Snapshot, key: &ObjectKey) -> Option<&'a str> {
     match key {
@@ -539,108 +569,8 @@ fn zone_of<'a>(snapshot: &'a Snapshot, key: &ObjectKey) -> Option<&'a str> {
     }
 }
 
-/// The banner: the first cut-off zone (critical), else the first endpoint
-/// down whose zone still has another (warning); none when every endpoint
-/// is connected.
-fn banner(
-    zones: &[ZoneGroup],
-    cut_off: &[String],
-    snapshot: &Snapshot,
-    health: &ClusterHealth,
-    late: usize,
-    now: Timestamp,
-) -> Option<HealthBanner> {
-    let gone_for = |name: &str| {
-        health
-            .endpoints
-            .get(name)
-            .and_then(|stats| stats.last_message.non_zero())
-            .map(|last| format_two_units(last.elapsed_until(now)))
-    };
-    if let Some(zone) = cut_off.first() {
-        let group = zones.iter().find(|group| group.name == *zone)?;
-        let names: Vec<&str> = group
-            .endpoints
-            .iter()
-            .map(|row| row.name.as_str())
-            .collect();
-        let who = names.join(" and ");
-        let title = match gone_for(names[0]) {
-            Some(gone) => format!(
-                "{who} {} not been connected for {gone}: zone {zone}’s results are stale.",
-                if names.len() == 1 { "has" } else { "have" }
-            ),
-            None => format!(
-                "{who} {} not connected: zone {zone}’s results are stale.",
-                if names.len() == 1 { "is" } else { "are" }
-            ),
-        };
-        let hosts = snapshot
-            .hosts
-            .values()
-            .filter(|host| host.check.zone.as_deref() == Some(zone.as_str()))
-            .count();
-        let mut detail = if late == 0 {
-            format!(
-                "No check of the {} hosts in zone {zone} is late yet",
-                count_text(hosts as u64)
-            )
-        } else {
-            format!(
-                "{} {} of {} hosts in zone {zone} {} late",
-                count_text(late as u64),
-                if late == 1 { "check" } else { "checks" },
-                count_text(hosts as u64),
-                if late == 1 { "is" } else { "are" }
-            )
-        };
-        if relay_growing(health) {
-            let items = health
-                .listener
-                .as_ref()
-                .map_or(0, |listener| rate(listener.relay_queue));
-            let _ = write!(
-                detail,
-                "; the relay queue is growing ({} messages)",
-                count_text(items)
-            );
-        }
-        if cut_off.len() > 1 {
-            let more = cut_off.len() - 1;
-            let _ = write!(
-                detail,
-                "; {more} more {} cut off",
-                if more == 1 { "zone is" } else { "zones are" }
-            );
-        }
-        detail.push('.');
-        return Some(HealthBanner {
-            tone: Tone::Critical,
-            title,
-            detail,
-            late_zone: (late > 0).then(|| zone.clone()),
-        });
-    }
-    let row = zones
-        .iter()
-        .flat_map(|zone| &zone.endpoints)
-        .find(|row| row.state == NodeState::Disconnected)?;
-    let title = match gone_for(&row.name) {
-        Some(gone) => format!("{} has not been connected for {gone}.", row.name),
-        None => format!("{} is not connected.", row.name),
-    };
-    Some(HealthBanner {
-        tone: Tone::Warning,
-        title,
-        detail: format!(
-            "Zone {} still has another endpoint: its checks run there, without a spare.",
-            row.zone
-        ),
-        late_zone: None,
-    })
-}
-
 /// The checks tiles.
+#[expect(clippy::too_many_lines, reason = "each tile with its rule and words")]
 fn check_tiles(
     snapshot: &Snapshot,
     status: Option<&InstanceStatus>,
@@ -654,15 +584,16 @@ fn check_tiles(
         |pick: fn(&HealthSample) -> f64| -> Vec<f64> { samples.iter().map(pick).collect() };
     let Some(status) = status else {
         return [
-            "active checks / min",
-            "passive checks / min",
-            "average latency",
-            "average execution",
-            "pending",
-            "late",
+            (HealthTile::ActiveChecks, "active checks / min"),
+            (HealthTile::PassiveChecks, "passive checks / min"),
+            (HealthTile::Latency, "average latency"),
+            (HealthTile::Execution, "average execution"),
+            (HealthTile::Pending, "pending"),
+            (HealthTile::Late, "late"),
         ]
         .into_iter()
-        .map(|label| Tile {
+        .map(|(kind, label)| Tile {
+            kind: Some(kind),
             label,
             value: "—".to_owned(),
             detail: "no status yet".to_owned(),
@@ -695,6 +626,7 @@ fn check_tiles(
     vec![
         Tile {
             label: "active checks / min",
+            kind: Some(HealthTile::ActiveChecks),
             value: count_text(rate(status.checks_per_minute)),
             detail: format!("of {} objects", count_text(objects)),
             tone: active_checks_tone(health),
@@ -703,6 +635,7 @@ fn check_tiles(
         },
         Tile {
             label: "passive checks / min",
+            kind: Some(HealthTile::PassiveChecks),
             value: count_text(rate(status.passive_checks_per_minute)),
             detail: "results sent in".to_owned(),
             tone: Tone::Normal,
@@ -711,6 +644,7 @@ fn check_tiles(
         },
         Tile {
             label: "average latency",
+            kind: Some(HealthTile::Latency),
             value: crate::format::seconds(status.avg_latency),
             detail: format!("max {}", crate::format::seconds(status.max_latency)),
             tone: latency_tone(health),
@@ -719,6 +653,7 @@ fn check_tiles(
         },
         Tile {
             label: "average execution",
+            kind: Some(HealthTile::Execution),
             value: crate::format::seconds(status.avg_execution_time),
             detail: format!("max {}", crate::format::seconds(status.max_execution_time)),
             tone: Tone::Normal,
@@ -727,6 +662,7 @@ fn check_tiles(
         },
         Tile {
             label: "pending",
+            kind: Some(HealthTile::Pending),
             value: count_text(u64::from(pending_hosts) + u64::from(pending_services)),
             detail: pending_detail,
             tone: Tone::Normal,
@@ -735,6 +671,7 @@ fn check_tiles(
         },
         Tile {
             label: "late",
+            kind: Some(HealthTile::Late),
             value: count_text(late as u64),
             detail: late_detail,
             tone: late_tone(late, Some(status), cut_off),
@@ -763,7 +700,9 @@ fn queue_tiles(
     let samples = &health.samples;
     let listener = health.listener.as_ref();
     let missing = || "—".to_owned();
-    let waiting = "while the page is open";
+    // Read with the status poll while the page is open, else every 5
+    // minutes (E2): until the first answer, nothing to show.
+    let waiting = "not read yet";
     let relay_trend: Vec<f64> = samples
         .iter()
         .filter_map(|sample| sample.relay_queue)
@@ -779,6 +718,7 @@ fn queue_tiles(
     let mut tiles = vec![
         Tile {
             label: "API work queue",
+            kind: Some(HealthTile::WorkQueue),
             value: listener.map_or_else(missing, |listener| {
                 format!("{}/s", count_text(rate(listener.work_queue_rate)))
             }),
@@ -793,6 +733,7 @@ fn queue_tiles(
         },
         Tile {
             label: "relay queue",
+            kind: Some(HealthTile::RelayQueue),
             value: listener.map_or_else(missing, |listener| count_text(rate(listener.relay_queue))),
             detail: match listener {
                 Some(_) if relay_growing(health) => "growing".to_owned(),
@@ -805,6 +746,7 @@ fn queue_tiles(
         },
         Tile {
             label: "cluster connections",
+            kind: Some(HealthTile::Connections),
             value: listener.map_or_else(missing, |listener| {
                 format!(
                     "{} of {}",
@@ -828,6 +770,7 @@ fn queue_tiles(
         },
         Tile {
             label: "HTTP clients",
+            kind: Some(HealthTile::HttpClients),
             value: listener.map_or_else(missing, |listener| {
                 count_text(u64::from(listener.http_clients))
             }),
@@ -844,6 +787,7 @@ fn queue_tiles(
     if let Some(state) = icingadb {
         tiles.push(Tile {
             label: "IcingaDB",
+            kind: Some(HealthTile::IcingaDb),
             value: if state == FeatureState::Running {
                 "on".to_owned()
             } else {
@@ -862,6 +806,7 @@ fn queue_tiles(
     let start = status.and_then(|status| status.program_start.non_zero());
     tiles.push(Tile {
         label: "uptime",
+        kind: Some(HealthTile::Uptime),
         value: start.map_or_else(missing, |start| format_two_units(start.elapsed_until(now))),
         detail: start.map_or_else(String::new, |start| {
             crate::format::date_time(start, &chrono::Local).map_or_else(String::new, |at| {

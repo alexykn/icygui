@@ -566,6 +566,11 @@ impl Watchdog {
 }
 
 fn deadline_of(store: &Store, key: &ObjectKey, globals: Globals) -> Option<(f64, f64)> {
+    // A heartbeat has a watch of its own (its time budget), and is never
+    // late in the lists.
+    if store.is_excluded(key) {
+        return None;
+    }
     let (state, check) = store.checkable(key)?;
     next_update(state, check, globals)
 }

@@ -999,6 +999,29 @@ impl Client {
     ///   request timeout;
     /// - other transport, TLS and HTTP errors as [`ApiError`].
     pub async fn events(&self, queue: &str, kinds: &[EventKind]) -> Result<EventStream, ApiError> {
+        self.events_filtered(queue, kinds, None).await
+    }
+
+    /// [`Client::events`] with Icinga's stream `filter`: an expression on
+    /// `event` (`event.type`, `event.host`, `event.service`, …) that every
+    /// event must match to be sent, such as quiet mode's `event.type !=
+    /// "CheckResult" || event.host == "icygui-hb" && event.service ==
+    /// "beat"` (only the heartbeats' check results). A blank filter is
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::events`]; a filter needs Icinga's `filter-expression`
+    /// permission where Icinga enforces it (by default from 2.17, or with
+    /// `enforce_filter_expression_permission`): without it the stream is
+    /// refused with [`ApiError::Forbidden`] (`Missing permission:
+    /// filter-expression`).
+    pub async fn events_filtered(
+        &self,
+        queue: &str,
+        kinds: &[EventKind],
+        filter: Option<&str>,
+    ) -> Result<EventStream, ApiError> {
         if kinds.is_empty() {
             return Err(ApiError::InvalidSettings(
                 "subscribe to at least one event type".to_owned(),
@@ -1010,7 +1033,10 @@ impl Client {
             ));
         }
         let types: Vec<&str> = kinds.iter().map(|kind| kind.api_name()).collect();
-        let body = json!({ "queue": queue, "types": types });
+        let mut body = json!({ "queue": queue, "types": types });
+        if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
+            body["filter"] = Value::String(filter.to_owned());
+        }
         let request = self
             .request(reqwest::Method::POST, "v1/events")?
             .json(&body);

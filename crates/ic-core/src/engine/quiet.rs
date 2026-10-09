@@ -137,6 +137,8 @@ pub(super) struct Switch {
     quiet: bool,
     /// The new stream's event types.
     kinds: Vec<EventKind>,
+    /// Its filter (a quiet stream's naming the heartbeats).
+    filter: Option<String>,
     /// The line count when the new stream was asked for: old-stream lines
     /// read after it may come on the new stream too.
     since: u64,
@@ -325,7 +327,7 @@ fn result_due(state: CheckableState, check: &CheckInfo) -> Option<f64> {
 impl Engine {
     /// Whether quiet mode is wanted ([`crate::Command::SetQuiet`]).
     pub(super) fn quiet(&self) -> bool {
-        self.quiet_wanted.load(Ordering::SeqCst)
+        self.wish.quiet.load(Ordering::SeqCst)
     }
 
     /// Whether the session's stream carries no check results (quiet mode;
@@ -338,7 +340,7 @@ impl Engine {
 
     /// `Command::SetQuiet`.
     pub(super) fn set_quiet(&mut self, quiet: bool) {
-        if self.quiet_wanted.swap(quiet, Ordering::SeqCst) == quiet {
+        if self.wish.quiet.swap(quiet, Ordering::SeqCst) == quiet {
             return;
         }
         tracing::info!(environment = %self.spec.environment.name, quiet, "quiet mode");
@@ -391,7 +393,10 @@ impl Engine {
         let Some(conn) = &mut self.conn else {
             return;
         };
-        if conn.quiet == quiet {
+        let (kinds, filter) = self.wish.spec(&conn.info);
+        if conn.quiet == quiet
+            && (self.lines.is_none() || (kinds == conn.kinds && filter == conn.filter))
+        {
             return;
         }
         if self.lines.is_none() {
@@ -401,8 +406,7 @@ impl Engine {
             self.mode_changed = true;
             return;
         }
-        let kinds = connect::stream_kinds(&conn.info, quiet);
-        if kinds == conn.kinds {
+        if kinds == conn.kinds && filter == conn.filter {
             // The API user may not read check results anyway.
             conn.quiet = quiet;
             self.stream_quiet = quiet;
@@ -419,12 +423,14 @@ impl Engine {
             id,
             quiet,
             kinds: kinds.clone(),
+            filter: filter.clone(),
             since: self.seq.load(Ordering::SeqCst),
             old: HashMap::new(),
             stage: Stage::Opening,
         });
+        let wish = Arc::clone(&self.wish);
         self.tasks.spawn(async move {
-            let result = connect::open_events(&client, &kinds).await;
+            let result = connect::open_wished(&client, kinds, filter, &wish).await;
             let _ = tx.send(Internal::StreamOpened {
                 session,
                 switch: id,
@@ -434,12 +440,21 @@ impl Engine {
     }
 
     /// The new stream of switch `id` is open (or couldn't be opened).
-    pub(super) fn on_stream_opened(&mut self, id: u64, result: Result<EventLines, ApiError>) {
+    pub(super) fn on_stream_opened(
+        &mut self,
+        id: u64,
+        result: Result<(EventLines, Vec<EventKind>, Option<String>), ApiError>,
+    ) {
         if self.switch.as_ref().is_none_or(|switch| switch.id != id) {
             return;
         }
         match result {
-            Ok(lines) => {
+            Ok((lines, kinds, filter)) => {
+                // What it carries (Icinga may have refused the filter).
+                if let Some(switch) = &mut self.switch {
+                    switch.kinds = kinds;
+                    switch.filter = filter;
+                }
                 let (tx, rx) = mpsc::unbounded_channel();
                 let reader = self
                     .tasks
@@ -597,6 +612,7 @@ impl Engine {
         let Switch {
             quiet,
             kinds,
+            filter,
             mut old,
             since,
             stage,
@@ -647,14 +663,17 @@ impl Engine {
             .as_ref()
             .map_or_else(Instant::now, |conn| conn.last_line);
         if let Some(conn) = &mut self.conn {
-            conn.check_events = kinds.contains(&EventKind::CheckResult);
+            conn.check_events = kinds.contains(&EventKind::CheckResult) && filter.is_none();
             conn.kinds = kinds;
+            conn.filter = filter;
             conn.quiet = quiet;
             // The stall watch counts from the new stream.
             conn.last_line = Instant::now();
         }
         self.stream_quiet = quiet;
         self.mode_changed = true;
+        // The heartbeats come on the new stream, or are read by polls.
+        self.beats_stream_changed();
         self.switch_backoff.reset();
         self.dedupe = Some(Dedupe {
             hashes: old,

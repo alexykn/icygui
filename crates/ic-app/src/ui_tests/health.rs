@@ -1,9 +1,9 @@
 //! The cluster health page (topic 06) through the real core and the
 //! demo's `prod-cluster` (two masters, a satellite in `ams` and one in
 //! `fra`): it opens from the sidebar, the switcher and the palette; while
-//! it shows, the engine asks for the node's listener status and features
-//! (each once when it opens); the satellite dropping out turns the page
-//! and the sidebar's dot critical.
+//! it shows, the engine asks for the node's listener status with every
+//! poll (closed, every 5 minutes for the trouble alerts); the satellite
+//! dropping out turns the page and the sidebar's dot critical.
 
 use std::time::Duration;
 
@@ -44,10 +44,11 @@ fn the_health_page_shows_the_cluster_and_asks_only_while_open() {
                     connected_to(app.state.read(cx), demo::ENDPOINT)
                 })
                 .await;
-                // Closed: the page's own requests aren't made.
+                // Closed: the trouble alerts' round only (PLAN.md §4.2 E2:
+                // every 5 minutes, with a status poll).
                 cx.update(|cx| {
-                    assert_eq!(asked(cx, "/v1/status/ApiListener"), 0);
-                    assert_eq!(asked(cx, "/v1/objects/checkercomponents"), 0);
+                    assert!(asked(cx, "/v1/status/ApiListener") <= 1);
+                    assert!(asked(cx, "/v1/objects/checkercomponents") <= 1);
                 });
                 // Opened from the palette's command (as from the sidebar
                 // and the switcher: the same entry).
@@ -73,8 +74,16 @@ fn the_health_page_shows_the_cluster_and_asks_only_while_open() {
                 )
                 .await;
                 cx.update(|cx| {
-                    assert_eq!(asked(cx, "/v1/status/ApiListener"), 1, "once, at once");
-                    assert_eq!(asked(cx, "/v1/objects/checkercomponents"), 1);
+                    let listener = asked(cx, "/v1/status/ApiListener");
+                    assert!(
+                        (1..=2).contains(&listener),
+                        "{listener}: at once, unless just asked"
+                    );
+                    assert_eq!(
+                        asked(cx, "/v1/objects/checkercomponents"),
+                        1,
+                        "every 5 minutes, open or not"
+                    );
                     let page = app.workspace.read(cx).health_page().clone();
                     let report = page.read(cx).report(cx);
                     assert_eq!(report.seen_from.as_deref(), Some("master-01"));
@@ -140,11 +149,13 @@ fn the_health_page_shows_the_cluster_and_asks_only_while_open() {
                     assert_eq!((report.connected, report.not_connected), (3, 1));
                     let fra = &report.zones[2].endpoints[0];
                     assert_eq!(fra.tone, Tone::Critical);
-                    let banner = report.banner.as_ref().expect("a cut-off zone's banner");
-                    assert_eq!(banner.tone, Tone::Critical);
+                    // Its alert is raised after the 2-minute grace (the
+                    // engine's tests follow it there).
                     assert!(
-                        banner.title.contains("zone fra’s results are stale"),
-                        "{banner:?}"
+                        report
+                            .alerts
+                            .iter()
+                            .all(|alert| alert.tone == Tone::Critical)
                     );
                     let state = app.state.read(cx);
                     assert_eq!(

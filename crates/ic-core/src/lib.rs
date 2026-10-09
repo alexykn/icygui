@@ -49,6 +49,7 @@ mod error;
 mod event_log;
 mod handle;
 pub mod health;
+pub mod heartbeat;
 pub mod ports;
 mod probe;
 pub mod snapshot;
@@ -56,6 +57,7 @@ mod spec;
 mod store;
 mod summary;
 mod topology;
+pub mod trouble;
 
 pub use command::{
     ActionOutcome, Command, ConnectionState, CoreEvent, LoadPhase, LogEntry, LogKind,
@@ -78,3 +80,8 @@ pub use probe::{
 pub use spec::{EnvironmentSpec, Ports, Start, Tuning};
 pub use summary::Tally;
 pub use topology::{ClusterNode, ClusterView, ConnectedNode, NodeState};
+
+/// How often an engine says it runs ([`CoreEvent::Alive`]), whatever else
+/// it does. The UI takes an environment whose engine hasn't said so for
+/// three of these for stale.
+pub const ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);

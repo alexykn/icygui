@@ -31,6 +31,8 @@ pub struct EventStreamStats {
     pub lines: u64,
     /// Bytes sent to it so far.
     pub bytes: u64,
+    /// It has a `filter`.
+    pub filtered: bool,
 }
 
 /// A request the server received (recorded before authentication, so
@@ -361,6 +363,23 @@ impl MockControl {
         Ok(())
     }
 
+    /// Deletes a service, as a configuration deployment that drops it does:
+    /// `ObjectDeleted` goes to the event streams.
+    ///
+    /// # Errors
+    /// Unknown service.
+    pub fn remove_service(&self, host: &str, name: &str) -> Result<(), MockError> {
+        let full = format!("{host}!{name}");
+        let mut world = self.world();
+        world
+            .services
+            .get_mut(host)
+            .and_then(|services| services.remove(name))
+            .ok_or_else(|| unknown(&full))?;
+        world.emit_object_change(EventType::ObjectDeleted, "Service", &full);
+        Ok(())
+    }
+
     /// Emits `ObjectModified` for an object, as a configuration deployment
     /// would (the mock never changes configuration itself).
     ///
@@ -392,6 +411,32 @@ impl MockControl {
         let mut bytes = line.as_bytes().to_vec();
         bytes.push(b'\n');
         self.world().bus.publish_line_bytes(&Bytes::from(bytes));
+    }
+
+    /// Stops every check, like a checker that hangs: no scheduled,
+    /// simulated, forced or real-time check runs until
+    /// [`MockControl::start_checks`] (passive results are still processed).
+    pub fn stop_checks(&self) {
+        self.world().checks_stopped = true;
+    }
+
+    /// Runs checks again after [`MockControl::stop_checks`]; the real-time
+    /// checks run at once.
+    pub fn start_checks(&self) {
+        let mut world = self.world();
+        world.checks_stopped = false;
+        let now = world.now();
+        for at in world.realtime.values_mut() {
+            *at = (*at).min(now);
+        }
+    }
+
+    /// Runs the real-time checks that are due now (the timers do so every
+    /// housekeeping interval).
+    pub fn run_realtime_checks(&self) {
+        let mut world = self.world();
+        let now = world.now();
+        world.run_realtime_checks(now);
     }
 
     /// Disconnects every event stream (the connections are aborted, like a
@@ -427,6 +472,7 @@ impl MockControl {
                 types: info.types,
                 lines: info.lines,
                 bytes: info.bytes,
+                filtered: info.filtered,
             })
             .collect()
     }

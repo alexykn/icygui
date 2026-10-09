@@ -611,6 +611,9 @@ impl World {
     /// Runs a check now and processes its result: the current state again
     /// with fresh timestamps (what a scheduled check does in the mock).
     pub(crate) fn run_check(&mut self, object: &str) -> Option<ProcessOutcome> {
+        if self.checks_stopped {
+            return None;
+        }
         let checkable = self.checkable(object)?;
         let input = self.recheck_input(checkable, None);
         self.process_check_result(object, input)
@@ -1088,6 +1091,7 @@ impl World {
             self.scheduled_checks.remove(&object);
             self.checks.push(&object);
         }
+        self.run_realtime_checks(now);
         // Command executions.
         let (due, later): (Vec<PendingExecution>, Vec<PendingExecution>) =
             std::mem::take(&mut self.pending_executions)
@@ -1096,6 +1100,58 @@ impl World {
         self.pending_executions = later;
         for execution in due {
             self.finish_execution(&execution, now);
+        }
+    }
+
+    /// Runs the real-time checks that are due (heartbeats): OK, or UNKNOWN
+    /// with Icinga's output while the endpoint the check is pinned to
+    /// isn't connected. Nothing runs while checks are stopped.
+    pub(crate) fn run_realtime_checks(&mut self, now: f64) {
+        if self.checks_stopped {
+            return;
+        }
+        let due: Vec<String> = self
+            .realtime
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(object, _)| object.clone())
+            .collect();
+        for object in due {
+            let Some(checkable) = self.checkable(&object) else {
+                self.realtime.remove(&object);
+                continue;
+            };
+            let interval = checkable.check_interval.max(1.0);
+            let node = self.app.node_name.clone();
+            let pinned = checkable.command_endpoint.clone();
+            let disconnected = !pinned.is_empty()
+                && pinned != node
+                && self
+                    .endpoints
+                    .get(&pinned)
+                    .is_none_or(|endpoint| !endpoint.connected);
+            // The pinned endpoint is the check's source even while it isn't
+            // connected (as Icinga 2.15 reports it, checked in Docker).
+            let source = if pinned.is_empty() {
+                node.clone()
+            } else {
+                pinned.clone()
+            };
+            let (state, output) = if disconnected {
+                (
+                    3,
+                    format!("Remote Icinga instance '{pinned}' is not connected to '{node}'"),
+                )
+            } else {
+                (0, format!("icygui heartbeat {now:.0}"))
+            };
+            let base = self.recheck_input(checkable, Some((state, output, Some(Vec::new()))));
+            let input = CheckInput {
+                check_source: source,
+                ..base
+            };
+            self.process_check_result(&object, input);
+            self.realtime.insert(object, now + interval);
         }
     }
 

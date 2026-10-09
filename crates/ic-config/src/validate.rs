@@ -11,15 +11,17 @@ use std::fmt;
 use std::net::IpAddr;
 use std::path::Path;
 
-use ic_model::ObjectKey;
+use ic_model::{ObjectKey, ServiceKey};
 use ic_rules::{NotificationSettings, QuietHours};
 
 use crate::environment::{CREDENTIALS_REASON, has_credentials, parse_api_url};
 use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::fingerprint::parse_fingerprint;
+use crate::health_page::HealthPage;
 use crate::model::{
     ApiUrl, AuthConfig, Config, Dashboard, DashboardGroup, Environment, MAX_API_URLS, TlsConfig,
 };
+use crate::trouble::{MIN_HEARTBEAT_INTERVAL_SECS, Trouble};
 use crate::view::{GroupBy, GroupSource, MAX_VIEWS, ObjectKind, STREAM_LINES, View, ViewDisplay};
 
 /// The shortest allowed event log retention, in hours.
@@ -214,6 +216,55 @@ fn check_environment(environment: &Environment, path: &str, issues: &mut Issues)
         &join(path, "notifications"),
         issues,
     );
+    check_trouble(&environment.trouble, &join(path, "trouble"), issues);
+    check_health_page(&environment.health_page, &join(path, "health_page"), issues);
+}
+
+/// The trouble alerts: listed heartbeats name a service (`host!service`),
+/// an interval override isn't too short, the custom variable is a name.
+fn check_trouble(trouble: &Trouble, path: &str, issues: &mut Issues) {
+    let heartbeats = &trouble.heartbeats;
+    for (index, entry) in heartbeats.list.iter().enumerate() {
+        if ServiceKey::parse(entry.trim()).is_none() {
+            issues.push(
+                join(path, &format!("heartbeats.list[{index}]")),
+                "must name a service as host!service",
+            );
+        }
+    }
+    if let Some(interval) = heartbeats.interval_secs
+        && interval < MIN_HEARTBEAT_INTERVAL_SECS
+    {
+        issues.push(
+            join(path, "heartbeats.interval_secs"),
+            format!("must be at least {MIN_HEARTBEAT_INTERVAL_SECS} seconds"),
+        );
+    }
+    let name = heartbeats.variable_name();
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        issues.push(
+            join(path, "heartbeats.variable"),
+            "must be a custom variable's name, such as icygui_heartbeat",
+        );
+    }
+}
+
+/// The cluster health page: only health kinds, each once.
+fn check_health_page(page: &HealthPage, path: &str, issues: &mut Issues) {
+    let mut seen = Vec::new();
+    for (index, view) in page.views.iter().enumerate() {
+        let view_path = join(path, &format!("views[{index}].display"));
+        if !view.display.is_health() {
+            issues.push(view_path, "must be a health view");
+        } else if seen.contains(&view.display) {
+            issues.push(view_path, "is already on the page");
+        } else {
+            seen.push(view.display);
+        }
+    }
 }
 
 fn check_name(name: &str, path: &str, issues: &mut Issues) {
@@ -404,6 +455,12 @@ fn check_dashboard(dashboard: &Dashboard, path: &str, issues: &mut Issues) {
 }
 
 fn check_view(view: &View, path: &str, issues: &mut Issues) {
+    if view.display.is_health() {
+        issues.push(
+            join(path, "display"),
+            "belongs to the cluster health page, not to a dashboard",
+        );
+    }
     if view.object_kind == ObjectKind::Hosts && view.list_grouping() == GroupBy::ServiceGroup {
         issues.push(
             join(path, "group_by"),

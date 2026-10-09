@@ -10,11 +10,12 @@ use ic_ui_kit::IconName;
 
 use crate::lists::ListKind;
 
+pub(crate) mod beats;
 pub(crate) mod health;
 mod page;
 mod spark;
 
-pub(crate) use page::HealthPage;
+pub(crate) use page::{HealthPage, HealthPageEvent, Preview as HealthPreview};
 
 /// An entry of the cluster section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -107,6 +108,29 @@ pub(crate) fn cluster_state(snapshot: &Snapshot, connected: bool, now: Timestamp
     health::assess(snapshot, connected, now)
 }
 
+/// The sidebar's *health* dot (no false green, PLAN.md §4.2): the
+/// cluster's state, but never green or grey while the environment has no
+/// live data (yellow), and red once its engine stopped saying it runs.
+pub(crate) fn sidebar_state(
+    snapshot: &Snapshot,
+    connection: &crate::app_state::ConnectionStatus,
+    now: Timestamp,
+) -> ClusterState {
+    let state = cluster_state(snapshot, connection.is_connected(), now);
+    if connection
+        .engine_silent(now)
+        .is_some_and(|silent| silent > crate::app_state::connection::ENGINE_STUCK_AFTER)
+    {
+        return ClusterState::Critical;
+    }
+    match state {
+        ClusterState::Ok | ClusterState::Unknown if connection.no_data_for(now).is_some() => {
+            ClusterState::Warning
+        }
+        state => state,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +147,42 @@ mod tests {
             .map(|entry| entry.title())
             .collect();
         assert_eq!(titles, ["handling", "downtimes", "events", "health"]);
+    }
+
+    /// No false green: without live data the dot is yellow, never green
+    /// or grey; a stuck engine turns it red.
+    #[test]
+    fn no_live_data_is_never_green_in_the_sidebar() {
+        use std::sync::Arc;
+        let since = Timestamp::from_unix_seconds(1_000.0);
+        let now = Timestamp::from_unix_seconds(1_180.0);
+        let mut connection = crate::app_state::ConnectionStatus::starting("master-01", None);
+        let blind = Snapshot {
+            trouble: Arc::new(ic_core::trouble::Trouble {
+                alerts: Vec::new(),
+                blind: Some(ic_core::trouble::Blind {
+                    since,
+                    reason: "connection lost".to_owned(),
+                }),
+            }),
+            ..Snapshot::default()
+        };
+        assert_eq!(
+            sidebar_state(&blind, &connection, now),
+            ClusterState::Unknown
+        );
+        connection.on_snapshot_at(&blind, now);
+        assert_eq!(
+            sidebar_state(&blind, &connection, now),
+            ClusterState::Warning
+        );
+        // An engine silent for longer than a minute: red.
+        let mut silent = crate::app_state::ConnectionStatus::starting("master-01", None);
+        silent.on_alive(since);
+        assert_eq!(
+            sidebar_state(&Snapshot::default(), &silent, now),
+            ClusterState::Critical
+        );
     }
 
     #[test]

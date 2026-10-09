@@ -28,6 +28,7 @@ mod operations;
 pub(crate) mod permissions;
 mod presence;
 pub(crate) mod settings_file;
+mod trouble;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1126,6 +1127,9 @@ impl AppState {
             // engine saying its pause ended lets the app forget the ones
             // that are over.
             CoreEvent::NotificationsPaused(_) => self.expire_pauses(Timestamp::now()),
+            // The engine runs: the footer, the sidebar's dot and the tray
+            // stay green only while it says so.
+            CoreEvent::Alive(_) => self.engine.connection.on_alive(Timestamp::now()),
         }
     }
 

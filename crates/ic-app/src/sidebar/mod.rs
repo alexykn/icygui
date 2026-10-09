@@ -81,6 +81,9 @@ pub(crate) enum SidebarEvent {
         /// The object.
         object: ObjectKey,
     },
+    /// Show this environment's cluster health page (a trouble alert's
+    /// entry), switching to the environment first.
+    OpenHealthIn(String),
     /// Open the settings on this tab.
     OpenSettings(SettingsPage),
     /// Give this group or dashboard a custom notification rule, in the
@@ -398,7 +401,7 @@ impl Sidebar {
         }
         let tabs = model::open_tabs(state.tabs(), state.active_tab(), state.snapshot());
         let cluster_state =
-            crate::cluster::cluster_state(state.snapshot(), state.connection().is_connected(), now);
+            crate::cluster::sidebar_state(state.snapshot(), state.connection(), now);
         let cluster =
             model::cluster_rows(state.snapshot(), state.active_cluster(), cluster_state, now);
         let environment_name = environment.name.clone();
@@ -1083,7 +1086,10 @@ impl Sidebar {
         let connection = state.connection();
         let health = connection.health(now);
         let (endpoint, suffix) = connection.label_parts(now);
-        let connected = connection.is_connected() && health != Health::Failed;
+        // No live data (or an engine that stopped saying it runs): the
+        // node stays, `no data 3m` takes the age's place (16f).
+        let no_data = connection.no_data_for(now).is_some();
+        let connected = (connection.is_connected() && health != Health::Failed) || no_data;
         let name = state
             .environment()
             .map(|environment| environment.name.clone());
@@ -1142,7 +1148,9 @@ impl Sidebar {
                         .child(name),
                 )
             })
-            .map(|status| Self::status_detail(status, connected, endpoint, suffix, partial, theme))
+            .map(|status| {
+                Self::status_detail(status, connected, endpoint, suffix, partial, no_data, theme)
+            })
             .child(
                 div().flex_none().ml(px(2.)).child(
                     Icon::new(IconName::ChevronDown)
@@ -1185,19 +1193,30 @@ impl Sidebar {
         endpoint: String,
         suffix: Option<String>,
         partial: bool,
+        no_data: bool,
         theme: &Theme,
     ) -> Stateful<Div> {
+        let slot = if no_data {
+            NO_DATA_SLOT_CHARS
+        } else {
+            AGE_SLOT_CHARS
+        };
         match (connected, suffix) {
+            // Without live data the node gives way to `no data 3m`, so the
+            // environment's name stays whole in the sidebar-wide footer
+            // (the banner names the node).
             (true, Some(age)) => status
-                .child(
-                    div()
-                        .flex_none()
-                        .max_w(px(STATUS_NODE_MAX))
-                        .ml(px(5.))
-                        .truncate()
-                        .when(partial, |node| node.text_color(theme.states.text.warning))
-                        .child(short_node(&endpoint).to_owned()),
-                )
+                .when(!no_data, |status| {
+                    status.child(
+                        div()
+                            .flex_none()
+                            .max_w(px(STATUS_NODE_MAX))
+                            .ml(px(5.))
+                            .truncate()
+                            .when(partial, |node| node.text_color(theme.states.text.warning))
+                            .child(short_node(&endpoint).to_owned()),
+                    )
+                })
                 .child(div().flex_1())
                 .child(
                     div()
@@ -1205,7 +1224,8 @@ impl Sidebar {
                         .flex_none()
                         .ml(px(2.))
                         .justify_end()
-                        .w(theme.text.hint * (AGE_SLOT_CHARS * ic_ui_kit::CHAR_WIDTH))
+                        .w(theme.text.hint * (slot * ic_ui_kit::CHAR_WIDTH))
+                        .when(no_data, |age| age.text_color(theme.states.text.warning))
                         .child(age),
                 ),
             (_, suffix) => status
@@ -1380,6 +1400,8 @@ pub(super) fn short_node(name: &str) -> &str {
 }
 /// The footer age's slot, in characters (`59s`, `23h`).
 const AGE_SLOT_CHARS: f32 = 3.;
+/// The slot of `no data 59m`, in characters.
+const NO_DATA_SLOT_CHARS: f32 = 11.;
 
 /// The footer dot's colour (ENV-06): green while live, yellow when stale,
 /// red when reconnecting or failed, grey otherwise.

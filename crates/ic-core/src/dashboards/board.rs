@@ -264,6 +264,12 @@ fn targets(view: &View) -> (bool, bool) {
     match view.display {
         ViewDisplay::HostGroupGrid => (true, false),
         ViewDisplay::EventStream | ViewDisplay::Handling | ViewDisplay::Downtimes => (true, true),
+        // The cluster health page's kinds evaluate nothing (they are never
+        // a dashboard's: the settings keep them on that page).
+        ViewDisplay::ZonesAndEndpoints
+        | ViewDisplay::Checks
+        | ViewDisplay::QueuesAndConnections
+        | ViewDisplay::GlobalSwitches => (false, false),
         ViewDisplay::List | ViewDisplay::GroupedList | ViewDisplay::SummaryTiles => {
             match view.object_kind {
                 ObjectKind::Hosts => (true, false),
@@ -382,7 +388,11 @@ impl Board {
             ViewDisplay::List
             | ViewDisplay::EventStream
             | ViewDisplay::Handling
-            | ViewDisplay::Downtimes => false,
+            | ViewDisplay::Downtimes
+            | ViewDisplay::ZonesAndEndpoints
+            | ViewDisplay::Checks
+            | ViewDisplay::QueuesAndConnections
+            | ViewDisplay::GlobalSwitches => false,
             ViewDisplay::GroupedList => self.view.list_grouping() != GroupBy::Host,
             ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => true,
         }
@@ -565,7 +575,8 @@ impl Board {
         service: Option<&Arc<Service>>,
         host: Option<&Host>,
     ) {
-        let Some(service) = service else {
+        let Some(service) = service.filter(|service| !data.excluded.contains(&service.key)) else {
+            // Gone, or a heartbeat: no view shows or counts it.
             self.forget(&object);
             return;
         };
@@ -637,6 +648,10 @@ impl Board {
                 }
             }
             ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles => self.rows_dirty = true,
+            ViewDisplay::ZonesAndEndpoints
+            | ViewDisplay::Checks
+            | ViewDisplay::QueuesAndConnections
+            | ViewDisplay::GlobalSwitches => {}
         }
     }
 
@@ -678,7 +693,13 @@ impl Board {
                 host.map(|host| self.picker.groups_of(host))
                     .hash(&mut hasher);
             }
-            ViewDisplay::EventStream | ViewDisplay::Handling | ViewDisplay::Downtimes => return 0,
+            ViewDisplay::EventStream
+            | ViewDisplay::Handling
+            | ViewDisplay::Downtimes
+            | ViewDisplay::ZonesAndEndpoints
+            | ViewDisplay::Checks
+            | ViewDisplay::QueuesAndConnections
+            | ViewDisplay::GlobalSwitches => return 0,
         }
         hasher.finish()
     }
@@ -720,6 +741,10 @@ impl Board {
         } else {
             match self.view.display {
                 ViewDisplay::List | ViewDisplay::GroupedList => self.list_result(data, failed),
+                ViewDisplay::ZonesAndEndpoints
+                | ViewDisplay::Checks
+                | ViewDisplay::QueuesAndConnections
+                | ViewDisplay::GlobalSwitches => self.empty_result(None),
                 ViewDisplay::HostGroupGrid => {
                     let built = groups::grid(self, &self.picker, data);
                     ViewResult {
@@ -791,7 +816,12 @@ impl Board {
             ViewDisplay::HostGroupGrid => ViewBody::Grid(Arc::default()),
             ViewDisplay::SummaryTiles => ViewBody::Tiles(Arc::default()),
             ViewDisplay::EventStream => ViewBody::Stream(Arc::default()),
-            ViewDisplay::Handling | ViewDisplay::Downtimes => ViewBody::Members(Arc::default()),
+            ViewDisplay::Handling
+            | ViewDisplay::Downtimes
+            | ViewDisplay::ZonesAndEndpoints
+            | ViewDisplay::Checks
+            | ViewDisplay::QueuesAndConnections
+            | ViewDisplay::GlobalSwitches => ViewBody::Members(Arc::default()),
         };
         ViewResult {
             id: self.view.id.clone(),

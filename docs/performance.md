@@ -202,3 +202,26 @@ These budgets are tested: `ic-mock` has a `large` scenario of the same size with
 | A host-group grid of every host on screen (v1 stage 3 fixes, measured 2026-10-07): the demo's `fleet` dashboard with `ICYGUI_DEMO_SCENARIO=large` (2 000 hosts, about 2 400 squares drawn), the UI thread's CPU over 30 s in the debug build, the simulator live | 560 ticks (19 % of a core; 937–973 before each square's hover card was built only on hover and its element id became an index); the rc1-style `overview` list on the same data: 168 ticks. The rest is drawing 2 400 squares as elements each frame: one painted canvas per group with hit-testing is the next step if release measurements need it |
 
 The dev-profile numbers above already meet the release budgets (50 000 events in under 3 s; a full evaluation of 20 000 × 10 well under a second; memory far below 400 MB), so release builds have a wide margin.
+
+## Heartbeats
+
+**What they cost.** A heartbeat is one `dummy` check per interval on Icinga (no plugin runs) and, on a live stream, the `CheckResult` events icygui receives anyway. On a quiet stream, Icinga's stream `filter` names the heartbeats, so only their results come along (`event.type != "CheckResult" || (event.host == "…" && event.service == "…") || …`): a few hundred bytes per beat. An API user without `filter-expression` can't filter the stream; icygui then reads the beats' `last_check` with one by-name request per interval while quiet (through the request budget). A missed beat costs one more such request; a reconnect only follows when that request shows the beat ran but its result didn't arrive.
+
+**The time budget** (`ic_core::heartbeat`): each beat's deadline is its last arrival + its interval + an allowance, the allowance being `max(5 s, 3 × p99)` of the last 50 beats' lateness (arrival minus the previous arrival minus the interval), capped at half the interval. A beat past its deadline is *late* (shown, never alerted by itself); the REST query goes out 10 s after the deadline, and a fresh `last_check` gets a second look 5 s later before the stream is reconnected. Every beat records its latency (Icinga's `execution_end − execution_start`) and its delivery delay (arrival − `execution_end`, against the first beat as a baseline, so a skewed clock doesn't count).
+
+**Calibrated** 2026-10-09 (`contract/scale/heartbeat.sh` driving `contract/scale/heartbeat.py`: the disposable Icinga 2.15 in Docker on this 4-core machine, two heartbeats of 10 s and 30 s, each watched on a live stream (every type) and a quiet one (filtered), 30 minutes idle, then 30 minutes with 200 hosts and bursts of 400 state changes every 6 minutes; never against a production Icinga):
+
+| | beats | latency p99 / max | delivery p50 / p99 / max | gap − interval p99 / max | allowance | late | queries |
+|---|---|---|---|---|---|---|---|
+| idle, live, 10 s | 180 | 2.3 / 6.6 ms | 0.4 ms / 3.9 s / 5.0 s | 3.9 / 5.0 s | 5.0 s | 2 | 0 |
+| idle, live, 30 s | 60 | 2.3 / 3.4 ms | 0.3 ms / 3.8 s / 3.9 s | 2.2 / 2.3 s | 5.0–11.7 s | 0 | 0 |
+| idle, quiet, 10 s | 180 | 2.3 / 6.6 ms | 0.3 ms / 4.5 s / 5.0 s | 4.5 / 5.0 s | 5.0 s | 2 | 0 |
+| idle, quiet, 30 s | 60 | 2.3 / 3.4 ms | 0.2 ms / 4.6 s / 4.6 s | 4.6 / 4.6 s | 5.0–13.7 s | 0 | 0 |
+| load, live, 10 s | 180 | 0.8 / 2.7 ms | 2.1 s / 4.9 s / 5.0 s | 4.6 / 4.9 s | 5.0 s | 0 | 0 |
+| load, live, 30 s | 60 | 1.0 / 64.6 ms | 2.3 s / 4.9 s / 5.0 s | 4.6 / 4.9 s | 5.0–15.0 s | 0 | 0 |
+| load, quiet, 10 s | 180 | 0.8 / 2.7 ms | 0.3 ms / 0.6 ms / 1.1 s | 0.0 / 1.1 s | 5.0 s | 0 | 0 |
+| load, quiet, 30 s | 60 | 1.0 / 64.6 ms | 0.1 ms / 3.9 s / 3.9 s | 3.9 / 3.9 s | 5.0–11.7 s | 0 | 0 |
+
+Icinga used 0.11 % of a core idle and 4.77 % under the load (the bursts, not the beats).
+
+**What the numbers say.** Running a beat takes milliseconds; what varies is its delivery: results reach the stream up to 5.0 s after they ran, never later, idle or loaded, live or quiet (a busy live stream delivers later on average, 2 s, but not later at the tail). The allowance therefore never needs more than its 5 s floor for a 10 s beat, and learns 12–15 s for a 30 s beat from its occasional slow delivery. In two hours of watching, two beats were *late* for a moment (a 10 s beat whose delivery took the full 5 s; shown on the page, never alerted) and none reached the REST query, so the defaults hold: 5 s minimum allowance, query 10 s after the deadline, 5 s second look, 30 s beats recommended (10 s at the least). Raising the minimum allowance would only delay real alerts; the query, not the deadline, is what decides.

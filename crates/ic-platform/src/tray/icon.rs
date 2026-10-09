@@ -12,7 +12,7 @@ use std::f64::consts::PI;
 
 use tray_icon::{BadIcon, Icon};
 
-use super::TrayTone;
+use super::{TrayLook, TrayTone};
 
 /// Width and height in pixels. macOS draws menu-bar icons at most 22 pt
 /// tall (so this is crisp up to 3x); Linux trays scale it to the panel.
@@ -49,13 +49,64 @@ const NODE_DEGREES: f64 = -45.0;
 /// the glyph near the 16 pt macOS recommends inside the 22 pt slot.
 const MARK_PIXELS: f64 = 50.0;
 
-/// The tray icon for a state; `None` is the grey "no state" icon.
+/// The tray icon for a look: a state's tint (`None` is the grey "no
+/// state" icon), or the blind one.
 ///
 /// # Errors
 ///
 /// Never in practice: the buffer always matches [`SIZE`].
-pub(crate) fn tray_icon(tone: Option<TrayTone>) -> Result<Icon, BadIcon> {
-    Icon::from_rgba(render(tone), SIZE, SIZE)
+pub(crate) fn tray_icon(look: TrayLook) -> Result<Icon, BadIcon> {
+    let rgba = match look {
+        TrayLook::State(tone) => render(tone),
+        TrayLook::Blind => render_blind(),
+    };
+    Icon::from_rgba(rgba, SIZE, SIZE)
+}
+
+/// How many dashes the blind look's orbit has, and the part of each
+/// period they fill.
+const DASHES: f64 = 10.0;
+const DASH_FILL: f64 = 0.6;
+/// The blind look's hollow core: its radius and half width (logo units).
+const HOLLOW_RADIUS: f64 = 130.0;
+const HOLLOW_HALF_WIDTH: f64 = 32.0;
+
+/// The blind look (16e): the orbit dashed and the core hollow, both grey,
+/// the node in the warning colour. Straight-alpha RGBA like [`render`].
+pub(crate) fn render_blind() -> Vec<u8> {
+    let mark = Mark::new();
+    let centre = f64::from(SIZE) / 2.0;
+    let node = TrayTone::Warning.rgb();
+    let period = 2.0 * PI / DASHES;
+    let mut rgba = Vec::with_capacity(BYTES);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let px = (f64::from(x) + 0.5 - centre) / mark.scale;
+            let py = (f64::from(y) + 0.5 - centre) / mark.scale;
+            // The orbit, cut into dashes: outside a dash, the distance to
+            // its nearest end along the circle.
+            let angle = py.atan2(px).rem_euclid(period);
+            let dash = period * DASH_FILL;
+            let outside = if angle < dash {
+                0.0
+            } else {
+                (angle - dash).min(period - angle) * ORBIT_RADIUS
+            };
+            let orbit = mark.orbit_distance(px, py).max(outside - ORBIT_HALF_WIDTH);
+            let hollow = (px.hypot(py) - HOLLOW_RADIUS).abs() - HOLLOW_HALF_WIDTH;
+            let (distance, colour) = [
+                (orbit, NO_STATE),
+                (hollow, NO_STATE),
+                (mark.node_distance(px, py), node),
+            ]
+            .into_iter()
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap_or((f64::INFINITY, NO_STATE));
+            rgba.extend_from_slice(&colour);
+            rgba.push(coverage_to_alpha(0.5 - distance * mark.scale));
+        }
+    }
+    rgba
 }
 
 /// Straight-alpha RGBA pixels, row by row, [`SIZE`] × [`SIZE`].
@@ -183,7 +234,9 @@ mod tests {
         for tone in TONES {
             assert_eq!(render(tone).len(), (SIZE * SIZE * 4) as usize);
         }
-        assert!(tray_icon(Some(TrayTone::Critical)).is_ok());
+        assert!(tray_icon(TrayLook::State(Some(TrayTone::Critical))).is_ok());
+        assert!(tray_icon(TrayLook::Blind).is_ok());
+        assert_eq!(render_blind().len(), (SIZE * SIZE * 4) as usize);
     }
 
     #[test]
@@ -392,5 +445,27 @@ mod tests {
             }
         }
         assert_eq!(render(Some(TrayTone::Ok)), render(Some(TrayTone::Ok)));
+    }
+
+    #[test]
+    fn the_blind_look_is_grey_with_a_hollow_core_and_a_yellow_node() {
+        let rgba = render_blind();
+        // The core's centre is empty; its ring is grey.
+        assert_eq!(pixel_at(&rgba, 0.0, 0.0)[3], 0, "hollow");
+        assert_eq!(pixel_at(&rgba, 90.0, HOLLOW_RADIUS), opaque(NO_STATE));
+        // The node keeps its place, in the warning colour.
+        assert_eq!(
+            pixel_at(&rgba, NODE_DEGREES, ORBIT_RADIUS),
+            opaque(TrayTone::Warning.rgb())
+        );
+        // The orbit is dashed: on it, some points are drawn and some not.
+        let on_orbit: Vec<u8> = (0..72)
+            .map(|step| pixel_at(&rgba, f64::from(step) * 5.0 + 2.5, ORBIT_RADIUS)[3])
+            .collect();
+        assert!(
+            on_orbit.contains(&255) && on_orbit.contains(&0),
+            "{on_orbit:?}"
+        );
+        assert_ne!(rgba, render(None));
     }
 }

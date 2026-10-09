@@ -213,6 +213,27 @@ impl AppState {
         Some(reference)
     }
 
+    /// Saves the cluster health page's `views` (the editor's draft) for the
+    /// active environment, repaired (one view per health kind, each with
+    /// its kind's id); the settings file leaves the page out while it is
+    /// the default layout. Returns whether the environment exists.
+    pub(crate) fn save_health_page(&mut self, views: Vec<View>) -> bool {
+        let mut page = ic_config::HealthPage { views };
+        page.repair();
+        let Some(environment) = self.environment() else {
+            return false;
+        };
+        if environment.health_page == page {
+            return true;
+        }
+        tracing::info!(environment = %environment.name, "cluster health page changed");
+        self.change_environment(|environment| {
+            environment.health_page = page;
+            Some(())
+        })
+        .is_some()
+    }
+
     /// Saves the editor's `draft` over the dashboard `reference`: name,
     /// view, notification setting, and its group (moved to the end of
     /// another one). Returns its reference afterwards.
@@ -513,6 +534,27 @@ mod tests {
                 .id
                 .clone(),
         }
+    }
+
+    #[test]
+    fn the_health_page_saves_repaired_and_only_when_changed() {
+        let (mut state, recorder) = fixture();
+        let mut views = ic_config::HealthPage::default().views;
+        assert!(state.save_health_page(views.clone()), "unchanged");
+        assert!(recorder.sent().is_empty(), "nothing to tell the engine");
+        views.swap(0, 3);
+        views[1].health.sparklines = false;
+        views[2].id = "mine".to_owned();
+        views.push(View::default());
+        assert!(state.save_health_page(views));
+        let page = &state.environment().unwrap().health_page;
+        let ids: Vec<&str> = page.views.iter().map(|view| view.id.as_str()).collect();
+        assert_eq!(ids, ["switches", "checks", "queues", "zones"], "repaired");
+        assert!(!page.views[1].health.sparklines);
+        assert_eq!(recorder.sent(), ["UpdateEnvironment(prod-cluster)"]);
+        // Reset to default: the settings file leaves it out again.
+        assert!(state.save_health_page(ic_config::HealthPage::default().views));
+        assert!(state.environment().unwrap().health_page.is_default());
     }
 
     #[test]

@@ -313,6 +313,7 @@ impl AppState {
                     }
                     CoreEvent::Permissions(info) => slot.permissions = Some(info),
                     CoreEvent::Notification(record) => slot.push_notification(record),
+                    CoreEvent::Alive(_) => slot.connection.on_alive(ic_model::Timestamp::now()),
                     CoreEvent::ActionFinished { .. } | CoreEvent::NotificationsPaused(_) => {}
                 }
                 if update {

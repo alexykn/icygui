@@ -36,6 +36,8 @@ impl Environment {
             author: None,
             groups: default_groups(),
             notifications: NotificationSettings::default(),
+            trouble: crate::Trouble::default(),
+            health_page: crate::HealthPage::default(),
         }
     }
 

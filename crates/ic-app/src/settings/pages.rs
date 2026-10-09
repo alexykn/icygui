@@ -13,7 +13,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, Styled as _, div, prelude::FluentBuilder as _,
+    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    div, prelude::FluentBuilder as _,
 };
 use ic_config::{Appearance, General, InterfaceSize, ListTimes, LogLevel, RowDensity, ThemeChoice};
 use ic_core::snapshot::Summary;
@@ -417,6 +418,11 @@ impl SettingsPanel {
     ) -> (Vec<AnyElement>, Vec<Section>) {
         if !self.query.is_empty() {
             return self.render_search(theme, facts, cx);
+        }
+        if self.drilled_environment().is_some() {
+            let blocks = self.render_environment(theme, cx);
+            let sections = vec![Section::Environments; blocks.len()];
+            return (blocks, sections);
         }
         let sections = self.page.sections();
         let blocks = sections
@@ -1394,7 +1400,10 @@ impl SettingsPanel {
                         div()
                             .text_size(theme.text.small)
                             .text_color(theme.states.text.warning)
-                            .child(paused_text(count, until, facts.now)),
+                            .child(format!(
+                                "{}, trouble alerts too",
+                                paused_text(count, until, facts.now)
+                            )),
                     )
                     .child(self.focusable(
                         "settings-resume",
@@ -1985,13 +1994,24 @@ impl SettingsPanel {
                 environment.health,
                 theme,
             )))
-            .child(
+            .child({
+                let id = environment.id.clone();
                 div()
+                    .id(SharedString::from(format!(
+                        "settings-open-environment-{}",
+                        environment.id
+                    )))
                     .flex_none()
                     .text_size(theme.text.row)
                     .text_color(colors.text_strong)
-                    .child(rows::marked(&environment.name, &self.query, theme)),
-            )
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(colors.accent_text))
+                    .child(rows::marked(&environment.name, &self.query, theme))
+                    .tooltip(Tooltip::text("Trouble alerts and heartbeats"))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.show_environment(&id, window, cx);
+                    }))
+            })
             .child(
                 div()
                     .flex_1()

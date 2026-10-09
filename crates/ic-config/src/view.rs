@@ -88,6 +88,10 @@ pub struct View {
     /// never exported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub density: Option<RowDensity>,
+    /// A health view's options (the cluster health page's views only):
+    /// switched off, the tiles it leaves out, its trend lines.
+    #[serde(skip_serializing_if = "is_default")]
+    pub health: HealthOptions,
 }
 
 impl Default for View {
@@ -109,6 +113,7 @@ impl Default for View {
             threads: ThreadOptions::default(),
             state: None,
             density: None,
+            health: HealthOptions::default(),
         }
     }
 }
@@ -215,11 +220,24 @@ pub enum ViewDisplay {
     /// The downtimes of the objects the filter matches, in effect and to
     /// come, as a timeline or a list (topic 14).
     Downtimes,
+    /// The cluster health page's zones with their endpoints (topic 06).
+    ZonesAndEndpoints,
+    /// The cluster health page's check tiles: checks a minute, latency,
+    /// execution time, pending, late.
+    Checks,
+    /// The cluster health page's queue and connection tiles.
+    QueuesAndConnections,
+    /// The cluster health page's view of Icinga's global switches and the
+    /// node's features.
+    GlobalSwitches,
 }
 
 impl ViewDisplay {
-    /// Every display, in the order of the editor's *add view* menu: the
-    /// lists, the overviews, then the activity (which never counts).
+    /// Every display a dashboard of the sidebar may have, in the order of
+    /// the editor's *add view* menu: the lists, the overviews, then the
+    /// activity (which never counts). The health kinds
+    /// ([`ViewDisplay::HEALTH`]) are not among them: they belong to the
+    /// cluster health page.
     pub const ALL: [Self; 7] = [
         Self::List,
         Self::GroupedList,
@@ -229,6 +247,33 @@ impl ViewDisplay {
         Self::Handling,
         Self::Downtimes,
     ];
+
+    /// The cluster health page's kinds, in its default order (topic 06):
+    /// the only displays its editor offers, and never a sidebar
+    /// dashboard's.
+    pub const HEALTH: [Self; 4] = [
+        Self::ZonesAndEndpoints,
+        Self::Checks,
+        Self::QueuesAndConnections,
+        Self::GlobalSwitches,
+    ];
+
+    /// Whether this is one of the cluster health page's kinds.
+    #[must_use]
+    pub fn is_health(self) -> bool {
+        Self::HEALTH.contains(&self)
+    }
+
+    /// The tiles a health view of this display can show (none for the
+    /// others).
+    #[must_use]
+    pub fn health_tiles(self) -> &'static [HealthTile] {
+        match self {
+            Self::Checks => &HealthTile::CHECKS,
+            Self::QueuesAndConnections => &HealthTile::QUEUES,
+            _ => &[],
+        }
+    }
 
     /// Whether a view of this display counts toward its dashboard's
     /// sidebar count and dot and its notifications: the problem views
@@ -248,7 +293,7 @@ impl ViewDisplay {
     /// round 5); grids and tiles have none.
     #[must_use]
     pub fn has_rows(self) -> bool {
-        !matches!(self, Self::HostGroupGrid | Self::SummaryTiles)
+        !matches!(self, Self::HostGroupGrid | Self::SummaryTiles) && !self.is_health()
     }
 
     /// Whether the view shows topic 14's threads: handling or downtimes.
@@ -714,6 +759,109 @@ impl Default for StreamEvents {
     }
 }
 
+/// A health view's options (the cluster health page, topic 16; the
+/// editor's switch, *tiles* and *show sparklines*).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HealthOptions {
+    /// Switched off on the page: kept in the editor's list, not shown.
+    pub off: bool,
+    /// The tiles a checks or queues view leaves out (new tiles show).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden_tiles: Vec<HealthTile>,
+    /// Trend lines under the tiles (the last 30 minutes).
+    pub sparklines: bool,
+}
+
+impl Default for HealthOptions {
+    fn default() -> Self {
+        Self {
+            off: false,
+            hidden_tiles: Vec::new(),
+            sparklines: true,
+        }
+    }
+}
+
+impl HealthOptions {
+    /// Whether `tile` shows.
+    #[must_use]
+    pub fn shows(&self, tile: HealthTile) -> bool {
+        !self.hidden_tiles.contains(&tile)
+    }
+}
+
+/// A tile of the cluster health page's checks or queues view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthTile {
+    /// Active checks a minute.
+    ActiveChecks,
+    /// Passive check results a minute.
+    PassiveChecks,
+    /// Average check latency.
+    Latency,
+    /// Average check execution time.
+    Execution,
+    /// Objects without a result yet.
+    Pending,
+    /// Late checks (icygui's own tracking).
+    Late,
+    /// The API's work-queue rate.
+    WorkQueue,
+    /// Messages waiting to be relayed.
+    RelayQueue,
+    /// Cluster (JSON-RPC) connections.
+    Connections,
+    /// HTTP clients of the API.
+    HttpClients,
+    /// `IcingaDB`, shown only while Icinga reports the feature enabled.
+    IcingaDb,
+    /// How long the node has run.
+    Uptime,
+}
+
+impl HealthTile {
+    /// The checks view's tiles, in their order.
+    pub const CHECKS: [Self; 6] = [
+        Self::ActiveChecks,
+        Self::PassiveChecks,
+        Self::Latency,
+        Self::Execution,
+        Self::Pending,
+        Self::Late,
+    ];
+
+    /// The queues and connections view's tiles, in their order.
+    pub const QUEUES: [Self; 6] = [
+        Self::WorkQueue,
+        Self::RelayQueue,
+        Self::Connections,
+        Self::HttpClients,
+        Self::IcingaDb,
+        Self::Uptime,
+    ];
+
+    /// The tile's label, as the tile and the editor's chip say it.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ActiveChecks => "active checks / min",
+            Self::PassiveChecks => "passive checks / min",
+            Self::Latency => "average latency",
+            Self::Execution => "average execution",
+            Self::Pending => "pending",
+            Self::Late => "late",
+            Self::WorkQueue => "API work queue",
+            Self::RelayQueue => "relay queue",
+            Self::Connections => "cluster connections",
+            Self::HttpClients => "HTTP clients",
+            Self::IcingaDb => "IcingaDB",
+            Self::Uptime => "uptime",
+        }
+    }
+}
+
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
@@ -836,6 +984,49 @@ mod tests {
                 "{display:?}"
             );
         }
+    }
+
+    #[test]
+    fn health_kinds_belong_to_the_health_page_only() {
+        for display in ViewDisplay::HEALTH {
+            assert!(display.is_health());
+            assert!(!ViewDisplay::ALL.contains(&display), "{display:?}");
+            assert!(!display.counts_problems(), "{display:?}");
+            assert!(!display.has_rows(), "{display:?}");
+        }
+        for display in ViewDisplay::ALL {
+            assert!(!display.is_health(), "{display:?}");
+            assert!(display.health_tiles().is_empty());
+        }
+        assert_eq!(ViewDisplay::Checks.health_tiles(), HealthTile::CHECKS);
+        assert_eq!(
+            ViewDisplay::QueuesAndConnections.health_tiles(),
+            HealthTile::QUEUES
+        );
+        let options = HealthOptions {
+            hidden_tiles: vec![HealthTile::Pending],
+            ..HealthOptions::default()
+        };
+        assert!(!options.shows(HealthTile::Pending));
+        assert!(options.shows(HealthTile::Late));
+        let view = View {
+            display: ViewDisplay::QueuesAndConnections,
+            health: options,
+            ..View::default()
+        };
+        let text = toml::to_string(&view).unwrap();
+        assert!(
+            text.contains("display = \"queues_and_connections\""),
+            "{text}"
+        );
+        assert!(text.contains("hidden_tiles = [\"pending\"]"), "{text}");
+        assert_eq!(toml::from_str::<View>(&text).unwrap(), view);
+        // A view of a sidebar dashboard writes no health options.
+        assert!(
+            !toml::to_string(&View::default())
+                .unwrap()
+                .contains("health")
+        );
     }
 
     #[test]

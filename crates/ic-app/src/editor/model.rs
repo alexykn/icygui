@@ -4,7 +4,10 @@
 //! where a filter error points.
 
 use chrono::Local;
-use ic_config::{GroupBy, GroupSource, MAX_VIEWS, ObjectKind, STREAM_LINES, View, ViewDisplay};
+use ic_config::{
+    GroupBy, GroupSource, HealthPage as HealthLayout, MAX_VIEWS, ObjectKind, STREAM_LINES, View,
+    ViewDisplay,
+};
 use ic_core::snapshot::{DashboardResult, Summary, ViewBody, ViewResult};
 use ic_model::Timestamp;
 use ic_rules::{DashboardRef, ScopeSetting};
@@ -19,6 +22,10 @@ pub(crate) enum EditorTarget {
     New,
     /// An existing dashboard.
     Existing(DashboardRef),
+    /// The active environment's cluster health page (a built-in
+    /// dashboard: its views are the health kinds only, it has no name,
+    /// group, mark or notifications of its own; PLAN.md §4.2 H).
+    Health,
 }
 
 /// The draft for `target`: the dashboard as saved, or a new one in
@@ -41,6 +48,17 @@ pub(crate) fn initial_draft(
             group_id: group_id.to_owned(),
             mark: ic_config::SidebarMark::Auto,
         }),
+        EditorTarget::Health => {
+            let mut page = state.environment()?.health_page.clone();
+            page.repair();
+            Some(DashboardDraft {
+                name: HealthLayout::TITLE.to_owned(),
+                views: page.views,
+                notifications: ScopeSetting::Inherit,
+                group_id: String::new(),
+                mark: ic_config::SidebarMark::Auto,
+            })
+        }
         EditorTarget::Existing(reference) => {
             let (group, dashboard) = state.dashboard(reference)?;
             Some(DashboardDraft {
@@ -135,6 +153,10 @@ pub(crate) fn display_name(display: ViewDisplay) -> &'static str {
         ViewDisplay::EventStream => "event stream",
         ViewDisplay::Handling => "handling",
         ViewDisplay::Downtimes => "downtimes",
+        ViewDisplay::ZonesAndEndpoints => "zones and endpoints",
+        ViewDisplay::Checks => "checks",
+        ViewDisplay::QueuesAndConnections => "queues and connections",
+        ViewDisplay::GlobalSwitches => "global switches",
     }
 }
 
@@ -244,6 +266,75 @@ pub(crate) fn move_view(views: &mut Vec<View>, from: usize, to: usize) -> Option
     let view = views.remove(from);
     views.insert(to, view);
     Some(to)
+}
+
+/// *add view* on the cluster health page: a view of `display` under the
+/// one at `after`. The page has one view per kind, so a kind it has
+/// already is switched on (and selected) instead. Returns the view's
+/// index; `None` for a kind that isn't a health kind.
+pub(crate) fn add_health_view(
+    views: &mut Vec<View>,
+    after: Option<usize>,
+    display: ViewDisplay,
+) -> Option<usize> {
+    if !display.is_health() {
+        return None;
+    }
+    if let Some(index) = views.iter().position(|view| view.display == display) {
+        views[index].health.off = false;
+        return Some(index);
+    }
+    insert_view(views, after, HealthLayout::view_of(display))
+}
+
+/// The kinds the health page's view `id` may show, each with whether it
+/// is free: its own, and the ones no other view of the page shows (one
+/// view per kind).
+pub(crate) fn health_displays(views: &[View], id: &str) -> Vec<(ViewDisplay, bool)> {
+    ViewDisplay::HEALTH
+        .into_iter()
+        .map(|display| {
+            let taken = views
+                .iter()
+                .any(|view| view.id != id && view.display == display);
+            (display, !taken)
+        })
+        .collect()
+}
+
+/// What a health view's row in the views list says: `off`, or what it
+/// shows on this environment: its endpoints, its tiles (`tiles`: the ones
+/// the page has for its kind now), Icinga's switches.
+pub(crate) fn health_shows(
+    view: &View,
+    endpoints: usize,
+    tiles: &[ic_config::HealthTile],
+    switches: usize,
+) -> String {
+    if view.health.off {
+        return "off".to_owned();
+    }
+    let count = |count: usize, one: &str, many: &str| {
+        if count == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{count} {many}")
+        }
+    };
+    match view.display {
+        ViewDisplay::ZonesAndEndpoints => count(endpoints, "endpoint", "endpoints"),
+        ViewDisplay::Checks | ViewDisplay::QueuesAndConnections => {
+            let shown = tiles
+                .iter()
+                .filter(|tile| {
+                    view.display.health_tiles().contains(tile) && view.health.shows(**tile)
+                })
+                .count();
+            count(shown, "tile", "tiles")
+        }
+        ViewDisplay::GlobalSwitches => count(switches, "switch", "switches"),
+        _ => String::new(),
+    }
 }
 
 /// A view's name, or what it shows when it has none (a dashboard from
@@ -1196,6 +1287,70 @@ mod tests {
         assert!(icons.contains(&ic_ui_kit::IconName::Server));
         assert!(icons.iter().all(|icon| icon.lucide_name().contains("ser")));
         assert!(pickable_icons("").len() > icons.len());
+    }
+
+    #[test]
+    fn the_health_page_is_edited_as_a_dashboard_of_its_kinds() {
+        let state = AppState::fixture(Timestamp::from_unix_seconds(1_790_000_000.));
+        let draft = initial_draft(&state, &EditorTarget::Health, "").unwrap();
+        assert_eq!(draft.name, "cluster health");
+        assert_eq!(draft.views, HealthLayout::default().views, "06's layout");
+        // One view per kind: adding a kind it has switches it on.
+        let mut views = draft.views.clone();
+        views[3].health.off = true;
+        assert_eq!(
+            add_health_view(&mut views, Some(0), ViewDisplay::GlobalSwitches),
+            Some(3)
+        );
+        assert!(!views[3].health.off);
+        assert_eq!(views.len(), 4);
+        assert_eq!(add_health_view(&mut views, None, ViewDisplay::List), None);
+        // A kind the page lacks comes back under the selected view.
+        views.remove(1);
+        assert_eq!(
+            add_health_view(&mut views, Some(0), ViewDisplay::Checks),
+            Some(1)
+        );
+        assert_eq!(views[1].id, "checks");
+        // The display menu offers its own kind and the free ones.
+        views.remove(3);
+        let free: Vec<(ViewDisplay, bool)> = health_displays(&views, "checks");
+        assert_eq!(
+            free,
+            [
+                (ViewDisplay::ZonesAndEndpoints, false),
+                (ViewDisplay::Checks, true),
+                (ViewDisplay::QueuesAndConnections, false),
+                (ViewDisplay::GlobalSwitches, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn health_rows_say_what_the_view_shows() {
+        use ic_config::HealthTile;
+        let mut checks = HealthLayout::view_of(ViewDisplay::Checks);
+        // Every tile Icinga has numbers for; a view counts its own.
+        let tiles: Vec<HealthTile> = HealthTile::CHECKS
+            .into_iter()
+            .chain(HealthTile::QUEUES)
+            .collect();
+        assert_eq!(health_shows(&checks, 5, &tiles, 6), "6 tiles");
+        checks.health.hidden_tiles = vec![HealthTile::Pending];
+        assert_eq!(health_shows(&checks, 5, &tiles, 6), "5 tiles");
+        // A tile Icinga has no numbers for (IcingaDB off) doesn't count.
+        let queues = HealthLayout::view_of(ViewDisplay::QueuesAndConnections);
+        let without_db: Vec<HealthTile> = HealthTile::QUEUES
+            .into_iter()
+            .filter(|tile| *tile != HealthTile::IcingaDb)
+            .collect();
+        assert_eq!(health_shows(&queues, 5, &without_db, 6), "5 tiles");
+        let zones = HealthLayout::view_of(ViewDisplay::ZonesAndEndpoints);
+        assert_eq!(health_shows(&zones, 1, &[], 6), "1 endpoint");
+        let mut switches = HealthLayout::view_of(ViewDisplay::GlobalSwitches);
+        assert_eq!(health_shows(&switches, 5, &[], 6), "6 switches");
+        switches.health.off = true;
+        assert_eq!(health_shows(&switches, 5, &[], 6), "off");
     }
 
     #[test]

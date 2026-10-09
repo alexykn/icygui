@@ -66,6 +66,12 @@ pub(crate) struct Posted {
     pub(crate) sound: Option<&'static str>,
     /// Buttons: id and label.
     pub(crate) actions: Vec<(&'static str, &'static str)>,
+    /// It stays on screen until it is dismissed or closed (a trouble
+    /// alert under the *persistent* policy).
+    pub(crate) persistent: bool,
+    /// The tag of a notification this one ends (a trouble alert's
+    /// recovery): the desktop takes that one away first.
+    pub(crate) closes: Option<String>,
 }
 
 /// A click on a notification: its tag and the button (`None`: the body).
@@ -126,7 +132,23 @@ pub(crate) fn posted(
             Tone::Info => "dialog-information",
         }),
         actions,
+        persistent: false,
+        closes: None,
     }
+}
+
+/// A trouble alert's notification (PLAN.md §4.2 A, E): its title names the
+/// environment already; under the *persistent* policy a raised alert comes
+/// at critical urgency and stays until it clears; its recovery takes the
+/// raised one away.
+pub(crate) fn trouble(mut posted: Posted, intent: &NotificationIntent, persistent: bool) -> Posted {
+    let raised = matches!(intent.tone, Tone::Critical | Tone::Warning);
+    if persistent && raised {
+        posted.persistent = true;
+        posted.urgency = Urgency::Critical;
+    }
+    posted.closes = ic_core::trouble::raised_id(&intent.id).map(str::to_owned);
+    posted
 }
 
 /// `title` with the environment's name in front, for when there is more

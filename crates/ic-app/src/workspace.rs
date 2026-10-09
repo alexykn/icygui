@@ -393,6 +393,7 @@ impl Workspace {
             ),
             cx.subscribe_in(&events, window, Self::on_dashboard),
             cx.subscribe_in(&dashboard, window, Self::on_dashboard),
+            cx.subscribe_in(&health, window, Self::on_health_page),
         ];
         let clock = cx.spawn(async move |this, cx| {
             loop {
@@ -450,6 +451,39 @@ impl Workspace {
     }
 
     /// The dashboard page (or the cluster's events) asked to edit.
+    /// The cluster health page's `···` and links.
+    fn on_health_page(
+        &mut self,
+        _: &Entity<crate::cluster::HealthPage>,
+        event: &crate::cluster::HealthPageEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            crate::cluster::HealthPageEvent::Edit => {
+                self.open_editor(EditorTarget::Health, "", window, cx);
+            }
+            crate::cluster::HealthPageEvent::Settings => self.open_trouble_settings(window, cx),
+            crate::cluster::HealthPageEvent::Pick(_) => {}
+        }
+    }
+
+    /// The environment on screen's trouble alerts in the settings panel
+    /// (the heartbeat row's *settings*, an alert's *settings*).
+    pub(crate) fn open_trouble_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(SettingsPage::Icinga, None, window, cx);
+        let active = self
+            .state
+            .read(cx)
+            .active_environment_id()
+            .map(str::to_owned);
+        if let (Some(settings), Some(id)) = (&self.settings, active) {
+            settings
+                .view
+                .update(cx, |panel, cx| panel.show_environment(&id, window, cx));
+        }
+    }
+
     fn on_dashboard(
         &mut self,
         _: &Entity<DashboardView>,
@@ -830,9 +864,13 @@ impl Workspace {
             }
         }
         // The engine on screen asks for what only the health page needs
-        // while it shows (topic 06).
-        let health_page =
-            self.shown == Shown::Health && self.editor.is_none() && self.onboarding.is_none();
+        // while it shows (topic 06), also as the preview of its editor.
+        let health_page = self.shown == Shown::Health
+            && self
+                .editor
+                .as_ref()
+                .is_none_or(|editor| editor.view.read(cx).edits_health())
+            && self.onboarding.is_none();
         self.state
             .update(cx, |state, _| state.set_health_page(health_page));
         self.sync_onboarding(window, cx);
@@ -1360,7 +1398,11 @@ impl Workspace {
                 state.pause_notifications(Some(choice.until(now)));
                 state.inform(
                     format!("Notifications paused {}", choice.label(now)),
-                    Some("They're recorded in the notification centre meanwhile.".to_owned()),
+                    Some(
+                        "Trouble alerts too. They're recorded in the notification centre \
+                         meanwhile."
+                            .to_owned(),
+                    ),
                 );
                 cx.notify();
             }),
@@ -1688,6 +1730,21 @@ impl Workspace {
                 environment,
                 object,
             } => self.reveal_in(environment, object, window, cx),
+            SidebarEvent::OpenHealthIn(environment) => {
+                let show = |this: &mut Self, cx: &mut Context<Self>| {
+                    this.state.update(cx, |state, cx| {
+                        if state.show_cluster(ClusterEntry::Health) {
+                            cx.notify();
+                        }
+                    });
+                };
+                if self.state.read(cx).is_active(environment) {
+                    show(self, cx);
+                } else if self.state.read(cx).environment_by_id(environment).is_some() {
+                    self.switch_environment(environment, cx);
+                    cx.defer_in(window, move |this, _, cx| show(this, cx));
+                }
+            }
             SidebarEvent::OpenSettings(page) => self.open_settings(*page, None, window, cx),
             SidebarEvent::CustomRule(key) => {
                 self.open_settings(SettingsPage::Notifications, Some(key), window, cx);
@@ -1907,8 +1964,9 @@ impl Workspace {
                 }
             });
             self.sync(window, cx);
-        } else if self.state.read(cx).active_tab().is_some()
-            || self.state.read(cx).active_cluster().is_some()
+        } else if target == EditorTarget::New
+            && (self.state.read(cx).active_tab().is_some()
+                || self.state.read(cx).active_cluster().is_some())
         {
             self.state.update(cx, |state, cx| {
                 if state.show_dashboard() {
@@ -2010,6 +2068,7 @@ impl Workspace {
         let detail = match editor.target() {
             EditorTarget::New => "The new dashboard isn't created.",
             EditorTarget::Existing(_) => "The dashboard keeps what was saved.",
+            EditorTarget::Health => "The page keeps what was saved.",
         };
         let confirmation = Confirmation {
             title: format!("Discard the changes to {}?", editor.title()),

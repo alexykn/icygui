@@ -835,3 +835,63 @@ async fn real_icinga_event_stream() {
         );
     }
 }
+
+/// The heartbeat on a quiet stream (PLAN.md §4.2 B): quiet mode's event
+/// types plus `CheckResult`, narrowed by Icinga's stream filter to the
+/// named objects, brings exactly their check results and nothing else's;
+/// and the filter needs the `filter-expression` permission, which the
+/// least-privilege `icygui` user doesn't have (the fixture enforces it, as
+/// Icinga 2.17 will by default), so icygui must fall back without it.
+#[tokio::test]
+async fn real_icinga_quiet_stream_filter_carries_only_the_heartbeat() {
+    let Some(contract) = fixture().await else {
+        return;
+    };
+    let admin = std::env::var("ICYGUI_CONTRACT_ADMIN_USER").expect("ICYGUI_CONTRACT_ADMIN_USER");
+    let admin_password =
+        std::env::var("ICYGUI_CONTRACT_ADMIN_PASSWORD").expect("ICYGUI_CONTRACT_ADMIN_PASSWORD");
+    let mut kinds = EventKind::QUIET.to_vec();
+    kinds.push(EventKind::CheckResult);
+    // `load` on db-prod-03 runs every 20 s; `ping4` on k8s-node-07 too,
+    // and every host every 30 s: their results must stay out.
+    let filter =
+        r#"event.type != "CheckResult" || event.host == "db-prod-03" && event.service == "load""#;
+    let refused = contract
+        .client()
+        .events_filtered("icygui-contract-filter-refused", &kinds, Some(filter))
+        .await;
+    assert!(
+        matches!(&refused, Err(ApiError::Forbidden(message)) if message.contains("filter-expression")),
+        "the icygui user may not filter the stream: {:?}",
+        refused.map(|_| ())
+    );
+    let mut stream = contract
+        .client_as(&admin, &admin_password)
+        .events_filtered("icygui-contract-filter", &kinds, Some(filter))
+        .await
+        .unwrap();
+    // Two of its results (20 s apart) within 70 s, none of another object.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(70);
+    let mut beats = Vec::new();
+    while beats.len() < 2 {
+        let event = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .expect("two results of the named object within 70 s")
+            .expect("the stream is open")
+            .unwrap();
+        if let Event::CheckResult { object, result, .. } = &event {
+            assert_eq!(
+                *object,
+                ObjectKey::service("db-prod-03", "load"),
+                "only the named object's check results: {event:?}"
+            );
+            // Icinga's own times, which the heartbeat's time budget
+            // measures (scheduling latency and delivery).
+            assert!(result.schedule_start.as_unix_seconds() > 0.0);
+            assert!(result.execution_start >= result.schedule_start);
+            assert!(result.execution_end >= result.execution_start);
+            beats.push(result.execution_end);
+        }
+    }
+    assert!(beats[1] > beats[0]);
+}

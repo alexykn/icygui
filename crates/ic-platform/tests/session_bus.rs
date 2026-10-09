@@ -304,11 +304,24 @@ fn menu(bus: &Connection, item: &str) -> MenuNode {
     MenuNode::new(id, properties, children)
 }
 
-/// The Environment submenu as text.
+impl MenuNode {
+    /// The environments' entries: the top-level items between the first
+    /// separator (under *Open*) and the next one.
+    fn environment_entries(&self) -> Vec<&MenuNode> {
+        self.children
+            .iter()
+            .skip_while(|child| !child.is_separator())
+            .skip(1)
+            .take_while(|child| !child.is_separator())
+            .filter(|child| child.label().starts_with('✓') || child.label().starts_with('\u{2003}'))
+            .collect()
+    }
+}
+
+/// The environments' entries as text.
 fn environments(bus: &Connection, item: &str) -> Vec<String> {
     let menu = menu(bus, item);
-    menu.find("Environment")
-        .children
+    menu.environment_entries()
         .iter()
         .map(|child| {
             let mut text = child.label();
@@ -320,20 +333,21 @@ fn environments(bus: &Connection, item: &str) -> Vec<String> {
         .collect()
 }
 
-/// An environment's name without the mark or indentation in front.
+/// An environment's name without the mark or indentation in front, and
+/// without its status after ` · `.
 fn environment_name(label: &str) -> &str {
-    label
+    let name = label
         .strip_prefix("✓ ")
         .or_else(|| label.strip_prefix('\u{2003}'))
-        .unwrap_or(label)
+        .unwrap_or(label);
+    name.split(" · ").next().unwrap_or(name)
 }
 
 /// The environments the host shows as the current one: checked (a check
 /// item's toggle state) or marked with `✓`.
 fn current_environments(bus: &Connection, item: &str) -> Vec<String> {
     let menu = menu(bus, item);
-    menu.find("Environment")
-        .children
+    menu.environment_entries()
         .iter()
         .filter(|child| {
             let checked = child
@@ -350,9 +364,8 @@ fn current_environments(bus: &Connection, item: &str) -> Vec<String> {
 fn click_environment(bus: &Connection, item: &str, name: &str) {
     let menu = menu(bus, item);
     let environment = menu
-        .find("Environment")
-        .children
-        .iter()
+        .environment_entries()
+        .into_iter()
         .find(|child| environment_name(&child.label()) == name)
         .unwrap_or_else(|| panic!("no environment {name:?}"));
     send_click(bus, item, environment.id);
@@ -466,7 +479,7 @@ fn other_environments() -> Vec<String> {
     .collect()
 }
 
-/// The expected Environment submenu: these two first, then the others.
+/// The expected environments' entries: these two first, then the others.
 fn shown_environments(prod: &str, staging: &str) -> Vec<String> {
     let mut shown = vec![prod.to_owned(), staging.to_owned()];
     shown.extend(other_environments());
@@ -474,6 +487,10 @@ fn shown_environments(prod: &str, staging: &str) -> Vec<String> {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one story through the menu, step by step"
+)]
 fn tray_menu_over_dbus() {
     if !is_child() {
         run_child("tray_menu_over_dbus", Bus::Private, &[]);
@@ -490,7 +507,6 @@ fn tray_menu_over_dbus() {
             "Open icygui",
             "---",
             "Pause notifications ▸ For 30 minutes / For 1 hour / Until 08:00",
-            "---",
             "Quit icygui",
         ]
     );
@@ -536,6 +552,21 @@ fn tray_menu_over_dbus() {
     );
     assert_eq!(current_environments(&bus, &item), ["staging"]);
 
+    // Each environment's status follows its name (A: `no data 3m`).
+    tray.set_environment_statuses(&[
+        ("env-a".to_owned(), "no data 3m".to_owned()),
+        ("env-b".to_owned(), "live".to_owned()),
+    ]);
+    assert_eq!(
+        environments(&bus, &item)[..2],
+        ["\u{2003}prod · no data 3m", "✓ staging · live (off)"]
+    );
+    assert_eq!(current_environments(&bus, &item), ["staging"]);
+    assert_eq!(
+        menu(&bus, &item).shown().last().map(String::as_str),
+        Some("Quit icygui")
+    );
+
     click(&bus, &item, "Open icygui");
     assert_eq!(next_command(&mut commands), TrayCommand::Open);
     click(&bus, &item, "For 30 minutes");
@@ -553,8 +584,13 @@ fn tray_menu_over_dbus() {
     );
 
     tray.set_paused(Some("18:30".to_owned()));
+    let shown = menu(&bus, &item).shown();
+    let paused = shown
+        .iter()
+        .position(|line| line.starts_with("Paused until"))
+        .unwrap_or_else(|| panic!("{shown:?}"));
     assert_eq!(
-        menu(&bus, &item).shown()[2..4],
+        shown[paused..paused + 2],
         ["Paused until 18:30 (off)", "Resume notifications"]
     );
     click(&bus, &item, "Resume notifications");

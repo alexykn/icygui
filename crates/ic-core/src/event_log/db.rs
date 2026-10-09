@@ -296,6 +296,61 @@ impl Database {
         Ok(events + notifications)
     }
 
+    /// The heartbeats remembered, by name.
+    pub(super) fn heartbeats(&self) -> Result<Vec<super::RememberedBeat>, DbError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT object, proves, missing_since FROM heartbeats ORDER BY object")?;
+        let rows = statement.query_map([], |row| {
+            let object: String = row.get(0)?;
+            let missing: Option<f64> = row.get(2)?;
+            Ok(ServiceKey::parse(&object).map(|key| super::RememberedBeat {
+                key,
+                proves: row.get(1).unwrap_or_default(),
+                missing_since: missing.map(Timestamp::from_unix_seconds),
+            }))
+        })?;
+        let mut beats = Vec::new();
+        for row in rows {
+            if let Some(beat) = row? {
+                beats.push(beat);
+            }
+        }
+        Ok(beats)
+    }
+
+    /// Remembers heartbeats, replacing what was known of them.
+    pub(super) fn remember_heartbeats(
+        &mut self,
+        beats: &[super::RememberedBeat],
+    ) -> Result<(), DbError> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut upsert = tx.prepare_cached(
+                "INSERT INTO heartbeats (object, proves, missing_since) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (object) DO UPDATE SET proves = ?2, missing_since = ?3",
+            )?;
+            for beat in beats {
+                upsert.execute(params![
+                    format!("{}!{}", beat.key.host, beat.key.name),
+                    beat.proves,
+                    beat.missing_since.map(Timestamp::as_unix_seconds),
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Forgets a heartbeat.
+    pub(super) fn forget_heartbeat(&self, key: &ServiceKey) -> Result<(), DbError> {
+        self.conn.execute(
+            "DELETE FROM heartbeats WHERE object = ?1",
+            params![format!("{}!{}", key.host, key.name)],
+        )?;
+        Ok(())
+    }
+
     /// The schema version recorded in the database.
     #[cfg(test)]
     pub(super) fn version(&self) -> Result<Option<i64>, DbError> {
@@ -334,6 +389,7 @@ fn migrate(conn: &Connection) -> Result<(), DbError> {
         None => {
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch(SCHEMA)?;
+            tx.execute_batch(HEARTBEATS)?;
             tx.execute(
                 "INSERT INTO schema_version (version) VALUES (?1)",
                 params![SCHEMA_VERSION],
@@ -343,9 +399,28 @@ fn migrate(conn: &Connection) -> Result<(), DbError> {
         }
         Some(found) if found > SCHEMA_VERSION => Err(DbError::Newer { found }),
         // Version 1 is the first; later versions migrate here.
-        Some(_) => add_silenced_column(conn),
+        Some(_) => {
+            add_silenced_column(conn)?;
+            add_heartbeats_table(conn)
+        }
     }
 }
+
+/// The heartbeats icygui has seen (v1 stage 4), added like
+/// `notifications.silenced`: without a new schema version, so versions
+/// that don't know it keep reading and writing the file.
+fn add_heartbeats_table(conn: &Connection) -> Result<(), DbError> {
+    conn.execute_batch(HEARTBEATS)?;
+    Ok(())
+}
+
+const HEARTBEATS: &str = "
+CREATE TABLE IF NOT EXISTS heartbeats (
+    object TEXT PRIMARY KEY,
+    proves TEXT NOT NULL,
+    missing_since REAL
+);
+";
 
 /// Adds `notifications.silenced` to a file written before it existed
 /// (see [`SCHEMA_VERSION`]).

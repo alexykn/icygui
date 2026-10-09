@@ -27,6 +27,7 @@
 //! switches are never touched.
 
 pub(crate) mod about;
+mod environment;
 mod files;
 mod keyboard;
 mod model;
@@ -189,6 +190,8 @@ pub(crate) enum SettingsMenu {
     Environment,
     /// The log level.
     LogLevel,
+    /// An environment's trouble alerts policy.
+    TroublePolicy,
 }
 
 /// Where the settings' files and folders are (`None` where there is none:
@@ -240,6 +243,9 @@ pub(crate) struct SettingsPanel {
     /// The environment whose notification rules the notifications page
     /// shows (the active one when the panel opened).
     environment: Option<String>,
+    /// The environment whose own page shows (icinga › environments ›
+    /// it), with its fields.
+    drill: Option<environment::EnvironmentPage>,
     search: Entity<InputState>,
     /// The search, normalized (empty: no search).
     query: String,
@@ -360,6 +366,7 @@ impl SettingsPanel {
             state,
             page,
             environment,
+            drill: None,
             search,
             query: String::new(),
             keymap_filter,
@@ -471,6 +478,10 @@ impl SettingsPanel {
     ) {
         self.page = page;
         self.menus.close();
+        if self.drill.is_some() {
+            self.commit_trouble(cx);
+            self.drill = None;
+        }
         if !self.query.is_empty() {
             self.search
                 .update(cx, |search, cx| search.set_value("", window, cx));
@@ -482,6 +493,8 @@ impl SettingsPanel {
 
     /// Scrolls to `section` of the page shown.
     fn show_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        // From an environment's page: back to the page's sections.
+        self.leave_environment(cx);
         if let Some(index) = self
             .drawn_sections
             .iter()
@@ -577,6 +590,10 @@ impl SettingsPanel {
                 .update(cx, |search, cx| search.set_value("", window, cx));
             self.query.clear();
             cx.notify();
+        } else if self.drill.is_some() {
+            // An environment's page goes back to the environments.
+            self.leave_environment(cx);
+            self.show_section(Section::Environments, cx);
         } else {
             self.commit_pending(window, cx);
             cx.emit(SettingsEvent::Close);
@@ -604,6 +621,7 @@ impl SettingsPanel {
         for id in pending {
             self.commit(&id, window, cx);
         }
+        self.commit_trouble(cx);
     }
 
     fn on_next_field(&mut self, _: &NextField, window: &mut Window, cx: &mut Context<Self>) {
@@ -715,6 +733,13 @@ impl SettingsPanel {
     /// applied keeps it), and the notifications page moves to the
     /// environment on screen when its own is gone.
     fn follow_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .drill
+            .as_ref()
+            .is_some_and(|page| self.state.read(cx).environment_by_id(&page.id).is_none())
+        {
+            self.drill = None;
+        }
         let gone = self
             .environment
             .as_deref()
@@ -1296,6 +1321,8 @@ impl SettingsPanel {
                 format!("{total} {noun}"),
                 format!("match “{}”", self.search.read(cx).value().trim()),
             )
+        } else if let Some(name) = self.environment_title(cx) {
+            (name, "environment · on this computer".to_owned())
         } else {
             (self.page.label().to_owned(), self.subtitle(facts))
         };

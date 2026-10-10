@@ -48,6 +48,8 @@ mod engine;
 mod error;
 mod event_log;
 mod handle;
+pub mod health;
+pub mod heartbeat;
 pub mod ports;
 mod probe;
 pub mod snapshot;
@@ -55,14 +57,17 @@ mod spec;
 mod store;
 mod summary;
 mod topology;
+pub mod trouble;
 
 pub use command::{
     ActionOutcome, Command, ConnectionState, CoreEvent, LoadPhase, LogEntry, LogKind,
     NotificationRecord, UntrustedUrl,
 };
+pub use dashboards::{evaluate_dashboard, stream_events};
 pub use error::CoreError;
-pub use event_log::{delete_event_log, event_log_path};
+pub use event_log::{delete_event_log, event_log_path, seed_event_log};
 pub use handle::{CoreHandle, start, start_with_tuning};
+pub use health::{ClusterHealth, HealthSample};
 /// The API user and permissions ([`CoreEvent::Permissions`]) and a server
 /// certificate ([`ConnectionState::TlsFailed`], [`fetch_certificate`]),
 /// re-exported so the UI can name them without depending on `ic-api`.
@@ -73,4 +78,10 @@ pub use probe::{
     missing_permissions, test_connection,
 };
 pub use spec::{EnvironmentSpec, Ports, Start, Tuning};
+pub use summary::Tally;
 pub use topology::{ClusterNode, ClusterView, ConnectedNode, NodeState};
+
+/// How often an engine says it runs ([`CoreEvent::Alive`]), whatever else
+/// it does. The UI takes an environment whose engine hasn't said so for
+/// three of these for stale.
+pub const ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);

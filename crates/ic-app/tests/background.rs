@@ -338,13 +338,19 @@ fn menu_items(bus: &Connection, item: &str) -> Vec<(i32, String)> {
     items
 }
 
-/// Clicks the menu item whose label ends with `label` (environments carry
-/// a mark or an indent in front), as a host does.
+/// Clicks the menu item whose label is `label`, as a host does
+/// (environments carry a mark or an indent in front and their status
+/// after ` · `).
 fn click(bus: &Connection, item: &str, label: &str) {
     let items = menu_items(bus, item);
     let (id, _) = items
         .iter()
-        .find(|(_, text)| text.ends_with(label))
+        .find(|(_, text)| {
+            text.trim_start_matches(['✓', '\u{2003}', ' '])
+                .split(" · ")
+                .next()
+                == Some(label)
+        })
         .unwrap_or_else(|| panic!("no menu item {label:?} in {items:?}"));
     bus.call_method(
         Some(item),
@@ -486,8 +492,9 @@ fn the_demo_runs_in_the_tray_and_notifies_the_desktop() {
         .collect();
     assert!(labels.contains(&"Open icygui".to_owned()), "{labels:?}");
     assert!(
-        labels.contains(&"prod-cluster".to_owned())
-            || labels.iter().any(|label| label.ends_with("prod-cluster")),
+        labels.iter().any(|label| label
+            .trim_start_matches(['✓', '\u{2003}', ' '])
+            .starts_with("prod-cluster · ")),
         "{labels:?}"
     );
     let log = log_of(&home, &args);

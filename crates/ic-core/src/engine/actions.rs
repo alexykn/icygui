@@ -269,13 +269,14 @@ impl Engine {
         }
         let dirty = self.action_objects(&target);
         let reported_by = reported_by(&action, &target);
+        let by_name = self.objects_by_name(&target);
         let runs = self.plan(action, target);
         let tx = self.internal_tx.clone();
         let sent = Timestamp::now();
         // Not a session task: an action whose request went out finishes
         // and reports even if the stream drops meanwhile.
         tokio::spawn(async move {
-            let (mut outcome, unknown) = execute(&client, runs, &author).await;
+            let (mut outcome, unknown) = execute(&client, runs, &author, &by_name).await;
             outcome.failed.extend(held);
             let finished = Finished {
                 id,
@@ -336,21 +337,38 @@ impl Engine {
     }
 
     /// The hosts and services an action changes: its objects, or the
-    /// object of the downtime or comment it removes.
+    /// objects of the downtimes or comments it removes (each once).
     fn action_objects(&self, target: &ActionTarget) -> Vec<ObjectKey> {
         match target {
             ActionTarget::Objects(keys) => keys.clone(),
-            ActionTarget::Downtime(name) => self
-                .store
-                .downtime(name)
-                .map(|downtime| downtime.object.clone())
-                .into_iter()
+            ActionTarget::Downtimes(_) | ActionTarget::Comments(_) => {
+                let mut seen = std::collections::HashSet::new();
+                self.objects_by_name(target)
+                    .into_values()
+                    .filter(|object| seen.insert(object.clone()))
+                    .collect()
+            }
+        }
+    }
+
+    /// The object of each downtime or comment a removal by name targets,
+    /// by its name (the names the store doesn't know are left out).
+    fn objects_by_name(&self, target: &ActionTarget) -> HashMap<String, ObjectKey> {
+        match target {
+            ActionTarget::Objects(_) => HashMap::new(),
+            ActionTarget::Downtimes(names) => names
+                .iter()
+                .filter_map(|name| {
+                    let downtime = self.store.downtime(name)?;
+                    Some((name.clone(), downtime.object.clone()))
+                })
                 .collect(),
-            ActionTarget::Comment(name) => self
-                .store
-                .comment(name)
-                .map(|comment| comment.object.clone())
-                .into_iter()
+            ActionTarget::Comments(names) => names
+                .iter()
+                .filter_map(|name| {
+                    let comment = self.store.comment(name)?;
+                    Some((name.clone(), comment.object.clone()))
+                })
                 .collect(),
         }
     }
@@ -396,8 +414,8 @@ impl Engine {
 /// None for `execute-command`, whose effect depends on the command.
 fn reported_by(action: &Action, target: &ActionTarget) -> &'static [EventKind] {
     match (action, target) {
-        (_, ActionTarget::Downtime(_)) => &[EventKind::DowntimeRemoved],
-        (_, ActionTarget::Comment(_)) => &[EventKind::CommentRemoved],
+        (_, ActionTarget::Downtimes(_)) => &[EventKind::DowntimeRemoved],
+        (_, ActionTarget::Comments(_)) => &[EventKind::CommentRemoved],
         (Action::CheckNow { .. } | Action::ProcessCheckResult { .. }, _) => {
             &[EventKind::CheckResult]
         }
@@ -421,6 +439,7 @@ async fn execute(
     client: &Client,
     runs: Vec<(Action, ActionTarget)>,
     author: &str,
+    by_name: &HashMap<String, ObjectKey>,
 ) -> (ActionOutcome, Vec<ObjectKey>) {
     let mut outcome = ActionOutcome::default();
     let mut unknown = Vec::new();
@@ -430,7 +449,7 @@ async fn execute(
         match client.run_action(&action, &target, author).await {
             Ok(results) => {
                 answered = true;
-                let keys = keys_by_name(&target);
+                let keys = keys_by_name(&target, by_name);
                 count(&mut outcome, &mut unknown, &keys, results);
             }
             Err(error) if !answered => {
@@ -490,14 +509,19 @@ fn count(
     }
 }
 
-/// The objects of a target by full name, to recognise them in results.
-fn keys_by_name(target: &ActionTarget) -> HashMap<String, ObjectKey> {
+/// The objects of a target by full name, to recognise them in results; a
+/// removal by name has the objects of its downtimes or comments
+/// (`by_name`) by their names.
+fn keys_by_name(
+    target: &ActionTarget,
+    by_name: &HashMap<String, ObjectKey>,
+) -> HashMap<String, ObjectKey> {
     match target {
         ActionTarget::Objects(keys) => keys
             .iter()
             .map(|key| (key.full_name(), key.clone()))
             .collect(),
-        ActionTarget::Downtime(_) | ActionTarget::Comment(_) => HashMap::new(),
+        ActionTarget::Downtimes(_) | ActionTarget::Comments(_) => by_name.clone(),
     }
 }
 
@@ -508,7 +532,7 @@ fn describe(error: &ApiError) -> String {
 fn target_names(target: &ActionTarget) -> Vec<String> {
     match target {
         ActionTarget::Objects(keys) => keys.iter().map(ObjectKey::full_name).collect(),
-        ActionTarget::Downtime(name) | ActionTarget::Comment(name) => vec![name.clone()],
+        ActionTarget::Downtimes(names) | ActionTarget::Comments(names) => names.clone(),
     }
 }
 

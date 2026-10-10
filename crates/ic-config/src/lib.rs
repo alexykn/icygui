@@ -1,12 +1,17 @@
-//! Local settings: environments, dashboard groups, dashboards and notification
-//! rules, stored as versioned TOML with migrations and atomic writes.
+//! Local settings: environments, dashboard groups, dashboards (each a list
+//! of views) and notification rules, stored as versioned TOML with
+//! migrations and atomic writes.
 //!
 //! - [`Paths`] says where files live; [`ConfigStore`] loads and saves the
 //!   settings file. Loading upgrades older formats ([`migrate()`]); saving is
 //!   atomic, keeps one `.bak` copy and makes the file user-only on Unix.
+//!   [`merge_edit`] merges an edit of the file by hand with the app's own
+//!   changes made meanwhile.
 //! - [`Config::validate`] finds settings that load but can't work (bad URLs,
 //!   missing names, duplicate ids, unparsable fingerprints).
 //! - [`export_groups`] and [`import_groups`] share dashboards as files.
+//! - [`read_keymap`] reads the user's own key bindings (`keymap.toml`,
+//!   [`Paths::keymap_file`]).
 //! - [`StateStore`] keeps the [`UiState`] (window size and position, open
 //!   tabs, selected dashboards) in a file of its own next to the data.
 //!
@@ -20,27 +25,47 @@ mod environment;
 mod error;
 mod files;
 mod fingerprint;
+mod health_page;
+mod keymap;
+mod merge;
 mod migrate;
 mod model;
 mod paths;
 mod share;
 mod store;
+mod trouble;
 mod ui_state;
 mod validate;
+mod view;
 
 pub use config::new_id;
 pub use environment::default_groups;
 pub use error::ConfigError;
 pub use fingerprint::{format_fingerprint, parse_fingerprint};
+pub use health_page::HealthPage;
+pub use keymap::{KEYMAP_TEMPLATE, Keymap, KeymapAction, KeymapBinding, parse_keymap, read_keymap};
+pub use merge::merge_edit;
 pub use migrate::migrate;
 pub use model::{
-    ApiUrl, AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup, Environment, General,
-    GroupBy, MAX_API_URLS, ObjectKind, Sort, SortKey, ThemeChoice, TlsConfig, View,
+    ApiUrl, Appearance, AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup,
+    EffectiveMark, Environment, General, InterfaceSize, ListTimes, LogLevel, MAX_API_URLS,
+    RowDensity, SidebarMark, ThemeChoice, TlsConfig,
 };
 pub use paths::Paths;
 pub use share::{export_groups, import_groups};
 pub use store::ConfigStore;
+pub use trouble::{
+    DEFAULT_HEARTBEAT_VARIABLE, HeartbeatMode, HeartbeatSettings, MIN_HEARTBEAT_INTERVAL_SECS,
+    Trouble, TroublePolicy,
+};
 pub use ui_state::{
-    EnvironmentUiState, MAX_TABS, StateStore, UI_STATE_VERSION, UiState, WindowState,
+    EnvironmentUiState, ListOptionsState, MAX_RECENT_ICONS, MAX_TABS, StateStore, UI_STATE_VERSION,
+    UiState, WindowState,
 };
 pub use validate::{MIN_EVENT_LOG_RETENTION_HOURS, MIN_RECONCILE_INTERVAL_SECS, ValidationIssue};
+pub use view::{
+    DowntimeKinds, DowntimesMode, GridCells, GridColour, GridOptions, GroupBy, GroupOrder,
+    GroupSource, HandledMode, HandledSetting, HealthOptions, HealthTile, HideHandled, MAX_VIEWS,
+    ObjectKind, STREAM_LINES, Sort, SortKey, StateChip, StreamEvents, StreamOptions, ThreadChip,
+    ThreadOptions, ThreadSort, View, ViewDisplay, ViewGroups,
+};

@@ -304,11 +304,23 @@ fn menu(bus: &Connection, item: &str) -> MenuNode {
     MenuNode::new(id, properties, children)
 }
 
-/// The Environment submenu as text.
+impl MenuNode {
+    /// The environments' entries: the top-level items between the first
+    /// separator (under *Open*) and the next one.
+    fn environment_entries(&self) -> Vec<&MenuNode> {
+        self.children
+            .iter()
+            .skip_while(|child| !child.is_separator())
+            .skip(1)
+            .take_while(|child| !child.is_separator())
+            .collect()
+    }
+}
+
+/// The environments' entries as text.
 fn environments(bus: &Connection, item: &str) -> Vec<String> {
     let menu = menu(bus, item);
-    menu.find("Environment")
-        .children
+    menu.environment_entries()
         .iter()
         .map(|child| {
             let mut text = child.label();
@@ -320,20 +332,16 @@ fn environments(bus: &Connection, item: &str) -> Vec<String> {
         .collect()
 }
 
-/// An environment's name without the mark or indentation in front.
+/// An environment's name, without its status after ` · `.
 fn environment_name(label: &str) -> &str {
-    label
-        .strip_prefix("✓ ")
-        .or_else(|| label.strip_prefix('\u{2003}'))
-        .unwrap_or(label)
+    label.split(" · ").next().unwrap_or(label)
 }
 
-/// The environments the host shows as the current one: checked (a check
-/// item's toggle state) or marked with `✓`.
+/// The environments the host shows as checked or marked: none (selection
+/// is never a check mark; 16e draws none).
 fn current_environments(bus: &Connection, item: &str) -> Vec<String> {
     let menu = menu(bus, item);
-    menu.find("Environment")
-        .children
+    menu.environment_entries()
         .iter()
         .filter(|child| {
             let checked = child
@@ -350,9 +358,8 @@ fn current_environments(bus: &Connection, item: &str) -> Vec<String> {
 fn click_environment(bus: &Connection, item: &str, name: &str) {
     let menu = menu(bus, item);
     let environment = menu
-        .find("Environment")
-        .children
-        .iter()
+        .environment_entries()
+        .into_iter()
         .find(|child| environment_name(&child.label()) == name)
         .unwrap_or_else(|| panic!("no environment {name:?}"));
     send_click(bus, item, environment.id);
@@ -462,11 +469,10 @@ fn other_environments() -> Vec<String> {
         format!("{}…", "x".repeat(59)),
     ]
     .into_iter()
-    .map(|name| format!("\u{2003}{name}"))
     .collect()
 }
 
-/// The expected Environment submenu: these two first, then the others.
+/// The expected environments' entries: these two first, then the others.
 fn shown_environments(prod: &str, staging: &str) -> Vec<String> {
     let mut shown = vec![prod.to_owned(), staging.to_owned()];
     shown.extend(other_environments());
@@ -474,6 +480,10 @@ fn shown_environments(prod: &str, staging: &str) -> Vec<String> {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one story through the menu, step by step"
+)]
 fn tray_menu_over_dbus() {
     if !is_child() {
         run_child("tray_menu_over_dbus", Bus::Private, &[]);
@@ -490,51 +500,62 @@ fn tray_menu_over_dbus() {
             "Open icygui",
             "---",
             "Pause notifications ▸ For 30 minutes / For 1 hour / Until 08:00",
-            "---",
             "Quit icygui",
         ]
     );
 
     let list = some_environments();
     tray.set_environments(&list, Some("env-a"));
-    assert_eq!(current_environments(&bus, &item), ["prod"]);
+    // No check-mark column (16e): every environment a plain item, none
+    // checked or marked, the active one too.
+    assert!(current_environments(&bus, &item).is_empty());
 
-    // The user picks staging, but the switch doesn't happen (it fails, or
-    // the app refuses): prod stays the only current one, both before and
-    // after the app sends the unchanged list again.
+    // The user picks staging: the app is told; the menu changes nothing by
+    // itself, before and after the app sends the unchanged list again.
     click_environment(&bus, &item, "staging");
     assert_eq!(
         next_command(&mut commands),
         TrayCommand::SwitchEnvironment("env-b".to_owned())
     );
-    assert_eq!(current_environments(&bus, &item), ["prod"]);
     tray.set_environments(&list, Some("env-a"));
-    assert_eq!(current_environments(&bus, &item), ["prod"]);
 
-    // How the host shows it: plain items, the active one marked and
-    // disabled.
+    // How the host shows it: plain items, all enabled.
     assert_eq!(
         environments(&bus, &item),
-        shown_environments("✓ prod (off)", "\u{2003}staging")
+        shown_environments("prod", "staging")
     );
     assert!(
         !menu(&bus, &item).has_toggles(),
         "no check items: muda ticks those itself when clicked"
     );
 
-    // A switch that happens moves the mark.
+    // A switch that happens shows nothing more in the menu.
     tray.set_environments(&list, Some("env-b"));
-    assert_eq!(current_environments(&bus, &item), ["staging"]);
+    assert!(current_environments(&bus, &item).is_empty());
     assert_eq!(
         environments(&bus, &item),
-        shown_environments("\u{2003}prod", "✓ staging (off)")
+        shown_environments("prod", "staging")
     );
     click_environment(&bus, &item, "prod_cluster");
     assert_eq!(
         next_command(&mut commands),
         TrayCommand::SwitchEnvironment("env-d".to_owned())
     );
-    assert_eq!(current_environments(&bus, &item), ["staging"]);
+
+    // Each environment's status follows its name (A: `no data 3m`).
+    tray.set_environment_statuses(&[
+        ("env-a".to_owned(), "no data 3m".to_owned()),
+        ("env-b".to_owned(), "live".to_owned()),
+    ]);
+    assert_eq!(
+        environments(&bus, &item)[..2],
+        ["prod · no data 3m", "staging · live"]
+    );
+    assert!(current_environments(&bus, &item).is_empty());
+    assert_eq!(
+        menu(&bus, &item).shown().last().map(String::as_str),
+        Some("Quit icygui")
+    );
 
     click(&bus, &item, "Open icygui");
     assert_eq!(next_command(&mut commands), TrayCommand::Open);
@@ -553,8 +574,13 @@ fn tray_menu_over_dbus() {
     );
 
     tray.set_paused(Some("18:30".to_owned()));
+    let shown = menu(&bus, &item).shown();
+    let paused = shown
+        .iter()
+        .position(|line| line.starts_with("Paused until"))
+        .unwrap_or_else(|| panic!("{shown:?}"));
     assert_eq!(
-        menu(&bus, &item).shown()[2..4],
+        shown[paused..paused + 2],
         ["Paused until 18:30 (off)", "Resume notifications"]
     );
     click(&bus, &item, "Resume notifications");

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures::channel::oneshot;
 use ic_api::{ApiInfo, CertificateInfo};
-use ic_model::{Action, ActionTarget, CheckableState, ObjectKey, StateType, Timestamp};
+use ic_model::{Action, ActionTarget, CheckableState, ObjectKey, ServiceKey, StateType, Timestamp};
 use ic_rules::NotificationIntent;
 
 use crate::snapshot::{DashboardResult, Snapshot};
@@ -68,14 +68,19 @@ pub enum Command {
         /// Receives the time.
         reply: oneshot::Sender<Option<Timestamp>>,
     },
-    /// Evaluates a view that isn't saved yet (the dashboard editor's live
-    /// match count and rows).
+    /// Evaluates views that aren't saved yet (the dashboard editor's live
+    /// preview, match counts and rows) as one dashboard, with the
+    /// settings' handled defaults.
     PreviewDashboard {
-        /// The view being edited.
-        view: ic_config::View,
-        /// Receives the result, or why the filter doesn't work.
-        reply: oneshot::Sender<Result<DashboardResult, String>>,
+        /// The dashboard's views being edited.
+        views: Vec<ic_config::View>,
+        /// Receives the result; a view whose filter doesn't work has its
+        /// `error` set.
+        reply: oneshot::Sender<DashboardResult>,
     },
+    /// The settings' handled defaults changed (`[appearance.hide_handled]`):
+    /// the views that follow them are evaluated again.
+    SetHandledDefaults(ic_config::HideHandled),
     /// Fetches full details (output, perfdata, links) of lean objects: the
     /// rows on screen and an opened pane. Sent debounced by the UI.
     Hydrate(Vec<ObjectKey>),
@@ -121,6 +126,24 @@ pub enum Command {
     /// The user is here (the window was shown): a background start's first
     /// load that still waits ([`crate::Start::Background`]) starts now.
     StartNow,
+    /// Whether the cluster health page shows this environment (topic 06;
+    /// the app sends `false` while the window is hidden). While it does and
+    /// the environment isn't quiet, each status poll also asks for the
+    /// node's `ApiListener` status, and the node's features are asked for
+    /// when the page opens and every five minutes after (each request from
+    /// the request budget); the page opening asks for both at once unless
+    /// a poll brought them less than an interval ago. Nothing is asked for
+    /// while no page shows it. [`crate::Snapshot::health`] carries them.
+    ///
+    /// While no page shows it, the trouble alerts still need both (a
+    /// growing relay queue, a feature turned off): every five minutes, with
+    /// a status poll, through the request budget.
+    WatchHealth(bool),
+    /// The user confirmed in the settings that a heartbeat that
+    /// disappeared ([`crate::heartbeat::BeatState::Disappeared`]) is gone
+    /// for good: it is forgotten, and its finding ends (without a
+    /// notification).
+    ConfirmHeartbeatRemoval(ServiceKey),
 }
 
 /// What the engine tells the UI. Received from
@@ -144,6 +167,11 @@ pub enum CoreEvent {
     Notification(NotificationRecord),
     /// Notifications are paused until this time (`None`: not paused).
     NotificationsPaused(Option<Timestamp>),
+    /// The engine runs (every [`crate::ALIVE_INTERVAL`], whatever else it
+    /// does): the UI takes an environment whose engine stopped saying so
+    /// for stale, not for live (no false green). Carries the engine's
+    /// clock.
+    Alive(Timestamp),
 }
 
 /// The connection's state, for the footer and the connection banner.

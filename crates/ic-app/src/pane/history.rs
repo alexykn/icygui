@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    Styled as _, div, prelude::FluentBuilder as _, px,
+    Styled as _, div, prelude::FluentBuilder as _,
 };
 use ic_core::LogEntry;
 use ic_model::{ObjectKey, Timestamp};
-use ic_ui_kit::{ActiveTheme as _, SectionLabel, StateDot, Theme};
+use ic_ui_kit::{ActiveTheme as _, Density, SectionLabel, StateDot, Theme, px};
 
 use super::{HostTab, ObjectPane};
 use crate::notifications::history::{
@@ -135,11 +135,7 @@ impl ObjectPane {
             .filter(|history| history.object == self.object)
         {
             Some(history) => (
-                history
-                    .entries
-                    .iter()
-                    .map(|entry| history::line(entry, &self.object, now))
-                    .collect(),
+                history::lines(&history.entries, &self.object, now),
                 history::since_text(history.oldest, started, retention, now),
                 history.loading && history.entries.is_empty(),
             ),
@@ -264,15 +260,22 @@ pub(super) fn service_section(
         .into_any_element()
 }
 
-/// One line: time, dot, `KIND object`, and what was said under it.
+/// One line: time, dot, `KIND object`, and what was said under it (not in
+/// compact rows: one line per entry, as in the dashboard list).
 fn render_line(index: usize, line: &HistoryLine, time_width: f32, theme: &Theme) -> AnyElement {
     let colors = theme.colors;
-    let color = match line.tone {
-        HistoryTone::State(state) => theme.states.checkable(state),
-        HistoryTone::Accent => colors.accent,
-        HistoryTone::Downtime => theme.states.unknown,
-        HistoryTone::Flapping => theme.states.warning,
-        HistoryTone::Quiet => colors.text_faint,
+    let compact = theme.density == Density::Compact;
+    // The dot takes the fill shade, the kind word the text shade.
+    let (dot, word) = match line.tone {
+        HistoryTone::State(state) => (
+            theme.states.fill.checkable(state),
+            theme.states.text.checkable(state),
+        ),
+        // Acknowledgements and downtimes take the accent (the downtime
+        // banner's blue), never a state's colour (topic 01).
+        HistoryTone::Accent | HistoryTone::Downtime => (colors.accent, colors.accent_text),
+        HistoryTone::Flapping => (theme.states.fill.warning, theme.states.text.warning),
+        HistoryTone::Quiet => (colors.text_faint, colors.text_faint),
     };
     div()
         .id(SharedString::from(format!("history-{index}")))
@@ -294,7 +297,7 @@ fn render_line(index: usize, line: &HistoryLine, time_width: f32, theme: &Theme)
             div()
                 .pt(px(5.))
                 .flex_none()
-                .child(StateDot::with_color(color).size(px(7.))),
+                .child(StateDot::with_color(dot).size(px(7.))),
         )
         .child(
             div()
@@ -313,7 +316,7 @@ fn render_line(index: usize, line: &HistoryLine, time_width: f32, theme: &Theme)
                             div()
                                 .flex_none()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(color)
+                                .text_color(word)
                                 .child(line.kind),
                         )
                         .child(
@@ -324,7 +327,7 @@ fn render_line(index: usize, line: &HistoryLine, time_width: f32, theme: &Theme)
                                 .child(line.object.clone()),
                         ),
                 )
-                .when(!line.note.is_empty(), |column| {
+                .when(!compact && !line.note.is_empty(), |column| {
                     column.child(
                         div()
                             .truncate()

@@ -12,6 +12,17 @@
 //! docs/performance.md. `ICYGUI_SCALE_DELAY_PER_THOUSAND_MS` and
 //! `ICYGUI_SCALE_DELAY_MAX_S` try other background-start factors.
 //!
+//! The other client's query asks for `ICYGUI_SCALE_PROBE` (default
+//! `web-0000.prod.example.com!ping4`, the first service of
+//! `contract/scale/generate.py`'s workload, which the demo cluster loads
+//! too with `ICYGUI_DEMO_SCALE_HOSTS`); a probe that doesn't answer 200
+//! fails the run instead of timing error answers.
+//!
+//! Against the demo cluster (docs/development.md, "Many clients on the
+//! demo cluster"): `ICYGUI_SCALE_URL=https://127.0.0.1:5665`,
+//! `ICYGUI_SCALE_CONTAINER=icygui-demo-master-01-1`,
+//! `ICYGUI_SCALE_USER=icygui-demo`, `ICYGUI_SCALE_PASSWORD=icygui-demo-password`.
+//!
 //! Ignored, and a no-op without `ICYGUI_SCALE_URL`. Like the contract
 //! tests it refuses anything but the local container before a single
 //! request: the URL must point to this machine and
@@ -95,36 +106,71 @@ fn sample_memory(container: String, stop: Arc<AtomicBool>) -> std::thread::JoinH
     })
 }
 
+/// The service the other client's query asks for: `ICYGUI_SCALE_PROBE`
+/// (`host!service`), by default the scale workload's first service.
+fn probe_service() -> String {
+    std::env::var("ICYGUI_SCALE_PROBE")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "web-0000.prod.example.com!ping4".to_owned())
+}
+
+/// One answer to the probe: the HTTP status and the time it took
+/// (`curl -w '%{http_code} %{time_total}'`).
+fn probe_answer(text: &str) -> Option<(u16, f64)> {
+    let (code, seconds) = text.trim().split_once(' ')?;
+    Some((code.parse().ok()?, seconds.parse().ok()?))
+}
+
 /// Sends a small by-name query (one service, two attributes, as a pane
 /// opens it) every half second with `curl` until stopped: the response
-/// times in seconds, as anyone else using the master sees them.
+/// times in seconds, as anyone else using the master sees them. Every
+/// answer must be a 200: a probe of a service that doesn't exist (404) or
+/// a refused one would time error answers, so it fails the run, naming
+/// `ICYGUI_SCALE_PROBE`.
 fn probe_latency(
     url: String,
     credentials: String,
     stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<Vec<f64>> {
+    let service = probe_service();
     std::thread::spawn(move || {
         let query = format!(
-            "{url}/v1/objects/services?service=web-0000.prod.example.com!ping4\
-             &attrs=state&attrs=last_check_result"
+            "{url}/v1/objects/services?service={service}&attrs=state&attrs=last_check_result"
         );
         let mut times = Vec::new();
         while !stop.load(Ordering::SeqCst) {
             let output = Process::new("curl")
-                .args(["-sk", "-o", "/dev/null", "-w", "%{time_total}", "-u"])
+                .args(["-sk", "-o", "/dev/null", "-w", "%{http_code} %{time_total}"])
+                .arg("-u")
                 .arg(&credentials)
                 .args(["-H", "Accept: application/json", "--max-time", "60"])
                 .arg(&query)
                 .output();
             if let Ok(output) = output
-                && let Ok(seconds) = String::from_utf8_lossy(&output.stdout).trim().parse()
+                && let Some((code, seconds)) =
+                    probe_answer(&String::from_utf8_lossy(&output.stdout))
             {
+                assert!(
+                    code == 200 || code == 0,
+                    "the probe {service} answered {code}: set ICYGUI_SCALE_PROBE to a \
+                     service the master has (host!service), or load the scale workload \
+                     (ICYGUI_DEMO_SCALE_HOSTS)"
+                );
+                // 0: no answer within curl's 60 s, a time of its own.
                 times.push(seconds);
             }
             std::thread::sleep(Duration::from_millis(500));
         }
         times
     })
+}
+
+#[test]
+fn a_probe_answer_is_its_status_and_time() {
+    assert_eq!(probe_answer("200 0.012345\n"), Some((200, 0.012_345)));
+    assert_eq!(probe_answer("404 0.002"), Some((404, 0.002)));
+    assert_eq!(probe_answer("0.002"), None);
 }
 
 /// `share` (0–1) of the sorted `values`.
@@ -234,6 +280,7 @@ async fn many_clients_start_at_once() {
             general: General::default(),
             now: ic_model::Timestamp::now().as_unix_seconds(),
             data_dir: None,
+            real_clock: false,
             start: if background {
                 Start::Background
             } else {

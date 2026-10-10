@@ -3,7 +3,7 @@
 //! built from the model.
 //!
 //! The menu is rebuilt from the model when the model changes (pause state,
-//! environments). That is rare, and rebuilding keeps the code free of
+//! environments, their coarse statuses). That is rare, and rebuilding keeps the code free of
 //! in-place bookkeeping; on macOS it closes the menu if it happens to be
 //! open, on Linux the host just reloads the layout.
 //!
@@ -34,16 +34,9 @@ const ENVIRONMENT_PREFIX: &str = "icygui.tray.environment.";
 /// Ids of entries that do nothing when clicked.
 const STATUS_ID: &str = "icygui.tray.status";
 const PAUSE_MENU_ID: &str = "icygui.tray.pause";
-const ENVIRONMENT_MENU_ID: &str = "icygui.tray.environments";
 
 /// Longest label, in characters; longer names are shortened with "…".
 const MAX_LABEL_CHARS: usize = 60;
-
-/// Marks the current choice of a set (the active environment).
-const CURRENT_MARK: &str = "✓ ";
-/// Indents the other choices by about the width of [`CURRENT_MARK`], so
-/// the names line up (an em space).
-const CHOICE_INDENT: &str = "\u{2003}";
 
 /// Local hour at which the morning pause ends.
 const MORNING_HOUR: i8 = 8;
@@ -193,6 +186,9 @@ pub(crate) struct MenuState {
     pub(crate) environments: Vec<(String, String)>,
     /// The active environment's id.
     pub(crate) active: Option<String>,
+    /// What each environment's line says after its name (`live`, `no data
+    /// 3m`), by id.
+    pub(crate) statuses: Vec<(String, String)>,
     /// When notifications resume, as the app formats it; `None` when not
     /// paused.
     pub(crate) paused_until: Option<String>,
@@ -204,6 +200,7 @@ impl MenuState {
             app_name: app_name.to_owned(),
             environments: Vec::new(),
             active: None,
+            statuses: Vec::new(),
             paused_until: None,
         }
     }
@@ -216,14 +213,6 @@ pub(crate) enum Entry {
     Item {
         action: MenuAction,
         label: String,
-    },
-    /// One of a set of choices, as a plain item whose label carries the
-    /// mark: the current one reads `✓ name` and is disabled, the others are
-    /// indented to line up with it.
-    Choice {
-        action: MenuAction,
-        label: String,
-        current: bool,
     },
     /// A disabled line of information.
     Status(String),
@@ -241,12 +230,12 @@ pub(crate) enum Entry {
 /// ```text
 /// Open icygui
 /// ─────────────
+/// prod-cluster · no data 3m   (the environments, each with its status,
+/// staging · live               no check mark (16e); a click switches)
+/// ─────────────
 /// Paused until 18:30          (while paused)
 /// Resume notifications        (while paused)
 /// Pause notifications       ▸ For 30 minutes / For 1 hour / Until 08:00
-/// ─────────────               (with environments)
-/// Environment               ▸ ✓ prod-cluster / staging / …
-/// ─────────────
 /// Quit icygui
 /// ```
 pub(crate) fn entries(state: &MenuState) -> Vec<Entry> {
@@ -258,6 +247,28 @@ pub(crate) fn entries(state: &MenuState) -> Vec<Entry> {
         },
         Entry::Separator,
     ];
+    if !state.environments.is_empty() {
+        entries.extend(state.environments.iter().map(|(id, name)| {
+            let status = state
+                .statuses
+                .iter()
+                .find(|(status_id, _)| status_id == id)
+                .map(|(_, status)| clean_label(status))
+                .filter(|status| !status.is_empty());
+            let name = environment_label(id, name);
+            // No check-mark column (selection is never a check mark, 16e):
+            // the active one is a plain item too; switching to it again
+            // changes nothing.
+            Entry::Item {
+                action: MenuAction::SwitchEnvironment(id.clone()),
+                label: match status {
+                    Some(status) => clean_label(&format!("{name} · {status}")),
+                    None => name,
+                },
+            }
+        }));
+        entries.push(Entry::Separator);
+    }
     if let Some(until) = &state.paused_until {
         entries.push(Entry::Status(clean_label(&format!("Paused until {until}"))));
         entries.push(Entry::Item {
@@ -276,23 +287,6 @@ pub(crate) fn entries(state: &MenuState) -> Vec<Entry> {
             })
             .collect(),
     });
-    if !state.environments.is_empty() {
-        entries.push(Entry::Separator);
-        entries.push(Entry::Submenu {
-            id: ENVIRONMENT_MENU_ID,
-            label: "Environment".to_owned(),
-            entries: state
-                .environments
-                .iter()
-                .map(|(id, name)| Entry::Choice {
-                    action: MenuAction::SwitchEnvironment(id.clone()),
-                    label: environment_label(id, name),
-                    current: state.active.as_deref() == Some(id.as_str()),
-                })
-                .collect(),
-        });
-    }
-    entries.push(Entry::Separator);
     entries.push(Entry::Item {
         action: MenuAction::Quit,
         label: format!("Quit {app}"),
@@ -332,13 +326,6 @@ pub(crate) fn clean_label(text: &str) -> String {
     short
 }
 
-/// The label of a choice: marked if it is the current one, indented
-/// otherwise.
-fn choice_label(label: &str, current: bool) -> String {
-    let prefix = if current { CURRENT_MARK } else { CHOICE_INDENT };
-    format!("{prefix}{label}")
-}
-
 /// Text for muda, which treats `&` as a mnemonic marker (`&&` is a
 /// literal `&`).
 fn muda_text(label: &str) -> String {
@@ -364,19 +351,6 @@ fn item(entry: &Entry) -> Result<Box<dyn IsMenuItem>, MenuError> {
         Entry::Item { action, label } => {
             Box::new(MenuItem::with_id(action.id(), muda_text(label), true, None))
         }
-        // Clicking the current choice again would change nothing, so it is
-        // disabled; hosts that ignore that send a switch to the active
-        // environment, which the app treats as a no-op.
-        Entry::Choice {
-            action,
-            label,
-            current,
-        } => Box::new(MenuItem::with_id(
-            action.id(),
-            muda_text(&choice_label(label, *current)),
-            !current,
-            None,
-        )),
         Entry::Status(text) => Box::new(MenuItem::with_id(STATUS_ID, muda_text(text), false, None)),
         Entry::Submenu { id, label, entries } => {
             let submenu = Submenu::with_id(*id, muda_text(label), true);
@@ -481,7 +455,6 @@ pub(super) mod tests {
         }
         assert_eq!(MenuAction::from_id(STATUS_ID), None);
         assert_eq!(MenuAction::from_id(PAUSE_MENU_ID), None);
-        assert_eq!(MenuAction::from_id(ENVIRONMENT_MENU_ID), None);
     }
 
     #[test]
@@ -603,9 +576,6 @@ pub(super) mod tests {
             .iter()
             .map(|entry| match entry {
                 Entry::Item { label, .. } => label.clone(),
-                Entry::Choice { label, current, .. } => {
-                    format!("{}{label}", if *current { "✓ " } else { "  " })
-                }
                 Entry::Status(text) => format!("({text})"),
                 Entry::Submenu { label, entries, .. } => {
                     format!("{label} ▸ {}", labels(entries).join(" / "))
@@ -623,7 +593,6 @@ pub(super) mod tests {
                 "Open icygui",
                 "---",
                 "Pause notifications ▸ For 30 minutes / For 1 hour / Until 08:00",
-                "---",
                 "Quit icygui",
             ]
         );
@@ -642,7 +611,6 @@ pub(super) mod tests {
                 "(Paused until 18:30)",
                 "Resume notifications",
                 "Pause notifications ▸ For 30 minutes / For 1 hour / Until 08:00",
-                "---",
                 "Quit icygui",
             ]
         );
@@ -653,7 +621,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn environments_submenu_marks_the_active_one() {
+    fn environments_are_listed_with_their_status_and_the_active_one_marked() {
         let mut state = state();
         state.environments = vec![
             ("id-prod".to_owned(), "prod-cluster".to_owned()),
@@ -661,21 +629,25 @@ pub(super) mod tests {
             ("id-lab".to_owned(), "  ".to_owned()),
         ];
         state.active = Some("id-staging".to_owned());
+        state.statuses = vec![
+            ("id-prod".to_owned(), "no data 3m".to_owned()),
+            ("id-staging".to_owned(), "live".to_owned()),
+        ];
         assert_eq!(
             labels(&entries(&state)),
             [
                 "Open icygui",
                 "---",
+                "prod-cluster · no data 3m",
+                "staging · live",
+                "id-lab",
+                "---",
                 "Pause notifications ▸ For 30 minutes / For 1 hour / Until 08:00",
-                "---",
-                "Environment ▸   prod-cluster / ✓ staging /   id-lab",
-                "---",
                 "Quit icygui",
             ]
         );
 
-        // An unknown active id checks nothing.
-        state.active = Some("gone".to_owned());
+        // No check-mark column, whatever is active.
         let shown = labels(&entries(&state));
         assert!(!shown.iter().any(|label| label.contains('✓')), "{shown:?}");
     }
@@ -685,16 +657,12 @@ pub(super) mod tests {
         let mut state = state();
         state.environments = vec![("3f2a".to_owned(), "prod".to_owned())];
         let entries = entries(&state);
-        let Some(Entry::Submenu { entries: items, .. }) = entries.get(4) else {
-            panic!("no environment submenu: {entries:?}");
-        };
         assert_eq!(
-            items,
-            &[Entry::Choice {
+            entries.get(2),
+            Some(&Entry::Item {
                 action: MenuAction::SwitchEnvironment("3f2a".to_owned()),
                 label: "prod".to_owned(),
-                current: false,
-            }]
+            })
         );
     }
 
@@ -713,18 +681,6 @@ pub(super) mod tests {
         assert_eq!(clean_label(&wide).chars().count(), MAX_LABEL_CHARS);
         assert_eq!(environment_label("", ""), "(unnamed)");
         assert_eq!(environment_label("id\n1", " "), "id 1");
-    }
-
-    #[test]
-    fn choices_carry_their_mark_in_the_label() {
-        assert_eq!(choice_label("prod", true), "✓ prod");
-        assert_eq!(choice_label("staging", false), "\u{2003}staging");
-        // The mark goes in front of the cleaned name, so cleaning can't
-        // remove the indentation.
-        assert_eq!(
-            choice_label(&environment_label("id", "  lab "), false),
-            "\u{2003}lab"
-        );
     }
 
     #[test]
@@ -780,12 +736,12 @@ pub(super) mod tests {
                 [
                     "Open icygui",
                     "---",
+                    "R&&D",
+                    "prod_cluster",
+                    "---",
                     "Paused until tomorrow 08:00 (off)",
                     "Resume notifications",
                     "Pause notifications ▸ For 30 minutes / For 1 hour / Until 08:00",
-                    "---",
-                    "Environment ▸ \u{2003}R&&D / ✓ prod_cluster (off)",
-                    "---",
                     "Quit icygui",
                 ]
             );
@@ -813,14 +769,13 @@ pub(super) mod tests {
                 ids,
                 [
                     OPEN_ID,
+                    "icygui.tray.environment.env-1",
                     STATUS_ID,
                     RESUME_ID,
                     PAUSE_MENU_ID,
                     "icygui.tray.pause.30m",
                     "icygui.tray.pause.1h",
                     "icygui.tray.pause.morning",
-                    ENVIRONMENT_MENU_ID,
-                    "icygui.tray.environment.env-1",
                     QUIT_ID,
                 ]
             );

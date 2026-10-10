@@ -283,7 +283,10 @@ fn an_environment_off_screen_notifies_and_is_acknowledged_there() {
 /// check results) or quiet (without; PERF-09).
 pub(super) fn one_stream(control: &MockControl, live: bool) -> bool {
     let streams = control.event_stream_stats();
-    streams.len() == 1 && streams[0].types.contains(&"CheckResult") == live
+    // A quiet stream carries no check results but the heartbeats' (through
+    // its filter).
+    streams.len() == 1
+        && (streams[0].types.contains(&"CheckResult") && !streams[0].filtered) == live
 }
 
 /// ENV-01, D2: switching shows what the other environment's engine has at

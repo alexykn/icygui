@@ -19,7 +19,7 @@ use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
     Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
     PathPromptOptions, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _,
 };
 use ic_config::{ApiUrl, Environment};
 use ic_core::{CertificateInfo, ClusterView, ConnectionFailure, ConnectionReport};
@@ -27,7 +27,7 @@ use ic_model::Timestamp;
 use ic_ui_kit::input::{InputEvent, InputState};
 use ic_ui_kit::{
     ActiveTheme as _, Banner, BannerTone, Button, DialogBody, Field, FieldTone, IconButton,
-    IconName, Link, Segmented, Switch, TextField, Theme, Tooltip,
+    IconName, Link, Segmented, Switch, TextField, Theme, Tooltip, px,
 };
 use secrecy::SecretString;
 
@@ -992,7 +992,7 @@ impl EnvironmentEditor {
                 );
         }
         let below = match (error, status) {
-            (Some(error), _) => Some((SharedString::from(error), theme.states.critical)),
+            (Some(error), _) => Some((SharedString::from(error), theme.states.text.critical)),
             (None, Some((text, color))) => Some((SharedString::from(text), color)),
             (None, None) => None,
         };
@@ -1282,7 +1282,7 @@ impl EnvironmentEditor {
         let colors = theme.colors;
         let headline = |text: String| {
             div()
-                .text_color(theme.states.critical)
+                .text_color(theme.states.text.critical)
                 .font_weight(FontWeight::MEDIUM)
                 .child(text)
         };
@@ -1576,7 +1576,7 @@ fn report_view(report: &ConnectionReport, theme: &Theme) -> AnyElement {
         .child(
             div()
                 .pb(px(4.))
-                .text_color(theme.states.ok)
+                .text_color(theme.states.text.ok)
                 .font_weight(FontWeight::MEDIUM)
                 .child(format!("Connected as {}", report.info.user)),
         )
@@ -1648,8 +1648,8 @@ fn url_status(test: &TestState, theme: &Theme) -> Option<(String, Hsla)> {
             Ok(report) => {
                 let node = &report.node;
                 let color = match node.view {
-                    ClusterView::Full => theme.states.ok,
-                    ClusterView::Partial { .. } => theme.states.warning,
+                    ClusterView::Full => theme.states.text.ok,
+                    ClusterView::Partial { .. } => theme.states.text.warning,
                     ClusterView::Unverified { .. } => theme.colors.text_faint,
                 };
                 (format!("{} · {}", node.name, node.view.label()), color)
@@ -1671,7 +1671,7 @@ fn failure_status(failure: &ConnectionFailure, theme: &Theme) -> (String, Hsla) 
             ConnectionFailure::Unreachable(_) => "can't be reached".to_owned(),
             ConnectionFailure::Other(message) => message.clone(),
         },
-        theme.states.critical,
+        theme.states.text.critical,
     )
 }
 
@@ -1704,7 +1704,7 @@ pub(crate) fn server_name_offer(message: &str, certificate: &CertificateInfo) ->
 fn error_line(error: String, theme: &Theme) -> AnyElement {
     div()
         .text_size(theme.text.small)
-        .text_color(theme.states.critical)
+        .text_color(theme.states.text.critical)
         .child(error)
         .into_any_element()
 }

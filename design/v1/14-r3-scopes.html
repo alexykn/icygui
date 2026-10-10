@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 14 round 3 scopes</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="settings.js"></script><script src="threads.js"></script></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">14</span><span class="topic-name">Handling and downtimes: scopes and fixes (round 3, final)</span><span class="topic-id" style="background:#f2d974">round 3</span></div>
+<p class="topic-intro">The approved model: two views, <b>handling</b> (chips: all, acknowledged, in downtime, upcoming, comments) and <b>downtimes</b> (timeline | list), plus the thread in the object’s pane; no separate acknowledged or comments view (the palette’s <i>acknowledged</i> opens handling with that chip). Round 3 adds <b>two scopes</b>, with the same parts (threads.js) and the same look; only the scope line in the header differs: <b>the whole environment</b>, from a fixed section at the top of the sidebar (a), and <b>a group</b>, optional and off by default, turned on in the group’s settings (h), shown as the group’s first entries in the sidebar (d). A team with one dashboard makes a group for it. Everything comes from the snapshot icygui already holds, scoped by the dashboards’ existing filters: no new requests. Also three fixes from round 2: one line per downtime in the timeline (e), names never cut in a narrow list (f), one row for an object with a single downtime (g). Wall clock: Wed 7 Oct, 14:12.</p>
+<div class="shots"></div>
+<script>
+const L = { theme: 'light' };
+// ---- the sidebar: the cluster section and the groups (shared, v1.js) ------------
+const win = (main, { top = '', ...o } = {}) => clusterWindow(main, { cluster: top, on: 'both', ...o });
+
+// ---- threads (the same data as round 2) ---------------------------------------
+const SW_TEXT = 'Line card swap in slot 3 (CHG-4468): Po12 to edge-ams is down during the swap.';
+const T = {
+  rabbit: () => tBand({ st: 'crit', name: 'rabbitmq-queue', host: 'mq-prod-01', out: 'CRITICAL - queue orders.retry depth 18,402', slot: '1 comment' }) +
+    tEntry({ kind: 'comment', au: 'm.keller', at: '14:09', text: 'Consumer deploy rolled back; the queue should drain within 20 minutes.' }),
+  pg: (o = {}) => tBand({ st: 'crit', ring: true, name: 'postgres-replication', host: 'db-prod-03', out: 'CRITICAL - standby lag 412s (> 300s)', slot: 'in downtime · 3 comments', ...o }) +
+    tEntry({ kind: 'on', au: 'j.berg', at: '12:41', meta: 'fixed 13:00 → 16:00', text: 'Failover drill on db-prod-01 (CHG-4473): the standby lags until the replica rebuild is done.', a: { progress: 40 }, b: '1h 48m left', bTone: 'acc' }) +
+    tEntry({ kind: 'comment', au: 'j.berg', at: '13:41', text: 'Failover drill on db-prod-01 at 15:00. Expect lag on 03 until the replica is rebuilt.', re: true }) +
+    tEntry({ kind: 'comment', au: 'dba-oncall', at: '13:58', text: 'Replica rebuild started on db-prod-03, about 45 minutes. Leaving the alert as it is.', re: true, sel: true }) +
+    tEntry({ kind: 'comment', au: 'j.berg', at: '14:05', text: 'Thanks. I’ll check again after the drill.', re: true }),
+  sw: () => tBand({ st: 'ok', ring: true, name: 'sw-core-ams-02', out: 'UP · host and 18 services in downtime', slot: 'in downtime · 2 upcoming' }) +
+    tEntry({ kind: 'on', au: 'm.keller', at: '13:52', meta: 'fixed 14:00 → 15:00 · host and 18 services', text: SW_TEXT, a: { progress: 20 }, b: '48m left', bTone: 'acc' }) +
+    tFold({ n: 18, host: 'sw-core-ams-02' }) +
+    tEntry({ kind: 'up', au: 'm.keller', at: '13:57', meta: 'flexible 1h · window 22:00 → 06:00 · host only', text: 'IOS XE 17.9.5 if the vendor build passes the lab tonight.', re: true, b: 'by 22:00' }) +
+    tEntry({ kind: 'cfg', au: 'weekly-patching', meta: 'fixed · Sat 06:00 → 10:00', text: 'From the config (ScheduledDowntime): it comes back at the next reload, so it can’t be removed here.', re: true, b: 'Sat 06:00' }),
+  auto: () => tBand({ st: 'crit', ring: true, name: 'pg-autovacuum', host: 'db-prod-01', out: 'CRITICAL - autovacuum has not run on orders for 26h', slot: 'acknowledged · 1 comment' }) +
+    tEntry({ kind: 'ack', au: 'dba-oncall', at: '13:12', text: 'Vacuum running on orders, about 30 minutes.', b: 'expires 15:00, in 48m', bTone: 'warn' }) +
+    tEntry({ kind: 'comment', au: 'j.berg', at: '13:44', text: 'Still running at 13:44; nothing extended, it expires at 15:00 on its own.', re: true }),
+  k8s: () => tBand({ st: 'ok', ring: true, name: 'k8s-node-07', out: 'UP · host and 22 services in downtime', slot: 'in downtime' }) +
+    tEntry({ kind: 'on', au: 'm.keller', at: '13:21', meta: 'fixed 13:30 → 15:30 · host and 22 services', text: 'Drained and cordoned for the kernel 6.8 rollout (CHG-4470).', a: { progress: 35 }, b: '1h 18m left', bTone: 'acc' }) +
+    tFold({ n: 22, host: 'k8s-node-07' }),
+  tls: () => tBand({ st: 'crit', ring: true, name: 'http-tls', host: 'web-edge-02', out: 'SSL CRITICAL - certificate expires in 2 days', slot: 'acknowledged · 1 comment' }) +
+    tEntry({ kind: 'ack', au: 'm.keller', at: '12:02', text: 'Renewal ordered, new certificate expected tomorrow (CHG-4459).', a: 'sticky', b: 'expires Thu 12:00' }) +
+    tEntry({ kind: 'comment', au: 'j.berg', at: '12:40', text: 'The CA confirmed: issued by tomorrow 10:00.', re: true }),
+  ntp: () => tBand({ st: 'warn', ring: true, name: 'ntp-offset', host: 'k8s-node-02', out: 'WARNING - offset 182 ms', slot: 'acknowledged' }) +
+    tEntry({ kind: 'ack', au: 'j.berg', at: '12:30', text: 'chrony re-syncs with the node reboot tonight.', a: 'sticky', b: 'expires 23:00, in 8h 48m' }),
+};
+const ENV_CHIPS = HANDLING_CHIPS;
+const PLAT_CHIPS = [
+  ['all', 'all', undefined],
+  ['ack', 'acknowledged', 2, `<span class="acc" style="display:flex">${icon('check', 11)}</span>`],
+  ['on', 'in downtime', 2, `<span class="dot accb d7"></span>`],
+  ['up', 'upcoming', 1, `<span class="dot pend d7"></span>`],
+  ['comment', 'comment', 1, `<span style="display:flex">${icon('message-square', 11)}</span>`],
+];
+
+// ---- a. the environment's section, handling open -----------------------------------
+const envHandling = tHeader({ title: 'handling', subtitle: 'prod-cluster · the whole environment · 20 objects', sort: 'latest activity ↓' }) +
+  tChips(ENV_CHIPS, 'all') + `<div class="list">${T.rabbit()}${T.pg()}${T.sw()}${T.auto()}</div>`;
+shot('14-r3-a', '14-r3-a-environment', '<b>The cluster section</b>: fixed at the very top of the sidebar, above the groups, headed <i>cluster</i> with the environment’s name faint beside it. It holds the environment-wide pages, each with its mark in the fixed dot slot and its count in the fixed count slot: <b>handling</b> (its icon; the objects being handled, 20), <b>downtimes</b> (its icon; in effect now, 5) and <b>health</b>, topic 06’s cluster health page, with the cluster’s state dot (green; warning when a node lags or a queue grows; critical when an endpoint is down, by 06’s rules) and no count. Order: the two pages people work in first, health last (it is looked at when something seems off, not worked through). The <i>open</i> section stays below the groups for ad-hoc tabs only and appears only when there are any. The page’s scope line: <i>prod-cluster · the whole environment · 20 objects</i>. platform’s own entries (d) show the group scope.',
+  win(envHandling, { top: 'handling' }));
+shot('14-r3-a-l', '14-r3-a-environment-light', '<b>The whole environment</b>, light.', win(envHandling, { top: 'handling' }), L);
+
+// ---- d. platform's handling -----------------------------------------------------------
+const platHandling = tHeader({ title: 'handling', subtitle: 'platform · 4 dashboards · 64 objects', sort: 'latest activity ↓' }) +
+  tChips(PLAT_CHIPS, 'all') + `<div class="list">${T.sw()}${T.k8s()}${T.tls()}${T.ntp()}</div>`;
+shot('14-r3-d', '14-r3-d-group', '<b>A group’s own handling</b>: platform has <i>handling</i> and <i>downtimes</i> turned on in its settings (h), so they are its <b>first entries</b> in the sidebar, before its dashboards, with their icons and counts. The page is the same handling view, scoped to the union of the objects of platform’s four dashboards (their existing filters, evaluated on the snapshot icygui already holds): the scope line says <i>platform · 4 dashboards · 64 objects</i>, and the chips count only what is in it. The VoIP team or the IP team each get theirs the same way; a team with one dashboard makes a group for it.',
+  win(platHandling, { activeGroup: 'platform', activeItem: 'handling' }));
+shot('14-r3-d-l', '14-r3-d-group-light', '<b>A group’s own handling</b>, light.', win(platHandling, { activeGroup: 'platform', activeItem: 'handling' }), L);
+
+// ---- e. the timeline, one line per downtime -----------------------------------------
+const lock = icon('lock', 11);
+function timeline() {
+  let h = tHeader({ title: 'downtimes', subtitle: 'prod-cluster · the whole environment · 14 downtimes', sort: 'by time', mode: 'timeline' }) +
+    tChips(DOWNTIME_CHIPS, 'all') + '<div class="list" style="position:relative">';
+  h += tlHead('noon to midnight · now 14:12');
+  h += tlRow({ st: 'warn', ring: true, name: 'redis-memory', host: 'cache-02', text: 'j.berg: maxmemory raised; restart at 16:00.', bars: [[12.25, 16.25, 'on']], right: '2h 03m left', acc: true });
+  h += tlRow({ st: 'crit', ring: true, name: 'postgres-replication', host: 'db-prod-03', text: 'j.berg: Failover drill on db-prod-01 (CHG-4473).', bars: [[13, 16, 'on']], right: '1h 48m left', acc: true });
+  h += tlBand({ st: 'ok', ring: true, name: 'sw-core-ams-02', out: 'UP · 3 downtimes', slot: '' });
+  h += tlLine({ kind: 'on', au: 'm.keller', text: SW_TEXT, bars: [[14, 15, 'on']], right: '48m left', acc: true });
+  h += tFold({ n: 18, host: 'sw-core-ams-02' });
+  h += tlLine({ kind: 'up', au: 'm.keller', text: 'IOS XE 17.9.5 if the vendor build passes the lab tonight.', bars: [[22, 30, 'flex', 'flexible 1h']], right: 'by 22:00' });
+  h += tlLine({ kind: 'cfg', au: 'weekly-patching', text: 'Sat 06:00 → 10:00, from the config: not removable here.', off: `${lock} → Sat 06:00`, right: `<span style="display:inline-flex;gap:5px;align-items:center">${lock}from config</span>` });
+  h += tlBand({ st: 'ok', ring: true, name: 'k8s-node-07', out: 'UP · host and 22 services', slot: '' });
+  h += tlLine({ kind: 'on', au: 'm.keller', text: 'Drained and cordoned for the kernel 6.8 rollout (CHG-4470).', bars: [[13.5, 15.5, 'on']], right: '1h 18m left', acc: true });
+  h += tFold({ n: 22, host: 'k8s-node-07' });
+  h += tlRow({ st: 'unk', ring: true, name: 'kubelet', host: 'k8s-node-07', text: 'j.berg: its own downtime: reimage after the drain, until 17:00.', bars: [[13.5, 17, 'on']], right: '2h 48m left', acc: true });
+  h += tlRow({ st: 'ok', name: 'pg-locks', host: 'db-prod-05', text: 'dba-oncall: VACUUM FULL on orders_archive.', bars: [[14, 18, 'flex', 'flexible 2h']], right: 'not started' });
+  h += tlRow({ st: 'warn', name: 'haproxy-backend', host: 'lb-prod-02', text: 'm.keller: HAProxy 2.8 rollout on lb-prod-01/02 (CHG-4471).', bars: [[22, 23, 'up']], right: 'in 7h 48m' });
+  h += tlRow({ st: 'ok', name: 'sw-core-ams-01', text: 'from config: weekly-patching', off: `${lock} → Sat 06:00`, right: `<span style="display:inline-flex;gap:5px;align-items:center">${lock}from config</span>` });
+  return h + '<span class="nowl" data-now></span></div>';
+}
+shot('14-r3-e', '14-r3-e-timeline', '<b>Timeline, fix (a)</b>: an object with several downtimes is a group, and <b>each downtime gets its own line</b> inside it, with its kind’s icon in the mark slot (calendar in the accent in effect, faint upcoming, the lock from config), the kind and the author on the first line and its text on the second (the window is the bar itself), its own bar and its own time at the right. sw-core-ams-02 now reads as three lines (now, tonight’s flexible window, Saturday’s config downtime) instead of labels crammed on one row. A host downtime covering services keeps its fold under its line (closed: 18, 22 identical services). An object with a single downtime stays one row (redis-memory, kubelet, pg-locks).',
+  win(timeline(), { top: 'downtimes' }));
+shot('14-r3-e-l', '14-r3-e-timeline-light', '<b>Timeline, fix (a)</b>, light.', win(timeline(), { top: 'downtimes' }), L);
+
+// ---- f. a narrow list next to the pane --------------------------------------------------
+const cb = (st, ring, name, host, out, slot, sel) => tBand({ st, ring, name, host, out, slot, collapsed: true, sel });
+const narrow = tHeader({ title: 'handling', subtitle: 'prod-cluster', sort: 'latest activity ↓' }) + tChips(ENV_CHIPS, 'all') + `<div class="list">
+  ${cb('crit', false, 'rabbitmq-queue', 'mq-prod-01', 'CRITICAL - queue orders.retry depth 18,402', '1 comment')}
+  ${cb('crit', true, 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', 'in downtime · 3 comments', true)}
+  ${cb('ok', true, 'sw-core-ams-02', '', 'UP · host and 18 services in downtime', 'in downtime · 2 upcoming')}
+  ${cb('crit', true, 'pg-autovacuum', 'db-prod-01', 'CRITICAL - autovacuum has not run on orders for 26h', 'acknowledged · 1 comment')}
+  ${cb('unk', true, 'kafka-consumer-lag', 'kafka-01', 'UNKNOWN - consumer group rebalancing', 'acknowledged')}
+  ${cb('ok', true, 'k8s-node-07', '', 'UP · host and 22 services in downtime', 'in downtime')}
+  ${cb('unk', true, 'borg-last-run', 'backup-01', 'UNKNOWN - repository lock held by PID 4412', 'acknowledged')}
+  ${cb('warn', true, 'ntp-offset', 'k8s-node-02', 'WARNING - offset 182 ms', 'acknowledged')}
+  ${cb('crit', true, 'http-tls', 'web-edge-02', 'SSL CRITICAL - certificate expires in 2 days', 'acknowledged · 1 comment')}
+  ${cb('warn', false, 'haproxy-backend', 'lb-prod-02', 'WARNING - backend api: 2/6 servers down', 'upcoming')}</div>`;
+const pgBanner = dtBanner({ what: 'In downtime', left: '1h 48m left', action: btn('remove downtime'), l2: `fixed${S}13:00 → 16:00 today${S}started 1h 12m ago`, l3: au('j.berg', '12:41', 'Failover drill on db-prod-01 (CHG-4473): the standby lags until the replica rebuild is done.'), progress: 40 });
+const pgPane = `<div class="pane">${paneHeader('service')}${pgBanner}<div class="pbody">
+  ${paneTitle({ st: 'crit', label: 'CRIT', ring: true, name: 'postgres-replication', sub: 'on <a>db-prod-03</a> · 14m · hard 3/3' })}
+  ${actionButtons()}
+  <div class="col" style="gap:6px"><div style="display:flex;align-items:baseline;gap:10px">${seclabel('handling')}<span class="faint" style="font-size:11.5px">4 · oldest first</span></div>
+    <div class="col" style="margin:0 -24px">
+    ${tEntry({ kind: 'on', au: 'j.berg', at: '12:41', meta: 'fixed 13:00 → 16:00', text: '<span class="faint">the downtime in the banner above</span>', a: { progress: 40 }, b: '1h 48m left', bTone: 'acc' })}
+    ${tEntry({ kind: 'comment', au: 'j.berg', at: '13:41', text: 'Failover drill on db-prod-01 at 15:00. Expect lag on 03 until the replica is rebuilt.', re: true })}
+    ${tEntry({ kind: 'comment', au: 'dba-oncall', at: '13:58', text: 'Replica rebuild started on db-prod-03, about 45 minutes. Leaving the alert as it is.', re: true })}
+    ${tEntry({ kind: 'comment', au: 'j.berg', at: '14:05', text: 'Thanks. I’ll check again after the drill.', re: true })}</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px"><span class="input" style="flex:1"><span class="ph">add a comment (c)</span></span>${btn('comment', { key: '↵' })}</div></div>
+</div></div>`;
+shot('14-r3-f', '14-r3-f-narrow', '<b>A narrow list beside the pane, fix (b)</b>: the band is a flex row in which <i>service on host</i> never shrinks; the faint output gives way first, then the right slot (it shortens with an ellipsis), so names stay whole as long as there is room for them (<i>postgres-replication on db-prod-03</i>, <i>kafka-consumer-lag on kafka-01</i>). The pane is the object’s thread, as in round 2.',
+  win(`<div class="split" style="grid-template-columns:minmax(0,1fr) 580px"><div class="col">${narrow}</div>${pgPane}</div>`, { top: 'handling' }));
+shot('14-r3-f-l', '14-r3-f-narrow-light', '<b>A narrow list beside the pane</b>, light.', win(`<div class="split" style="grid-template-columns:minmax(0,1fr) 580px"><div class="col">${narrow}</div>${pgPane}</div>`, { top: 'handling' }), L);
+
+// ---- g. the downtimes list, one row per single downtime ------------------------------
+function dtList() {
+  let h = tHeader({ title: 'downtimes', subtitle: 'prod-cluster · the whole environment · 14 downtimes', sort: 'ends, then starts soonest ↑', mode: 'list' }) +
+    tChips(DOWNTIME_CHIPS, 'all') + '<div class="list">';
+  h += tSec({ ic: 'calendar-clock', title: 'in effect · 5', detail: 'ending soonest first' });
+  h += tBand({ st: 'ok', ring: true, name: 'sw-core-ams-02', out: 'UP · host and 18 services in downtime', slot: '3 downtimes' }) +
+    tEntry({ kind: 'on', au: 'm.keller', at: '13:52', meta: 'fixed 14:00 → 15:00 · host and 18 services', text: SW_TEXT, a: { progress: 20 }, b: '48m left', bTone: 'acc', sel: true }) +
+    tFold({ n: 18, host: 'sw-core-ams-02' }) +
+    tEntry({ kind: 'up', au: 'm.keller', at: '13:57', meta: 'flexible 1h · window 22:00 → 06:00 · host only', text: 'IOS XE 17.9.5 if the vendor build passes the lab tonight.', re: true, b: 'by 22:00' }) +
+    tEntry({ kind: 'cfg', au: 'weekly-patching', meta: 'fixed · Sat 06:00 → 10:00', text: 'From the config (ScheduledDowntime): not removable here.', re: true, b: 'Sat 06:00' });
+  h += tBand({ st: 'ok', ring: true, name: 'k8s-node-07', out: 'UP · host and 22 services in downtime', slot: '1 downtime' }) +
+    tEntry({ kind: 'on', au: 'm.keller', at: '13:21', meta: 'fixed 13:30 → 15:30 · host and 22 services', text: 'Drained and cordoned for the kernel 6.8 rollout (CHG-4470).', a: { progress: 35 }, b: '1h 18m left', bTone: 'acc' }) +
+    tFold({ n: 22, host: 'k8s-node-07' });
+  h += tRow({ st: 'crit', ring: true, name: 'postgres-replication', host: 'db-prod-03', kind: 'on', au: 'j.berg', at: '12:41', meta: 'fixed 13:00 → 16:00', text: 'Failover drill on db-prod-01 (CHG-4473): the standby lags until the replica rebuild is done.', a: { progress: 40 }, b: '1h 48m left', bTone: 'acc' });
+  h += tRow({ st: 'warn', ring: true, name: 'redis-memory', host: 'cache-02', kind: 'on', au: 'j.berg', at: '12:10', meta: 'fixed 12:15 → 16:15', text: 'maxmemory raised; restart at 16:00.', a: { progress: 49 }, b: '2h 03m left', bTone: 'acc' });
+  h += tRow({ st: 'unk', ring: true, name: 'kubelet', host: 'k8s-node-07', kind: 'on', au: 'j.berg', at: '13:25', meta: 'fixed 13:30 → 17:00 · its own', text: 'Reimage after the drain; longer than the host’s downtime.', a: { progress: 20 }, b: '2h 48m left', bTone: 'acc' });
+  h += tSec({ ic: 'clock', title: 'upcoming · 4', detail: 'starting soonest first' });
+  h += tRow({ st: 'ok', name: 'pg-locks', host: 'db-prod-05', kind: 'up', au: 'dba-oncall', at: '13:40', meta: 'flexible 2h · window 14:00 → 18:00', text: 'VACUUM FULL on orders_archive; lock waits are expected while it runs.', b: 'not started' });
+  h += tRow({ st: 'warn', name: 'haproxy-backend', host: 'lb-prod-02', kind: 'up', au: 'm.keller', at: '11:02', meta: 'fixed 22:00 → 23:00', text: 'HAProxy 2.8 rollout on lb-prod-01/02 (CHG-4471).', b: 'in 7h 48m' });
+  h += tBand({ st: 'unk', name: 'backup-01', out: 'UP · host and 6 services, Thursday', slot: '1 downtime' }) +
+    tEntry({ kind: 'up', au: 'j.berg', at: 'Tue 10:02', meta: 'fixed · Thu 01:00 → 03:00 · host and 6 services', text: 'borg repository migration to backup-02 (CHG-4480).', b: 'in 10h 48m' }) + tFold({ n: 6, host: 'backup-01' });
+  h += tRow({ st: 'ok', name: 'sw-core-ams-01', kind: 'cfg', au: 'weekly-patching', meta: 'fixed · Sat 06:00 → 10:00', text: 'From the config (ScheduledDowntime): not removable here.', b: 'Sat 06:00' });
+  return h + '</div>';
+}
+shot('14-r3-g', '14-r3-g-list', '<b>Downtimes list, fix (c)</b>: an object with a <b>single downtime</b> and no services takes <b>one row</b>, band and entry merged at an entry’s height: the object’s state dot in the mark slot, the chevron slot empty, the first line names the object (<i>postgres-replication on db-prod-03</i>) and then the kind, author and window, the second line is the text; the same two tag slots. The band with entries under it only appears for an object with several downtimes (sw-core-ams-02) or a services fold (k8s-node-07, backup-01). Shown at full height.',
+  win(dtList(), { top: 'downtimes' }), { h: 1210 });
+shot('14-r3-g-l', '14-r3-g-list-light', '<b>Downtimes list, fix (c)</b>, light.', win(dtList(), { top: 'downtimes' }), { theme: 'light', h: 1210 });
+
+// ---- h. the group's settings: the two switches -----------------------------------------
+const groupDlg = dialog({
+  title: 'Group settings', what: 'platform · 4 dashboards',
+  body: `<div class="field"><div class="lab">name</div><span class="input">platform</span></div>
+    <div class="col rows0" style="gap:0">
+      ${srow('handling for this group', 'One view of every acknowledgement, downtime and comment across its dashboards.', sw(true))}
+      ${srow('downtimes for this group', 'One view of every downtime across its dashboards, as a timeline or a list.', sw(false))}
+    </div>
+    <span class="faint" style="font-size:11.5px;line-height:1.45">Turned on, each shows as an entry at the top of the group in the sidebar. They read what icygui already loads: no extra requests.</span>`,
+  footStart: 'changes apply at once',
+  actions: btn('done', { key: '↵', primary: true }),
+});
+shot('14-r3-h', '14-r3-h-group-settings', '<b>The group’s settings</b> (the group’s <i>···</i> → <i>group settings</i>, and the same rows when a group is created with <i>new group</i>): the name, then two switches in fixed rows, <b>off by default</b>, each with a one-line description: <i>handling for this group</i> (on here, so platform’s <i>handling</i> entry is in the sidebar) and <i>downtimes for this group</i> (off, so there is no <i>downtimes</i> entry). They can be changed any time; changes apply at once. A new group offers the same rows with both off and <i>create group</i>.',
+  win(listHeader({ title: 'network', subtitle: 'service problems' }) + summary() + `<div class="list">${rows()}</div>`, { activeGroup: 'platform', activeItem: 'network', menuOn: true, on: 'handling' }) + modal(740, groupDlg));
+shot('14-r3-h-l', '14-r3-h-group-settings-light', '<b>The group’s settings</b>, light.', win(listHeader({ title: 'network', subtitle: 'service problems' }) + summary() + `<div class="list">${rows()}</div>`, { activeGroup: 'platform', activeItem: 'network', menuOn: true, on: 'handling' }) + modal(740, groupDlg), L);
+
+// the now line on the timeline's axis
+document.querySelectorAll('[data-now]').forEach((ln) => {
+  const ax = ln.parentElement.querySelector('.tlax .ax');
+  ln.style.left = (ax.getBoundingClientRect().left - ln.parentElement.getBoundingClientRect().left + tlX(TL.now)) + 'px';
+});
+</script>
+</body></html>

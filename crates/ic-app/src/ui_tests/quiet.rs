@@ -30,7 +30,6 @@ use crate::fixture::FixtureOptions;
 use crate::live::desktop::Response;
 use crate::live::{self, demo};
 use crate::pane::UPDATING_HINT_AFTER;
-use crate::workspace::ModalKind;
 
 /// The Focus commands `core` got, in order.
 fn focused(core: &Recorder) -> Vec<String> {
@@ -342,20 +341,13 @@ fn the_quiet_mode_switch_is_saved() {
                 )
                 .await;
                 cx.update(|cx| {
-                    assert_eq!(app.workspace.read(cx).modal(cx), Some(ModalKind::Settings));
-                    // Under *start at login* and its one-line hint; the
-                    // tray hint above has two lines without a tray host.
-                    let host = app
-                        .workspace
-                        .read(cx)
-                        .settings()
-                        .is_some_and(|dialog| dialog.read(cx).tray_host() == Some(true));
-                    let quiet = if host { 254. } else { 270. };
-                    app.click(cx, point(px(405.), px(quiet)), Modifiers::default());
+                    assert!(app.workspace.read(cx).settings().is_some());
+                    // The third row of the general page; it applies as it
+                    // is clicked (no save, nothing to close).
+                    app.click(cx, point(px(1213.), px(319.)), Modifiers::default());
                 });
-                cx.update(|cx| app.keys(cx, "ctrl-s"));
                 cx.update(|cx| {
-                    assert_eq!(app.workspace.read(cx).modal(cx), None, "saved and closed");
+                    assert!(app.workspace.read(cx).settings().is_some(), "still open");
                     let general = &app.state.read(cx).config().general;
                     assert!(!general.quiet_when_hidden, "switched off");
                     assert!(general.close_to_tray, "the others as they were");

@@ -5,6 +5,7 @@
 
 mod action;
 mod event;
+mod glob;
 mod name;
 mod notification;
 mod object;
@@ -16,15 +17,19 @@ mod time;
 
 pub use action::{Action, ActionTarget, ChildOptions, CommandType, DowntimeMode};
 pub use event::{CheckableState, Event, EventKind, ObjectChange, StateAfter};
+pub use glob::{Glob, glob_matches};
 pub use name::{HostName, ObjectKey, ServiceKey};
 pub use notification::{Notification, Notified};
 pub use object::{
-    AckKind, CheckInfo, CheckResult, Comment, CommentKind, Dependency, Downtime, Endpoint,
-    Features, Host, HostGroup, Links, Service, ServiceGroup, Vars, Zone,
+    AckKind, CheckInfo, CheckResult, Comment, CommentKind, Dependency, Downtime, DowntimePhase,
+    Endpoint, Features, Host, HostGroup, Links, Service, ServiceGroup, Vars, Zone,
 };
 pub use perfdata::{
     Perfdata, PerfdataStatus, Threshold, format_number, parse_perfdata, parse_perfdata_entry,
 };
 pub use state::{HostState, ServiceState, StateType};
-pub use status::{InstanceStatus, ObjectCounts};
+pub use status::{
+    EndpointStats, FeatureState, InstanceStatus, ListenerStatus, NodeFeatures, ObjectCounts,
+    Version,
+};
 pub use time::{Timestamp, format_compact, format_two_units};

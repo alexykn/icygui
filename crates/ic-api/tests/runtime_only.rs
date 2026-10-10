@@ -127,5 +127,5 @@ fn requests_go_to_the_known_paths_only() {
             "an action endpoint from {value}"
         );
     }
-    assert!(actions.contains("single(TargetKind::Comment, \"remove-comment\", name)"));
+    assert!(actions.contains("named(TargetKind::Comment, \"remove-comment\", names)"));
 }

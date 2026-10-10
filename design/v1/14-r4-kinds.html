@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 14 round 4 dashboard kinds</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="threads.js"></script>
+<style>
+/* the filter field's "copy filter from" control: a small icon button in a
+ * fixed slot at the field's top right, on every filter field */
+.fx .fxcp { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: var(--t-faint); }
+.fx .fxcp.on { background: var(--el-hover); color: var(--t); }
+.fx { padding-right: 36px; }
+/* the copy-filter menu: the menu card, rows with name, place and the filter */
+.cfm { position: absolute; z-index: 30; width: 440px; padding: 4px; border-radius: 6px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 6px 18px var(--shadow-strong); display: flex; flex-direction: column; }
+.cfm .q { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; margin-bottom: 4px; border-bottom: 1px solid var(--bd-header); font-size: 12.5px; color: var(--t-muted); }
+.cfm .sec { padding: 6px 8px 2px; font-size: 10.5px; color: var(--t-faint); }
+.cfm .it { display: grid; grid-template-columns: 14px minmax(0,1fr); gap: 8px; padding: 5px 8px 6px; border-radius: 4px; }
+.cfm .it.hov { background: var(--row-sel); }
+.cfm .it .mk { display: flex; justify-content: center; padding-top: 3px; color: var(--t-muted); }
+.cfm .it .l1 { font-size: 12.5px; color: var(--t); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cfm .it .l1 .g { color: var(--t-faint); font-size: 12px; }
+.cfm .it .l2 { font-size: 11.5px; color: var(--t-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+.cfm .ft { display: flex; gap: 14px; padding: 7px 8px 3px; margin-top: 4px; border-top: 1px solid var(--bd-header); font-size: 11px; color: var(--t-faint); }
+.cfc { position: absolute; z-index: 30; width: 272px; padding: 9px 11px; border-radius: 6px; border: 1px solid var(--bd-window); background: var(--el-bg); box-shadow: 0 6px 18px var(--shadow-strong); font-size: 12px; line-height: 1.5; color: var(--t-sec); display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; }
+.cfc .code { padding: 6px 8px; font-size: 12px; line-height: 1.6; }
+/* a narrow timeline for the editor's preview */
+.tlnarrow .tml, .tlnarrow .tlax, .tlnarrow .ghb.tlb, .tlnarrow .tsvc.tlb { grid-template-columns: 44px minmax(0,1fr) 300px 80px; }
+.kindl { display: flex; align-items: center; gap: 8px; height: 30px; font-size: 13px; color: var(--t); }
+</style></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">14</span><span class="topic-name">Handling and downtimes as kinds of dashboard (round 4)</span><span class="topic-id" style="background:#f2d974">round 4</span></div>
+<p class="topic-intro">Round 4 replaces the group scope: <b>handling</b> and <b>downtimes</b> are <b>kinds of dashboard</b>, each with its own filter, placed in any group like other dashboards. Groups stay plain folders (no switches, no aggregation; <i>new group</i> stays rc1’s instant create and rename). The <b>cluster</b> section (handling, downtimes and health for the whole environment) stays as drawn. A dashboard’s kind is chosen when it is created (a); the editor then shows the kind’s settings and a live preview (b, c). And every filter field, of every kind of dashboard and every view, gets <b>copy filter from</b> (e). Data: no new requests; a handling or downtimes dashboard evaluates its filter on the snapshot icygui already holds, as problems dashboards do. Wall clock: Wed 7 Oct, 14:12.</p>
+<div class="shots"></div>
+<script>
+const L = { theme: 'light' };
+// ---- the sidebar: cluster section, overview, voip with three kinds, platform, lab
+const VOIP = (all = true) => ({ name: 'voip', items: [['voip problems', 'crit', 3], ...(all ? [['voip handling', 'ic-users', 4], ['voip downtimes', 'ic-calendar-clock', 1]] : [])] });
+const PLAIN_PLATFORM = { name: 'platform', items: [['network', 'unk', 5], ['kubernetes', 'crit', 9], ['certificates', 'warn', 1], ['all services', 'crit', 38]] };
+const win = (main, { all = true, activeGroup = 'voip', activeItem = '', menuOn = false, foot = {} } = {}) => sbWithIcons(appWindow(main, {
+  groups: [SIDEBAR_GROUPS[0], { ...VOIP(all), ...(menuOn ? { menu: true } : {}) }, PLAIN_PLATFORM, SIDEBAR_GROUPS[2]], activeGroup, activeItem, foot, before: clusterSection() }));
+const K = (t) => `<span class="tk-k">${t}</span>`, Str = (t) => `<span class="tk-s">${t}</span>`, O = (t) => `<span class="tk-o">${t}</span>`;
+const VOIP_FILTER = `${K('host.vars.team')} ${O('==')} ${Str('"voip"')}`;
+
+// ---- voip data ------------------------------------------------------------------
+const VOIP_CHIPS = [
+  ['all', 'all', undefined],
+  ['ack', 'acknowledged', 2, `<span class="acc" style="display:flex">${icon('check', 11)}</span>`],
+  ['on', 'in downtime', 1, `<span class="dot accb d7"></span>`],
+  ['up', 'upcoming', 1, `<span class="dot pend d7"></span>`],
+  ['comment', 'comments', 2, `<span style="display:flex">${icon('message-square', 11)}</span>`],
+];
+const VT = {
+  trunk: () => tBand({ st: 'crit', ring: true, name: 'sip-trunk telekom', host: 'sbc-01', out: 'CRITICAL - trunk unregistered for 6m (503 from peer)', slot: 'acknowledged · 1 comment' }) +
+    tEntry({ kind: 'ack', au: 'n.weber', at: '14:08', text: 'Telekom confirms an outage in Frankfurt (ticket 7781123); calls fail over to the Vodafone trunk.', b: 'expires 18:00, in 3h 48m' }) +
+    tEntry({ kind: 'comment', au: 's.otto', at: '14:10', text: 'Inbound calls route via Vodafone, outbound is fine. Watching the queue.', re: true }),
+  pbx: () => tBand({ st: 'ok', ring: true, name: 'pbx-02', out: 'UP · host and 9 services in downtime', slot: 'in downtime' }) +
+    tEntry({ kind: 'on', au: 'n.weber', at: '13:55', meta: 'fixed 14:00 → 15:00 · host and 9 services', text: 'Asterisk 20.9 upgrade on the standby PBX.', a: { progress: 20 }, b: '48m left', bTone: 'acc' }) +
+    tFold({ n: 9, host: 'pbx-02' }),
+  jitter: () => tBand({ st: 'warn', name: 'rtp-jitter', host: 'sbc-02', out: 'WARNING - jitter 38 ms (> 30 ms) on 12 calls', slot: '1 comment' }) +
+    tEntry({ kind: 'comment', au: 's.otto', at: '13:40', text: 'Jitter only on calls via the Frankfurt PoP; carrier ticket opened.' }),
+  prov: () => tBand({ st: 'unk', ring: true, name: 'phone-provisioning', host: 'prov-01', out: 'UNKNOWN - TFTP check timed out', slot: 'acknowledged' }) +
+    tEntry({ kind: 'ack', au: 's.otto', at: '12:20', text: 'TFTP moves to prov-02 this week; the check follows on Friday.', a: 'sticky', b: 'expires Fri 12:00' }),
+};
+const voipHandlingBody = () => tChips(VOIP_CHIPS, 'all') + `<div class="list">${VT.trunk()}${VT.pbx()}${VT.jitter()}${VT.prov()}</div>`;
+
+// ---- a. the new dashboard choice ---------------------------------------------------
+const KINDS = [
+  { label: 'problems', ic: 'layout-dashboard', det: 'objects with problems: a list, a grid or several views' },
+  { label: 'handling', ic: 'users', det: 'who is handling what: acknowledgements, downtimes, comments' },
+  { label: 'downtimes', ic: 'calendar-clock', det: 'downtimes in effect and upcoming, as a timeline or a list' },
+];
+const kindMenu = (x, y, hov = 1) => menu(['new dashboard in voip', ...KINDS.map((k, i) => ({ ...k, hov: i === hov }))], { x, y, w: 580 });
+const mainProblems = listHeader({ title: 'voip problems', subtitle: 'service problems' }) + summary([['crit', 1, 'critical'], ['warn', 1, 'warning'], ['unk', 1, 'unknown']], handledEnd(2)) +
+  `<div class="list">${rows([['crit', 'sip-trunk telekom', 'sbc-01', 'CRITICAL - trunk unregistered for 6m (503 from peer)', '6m'], ['warn', 'rtp-jitter', 'sbc-02', 'WARNING - jitter 38 ms (> 30 ms) on 12 calls', '14m'], ['unk', 'phone-provisioning', 'prov-01', 'UNKNOWN - TFTP check timed out', '41m']])}</div>`;
+shot('14-r4-a', '14-r4-a-new-dashboard', '<b>New dashboard: choose its kind.</b> The group’s <i>+</i> (here on voip) opens a small menu, as 04’s <i>add view</i> does: <b>problems</b> (today’s dashboards), <b>handling</b> and <b>downtimes</b>, each with its icon in the mark slot and a one-line description. The choice opens the editor for that kind (b, c); a new dashboard starts with its group’s filters copied in when the group has one dashboard, otherwise empty. The footer’s <i>+</i> has the same choice under <i>new dashboard</i> (light frame). The kind is fixed once created; the editor says so.',
+  win(mainProblems, { all: false, activeItem: 'voip problems', menuOn: true }) + kindMenu(226, 364));
+const footMenu = menu([{ label: 'new dashboard', hov: true, right: `<span class="faint" style="display:flex">${icon('chevron-right', 12)}</span>` }, { label: 'new group' }, '-', { label: 'import dashboards' }, { label: 'paste dashboards', key: 'ctrl-v' }, { label: 'export all dashboards' }], { x: 330, y: 650, w: 240 });
+shot('14-r4-a-l', '14-r4-a-new-dashboard-light', '<b>New dashboard</b>, light, from the footer’s <i>+</i>: <i>new dashboard</i> opens the same three kinds beside it.',
+  win(mainProblems, { all: false, activeItem: 'voip problems' }) + footMenu + menu(['new dashboard', ...KINDS.map((k, i) => ({ ...k, hov: i === 1 }))], { x: 574, y: 650, w: 580 }), L);
+
+// ---- the editor parts -----------------------------------------------------------------
+const editorHeader = (title) => `<div class="hbar"><span class="title">${title}</span><span class="acc" style="font-size:12px">editing · voip</span><span class="grow"></span>${btn('discard', { key: 'esc' })}${btn('save dashboard', { key: 'ctrl-s', primary: true })}</div>`;
+const fx = (inner, { status, tone = 'c-ok', cpOn = false, focus = true } = {}) => `<div class="field"><div class="lab">filter<span class="st ${tone}">${status}</span></div>
+  <div class="fx${focus ? ' focus' : ''}" style="min-height:44px">${inner}<span class="fxcp${cpOn ? ' on' : ''}" data-cp>${icon('copy', 12)}</span></div></div>`;
+const noNotify = (what) => `<span class="faint" style="font-size:11.5px;line-height:1.45">${what} dashboards don’t notify; notifications come from problems dashboards.</span>`;
+const inspector = (kind, ic, body) => `<div class="pane" style="background:var(--win-bg)">
+  <div class="hbar pane-h" style="padding:0 18px"><span class="title" style="font-size:13.5px">dashboard</span><span class="grow"></span><span class="right faint" style="display:flex;align-items:center;gap:6px">${icon(ic, 12)}${kind}</span></div>
+  <div class="col" style="gap:16px;padding:16px 18px;overflow:hidden">${body}</div></div>`;
+const nameGroup = (name) => `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="field"><div class="lab">name</div><span class="input">${name}</span></div><div class="field"><div class="lab">group</div>${select('voip')}</div></div>`;
+const kindRow = (ic, kind) => `<div class="field"><div class="lab">kind<span class="st faint">chosen when created</span></div><span class="kindl">${icon(ic, 13)}${kind}</span></div>`;
+
+// ---- b. the handling editor -------------------------------------------------------------
+const handlingInsp = inspector('handling', 'users', `${kindRow('users', 'handling')}${nameGroup('voip handling')}
+  ${fx(`${VOIP_FILTER}<span class="caret" style="height:13px"></span>`, { status: 'matches 214 objects · 12 being handled' })}
+  <div class="field"><div class="lab">opens with</div><div style="display:flex;gap:6px;flex-wrap:wrap">${chip('all', { sel: true })}${chip('acknowledged')}${chip('in downtime')}${chip('upcoming')}${chip('comments')}</div></div>
+  <div class="field"><div class="lab">sort</div>${select('latest activity')}</div>
+  ${noNotify('Handling')}`);
+const editorB = () => `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px"><div class="col" style="min-height:0;overflow:hidden">${editorHeader('voip handling')}${voipHandlingBody()}</div>${handlingInsp}</div>`;
+shot('14-r4-b', '14-r4-b-handling-editor', '<b>The editor of a handling dashboard.</b> The inspector: the kind (fixed), name and group, the <b>filter</b> with topic 09’s autocomplete and syntax colours, and its live status, <i>matches 214 objects · 12 being handled</i> (in the critical colour with the parse error when it doesn’t parse); which chip it opens with, and the sort. <b>No notifications row</b>: one faint line says that handling dashboards don’t notify. On the left, the live preview: the handling view for exactly that filter (the same parts as everywhere). The filter field’s copy control sits at its top right (e).',
+  win(editorB(), { activeItem: 'voip handling' }));
+shot('14-r4-b-l', '14-r4-b-handling-editor-light', '<b>The editor of a handling dashboard</b>, light.', win(editorB(), { activeItem: 'voip handling' }), L);
+
+// ---- c. the downtimes editor -----------------------------------------------------------------
+TL.w = 300;
+const dtPreview = `<div class="tlnarrow" style="position:relative">${tChips(DOWNTIME_CHIPS.map(([k, l, n, m]) => [k, l, k === 'on' ? 1 : k === 'up' ? 2 : k === 'cfg' ? 0 : n, m]), 'all')}<div class="list" style="position:relative">
+  ${tlHead('now 14:12')}
+  ${tlBand({ st: 'ok', ring: true, name: 'pbx-02', out: 'UP · host and 9 services' })}
+  ${tlLine({ kind: 'on', au: 'n.weber', text: 'Asterisk 20.9 upgrade on the standby PBX.', bars: [[14, 15, 'on']], right: '48m left', acc: true })}
+  ${tFold({ n: 9, host: 'pbx-02' })}
+  ${tlRow({ st: 'unk', name: 'phone-provisioning', host: 'prov-01', text: 's.otto: TFTP move to prov-02.', bars: [[16, 20, 'flex', 'flexible 1h']], right: 'not started' })}
+  ${tlRow({ st: 'crit', name: 'sip-trunk telekom', host: 'sbc-01', text: 'n.weber: SBC firmware 6.2.', bars: [[22, 23, 'up']], right: 'in 7h 48m' })}
+  <span class="nowl" data-now></span></div></div>`;
+TL.w = 640;
+const dtInsp = inspector('downtimes', 'calendar-clock', `${kindRow('calendar-clock', 'downtimes')}${nameGroup('voip downtimes')}
+  ${fx(`${VOIP_FILTER}`, { status: 'matches 214 objects · 3 downtimes', focus: false })}
+  <div class="field"><div class="lab">opens as</div><span class="seg" style="display:flex"><span class="on" style="flex:1">timeline</span><span style="flex:1">list</span></span></div>
+  <div class="field"><div class="lab">shows</div><div style="display:flex;gap:6px;flex-wrap:wrap">${chip('in effect', { sel: true })}${chip('upcoming', { sel: true })}${chip('from config', { sel: true })}</div></div>
+  ${noNotify('Downtimes')}`);
+const editorC = () => `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px"><div class="col" style="min-height:0;overflow:hidden">${editorHeader('voip downtimes')}${dtPreview}</div>${dtInsp}</div>`;
+shot('14-r4-c', '14-r4-c-downtimes-editor', '<b>The editor of a downtimes dashboard</b>: the same inspector, with the live status <i>matches 214 objects · 3 downtimes</i>, plus <b>opens as</b> (timeline, the default, or list) and which kinds it shows (in effect, upcoming, from config). The preview is the timeline for that filter, its axis fitted to the preview’s width: pbx-02’s host downtime with its services folded, a flexible window and an upcoming one. No notifications row; the faint line says so.',
+  win(editorC(), { activeItem: 'voip downtimes' }));
+shot('14-r4-c-l', '14-r4-c-downtimes-editor-light', '<b>The editor of a downtimes dashboard</b>, light.', win(editorC(), { activeItem: 'voip downtimes' }), L);
+
+// ---- d. the voip group with its three dashboards, handling open ---------------------------------
+const voipHandlingPage = tHeader({ title: 'voip handling', subtitle: `voip · host.vars.team == "voip" · 214 objects`, sort: 'latest activity ↓' }) + voipHandlingBody();
+shot('14-r4-d', '14-r4-d-voip-group', '<b>A team’s three dashboards in its group.</b> voip holds <i>voip problems</i> (its worst state’s dot, the problem count), <i>voip handling</i> (its kind’s icon in the mark slot; the objects being handled, 4) and <i>voip downtimes</i> (its icon; in effect, 1), in the order the team chose, like any dashboards. <i>voip handling</i> is open: the handling view for its filter, with the filter as the scope line. The cluster section above still covers the whole environment; platform is a plain folder.',
+  win(voipHandlingPage, { activeItem: 'voip handling' }));
+shot('14-r4-d-l', '14-r4-d-voip-group-light', '<b>A team’s three dashboards</b>, light.', win(voipHandlingPage, { activeItem: 'voip handling' }), L);
+
+// ---- e. copy filter from -------------------------------------------------------------------------
+const cfItems = [
+  ['sec', 'dashboards'],
+  ['it', dot('crit', 'd7'), 'voip problems', 'voip · problems', 'host.vars.team == "voip" && service.problem'],
+  ['it', icon('users', 12), 'voip handling', 'voip · handling', 'host.vars.team == "voip"', true],
+  ['it', dot('crit', 'd7'), 'databases', 'overview · problems', 'host.vars.role in ["postgres", "mysql"]'],
+  ['it', dot('crit', 'd7'), 'kubernetes', 'platform · problems', 'host.groups contains "k8s-workers" || host.groups contains "k8s-control"'],
+  ['sec', 'views'],
+  ['it', icon('list', 12), 'databases › failing services', 'overview', '(host.vars.role == "postgres" || host.vars.role == "mysql") && service.problem'],
+  ['it', icon('layout-grid', 12), 'fleet › hosts by group', 'platform', 'all host groups'],
+];
+const cfMenu = `<div class="cfm" data-cfm><div class="q">${icon('search', 12)}<span class="faint">find a dashboard or view</span></div>
+  ${cfItems.map((r) => r[0] === 'sec' ? `<div class="sec">${r[1]}</div>` : `<div class="it${r[5] ? ' hov' : ''}"><span class="mk">${r[1]}</span><div style="min-width:0"><div class="l1">${r[2]} <span class="g">· ${r[3]}</span></div><div class="l2">${esc(r[4])}</div></div></div>`).join('')}
+  <div class="ft"><span>↵ copy into the field</span><span>ctrl-z undoes it</span><span class="grow"></span><span>esc</span></div></div>`;
+const cfCard = `<div class="cfc" data-cfc><span class="strong">voip handling</span><span class="faint">a handling dashboard in voip</span><div class="code" style="white-space:pre-wrap"><span style="color:var(--t-muted)">host.vars.team</span> <span class="faint">==</span> <span style="color:var(--ok-text)">"voip"</span></div><span>here: matches 214 objects · 3 downtimes</span></div>`;
+const newDtInsp = inspector('downtimes', 'calendar-clock', `${kindRow('calendar-clock', 'downtimes')}${nameGroup('voip downtimes')}
+  ${fx(`<span class="ghost">empty: every object</span>`, { status: 'every object · 14 downtimes', tone: 'faint', cpOn: true })}
+  <div class="field"><div class="lab">opens as</div><span class="seg" style="display:flex"><span class="on" style="flex:1">timeline</span><span style="flex:1">list</span></span></div>
+  <div class="field"><div class="lab">shows</div><div style="display:flex;gap:6px;flex-wrap:wrap">${chip('in effect', { sel: true })}${chip('upcoming', { sel: true })}${chip('from config', { sel: true })}</div></div>
+  ${noNotify('Downtimes')}`);
+const editorE = () => `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px"><div class="col" style="min-height:0;overflow:hidden">${editorHeader('voip downtimes')}<div class="sum"><span class="faint">preview: every object until the filter is set</span></div></div>${newDtInsp}</div>`;
+shot('14-r4-e', '14-r4-e-copy-filter', '<b>Copy filter from</b>, on every filter field: the dashboard editor’s for every kind (here a new downtimes dashboard), and each view’s filter in a multi-view dashboard. A small icon button in a fixed slot at the field’s top right (tooltip <i>copy filter from</i>) opens a menu of the other dashboards and views, found by typing: each with its mark (state dot or kind icon), its name, its group and kind, and its filter faint on the second line. The pointed one’s filter shows in full in a card to its <b>left</b> (topic 09’s rule: info cards never cover the field), with what it would match here. ↵ copies it into the field, replacing what is there; ctrl-z (or the editor’s <i>discard</i>) brings the old filter back. The copy is plain text: the two dashboards don’t stay linked.',
+  win(editorE(), { activeItem: 'voip downtimes' }) + cfMenu + cfCard);
+shot('14-r4-e-l', '14-r4-e-copy-filter-light', '<b>Copy filter from</b>, light.', win(editorE(), { activeItem: 'voip downtimes' }) + cfMenu + cfCard, L);
+
+// ---- placement: the copy menu under its button, right-aligned; its card to the left
+document.querySelectorAll('.frame').forEach((fr) => {
+  const f = fr.getBoundingClientRect();
+  const m = fr.querySelector('[data-cfm]');
+  if (m) {
+    const b = fr.querySelector('.fxcp.on').getBoundingClientRect();
+    m.style.left = (b.right - f.left - m.offsetWidth) + 'px';
+    m.style.top = (b.bottom - f.top + 6) + 'px';
+    const c = fr.querySelector('[data-cfc]');
+    c.style.left = (m.offsetLeft - 4 - c.offsetWidth) + 'px';
+    c.style.top = (m.offsetTop + 70) + 'px';
+  }
+  fr.querySelectorAll('[data-now]').forEach((ln) => {
+    const ax = ln.parentElement.querySelector('.tlax .ax');
+    const w = ln.closest('.tlnarrow') ? 300 : 640;
+    ln.style.left = (ax.getBoundingClientRect().left - ln.parentElement.getBoundingClientRect().left + Math.round((TL.now - TL.a0) / (TL.a1 - TL.a0) * w)) + 'px';
+  });
+});
+</script>
+</body></html>

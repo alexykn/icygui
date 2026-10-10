@@ -13,21 +13,29 @@ use std::collections::BTreeSet;
 
 use crate::support::{ENV_ID, FakeSecrets, PASSWORD, WAIT, environment, mock, start, tuning};
 use futures::channel::oneshot;
-use ic_config::{Dashboard, DashboardGroup, Environment, GroupBy, ObjectKind, Sort, View};
+use ic_config::{
+    Dashboard, DashboardGroup, Environment, GroupBy, HandledSetting, ObjectKind, Sort, View,
+};
 use ic_core::Command;
-use ic_core::snapshot::{DashboardResult, DashboardRow, Snapshot};
+use ic_core::snapshot::{DashboardRow, Snapshot, ViewResult};
 use ic_mock::{MockConfig, MockControl, MockServer, scenarios};
 use ic_model::{ObjectKey, Service, ServiceState};
 use ic_rules::DashboardRef;
 
 fn view(kind: ObjectKind, filter: &str, problems_only: bool, hide_handled: bool) -> View {
     View {
+        id: "v".to_owned(),
         object_kind: kind,
         filter: filter.to_owned(),
         problems_only,
-        hide_handled,
+        handled: if hide_handled {
+            HandledSetting::SETTINGS
+        } else {
+            HandledSetting::SHOW
+        },
         sort: Sort::default(),
         group_by: GroupBy::None,
+        ..View::default()
     }
 }
 
@@ -39,7 +47,7 @@ const DATABASES: &str = "\"databases\" in service.groups";
 fn dashboards(server: &MockServer) -> Environment {
     let mut environment = environment(server);
     let mut all_db = view(ObjectKind::Services, DATABASES, false, false);
-    all_db.group_by = GroupBy::Host;
+    all_db.set_grouping(GroupBy::Host);
     let boards = [
         ("db", view(ObjectKind::Services, DATABASES, true, true)),
         ("all-db", all_db),
@@ -65,7 +73,7 @@ fn dashboards(server: &MockServer) -> Environment {
             .map(|(id, view)| Dashboard {
                 id: id.to_owned(),
                 name: id.to_owned(),
-                view,
+                views: vec![view],
                 ..Dashboard::default()
             })
             .collect(),
@@ -81,13 +89,14 @@ fn reference(id: &str) -> DashboardRef {
     }
 }
 
-fn board<'a>(snapshot: &'a Snapshot, id: &str) -> &'a DashboardResult {
-    &snapshot.dashboards[&reference(id)]
+/// The only view of dashboard `id`.
+fn board<'a>(snapshot: &'a Snapshot, id: &str) -> &'a ViewResult {
+    &snapshot.dashboards[&reference(id)].views[0]
 }
 
-fn objects(result: &DashboardResult) -> Vec<ObjectKey> {
+fn objects(result: &ViewResult) -> Vec<ObjectKey> {
     result
-        .rows
+        .rows()
         .iter()
         .filter_map(|row| match row {
             DashboardRow::Object(object) => Some(object.clone()),
@@ -172,7 +181,7 @@ async fn dashboards_follow_the_live_store() {
     // Grouped by host: a header per host, every member under it.
     let all_db = board(&snapshot, "all-db");
     let headers = all_db
-        .rows
+        .rows()
         .iter()
         .filter(|row| matches!(row, DashboardRow::Group { .. }))
         .count();
@@ -196,7 +205,7 @@ async fn dashboards_follow_the_live_store() {
 
     // A filter that doesn't parse says where.
     let broken = board(&snapshot, "broken");
-    assert!(broken.rows.is_empty());
+    assert!(broken.rows().is_empty());
     assert!(
         broken.error.as_deref().unwrap().contains("line 1"),
         "{:?}",
@@ -268,7 +277,10 @@ async fn previews_and_changed_dashboards() {
     // The editor's preview of an unsaved view.
     let preview = |view: View| {
         let (reply, answer) = oneshot::channel();
-        engine.send(Command::PreviewDashboard { view, reply });
+        engine.send(Command::PreviewDashboard {
+            views: vec![view],
+            reply,
+        });
         answer
     };
     let answer = preview(view(
@@ -277,11 +289,8 @@ async fn previews_and_changed_dashboards() {
         false,
         false,
     ));
-    let result = tokio::time::timeout(WAIT, answer)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let result = tokio::time::timeout(WAIT, answer).await.unwrap().unwrap();
+    let result = &result.views[0];
     let replication: BTreeSet<ObjectKey> = control
         .services()
         .iter()
@@ -289,16 +298,13 @@ async fn previews_and_changed_dashboards() {
         .map(Service::object_key)
         .collect();
     assert_eq!(
-        objects(&result).into_iter().collect::<BTreeSet<_>>(),
+        objects(result).into_iter().collect::<BTreeSet<_>>(),
         replication
     );
-    // Errors come back as errors, with the position.
+    // Errors come back in the view, with the position.
     let bad = preview(view(ObjectKind::Hosts, "host.name == (", false, false));
-    let error = tokio::time::timeout(WAIT, bad)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err();
+    let bad = tokio::time::timeout(WAIT, bad).await.unwrap().unwrap();
+    let error = bad.views[0].error.as_deref().unwrap();
     assert!(error.contains("line 1"), "{error}");
     // A preview replaced while another runs is dropped; the newest is
     // answered.
@@ -311,18 +317,14 @@ async fn previews_and_changed_dashboards() {
     ));
     let third = preview(view(ObjectKind::Hosts, "", false, false));
     let first = tokio::time::timeout(WAIT, first).await.unwrap();
-    let third = tokio::time::timeout(WAIT, third)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert_eq!(third.rows.len(), control.hosts().len());
+    let third = tokio::time::timeout(WAIT, third).await.unwrap().unwrap();
+    assert_eq!(third.views[0].rows().len(), control.hosts().len());
     if let Ok(first) = first {
-        assert_eq!(first.unwrap().rows.len(), control.services().len());
+        assert_eq!(first.views[0].rows().len(), control.services().len());
     }
     let second = tokio::time::timeout(WAIT, second).await.unwrap();
     assert!(
-        second.is_err() || second.unwrap().is_ok(),
+        second.is_err() || second.unwrap().views[0].error.is_none(),
         "dropped (Canceled) or answered"
     );
 
@@ -333,9 +335,9 @@ async fn previews_and_changed_dashboards() {
         .filter(|request| request.path == "/v1/events")
         .count();
     let revision = snapshot.revision;
-    environment.groups[0].dashboards[0].view.filter =
+    environment.groups[0].dashboards[0].views[0].filter =
         "\"replication\" in service.groups".to_owned();
-    environment.groups[0].dashboards[0].view.problems_only = false;
+    environment.groups[0].dashboards[0].views[0].problems_only = false;
     environment.groups[0]
         .dashboards
         .retain(|dashboard| dashboard.id != "broken");
@@ -371,5 +373,131 @@ async fn previews_and_changed_dashboards() {
         streams,
         "no reconnect"
     );
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(clippy::too_many_lines, reason = "one end-to-end scenario")]
+async fn multi_view_dashboards_and_event_streams_follow_the_store() {
+    use ic_config::{HideHandled, ViewDisplay};
+    use ic_core::snapshot::ViewBody;
+
+    let server = mock(MockConfig::with_scenario(scenarios::prod_cluster())).await;
+    let control = server.control();
+    let mut environment = environment(&server);
+    let grid = View {
+        id: "grid".to_owned(),
+        display: ViewDisplay::HostGroupGrid,
+        object_kind: ObjectKind::Hosts,
+        ..View::default()
+    };
+    let db = View {
+        id: "db".to_owned(),
+        ..view(ObjectKind::Services, DATABASES, true, true)
+    };
+    let stream = View {
+        id: "events".to_owned(),
+        display: ViewDisplay::EventStream,
+        filter: DATABASES.to_owned(),
+        ..View::default()
+    };
+    environment.groups = vec![DashboardGroup {
+        id: "g".to_owned(),
+        name: "group".to_owned(),
+        dashboards: vec![Dashboard {
+            id: "m".to_owned(),
+            name: "databases".to_owned(),
+            views: vec![grid, db, stream],
+            ..Dashboard::default()
+        }],
+        ..DashboardGroup::default()
+    }];
+    let mut engine = start(environment, FakeSecrets::with(ENV_ID, PASSWORD), tuning());
+    engine.connected().await;
+    let snapshot = engine
+        .snapshot(|snapshot| {
+            snapshot.services.len() == control.services().len() && snapshot.dashboards.len() == 1
+        })
+        .await;
+    let result = &snapshot.dashboards[&reference("m")];
+    let ids: Vec<&str> = result.views.iter().map(|view| view.id.as_str()).collect();
+    assert_eq!(ids, ["grid", "db", "events"]);
+    let ViewBody::Grid(grid) = &result.view("grid").unwrap().body else {
+        panic!("a grid");
+    };
+    let grouped = control
+        .hosts()
+        .iter()
+        .filter(|host| !host.groups.is_empty())
+        .count();
+    assert_eq!(grid.hosts, u32::try_from(grouped).unwrap());
+    // The sidebar counts the grid's hosts and services and the list's
+    // services, each once: at least what the list counts.
+    let db = result.view("db").unwrap();
+    assert!(result.summary.unhandled >= db.counts.unhandled);
+    assert_eq!(db.counts.unhandled, db.summary.unhandled);
+
+    // A database service fails hard: the stream shows it, the grid's
+    // square turns critical.
+    let victim = control
+        .services()
+        .into_iter()
+        .filter(is_database)
+        .find(|service| {
+            service.state == ServiceState::Ok
+                && !control
+                    .host(service.key.host.as_str())
+                    .unwrap()
+                    .is_problem()
+        })
+        .unwrap();
+    let key = victim.object_key();
+    control
+        .set_service_state(
+            victim.key.host.as_str(),
+            &victim.key.name,
+            ServiceState::Critical,
+            "CRITICAL - injected",
+            true,
+        )
+        .unwrap();
+    let streamed = |snapshot: &Snapshot| {
+        snapshot
+            .dashboards
+            .get(&reference("m"))
+            .is_some_and(|result| {
+                matches!(&result.view("events").unwrap().body, ViewBody::Stream(events)
+                if events.iter().any(|entry| entry.object == key))
+            })
+    };
+    let snapshot = engine.snapshot(streamed).await;
+    let result = &snapshot.dashboards[&reference("m")];
+    let ViewBody::Grid(grid) = &result.view("grid").unwrap().body else {
+        panic!("a grid");
+    };
+    let host = victim.key.host.clone();
+    assert!(
+        grid.groups
+            .iter()
+            .flat_map(|group| &group.cells)
+            .filter(|cell| cell.host == host)
+            .all(|cell| cell.state.is_problem())
+    );
+    assert!(objects(result.view("db").unwrap()).contains(&key));
+
+    // The settings show handled problems now: the list follows them.
+    let handled = result.view("db").unwrap().hidden;
+    let rows = result.view("db").unwrap().rows().len();
+    engine.send(Command::SetHandledDefaults(HideHandled::NONE));
+    let snapshot = engine
+        .snapshot(|snapshot| {
+            snapshot
+                .dashboards
+                .get(&reference("m"))
+                .is_some_and(|result| result.view("db").unwrap().hidden == 0)
+        })
+        .await;
+    let db = snapshot.dashboards[&reference("m")].view("db").unwrap();
+    assert_eq!(db.rows().len(), rows + usize::try_from(handled).unwrap());
     engine.shutdown();
 }

@@ -34,12 +34,16 @@
 
 mod actions;
 mod fetch;
+mod health;
+mod heartbeat;
 mod load;
 mod notify;
 mod publish;
 mod quiet;
+mod recent;
 mod stream;
 mod sync;
+mod trouble;
 mod watchdog;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -76,7 +80,7 @@ use sync::Restarts;
 use watchdog::Watchdog;
 
 /// The cluster nodes a status poll asked for, and their states.
-type NodeStates = (Vec<String>, Result<Vec<(String, bool)>, ApiError>);
+type NodeStates = (Vec<String>, Result<Vec<ic_api::EndpointState>, ApiError>);
 
 /// Messages from the engine's background tasks.
 #[derive(Debug)]
@@ -97,12 +101,18 @@ pub(crate) enum Internal {
         load: u64,
         step: LoadStep,
     },
-    /// A status poll's answer, and the cluster nodes' states when they
-    /// were asked for too.
+    /// A status poll's answer, and the cluster nodes' states and the
+    /// cluster health page's requests when they were asked for too.
     Status {
         session: u64,
         result: Result<InstanceStatus, ApiError>,
         nodes: Option<NodeStates>,
+        health: Option<Box<health::Answers>>,
+    },
+    /// The cluster health page's requests, asked for when it opened.
+    Health {
+        session: u64,
+        answers: Box<health::Answers>,
     },
     /// A re-query round's answers.
     Fetched { session: u64, answers: Box<Answers> },
@@ -120,6 +130,12 @@ pub(crate) enum Internal {
     },
     /// A dashboard preview was answered.
     PreviewDone,
+    /// The event log's newest entries, read at the start (`generation`:
+    /// which read).
+    RecentEvents {
+        generation: u64,
+        entries: Vec<LogEntry>,
+    },
     /// Notifications are in the event log (the new ones; an id already
     /// there from an earlier run is dropped): emit them.
     Logged(Vec<NotificationIntent>),
@@ -141,7 +157,7 @@ pub(crate) enum Internal {
     StreamOpened {
         session: u64,
         switch: u64,
-        result: Result<EventLines, ApiError>,
+        result: Result<(EventLines, Vec<EventKind>, Option<String>), ApiError>,
     },
     /// The object the user opened (`Command::Focus`), fetched in full when
     /// the reader had read `started` lines.
@@ -154,6 +170,20 @@ pub(crate) enum Internal {
     /// A background start's size: Icinga's service count, if it could be
     /// read.
     StartSize { session: u64, services: Option<u32> },
+    /// The heartbeats the event log remembers (`generation`: which log).
+    RememberedBeats {
+        generation: u64,
+        beats: Vec<crate::event_log::RememberedBeat>,
+    },
+    /// A query of heartbeats is back (sent when the reader had read
+    /// `started` lines): `late` are those a deadline sent, the others came
+    /// with a poll.
+    Beats {
+        session: u64,
+        started: u64,
+        late: Vec<ServiceKey>,
+        result: Result<ic_api::Fetched, ApiError>,
+    },
 }
 
 /// A load's progress and answers.
@@ -309,11 +339,17 @@ struct Conn {
     check_events: bool,
     /// The stream's event types.
     kinds: Vec<EventKind>,
-    /// The stream carries no check results (quiet mode).
+    /// Its filter: a quiet stream's, naming the heartbeats whose results
+    /// it carries.
+    filter: Option<String>,
+    /// The stream carries no check results (quiet mode; but the
+    /// heartbeats' with a `filter`).
     quiet: bool,
     /// When the engine last received stream lines (or the stream opened,
     /// or the session went live).
     last_line: Instant,
+    /// The cluster health page's requests in this session.
+    health: health::Asked,
 }
 
 /// The engine.
@@ -353,6 +389,9 @@ pub(crate) struct Engine {
     /// out every `publish_interval`, else every
     /// `background_publish_interval` unless rule inputs wait.
     active: bool,
+    /// The cluster health page shows this environment
+    /// (`Command::WatchHealth`).
+    health_watch: bool,
     /// The dashboards' state; `None` while an evaluation runs on a
     /// blocking thread.
     dashboards: Option<Box<Dashboards>>,
@@ -438,9 +477,10 @@ pub(crate) struct Engine {
     /// the cluster (ENV-12): it brings every object, so events about
     /// objects the store doesn't hold aren't looked up by name meanwhile.
     view_reload: bool,
-    /// Quiet mode is wanted (`Command::SetQuiet`); the connect task reads
-    /// it when it opens the stream.
-    quiet_wanted: Arc<AtomicBool>,
+    /// Quiet mode is wanted (`Command::SetQuiet`), and the heartbeats a
+    /// quiet stream carries; the connect task and switches read it when
+    /// they open a stream.
+    wish: Arc<connect::StreamWish>,
     /// The latest stream carried no check results (kept across sessions:
     /// a live stream after a quiet one wakes up).
     stream_quiet: bool,
@@ -503,6 +543,23 @@ pub(crate) struct Engine {
     mode_changed: bool,
     /// Every dashboard is evaluated again (after quiet mode).
     dashboards_resume: bool,
+    /// The event log's latest entries, newest first, for event stream
+    /// views (`recent.rs`).
+    recent_events: Arc<Vec<LogEntry>>,
+    /// They changed since the last evaluation.
+    events_changed: bool,
+    /// Counts the reads of the log's newest entries (an older read's
+    /// answer is dropped).
+    recent_generation: u64,
+    /// The heartbeats (`heartbeat.rs`).
+    beats: heartbeat::Beats,
+    /// The trouble alerts (`trouble.rs`).
+    trouble: trouble::Tracker,
+    /// The next [`CoreEvent::Alive`].
+    alive_at: Instant,
+    /// The last tick by both clocks: a wall clock that moved much further
+    /// than the monotonic one means the computer slept.
+    last_tick: Option<(Instant, Timestamp)>,
 }
 
 /// Why the select loop woke up.
@@ -517,6 +574,10 @@ enum Wake {
 }
 
 impl Engine {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one line per part of the engine's state"
+    )]
     pub(crate) fn new(
         spec: EnvironmentSpec,
         ports: Ports,
@@ -525,7 +586,7 @@ impl Engine {
         internal_tx: UnboundedSender<Internal>,
     ) -> Self {
         let mut dashboards = Dashboards::default();
-        dashboards.configure(&spec.environment);
+        dashboards.configure(&spec.environment, spec.hide_handled);
         let event_log = EventLog::open(event_log_path(&spec.data_dir, &spec.environment.id));
         let notify = Notify::new(&spec.environment);
         let now = Instant::now();
@@ -563,6 +624,7 @@ impl Engine {
             revision: 0,
             last_publish: None,
             active: true,
+            health_watch: false,
             dashboards: Some(Box::new(dashboards)),
             dashboard_results: Arc::default(),
             dashboards_configured: false,
@@ -594,7 +656,7 @@ impl Engine {
             probe_backoff: Backoff::new(tuning_probe.0, tuning_probe.1),
             probe_in_flight: false,
             view_reload: false,
-            quiet_wanted: Arc::new(AtomicBool::new(false)),
+            wish: Arc::new(connect::StreamWish::default()),
             stream_quiet: false,
             reader: None,
             switch: None,
@@ -622,6 +684,13 @@ impl Engine {
             updating_changed: false,
             mode_changed: false,
             dashboards_resume: false,
+            recent_events: Arc::default(),
+            events_changed: false,
+            recent_generation: 0,
+            beats: heartbeat::Beats::default(),
+            trouble: trouble::Tracker::default(),
+            alive_at: now,
+            last_tick: None,
         }
     }
 
@@ -635,6 +704,10 @@ impl Engine {
         // Pruned before any query can reach the log (a history asked for
         // right after the start is among the commands below).
         self.prune(Instant::now());
+        // Event stream views show the log's newest entries.
+        self.load_recent_events();
+        // Heartbeats seen before, so one that is gone is a finding.
+        self.read_remembered_beats();
         // Commands sent right after the start (quiet mode, say) apply
         // before the first connect opens the stream.
         while let Ok(command) = commands.try_recv() {
@@ -781,6 +854,8 @@ impl Engine {
             self.switch_retry_due(),
             self.handover_at(),
             self.stall_suspect.map(|(at, _)| at),
+            self.beats_due(),
+            self.trouble.due(),
             Some(self.tick_at),
             Some(self.prune_at),
         ]
@@ -828,6 +903,12 @@ impl Engine {
         if self.probe_due().is_some_and(|at| at <= now) {
             self.start_probe();
         }
+        if self.beats_due().is_some_and(|at| at <= now) {
+            self.run_beats(now);
+        }
+        if self.trouble.due().is_some_and(|at| at <= now) {
+            self.assess_trouble(now);
+        }
         if self.tick_at <= now {
             self.tick(now);
         }
@@ -855,9 +936,9 @@ impl Engine {
         let tx = self.internal_tx.clone();
         let timeouts = (self.tuning.action_timeout, self.tuning.identify_timeout);
         let first = self.walk_start();
-        let quiet = Arc::clone(&self.quiet_wanted);
+        let wish = Arc::clone(&self.wish);
         self.tasks.spawn(async move {
-            let connected = connect::connect(&environment, secrets, timeouts, first, quiet).await;
+            let connected = connect::connect(&environment, secrets, timeouts, first, wish).await;
             let message = match connected {
                 Ok(connected) => Internal::Connected {
                     session,
@@ -935,6 +1016,8 @@ impl Engine {
             .as_ref()
             .and_then(|conn| conn.live_since)
             .is_some_and(|(since, _)| since.elapsed() >= self.tuning.healthy_after);
+        // No live data from here (A): blind after a while.
+        self.go_dark(&failure);
         self.teardown();
         self.publish_changes();
         let state = match failure {
@@ -999,12 +1082,17 @@ impl Engine {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the steps of a new connection in their order"
+    )]
     fn on_connected(&mut self, connected: Connected) {
         let Connected {
             client,
             info,
             lines,
             kinds,
+            filter,
             quiet,
             node,
             login,
@@ -1048,7 +1136,9 @@ impl Engine {
         let notifications_allowed = info.allows("objects/query/Notification");
         let notification_events = self.lines.is_some()
             && info.allows(&format!("events/{}", EventKind::Notification.api_name()));
-        let check_events = kinds.contains(&EventKind::CheckResult);
+        // A filtered stream carries only the heartbeats' results: its
+        // silence says nothing about the other checks.
+        let check_events = kinds.contains(&EventKind::CheckResult) && filter.is_none();
         // The gap is judged by the stream that broke (a quiet one may be
         // silent for minutes), whatever mode the new one has.
         let was_quiet = self.stream_quiet;
@@ -1083,9 +1173,15 @@ impl Engine {
             notification_events_waiting: Vec::new(),
             check_events,
             kinds,
+            filter,
             quiet,
             last_line: Instant::now(),
+            health: health::Asked::default(),
         });
+        // The listener status and features were another session's node's
+        // (the first status poll sets the interval).
+        self.store
+            .update_health(crate::health::ClusterHealth::forget_node);
         // The stream is continuous from here (lines wait during a load).
         self.continuous_since = Some(Instant::now());
         if self.loaded {
@@ -1187,8 +1283,28 @@ impl Engine {
                 hosts,
             } => {
                 if let Some(status) = &overview.status {
-                    // The load reloads anyway.
-                    self.restarts.observe(status, Instant::now());
+                    // The load reloads anyway; a restart is announced.
+                    if self.restarts.observe(status, Instant::now()).is_some() {
+                        self.icinga_restarted(status);
+                    }
+                    // The trend's first point (topic 06): the status the
+                    // load brought, so the health page has numbers before
+                    // the first poll.
+                    let sample = crate::health::HealthSample::of(
+                        status,
+                        None,
+                        self.watchdog.late().len(),
+                        self.ports.clock.now(),
+                    );
+                    let interval = if self.quiet() {
+                        self.tuning.quiet_status_interval
+                    } else {
+                        self.tuning.status_interval
+                    };
+                    self.store.update_health(|health| {
+                        health.push(sample);
+                        health.interval = interval;
+                    });
                 }
                 self.store.apply_overview(*overview, started);
                 self.store.replace_hosts(hosts, started);
@@ -1201,6 +1317,8 @@ impl Engine {
                 details,
             } => {
                 self.store.replace_services(services, Detail::Lean, started);
+                // The heartbeats are left out of everything from here.
+                self.discover_beats();
                 self.record_discovered(true);
                 // The load task is gone if the session ended meanwhile.
                 let _ = details.send(self.problem_details(kind));
@@ -1264,6 +1382,8 @@ impl Engine {
         self.loaded = true;
         // The objects are this node's now.
         self.adopt_node(true);
+        // Heartbeats found, gone or back (a complete load says).
+        self.discover_beats();
         self.track_continuity(kind);
         self.last_load_end = Some(now);
         self.fetch
@@ -1351,7 +1471,7 @@ impl Engine {
         let at = self.evaluation_time();
         let mut log = Vec::new();
         self.notify.seed(&self.store, &began, at, &mut log);
-        self.event_log.record(log);
+        self.record_log(log);
         waiting
     }
 
@@ -1374,6 +1494,10 @@ impl Engine {
             since: now,
         });
         self.schedule_probe();
+        // Live data again; the heartbeats get their grace (Icinga may
+        // have rescheduled their checks meanwhile).
+        self.go_bright();
+        self.beats_grace("connected");
         // The stream follows the wanted mode.
         self.want_mode();
     }
@@ -1515,6 +1639,7 @@ impl Engine {
         let client = conn.client.clone();
         let tx = self.internal_tx.clone();
         let session = self.session;
+        let health = self.health_ask(now);
         self.tasks.spawn(async move {
             let result = client.status().await;
             let nodes = match nodes {
@@ -1524,10 +1649,15 @@ impl Engine {
                 }
                 None => None,
             };
+            let health = match health {
+                Some(ask) => Some(Box::new(health::fetch(&client, ask).await)),
+                None => None,
+            };
             let _ = tx.send(Internal::Status {
                 session,
                 result,
                 nodes,
+                health,
             });
         });
     }
@@ -1588,7 +1718,11 @@ impl Engine {
 
     /// The cluster nodes' states (of the nodes `asked` for) came with a
     /// status poll.
-    fn on_node_states(&mut self, asked: &[String], nodes: Result<Vec<(String, bool)>, ApiError>) {
+    fn on_node_states(
+        &mut self,
+        asked: &[String],
+        nodes: Result<Vec<ic_api::EndpointState>, ApiError>,
+    ) {
         let Some(conn) = &mut self.conn else {
             return;
         };
@@ -1596,9 +1730,12 @@ impl Engine {
             Ok(states) => {
                 let local = conn.node.name.clone();
                 self.store.set_endpoint_states(&states, &local);
+                let now = self.ports.clock.now();
+                self.store
+                    .update_health(|health| health.endpoints_at = Some(now));
                 if asked
                     .iter()
-                    .any(|name| !states.iter().any(|(state, _)| state == name))
+                    .any(|name| !states.iter().any(|state| state.name == *name))
                 {
                     // A node of the list is gone (Icinga then fails the
                     // whole request: none came back): the list is reloaded,
@@ -1621,7 +1758,11 @@ impl Engine {
         }
     }
 
-    fn on_status(&mut self, result: Result<InstanceStatus, ApiError>) {
+    fn on_status(
+        &mut self,
+        result: Result<InstanceStatus, ApiError>,
+        listener: Option<&ic_model::ListenerStatus>,
+    ) {
         let interval = if self.quiet() {
             self.tuning.quiet_status_interval
         } else {
@@ -1647,8 +1788,27 @@ impl Engine {
                 // masters of an HA zone behind a load balancer each have
                 // their own.
                 let restarted = self.restarts.observe(&status, Instant::now());
+                if restarted.is_some() {
+                    self.icinga_restarted(&status);
+                }
+                // The trend of the cluster health page (topic 06): every
+                // poll, in memory only.
+                let sample = crate::health::HealthSample::of(
+                    &status,
+                    listener,
+                    self.watchdog.late().len(),
+                    self.ports.clock.now(),
+                );
+                self.store.update_health(|health| {
+                    health.push(sample);
+                    health.interval = interval;
+                });
                 self.store.set_status(status);
                 if let Some(seen) = restarted {
+                    // Its features may have changed with the restart.
+                    if let Some(conn) = &mut self.conn {
+                        conn.health.features_at = None;
+                    }
                     if sync::reload_covers_restart(self.last_load_start, connected, seen) {
                         // A restart of the node behind the stream ended the
                         // stream, and a load since the reconnect brought
@@ -1725,6 +1885,21 @@ impl Engine {
 
     fn on_fetched(&mut self, answers: Answers) {
         let mut missing = Vec::new();
+        // Answers about heartbeats (or services that may have become one)
+        // find them again.
+        let beats_touched = answers.objects.iter().any(|answer| match &answer.result {
+            Ok(fetched) => {
+                fetched
+                    .services
+                    .iter()
+                    .any(|service| self.beat_candidate(service))
+                    || fetched.missing.iter().any(|key| {
+                        key.as_service()
+                            .is_some_and(|service| self.beats.watches(service))
+                    })
+            }
+            Err(_) => false,
+        });
         for answer in answers.objects {
             match answer.result {
                 Ok(fetched) => {
@@ -1802,6 +1977,9 @@ impl Engine {
             }
         }
         self.fetch.finished(&missing, Instant::now());
+        if beats_touched {
+            self.discover_beats();
+        }
         self.note_updating();
         if answers.urgent {
             self.publish_changes();
@@ -1905,7 +2083,21 @@ impl Engine {
                 }
                 _ => None,
             };
-            match self.store.apply(seq, &event) {
+            // A heartbeat's result (the stream's time counts for its
+            // budget).
+            let beat = match &event {
+                Event::CheckResult { object, result, .. }
+                | Event::StateChange { object, result, .. } => object
+                    .as_service()
+                    .filter(|key| self.beats.watches(key))
+                    .map(|key| (key.clone(), result.clone())),
+                _ => None,
+            };
+            let applied = self.store.apply(seq, &event);
+            if let Some((key, result)) = beat {
+                self.beat_result(&key, &result, true);
+            }
+            match applied {
                 Applied::Changed { before, after } => {
                     let entry = AppliedEvent {
                         seq,
@@ -1930,7 +2122,7 @@ impl Engine {
                 }
             }
         }
-        self.event_log.record(log);
+        self.record_log(log);
     }
 
     /// A config object was created, modified or deleted (event `seq`):
@@ -2076,7 +2268,7 @@ impl Engine {
         let at = self.evaluation_time();
         self.notify
             .discovered(&self.store, found, load, at, &mut log);
-        self.event_log.record(log);
+        self.record_log(log);
     }
 
     /// A load is over (or cut off): what it found is judged now, and the
@@ -2084,7 +2276,7 @@ impl Engine {
     fn finish_discovered(&mut self) {
         let mut log = Vec::new();
         self.notify.load_finished(&self.store, &mut log);
-        self.event_log.record(log);
+        self.record_log(log);
         let appeared = self.store.take_appeared();
         self.store.track_appeared(false);
         if !appeared.is_empty() {
@@ -2113,7 +2305,8 @@ impl Engine {
             Command::LoadNotifications { limit, reply } => {
                 self.event_log.notifications(limit, reply);
             }
-            Command::PreviewDashboard { view, reply } => self.preview(view, reply),
+            Command::PreviewDashboard { views, reply } => self.preview(views, reply),
+            Command::SetHandledDefaults(defaults) => self.set_handled_defaults(defaults),
             Command::PauseNotifications(until) => {
                 let paused = self.notify.pause(until);
                 tracing::info!(?paused, "notifications paused");
@@ -2127,6 +2320,8 @@ impl Engine {
             Command::SetQuiet(quiet) => self.set_quiet(quiet),
             Command::Focus(key) => self.focus(key),
             Command::StartNow => self.start_now(),
+            Command::WatchHealth(watch) => self.watch_health(watch),
+            Command::ConfirmHeartbeatRemoval(key) => self.confirm_beat_removal(key),
         }
     }
 
@@ -2177,6 +2372,16 @@ impl Engine {
         }
     }
 
+    /// `Command::SetHandledDefaults`: the views that follow the settings
+    /// hide other handled problems now.
+    fn set_handled_defaults(&mut self, defaults: ic_config::HideHandled) {
+        if self.spec.hide_handled != defaults {
+            self.spec.hide_handled = defaults;
+            self.dashboards_configured = true;
+            self.publish_changes();
+        }
+    }
+
     fn update_environment(&mut self, environment: ic_config::Environment) {
         let old = &self.spec.environment;
         let reconnect = old.id != environment.id || old.connection_differs(&environment);
@@ -2185,6 +2390,7 @@ impl Engine {
         let other_server = old.id != environment.id || !shares_url(old, &environment);
         let other_log = old.id != environment.id;
         let dashboards_changed = old.groups != environment.groups;
+        let beats_changed = old.trouble.heartbeats != environment.trouble.heartbeats;
         self.spec.environment = environment;
         if dashboards_changed {
             self.dashboards_configured = true;
@@ -2197,6 +2403,8 @@ impl Engine {
                 &self.spec.environment.id,
             ));
             self.prune(Instant::now());
+            self.reset_recent_events();
+            self.read_remembered_beats();
         }
         if other_server {
             // Nothing the rule engine remembers is about this server.
@@ -2206,10 +2414,15 @@ impl Engine {
             self.watchdog.clear();
             self.restarts = Restarts::default();
             self.loaded = false;
+            self.reset_beats();
+            self.reset_trouble();
             self.publish();
         } else {
             self.notify.set_rules(&self.spec.environment);
-            if dashboards_changed {
+            if beats_changed {
+                self.discover_beats();
+            }
+            if dashboards_changed || beats_changed {
                 self.publish_changes();
             }
         }
@@ -2245,11 +2458,19 @@ impl Engine {
                 session,
                 result,
                 nodes,
+                health,
             } if session == self.session => {
                 if let Some((asked, nodes)) = nodes {
                     self.on_node_states(&asked, nodes);
                 }
-                self.on_status(result);
+                let listener = health.and_then(|answers| self.on_health(*answers));
+                self.on_status(result, listener.as_ref());
+            }
+            Internal::Health { session, answers } if session == self.session => {
+                if let Some(conn) = &mut self.conn {
+                    conn.health.in_flight = false;
+                }
+                self.on_health(*answers);
             }
             Internal::Fetched { session, answers } if session == self.session => {
                 self.on_fetched(*answers);
@@ -2261,6 +2482,10 @@ impl Engine {
                 broken,
             } => self.on_evaluated(dashboards, *snapshot, quiet, broken),
             Internal::PreviewDone => self.on_preview_done(),
+            Internal::RecentEvents {
+                generation,
+                entries,
+            } => self.on_recent_events(generation, entries),
             Internal::Logged(intents) => self.on_logged(intents),
             Internal::NotifiedBefore { asked, known } => self.on_notified_before(&asked, &known),
             Internal::IcingaNotifications {
@@ -2282,17 +2507,28 @@ impl Engine {
             Internal::StartSize { session, services } if session == self.session => {
                 self.start_after(services);
             }
+            Internal::RememberedBeats { generation, beats } => {
+                self.on_remembered_beats(generation, beats);
+            }
+            Internal::Beats {
+                session,
+                started,
+                late,
+                result,
+            } if session == self.session => self.on_beats(started, &late, result),
             // An older session's late answer.
             Internal::Connected { .. }
             | Internal::ConnectFailed { .. }
             | Internal::Probed { .. }
             | Internal::Load { .. }
             | Internal::Status { .. }
+            | Internal::Health { .. }
             | Internal::Fetched { .. }
             | Internal::IcingaNotifications { .. }
             | Internal::StreamOpened { .. }
             | Internal::Focused { .. }
-            | Internal::StartSize { .. } => {}
+            | Internal::StartSize { .. }
+            | Internal::Beats { .. } => {}
         }
     }
 

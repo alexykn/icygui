@@ -179,10 +179,12 @@ impl Action {
 pub enum ActionTarget {
     /// These hosts and services.
     Objects(Vec<ObjectKey>),
-    /// One downtime, by its full name (only for removing downtimes).
-    Downtime(String),
-    /// One comment, by its full name (only for removing comments).
-    Comment(String),
+    /// These downtimes, by their full names (only for removing downtimes):
+    /// sent in batches of names, never one request per downtime.
+    Downtimes(Vec<String>),
+    /// These comments, by their full names (only for removing comments):
+    /// sent in batches of names, never one request per comment.
+    Comments(Vec<String>),
 }
 
 #[cfg(test)]

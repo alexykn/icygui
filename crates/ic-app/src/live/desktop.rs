@@ -2,7 +2,9 @@
 //! screen, and who shows it.
 //!
 //! - title `CRITICAL · postgres-replication on db-prod-03`, the output's
-//!   first line with the matching `group / dashboard` under it;
+//!   first line with the matching `group / dashboard` under it (without
+//!   the output when the settings' *show plugin output* is off, for shared
+//!   screens and the lock screen);
 //! - urgency by tone (critical and down: critical, so most desktops keep
 //!   them on screen; warnings and unknowns: normal; recoveries and
 //!   information: low), and the rule's sound (a freedesktop sound name by
@@ -64,6 +66,12 @@ pub(crate) struct Posted {
     pub(crate) sound: Option<&'static str>,
     /// Buttons: id and label.
     pub(crate) actions: Vec<(&'static str, &'static str)>,
+    /// It stays on screen until it is dismissed or closed (a trouble
+    /// alert under the *persistent* policy).
+    pub(crate) persistent: bool,
+    /// The tag of a notification this one ends (a trouble alert's
+    /// recovery): the desktop takes that one away first.
+    pub(crate) closes: Option<String>,
 }
 
 /// A click on a notification: its tag and the button (`None`: the body).
@@ -78,10 +86,24 @@ pub(crate) struct Response {
 /// What `intent` of environment `environment` looks like on screen: the
 /// first line, then where it matched without repeating anything (like the
 /// notification centre's labels). `acknowledge` offers the *Acknowledge*
-/// button (a problem the API user may acknowledge).
-pub(crate) fn posted(intent: &NotificationIntent, environment: &str, acknowledge: bool) -> Posted {
+/// button (a problem the API user may acknowledge). Without `output` (the
+/// settings' *show plugin output* off) a state change says only where it
+/// matched: its first line is the plugin's output. Acknowledgement and
+/// downtime comments and storm summaries stay.
+pub(crate) fn posted(
+    intent: &NotificationIntent,
+    environment: &str,
+    acknowledge: bool,
+    output: bool,
+) -> Posted {
     let place = crate::notifications::entry::place_of(&intent.subtitle, environment);
-    let body = match (intent.body.trim(), place.as_str()) {
+    let state_change = intent.object.is_some() && intent.tone != Tone::Info;
+    let first_line = if output || !state_change {
+        intent.body.trim()
+    } else {
+        ""
+    };
+    let body = match (first_line, place.as_str()) {
         ("", place) => place.to_owned(),
         (body, "") => body.to_owned(),
         (body, place) => format!("{body}\n{place}"),
@@ -110,7 +132,23 @@ pub(crate) fn posted(intent: &NotificationIntent, environment: &str, acknowledge
             Tone::Info => "dialog-information",
         }),
         actions,
+        persistent: false,
+        closes: None,
     }
+}
+
+/// A trouble alert's notification (PLAN.md §4.2 A, E): its title names the
+/// environment already; under the *persistent* policy a raised alert comes
+/// at critical urgency and stays until it clears; its recovery takes the
+/// raised one away.
+pub(crate) fn trouble(mut posted: Posted, intent: &NotificationIntent, persistent: bool) -> Posted {
+    let raised = matches!(intent.tone, Tone::Critical | Tone::Warning);
+    if persistent && raised {
+        posted.persistent = true;
+        posted.urgency = Urgency::Critical;
+    }
+    posted.closes = ic_core::trouble::raised_id(&intent.id).map(str::to_owned);
+    posted
 }
 
 /// `title` with the environment's name in front, for when there is more
@@ -205,6 +243,7 @@ mod tests {
             &intent(Tone::Critical, Some(replication()), true),
             "prod-cluster",
             true,
+            true,
         );
         assert_eq!(
             posted.title,
@@ -249,6 +288,7 @@ mod tests {
             &intent(Tone::Recovery, Some(replication()), false),
             "prod-cluster",
             true,
+            true,
         );
         assert_eq!(recovery.urgency, Urgency::Low);
         assert_eq!(recovery.sound, None, "the rule turned the sound off");
@@ -261,6 +301,7 @@ mod tests {
             &intent(Tone::Warning, Some(replication()), true),
             "prod-cluster",
             false,
+            true,
         );
         assert_eq!(warning.urgency, Urgency::Normal);
         assert_eq!(
@@ -270,7 +311,7 @@ mod tests {
         );
         let mut summary = intent(Tone::Info, None, true);
         summary.body = String::new();
-        let summary = posted(&summary, "prod-cluster", true);
+        let summary = posted(&summary, "prod-cluster", true, true);
         assert!(summary.actions.is_empty(), "no object to open");
         assert_eq!(summary.body, "overview / databases");
         assert_eq!(summary.urgency.level(), 0);
@@ -281,7 +322,7 @@ mod tests {
         let mut repeated = intent(Tone::Critical, Some(replication()), true);
         repeated.subtitle = "overview / overview".to_owned();
         assert_eq!(
-            posted(&repeated, "prod-cluster", true).body,
+            posted(&repeated, "prod-cluster", true, true).body,
             "CRITICAL - standby lag 412s (> 300s)\noverview"
         );
         // A storm's summary names its environment in the title already.
@@ -289,6 +330,37 @@ mod tests {
         summary.title = "14 new problems in staging".to_owned();
         summary.subtitle = "staging".to_owned();
         summary.body = "14 critical".to_owned();
-        assert_eq!(posted(&summary, "staging", true).body, "14 critical");
+        assert_eq!(posted(&summary, "staging", true, true).body, "14 critical");
+    }
+
+    #[test]
+    fn without_plugin_output_a_state_change_says_only_where() {
+        let critical = intent(Tone::Critical, Some(replication()), true);
+        let hidden = posted(&critical, "prod-cluster", true, false);
+        assert_eq!(hidden.body, "overview / databases");
+        assert_eq!(
+            hidden.title, "CRITICAL · postgres-replication on db-prod-03",
+            "the title still names the object and its state"
+        );
+        assert_eq!(hidden.actions.len(), 2);
+        let recovery = intent(Tone::Recovery, Some(replication()), true);
+        assert!(
+            !posted(&recovery, "prod-cluster", true, false)
+                .body
+                .contains("standby lag")
+        );
+        // An acknowledgement's comment and a storm's summary aren't the
+        // plugin's output.
+        let mut acknowledged = intent(Tone::Info, Some(replication()), true);
+        acknowledged.body = "m.keller: replica rebuilding".to_owned();
+        assert!(
+            posted(&acknowledged, "prod-cluster", true, false)
+                .body
+                .starts_with("m.keller: replica rebuilding")
+        );
+        let mut summary = intent(Tone::Info, None, true);
+        summary.body = "14 critical".to_owned();
+        summary.subtitle = "staging".to_owned();
+        assert_eq!(posted(&summary, "staging", true, false).body, "14 critical");
     }
 }

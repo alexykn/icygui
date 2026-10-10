@@ -82,6 +82,11 @@ struct Args {
     /// (Icinga before 2.17 by default).
     #[arg(long)]
     no_filter_permission: bool,
+    /// Add icygui heartbeats (`vars.icygui_heartbeat`) checked every
+    /// SECONDS seconds in real time: one per zone of masters and
+    /// satellites, and one pinned to each endpoint of a zone with more.
+    #[arg(long, value_name = "SECONDS")]
+    heartbeats: Option<f64>,
 }
 
 /// One environment to serve.
@@ -165,15 +170,31 @@ fn parse_users(users: &[String]) -> Result<Vec<MockUser>, String> {
         .collect()
 }
 
+/// Writes `contents` to `path`. A secret (a private key) is created with
+/// mode 0600 from the start, so it is never readable by others, not even
+/// for a moment between writing and restricting it; an existing file is
+/// removed first, because a file that already exists keeps its old mode.
 fn write_file(path: &Path, contents: &str, secret: bool) -> Result<(), MockError> {
-    std::fs::write(path, contents)?;
     #[cfg(unix)]
     if secret {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents.as_bytes())?;
+        return Ok(());
     }
     #[cfg(not(unix))]
     let _ = secret;
+    std::fs::write(path, contents)?;
     Ok(())
 }
 
@@ -367,8 +388,14 @@ async fn run(args: Args) -> Result<(), String> {
     };
     let mut servers = Vec::new();
     for env in &envs {
-        let scenario = scenarios::by_name(&env.name, args.seed)
+        let mut scenario = scenarios::by_name(&env.name, args.seed)
             .ok_or_else(|| format!("unknown environment '{}'", env.name))?;
+        if let Some(interval) = args.heartbeats {
+            if !(interval.is_finite() && interval >= 1.0) {
+                return Err("--heartbeats must be at least 1 second".to_owned());
+            }
+            scenario = scenario.with_heartbeats(interval);
+        }
         let tls = material_for(
             dir,
             args.tls,
@@ -580,5 +607,30 @@ mod tests {
         assert_eq!(parse_users(&[]).unwrap()[0].username, "root");
         assert!(parse_users(&["nopass".into()]).is_err());
         assert!(parse_users(&[":x".into()]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_keys_are_never_world_readable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("icinga-mock-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        // A new key is created 0600.
+        let key = dir.join("new.key");
+        write_file(&key, "secret", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), "secret");
+        assert_eq!(mode(&key), 0o600);
+
+        // A key file left world-readable by an older run is replaced, not
+        // rewritten in place under its old mode.
+        let old = dir.join("old.key");
+        std::fs::write(&old, "old").unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_file(&old, "new secret", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "new secret");
+        assert_eq!(mode(&old), 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

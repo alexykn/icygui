@@ -566,6 +566,19 @@ pub(crate) struct EndpointData {
     pub(crate) port: String,
     pub(crate) connected: bool,
     pub(crate) icinga_version: u64,
+    /// When its last message arrived while it was connected (0: never);
+    /// a connected endpoint's last message is always a moment ago.
+    pub(crate) last_message: f64,
+    /// Messages per second it sends the node while connected.
+    pub(crate) message_rate: f64,
+    pub(crate) meta: ObjMeta,
+}
+
+/// One of the node's features (`CheckerComponent`,
+/// `NotificationComponent`, `IcingaDB`): enabled, it has one object.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FeatureData {
+    pub(crate) name: String,
     pub(crate) meta: ObjMeta,
 }
 

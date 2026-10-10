@@ -28,14 +28,15 @@ use gpui::{
     Action, AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
     FocusHandle, Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, MouseDownEvent,
     ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task,
-    Window, div, prelude::FluentBuilder as _, px,
+    Window, div, prelude::FluentBuilder as _,
 };
+use ic_core::snapshot::Snapshot;
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{
     ActiveTheme as _, Button, ButtonVariant, DialogBody, Divider, DividerColor, Field, IconButton,
-    IconName, Modal, ModalPlacement, Root, TextField, Theme, Tooltip,
+    IconName, Modal, ModalPlacement, Root, TextField, Theme, Tooltip, px,
 };
 
 use crate::actions::{
@@ -45,19 +46,25 @@ use crate::actions::{
 };
 use crate::app_state::editing::DashboardDraft;
 use crate::app_state::{AppState, UserNotice};
+use crate::appearance;
 use crate::background::presence;
 use crate::chrome::{self, Controls, WindowControls, WindowDrag};
+use crate::cluster::ClusterEntry;
 use crate::dashboard::{DashboardEvent, DashboardView};
 use crate::editor::{DashboardEditor, EditorEvent, EditorTarget};
 use crate::environments::{
     CertificateEvent, CertificateReview, EditorMode, EnvironmentEditor, EnvironmentEditorEvent,
 };
+use crate::home::expand_home;
+use crate::lists::dialog::RemovalDialog;
+use crate::lists::view::ListSource;
+use crate::lists::{ListKind, RecordList, RecordListEvent};
 use crate::operate::dialog::{ActionDialog, DialogEvent, DialogKind};
 use crate::operate::forms::{self, describe_objects};
 use crate::operate::{ActionSpec, CHECK_CONFIRM_ABOVE};
 use crate::palette::{CommandPalette, Focus, PaletteCommand, PaletteEvent};
 use crate::pane::{ObjectPane, PaneMode};
-use crate::settings::{ScopeKey, SettingsDialog, SettingsEvent, SettingsTab};
+use crate::settings::{ScopeKey, SettingsEvent, SettingsPage, SettingsPanel};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::{live, recovery, window_state};
 
@@ -113,12 +120,25 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-n", NewDashboard, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new("escape", CloseModal, Some(MODAL_CONTEXT)),
         KeyBinding::new("enter", ConfirmModal, Some(CONFIRM_CONTEXT)),
+        // A confirmation has no fields: Tab keeps the keyboard in it.
+        KeyBinding::new(
+            "tab",
+            crate::lists::dialog::KeepFocus,
+            Some(CONFIRM_CONTEXT),
+        ),
+        KeyBinding::new(
+            "shift-tab",
+            crate::lists::dialog::KeepFocus,
+            Some(CONFIRM_CONTEXT),
+        ),
     ]);
     actions::bind_keys(cx);
     crate::editor::bind_keys(cx);
     crate::palette::bind_keys(cx);
     crate::operate::dialog::bind_keys(cx);
     crate::settings::bind_keys(cx);
+    crate::lists::view::bind_keys(cx);
+    crate::lists::dialog::bind_keys(cx);
 }
 
 /// What the main area shows.
@@ -126,6 +146,24 @@ pub(crate) fn bind_keys(cx: &mut App) {
 enum Shown {
     Dashboard(Option<DashboardRef>),
     Tab(ObjectKey),
+    /// A handling or downtimes page: the cluster section's, or a
+    /// dashboard whose only view is one.
+    List(ListKey),
+    /// The cluster section's events.
+    Events,
+    /// The cluster section's health.
+    Health,
+}
+
+/// Which handling or downtimes page.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ListKey {
+    /// The cluster section's handling or downtimes.
+    Cluster(ListKind),
+    /// A dashboard whose only view is handling or downtimes: the
+    /// dashboard, the view's kind and its id (a changed kind or a
+    /// replaced view is another page).
+    Dashboard(DashboardRef, ListKind, String),
 }
 
 /// An object open as a tab.
@@ -139,6 +177,8 @@ struct OpenEditor {
     view: Entity<DashboardEditor>,
     opened_over: Shown,
     _events: Subscription,
+    /// Keeps the sidebar's provisional row (a new dashboard's) current.
+    _changes: Subscription,
 }
 
 /// What a confirmation carries out.
@@ -216,8 +256,9 @@ enum OpenModal {
     Action(Held<ActionDialog>),
     Confirm(Confirmation),
     Path(PathPrompt),
-    Settings(Held<SettingsDialog>),
     About,
+    /// Removing from a list (topic 07), listing every target.
+    Removal(Held<RemovalDialog>),
 }
 
 /// Which modal is open, for tests.
@@ -236,10 +277,10 @@ pub(crate) enum ModalKind {
     Confirm(Box<Confirmation>),
     /// A file path.
     Path,
-    /// The settings.
-    Settings,
     /// The about dialog.
     About,
+    /// Removing downtimes, comments or acknowledgements.
+    Removal(crate::lists::removal::RemovalKind),
 }
 
 /// The window's content.
@@ -248,6 +289,14 @@ pub(crate) struct Workspace {
     sidebar: Entity<Sidebar>,
     dashboard: Entity<DashboardView>,
     tabs: HashMap<ObjectKey, TabPane>,
+    /// The handling and downtimes pages (the cluster section's, and the
+    /// dashboards whose only view is one), each with its own selection,
+    /// scroll position and pane.
+    lists: HashMap<ListKey, Held<RecordList>>,
+    /// The cluster section's events: the event stream without a filter.
+    events: Entity<DashboardView>,
+    /// The cluster section's health.
+    health: Entity<crate::cluster::HealthPage>,
     editor: Option<OpenEditor>,
     /// Changes of an editor that closed because something else was shown:
     /// editing the same dashboard again continues with them.
@@ -258,6 +307,9 @@ pub(crate) struct Workspace {
     drafts_elsewhere: HashMap<String, (EditorTarget, DashboardDraft)>,
     onboarding: Option<(Entity<EnvironmentEditor>, Subscription)>,
     modal: Option<OpenModal>,
+    /// The settings panel, over the main area and under the modals (an
+    /// environment's editor or the about dialog opens over it).
+    settings: Option<Held<SettingsPanel>>,
     /// The environment active when the open modal opened.
     modal_environment: Option<String>,
     /// The modal the question before closing the window replaced (a
@@ -292,8 +344,14 @@ impl Workspace {
         // may first report it hidden until it is mapped; only changes
         // count).
         presence::shown(&state, cx);
+        // The appearance settings, with the desktop's light or dark mode as
+        // this window reports it, before the first frame.
+        let appearance = *state.read(cx).appearance();
+        appearance::window_opened(window.appearance(), appearance, cx);
         let sidebar = cx.new(|cx| Sidebar::new(state.clone(), window, cx));
         let dashboard = cx.new(|cx| DashboardView::new(state.clone(), cx));
+        let events = cx.new(|cx| DashboardView::cluster_events(state.clone(), cx));
+        let health = cx.new(|cx| crate::cluster::HealthPage::new(state.clone(), cx));
         // Keyboard shortcuts reach the list through the focus path.
         window.focus(&dashboard.focus_handle(cx), cx);
         let subscriptions = vec![
@@ -308,10 +366,23 @@ impl Workspace {
             cx.observe_window_bounds(window, |this, window, cx| {
                 this.window_moved(window, cx);
             }),
+            // The desktop switched between light and dark: *follow system*
+            // follows at once.
+            cx.observe_window_appearance(window, |this, window, cx| {
+                let appearance = *this.state.read(cx).appearance();
+                appearance::system_changed(window.appearance(), appearance, cx);
+            }),
             // Out of sight for a while (minimised, another desktop), the
             // environment on screen turns quiet too (PERF-09).
             cx.observe_window_visibility(window, |this, visibility, _, cx| {
                 presence::visibility_changed(&this.state, visibility, cx);
+            }),
+            // Back from an editor (*edit in settings file*, *edit keymap
+            // file*): what changed there applies now.
+            cx.observe_window_activation(window, |_, window, cx| {
+                if window.is_window_active() {
+                    Self::files_may_have_changed(cx);
+                }
             }),
             cx.subscribe_in(
                 &sidebar,
@@ -320,15 +391,9 @@ impl Workspace {
                     this.on_sidebar(event, window, cx);
                 },
             ),
-            cx.subscribe_in(
-                &dashboard,
-                window,
-                |this, _, event: &DashboardEvent, window, cx| match event {
-                    DashboardEvent::Edit(reference) => {
-                        this.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
-                    }
-                },
-            ),
+            cx.subscribe_in(&events, window, Self::on_dashboard),
+            cx.subscribe_in(&dashboard, window, Self::on_dashboard),
+            cx.subscribe_in(&health, window, Self::on_health_page),
         ];
         let clock = cx.spawn(async move |this, cx| {
             loop {
@@ -359,11 +424,15 @@ impl Workspace {
             sidebar,
             dashboard,
             tabs: HashMap::new(),
+            lists: HashMap::new(),
+            events,
+            health,
             editor: None,
             kept_draft: None,
             drafts_elsewhere: HashMap::new(),
             onboarding: None,
             modal: None,
+            settings: None,
             modal_environment: None,
             behind_close: None,
             environment,
@@ -379,6 +448,70 @@ impl Workspace {
         };
         workspace.sync_onboarding(window, cx);
         workspace
+    }
+
+    /// The dashboard page (or the cluster's events) asked to edit.
+    /// The cluster health page's `···` and links.
+    fn on_health_page(
+        &mut self,
+        _: &Entity<crate::cluster::HealthPage>,
+        event: &crate::cluster::HealthPageEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            crate::cluster::HealthPageEvent::Edit => {
+                self.open_editor(EditorTarget::Health, "", window, cx);
+            }
+            crate::cluster::HealthPageEvent::Settings => self.open_trouble_settings(window, cx),
+            crate::cluster::HealthPageEvent::Pick(_) => {}
+        }
+    }
+
+    /// The environment on screen's trouble alerts in the settings panel
+    /// (the heartbeat row's *settings*, an alert's *settings*).
+    pub(crate) fn open_trouble_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(SettingsPage::Icinga, None, window, cx);
+        let active = self
+            .state
+            .read(cx)
+            .active_environment_id()
+            .map(str::to_owned);
+        if let (Some(settings), Some(id)) = (&self.settings, active) {
+            settings
+                .view
+                .update(cx, |panel, cx| panel.show_environment(&id, window, cx));
+        }
+    }
+
+    fn on_dashboard(
+        &mut self,
+        _: &Entity<DashboardView>,
+        event: &DashboardEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            DashboardEvent::Edit(reference) => {
+                self.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
+            }
+            DashboardEvent::EditView(reference, view_id) => {
+                self.edit_view(reference, view_id, window, cx);
+            }
+            // Only the editor's preview picks and changes views.
+            DashboardEvent::Pick(_) | DashboardEvent::ChangeView(..) => {}
+        }
+    }
+
+    /// The window came to the front: the keymap and settings files are
+    /// read again if they were edited meanwhile.
+    fn files_may_have_changed(cx: &mut Context<Self>) {
+        if crate::keymap::reload_if_changed(cx) {
+            cx.notify();
+        }
+        if let Some(session) = live::session(cx) {
+            session.update(cx, live::Session::reload_settings_file);
+        }
     }
 
     /// The window moved or changed size: remember where, and save it once
@@ -520,18 +653,61 @@ impl Workspace {
             OpenModal::Action(dialog) => ModalKind::Action(dialog.view.read(cx).kind()),
             OpenModal::Confirm(confirmation) => ModalKind::Confirm(Box::new(confirmation.clone())),
             OpenModal::Path(_) => ModalKind::Path,
-            OpenModal::Settings(_) => ModalKind::Settings,
             OpenModal::About => ModalKind::About,
+            OpenModal::Removal(dialog) => ModalKind::Removal(dialog.view.read(cx).kind()),
         })
     }
 
-    /// The open settings dialog.
+    /// The open removal confirmation of a list.
     #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn settings(&self) -> Option<&Entity<SettingsDialog>> {
+    pub(crate) fn removal_dialog(&self) -> Option<&Entity<RemovalDialog>> {
         match &self.modal {
-            Some(OpenModal::Settings(settings)) => Some(&settings.view),
+            Some(OpenModal::Removal(dialog)) => Some(&dialog.view),
             _ => None,
         }
+    }
+
+    /// The list `kind`'s view, while it is open.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn list(&self, kind: ListKind) -> Option<&Entity<RecordList>> {
+        self.lists
+            .get(&ListKey::Cluster(kind))
+            .map(|list| &list.view)
+    }
+
+    /// The cluster health page.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn health_page(&self) -> &Entity<crate::cluster::HealthPage> {
+        &self.health
+    }
+
+    /// What the main area shows: `dashboard`, `tab`, `list` (handling or
+    /// downtimes), `events` or `health`.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn shown_page(&self) -> &'static str {
+        match self.shown {
+            Shown::Dashboard(_) => "dashboard",
+            Shown::Tab(_) => "tab",
+            Shown::List(_) => "list",
+            Shown::Events => "events",
+            Shown::Health => "health",
+        }
+    }
+
+    /// The page of a dashboard whose only view is handling or downtimes,
+    /// once shown.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn dashboard_list(&self, dashboard: &DashboardRef) -> Option<&Entity<RecordList>> {
+        self.lists.iter().find_map(|(key, list)| match key {
+            ListKey::Dashboard(reference, ..) if reference == dashboard => Some(&list.view),
+            _ => None,
+        })
+    }
+
+    /// The settings panel, while open.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn settings(&self) -> Option<&Entity<SettingsPanel>> {
+        self.settings.as_ref().map(|settings| &settings.view)
     }
 
     /// The open palette.
@@ -585,6 +761,17 @@ impl Workspace {
         {
             tab.view.update(cx, |_, cx| cx.notify());
         }
+        if let Shown::List(key) = &self.shown
+            && let Some(list) = self.lists.get(key)
+        {
+            list.view.update(cx, |_, cx| cx.notify());
+        }
+        if self.shown == Shown::Events {
+            self.events.update(cx, |_, cx| cx.notify());
+        }
+        if self.shown == Shown::Health {
+            self.health.update(cx, |_, cx| cx.notify());
+        }
         cx.notify();
     }
 
@@ -593,6 +780,10 @@ impl Workspace {
     /// onboarding form current, and moves the focus when the main area
     /// switches between the dashboard and a tab.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A changed appearance setting (the settings panel, the settings
+        // file) applies at once.
+        let appearance = *self.state.read(cx).appearance();
+        appearance::apply(appearance, cx);
         let active = self
             .state
             .read(cx)
@@ -604,14 +795,41 @@ impl Workspace {
         }
         let state = self.state.read(cx);
         let open: Vec<ObjectKey> = state.tabs().to_vec();
-        let shown = match state.active_tab() {
-            Some(key) => Shown::Tab(key.clone()),
-            None => Shown::Dashboard(state.selected().cloned()),
+        let shown = match (state.active_tab(), state.active_cluster()) {
+            (Some(key), _) => Shown::Tab(key.clone()),
+            (None, Some(ClusterEntry::Events)) => Shown::Events,
+            (None, Some(ClusterEntry::Health)) => Shown::Health,
+            (None, Some(entry)) => match entry.list() {
+                Some(kind) => Shown::List(ListKey::Cluster(kind)),
+                None => Shown::Dashboard(state.selected().cloned()),
+            },
+            (None, None) => match state.selected() {
+                Some(reference) => match one_view_list(state, reference) {
+                    Some((kind, view)) => {
+                        Shown::List(ListKey::Dashboard(reference.clone(), kind, view))
+                    }
+                    None => Shown::Dashboard(Some(reference.clone())),
+                },
+                None => Shown::Dashboard(None),
+            },
         };
         let title = title_of(state);
         if title != self.title {
             window.set_window_title(&title);
             self.title = title;
+        }
+        // A dashboard's page goes with the dashboard, its one view or the
+        // view's kind.
+        self.lists.retain(|key, _| match key {
+            ListKey::Cluster(_) => true,
+            ListKey::Dashboard(reference, kind, view) => {
+                one_view_list(state, reference).is_some_and(|(now, id)| now == *kind && id == *view)
+            }
+        });
+        if let Shown::List(key) = &shown
+            && !self.lists.contains_key(key)
+        {
+            self.open_list_page(key.clone(), window, cx);
         }
         self.tabs.retain(|key, _| open.contains(key));
         for key in open {
@@ -632,6 +850,7 @@ impl Workspace {
             .is_some_and(|editor| editor.opened_over != shown)
             && let Some(editor) = self.editor.take()
         {
+            self.sync_provisional(cx);
             self.keep_changes(&editor, None, cx);
         }
         if shown != self.shown {
@@ -644,9 +863,56 @@ impl Workspace {
                 self.focus_main(window, cx);
             }
         }
+        // The engine on screen asks for what only the health page needs
+        // while it shows (topic 06), also as the preview of its editor.
+        let health_page = self.shown == Shown::Health
+            && self
+                .editor
+                .as_ref()
+                .is_none_or(|editor| editor.view.read(cx).edits_health())
+            && self.onboarding.is_none();
+        self.state
+            .update(cx, |state, _| state.set_health_page(health_page));
         self.sync_onboarding(window, cx);
         self.pick_up_request(window, cx);
         cx.notify();
+    }
+
+    /// Builds the handling or downtimes page `key`, with its own
+    /// selection, scroll position and pane.
+    fn open_list_page(&mut self, key: ListKey, window: &mut Window, cx: &mut Context<Self>) {
+        let (kind, source) = match &key {
+            ListKey::Cluster(kind) => (*kind, ListSource::Cluster),
+            ListKey::Dashboard(reference, kind, view) => (
+                *kind,
+                ListSource::View {
+                    dashboard: reference.clone(),
+                    view: view.clone(),
+                },
+            ),
+        };
+        let state = self.state.clone();
+        let sidebar_open = self.sidebar_open;
+        let view = cx.new(|cx| {
+            let mut list = RecordList::new(state, kind, source, cx);
+            list.set_sidebar_open(sidebar_open, cx);
+            list
+        });
+        let events = cx.subscribe_in(
+            &view,
+            window,
+            |this, _, event: &RecordListEvent, window, cx| match event {
+                RecordListEvent::Remove(removal) => {
+                    this.open_list_removal(removal.clone(), window, cx);
+                }
+                RecordListEvent::Edit(reference) => {
+                    this.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
+                }
+                // Only the editor's preview changes a draft.
+                RecordListEvent::ChangeView(_) => {}
+            },
+        );
+        self.lists.insert(key, Held::new(view, events));
     }
 
     /// Another environment is active (from the footer, the palette, the
@@ -664,8 +930,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(editor) = self.editor.take() {
+            self.sync_provisional(cx);
             self.keep_changes(&editor, previous.as_deref(), cx);
         }
+        // A list's marks and pane belong to the environment they were made
+        // in; the new one's lists start afresh.
+        self.lists.clear();
         if let Some(draft) = self.kept_draft.take()
             && let Some(previous) = previous
         {
@@ -783,14 +1053,19 @@ impl Workspace {
                     let handle = prompt.input.focus_handle(cx);
                     (handle.clone(), handle)
                 }
-                OpenModal::Settings(settings) => (
-                    settings.view.focus_handle(cx),
-                    settings.view.read(cx).default_focus(cx),
-                ),
                 OpenModal::Confirm(_) | OpenModal::About => {
                     (self.modal_focus.clone(), self.modal_focus.clone())
                 }
+                OpenModal::Removal(dialog) => {
+                    let handle = dialog.view.focus_handle(cx);
+                    (handle.clone(), handle)
+                }
             }
+        } else if let Some(settings) = &self.settings {
+            (
+                settings.view.focus_handle(cx),
+                settings.view.read(cx).default_focus(cx),
+            )
         } else if let Some(editor) = &self.editor {
             (
                 editor.view.focus_handle(cx),
@@ -807,6 +1082,12 @@ impl Workspace {
                     || self.dashboard.focus_handle(cx),
                     |tab| tab.view.focus_handle(cx),
                 ),
+                Shown::List(key) => self.lists.get(key).map_or_else(
+                    || self.dashboard.focus_handle(cx),
+                    |list| list.view.focus_handle(cx),
+                ),
+                Shown::Events => self.events.focus_handle(cx),
+                Shown::Health => self.health.focus_handle(cx),
                 Shown::Dashboard(_) => self.dashboard.focus_handle(cx),
             };
             (handle.clone(), handle)
@@ -887,9 +1168,17 @@ impl Workspace {
         let open = self.sidebar_open;
         self.dashboard
             .update(cx, |dashboard, cx| dashboard.set_sidebar_open(open, cx));
+        self.events
+            .update(cx, |events, cx| events.set_sidebar_open(open, cx));
+        self.health
+            .update(cx, |health, cx| health.set_sidebar_open(open, cx));
         for tab in self.tabs.values() {
             tab.view
                 .update(cx, |pane, cx| pane.set_sidebar_open(open, cx));
+        }
+        for list in self.lists.values() {
+            list.view
+                .update(cx, |list, cx| list.set_sidebar_open(open, cx));
         }
         if let Some(editor) = &self.editor {
             editor
@@ -1000,10 +1289,18 @@ impl Workspace {
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let targets = match &self.shown {
             Shown::Tab(key) => vec![key.clone()],
+            Shown::List(key) => self
+                .lists
+                .get(key)
+                .map(|list| list.view.update(cx, RecordList::action_targets))
+                .unwrap_or_default(),
+            Shown::Events if self.editor.is_none() => {
+                self.events.update(cx, DashboardView::action_targets)
+            }
             Shown::Dashboard(_) if self.editor.is_none() => {
                 self.dashboard.update(cx, DashboardView::action_targets)
             }
-            Shown::Dashboard(_) => Vec::new(),
+            Shown::Dashboard(_) | Shown::Events | Shown::Health => Vec::new(),
         };
         let focus = Focus { targets };
         let state = self.state.clone();
@@ -1023,6 +1320,7 @@ impl Workspace {
     }
 
     /// Carries out what was chosen in the palette.
+    #[expect(clippy::too_many_lines, reason = "one arm per palette command")]
     fn run_command(
         &mut self,
         command: PaletteCommand,
@@ -1037,17 +1335,47 @@ impl Workspace {
                     cx.notify();
                 }
             }),
-            PaletteCommand::Act(action, targets) if targets.is_empty() => {
-                let tab = match &self.shown {
-                    Shown::Tab(key) => Some(key.clone()),
-                    Shown::Dashboard(_) => None,
-                };
-                match tab {
-                    Some(key) => self.request(action, vec![key], cx),
-                    None => self
-                        .dashboard
-                        .update(cx, |dashboard, cx| dashboard.run_action(action, cx)),
+            PaletteCommand::Act(action, targets) if targets.is_empty() => match &self.shown {
+                Shown::Tab(key) => self.request(action, vec![key.clone()], cx),
+                Shown::List(key) => {
+                    let targets = self
+                        .lists
+                        .get(key)
+                        .map(|list| list.view.update(cx, RecordList::action_targets))
+                        .unwrap_or_default();
+                    if !targets.is_empty() {
+                        self.request(action, targets, cx);
+                    }
                 }
+                Shown::Events => self
+                    .events
+                    .update(cx, |events, cx| events.run_action(action, cx)),
+                Shown::Health => {}
+                Shown::Dashboard(_) => self
+                    .dashboard
+                    .update(cx, |dashboard, cx| dashboard.run_action(action, cx)),
+            },
+            PaletteCommand::OpenList(kind, chip) => self.state.update(cx, |state, cx| {
+                let changed = match chip {
+                    Some(chip) => state.open_list_on(kind, chip),
+                    None => state.open_list(kind),
+                };
+                if changed {
+                    cx.notify();
+                }
+            }),
+            PaletteCommand::ClusterHealth => self.state.update(cx, |state, cx| {
+                if state.show_cluster(ClusterEntry::Health) {
+                    cx.notify();
+                }
+            }),
+            PaletteCommand::EditHealthPage => {
+                self.state.update(cx, |state, cx| {
+                    if state.show_cluster(ClusterEntry::Health) {
+                        cx.notify();
+                    }
+                });
+                self.open_editor(EditorTarget::Health, "", window, cx);
             }
             PaletteCommand::Act(action, targets) => self.act_on_named(action, targets, window, cx),
             PaletteCommand::Copy { what, text } => self.copy(what, text, cx),
@@ -1078,7 +1406,11 @@ impl Workspace {
                 state.pause_notifications(Some(choice.until(now)));
                 state.inform(
                     format!("Notifications paused {}", choice.label(now)),
-                    Some("They're recorded in the notification centre meanwhile.".to_owned()),
+                    Some(
+                        "Trouble alerts too. They're recorded in the notification centre \
+                         meanwhile."
+                            .to_owned(),
+                    ),
                 );
                 cx.notify();
             }),
@@ -1230,6 +1562,27 @@ impl Workspace {
             });
             return;
         }
+        // Removing downtimes always asks first, listing every downtime it
+        // removes (topic 01).
+        if elsewhere.is_none()
+            && self.ask_removal(&action, &snapshot, &eligible.targets, window, cx)
+        {
+            return;
+        }
+        // So does removing several acknowledgements, listing each one with
+        // who set it, sticky and expiry (topic 07).
+        if elsewhere.is_none()
+            && action == actions::ObjectAction::RemoveAcknowledgement
+            && eligible.targets.len() > 1
+        {
+            let removal = crate::lists::removal::acknowledgements(
+                &snapshot,
+                &eligible.targets,
+                Timestamp::now(),
+            );
+            self.open_list_removal(removal, window, cx);
+            return;
+        }
         // Objects a palette query named loosely are always listed first.
         let dialog = if review {
             DialogKind::for_review(&action)
@@ -1265,12 +1618,83 @@ impl Workspace {
             });
             return;
         }
-        match confirmation_for(&spec, &snapshot, &eligible) {
+        match confirmation_for(&spec, &eligible) {
             Some(confirmation) => {
                 self.open_modal(OpenModal::Confirm(confirmation), window, cx);
             }
             None => self.submit(spec, cx),
         }
+    }
+
+    /// For a removal of downtimes: opens the dialog listing what goes, or
+    /// says the downtime is gone already. Whether it was one.
+    fn ask_removal(
+        &mut self,
+        action: &actions::ObjectAction,
+        snapshot: &Snapshot,
+        targets: &[ObjectKey],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let removal = match action {
+            actions::ObjectAction::RemoveDowntime(name) => targets
+                .first()
+                .and_then(|object| crate::downtimes::Removal::downtime(snapshot, object, name)),
+            actions::ObjectAction::RemoveDowntimes => {
+                Some(crate::downtimes::Removal::all_of(snapshot, targets))
+            }
+            _ => return false,
+        };
+        match removal {
+            Some(removal) => self.open_removal(removal, window, cx),
+            None => self.state.update(cx, |state, cx| {
+                state.inform(
+                    "Nothing to remove",
+                    Some("The downtime is gone already.".to_owned()),
+                );
+                cx.notify();
+            }),
+        }
+        true
+    }
+
+    /// Opens the dialog that lists every downtime `removal` removes.
+    fn open_removal(
+        &mut self,
+        removal: crate::downtimes::Removal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.state.clone();
+        let dialog = cx.new(|cx| ActionDialog::removal(state, removal, window, cx));
+        let events = cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, event: &DialogEvent, window, cx| match event {
+                DialogEvent::Close => this.close_modal(window, cx),
+            },
+        );
+        self.open_modal(OpenModal::Action(Held::new(dialog, events)), window, cx);
+    }
+
+    /// Opens the confirmation that lists every target of a removal from a
+    /// list (or of removing several acknowledgements).
+    fn open_list_removal(
+        &mut self,
+        removal: crate::lists::removal::BulkRemoval,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.state.clone();
+        let dialog = cx.new(|cx| RemovalDialog::new(state, removal, cx));
+        let events = cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, event: &DialogEvent, window, cx| match event {
+                DialogEvent::Close => this.close_modal(window, cx),
+            },
+        );
+        self.open_modal(OpenModal::Removal(Held::new(dialog, events)), window, cx);
     }
 
     /// Sends `spec`; a refusal shows as a toast.
@@ -1314,9 +1738,24 @@ impl Workspace {
                 environment,
                 object,
             } => self.reveal_in(environment, object, window, cx),
-            SidebarEvent::OpenSettings(tab) => self.open_settings(*tab, None, window, cx),
+            SidebarEvent::OpenHealthIn(environment) => {
+                let show = |this: &mut Self, cx: &mut Context<Self>| {
+                    this.state.update(cx, |state, cx| {
+                        if state.show_cluster(ClusterEntry::Health) {
+                            cx.notify();
+                        }
+                    });
+                };
+                if self.state.read(cx).is_active(environment) {
+                    show(self, cx);
+                } else if self.state.read(cx).environment_by_id(environment).is_some() {
+                    self.switch_environment(environment, cx);
+                    cx.defer_in(window, move |this, _, cx| show(this, cx));
+                }
+            }
+            SidebarEvent::OpenSettings(page) => self.open_settings(*page, None, window, cx),
             SidebarEvent::CustomRule(key) => {
-                self.open_settings(SettingsTab::Notifications, Some(key), window, cx);
+                self.open_settings(SettingsPage::Notifications, Some(key), window, cx);
             }
         }
     }
@@ -1346,37 +1785,88 @@ impl Workspace {
         self.sidebar.update(cx, Sidebar::open_notifications);
     }
 
-    /// Opens the settings on `tab`; with `custom`, that group or dashboard
-    /// gets a custom rule to edit.
+    /// Opens the settings panel on `page` (or shows `page` in the open
+    /// one); with `custom`, that group or dashboard of the environment on
+    /// screen gets a custom rule to edit, on the notifications page.
     pub(crate) fn open_settings(
         &mut self,
-        tab: SettingsTab,
+        page: SettingsPage,
         custom: Option<&ScopeKey>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(OpenModal::Settings(settings)) = &self.modal
-            && custom.is_none()
-        {
-            settings
-                .view
-                .update(cx, |settings, cx| settings.show_tab(tab, cx));
-            return;
+        // A modal over the main area (the palette that opened this) goes.
+        if self.modal.is_some() {
+            self.close_modal(window, cx);
         }
-        let state = self.state.clone();
-        let dialog = cx.new(|cx| SettingsDialog::new(state, tab, custom, window, cx));
-        let events = cx.subscribe_in(
-            &dialog,
-            window,
-            |this, _, event: &SettingsEvent, window, cx| match event {
-                SettingsEvent::Close => this.close_modal(window, cx),
-                SettingsEvent::About => this.open_about(window, cx),
-                SettingsEvent::LaunchAtLogin(enabled) => {
-                    crate::background::autostart::change(*enabled, &this.state, cx);
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.close_menu(cx);
+        });
+        let panel = if let Some(settings) = &self.settings {
+            settings.view.clone()
+        } else {
+            {
+                let state = self.state.clone();
+                let panel = cx.new(|cx| SettingsPanel::new(state, page, window, cx));
+                let events = cx.subscribe_in(
+                    &panel,
+                    window,
+                    |this, _, event: &SettingsEvent, window, cx| match event {
+                        SettingsEvent::Close => this.close_settings(window, cx),
+                        SettingsEvent::About => this.open_about(window, cx),
+                        SettingsEvent::LaunchAtLogin(enabled) => {
+                            crate::background::autostart::change(*enabled, &this.state, cx);
+                        }
+                        SettingsEvent::EditEnvironment(id) => {
+                            this.open_environment_editor(Some(id), window, cx);
+                        }
+                        SettingsEvent::AddEnvironment => {
+                            this.open_environment_editor(None, window, cx);
+                        }
+                    },
+                );
+                self.settings = Some(Held::new(panel.clone(), events));
+                panel
+            }
+        };
+        panel.update(cx, |panel, cx| match custom {
+            Some(key) => panel.show_custom_rule(key, window, cx),
+            None => panel.show_page(page, window, cx),
+        });
+        let focus = panel.read(cx).default_focus(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Closes the settings panel; the keyboard goes back to the main area.
+    pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.take().is_some() {
+            self.focus_main(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The settings panel over the dimmed window, centred, about
+    /// 1080×760 and fitted to smaller windows.
+    fn render_settings(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let settings = self.settings.as_ref()?;
+        Some(
+            Modal::new(
+                "settings",
+                px(crate::settings::PANEL_WIDTH),
+                settings.view.clone(),
+            )
+            .on_dismiss(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                // Everything applied already but a field being typed in.
+                if let Some(settings) = &this.settings {
+                    settings
+                        .view
+                        .update(cx, |panel, cx| panel.commit_pending(window, cx));
                 }
-            },
-        );
-        self.open_modal(OpenModal::Settings(Held::new(dialog, events)), window, cx);
+                this.close_settings(window, cx);
+            }))
+            .into_any_element(),
+        )
     }
 
     /// Shows the about dialog.
@@ -1385,7 +1875,14 @@ impl Workspace {
     }
 
     fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_settings(SettingsTab::General, None, window, cx);
+        // ctrl-, again shows the page already open.
+        let page = self
+            .settings
+            .as_ref()
+            .map_or(SettingsPage::General, |settings| {
+                settings.view.read(cx).page()
+            });
+        self.open_settings(page, None, window, cx);
     }
 
     fn on_show_about(&mut self, _: &ShowAbout, window: &mut Window, cx: &mut Context<Self>) {
@@ -1430,6 +1927,34 @@ impl Workspace {
         }
     }
 
+    /// Opens the editor for `reference` with its view `view_id` selected
+    /// (a view header's *edit view*).
+    fn edit_view(
+        &mut self,
+        reference: &DashboardRef,
+        view_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_editor(EditorTarget::Existing(reference.clone()), "", window, cx);
+        if let Some(editor) = &self.editor {
+            editor
+                .view
+                .update(cx, |editor, cx| editor.select_view(view_id, cx));
+        }
+    }
+
+    /// Shows a new dashboard's provisional row in the sidebar while its
+    /// editor is open, and takes it away after.
+    fn sync_provisional(&self, cx: &mut Context<Self>) {
+        let provisional = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.view.read(cx).provisional());
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_provisional(provisional, cx));
+    }
+
     /// Opens the dashboard editor in the main area.
     fn open_editor(
         &mut self,
@@ -1447,7 +1972,10 @@ impl Workspace {
                 }
             });
             self.sync(window, cx);
-        } else if self.state.read(cx).active_tab().is_some() {
+        } else if target == EditorTarget::New
+            && (self.state.read(cx).active_tab().is_some()
+                || self.state.read(cx).active_cluster().is_some())
+        {
             self.state.update(cx, |state, cx| {
                 if state.show_dashboard() {
                     cx.notify();
@@ -1488,6 +2016,7 @@ impl Workspace {
                 |this, _, event: &EditorEvent, window, cx| match event {
                     EditorEvent::Closed => {
                         this.editor = None;
+                        this.sync_provisional(cx);
                         this.focus_main(window, cx);
                         cx.notify();
                     }
@@ -1497,11 +2026,14 @@ impl Workspace {
                     }
                 },
             );
+        let changes = cx.observe(&view, |this, _, cx| this.sync_provisional(cx));
         self.editor = Some(OpenEditor {
             view,
             opened_over: self.shown.clone(),
             _events: events,
+            _changes: changes,
         });
+        self.sync_provisional(cx);
         self.focus_main(window, cx);
         cx.notify();
     }
@@ -1544,6 +2076,7 @@ impl Workspace {
         let detail = match editor.target() {
             EditorTarget::New => "The new dashboard isn't created.",
             EditorTarget::Existing(_) => "The dashboard keeps what was saved.",
+            EditorTarget::Health => "The page keeps what was saved.",
         };
         let confirmation = Confirmation {
             title: format!("Discard the changes to {}?", editor.title()),
@@ -1654,6 +2187,7 @@ impl Workspace {
             Confirmed::Action(spec) => self.submit(spec, cx),
             Confirmed::DiscardEdits => {
                 self.editor = None;
+                self.sync_provisional(cx);
             }
             Confirmed::DiscardEnvironmentEdits => {
                 self.behind_close = None;
@@ -1661,6 +2195,7 @@ impl Workspace {
             Confirmed::CloseWindow => {
                 self.behind_close = None;
                 self.editor = None;
+                self.sync_provisional(cx);
                 self.kept_draft = None;
                 self.drafts_elsewhere.clear();
                 window.remove_window();
@@ -1681,6 +2216,7 @@ impl Workspace {
                     .is_some_and(|editor| *editor.view.read(cx).target() == edited)
                 {
                     self.editor = None;
+                    self.sync_provisional(cx);
                 }
                 if self
                     .kept_draft
@@ -1706,6 +2242,7 @@ impl Workspace {
                 };
                 if deleted {
                     self.editor = None;
+                    self.sync_provisional(cx);
                     self.drafts_elsewhere.remove(&id);
                 }
             }
@@ -2182,7 +2719,12 @@ impl Workspace {
                 review.view.clone().into_any_element(),
             ),
             OpenModal::Action(dialog) => (
-                580.,
+                // The removal's list is narrower, as drawn (topic 01).
+                if dialog.view.read(cx).kind() == DialogKind::RemoveDowntime {
+                    520.
+                } else {
+                    580.
+                },
                 ModalPlacement::Center,
                 dialog.view.clone().into_any_element(),
             ),
@@ -2196,12 +2738,12 @@ impl Workspace {
                 ModalPlacement::Center,
                 Self::render_path_prompt(prompt, cx),
             ),
-            OpenModal::Settings(settings) => (
-                700.,
-                ModalPlacement::Top(px(48.)),
-                settings.view.clone().into_any_element(),
-            ),
             OpenModal::About => (460., ModalPlacement::Center, self.render_about(cx)),
+            OpenModal::Removal(dialog) => (
+                dialog.view.read(cx).width(),
+                ModalPlacement::Center,
+                dialog.view.clone().into_any_element(),
+            ),
         };
         Some(
             div()
@@ -2245,6 +2787,11 @@ impl Workspace {
             .key_context(CONFIRM_CONTEXT)
             .track_focus(&self.modal_focus)
             .on_action(cx.listener(Self::on_confirm))
+            .on_action(
+                cx.listener(|this, _: &crate::lists::dialog::KeepFocus, window, cx| {
+                    this.modal_focus.focus(window, cx);
+                }),
+            )
             .child(
                 DialogBody::new(confirmation.title.clone())
                     .child(
@@ -2375,6 +2922,8 @@ pub(crate) fn close_window(window: &mut Window, cx: &mut App) {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A closed editor's provisional row goes with it.
+        self.sync_provisional(cx);
         if let Some(problem) = self.state.read(cx).config_problem().cloned() {
             return div()
                 .id("workspace")
@@ -2395,21 +2944,35 @@ impl Render for Workspace {
                     .tabs
                     .get(key)
                     .map(|tab| tab.view.clone().into_any_element()),
+                Shown::List(key) => self
+                    .lists
+                    .get(key)
+                    .map(|list| list.view.clone().into_any_element()),
+                Shown::Events => Some(self.events.clone().into_any_element()),
+                Shown::Health => Some(self.health.clone().into_any_element()),
                 Shown::Dashboard(_) => None,
             }
             .unwrap_or_else(|| self.dashboard.clone().into_any_element())
         };
         let modal = self.render_modal(cx);
-        let modal_open = self.modal.is_some();
+        let settings = self.render_settings(cx);
+        let modal_open = self.modal.is_some() || self.settings.is_some();
         // Above the list's selection bar while rows are marked.
-        let bar = matches!(self.shown, Shown::Dashboard(_))
-            && self.editor.is_none()
+        let bar = self.editor.is_none()
             && self.onboarding.is_none()
-            && self.dashboard.read(cx).has_marks(cx);
+            && match &self.shown {
+                Shown::Dashboard(_) => self.dashboard.read(cx).has_marks(cx),
+                Shown::Events => self.events.read(cx).has_marks(cx),
+                Shown::List(key) => self
+                    .lists
+                    .get(key)
+                    .is_some_and(|list| list.view.read(cx).has_marks()),
+                Shown::Tab(_) | Shown::Health => false,
+            };
         let toasts = crate::operate::toasts::render(
             &self.state,
             if bar {
-                16. + f32::from(crate::dashboard::SELECTION_BAR_HEIGHT)
+                16. + crate::dashboard::SELECTION_BAR_HEIGHT
             } else {
                 16.
             },
@@ -2452,6 +3015,7 @@ impl Render for Workspace {
                 workspace.child(self.sidebar.clone())
             })
             .child(div().flex().flex_1().min_w_0().h_full().child(main))
+            .children(settings)
             .children(toasts)
             .children(modal)
             .into_any_element()
@@ -2459,11 +3023,11 @@ impl Render for Workspace {
 }
 
 /// The question to ask before sending `spec`, if it needs one: checking
-/// many objects at once (a burst of work for the satellites), removing
-/// several acknowledgements, removing downtimes.
+/// many objects at once (a burst of work for the satellites). (Removing
+/// downtimes, and several acknowledgements, have their own dialogs, which
+/// list every target.)
 pub(crate) fn confirmation_for(
     spec: &ActionSpec,
-    snapshot: &ic_core::snapshot::Snapshot,
     eligible: &forms::Eligible,
 ) -> Option<Confirmation> {
     let what = describe_objects(&spec.objects);
@@ -2481,38 +3045,6 @@ pub(crate) fn confirmation_for(
             "check now",
             false,
         ),
-        actions::ObjectAction::RemoveAcknowledgement if spec.objects.len() > 1 => (
-            format!("Remove the acknowledgement of {what}?"),
-            format!(
-                "Their problems count as unhandled again and notify as configured; the \
-                 acknowledgement comments go too.{skipped}"
-            ),
-            "remove acknowledgements",
-            true,
-        ),
-        actions::ObjectAction::RemoveDowntimes => {
-            let count: usize = spec
-                .objects
-                .iter()
-                .map(|object| snapshot.downtimes.get(object).map_or(0, Vec::len))
-                .sum();
-            let downtimes = if count == 1 {
-                "its downtime".to_owned()
-            } else {
-                format!("{count} downtimes")
-            };
-            (
-                format!("Remove the downtimes of {what}?"),
-                format!(
-                    "{} end{} at once, with any downtimes they triggered; the objects notify as \
-                     configured again.{skipped}",
-                    capitalize(&downtimes),
-                    if count == 1 { "s" } else { "" },
-                ),
-                "remove downtimes",
-                true,
-            )
-        }
         _ => return None,
     };
     Some(Confirmation {
@@ -2521,13 +3053,6 @@ pub(crate) fn confirmation_for(
         confirm,
         danger,
         action: Confirmed::Action(spec.clone()),
-    })
-}
-
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
     })
 }
 
@@ -2572,12 +3097,15 @@ fn file_stem(name: &str) -> String {
     }
 }
 
-/// A typed path with `~/` meaning the home directory.
-fn expand_home(text: &str) -> PathBuf {
-    match (text.strip_prefix("~/"), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
-        _ => PathBuf::from(text),
-    }
+/// A dashboard whose only view is handling or downtimes (topic 14, round
+/// 5): its page is that view's ([`RecordList`]); the kind and the view's
+/// id.
+fn one_view_list(state: &AppState, reference: &DashboardRef) -> Option<(ListKind, String)> {
+    let (_, dashboard) = state.dashboard(reference)?;
+    let [view] = dashboard.views.as_slice() else {
+        return None;
+    };
+    Some((ListKind::of_display(view.display)?, view.id.clone()))
 }
 
 /// The window controls and a button to bring the sidebar back, for the main
@@ -2616,13 +3144,5 @@ mod tests {
         assert_eq!(file_stem("prod cluster/db"), "prod-cluster-db");
         assert_eq!(file_stem("  "), "dashboards");
         assert_eq!(file_stem("ops_2.0"), "ops_2.0");
-    }
-
-    #[test]
-    fn typed_paths_expand_the_home_directory() {
-        if let Some(home) = std::env::var_os("HOME") {
-            assert_eq!(expand_home("~/x.toml"), PathBuf::from(home).join("x.toml"));
-        }
-        assert_eq!(expand_home("/tmp/x"), PathBuf::from("/tmp/x"));
     }
 }

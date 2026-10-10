@@ -14,6 +14,14 @@ use ic_model::{Timestamp, format_compact};
 /// silent for many minutes).
 pub(crate) const STALE_AFTER_SECS: u64 = 30;
 
+/// An engine that hasn't said it runs ([`ic_core::CoreEvent::Alive`]) for
+/// this long is stale: what it showed last may be outdated (yellow).
+pub(crate) const ENGINE_STALE_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(3 * ic_core::ALIVE_INTERVAL.as_secs());
+
+/// … and for this long, stuck (red).
+pub(crate) const ENGINE_STUCK_AFTER: std::time::Duration = std::time::Duration::from_mins(1);
+
 /// How the footer colours the connection status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Health {
@@ -61,10 +69,10 @@ impl NoticeAction {
     /// The link's text.
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::RetryNow => "Retry now",
-            Self::ReviewCertificate => "Review certificate",
-            Self::EditEnvironment => "Edit environment",
-            Self::RestartEngine => "Restart",
+            Self::RetryNow => "retry now",
+            Self::ReviewCertificate => "review certificate",
+            Self::EditEnvironment => "edit environment",
+            Self::RestartEngine => "restart",
         }
     }
 }
@@ -100,6 +108,9 @@ pub(crate) enum NoticeKind {
     Misconfigured,
     /// The engine itself couldn't start.
     EngineFailed,
+    /// No live data for more than two minutes (PLAN.md §4.2 A): what
+    /// every page shows may be outdated.
+    Blind,
 }
 
 /// How far the initial load has got.
@@ -152,6 +163,17 @@ impl ViewMarker {
     }
 }
 
+/// One state of the connection in the three places that name it (see
+/// [`ConnectionStatus::wording`]).
+struct Wording {
+    /// The footer's text after the endpoint.
+    footer: String,
+    /// The tray tooltip's word or two, without times.
+    short: &'static str,
+    /// The connection details: what it is doing and why.
+    detail: String,
+}
+
 /// The connection to the active environment.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ConnectionStatus {
@@ -184,6 +206,12 @@ pub(crate) struct ConnectionStatus {
     engine_stopped: bool,
     /// Icinga's version, once connected.
     version: Option<String>,
+    /// When the engine last said it runs (UI clock): an engine that stops
+    /// saying so is stale, not live (no false green).
+    alive_at: Option<Timestamp>,
+    /// Since when the environment has had no live data, and why, as its
+    /// engine says (after its two minutes' grace).
+    pub(crate) blind: Option<ic_core::trouble::Blind>,
 }
 
 /// What an environment's event stream carries, as the footer counts it.
@@ -216,6 +244,8 @@ impl ConnectionStatus {
             engine_error: None,
             engine_stopped: false,
             version: None,
+            alive_at: None,
+            blind: None,
         }
     }
 
@@ -253,6 +283,11 @@ impl ConnectionStatus {
 
     /// The core published `snapshot`, received at `now`.
     pub(crate) fn on_snapshot_at(&mut self, snapshot: &Snapshot, now: Timestamp) {
+        // A snapshot says the engine runs too.
+        if self.alive_at.is_some() {
+            self.alive_at = Some(now);
+        }
+        self.blind.clone_from(&snapshot.trouble.blind);
         if snapshot.last_event_at.is_some() {
             self.last_event_at = snapshot.last_event_at;
         }
@@ -292,6 +327,35 @@ impl ConnectionStatus {
     /// PERF-09): its silence says nothing about the connection.
     pub(crate) fn is_quiet(&self) -> bool {
         self.stream == Stream::Quiet
+    }
+
+    /// The engine said it runs, at `now` (UI clock).
+    pub(crate) fn on_alive(&mut self, now: Timestamp) {
+        self.alive_at = Some(now);
+    }
+
+    /// How long the engine hasn't said it runs, when that is longer than
+    /// [`ENGINE_STALE_AFTER`] (it said so before).
+    pub(crate) fn engine_silent(&self, now: Timestamp) -> Option<std::time::Duration> {
+        let silent = self.alive_at?.elapsed_until(now);
+        (silent > ENGINE_STALE_AFTER).then_some(silent)
+    }
+
+    /// How long the environment has had no live data, as its engine says
+    /// (`None` while live, or within the grace), or how long its engine
+    /// has been silent: the footer's `no data 3m`, the tray's ages.
+    pub(crate) fn no_data_for(&self, now: Timestamp) -> Option<std::time::Duration> {
+        if self.engine_error.is_some() {
+            return None;
+        }
+        let blind = self
+            .blind
+            .as_ref()
+            .map(|blind| blind.since.elapsed_until(now));
+        match (blind, self.engine_silent(now)) {
+            (Some(blind), Some(silent)) => Some(blind.max(silent)),
+            (blind, silent) => blind.or(silent),
+        }
     }
 
     /// The engine couldn't start.
@@ -346,11 +410,28 @@ impl ConnectionStatus {
         ) && self.engine_error.is_none()
     }
 
-    /// The colour class at `now`.
+    /// The colour class at `now`: an engine that stopped saying it runs,
+    /// or an environment without live data, is never green.
     pub(crate) fn health(&self, now: Timestamp) -> Health {
         if self.engine_error.is_some() {
             return Health::Failed;
         }
+        if let Some(silent) = self.engine_silent(now) {
+            return if silent > ENGINE_STUCK_AFTER {
+                Health::Failed
+            } else {
+                Health::Stale
+            };
+        }
+        let health = self.state_health(now);
+        if self.blind.is_some() && health != Health::Failed {
+            return Health::Stale;
+        }
+        health
+    }
+
+    /// The colour class of the connection state alone.
+    fn state_health(&self, now: Timestamp) -> Health {
         match &self.state {
             None => Health::Idle,
             Some(ConnectionState::Connecting { .. } | ConnectionState::Loading { .. }) => {
@@ -371,6 +452,15 @@ impl ConnectionStatus {
                     Health::Live
                 }
             }
+        }
+    }
+
+    /// How long the connected event stream has been silent (the tray's
+    /// `no events 1m`); `None` while not connected.
+    pub(crate) fn silent_for(&self, now: Timestamp) -> Option<std::time::Duration> {
+        match &self.state {
+            Some(ConnectionState::Connected { since, .. }) => Some(self.quiet_for(*since, now)),
+            _ => None,
         }
     }
 
@@ -412,32 +502,13 @@ impl ConnectionStatus {
         if self.engine_error.is_some() {
             return (endpoint, Some(self.engine_word().to_owned()));
         }
+        if let Some(age) = self.no_data_for(now) {
+            return (endpoint, Some(no_data(age)));
+        }
         let Some(state) = &self.state else {
             return (endpoint, None);
         };
-        let status = match state {
-            // A quiet stream's age says nothing (PERF-09).
-            ConnectionState::Connected { .. } if self.is_quiet() => "quiet".to_owned(),
-            ConnectionState::Connected { since, .. } => format_compact(self.quiet_for(*since, now)),
-            ConnectionState::Connecting { attempt } if *attempt > 1 => {
-                format!("connecting ({attempt})")
-            }
-            ConnectionState::Connecting { .. } => "connecting".to_owned(),
-            ConnectionState::Loading { .. } => "loading".to_owned(),
-            ConnectionState::Reconnecting { retry_at, .. } => {
-                let wait = retry_at.remaining_from(now);
-                if wait.as_secs() == 0 {
-                    "retrying".to_owned()
-                } else {
-                    format!("retry in {}", format_compact(wait))
-                }
-            }
-            ConnectionState::AuthFailed { .. } => "login refused".to_owned(),
-            ConnectionState::TlsFailed { .. } => "not trusted".to_owned(),
-            ConnectionState::MissingSecret => "no password".to_owned(),
-            ConnectionState::Misconfigured { .. } => "invalid settings".to_owned(),
-        };
-        (endpoint, Some(status))
+        (endpoint, Some(self.wording(state, now).footer))
     }
 
     /// The connected node's view when it is short of the whole cluster:
@@ -456,16 +527,15 @@ impl ConnectionStatus {
         if self.engine_error.is_some() {
             return self.engine_word();
         }
+        if self.engine_silent(Timestamp::now()).is_some() {
+            return "engine not answering";
+        }
+        if self.blind.is_some() {
+            return "no live data";
+        }
         match &self.state {
             None => "not connected",
-            Some(ConnectionState::Connected { .. }) => "connected",
-            Some(ConnectionState::Connecting { .. }) => "connecting",
-            Some(ConnectionState::Loading { .. }) => "loading",
-            Some(ConnectionState::Reconnecting { .. }) => "reconnecting",
-            Some(ConnectionState::AuthFailed { .. }) => "login refused",
-            Some(ConnectionState::TlsFailed { .. }) => "certificate not trusted",
-            Some(ConnectionState::MissingSecret) => "no password",
-            Some(ConnectionState::Misconfigured { .. }) => "invalid settings",
+            Some(state) => self.wording(state, Timestamp::now()).short,
         }
     }
 
@@ -483,30 +553,89 @@ impl ConnectionStatus {
         let Some(state) = &self.state else {
             return "no environment".to_owned();
         };
+        self.wording(state, now).detail
+    }
+
+    /// How `state` reads in each place that names it, the one table of
+    /// the connection's words: the footer's short form (it has little
+    /// room, and shortens the endpoint rather than this), the tray's
+    /// tooltip and the connection details. The footer's forms are short on
+    /// purpose (`not trusted` for `certificate not trusted`, `connecting
+    /// (3)` for `connecting (attempt 3)`): the footer is narrow and long
+    /// production endpoints already compete for it. Keeping the three
+    /// readings of a state in one arm keeps them from drifting apart.
+    fn wording(&self, state: &ConnectionState, now: Timestamp) -> Wording {
         match state {
-            ConnectionState::Connected { since, .. } => {
-                format!("connected for {}", format_compact(since.elapsed_until(now)))
-            }
-            ConnectionState::Connecting { attempt: 1 } => "connecting".to_owned(),
-            ConnectionState::Connecting { attempt } => format!("connecting (attempt {attempt})"),
-            ConnectionState::Loading { .. } => self
-                .progress()
-                .map_or_else(|| "loading".to_owned(), |progress| progress.text),
+            ConnectionState::Connected { since, .. } => Wording {
+                // A quiet stream's age says nothing (PERF-09).
+                footer: if self.is_quiet() {
+                    "quiet".to_owned()
+                } else {
+                    format_compact(self.quiet_for(*since, now))
+                },
+                short: "connected",
+                detail: format!("connected for {}", format_compact(since.elapsed_until(now))),
+            },
+            ConnectionState::Connecting { attempt } => Wording {
+                footer: if *attempt > 1 {
+                    format!("connecting ({attempt})")
+                } else {
+                    "connecting".to_owned()
+                },
+                short: "connecting",
+                detail: if *attempt > 1 {
+                    format!("connecting (attempt {attempt})")
+                } else {
+                    "connecting".to_owned()
+                },
+            },
+            ConnectionState::Loading { .. } => Wording {
+                footer: "loading".to_owned(),
+                short: "loading",
+                detail: self
+                    .progress()
+                    .map_or_else(|| "loading".to_owned(), |progress| progress.text),
+            },
             ConnectionState::Reconnecting {
                 error,
                 attempt,
                 retry_at,
                 ..
-            } => format!(
-                "retrying in {} (attempt {attempt}): {error}",
-                format_compact(retry_at.remaining_from(now))
-            ),
-            ConnectionState::AuthFailed { message } => format!("login refused: {message}"),
-            ConnectionState::TlsFailed { message, .. } => {
-                format!("certificate not trusted: {message}")
+            } => {
+                let wait = retry_at.remaining_from(now);
+                Wording {
+                    footer: if wait.as_secs() == 0 {
+                        "retrying".to_owned()
+                    } else {
+                        format!("retry in {}", format_compact(wait))
+                    },
+                    short: "reconnecting",
+                    detail: format!(
+                        "retrying in {} (attempt {attempt}): {error}",
+                        format_compact(wait)
+                    ),
+                }
             }
-            ConnectionState::MissingSecret => "no password in the keychain".to_owned(),
-            ConnectionState::Misconfigured { message } => format!("settings can't work: {message}"),
+            ConnectionState::AuthFailed { message } => Wording {
+                footer: "login refused".to_owned(),
+                short: "login refused",
+                detail: format!("login refused: {message}"),
+            },
+            ConnectionState::TlsFailed { message, .. } => Wording {
+                footer: "not trusted".to_owned(),
+                short: "certificate not trusted",
+                detail: format!("certificate not trusted: {message}"),
+            },
+            ConnectionState::MissingSecret => Wording {
+                footer: "no password".to_owned(),
+                short: "no password",
+                detail: "no password in the keychain".to_owned(),
+            },
+            ConnectionState::Misconfigured { message } => Wording {
+                footer: "invalid settings".to_owned(),
+                short: "invalid settings",
+                detail: format!("settings can't work: {message}"),
+            },
         }
     }
 
@@ -546,7 +675,7 @@ impl ConnectionStatus {
         Some(Progress { fraction, text })
     }
 
-    /// The notice while reconnecting: when, why, *Retry now*, and
+    /// The notice while reconnecting: when, why, *retry now*, and
     /// *Review certificate* while another URL's certificate isn't trusted
     /// (`untrusted`).
     fn reconnecting_notice(
@@ -584,6 +713,59 @@ impl ConnectionStatus {
         }
     }
 
+    /// The notice while the environment has no live data (16d): how long,
+    /// that states may be outdated, why and since when, and what the
+    /// connection does.
+    fn blind_notice(&self, now: Timestamp) -> Option<ConnectionNotice> {
+        let age = self.no_data_for(now)?;
+        let (reason, since) = match &self.blind {
+            Some(blind) => (blind.reason.clone(), Some(blind.since)),
+            None => (
+                "the connection engine isn't answering".to_owned(),
+                self.alive_at,
+            ),
+        };
+        let since = since.map_or_else(String::new, |at| {
+            format!(" since {}", crate::format::list_clock(at, now))
+        });
+        let doing = match &self.state {
+            Some(ConnectionState::Reconnecting { retry_at, .. }) => {
+                let wait = retry_at.remaining_from(now);
+                if wait.as_secs() == 0 {
+                    "; reconnecting".to_owned()
+                } else {
+                    format!("; retrying in {}", format_compact(wait))
+                }
+            }
+            Some(ConnectionState::Connecting { .. } | ConnectionState::Loading { .. }) => {
+                "; reconnecting".to_owned()
+            }
+            _ => String::new(),
+        };
+        let mut actions = vec![NoticeAction::RetryNow];
+        match self.state {
+            Some(
+                ConnectionState::AuthFailed { .. }
+                | ConnectionState::MissingSecret
+                | ConnectionState::Misconfigured { .. },
+            ) => actions.insert(0, NoticeAction::EditEnvironment),
+            Some(ConnectionState::TlsFailed { .. }) => {
+                actions.insert(0, NoticeAction::ReviewCertificate);
+            }
+            _ => {}
+        }
+        Some(ConnectionNotice {
+            kind: NoticeKind::Blind,
+            tone: Tone::Warning,
+            title: format!(
+                "no live data for {} — states may be outdated",
+                format_compact(age)
+            ),
+            detail: Some(format!("{reason}{since}{doing}")),
+            actions,
+        })
+    }
+
     /// The problem to show over the list at `now`, if any.
     pub(crate) fn notice(&self, environment: &str, now: Timestamp) -> Option<ConnectionNotice> {
         if let Some(error) = &self.engine_error {
@@ -599,6 +781,9 @@ impl ConnectionStatus {
                 detail: Some(error.clone()),
                 actions: vec![NoticeAction::RestartEngine],
             });
+        }
+        if let Some(notice) = self.blind_notice(now) {
+            return Some(notice);
         }
         let notice = match self.state.as_ref()? {
             ConnectionState::Reconnecting {
@@ -665,6 +850,12 @@ impl ConnectionStatus {
         };
         Some(notice)
     }
+}
+
+/// `no data 3m`: the footer's and the tray's wording while an environment
+/// has no live data.
+pub(crate) fn no_data(age: std::time::Duration) -> String {
+    format!("no data {}", format_compact(age))
 }
 
 /// A node with the full view, reached at its first URL (tests).
@@ -756,6 +947,69 @@ mod tests {
         });
         status.on_snapshot(&snapshot(Some(18.), None));
         assert_eq!(status.label(at(20.)), "master-02 · 2s");
+    }
+
+    /// No false green (PLAN.md §4.2): an engine that stops saying it runs
+    /// turns the footer yellow, then red, with `no data` instead of a
+    /// frozen age, worked out from the UI's clock (the engine can't push
+    /// anything while it is stuck).
+    #[test]
+    fn a_silent_engine_is_never_green() {
+        let mut status = connected();
+        status.on_alive(at(0.));
+        status.on_snapshot_at(&snapshot(Some(0.), Some(120.)), at(0.));
+        assert_eq!(status.health(at(1.)), Health::Live);
+        assert_eq!(status.no_data_for(at(1.)), None);
+        let stale = ENGINE_STALE_AFTER.as_secs_f64() + 1.;
+        assert_eq!(status.health(at(stale)), Health::Stale);
+        assert!(
+            status.label(at(stale)).starts_with("master-01 · no data"),
+            "{}",
+            status.label(at(stale))
+        );
+        let stuck = ENGINE_STUCK_AFTER.as_secs_f64() + 1.;
+        assert_eq!(status.health(at(stuck)), Health::Failed);
+        let notice = status.notice("prod", at(stuck)).unwrap();
+        assert_eq!(notice.kind, NoticeKind::Blind);
+        // It runs again and events flow: live.
+        status.on_alive(at(stuck));
+        status.on_snapshot_at(&snapshot(Some(stuck), Some(120.)), at(stuck));
+        assert_eq!(status.health(at(stuck + 1.)), Health::Live);
+        assert!(status.notice("prod", at(stuck + 1.)).is_none());
+    }
+
+    /// No live data (PLAN.md §4.2 A): the engine's *blind* turns the
+    /// footer yellow with `no data 3m`, and the banner says since when and
+    /// why; live again, both go.
+    #[test]
+    fn no_live_data_shows_its_age_and_banner() {
+        let mut status = connected();
+        let mut blind = snapshot(Some(0.), Some(120.));
+        blind.trouble = Arc::new(ic_core::trouble::Trouble {
+            alerts: Vec::new(),
+            blind: Some(ic_core::trouble::Blind {
+                since: at(0.),
+                reason: "event stream stalled".to_owned(),
+            }),
+        });
+        status.on_snapshot_at(&blind, at(120.));
+        assert_eq!(status.health(at(180.)), Health::Stale);
+        assert_eq!(status.label(at(180.)), "master-01 · no data 3m");
+        let notice = status.notice("prod", at(180.)).unwrap();
+        assert_eq!(notice.kind, NoticeKind::Blind);
+        assert_eq!(notice.title, "no live data for 3m — states may be outdated");
+        assert!(
+            notice
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.starts_with("event stream stalled since")),
+            "{:?}",
+            notice.detail
+        );
+        status.on_snapshot_at(&snapshot(Some(181.), Some(120.)), at(181.));
+        assert_eq!(status.health(at(182.)), Health::Live);
+        assert_eq!(status.label(at(182.)), "master-01 · 1s");
+        assert!(status.notice("prod", at(182.)).is_none());
     }
 
     #[test]
@@ -878,6 +1132,82 @@ mod tests {
         assert_eq!(
             ConnectionStatus::idle().label_parts(at(0.)),
             ("no environment".to_owned(), None)
+        );
+    }
+
+    /// Every state's three readings, side by side: the footer's short
+    /// form, the tray's word and the details. They come from one table
+    /// (`ConnectionStatus::wording`), so a new variant can't get one
+    /// reading and miss another. The footer's forms are deliberately
+    /// shorter (`not trusted`, `connecting (3)`): it shows the state after
+    /// the endpoint and shortens the endpoint for it, and its tooltip has
+    /// the details (PLAN 4.2, scout bug 3).
+    #[test]
+    fn each_state_has_its_footer_tray_and_detail_reading_in_one_table() {
+        let readings = |state: ConnectionState| {
+            let mut status = ConnectionStatus::starting("master-01", None);
+            status.on_state(state);
+            (
+                status.label_parts(at(0.)).1.unwrap(),
+                status.short_state().to_owned(),
+                status.describe(at(0.)),
+            )
+        };
+        let reading = |footer: &str, short: &str, detail: &str| {
+            (footer.to_owned(), short.to_owned(), detail.to_owned())
+        };
+        assert_eq!(
+            readings(ConnectionState::Connecting { attempt: 1 }),
+            reading("connecting", "connecting", "connecting")
+        );
+        assert_eq!(
+            readings(ConnectionState::Connecting { attempt: 3 }),
+            reading("connecting (3)", "connecting", "connecting (attempt 3)")
+        );
+        assert_eq!(
+            readings(ConnectionState::Reconnecting {
+                error: "refused".to_owned(),
+                attempt: 4,
+                retry_at: at(12.),
+                untrusted: None,
+            }),
+            reading(
+                "retry in 12s",
+                "reconnecting",
+                "retrying in 12s (attempt 4): refused"
+            )
+        );
+        assert_eq!(
+            readings(ConnectionState::AuthFailed {
+                message: "401".to_owned()
+            }),
+            reading("login refused", "login refused", "login refused: 401")
+        );
+        assert_eq!(
+            readings(ConnectionState::TlsFailed {
+                url: "https://master-01:5665".to_owned(),
+                message: "pin mismatch".to_owned(),
+                certificate: None,
+            }),
+            reading(
+                "not trusted",
+                "certificate not trusted",
+                "certificate not trusted: pin mismatch"
+            )
+        );
+        assert_eq!(
+            readings(ConnectionState::MissingSecret),
+            reading("no password", "no password", "no password in the keychain")
+        );
+        assert_eq!(
+            readings(ConnectionState::Misconfigured {
+                message: "bad url".to_owned()
+            }),
+            reading(
+                "invalid settings",
+                "invalid settings",
+                "settings can't work: bad url"
+            )
         );
     }
 

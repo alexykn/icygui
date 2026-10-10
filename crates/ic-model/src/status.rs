@@ -33,10 +33,19 @@ pub struct InstanceStatus {
     pub perfdata_enabled: bool,
     /// Active host and service checks in the last minute.
     pub checks_per_minute: f64,
+    /// Passive host and service check results in the last minute.
+    #[serde(default)]
+    pub passive_checks_per_minute: f64,
     /// Average check latency in seconds.
     pub avg_latency: f64,
+    /// The largest check latency in seconds.
+    #[serde(default)]
+    pub max_latency: f64,
     /// Average check execution time in seconds.
     pub avg_execution_time: f64,
+    /// The longest check execution time in seconds.
+    #[serde(default)]
+    pub max_execution_time: f64,
     /// How many hosts and services Icinga has, by state (`/v1/status/CIB`):
     /// the size of the installation before any object is loaded, and the
     /// state counts quiet mode's stall check compares between polls.
@@ -119,6 +128,130 @@ impl ObjectCounts {
     }
 }
 
+/// A cluster endpoint's numbers as the node icygui talks to sees them
+/// (`Endpoint` attributes `icinga_version`, `last_message_received`,
+/// `messages_received_per_second`, `messages_sent_per_second` and
+/// `connecting`): the cluster health page's endpoint columns (topic 06).
+/// Icinga reports zeros for the node's own endpoint and for an endpoint
+/// it never talked to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EndpointStats {
+    /// Icinga's version as a number (`21506` for 2.15.6); 0 when unknown
+    /// (never connected, or the node itself).
+    pub version: u32,
+    /// When the last message from it arrived; the epoch when none did.
+    pub last_message: Timestamp,
+    /// Messages received from it per second.
+    pub messages_in: f64,
+    /// Messages sent to it per second.
+    pub messages_out: f64,
+    /// A connection to it is being set up.
+    pub connecting: bool,
+}
+
+/// An Icinga version (`2.15.6`), from the number an endpoint reports
+/// (`21506`) or the string `/v1/status` reports (`v2.15.6`,
+/// `r2.14.3-1`).
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct Version {
+    /// Major version.
+    pub major: u32,
+    /// Minor version.
+    pub minor: u32,
+    /// Patch level.
+    pub patch: u32,
+}
+
+impl Version {
+    /// The version an endpoint's `icinga_version` names (`21506` is
+    /// 2.15.6: major × 10 000 + minor × 100 + patch); `None` for 0.
+    #[must_use]
+    pub fn from_number(number: u32) -> Option<Self> {
+        (number > 0).then_some(Self {
+            major: number / 10_000,
+            minor: number / 100 % 100,
+            patch: number % 100,
+        })
+    }
+
+    /// The version in Icinga's version string (`v2.15.6`, `r2.14.3-1`,
+    /// `2.15.0-12-gabcdef`): the first three numbers after an optional
+    /// `v` or `r`.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim().trim_start_matches(['v', 'r']);
+        let core = text.split(['-', ' ', '+']).next()?;
+        let mut parts = core.split('.').map(str::parse::<u32>);
+        let major = parts.next()?.ok()?;
+        let minor = parts.next()?.ok()?;
+        let patch = parts.next().and_then(Result::ok).unwrap_or(0);
+        Some(Self {
+            major,
+            minor,
+            patch,
+        })
+    }
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// What `/v1/status/ApiListener` reports about the node's cluster and API
+/// connections and its JSON-RPC queues (Icinga 2.15 reports no length for
+/// the work queue, only its rate).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ListenerStatus {
+    /// Open HTTP (API) connections (`api.http.clients`).
+    pub http_clients: u32,
+    /// Endpoints the node should be connected to (its own zone, the
+    /// parent zone and the child zones; `num_endpoints`).
+    pub endpoints: u32,
+    /// Those it is connected to (`num_conn_endpoints`).
+    pub connected_endpoints: u32,
+    /// Messages waiting to be relayed to other zones
+    /// (`json_rpc.relay_queue_items`).
+    pub relay_queue: f64,
+    /// Messages relayed per second over the last minute
+    /// (`json_rpc.relay_queue_item_rate`).
+    pub relay_rate: f64,
+    /// Configuration sync messages waiting (`json_rpc.sync_queue_items`).
+    pub sync_queue: f64,
+    /// JSON-RPC messages processed per second over the last minute
+    /// (`json_rpc.work_queue_item_rate`).
+    pub work_queue_rate: f64,
+}
+
+/// Whether one of the node's features runs (its object exists: the
+/// feature is enabled), and whether it is paused there: a feature with
+/// high availability runs on one master of a zone at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FeatureState {
+    /// Not enabled on this node.
+    Off,
+    /// Enabled and running here.
+    Running,
+    /// Enabled, but paused here (another master of the zone runs it).
+    Paused,
+}
+
+/// The features of the node icygui talks to that its cluster health
+/// page shows (`CheckerComponent`, `NotificationComponent` and `IcingaDB`
+/// objects); `None` where the API user may not read them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NodeFeatures {
+    /// The checker (`checker` feature).
+    pub checker: Option<FeatureState>,
+    /// Notifications (`notification` feature).
+    pub notification: Option<FeatureState>,
+    /// The `IcingaDB` writer (`icingadb` feature; icygui never reads it).
+    pub icingadb: Option<FeatureState>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +264,23 @@ mod tests {
         assert_eq!(index(ServiceState::Critical), 2);
         assert_eq!(index(ServiceState::Unknown), 3);
         assert_eq!(index(ServiceState::Pending), 3);
+    }
+
+    #[test]
+    fn versions_read_like_icinga_writes_them() {
+        let v = |major, minor, patch| Version {
+            major,
+            minor,
+            patch,
+        };
+        assert_eq!(Version::from_number(21506), Some(v(2, 15, 6)));
+        assert_eq!(Version::from_number(0), None);
+        assert_eq!(Version::parse("v2.15.6"), Some(v(2, 15, 6)));
+        assert_eq!(Version::parse("r2.14.3-1"), Some(v(2, 14, 3)));
+        assert_eq!(Version::parse("2.15.0-12-gabcdef"), Some(v(2, 15, 0)));
+        assert_eq!(Version::parse("v2.16"), Some(v(2, 16, 0)));
+        assert_eq!(Version::parse(""), None);
+        assert!(v(2, 14, 2) < v(2, 14, 3));
+        assert_eq!(v(2, 14, 3).to_string(), "2.14.3");
     }
 }

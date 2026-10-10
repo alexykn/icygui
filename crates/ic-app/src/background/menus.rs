@@ -21,7 +21,7 @@ use ic_ui_kit::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
 
 use super::window;
 use crate::actions::{OpenNotifications, OpenSettings, Quit, ShowAbout, ShowWindow};
-use crate::settings::SettingsTab;
+use crate::settings::SettingsPage;
 use crate::workspace::{ToggleCommandPalette, ToggleSidebar};
 
 /// Hides the app (macOS).
@@ -123,7 +123,7 @@ pub(crate) fn install(cx: &mut App) {
     });
     cx.on_action(|_: &OpenSettings, cx: &mut App| {
         window::with_workspace(cx, |workspace, window, cx| {
-            workspace.open_settings(SettingsTab::General, None, window, cx);
+            workspace.open_settings(SettingsPage::General, None, window, cx);
         });
     });
     cx.on_action(|_: &ShowAbout, cx: &mut App| {

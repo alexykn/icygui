@@ -5,6 +5,10 @@
 //! configured with builders; colours and sizes come from the active
 //! [`Theme`]. Text input comes from gpui-component, restyled to the theme.
 //!
+//! Lengths are written in the design's pixels with [`px`], which scales
+//! them to the interface size of the active theme; [`gpui::px`] is for real
+//! pixels only (window geometry, hairline rules).
+//!
 //! Call [`init`] once at startup and pass [`Assets`] to
 //! `Application::with_assets`, then wrap each window's root view in [`Root`].
 
@@ -13,23 +17,26 @@ mod component_theme;
 mod components;
 mod fonts;
 mod icon;
+mod scale;
 mod theme;
 
 pub use assets::Assets;
 pub use components::{
     Banner, BannerTone, Button, ButtonColors, ButtonVariant, CHIP_HEIGHT, Chip, CircleSize,
     CodeBlock, CompactRow, DialogBody, Dismissable, Dismissal, Divider, DividerColor, EmptyState,
-    Field, FieldTone, GlyphButton, IconButton, ItemAction, KeyHint, KvTable, Link, LinkStyle,
-    ListRow, Menu, MenuItem, Modal, ModalPlacement, NoteEntry, Paint, PaneHeader, PerfdataRow,
-    PerfdataTable, Popover, ProgressBar, RowEmphasis, SUB_TAB_GAP, SectionLabel, Segmented,
-    StateCircle, StateDot, SubTabs, SummaryBar, SummaryItem, Switch, TOAST_WIDTH, TextArea,
-    TextField, Toast, ToastTone, Tooltip, TreeLine, TreeTable, chip_width, sub_tab_width,
+    Field, FieldTone, FloatKind, GlyphButton, IconButton, ItemAction, KeyHint, KvTable, Link,
+    LinkStyle, ListRow, Menu, MenuItem, Modal, ModalPlacement, NoteEntry, ObjectMark, Paint,
+    PaneBanner, PaneBannerTone, PaneHeader, PerfdataRow, PerfdataTable, Placed, Popover,
+    ProgressBar, RowEmphasis, SectionLabel, Segmented, Select, StateCircle, StateDot, SubTabs,
+    SummaryBar, SummaryItem, Switch, TOAST_WIDTH, TextArea, TextField, Toast, ToastTone, Tooltip,
+    TooltipPlacement, TreeLine, TreeTable, chip_width, last_placed, sub_tab_gap, sub_tab_width,
 };
 pub use fonts::FontError;
 pub use icon::{Icon, IconName};
+pub use scale::{px, scale};
 pub use theme::{
-    ActiveTheme, CHAR_WIDTH, Colors, FONT_FAMILY, LINE_HEIGHT, Metrics, StateColors, TextSizes,
-    Theme,
+    ActiveTheme, CHAR_WIDTH, Colors, Density, FONT_FAMILY, LINE_HEIGHT, Metrics, StateColors,
+    StateShades, TextSizes, Theme, ThemeMode, contrast_ratio,
 };
 
 /// gpui-component's window root: hosts its overlays and, on Linux with
@@ -41,6 +48,9 @@ pub use gpui_component::Root;
 /// `Scrollbar::vertical(&scroll_handle)` works with GPUI's `ScrollHandle`
 /// and `UniformListScrollHandle`.
 pub use gpui_component::scroll::Scrollbar;
+/// When a [`Scrollbar`] shows: `Always` for a box whose hidden rows must
+/// be obvious (a dialog's target list), else while scrolling.
+pub use gpui_component::scroll::ScrollbarMode;
 
 /// Text input state and events, for [`TextField`].
 pub mod input {
@@ -71,9 +81,11 @@ pub fn init(cx: &mut App) -> Result<(), FontError> {
 }
 
 /// Makes `theme` the active theme, for our components and gpui-component's,
-/// and redraws every window.
+/// with its interface size for the lengths views draw ([`px`]), and redraws
+/// every window.
 pub fn set_theme(theme: Theme, cx: &mut App) {
     component_theme::apply(&theme, cx);
+    scale::set_scale(theme.scale);
     cx.set_global(theme);
     cx.refresh_windows();
 }

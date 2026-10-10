@@ -1,0 +1,2101 @@
+# icygui v1 mock-ups: handoff
+
+HTML/CSS mock-ups for every visual change in v1 (PLAN.md §4.2), in the medium
+of the original design session (`design/project/`) and drawn to look like the
+rc1 app as built (`docs/screenshots/`, `crates/ic-ui-kit`).
+
+**Status.** The user reviewed every topic on 2026-10-07 (PLAN.md §4.2,
+*Mock-up review*) and approved all of them, some with revisions. The
+revisions are drawn here and the user accepted them the same day. Each section
+below gives the topic's status, what its frames show and the decisions to
+build. Where a decision is in this file and not drawn, the section says so.
+The open questions from the review are settled; nothing here waits for an
+answer.
+
+## Files
+
+- `v1.css`: the tokens of `crates/ic-ui-kit/src/theme.rs` as CSS variables
+  (dark, and the light theme of topic 03), and the ic-ui-kit components as
+  classes. Values that v1 adds to the theme are marked `NEW`.
+- `v1.js`: the app's building blocks as HTML helpers (the host band, `hostBand` and `hostRows`, shared by 10 and 15; sidebar, list rows, pane
+  title, buttons, menus, dialogs, toasts), named after ic-ui-kit. Every topic
+  draws its chrome through them, so the frames stay consistent.
+- `icons.js`: the Lucide icons the app uses (gpui-component's set), inline;
+  `rows-2` and `rows-4` (the row-density toggle, topic 14) are NEW.
+- `settings.js` (the settings panel, topics 02, 03 and 12) and `views.js`
+  (dashboard views, topics 04, 05 and 12; the view header, the rows toggle,
+  the view's `···` and the editor's rows field, topic 14): parts shared by
+  several topics.
+- `threads.js` (topic 14, round 2): the group band, the entry, the fold of a
+  host's services, the section label, the filter chips and the view header
+  shared by the handling view, the downtimes view and the object's pane.
+- `NN-topic.html`: one page per topic, each a column of 1440×900 frames (the
+  app's default window) with a caption. Open a page in a browser to view it.
+- `00-baseline.html`: rc1's service pane redrawn with the kit, as a check
+  that the kit matches the real app. It is not a proposal.
+- `render.js`: renders every frame to PNG at 2x (`[data-shot]`, plus crops in
+  `data-crops`):
+  `NODE_PATH=…/node_modules node design/v1/render.js OUT_DIR 01-downtimes.html`
+  (needs `playwright-core` and a Chromium; `PLAYWRIGHT_BROWSERS_PATH` or
+  `CHROMIUM`).
+
+Topic 13 draws native Windows parts in Segoe UI; where Segoe UI isn't
+installed, its frames fall back to Open Sans (the renders here used Open Sans
+through a fontconfig file; `render.js` is unchanged).
+
+The wall clock in every frame is Wednesday 7 October 2026, 14:12. The data is
+the demo's prod-cluster. Rendered PNGs are named `NN-topic-x-state.png`, one
+per frame, plus `-zoom` crops of the details.
+
+| # | Topic | Page | Frames | Status |
+|---|---|---|---|---|
+| 01 | Downtimes in the panes | `01-downtimes.html` | 11 (+6 zooms) | approved: variant A, with revisions |
+| 02 | Settings panel | `02-settings.html` | 10 | approved; handled defaults added |
+| 03 | Light theme | `03-light-theme.html` | 5 | approved with revisions |
+| 04 | Multi-view dashboards | `04-multi-view.html` | 6 (+5 zooms, +1 light) | approved; editor selection revised; view controls, header right side and rows per view added (topic 14, round 5) |
+| 05 | Host-group grid | `05-hostgroup-grid.html` | 6 (+3 zooms, +1 light) | approved; editor selection revised |
+| 06 | Cluster health | `06-cluster-health.html` | 3 (+2) | approved; reached from the cluster section (topic 14) |
+| 07 | Comment, downtime and acknowledged lists | `07-comments-downtimes-lists.html` | 7 | revised and approved |
+| 08 | YAML sharing | `08-yaml-sharing.html` | 7 (+1) | approved with revisions |
+| 09 | Filter autocomplete | `09-filter-autocomplete.html` | 7 (+7) | revised and approved |
+| 10 | Palette multi-select | `10-palette-multiselect.html` | 12 (+11) | approved with two changes; combined view rebuilt, hosts page by count |
+| 11 | Read-only config | `11-config-tab.html` | 4 (+4) | approved, both parts |
+| 12 | Notifications: on or off, and when | `12-notification-times.html` | 7 (+4) | design approved; revised for opt-in notifications |
+| 13 | Windows: installer, window, tray, toasts | `13-windows.html` | 14 (+3) | drawn; the open points decided by the coordinator, for the user's review |
+| 14 | Handling and downtimes (comments, acknowledgements, downtimes) | `14-r5-view-kinds.html` (round 5), `14-r4-kinds.html` (4), `14-r3-scopes.html` (3), `14-r2-handling-downtimes.html` (2), `14-comments-acks.html` (1) | 7 (+16 zooms, +7 light) | model approved; round 5 (view kinds, view controls, row density per view, sidebar mark) for review |
+| 15 | Host lists with services; group lists; layouts | `15-host-list-with-services.html` | 12 (+1 compare, +10 zooms, +12 light) | drawn for review |
+| 16 | Knowing when icygui is blind: no live data, heartbeat, health alerts, diagnostics | `16-live-data.html` (+ `health.js`, shared with 06) | 30 (+22 zooms, +16 light) | drawn for review; 17 and the health alerts approved |
+| 17 | Comments written in the handling view | `17-handling-comments.html` | 6 (+4 zooms, +5 light) | approved |
+
+---
+
+## Rules that span the topics
+
+- **Stacked view headers keep their chips inline** (user, 2026-10-07): count chips, the timeline | list switch and the sort stay in the view header when stacked; only secondary settings (only mine, rows, collapse, edit view) go in its `···`. This overrides any frame that moves chips into `···`.
+
+These come from the review and PLAN.md §4.3, and hold in every frame.
+
+- **Hollow circle = handled.** An object whose downtime is in effect counts
+  as handled whatever its state, so every list, the host-group grid and the
+  downtime list draw it as a hollow circle (or square) in its state colour: an
+  OK host in downtime is a hollow green ring. Acknowledged problems are
+  hollow too. A downtime that is not in effect yet keeps the filled circle.
+- **Host-with-services views** (dashboards grouped by host, the palette's
+  combined multi-host view, a grouped-list view on a multi-view dashboard):
+  each host is a slim **group-header band** (36px, `row_header`): its state
+  dot in the rows' mark column, the name, the address and status faint, and
+  the per-state counts on the right. Its services are standard list rows
+  under it, **with no indent**. Every host **collapses**: a chevron at the
+  band's left (at the x of 04's view-header chevron), a click on the chevron
+  only, or ←/→ with the cursor on the band. **The band has two click
+  targets** (user, 2026-10-07): the chevron collapses or expands and does
+  nothing else; a click anywhere else on the band (dot, name, address,
+  status, counts) opens the host in the pane, as Enter does. A collapsed host keeps its band and its counts.
+  Collapsing only changes what shows: summaries, counts, *mark all problems*
+  and ctrl-a still cover every host, and a collapsed host with marked rows
+  gets the marked tint and bar on its band, so no mark is out of sight. This
+  **replaces rc1's grouped-list header** (a full-height host row with a small
+  circle and indented service rows) in every host-with-services view (10h,
+  10j, 10k).
+- **Hosts page by count, not by state** (the rule of rc1's host pane,
+  `HOST_SERVICES_PREVIEW = 7`), in every host-with-services view and in the
+  host pane: a host shows up to 7 service rows, its problems first (worst
+  first, never hidden, even when there are more than 7), then OK services in
+  name order to fill the 7. A `+ N more` row follows (an all-OK host shows
+  its first 7 and `+ 12 more`); a click, Enter or → on it shows the whole host
+  in place (the list is virtualised), and the same slot then reads `− show
+  fewer` (click, Enter or ←), so nothing else moves. While an expanded host
+  scrolls, its band sticks to the top of the list. A click on a host band
+  (anywhere but its chevron) opens the host in the pane; the chevron and ←/→
+  collapse it. Paging
+  and collapsing only change what shows (summaries, counts and *mark all
+  problems* cover every service). rc1's `+ N more ok` becomes `+ N more`.
+- **Handled problems: shown or hidden per kind.** Icinga's *handled* has
+  three parts, and each is its own switch: hide acknowledged, hide in
+  downtime, hide services of hosts that are down. The defaults are in
+  Settings → appearance → *handled problems* (all on, 2c). Every list view
+  follows them unless the dashboard editor sets its own (*handled: as in
+  settings / show / hide*, with the kinds to hide; 4c, 9a–g). The summary
+  bar keeps rc1's place for it, as a button in a fixed, right-aligned slot:
+  `28 hidden · show`, and after a click `28 handled · hide`, saved with the
+  view as rc1's toggle was (2j). On a multi-view dashboard (no summary bar)
+  every list or grouped-list **view header** has the same button **left of
+  its counts**, right-aligned against them (`2 hidden · show` / `2 handled ·
+  hide`, 4a, 4b); a view with nothing handled does not draw it, and its
+  appearing moves nothing on its right (the view-header rule below). Shown handled rows are hollow. Filters
+  on `acknowledged` or `downtime_depth` still work; the switches apply on top.
+- **The per-state counts are unhandled counts**, in the summary bar and in
+  every view header: show and hide never change them (2j keeps `4 critical`
+  after *show*), and they match the sidebar's counts, which are unchanged.
+- **The pane's ×** sits left of `↗ open as tab`, in a fixed slot, on every
+  platform, so it never sits next to a window's close button (topic 13). A
+  pane that is already a tab keeps the tab slot, empty. The combined view's
+  `×` (back to the dashboard) likewise sits left of `↗ pin as tab`.
+- **The view selected in the dashboard editor** is marked on its header
+  only: the 2px accent bar that marks the focused view on a dashboard (4b),
+  plus a faint accent tint on the header (`accent-tint`, 8 % dark, 7 % light).
+  Nothing is drawn around the view's body (no outline or ring).
+- **Selection** is the selected-row background, never a check-mark column.
+  Every list and palette row has a mark in its fixed dot slot. Object labels
+  read `service on host`. The same object never gets two rows.
+- **Nothing moves with state:** fixed slots for hints, badges and marks (the
+  pane's `updating` hint, the sidebar's notification mark, the combined
+  view's bulk bar, the pin slot). **A label that changes width gets a slot
+  sized for its longest value**, and what follows it starts at a fixed x:
+  the import preview's status and choice columns (08), the selection bar's
+  count (`N selected`, 12ch; `N services marked`, 19ch), the palette footer's
+  count, the comment list's kind and detail (07), the bulk bar's problem
+  count (10). Choosing another option changes only the word in its slot.
+  (rc1's selection bar has no fixed count slot yet: its buttons shift when
+  the count gains a digit.)
+- **No trailing "…"** on button, menu or command labels; an ellipsis only
+  where text is cut off, and on progress text.
+- **The operator sees every target** before anything is sent: bulk dialogs
+  and removal confirmations list every object (the box scrolls) and the
+  button counts them.
+- **View controls (every view kind: list, grouped list, host-group grid,
+  summary tiles, event stream, handling, downtimes; topic 14, round 5).**
+  Every view has **one set of controls, and they always live in its view
+  header**. On a one-view dashboard the view header **is** the page header
+  (title and subtitle, then the controls; the summary bar is its second
+  row), so the controls are full and roomy (14-r5-d, 14-r5-f). Stacked on a
+  multi-view dashboard, the **same controls** sit compactly in each view's
+  36px header (14-r5-c, 04). Both forms are the same control with the same
+  value:
+  - **Count chips are the same clickable filters** in both forms (a click
+    filters the view, *all* clears it): handling's *acknowledged, in
+    downtime, upcoming, comments*; downtimes' *in effect, upcoming, from
+    config*. A list's per-state counts and its handled slot are the same in
+    both forms too (summary bar, or the view header's counts with the
+    handled slot left of them).
+  - **Sort is the same in both forms**: the view's own sort menu (4b),
+    **sized to its current word** (the view-header rule below).
+  - **The downtimes view's timeline | list switch** is a segmented control
+    in both forms (compact when stacked, never the plain word). **The mode
+    is saved with the view, like the sort, and it is the same setting as
+    the editor's *opens as*.**
+  - **only mine** (handling and downtimes) is a switch in a one-view header;
+    when space is tight (every stacked header, the editor's narrow preview,
+    beside a pane) it goes into the view's `···`.
+  - **Rows** (list-like views, below) are a two-icon toggle in a one-view
+    header and a group in the view's `···` when stacked.
+  - When a stacked header is narrow, the filter summary is cut first, then
+    the chips drop their words (mark and count stay; the tooltip names
+    them) (14-r5-e).
+- **The view header's right side** (user, 2026-10-07; every view header,
+  stacked or a one-view page header; `viewHeader` in `views.js`). From the
+  right: **`···`, the sort, the counts, the handled slot.** The counts sit
+  next to the sort with **one fixed 16px gap** (the handled slot sits 16px
+  left of the counts); `live` (a stream) sits between the counts and the
+  sort. Handling and downtimes put their filter chips in the counts' place,
+  with the downtimes view's *timeline | list* switch left of them. The
+  filter summary takes the rest of the space on the left and is cut first.
+  - **The sort is sized to its current word**, not to the longest label:
+    changing the sort is the user's own action, so what sits left of it may
+    shift a few characters then. Live state never moves anything.
+  - **The counts keep fixed per-state slots** (critical, warning, unknown,
+    in that order), each a dot and a THREE-digit number slot (orchestrator,
+    2026-10-07: production views reach hundreds, e.g. 427 critical), so a
+    count going from 9 to 427 moves nothing and a state at zero keeps its
+    slot, empty. On a narrow header the filter summary gives way first,
+    then hides. Chips (handling, downtimes) get the same digit slots.
+  - The sort's pressed look while its menu is open never changes its box.
+  - **The handled slot** (`2 hidden · show` / `2 handled · hide`) sits left
+    of the counts, right-aligned against them; with nothing handled it is
+    not drawn (no visible space), and its appearing or disappearing moves
+    nothing on its right.
+  - This replaces round 5's sort slot sized for the kind's longest label
+    (`SORT_CH`, removed), which left the counts floating up to 280px from
+    the sort (5a's *service problems*).
+
+  | Kind | One-view dashboard: page header (and second row) | Stacked: 36px view header | In the view's `···` (stacked) | Editor (the view's settings) |
+  |---|---|---|---|---|
+  | list, grouped list | rows toggle, sort, `···`; second row: per-state counts, handled slot | counts, handled slot, sort, `···` | rows | handled, sort, direction, rows |
+  | list of hosts (15) | hosts as: rows \| with services, rows toggle, sort, `···`; second row: per-state counts, handled slot | counts, handled slot, sort, `···` | hosts as, rows | display (layout), lists, group by, hosts as, sort, rows |
+  | host-group grid | sort, `···`; second row: hosts per worst state | counts, sort, `···` | none | its settings (5e); no rows |
+  | summary tiles | sort, `···`; second row: per-state counts | counts, sort, `···` | none | its settings (04); no rows |
+  | event stream | `live`, rows toggle, sort, `···` | `live`, sort, `···` | rows | events, show, lines, rows |
+  | handling | only mine, rows toggle, sort, `···`; second row: chips all, acknowledged, in downtime, upcoming, comments | chips, sort, `···` | only mine, rows | opens with, sort, rows |
+  | downtimes | timeline \| list, only mine, rows toggle, sort, `···`; second row: chips all, in effect, upcoming, from config | chips, timeline \| list (compact), sort, `···` | only mine, rows | opens as (= the switch), shows, sort, rows |
+
+  **Every header control is remembered with the view** (orchestrator,
+  round 5 follow-up): sort, mode, the chip, *only mine*, rows and the
+  handled show or hide; the editor shows the same values (its *opens with*
+  and *opens as* are the chip and the mode). **A problem list's per-state
+  counts become clickable filter chips too**, like handling's and
+  downtimes' (not drawn yet: the frames still show plain counts).
+  *only mine* and rows are personal and never shared in YAML (topic 08).
+  The rule holds for every one-view list dashboard; frames of older topics
+  predate the rows toggle, and the build follows the rule.
+- **Dropdowns: one system** (user, 2026-10-07; every select and every menu,
+  in every topic; `menu`, `selectOpen` and `anchorMenus` in `v1.js`, the
+  *one dropdown system* block in `v1.css`). Builders follow this spec.
+  - **No descriptions.** An entry is its icon (where the menu has icons) and
+    its name, nothing else: no faint details, no explanatory sentences, no
+    footer line. Section labels are short words (*lists*, *overviews*,
+    *activity*, *rows*, *hosts as*, *sort by*, *move to*). A disabled entry's
+    reason, when it needs one, is the row's tooltip. Fields carry no hint
+    sentence about their dropdown either.
+  - **The item, shared by selects and menus:** 28px high (24px in compact
+    density), a full-width highlight, the text **11px inside the card's
+    outer edge** (1px border + 10px), an optional 13px icon slot, the name
+    (cut with an ellipsis, the whole name in a tooltip), a key hint, and the
+    **check slot at the right**, where it never pushes the text. Section
+    labels at the same inset; dividers full width; a disabled entry in the
+    faint text colour. The card: `element_background`, the window border,
+    6px radius, 4px top and bottom padding.
+  - **Selects** (display, group, sort, rows, sidebar mark, environment,
+    every editor and settings select) **open from the field.** The list is
+    exactly as wide as the field (never wider) and joins its bottom edge:
+    field and list are one shape with a shared 1px accent border, a hairline
+    between them, no gap; the field's bottom corners turn square, the list's
+    bottom corners are rounded, and the shadow falls under the list only.
+    The list has the field's background. The field shows its open state
+    (accent border, chevron flipped). Names start at the field's own 11px
+    text inset, so the current value sits exactly over its own row; it is
+    ticked in the check slot, in the chevron's column. At most 10 rows, then
+    it scrolls (a thin thumb). With no room below it **opens upward**,
+    joined to the field's top edge (4f). Frames: 4f, 14-r5-g, 15f.
+  - **Action menus** (`···`, *add view*, the sidebar's `···`, the footer's
+    +, a header's sort) **hang from their trigger:** 4px below it (above
+    when there is no room), aligned to its edge (right-aligned for a trigger
+    on the right of its row or header, left-aligned otherwise); the trigger
+    is drawn pressed while the menu is open; the width is sized to the
+    longest entry, at least 180px and at most 280px. Same items, paddings,
+    check slot, labels, dividers, key hints and disabled look as selects.
+    Frames: 4b, 4d, 4e, 5f, 8a, 8b, 8d, 12f, 12g, 14-r5-b, 14-r5-c, 15c,
+    15g.
+  - **Not dropdowns:** 09's completion popup (anchored to the word being
+    typed, its own rules), the palette (10), 14-r5-f's icon picker (a
+    popover under its swatch, 4px gap), 06's environment switcher (a status
+    popover) and Windows' native menus (13) keep their own rules; they use
+    the same card.
+- **Row density per view** (topic 14, round 5; decided with the user).
+  Settings → appearance → *row density* is the **default** for every list.
+  Every list-like view (list, grouped list, handling, downtimes as a list
+  **or a timeline** (compact: one line per downtime), event stream) has
+  **rows: as in settings / comfortable / compact**.
+  New views start at *as in settings* and follow the global value until a
+  density is chosen on that view; *follow the default* in the view's `···`
+  removes the choice. **Shared or imported dashboards never carry a
+  density** (topic 08): an imported view is *as in settings*.
+  - **One-view header:** a small two-icon toggle (spacious rows `rows-2`,
+    compact rows `rows-4`, Lucide, NEW in the icon set) in a fixed slot
+    left of the sort. Chosen on the view: that icon is filled, as a
+    segmented control's *on*. Following the settings: the global value's
+    icon has a dashed inset outline (dashed = not set here, as topic 10's
+    preview outline). It works in both of a downtimes view's modes, so it
+    is never dim (14-r5-d, with its tooltip).
+  - **Stacked:** the view's `···` has *rows*: *comfortable*, *compact*,
+    *follow the default* (`settings: comfortable`), with a check on the
+    current one (14-r5-c).
+  - **Editor:** a *rows* field in the view's settings, a dropdown reading
+    **as in settings (comfortable)**, naming the current global value, or
+    *comfortable* or *compact* (14-r5-b, 14-r5-e, 4c, 4e).
+
+---
+
+## 01 Downtimes, very visible in the panes
+
+**Status: approved, variant A, with revisions** (the host dialog, history
+colour and host-only downtimes; accepted).
+
+**Shows** (`01-downtimes.html`): 1a a service in a fixed downtime (variant A,
+chosen); 1b variant B (not chosen, kept for the record); 1c a service in
+downtime with its host; 1d a flexible downtime that hasn't started; 1e a
+downtime scheduled for later on an unhandled problem; 1f a host pane with
+three downtimes; 1g *remove downtime* for a downtime set on the host; 1h the
+list rows (hollow = handled, the tag hint); 1i the host pane's downtime
+dialog with *all services*; 1j a host downtime without *all services*; 1k the
+history tab.
+
+**Decisions**
+
+- **Variant A: a banner under the pane header,** fixed between the header and
+  the scrolling body, so it stays in view while the body scrolls. It is the
+  existing `Banner` in the Info tone (tint at 8 %, a 2px tone bar; the
+  component derives the tint from its tone, so no new token is needed), with
+  a 2px `ProgressBar` on its bottom edge showing how much of the downtime has
+  passed. Lines:
+  1. icon `calendar-clock`, what (`In downtime`, `In downtime with its host`,
+     `Flexible downtime`, `Downtime scheduled`), how long is left or when it
+     starts (accent when in effect), and *remove downtime* on the right;
+  2. the facts: fixed or flexible (a flexible one: `lasts 2h from the first
+     problem` and its window), the window `13:00 → 16:00 today`, and for a
+     host downtime the host as a link and `host and all its services`;
+  3. author, time and the comment, at most two lines (the full text is in
+     the history and the tooltip);
+  4. only when the object has more downtimes: `+ 2 more below · tonight
+     22:00, flexible · Sat 06:00, from config`.
+
+  It replaces today's downtime note in the comments (and hides the
+  downtime's automatic comment, which repeats it). **When a downtime starts
+  while the pane is open, the banner slides in and the body moves down once;
+  the user accepted this one move.**
+- **Tone:** accent (blue) means the downtime is in effect and the object is
+  handled. Grey means scheduled but not in effect yet (flexible and waiting,
+  or in the future), so a problem still counts as unhandled.
+- **Several downtimes:** the banner shows the one in effect (else the next to
+  start). The others are listed in an `other downtimes` section (host pane:
+  above the services; service pane: where the comments are), each with its
+  window, fixed or flexible, status, author and comment, and a remove `×` in
+  a fixed slot that shows on hover. A downtime from the config
+  (`ScheduledDowntime`, `config_owned`) shows a lock instead of the calendar.
+- **Remove:** *remove downtime* always confirms, listing every downtime it
+  removes (the box scrolls). For a downtime set on the host with all
+  services, a segmented choice picks `this service only` or `the host and its
+  23 services`. The danger button counts what it removes, and the dialog says
+  which problems will notify again.
+- **Host pane, *downtime* (d) (1i):** schedules the downtime on the whole
+  host. Today's downtime dialog, with an **`all services` switch on by
+  default** at the top, right above the target box, which lists the host and
+  each of its services (it scrolls). Off, the box lists the host alone and the
+  button says `schedule downtime`. The rest is today's form.
+- **A host downtime without all services (1j):** as in Icinga Web: the
+  services are **not** in downtime (no banner, filled circle, the problem
+  still notifies). The host line under the service's name shows the host's
+  downtime marker (the calendar icon in the accent, `host in downtime until
+  15:00`); the host name opens the host pane with its banner.
+- **History (1k):** `DOWNTIME` lines use the downtime accent (the banner's
+  blue), like acknowledgements, not the unknown purple. `DOWNTIME ENDED`
+  stays faint like the other "ended" lines. The same applies to topic 04's
+  event stream.
+- **List rows (1h):** no new colour or column. Hollow = handled (see the
+  rules above). The tag, in faint text, says more: `downtime 1h 48m` (time
+  left), `host downtime 1h 18m`, `downtime, flexible 1h 12m`, and on an
+  unhandled problem with a later downtime, `downtime at 22:00`. Same slot as
+  `ack m.keller`, so nothing moves.
+
+---
+
+## 02 Settings panel, in the style of Zed's
+
+**Status: approved,** including the extra settings the designer added. The
+notifications page is revised with topic 12 (2d, 2e).
+
+**Shows** (`02-settings.html`, `settings.js`): 2a the panel over the main
+window; 2b general; 2c appearance; 2d notifications (top); 2e notifications
+(scrolled: the default times and which groups and dashboards are on); 2f
+icinga; 2g keymap; 2h advanced; 2i a search for "quiet"; 2j the summary
+bar's handled slot, hiding and after a click on *show*.
+
+**Decisions**
+
+- **A panel inside the main window, not a separate OS window.** It opens
+  over the main window like a large modal (1080×760 in the 1440×900 window,
+  the window dimmed behind it, as behind any modal), with ctrl-, (⌘, on
+  macOS), the app menu or the palette. The main window stays the active
+  window (its traffic lights keep their colours); × at the panel's top right
+  or Esc closes it. It replaces today's 700px two-tab dialog.
+- **Left: navigation.** The panel's top bar holds a search field (no traffic
+  lights; the panel has none). Below it come the categories as sidebar-style
+  rows (30px, an icon in the fixed mark slot, the selected one with the
+  sidebar's active background). Under the open category are its sections on
+  a guide line; the section in view is marked in the accent colour. At the
+  bottom: `focus navbar ctrl-shift-e`.
+- **Right: the page.** A 40px header bar (the page name like a dashboard
+  title, a faint scope such as `for prod-cluster · on this computer only`, the
+  `✓ saved` status and *edit in settings file*). Below it, section labels and
+  one row per setting: name (13px), a one-line description (12px muted,
+  truncated rather than wrapped), and the control right-aligned. Rows are
+  split by the list's row rules. Controls are today's `Switch` (without its
+  label), `Segmented`, `Chip`, the bordered `TextField`, and a dropdown in the
+  editor's style. Rows that depend on a switch above them are indented 20px.
+- **Changes apply at once** (Zed's model): each change is written to
+  settings.toml straight away. Text fields apply on Enter or blur; a bad
+  value shows its problem under the row (critical text) and isn't applied.
+  There is no save or cancel; the header's `✓ saved` confirms the write, and
+  the dashboard behind the panel follows the change. (The demo shows `the
+  demo saves nothing` there instead.)
+- **Categories and contents** (as confirmed by the user):
+  - **General:** keep running in the tray, start at login, quiet mode when
+    hidden; the longer explanations sit in one note under the rows.
+  - **Appearance:** theme (follow system, dark, light), **interface size
+    90 / 100 / 115 %** (small, default, large), row density (comfortable or
+    compact; **the default for every list**, which a view can set for itself,
+    topic 14 round 5: the *lists* section label says so), times in lists (relative or clock), **handled problems** (three
+    switches, all on: hide acknowledged, hide in downtime, hide services of
+    hosts that are down; the defaults for every view, which a view can
+    override in the editor), and a live preview of the databases dashboard. Compact rows are 32px plus the rule, with a 14px
+    circle and the time at the right, and no output line.
+  - **Notifications:** an `environment` dropdown first (rules are per
+    environment), the environment's master switch (off silences every group
+    and dashboard of that environment; it never turns one on), pause, *show
+    plugin output* (the output's first line in desktop notifications; off for
+    shared screens and the lock screen), the default rule, the **default
+    notification times** and the list of groups and dashboards that have
+    notifications on (topic 12), storm control, watched and muted objects.
+  - **Icinga:** reconcile (adaptive or a fixed interval), the event log's
+    retention, the environments with their health dot, a connection summary
+    and a gear that opens today's environment editor, and *add environment*.
+  - **Keymap:** a read-only, filterable table (action, keys, where) with
+    *edit keymap file* in the header.
+  - **Advanced:** the log level, *open folder* for logs and config, about.
+- **Search** filters across categories: the nav dims the categories without a
+  match and counts the matches of the others. The page lists the matching
+  rows under `category · section` headings, with the match in the accent
+  colour (as in the palette). The rows work in place. A section name that
+  matches brings its whole section. rc1's *quiet hours* are now the default
+  notification times, and searching "quiet hours" still finds them.
+- **Notes for building:** key hints are drawn in Linux notation (ctrl-,);
+  macOS shows ⌘, and ⌘⇧E. The nav uses Lucide icons from gpui-component's
+  set: `settings`, `sun-moon`, `bell`, `server`, `keyboard`, `wrench`, plus
+  `file-code` and `folder-open` on buttons.
+
+---
+
+## 03 Light theme
+
+**Status: approved with two revisions** (a fill shade and a text shade per
+state colour; a slightly grey sidebar), drawn and accepted.
+
+**Shows** (`03-light-theme.html`): 3a the main window (sidebar, overview
+dashboard, service pane, footer with an unread badge); 3b every row state,
+marked rows with the selection bar, and topic 01's banner in a host pane
+(hollow = handled); 3c the palette over the dimmed window; 3d Settings →
+appearance with *light* chosen; 3e a component sheet, dark beside light.
+
+**Decisions**
+
+- `Theme::light()` has the same fields as `Theme::dark()`. Every value is in
+  `v1.css` under `.light`. Its structure copies dark: the window is white
+  (`#ffffff`), the pane is a band off it (`#f7f8f9`), code blocks a band
+  further (`#f2f4f6`). Rules are light greys (`#d5d9dd` window, `#dfe2e6`
+  splits, `#e3e6e9` headers, `#eef0f2` rows).
+- **The sidebar is slightly grey** (`#f4f5f7`), with its active rows a step
+  darker, as in Zed's light themes.
+- **Text keeps the dark theme's contrast steps:** muted `#687077` is about
+  5:1 and faint `#899097` about 3.2:1 on white. Strong and body text are
+  near-black greys, never pure black.
+- **Two shades per state colour** (new theme fields; in dark both shades are
+  the same value):
+  - **fill**, for circles, dots, bars and grid squares: ok `#34a058`, warning
+    `#e0a020`, critical `#e04848`, unknown `#9a68dc`; pending `#c5cacf`;
+  - **text**, for words and numbers in a state colour (`CRIT`, `late 3m`,
+    perfdata values, KIND in the history), 5:1 or more on white: ok
+    `#237a3f`, warning `#9a6200`, critical `#c03535`, unknown `#7a4cbc`.
+- **Accent** `#2f74c0` (on-accent text white). **Selection** is tinted
+  towards the accent, as in dark: selected row `#e3ebf4`, marked row `#dbe8f7`
+  with the 2px accent bar, hover `#f4f6f8`.
+- **Shadows and backdrop** are softer: the modal backdrop is a light grey veil
+  (`rgba(30,36,42,.28)`) instead of near-black. The traffic lights keep their
+  colours.
+- *follow system* (the default) switches live with the desktop's appearance.
+  The tray icon follows the desktop, not this setting.
+- **Row density** (appearance, built with this topic in stage 1) becomes the
+  **default** for every list (topic 14, round 5, decided with the user): a
+  list-like view follows it until a density is chosen on that view (its
+  header's toggle, its `···` or the editor's *rows*); *follow the default*
+  removes the choice; the editor names the global value (*as in settings
+  (comfortable)*); shared or imported dashboards never carry a density. The
+  appearance page's *lists* label says it (2c, 3d). See *Row density per
+  view* in the rules above.
+
+---
+
+## 04 Multi-view dashboards
+
+**Status: approved.** The marking of the selected view in the editor was
+revised on 2026-10-07 at the user's request (no more accent ring).
+
+**Shows** (`04-multi-view.html`, `views.js`): 4a the databases dashboard
+with four views (summary tiles, a list, an empty view, an event stream);
+4b a collapsed view, the cursor in the stream, the pane open and a view's own
+sort menu; 4c the editor managing views; 4d *add view*; 4e a view's `···`
+and the settings of an event stream view; 4f an editor select open (the
+sort, opening upward; the dropdown rules). Topic 14 round 5 adds, here: the
+view header's right side (counts next to the sort, the handled slot left of
+them; 4a, 4b) and the *rows* field in
+the list and stream settings (4c, 4e); and in 14-r5-c a view header's `···`
+open (*only mine*, *rows*).
+
+**Decisions**
+
+- **A dashboard is a list of views stacked on one page,** which scrolls as a
+  whole (each view sizes to its content; a long list virtualises inside the
+  page's scroll). A single-view dashboard stays exactly as in rc1 (header and
+  summary bar), so existing dashboards don't change.
+- **The dashboard header** keeps the title; its subtitle says `4 views`, and
+  sort moves into the views. **There is no dashboard-wide summary bar:** each
+  view header carries its own counts.
+- **Counting:** every view whose objects are problems counts toward the
+  sidebar's count and dot and toward notifications, each object once even
+  when several views show it. A view header's counts are unhandled counts.
+  Handling, downtimes and event-stream views never count and never notify.
+- **View kinds (topic 14, round 5):** list, grouped list, host-group grid,
+  summary tiles, and, not counted, event stream, **handling** and
+  **downtimes** (topic 14's threads and timeline, each with its own filter).
+  *New dashboard* opens the editor at once with **one empty list view**
+  (no presets, no preset filters; user, 2026-10-07); a view's kind is its
+  *display*, changed there or chosen in *add view*, which lists the kinds.
+- **Sidebar rule:** a dashboard with a problem view shows its worst state's
+  dot and its problem count; a dashboard with only handling, downtimes or
+  event views shows its first view's kind icon and that view's count
+  (objects being handled, downtimes in effect, none for events). The mark is
+  a **setting of the dashboard** (*sidebar mark*: state or icon, topic 14
+  round 5, 14-r5-e to g); the above are its defaults, and the count slot
+  never changes with it.
+- **View controls and row density** follow the rules at the top of this
+  file: one set of controls per view, in its view header (roomy on a
+  one-view dashboard, compact when stacked); *only mine* and *rows* in the
+  view's `···` when stacked; the right side of the header as in *the view
+  header's right side* (the counts next to the sort).
+- **A view header's `···`** (on the dashboard, 14-r5-c): *only mine*
+  (handling, downtimes), then *rows* (comfortable, compact, follow the
+  default), then *collapse* (←) and *edit view* (opens the editor with the
+  view selected). The editor's views list has its own `···` (4e).
+- **The view header** is 36px (the summary bar's height) on the pane surface
+  (`pane_background`), so it reads as a band between views and differs from
+  a grouped list's group-header bands (`row_header`, darker). From the
+  left: a collapse chevron, the display's icon (in the mark slot), the name
+  (13px medium), the filter (faint, takes the rest and is cut first). From
+  the right: `···`, the view's own sort (sized to its word), 16px, the
+  counts (fixed per-state slots; handling and downtimes: their filter chips,
+  the downtimes view's compact *timeline | list* switch left of them),
+  16px, the handled slot (lists); `live` for a stream before the sort.
+- **Empty view:** only the header, with `nothing to show` in place of the
+  counts. There is no body and no empty box.
+- **Keyboard:** one cursor for the whole page. j/k move through the rows and
+  continue into the next view (they skip collapsed views); Tab and shift-Tab
+  jump to the first row of the next or previous view. The view holding the
+  cursor has a 2px accent bar on its header and its name in strong text.
+  **←/→ on a view header collapse and expand it** (a click on the chevron
+  too); a collapsed view keeps its header and counts. ctrl-a marks the rows of
+  the focused view only. Enter on an event opens its object in the pane.
+- **Summary tiles:** one tile per host group (or custom var value): the worst
+  state's dot in the mark slot, the name, the host count, a stacked 6px bar
+  and the counts in state colours. A click filters the page to that group
+  (as on the grid, 5c).
+- **Event stream:** the history tab's line format (time, dot, KIND in the
+  state colour, `service on host`, the note) from the local event log,
+  filtered by the view's filter, newest first, with `N lines` before it
+  scrolls. Acks and downtimes are in the accent colour (topic 01).
+- **Inspector layout (every editor frame, topic 14 round 5):** one left
+  and one right edge for every row: the dashboard's *name* (full width);
+  *sidebar mark* | *group* (two columns, 12px apart); *views*, whose rows
+  are field boxes (the same edges, 32px height, 6px radius and 11px text
+  inset as an input; the selected row has the selected-row background) with
+  *add view* as the list's last row, its + under the handles; then the
+  selected view's settings, starting with **view name** (its label says
+  *view 2 of 4*; there is no separate title row). Every control's text
+  starts 11px inside its box (inputs, dropdowns, filters, view rows); fields
+  are 12px apart. 4c and 4d are 960px tall and 5e 1000px, so the whole
+  inspector shows (`-inspector-zoom` crops).
+- **Editor:** the inspector (372px, as today) gets a `views` list. Each row
+  has a drag handle, the display icon, the name, what it matches, and `···`
+  (move up/down with alt-↑↓, duplicate, collapse by default, remove).
+  `+ add view` asks for the layout first (topic 15's layouts, in the
+  sections lists, overviews, activity; icon and name only, the dropdown
+  rules, 4d); every view's filter field has *copy
+  filter from* at its top right (topic 09, 14-r4-e); the new view starts from the
+  dashboard's filter and goes under the selected one. Below a rule come the
+  selected view's settings, which depend on its display (display and lists
+  share a row). A list view's **handled** field: *as in settings* (the
+  default; a dim row shows the kinds the settings hide), *show* (a faint
+  line: every handled problem shows, hollow) or *hide* (the kinds to hide as
+  chips: acknowledged, in downtime, host down); the kinds row is always
+  there, so nothing below it moves (4c; 9a–g show *show*).
+  Every list-like view (list, grouped list, event stream, handling,
+  downtimes) also has a **rows** field: *as in settings (comfortable)*,
+  naming the current global value (new views start there), *comfortable*
+  or *compact* (4c, 4e; topic 14 round 5).
+- **The handled button in the view header** (4a, 4b): a multi-view dashboard
+  has no summary bar, so each list or grouped-list view header has the
+  button left of its counts, right-aligned against them, with the summary
+  bar's wording and
+  behaviour: `2 hidden · show`, and after a click `2 handled · hide` with the
+  handled rows shown hollow (4b); the choice is saved with the view. The
+  counts beside it are unhandled counts and don't change. A view with
+  nothing handled (replication lag) draws nothing there. Tiles, grid and
+  stream views have no handled button. In 4b the pane is 560px, so the
+  header keeps its counts, the button, the sort and `···`; the filter
+  summary is cut first. The preview on the
+  left shows the whole dashboard. **The selected view is marked on its header
+  only: the focus bar plus a faint accent tint, nothing around its body**
+  (4c, 4d, 4e; class `.vh.picked` in `v1.css`). Clicking a view in the
+  preview selects it in the inspector. Removing a view needs no confirmation
+  (the editor's *discard* undoes it).
+
+---
+
+## 05 Host-group grid
+
+**Status: approved,** with hollow squares for hosts in downtime (accepted)
+and the editor's selection revised as in 04.
+
+**Shows** (`05-hostgroup-grid.html`): 5a squares, the default, as a view
+above a list; 5b hover, the keyboard cursor and the host pane; 5c a click on
+a group filters the page; 5d labelled cells, the other option; 5e the view's
+settings in the editor; 5f the grid view's `···` open (an action menu, the dropdown rules).
+
+**Decisions**
+
+- **A square per host** (12px, 3px gaps), grouped by host group in columns
+  (three at full width, two beside the pane), worst groups first. Colour =
+  the host's worst state, its own or its worst service's (or the host only, a
+  setting). **Healthy hosts are dim green** (ok at about 32 %, 38 % in light),
+  so the few problems stand out. Problems are full colour; **handled hosts are
+  hollow** (2px inset ring in the state colour): acknowledged, or in downtime
+  whatever the state, so an OK host in downtime is a hollow green square.
+  Pending is the pending grey.
+- **Group header:** the worst unhandled state's dot (mark slot), the name,
+  the host count (faint), and how many hosts are in each problem state (dot
+  and number: critical, warning, unknown).
+- **Interaction:** hover shows a tooltip (host, state, problem count, worst
+  service and its output's first line). Arrows move a cursor (2px accent
+  outline) and Enter or a click on a square filters the whole page to
+  that HOST (chip `host db-prod-03 ×`, same temporary filter as a group's,
+  user 2026-10-07) and opens its host pane. A click on a group's
+  name filters the whole page to that group: the group gets an accent ring,
+  the others dim to 35 %, the other views show only that group, and the
+  dashboard header shows a `host group edge-ams ×` chip (the filled chip
+  style). The filter is temporary: Esc or × clears it, and it is never saved.
+- **Squares or labelled cells is an option of the view** in the editor
+  (`hosts as: squares | labelled cells`, **squares by default**), not a
+  separate display. Cells: one per host (its state dot and name; a problem
+  cell is filled and names its worst service, cut off with an ellipsis).
+- **Settings (5e):** group by host group (all, or picked ones) or by a custom
+  var (`host.vars.site`), an optional filter, colour by `worst of host and
+  services` or `host only`, squares or cells, `hide groups where every host
+  is ok`, and whether a host in several groups shows in each. The selected
+  view is marked on its header as in 04.
+
+---
+
+## 06 Cluster health
+
+**Status: approved.**
+
+**Shows** (`06-cluster-health.html`): 6a the entries (the sidebar's
+cluster section and the footer switcher); 6b the page, healthy; 6c the page
+with a satellite gone.
+
+**Decisions**
+
+- **One page per environment.** It is reached from *health*, the last
+  entry of the sidebar's fixed **cluster** section at the top (topic 14:
+  handling, downtimes, events, health), with the cluster's state dot in the
+  mark slot and no count; also from a `cluster health` row under the nodes in
+  the footer switcher (a heart-pulse icon in the mark slot, a faint `zones,
+  queues, checks/min` hint) and *cluster health* in the palette. All open
+  the same page, `cluster health · prod-cluster`; it is not a tab in the
+  `open` section (6a shows the switcher's row and the sidebar entry, 6b and
+  6c the page with *health* selected; its dot turns critical in 6c). It is a
+  page, not a modal, so it can stay open on a second screen.
+- **Header:** `cluster health · prod-cluster · seen from master-01`, then
+  `updated 12s ago · every 30s`. The summary bar counts connected and
+  disconnected endpoints and ends with Icinga's version and uptime.
+- **Zones and endpoints:** zones as group-header bands (the worst endpoint's
+  dot, the name in semibold, its parent, endpoint and host counts) with their
+  endpoints under them. Columns: state dot, endpoint, zone, version, last
+  message, messages in and out per second, status. The node icygui is
+  connected to has the selected-row background and `this node`. Global zones
+  are a faint line at the end. A version older than the masters' says so.
+  The numbers come from the endpoint objects the connected node reports;
+  **clicking a node makes no extra request.**
+- **Numbers from /v1/status** as stat tiles (label, value, what it counts,
+  and a **trend line**: the last 30 minutes of the existing 30-second status
+  poll, kept in memory only and lost on restart; faint, with the latest point
+  in the accent). Checks: active and passive checks per minute, average
+  latency, average execution time, pending, late (from icygui's own
+  late-check tracking). Queues and connections: API work queue, relay queue,
+  cluster connections, HTTP clients, uptime. A value turns warning or
+  critical only when it is wrong, always next to its label. **The IcingaDB
+  tile shows only when Icinga reports the IcingaDB feature as enabled**;
+  icygui never uses IcingaDB, and without it uptime takes the slot.
+- **Icinga's global switches** (`enable_notifications`, active checks, event
+  handlers, flap detection, performance data) are read-only: green `on`, or
+  warning `off`.
+- **Degraded (6c):** the endpoint and its zone turn critical. A critical
+  banner says what it means for monitoring (`zone fra's results are stale ·
+  1,204 checks late · relay queue growing`), with a link to the late checks,
+  and the affected tiles colour themselves. The tab's dot and the switcher's
+  node dot follow.
+- **Cost:** none while the page is closed. It reads the status poll and the
+  endpoints and zones icygui already loads. In quiet mode the poll runs every
+  5 minutes, and the page says `quiet: every 5 min`.
+
+---
+
+## 07 Lists of every downtime, comment and acknowledgement
+
+**Status: revised and approved.**
+
+**Shows** (`07-comments-downtimes-lists.html`): 7a every downtime, in two
+sections; 7b three marked, with the selection bar and the pane; 7c the bulk
+removal confirmation; 7d every comment, four marked (an acknowledgement
+skipped); 7e the downtime list with *only mine* on; 7f the acknowledged
+list, three marked; 7g the remove-acknowledgements confirmation.
+
+**Decisions**
+
+- **Three lists across all objects:** downtimes, comments and **acknowledged**
+  problems, all in the same style. They open from the palette as tabs in the
+  sidebar's `open` section only (icon in the mark slot, a count). There are
+  no sidebar dashboards or dashboard views for them, and **no "my downtimes"
+  entry** in the sidebar.
+- **"only mine"** is a `Switch` in each list header, before the sort. It keeps
+  what the environment's author (by default the API user) set, and the
+  subtitle says so (`prod-cluster · set by j.berg`). The summary bar's end
+  counts what it hides.
+- **The state circle shows the downtime:** hollow while it is in effect,
+  whatever the state (rules above). Upcoming and not-started downtimes keep
+  the object's normal circle. Acknowledged problems are always hollow.
+- **Running and upcoming downtimes are separated inline** by section headers
+  in the list, not only by sort order: `in effect · 4` (`handled now · ending
+  soonest first`) and `upcoming · 6` (`not in effect yet · starting soonest
+  first`), in the style of the grouped list's group-header bands (`row_header`,
+  an icon in the mark slot, semibold name). Flexible downtimes that haven't
+  started belong to *upcoming*. **Default sort: ends soonest.**
+- **Rows** are today's list rows. Downtimes: the window and the comment on the
+  second line; in the tag, a 56px progress line and the time left (accent), or
+  `not started`, `in 7h 48m`, `by 22:00`. **Config downtimes** have a lock in
+  the progress slot and `from config`, and **can't be removed**. A host
+  downtime with `all_services` is one row (`+ 18 services`, unfolds on → or a
+  click). Comments: `author time · text`; the tag has two fixed,
+  left-aligned slots: the kind with its icon (`✓ acknowledgement` or
+  `comment`) and the detail (`sticky`, `expires Fri 12:00`), so the icons
+  line up. Downtime and flapping comments are left out (the summary bar says
+  so). Acknowledged: `who time, how long ago · comment`, and
+  in the tag fixed slots for `sticky` (or empty) and the expiry (`expires Thu
+  08:00`, `no expiry`).
+- **Selection** works as in every list; the selection bar has this list's
+  actions: `remove downtimes ⌫`, `remove comments ⌫` or `remove
+  acknowledgements ⌫` (primary), `copy names`, and `···`. Its count sits in
+  a fixed slot, so the buttons never move.
+- **Every removal confirms** (bulk removal), listing every target: downtimes
+  grouped by the downtime they belong to (a host downtime lists the host and
+  each service), comments with author and time, acknowledgements with who,
+  sticky and expiry. The dialog says what follows (the problems notify again
+  and count as unhandled; acknowledgement comments go unless persistent),
+  lists what it skips with the reason (acknowledgement comments: remove the
+  acknowledgement; config downtimes), and the danger button counts.
+
+---
+
+## 08 Sharing dashboards as YAML through the clipboard
+
+**Status: approved,** with the clash defaults and the notification rule
+below (accepted). The menus in 8a and 8b carry topic 12's notifications row.
+
+**Shows** (`08-yaml-sharing.html`): 8a *copy as YAML* in the dashboard's
+`···`; 8b *copy group as YAML* in the group's `···` and the toast; 8c the
+palette; 8d *paste dashboards* in another icygui (staging); 8e the import
+preview with clashes; 8f a broken paste; 8g a clashing group selected.
+
+**Decisions**
+
+- **Copy:** `copy as YAML`, **ctrl-shift-c** on the selected dashboard, after
+  `duplicate` in the dashboard menu, with `export to file` under it. In the
+  group menu, `copy group as YAML` above `export group to file` (today's
+  `export group`). The palette has `Copy as YAML · <dashboard>` (state dot),
+  `Copy group as YAML · <group>` (folder icon), `Paste dashboards` and
+  `Export all dashboards`, found by "yaml", "copy" or "share".
+- **Toast** (OK tone, check): `Copied overview as YAML`, `4 dashboards · 7
+  views · 112 lines`, `Paste with ctrl-v on a sidebar.` The clipboard is the
+  only place the text goes.
+- **Format:** `format: icygui-dashboards`, `version: 2`, a comment saying
+  where and when it was copied, then `groups → dashboards → views`. Each view
+  carries its display, lists, filter (folded `>-` when long), sort and the
+  display's own settings. Environment names, ids and secrets are never in it.
+  The exported file uses the same YAML; rc1's TOML exports still import. The
+  settings file stays TOML.
+- **Notification settings are never part of a shared dashboard:** not
+  exported, not imported, and the preview asks nothing about them. Imported
+  groups and dashboards arrive with notifications **off** (topic 12:
+  notifications are opt-in), and use this icygui's default times once
+  someone turns them on.
+- **Paste:** ctrl-v while the sidebar has the keyboard, `paste dashboards` in
+  the footer's + menu, or the palette. It **always opens the preview**, never
+  imports straight away.
+- **Import preview** (a 1040px dialog): on the left, what the YAML holds as a
+  tree (groups with a folder icon, dashboards with a dot and view count),
+  each with its status and choice on the right **in two fixed-width,
+  left-aligned columns**: the status (`new` in the OK colour, `exists here`
+  or `name taken` in the warning colour), sized for `exists here`, then the
+  choice (`· merge`, `· keep both`, `· replace`, `· skip`, faint), sized for
+  `· keep both`; `new` rows leave the choice column empty. Switching a choice
+  changes only its word; nothing else moves. The selected row opens a detail with the choice, what it leads to
+  (`imported as databases 2`), and what doesn't fit this environment (host
+  groups that don't exist here). **A clashing dashboard name defaults to
+  keep both** (or replace, skip). **A clashing group defaults to merge** (its
+  dashboards go into the group already here, each clashing dashboard with its
+  own choice), **with keep both offered** (a new group `overview 2`) (8g).
+  Below: the format check (`version 2 · all 7 filters parse`). On the right,
+  the YAML read-only, with the selected row's lines marked in the accent. The
+  button counts what will be imported (`import 3 dashboards`); undo with
+  ctrl-z.
+- **Broken paste (8f):** the dialog shows the YAML around the problem, with
+  the line marked critical and the character underlined (the filter field's
+  error style from topic 09), plus `line 10, column 42: …` and where it is.
+  It imports nothing. A newer format version says *update icygui to import
+  this*; unknown fields are listed and ignored. Text that isn't icygui YAML
+  at all only gets a toast.
+- **Row density and *only mine* are never shared** (topic 14 round 5,
+  decided with the user and the orchestrator): they are personal, so copied
+  or exported YAML leaves them out, and an imported view follows the
+  importer's settings (*as in settings*, *only mine* off). The rest of a
+  view's remembered controls (sort, mode, chip, handled) travel with it, and
+  so does the dashboard's **sidebar mark**.
+
+---
+
+## 09 Filter autocomplete, in the style of Zed
+
+**Status: revised and approved** (a smaller popup under the word being
+typed, never outside the field; syntax colouring and fuzzy matching
+approved).
+
+**Shows** (`09-filter-autocomplete.html`, each frame with a zoomed crop):
+9a attributes after `host.`; 9b custom variables after `host.vars.`; 9c
+values inside a string; 9d functions; 9e signature help inside a call; 9f
+hover help; 9g a parse error.
+
+**Decisions**
+
+- **The popup** is the app's menu card (element background, window border,
+  the menus' shadow) at the menu's text size: 272px wide, 24px rows, **8 rows
+  visible** with a thin scroll thumb when there are more. A kind icon in the
+  mark slot (`T` string, `#` number, `[]` array, `{}` dictionary, a toggle for
+  bool, a square-function for functions, a quote for values, `(x)` for custom
+  variables), the label with the fuzzy-matched characters in the accent
+  colour, faint extras (values in use), and the type or count right-aligned.
+  The selected row has the selected-row background.
+- **Placement:** right under the line being typed, its left edge at the
+  column where the word being completed starts, or at the field's inner left
+  edge when it wouldn't fit there. **It never sticks out of the field on the
+  left.**
+- **Info cards sit to the left, never over the field** (the user's rule):
+  the documentation card (as wide as the list) always sits **left of the
+  completion list, top-aligned with it**. Every other info card follows the
+  same rule: the signature help inside a call (9e) sits left of the list,
+  top-aligned with it; with no list open, hover help (9f) and an error's
+  message (9g) sit **left of the field**, top-aligned with the line they
+  explain. None of them ever sits over or above the field. The card gives
+  the selected item's signature and type, what it means, an example in a
+  code chip, and what is in use in this environment.
+- **Sources:** attributes per object type with their descriptions (a static
+  table); custom variables and values from the live object store, ranked by
+  how many objects have them; host group, service group, host and service
+  names and check commands for strings in those positions; functions and
+  methods with signatures; the state constants. Protected variables
+  (passwords, tokens) are listed by name, never with values.
+- **Fuzzy matching** (`r` matches `backup_retention`), ranked by match, then
+  by how many objects have the name.
+- **Keys:** completion opens as you type after `.`, inside a string, and on
+  an identifier, or with ctrl-space. ↑↓ choose, Tab or Enter accept, Esc
+  closes. Typing goes on filtering.
+- **Signature help** inside a call, with the current argument underlined and
+  its description, sits left of the completion list (top-aligned with it);
+  completions for that argument show under the line at the same time.
+- **Hover help** shows the documentation card for the token under the
+  pointer (the token gets the hover background), after the tooltip delay,
+  left of the field and top-aligned with the hovered line.
+- **Parse error:** a critical wavy underline at the position, the field's
+  border turns critical, and the status reads `line 3, column 23 · expected a
+  value`. Hovering the underline shows the full message and a hint, left of
+  the field, aligned with that line. The preview keeps the last valid
+  result, and the summary bar says so.
+- **Syntax colours** in the field: attributes muted, strings in the OK
+  colour, numbers in the unknown colour, functions in the accent, operators
+  faint. They are all theme tokens, so the light theme follows.
+- **Copy filter from** (topic 14, 14-r4-e), on **every** filter field: the
+  editor's for every kind of dashboard (problems, handling, downtimes) and
+  each view's filter in a multi-view dashboard. A small icon button (copy)
+  in a fixed slot at the field's top right, tooltip *copy filter from*,
+  opens a menu of the other dashboards and views, found by typing: each row
+  with its mark (state dot or kind icon), its name, its group and kind, and
+  its filter faint on a second line. The pointed row's filter shows in full
+  in a card to the **left** of the menu (the rule above), with what it would
+  match here. Enter copies it into the field, replacing what is there;
+  ctrl-z (or the editor's *discard*) brings the old filter back. The copy is
+  plain text: the dashboards don't stay linked.
+- The inspector in these frames also shows topic 12's notifications row.
+
+---
+
+## 10 Palette multi-select
+
+**Status: approved with two changes** (editing the query clears the
+selection; the combined multi-host view arrives with nothing marked and
+offers *mark all problems*), **and the combined view rebuilt as a grouped
+list** (approved: "this looks perfect"), with collapsible hosts. It also works
+for a selection of services only.
+
+**Shows** (`10-palette-multiselect.html`, the palette frames with zoomed
+crops): 10a no selection; 10b one block (shift-↓ twice); 10c several blocks
+(ctrl-click); 10d ctrl-a; 10e the cursor on *all N matches*; 10f the one
+bulk dialog; 10g hosts selected without a verb; 10h the combined multi-host
+view, paged by count, one host collapsed; 10i pinned as a tab, and *save as
+dashboard*; 10j *mark all problems*; 10k a host expanded in place by `+ N
+more` (no pane, full width, sticky band, `− show fewer`); 10l a click on a
+host's band (anywhere but the chevron) opens the host pane (a paged host; the pane pages its own
+services, `+ 16 more`).
+
+**Behaviour**
+
+- **What can be selected:** object rows only, meaning hosts, services, and a
+  verb query's action rows (`Acknowledge · postgres-replication`). Commands,
+  dashboards, environments and the *all N matches* row are skipped by
+  shift-↑↓ and ignore ctrl-click.
+- **Keys and clicks:** shift-↑/↓ extends or shrinks the selection from the
+  anchor (the row where it started) to the cursor. ctrl-click (⌘-click)
+  toggles a row and moves the cursor there; shift-click selects the range from
+  the anchor. ctrl-a (⌘A) selects every match. A plain ↑↓ moves the cursor and
+  keeps the selection. **Editing the query clears the selection.** Esc clears
+  the selection; a second Esc closes the palette.
+- **Enter:** with a selection and a verb query, it opens ONE dialog for every
+  selected object (today's action dialog). With a selection and no verb, it
+  opens the combined view; Tab opens it as a tab directly. Without a
+  selection, Enter runs the cursor row as today, and ctrl-↵ runs the verb on
+  all matches as today.
+- **Verb queries list every match** (rc1: the best 4 services and 2 hosts).
+  The list scrolls inside the palette's 420px. *All N matches* moves to the
+  top of the section, so it is always in view.
+- **The all-matches row shows what it counts:** with the cursor on it, the
+  rows it counts get a dashed outline (a preview, not a selection; no
+  counter).
+
+**Drawing**
+
+- **One rounded outline per block** of contiguous selected rows: the block
+  has the lists' marked tint (`row_marked`) and a 1px accent outline with the
+  rows' 6px radius. The outline is drawn as an overlay above the rows, so the
+  cursor row can't cover it. Rows inside a block lose their own corners.
+- **The cursor inside a block** keeps a row background of its own
+  (`element_hover`, lighter and neutral), so it stands out from the blue
+  tint. Outside a block it is the selected-row background, as today.
+- **Nothing moves:** the block wraps the rows without adding size; section
+  labels break a block in two; there is never a check column.
+- **Footer:** `3 selected` in the accent, in a fixed slot (14ch, so `all 7
+  selected` fits), then what Enter does (`↵ acknowledge all 3`, `↵ open
+  together`); at the right, `ctrl-a select all 7` and `esc clear`. A
+  growing count or action pushes nothing. Without a selection it shows the
+  keys as today, plus `shift-↑↓ select`.
+
+**The bulk dialog (10f):** today's action dialog. The title counts the
+targets (`Acknowledge · 7 services`), and the target box lists **every**
+object with its state dot (it scrolls; it no longer stops at five with `+ N
+more`). Skipped objects are listed with the reason, as today. The send button
+counts (`acknowledge 7`).
+
+**The combined view (10h, 10j, 10k):** in the main area, like a dashboard.
+The header reads `3 hosts · db-prod-01, db-prod-02, db-prod-03`, then `×`
+(back to the dashboard), `↗ pin as tab` and *save as dashboard*. The summary bar
+counts the services by state and ends with `3 hosts · 63 services`.
+
+- **10h, 10j and 15 share one band component** (`hostBand` and `hostRows`
+  in `v1.js`): the service list grouped by host and topic 15's host list
+  "with services" are drawn from the same parts, and 10's frames render
+  byte-identical since the move.
+- **A grouped list by host,** built from the list's parts (the
+  host-with-services rule above): each host is a slim group-header band
+  (36px, `row_header`; the host's state dot in the rows' mark column, the
+  name, the address and its check output faint, the per-state counts on the
+  right); its services are standard list rows under it **with no indent**
+  (the same circle, time and text column as on every dashboard). A selected
+  service shows under its host; **a selection of services only** opens the
+  same way, grouped by their hosts.
+- **Paged by count (10h, 10k):** up to 7 rows per host, problems first and
+  never hidden, OK services in name order fill the rest; `+ N more` in the
+  text column (db-prod-02, all OK: 7 rows and `+ 12 more`). A click, Enter or
+  → shows the whole host in place, downward, and the slot reads `− show
+  fewer`; nothing opens, and the expansion lasts while the view is open.
+  While an expanded host scrolls, its band sticks to the top of the list
+  (10k). A click on the host's **band** anywhere but its chevron (or Enter on
+  the band) opens the host in the pane, which pages its own services the
+  same way (10l): the band opens the pane, the chevron only collapses or
+  expands, `+ N more` only expands in place.
+- **Collapsible hosts:** the collapse chevron at the left of each band, at the
+  x of 04's view-header chevron (the dot, the name and the counts keep their
+  places). A click on the chevron, or ←/→ with the cursor on the band,
+  collapses or expands the host. Collapsed (db-prod-01 in 10h), the band stays
+  with its counts on the right and its rows hide. Collapsing only changes what
+  shows: the summary, the counts and *mark all problems* still cover every
+  host, and a collapsed host whose rows are marked gets the marked tint and
+  bar on its band.
+- **It arrives with nothing marked:** the palette's selection chose what to
+  show, not what to act on. The bulk bar under the list is always there in
+  this view, so nothing moves when rows get marked. Empty, it reads `nothing
+  marked · x marks a row · ctrl-a marks all` and, at the right, the count of
+  problems (`3 services`: the services with an unhandled problem, and a host
+  that is down or unreachable) in a fixed right-aligned slot before **mark
+  all problems**, so the button stays put when the count changes. With marks
+  (10j), it turns in place into the selection bar: the count (`3 services
+  marked`, in a fixed slot), acknowledge, downtime, check now, comment,
+  `···`, and `clear esc`. Esc clears the marks and the bar returns to *mark
+  all problems*.
+- Everything else is the normal list: x, shift-↓, ctrl-a, Enter for the pane.
+  In 10j, db-prod-02 (all OK) is collapsed, so every marked row is in view.
+- **This band replaces rc1's grouped-list header** (the full-height host row
+  with a small circle and indented rows) in every host-with-services view.
+
+**Pin and save (10i):** `↗ pin as tab` adds the view to the sidebar's `open`
+section (worst-state dot, `3 hosts db-prod-01, …`), where it survives
+restarts. Its slot in the header stays, empty, so nothing moves. *save as
+dashboard* asks for a name and a group, and whether to keep **these 3
+hosts** (`host.name in [...]`) or **the query** (`match("db-prod*",
+host.name)`). The result is a grouped list by host, editable later.
+
+---
+
+## 11 Read-only config: command line and who Icinga notifies
+
+**Status: approved, both parts.**
+
+**Shows** (`11-config-tab.html`): 11a the host pane's config tab; 11b the
+service pane's check section; 11c both without the extra permissions; 11d
+11b with the argument table unfolded.
+
+**Decisions**
+
+- **Each part shows when its permission is granted;** otherwise a dashed box
+  with a lock names the permission it needs, links to the user guide's API
+  user section, and shows what rc1 already knows (11c). The two can be
+  granted separately; the UI works with either, both or neither. Nothing is
+  greyed out without a reason.
+- **Command line** (`objects/query/CheckCommand`): a code block with the
+  command line as Icinga would run it, every macro resolved and the resolved
+  values tinted in the accent. Each argument (flag and value, e.g.
+  `--host=10.0.2.11,10.0.2.13`) is unbreakable, so a long command line wraps
+  only between arguments, never inside one. A copy button sits at the right of the section
+  label, which also names the CheckCommand and where it runs. **The argument
+  table folds under the command line, folded by default** (11a, 11b): a 28px
+  fold row right under the code block, with a chevron in a fixed 12px slot
+  (`›` folded, `⌄` open), `N arguments` and a faint `where each value comes
+  from`. A click on the row, or →/← with the cursor on it, unfolds and folds
+  it. Unfolded (11d), the table opens below the row: argument, value, and
+  `from` (`$check_address$ → host.address`, `host.vars.pg_user`, `command
+  default`, `set in the command`), one row per argument of the command line.
+  The row and everything above it never move; only what is below the table
+  moves down. Protected variables show `***` in both the command line and
+  the table, and the table says `protected`.
+- **Who Icinga notifies** (`objects/query/User`, `UserGroup`, `TimePeriod`):
+  one block per Notification object (name, the apply rule, the command), its
+  user groups with their members indented, each user's email and pager, and
+  their own period at the right. A line of conditions closes each block:
+  period, states, types, delay, interval. The section label sums up *now*
+  (`now: dba-oncall by mail at once; dba-pager from 18:00`).
+- **Without the permissions (11c):** the command is shown by name, and the
+  Notification objects with the users and groups they name (rc1 already
+  reads `Notification`).
+- **Where:** the host pane's config tab (after the check table, before
+  Icinga's switches) and the service pane's check section (after the check
+  table). A tab gets the same in its wide layout.
+
+---
+
+## 12 Notifications: on or off per group and dashboard, and when
+
+**Status: the design is approved; revised on 2026-10-07 for the user's
+decision that notifications are opt-in** (PLAN.md §4.2, *Notifications are
+opt-in* and *Notification times per group*). New in v1.
+
+**Shows** (`12-notification-times.html`): 12a Settings → notifications, the
+default times and which groups and dashboards are on; 12b a group's
+notification settings, off (the default); 12c the same group turned on, with
+custom times; 12d the dashboard editor's notifications row, on and custom;
+12e the sidebar's marks and the hover; 12f the group's `···` menu with the
+quick switch; 12g a dashboard's `···` menu, following its group.
+
+**Decisions**
+
+- **Notifications are opt-in.** Nothing notifies until someone turns
+  notifications on for a group or a dashboard. **Groups are off by default.**
+  A dashboard follows its group unless it is set itself (on or off). Nothing
+  called "inherit" or "default" ever switches notifications on by itself.
+  (rc1 inherited the environment's master switch, which was on; rc1 was never
+  deployed, so no one relies on that.)
+- **Two separate things per group and per dashboard:**
+  1. **on or off**: a switch;
+  2. **when**: `default` (the default times and rule from the settings
+     page) or `custom` (its own, set in its notification settings).
+
+  Turning notifications on uses whichever *when* applies. A dashboard's
+  `default` is what its group uses: the group's custom times if it has them,
+  otherwise the environment's defaults. Custom times replace the defaults for
+  that group or dashboard only, and a group's custom times pass on to its
+  dashboards that use `default`.
+- **No fixed presets:** engineers set the times themselves. A team's "9 to 5"
+  or "24/7" is just the times they set.
+- **The times controls** (the same everywhere): `notify` as `always`, `at set
+  times` or `never` (segmented); at set times, one row per window: day chips
+  `mo`…`su` and `from → to` fields, a remove `×`, and `+ add times`;
+  `critical and down at any time` (switch, on by default). Outside the times,
+  notifications go silently into the notification centre; `never` sends
+  none to the desktop. A window may cross midnight.
+- **Settings → notifications (12a)** holds the **defaults** per environment
+  (the `environment` dropdown at the top of the page): the default rule
+  (states, events, hard states only, skip acknowledged, skip in downtime,
+  skip services of hosts that are down, only after, sound; the three skips
+  are separate switches, user 2026-10-07: a host going down is not the same
+  as it being handled, and the host's own down notification is never
+  skipped by the third) and the
+  default notification times (rc1's quiet hours, turned into the times
+  notifications are active). The section says explicitly that these are
+  defaults, used by the groups and dashboards that have notifications turned
+  on, unless one has custom times, and that nothing notifies until a group
+  or dashboard is turned on. Below it, **`turned on`** lists per environment
+  the groups and dashboards whose notifications are on (a group with how many
+  of its dashboards are on; a dashboard set on by itself), each with what
+  it uses: `default times` (faint) or `custom: <its times>`, and `open ↗`,
+  which opens its notification settings. The environment line counts them
+  (`4 on · 3 with custom times`); an environment with nothing on says that
+  it doesn't notify.
+- **A group's notification settings (12b, 12c):** a dialog from the group's
+  `···` → `notification settings`. First row: **notifications**, with the
+  switch and a one-line summary of what applies (`on · default times:
+  Mon–Fri 07:00 → 22:00 · Sat–Sun 09:00 → 20:00, critical any time`; `on ·
+  custom times: Mon–Fri 09:00 → 17:00, critical and down at any time`; `off ·
+  nothing in platform notifies, except dashboards turned on themselves`).
+  Then **when**: `default | custom` (segmented). `default` shows a read-only
+  box with the environment's default times and rule, whether they are
+  notifying now (or, while the group is off, `used once notifications are
+  on`), and `change the defaults ↗` (opens the settings panel at them).
+  `custom` drops down, in place and indented, the same controls as the
+  settings page, for this group only, with a faint line saying what they
+  replace. The dialog lists the group's dashboards and what each one does,
+  in fixed columns: name, `on` or `off`, where that comes from (`as
+  platform` or `set on the dashboard`), and the times it uses
+  (`platform's times`, `custom: always`). The *when* controls stay usable
+  while the group is off, so times can be set before turning it on. Changes
+  apply at once; `done` closes.
+- **A dashboard's notifications (12d):** a row in the dashboard editor's
+  inspector, with the dashboard's name and group (it belongs to the
+  dashboard, not to a view): the label says where the state comes from (`as
+  overview`, or `set on this dashboard`); then the switch with `on`/`off`, a
+  faint note on the group (`overview is off`) and, when set on the
+  dashboard, `follow overview` at the right to hand the choice back to the
+  group (12d; 09's frames show a dashboard following its group); then `when:
+  default | custom`, the custom controls stacked for the narrow column. A
+  faint line says what applies now. It is saved with the dashboard, like the
+  rest of the editor.
+- **Quick switch in the `···` menus (12f, 12g):** the group's and the
+  dashboard's menus get a `notifications` row with a switch (the `Switch`
+  without its label) at the right, directly above `notification settings`
+  (no trailing "…"), in their own section. Menu entries carry no faint
+  details (the dropdown rules): default or custom times show as the
+  sidebar's bell or clock, and a dashboard that follows its group shows the
+  group's state in its switch; flipping the switch sets the dashboard
+  itself. A dashboard's `notification settings`
+  opens the editor at the notifications row.
+- **The sidebar mark (12e):** one fixed slot after a group's name and before
+  a dashboard's count. A **faint bell** when the group or dashboard notifies
+  with the default times (for a dashboard: its group's), a **faint clock**
+  instead when it notifies with custom times set on it, and **nothing when
+  it is off**. The slot is always reserved, so turning notifications on or
+  setting times moves nothing. Hovering the mark says what applies and
+  whether it is notifying now (`platform: on, its own times` / `Mon–Fri
+  09:00 → 17:00 · critical and down at any time` / `notifying now, until
+  17:00 · 3 of its 4 dashboards on`).
+- **The environment's master switch** (top of the notifications page) stays
+  as a way to silence a whole environment; off overrides every group and
+  dashboard, and on never turns any of them on.
+- **Never shared:** on/off and times stay with each person's icygui (per
+  environment, on this computer); YAML sharing neither exports nor imports
+  them (topic 08), so imported groups and dashboards arrive off.
+- **Replaces** rc1's four notification choices in the group menu (inherit,
+  on, off, custom rule) and rc1's quiet hours.
+
+---
+
+## 13 icygui on Windows: the installer, the window, the tray and toasts
+
+**Status: drawn, its open points decided; for the user's review** (PLAN.md
+§4.2, *Windows support*).
+
+**Shows** (`13-windows.html`): the installer, each page in Windows' dark and
+light mode side by side: 13a welcome; 13b install for me or for everyone;
+13c destination; 13d additional tasks; 13e ready; 13f installing; 13g
+finished; 13h uninstall; 13i the images we ship. The app: 13j the main
+window with Windows' caption buttons (zooms of both header ends); 13k every
+state of the caption buttons, dark and light, and the sidebar header per
+platform; 13l the tray icon's tooltip and menu; 13m a toast and Windows'
+notification centre; 13n the tray menu and a toast in light mode.
+
+**The installer** (Inno Setup 6.6; only what Inno does)
+
+- **Style:** `WizardStyle=modern dynamic`: Inno's modern wizard, which
+  follows Windows between dark and light. Inno fixes the layout (welcome and
+  finished pages with the tall image on the left; inner pages with the header
+  band, title, subtitle and the small image at the top right; Back, Next and
+  Cancel at the bottom right), the native controls and Segoe UI. About 700 ×
+  540 px at 100 %.
+- **What we ship** (generated from `assets/logo/` by `cargo xtask icons`,
+  like the app icons, each at 100, 125, 150, 200 and 250 %, listed
+  comma-separated so Inno picks the closest to the screen's scaling):
+  - `WizardImageFile` / `WizardImageFileDynamicDark` (240 × 459 at 100 %):
+    the logo's mark (its node in the theme's accent, `#2f74c0` light,
+    `#74ade8` dark), `icygui` in IBM Plex Mono, `Icinga 2 on your desktop`,
+    and a corner of the host-group grid (topic 05) fading in at the bottom,
+    on a light grey gradient or the app icon's dark tile gradient;
+  - `WizardSmallImageFile` / `…DynamicDark` (58 × 58): the mark alone,
+    transparent around it;
+  - `SetupIconFile` and `UninstallDisplayIcon`: `icygui.ico` (16 to 256 px),
+    the same icon the executable embeds.
+- **Texts** in `[Messages]` and `[CustomMessages]`; the welcome page says the
+  install is per user and needs no administrator rights.
+  `ButtonBrowse=&Browse` drops Inno's "Browse...", per the app's label rule.
+- **Install mode (13b):** `PrivilegesRequired=lowest` with
+  `PrivilegesRequiredOverridesAllowed=dialog`, so Inno asks first, in its
+  own dialog and words: **for me only** (preselected, no administrator
+  rights, `%LOCALAPPDATA%\Programs\icygui`) or **for all users** (elevation,
+  shield, `C:\Program Files\icygui`); `DefaultDirName={autopf}\icygui`
+  covers both. `/CURRENTUSER` and `/ALLUSERS` skip the question.
+- **Destination (13c):** shown on a first install only (`DisableDirPage=auto`).
+- **Tasks (13d), `[Tasks]`:** *create a desktop shortcut* (off, `Flags:
+  unchecked`) and *start icygui in the tray when you sign in* (on). The
+  second writes the same per-user Run entry as Settings → general → start at
+  login (`HKCU\…\Run`, `icygui.exe --background`). The Start menu shortcut
+  is always made, with the app's AppUserModelID (the toasts need it).
+- **Ready (13e), installing (13f):** Inno's pages. A running icygui is closed
+  by the restart manager (`CloseApplications=yes`) and started again after an
+  update if it was running; updates keep every setting.
+- **Finished (13g):** *launch icygui*, checked (`[Run] … Flags: postinstall
+  nowait skipifsilent`); a silent install doesn't launch.
+- **Uninstall (13h):** Inno's confirmation (`ConfirmUninstall`, *No* the
+  default), then our question from the uninstaller's `[Code]`
+  (`TaskDialogMsgBox` with our button labels): **keep them** (default) or
+  **remove them**: the settings in `%APPDATA%\icygui`, the event history in
+  `%LOCALAPPDATA%\icygui`, and the passwords icygui saved in Windows
+  Credential Manager. Program files, Start menu, desktop and sign-in entries
+  always go.
+- **Also:** a portable `.zip`; unsigned unless a code-signing certificate is
+  configured (SmartScreen warns on first start, documented).
+
+**The app on Windows**
+
+- **Caption buttons (13j, 13k):** Windows 11's minimise, maximise (restore
+  when maximised) and close, 46 px wide each and the full height of the 40 px
+  header row, in a fixed slot at the top right of the right-most header (the
+  pane's, or the list's when no pane is open; the pane's × sits left of
+  `↗ open as tab`), so the header's own items keep their places and nothing moves when the window becomes active, inactive or
+  maximised. Glyphs in the theme's strong text colour (faint while the
+  window is inactive); hover: a faint fill; close: `#c42b1c` with a white
+  glyph, pressed `#c83c31`. Our theme decides their colours, as for the rest
+  of our window. Snap layouts on the maximise button come from Windows.
+- **Top left:** the slot of the traffic lights (52 px) holds the app's mark
+  (16 px); a click on it opens the window menu (as alt-space does); the
+  search keeps its place. Dragging a header moves the window, a double click
+  maximises it (as on Linux; `chrome.rs` gets a third `Controls` variant).
+- **Tray (13l, 13n):** the mark tinted with the worst unhandled state of every
+  environment, as today. Windows cuts tooltips at 128 characters, so the
+  tooltip is one short line per environment (`prod-cluster: 38 unhandled, 4
+  critical`). Right click: the native Windows 11 menu with today's items
+  (open, pause notifications ▸, environment ▸ with a check at the active one,
+  quit); left click opens the window. Native menus follow Windows' dark or
+  light mode.
+- **Toasts (13m, 13n):** app icon and name from the Start menu shortcut's
+  AppUserModelID; title and body as today (`CRITICAL · postgres-replication
+  on db-prod-03`, the output's first line, where it matched); the state
+  circle as the toast's image (`appLogoOverride`, cropped to a circle);
+  **Acknowledge** and **Open** buttons; a click on the body opens the object.
+  They stay in Windows' notification centre, grouped under icygui; icygui's
+  own notification centre keeps the full history.
+
+**Decided** (by the coordinator, for the user's review of the frames)
+
+1. The pane's × moves left of `↗ open as tab` on every platform (a fixed
+   slot), so it never sits next to Windows' close button (all pane frames
+   re-rendered).
+2. The app's mark sits in the traffic-light slot on Windows.
+3. *Remove them* in the uninstaller also deletes the saved passwords in
+   Credential Manager.
+4. The toast's image is the state circle.
+5. The tall wizard image: the mark, the name, `Icinga 2 on your desktop` and
+   the grid corner.
+6. `Browse` without Inno's trailing dots.
+
+---
+
+## 14 Comments, acknowledgements and downtimes
+
+### Round 5 (current): handling and downtimes as view kinds
+
+**Status: for the user's review.** Makes round 4 coherent with topic 04.
+Since then (user, 2026-10-07): the project-wide **view controls** rule, **row
+density per view** and the **sidebar mark** per dashboard (PLAN.md §4.2,
+topic 14), drawn in 14-r5-b to g.
+
+**Shows** (`14-r5-view-kinds.html`, each dark and `-light`): 14-r5-a *new
+dashboard*: the editor at once, one empty list view (zoom of the inspector);
+14-r5-b 04's editor for *voip handling*,
+its handling view selected and *add view* open, the one-view header's
+controls kept in the editor (zoom `-b-header-zoom`); 14-r5-c the *voip*
+dashboard with a list view named *problems* (rows set to compact on the
+view), a handling view and a downtimes view in timeline mode, each view's controls compact in its header,
+the handling view's `···` open (zoom `-c-zoom`); 14-r5-d the sidebar rule
+(zoom of the sidebar) and *voip downtimes*, a one-view page with the same
+controls roomy, the rows toggle with its tooltip (zoom
+`-d-header-zoom`); **sidebar mark:** 14-r5-e the *voip* editor, mark
+*state* (zoom); 14-r5-f a new dashboard (*sbc*) still in the editor, mark *icon*, the
+icon picker open with `ser` typed (light: before typing) (zoom); 14-r5-g
+*voip handling*, the dropdown open with *state* greyed out (zoom).
+
+**Decisions**
+
+- **View kinds, not dashboard kinds.** *handling* and *downtimes* are kinds
+  of **view**, next to list, grouped list, host-group grid, summary tiles and
+  event stream. A dashboard is a stack of views, each with its own filter
+  (04); a full-page handling dashboard is a dashboard with one handling view
+  (with one view the view is the page: chips and threads, no view header).
+  Views of any kind combine freely (14-r5-c).
+- **Counting (04's rule, unchanged):** only problem views (list, grouped
+  list, host-group grid, summary tiles) count toward the sidebar number and
+  notifications. Handling, downtimes and event views never notify; the
+  editor says so in one faint line under the view's settings; *add view*
+  lists them in the *activity* section (no explanation in the menu).
+- **New dashboard (14-r5-a; user, 2026-10-07: no starting points):** the
+  group's **+**, the footer's **+ → new dashboard** and the palette's *new
+  dashboard* open **the editor directly**, with **one empty list view**: no
+  menu of presets, no preset filters. The name (*new dashboard*) is
+  selected, ready to type over; the group is the one whose **+** was used.
+  The view is named after its kind (*list*) until renamed. **Its filter is
+  empty, which means every object**: the field shows *every object*, faint,
+  and its status counts what that shows (`empty: every object · 38
+  problems`), so the preview is every problem until a filter is written.
+  People write their own Icinga filters, with topic 09's autocomplete and
+  *copy filter from* to help. The kind is the view's **display** (its
+  dropdown), and *add view* simply lists the kinds (list, grouped list,
+  host-group grid, summary tiles, event stream, handling, downtimes). The
+  sidebar mark starts at *state* (a list is a problem view). The frames of
+  round 4 and the first draft of round 5 with a kind or starting-point menu
+  are dropped.
+- **A view's name and its kind are separate** (user question, 2026-10-07):
+  the name (*problems*, *failing services*) is what the view header and the
+  editor's views list show; the kind is the *display* field. The selected
+  view's settings start with **view name** (a text field, as built in stage
+  3, `editor/inspector.rs`), then display and the rest (14-r5-b, e, f;
+  4c, 4e).
+- **The editor is 04's (14-r5-b)** for every dashboard: the dashboard's
+  name, group and **sidebar mark**, the views list, *add view* with the
+  full list of kinds, the selected view's settings. A handling view:
+  display, filter (09's autocomplete, *copy filter from* at its top right,
+  live status `matches 214 objects · 4 being handled`), *opens with* (the
+  chip), sort and **rows**. A downtimes view: the same with *opens
+  as* `timeline | list` and *shows* (in effect, upcoming, from config).
+  There is no "kind" field and no notifications row for these views.
+- **View controls (14-r5-b, c, d; the project-wide rule at the top of this
+  file, with its table).** A view has one set of controls, always in its
+  view header. On a one-view page (14-r5-d, *voip downtimes*) the view
+  header is the page header: *timeline | list*, *only mine*, the rows
+  toggle, the sort, `···`, and the chips as its second row. Stacked
+  (14-r5-c), the same controls sit compactly in the 36px header: the
+  handling view's chips (all, acknowledged, in downtime, upcoming,
+  comments) and sort; the downtimes view's chips (all, in effect, upcoming,
+  from config), a compact *timeline | list* switch (not the plain word) and
+  sort; *only mine* and *rows* in each view's `···`. The chips filter in
+  both forms; the sort is the same; the mode is saved with the view and is
+  the editor's *opens as*. In the editor (14-r5-b) a one-view dashboard's
+  header keeps its controls before *discard* and *save*; the preview is
+  narrow, so *only mine* sits in `···` there. In the editor's narrow preview
+  of a stacked dashboard (14-r5-e) the chips drop their words (mark and
+  count stay).
+- **Row density per view (14-r5-b, c, d, e; the rule at the top of this
+  file).** The list named *problems* in 14-r5-c is set to *compact* on the view
+  (its rows are one line; the editor shows `rows: compact`, 14-r5-e); the
+  handling view follows the settings (its `···`: *follow the default*,
+  `settings: comfortable`). In a one-view header the toggle sits left of the
+  sort (14-r5-b, 14-r5-d: following the settings, dashed outline). Not
+  drawn: compact rows of handling, the downtimes list and timeline, and the
+  event stream, which put each entry on one line (the header line
+  with the text after it, cut off), as compact list rows drop the output.
+- **Sidebar mark (14-r5-e, f, g).** Each dashboard has a *sidebar mark*
+  setting, in the editor's dashboard fields, beside the group under the name (above
+  *notifications*, topic 12), so it is also set in the new-dashboard flow,
+  which opens the same editor (14-r5-f).
+  - A small dropdown (filling the mark column), **state** (the coloured dot of the worst
+    problem) or **icon**; open, it is a select joined to its field (the
+    dropdown rules). With no problem view on the dashboard, *state* is
+    greyed out; its reason, *no problem view on this dashboard*, is the
+    disabled row's tooltip (menus carry no descriptions; 14-r5-g).
+  - Left of it, a **rounded square the height of a field** (30px plus the
+    border, like a colour swatch) **previews the mark**; the dot (10px) or
+    icon (16px) is centred exactly in it. With *state* it shows the dot and
+    is **not clickable: no hover highlight** (14-r5-e: the pointer, drawn
+    just beside the square so the alignment shows, has passed over it and
+    nothing lit up). With *icon* it is a button with the normal hover
+    highlight, and open it keeps the highlight with the accent border.
+  - **Layout (user, 2026-10-07):** *name* is a full-width row; the next row
+    has two columns on the inspector's grid: **sidebar mark** (the square,
+    12px, then the dropdown filling the column) and **group**. The label is
+    just *sidebar mark*, no hint suffix (user: removed); the square and the
+    dropdown keep their size and place, so switching moves nothing.
+  - **The icon picker** (like an emoji picker, 14-r5-f): a search field, a
+    **recent** row (the last 8 chosen), and a grid of **the app's own
+    icons** (its Lucide set, `icons.js` and `IconName`: 76 of the 102, the
+    pure controls such as chevrons, arrows, close, add and handles left out),
+    8 columns, 5 rows visible, scrolling. The picker has a fixed size: while
+    searching, the recent row stays and the matches fill the same grid
+    (`ser`: 6 matches). The cell under the cursor is highlighted and named
+    in the footer; the current icon has an accent ring. Arrows move, ↵
+    chooses, esc closes. Icons are **monochrome and neutral** (the sidebar's
+    faint icon colour), so colour keeps meaning state.
+  - **Default:** *state* when the dashboard has a problem view, else **the
+    first view kind's icon** (14-r5-g: handling). Switching a problem
+    dashboard to *icon* starts from its first view's kind icon (14-r5-f:
+    list). Adding a problem view does not switch the mark by itself;
+    removing the last problem view switches a *state* mark to the first
+    view's kind icon.
+  - The **count slot never changes** with the mark: a problem dashboard with
+    an icon still counts its problems (14-r5-f: *sbc*, 2).
+- **The sidebar rule (14-r5-d), now the sidebar mark's defaults:** a
+  dashboard with at least one problem view shows its worst state's dot and
+  its problem count, as today (*voip*, red, 3). A dashboard with **only** handling, downtimes or event views shows its
+  **first view's kind icon** in the mark slot and that view's count: handling
+  = objects being handled (*voip handling*, 4), downtimes = in effect now
+  (*voip downtimes*, 1), events = no count.
+- **The cluster section** is now **handling, downtimes, events, health**: the
+  first three are the same views without a filter (events with the activity
+  icon and no count); health keeps the cluster's state dot (topic 06).
+  Groups stay plain folders (round 4).
+- **Dropped from round 4:** the dashboard-kind editors (14-r4-b, 14-r4-c) and
+  their *kind* field; the kind menu (14-r4-a): *new dashboard* opens the
+  editor with one empty list view instead.
+  **Kept:** *copy filter from* (14-r4-e), on every view's filter field.
+
+### Round 4: handling and downtimes as kinds of dashboard
+
+**Status: superseded by round 5** (view kinds), except *copy filter from*
+(14-r4-e), which stays. Round 4 replaced round 3's group scope.
+
+**Shows** (`14-r4-kinds.html`, each dark and `-light`): 14-r4-a the *new
+dashboard* choice of kind (the group's + in dark, the footer's + in light);
+14-r4-b the editor of a handling dashboard; 14-r4-c the editor of a
+downtimes dashboard; 14-r4-d the voip group with its three dashboards,
+*voip handling* open; 14-r4-e *copy filter from* on a filter field.
+
+**Decisions**
+
+- **Kinds of dashboard, not scopes.** *handling* and *downtimes* are kinds of
+  dashboard next to **problems** (today's dashboards), each with its own
+  filter, placed in any group like other dashboards (a team keeps *voip
+  problems*, *voip handling* and *voip downtimes* in its *voip* group, in its
+  own order). **Groups stay plain folders**: no switches, no aggregation;
+  *new group* stays rc1's instant create and rename. Round 3's group
+  settings dialog (14-r3-h) and group entries (14-r3-d) are dropped.
+- **The cluster section** (handling, downtimes, health for the whole
+  environment) stays as drawn in round 3.
+- **New dashboard (14-r4-a):** the group's **+** opens a small menu, like
+  04's *add view*: *new dashboard in voip*, then **problems** ("objects with
+  problems: a list, a grid or several views"), **handling** ("who is handling
+  what: acknowledgements, downtimes, comments"), **downtimes** ("downtimes in
+  effect and upcoming, as a timeline or a list"), each with its icon in the
+  mark slot. The footer's **+** has *new dashboard ›* with the same three.
+  The choice opens the editor for that kind. The kind is fixed once created
+  (the editor shows it, `chosen when created`).
+- **The editor of a handling dashboard (14-r4-b):** the kind, name and
+  group, the **filter** (topic 09's autocomplete and syntax colours, with
+  *copy filter from*), its live status `matches 214 objects · 12 being
+  handled`, *opens with* (the chip it opens on) and the sort. **No
+  notifications row**: one faint line, "Handling dashboards don't notify;
+  notifications come from problems dashboards." The preview on the left is
+  the handling view for exactly that filter.
+- **The editor of a downtimes dashboard (14-r4-c):** the same, with the
+  status `matches 214 objects · 3 downtimes`, **opens as** `timeline | list`
+  (timeline by default) and **shows** (in effect, upcoming, from config).
+  The preview is the timeline for that filter, its axis fitted to the
+  preview's width. No notifications row.
+- **In the sidebar (14-r4-d):** a handling or downtimes dashboard has its
+  kind's icon in the mark slot and its count in the count slot (handling:
+  the objects being handled; downtimes: in effect now), like the cluster
+  section's entries; a problems dashboard keeps its state dot and problem
+  count. The page header's scope line is the dashboard's group and filter
+  (`voip · host.vars.team == "voip" · 214 objects`).
+- **Data:** no new requests; a handling or downtimes dashboard evaluates its
+  filter on the snapshot icygui already holds, like a problems dashboard.
+- **Copy filter from (14-r4-e):** on every filter field (topic 09).
+
+### Round 3: scopes, the cluster section, three fixes
+
+**Status: the cluster section and the three fixes are kept; the group scope
+(14-r3-d, 14-r3-h) is replaced by round 4.**
+
+**Shows** (`14-r3-scopes.html`, each dark and `-light`): 14-r3-a the
+sidebar's cluster section with handling open; 14-r3-d platform's own
+handling; 14-r3-e the timeline with one line per downtime; 14-r3-f a narrow
+list beside the pane; 14-r3-g the downtimes list with single-downtime rows;
+14-r3-h the group's settings with the two switches.
+
+**The final model**
+
+- Two views, **handling** (chips: all, acknowledged, in downtime, upcoming,
+  comments) and **downtimes** (timeline | list), plus the thread in the
+  object's pane. No separate acknowledged or comments view: the palette's
+  *acknowledged* opens handling with that chip selected.
+- **Two scopes, the same parts and look** (`threads.js`); only the scope
+  line in the page header differs:
+  1. **The environment** (14-r3-a): a fixed sidebar section **cluster** at
+     the very top, above the groups, its header `cluster` with the
+     environment's name faint beside it. Three entries, each with its mark in
+     the fixed dot slot and its count in the fixed count slot: **handling**
+     (its icon; the objects being handled), **downtimes** (its icon; in
+     effect now) and **health**, topic 06's cluster health page (the
+     cluster's state dot by 06's rules: ok, warning when a node lags or a
+     queue grows, critical when an endpoint is down; no count). Order:
+     handling and downtimes first, the pages people work through; health
+     last, looked at when something seems off. Scope line:
+     `prod-cluster · the whole environment · 20 objects`.
+  2. **A group** (14-r3-d, 14-r3-h): **optional, off by default**. The
+     group's settings (from its `···` → *group settings*, and the same rows
+     in *new group*) have two switches in fixed rows: *handling for this
+     group* ("One view of every acknowledgement, downtime and comment across
+     its dashboards.") and *downtimes for this group* ("One view of every
+     downtime across its dashboards, as a timeline or a list."). Turned on,
+     each is an entry at the top of the group in the sidebar, before its
+     dashboards, with its icon and count. The page covers the union of the
+     objects of the group's dashboards; scope line `platform · 4 dashboards ·
+     64 objects`. A team with one dashboard makes a group for it.
+  - **Not a dashboard view kind:** handling and downtimes are not views on
+    a single dashboard (dropped in round 3).
+- **The `open` section** stays below the groups for ad-hoc tabs only
+  (objects opened as tabs, pinned combined views) and appears only when
+  there are any.
+- **Data:** no new requests. Everything comes from the snapshot icygui
+  already holds (acknowledgements, downtimes and comments are loaded today);
+  a group's scope is the union of its dashboards' existing filters,
+  evaluated on that snapshot.
+
+**Fixes from round 2**
+
+- **(a) Timeline (14-r3-e):** an object with several downtimes is a group,
+  and each downtime gets its own line inside it: the kind's icon in the mark
+  slot, the kind and the author on the first line, the text on the second
+  (the window is the bar), its own bar and its own time at the right. A host
+  downtime with services keeps its fold under its line. An object with a
+  single downtime stays one row.
+- **(b) Narrow lists (14-r3-f):** the band is a flex row in which `service
+  on host` never shrinks; the faint output gives way first, then the right
+  slot (shortened with an ellipsis), so names stay whole as long as there is
+  room for them.
+- **(c) Downtimes list (14-r3-g):** an object with a single downtime and no
+  services fold takes one row of an entry's height: the object's state dot
+  in the mark slot, the chevron slot empty, the first line names the object
+  and then the kind, author and window, the second line is the text, the
+  same two tag slots. The band with entries under it appears only for an
+  object with several downtimes or a services fold.
+
+### Round 2: handling and downtimes
+
+**Status: approved as the model** (round 3 adds the scopes and fixes). Built from the user's verdict on
+round 1 (below) and the coordinator's decisions. Consistency across the views
+is the main goal: every part comes from one component, `threads.js` (styles:
+*threads* in `v1.css`).
+
+**Shows** (`14-r2-handling-downtimes.html`, each dark and `-light`):
+14-r2-a handling, all kinds; 14-r2-b handling filtered to comments; 14-r2-c
+handling filtered to acknowledged; 14-r2-d downtimes, timeline; 14-r2-e
+downtimes, list; 14-r2-f a service pane with its thread.
+
+**Decisions**
+
+- **Two dedicated views and one pane section.**
+  1. **Handling** (round 1's handling A): one thread per object with its
+     acknowledgement, downtimes (in effect and upcoming) and free-standing
+     comments, oldest first inside, like a chat. The summary bar's kind
+     counts are **filter chips** (*all*, *acknowledged*, *in downtime*,
+     *upcoming*, *comments*): *comments* gives round 1's comments A
+     (14-r2-b), *acknowledged* the acknowledged view (14-r2-c), in the same
+     look. There is **no separate comments view and no separate
+     acknowledged view**. *only mine* and the sort stay in the header.
+  2. **Downtimes**: one view with two displays in a segmented control in the
+     header, as 05's squares and labelled cells: **timeline** (the default,
+     14-r2-d) and **list** (round 1's A and B combined, 14-r2-e). In effect,
+     upcoming and from config are distinguishable in both (and are filter
+     chips).
+  3. **The object's pane** (round 1's comments C): the open object's thread
+     as a *handling* section, with the same entries, and a field to add a
+     comment (c). A downtime already shown in the pane's banner (topic 01)
+     keeps its place in the thread without repeating its text (14-r2-f).
+- **A comment is the text of its acknowledgement or downtime**, shown as part
+  of that entry; Icinga's automatic comments never appear; only free-standing
+  comments are entries of their own.
+- **One grouping pattern everywhere** (handling, downtimes list and
+  timeline, and the problem views of 10h): a group is the slim band (36px,
+  `row_header`; the chevron at the left, at the x of 04's view headers and
+  10h's host bands, only collapses; a click elsewhere on the band opens the
+  object's pane; the state dot, hollow = handled; `service on host`; the
+  output faint; a fixed right slot that says what the thread holds, e.g.
+  `in downtime · 3 comments`). Entries sit under it without indent. Groups
+  page by count (7, then `+ N more`, as everywhere).
+- **The entry** (one component): the kind's icon in the mark slot (✓
+  acknowledged and the calendar in effect in the accent; the calendar
+  upcoming faint; a lock from config; a speech bubble for comments), the
+  kind word (none for comments), the author, the time and details (window,
+  fixed or flexible, scope), then the text; later entries of a thread carry
+  a 2px left rule as replies. Two fixed tag slots at the right: **slot A**
+  `sticky` or the progress line, **slot B** the expiry (`expires 15:00, in
+  48m`, the warning text colour within 2 hours), the time left (accent), or
+  when it starts. Nothing moves when a value changes.
+- **Sections** (expires within 2 hours, in effect, upcoming…) are light
+  30px labels without the band's fill, so they never read as a group.
+- **Host downtime with all services**: one group, the host's band (`host and
+  18 services in downtime`); its child service downtimes are **folded by
+  default** into one row (`18 services, same downtime · folded: they are
+  identical`); the chevron opens them, paged by count (7, then `+ 15 more`).
+  A service with its **own different** downtime or acknowledgement is not
+  hidden in the fold: it is its own group or row (kubelet on k8s-node-07).
+  In the timeline the host row has one bar and `+ 22 services`; its chevron
+  opens the services, each with the same bar. In dashboards and the combined
+  view (problem views) host-with-services stays expanded by default, as
+  approved (there the services differ).
+- **Downtimes list: sections, then groups.** An object sits in the section of
+  its most current downtime (*in effect*, else *upcoming*) and appears once;
+  its other downtimes stay in its group with their kind (sw-core-ams-02: in
+  effect, upcoming, from config). Splitting an object across sections would
+  show it twice, so sections above the groups read better than a section per
+  entry.
+- **Timeline**: one row per object on a shared axis (noon to midnight here;
+  the axis follows the window and the earliest start), bars in the
+  progress-line style: in effect a track with the elapsed part in the
+  accent, upcoming a faint track, flexible a dashed line over its window; a
+  thin accent line at now; later ones say when they start at the right edge,
+  config ones with the lock.
+- **Config downtimes** keep the lock and `from config` everywhere and can't
+  be removed.
+
+**Sorting** (the sort control always shows the current sort; the menu offers
+*latest activity*, *expires or ends soonest*, *object*, *author*):
+
+| view / filter | default sort |
+|---|---|
+| handling, all kinds | latest activity (newest thread first; oldest first inside) |
+| handling, comments | latest activity |
+| handling, acknowledged | expires soonest, in sections *expires within 2 hours*, *expires later*, *no expiry* (always last) |
+| handling, in downtime / upcoming | ends soonest / starts soonest |
+| downtimes, list | in effect: ends soonest; upcoming: starts soonest |
+| downtimes, timeline | by time (start) |
+
+**Dropped after round 1:** the separate comments view (comments A becomes
+handling's *comments* filter; B dropped); comments D and acknowledged D (the
+merged "acknowledged and comments" view: handling covers it and reads like a
+history); acknowledged B and C as views (author is a sort; the compact
+table isn't needed); downtimes C (ticket grouping: confusing). Acknowledged A's
+expiry sections live on in handling's *acknowledged* filter.
+
+### Round 1: drafts (decided)
+
+**Status: decided by the user** (see round 2): handling A yes; comments A is
+the look for comments; comments C liked in the pane; comments D and
+acknowledged D dropped; downtimes A and B combined; downtimes D loved, as the
+default display; downtimes C dropped; acknowledged A's expiry sections kept.
+
+**The model behind every draft** (the user's notes): a comment is the text
+someone typed into the acknowledge or downtime dialog, so it is shown as part
+of its acknowledgement or downtime (`m.keller: BMC firmware update`), never
+as a separate row. Icinga's automatic acknowledgement and downtime comments
+are never listed. Only the rare free-standing comments (added with
+*comment*) are entries of their own. Every draft keeps the cross-topic rules:
+hollow = handled, `service on host`, marks in fixed slots, selection = row
+background, config downtimes visibly not removable (lock, `from config`).
+
+**Shows** (`14-comments-acks.html`; every draft dark, then `-light`):
+`14-comments-A..D`, `14-acks-A..D`, `14-downtimes-A..D`, `14-handling-A`.
+
+**Drafts that merge kinds:** *comments D* and *acknowledged D* merge
+acknowledgements and free-standing comments into one view
+(*acknowledged and comments*); *handling A* merges all three
+(acknowledgements, downtimes, comments). The others keep separate views.
+
+**Comments**
+
+- **A, a thread per object:** each object a slim band (as 10h), its
+  comments oldest first, `author · time` then the text, later ones with a
+  left rule as replies. + reads like a mailing-list thread, the whole
+  conversation at once; − a whole view for something rare.
+- **B, a flat mailing-list index:** one line per object (subject, from,
+  count, last), the selected one opens in place as its thread. + very
+  compact, scales; − one more step to read.
+- **C, no comments view:** the thread lives in the object's pane (with a
+  field to add one), list rows show a count in a fixed tag slot, the palette
+  finds comments and acknowledgement texts by their words. + no rarely used
+  view; comments where they are read; − no overview of all comments.
+- **D (merged), "acknowledged and comments", a thread per object:** the
+  acknowledgement as one entry (✓, who, when, its text, sticky and expiry as
+  small tags), then the free-standing comments. + one place for "who said
+  what about this problem", no duplicate text; − longer than a list.
+
+**Acknowledged**
+
+- **A, grouped by expiry:** *expires within 2 hours* on top (warning text,
+  time left), *expires later*, *no expiry*. + puts what comes back soon
+  first; − sections take room with few acknowledgements.
+- **B, grouped by author:** a section per person (you named). + hand-over
+  ("what is m.keller holding?"); − expiry is no longer the order.
+- **C, compact single line:** a 32px table (problem and text, by, since,
+  sticky, expires). + twice the density; − the text is cut, read in the
+  pane.
+- **D (merged), one row per object, thread in the pane:** acknowledged
+  objects and objects with comments once each; the second line is the
+  acknowledgement (✓ who when text) or the latest comment; tag slots for
+  sticky, expiry and the comment count; the pane shows the thread. + the
+  list stays a normal list; − the conversation needs the pane.
+
+**Downtimes**
+
+- **A, the two sections, tighter:** stage 2's *in effect* / *upcoming* at
+  one 34px line each (text faint and cut, window, progress line, time left).
+  + almost twice as many on screen, familiar; − the text is cut.
+- **B, a thread per object** (as comments A/D): an object's downtimes
+  together, each with its state (in effect, upcoming, from config), window
+  and text. + several downtimes on one host read as one story; − longer.
+- **C, grouped by change ticket** (read from the text, e.g. `CHG-4468`;
+  *by author* works the same): + a change's downtimes together (today's swap
+  and tonight's upgrade); − depends on people writing tickets in the text.
+- **D, a timeline:** bars on a shared axis for the next hours in the list's
+  progress-line style (in effect: elapsed in the accent; upcoming: faint;
+  flexible: dashed over its window), a thin line at now, later ones say when
+  they start. + overlaps at a glance; − needs width, poor beyond a day.
+
+**Handling A (merges all three), "who is handling what":** a thread per
+object with every entry kind: *acknowledged* (✓, sticky, expiry),
+*in downtime* (accent, window, time left), *downtime, upcoming* (faint,
+when it starts; the object stays filled because it is still unhandled), and
+free-standing comments. + one answer to "is anyone on this?"; − a bigger
+change, and the downtime list's time view gets lost unless it stays beside
+it.
+
+**Recommendation:** *handling A* as the one view for acknowledgements and
+comments (it subsumes comments D), with the comment thread also in the pane
+(comments C) and the palette's text search; keep a dedicated downtime list
+as *downtimes A* (tighter sections), with *downtimes D* (timeline) as a
+display option of it if the user likes it. Drop the separate comments view.
+Acknowledgements keep sticky and expiry, as small tags.
+
+---
+
+## 15 Host lists with their services; layouts
+
+**Status: drawn for review** (user, 2026-10-07). The host-group grid (05)
+is unchanged: Icinga's groups as lists are list layouts (15i to 15k), not a
+grid option.
+
+**Shows** (`15-host-list-with-services.html`, each dark and `-light`):
+15a the *host problems* dashboard as a host list *with services* (zoom of the
+header and bands); 15b compact, handled shown; 15e a down host's services
+shown, hollow (and 15e2, the same hidden, for the two `-zoom-hidden` /
+`-zoom-shown` crops); 15k marking two hosts and three services, the selection
+bar (zoom); 15c a stacked host view with the mode in its `···`, folded all-ok
+hosts and *no services* lines; 15d the editor; 15f the display dropdown open
+with every layout; 15g *add view* with the same layouts, compact; 15h after
+choosing *hosts by host group*; 15i a *host groups* list (one view); 15j a
+*service groups* list stacked under tiles; 15k a host clicked in it, the host
+pane narrowed to the group. The marking frame is 15m.
+
+**Decisions: host lists with services**
+
+- **One band component.** 10h, 10j and 15 share `hostBand` and `hostRows`
+  (`v1.js`): the band (chevron that only folds, state mark, name, address,
+  output, counts), the rows under it, the paging row (7, then `+ N more`),
+  folding. The only differences come from the filter picking hosts: a down
+  host always shows; a band can read **no services**; a down host's band can
+  read **N services hidden · host down**.
+- **A mode of host lists: hosts as: rows | with services**, following the
+  view-controls rule: a small two-option switch in a one-view header (15a,
+  left of the rows toggle), a *hosts as* group in the view's `···` when
+  stacked (15c), and in the editor a *hosts as* field shown only for host
+  lists (15d). Saved with the view; the editor shows the same value. In the
+  editor's narrow header the switch sits in `···` (tight space).
+- **What shows under a host:** *problems only* on: its service problems;
+  off: every service. The filter's `host.` terms pick hosts, its `service.`
+  terms the services under them (15c: `service.name == "smart-disks"`).
+  Problem hosts are expanded by default; hosts whose services are all OK are
+  folded, their counts still showing. A host with no services, or none left
+  after the filter, shows a faint **no services** line and no chevron (its
+  slot stays, empty).
+- **Down hosts** (and unreachable ones): the host always shows (it can still
+  be hidden for being in downtime or acknowledged, like any handled
+  problem). **Its band is the same neutral band as 10j** (no state tint,
+  user, 2026-10-07: a coloured row happens nowhere else in the app); its
+  state shows only as the state dot and the state word (*down 3m*,
+  *unreachable 11m*) in the state's text colour; a handled host (in
+  downtime) has a hollow mark. Its services follow *hide
+  services of hosts that are down* (the same switch for unreachable hosts):
+  hidden, the band shows one faint line, **4 services hidden · host down**
+  (*3 services hidden · host unreachable*); shown (the handled slot's
+  *show*), they are ordinary rows, **hollow**, tagged *host down*, *host
+  unreachable* or *downtime 1h 14m* (15b, 15e).
+- **Counts:** a band's counts are the unhandled per-state counts of what is
+  under it, so a down host whose services are all handled shows an empty
+  counts slot; show and hide never change them. The summary bar counts hosts
+  by state in words (*2 down*, *5 unreachable*) and its handled slot counts
+  every hidden host and service (*27 hidden · show*).
+- **Row density** applies to the service rows and to the band: compact is a
+  30px band, one-line rows, 26px note and paging rows (15b).
+- **Sort** applies to the hosts (severity, name, last change; severity is
+  the worst of the host and the services under it); the services under a host
+  are always worst first. The editor's *sort* says *hosts*.
+- **Marking:** a band marks its host (x on the band, ctrl-click); a row its
+  service; ctrl-a marks every host and every service row shown. A marked
+  band gets the marked tint and the 2px accent bar, as a marked row does.
+  The selection bar counts both kinds in a fixed slot sized for *99 hosts ·
+  999 services marked*: **2 hosts · 3 services marked** (15m); the actions
+  apply to all, and their dialogs list every target.
+
+**Decisions: layouts (15f, 15g, 15h)**
+
+- **The display dropdown and *add view* list named layouts** in three
+  sections, each entry its icon and its name, nothing else: **lists**
+  (services, services by host, services by host group, services by service
+  group, hosts, hosts with services, hosts by host group, host groups,
+  service groups), **overviews** (host-group grid, summary tiles),
+  **activity** (event stream, handling, downtimes).
+- **A layout is not a view kind:** it presets the existing fields
+  (*display*, *lists*: services | hosts | host groups | service groups,
+  *group by*, *hosts as*), which stay under it in the editor, and the
+  dropdown's label is derived from them: changing *group by* by hand
+  changes the label (15h: *hosts by host group*; *group by: none* would read
+  *hosts with services*). Nothing extra is stored.
+- **Every grouping exists from both sides:** members grouped by their
+  container (the filter picks members; a container shows only with matching
+  members: *services by host*, *by host group*, *by service group*, *hosts
+  by host group*) and containers with their members (the filter picks the
+  containers; every picked container shows, even with nothing under it, as a
+  faint *no hosts* / *no services* line: *hosts with services*,
+  *host groups*, *service groups*). A container list's filter reads the
+  container (`hostgroup.*`, `servicegroup.*`); empty, the field shows,
+  faint, *every host group · e.g. match("linux-*", hostgroup.name),
+  hostgroup.vars.team == "dba"* (*every service group · e.g.
+  match("db-*", servicegroup.name)*).
+- **The display dropdown (15f)** is a select (the dropdown rules): it opens
+  from the field, exactly as wide, ticks the current layout and shows the
+  keyboard focus as the highlighted row; at 10 rows it scrolls. **add view
+  (15g)** is an action menu hanging from the pressed *add view* row, with
+  the same sections, icons and names. Neither has descriptions.
+- **Icinga's groups as lists (15i, 15j, 15k):** *lists* has four values,
+  services | hosts | **host groups** | **service groups**. In a group list
+  the filter picks the groups and every picked group shows; each band is the
+  **shared band** (the group's display name, its host or service count, the
+  per-state counts of its members); the chevron only folds, a click on the
+  band's name filters the page to that group (as on the grid, 5c); rows page
+  by count (7, then `+ N more`); all-ok groups are folded by default, their
+  counts showing; a picked group with nothing in it reads, faint, **no
+  hosts**.
+  - **host groups** (15i): each row is one **host** of the group, an
+    ordinary host row (state circle, name, address and output, the handled
+    tag).
+  - **service groups** (15j): each row is a **host that has services in the
+    group**, not the services: the normal host row, and in its fixed right
+    slot that host's per-state counts for its services in this group
+    (`● 1 ● 1 ● 12 · 14 checks`). Hosts sort worst first by those services.
+  - **A click on a host row opens the normal host pane** (rc1's; `hostPaneView`
+    in `v1.js`, also 10l). From a service groups list its services tab is
+    narrowed to that group, shown by a removable chip at the top of the tab,
+    **service group databases ×** (× shows all its services again; 15k).
+    From a host groups list the pane opens unfiltered. Nothing else in the
+    pane is new.
+  - The host-group grid (05) is unchanged.
+- Not redrawn here: 04's *add view* (4d) and 14-r5-b still show the kinds
+  list; the layouts list replaces it when built. 04's *grouped list* display
+  is the layout *services by host* (display list, group by host).
+
+---
+
+## 16 Knowing when icygui is blind
+
+**Status: approved** (user, 2026-10-08), except **heartbeats per zone and per
+endpoint (B3), drawn for review** (user, 2026-10-09; 16a, 16a2, 16a3, 16b,
+16b2, 16b3, 16r–16u redrawn or new; PLAN.md §4.2, items A, B, B2, B3, E, F, G).
+
+**Shows** (`16-live-data.html`): 16a the cluster health page with a
+heartbeat slot on every row of *zones and endpoints* and the summary row
+(and light); 16a2 the summary row's states stacked (and light); 16a3 Icinga
+health alerts with every beat dead; 16r (a) master-02's pinned beat dead with
+Icinga's reason (and light); 16s (b) zone fra runs no checks, sat-fra-01
+connected; 16t (c) sat-fra-01 down and its beat lost as one line; 16u (d) a
+disappeared heartbeat (and light); 16b Settings → icinga → an environment,
+*trouble alerts* with heartbeats found by custom variable (and light); 16b3 a
+disappeared heartbeat with *confirm removal*; 16b2 the list mode with a typo
+not found (and light); 16c the no-live-data,
+heartbeat-lost and recovery notifications (Linux dunst, macOS); 16c2 health
+alerts as notifications; 16d a blind environment's banner and footer (16f is
+its footer crop); 16e the tray's blind look and menu; 16g5 *diagnostics ·
+app* (and light), 16g9 with *include engines* on; 16g6 *diagnostics · engine*
+with staging chosen and stuck (and light), 16g10 *all engines*, 16g7 the
+engine select open, 16g8 prod-cluster chosen; 16g11 debug on with staging
+chosen (and light, and a header zoom; 16g5's header zoom shows debug off); 16h save diagnostics; 16i the
+restarted-after-a-crash notification; 16j the health page's `···` with
+*edit page*; 16k the health page in the editor (and light); 16l its *add view*;
+16n the status bar (and zooms of its ends), 16o hover on the gauge, 16p a
+stuck engine's red dot; 16q the app symbol's candidates (the monitor chosen).
+
+**Decisions**
+
+- **On topic 06's approved page** (`health.js`, shared by 06 and 16; 06
+  renders byte-identical): nothing of 06 changes; 16 adds two things.
+- **Heartbeats per zone and per endpoint (B3; 16a, 16a2):** sample
+  topology: zone master (HA: master-01, master-02), ams (sat-ams-01), fra
+  (HA: sat-fra-01, sat-fra-02); six heartbeats: one pinned per master, one
+  per satellite zone, one pinned per satellite in the HA zone fra (any zone
+  with more than one endpoint pins one per endpoint).
+  - **Zones and endpoints** gets a **heartbeat** column at the right: dot +
+    the age of the last OK beat, colour = state (green on time, yellow late
+    or disappeared, red dead), 104px wide on every row (`.hbc`), empty where
+    a row has no beat, so zone rows (flex) and endpoint rows (grid) line up
+    and nothing moves. A zone's beat sits on its zone row, a pinned beat on
+    its endpoint row. `beatsTable` in `health.js` (`healthPage({ beats })`;
+    06 renders byte-identical without it).
+  - **The heartbeat row is the summary** (`hbSummary`): fixed slots for dot,
+    *heartbeats*/*heartbeat*, the subject, the state word, the age; *notify*
+    and *settings* at the right. All fine: *heartbeats 6 of 6 · on time*;
+    else the worst by name (*heartbeat ams · 1 interval late · 48s*,
+    *heartbeat fra · dead · last 02:11*); a disappeared beat is counted
+    (*heartbeats 5 of 6 · fra disappeared*), never *5 of 5*; grey *off* and
+    *none found*.
+- **Health alerts (16a3, 16r–16u), in 06's banner (one system):** one block
+  in the worst alert's tone under the summary row: the worst in full (first
+  line, detail line, an action), the others one line each, worst first,
+  *since* in a fixed slot. A cleared alert **just goes** (its raise and
+  clear stay in the log and the notification centre). With heartbeats:
+  - (a) a non-OK beat is dead with Icinga's output: *heartbeat master-02
+    dead: Remote Icinga instance 'master-02' is not connected* (16r), one
+    alert for the cause.
+  - (b) a zone whose beat stopped while an endpoint is connected: *zone fra
+    runs no checks (sat-fra-01 connected)* (16s; here sat-fra-02 went down
+    first, its own one line under it).
+  - (c) an endpoint down and its beat lost is **one** line: *zone fra:
+    sat-fra-01 disconnected, heartbeat lost* (16t, 16a3), never two.
+  - (d) *heartbeat fra disappeared since 14:02*, warning tone, *settings* to
+    confirm (16u).
+- **Trouble alerts always notify at the OS level, no opt-out** (user,
+  2026-10-08): no live data, a dead or disappeared heartbeat, Icinga health
+  alerts and a failing engine; only a pause holds them back. The
+  environment's *trouble alerts* group (16b): **policy** *notify* |
+  *persistent* (a plain select), *no live data* shown as always on, and
+  **heartbeats**: *find by custom variable* | *list*.
+  - *find by custom variable* (default): the variable's name
+    (*icygui_heartbeat*) with the result in a fixed slot (*found 6*), and
+    under it every match: what it proves (master-01, zone ams, sat-fra-01),
+    its *host!service* dimmed, its interval (from the object; each beat keeps
+    its own time budget), its last beat.
+  - A heartbeat discovery no longer finds keeps its row, yellow,
+    *disappeared since 14:02*, with **confirm removal** (16b3); the result
+    reads *found 5 · 1 disappeared*.
+  - *list* (16b2): *host!service* entries, each with what it proves and its
+    interval in a fixed slot, × to remove, *add*; a typo shows *not found* at
+    once, the field keeping the focus.
+  - One help line. No per-kind switches.
+- **Notifications (16c, 16c2, 16g4):** title = environment + what happened,
+  body = since when and why; one per outage and one on recovery. The
+  heartbeat-lost and no-checks ones at critical urgency.
+- **Blind page (16d, 16f):** the existing connection banner, warning tone:
+  *no live data for 3m — states may be outdated*, reason on line two,
+  *retry now*. Rows unchanged. The footer puts *no data 3m* where the age
+  was, warning colour, dot yellow.
+- **Tray (16e):** a new *blind* look: the core hollow, the orbit broken, in
+  grey, the node in the warning colour at the same size and place as the
+  other looks' blue node; it wins over any state colour. The
+  menu lists each environment with its age (*no data 3m*, *live 2s*).
+- **Diagnostics: two pages with the approved 16g5 look** (user,
+  2026-10-08). Each header is fixed: *diagnostics · app* and *diagnostics ·
+  engine*, whatever is chosen. Neither belongs to an environment (nothing in
+  the cluster section highlighted). Both are built-in dashboards.
+  - **diagnostics · app** (the monitor; 16g5, 16g9): views **app** (the app's
+    tiles, `kpi()` from `health.js`: UI thread, engines (*2 live · 1 failed*, the sub-line naming lab; yellow),
+    memory, settings writes, the notifier) and **log** with only the app's
+    own lines (start, settings, the window, the notifier). The log header has
+    the switch **include engines** (beside *follow*): on, it is the full log
+    of everything in order, and the source column appears naming each line's
+    source (*app* or the environment). No engines view here.
+  - **diagnostics · engine** (the gauge; 16g6, 16g10, 16g7, 16g8): no app
+    view. **engines**: the **engine** select (the dropdown system: *all
+    engines*, then each engine with its state dot, no descriptions) defaults
+    to the active environment's engine. *All engines* shows the compact rows
+    like 06's *zones and endpoints* (state dot, environment, stream, node,
+    last event, engine tick, status: *running · up 18h*, *stuck · restarted
+    1 of 3* red, *running · login refused* yellow); a click on a row chooses
+    it. A chosen engine: its row alone, selected, **restart engine** at the
+    row's right, its tiles right under it (last event, engine tick, last
+    evaluation, queues, requests). **log**: engine lines only, never the
+    app's: every engine's for *all engines*, else the chosen one's behind the
+    chip **engine staging ×** (× or Esc goes back to *all engines*). The
+    source column stays, so nothing moves.
+  - **The log view, on both:** event-style rows with day separators (*Wed 7
+    Oct*), one line each: time, the level as a coloured word (ERROR red,
+    WARN yellow, INFO default), the source, the message. Level chips with
+    counts in digit slots, search, follow; *open log folder*, *save
+    diagnostics*, *copy all shown* in its `···`. Rows select like any list;
+    the shared selection bar reads *3 lines* · *copy* · *clear*.
+  - **Debug switch** (user, 2026-10-08; PLAN *Debug logging switch*):
+    each log header has a **debug** switch next to *follow*. On the app page
+    it records the app's debug lines; on the engine page the chosen engine's
+    (every engine's with *all engines*). Off, the *debug* level chip reads
+    **debug · off**, greyed; on, the switch reads its time left, **debug ·
+    28m** (it turns itself off after 30 minutes), the chip has its count,
+    and debug lines sit between the others in the faint colour (the events'
+    faint words). Both the chip and the switch label have fixed slots, so
+    nothing moves.
+  - **Vertical rhythm:** 06's: tiles padded 14/16 under their header, rows
+    straight onto the next view header.
+- **Save diagnostics (16h):** lists what goes in (logs, versions, settings
+  without secrets, connection states) and the *replace host names* switch.
+
+- **The health page is a built-in dashboard** (user, 2026-10-08), and so is
+  diagnostics. Every environment gets 06's approved layout by default, with
+  no editor needed: the pinned alert block and heartbeat row, then
+  *zones and endpoints*, *checks*, *queues and connections*, *global
+  switches* in 06's order (the IcingaDB tile only when that feature is on).
+  Its `···` has **edit page** (16j), which opens **the same dashboard
+  editor** (one abstraction, parameterised by the kinds a page allows; the
+  approved inspector layout, 16k): the name is built in; the pinned parts are
+  **locked rows** (a lock in the handle's slot, *pinned*); each health view
+  has its handle and an on/off switch; a tiles view picks which tiles it
+  shows; *add view* lists only the health kinds (16l); the editor's `···`
+  has **reset to default**. The diagnostics pages' editors offer only
+  *app*, *engines* and *log*. **These kinds live on their built-in pages only**: a
+  normal dashboard's *add view* never lists them (`HEALTH_KINDS`,
+  `DIAG_KINDS` in `views.js`, outside `LAYOUTS`).
+- **Vertical rhythm:** every banner's text sits 9.1px from its top and its
+  bottom edge (`.banner` in `v1.css`: padding-bottom 6.4px; 06 and 03 differ
+  only by that, the banner 1.6px shorter); the alert block likewise (9px).
+- **The status bar** (user, 2026-10-08, Zed as the reference; 16n–16p): the
+  footer under the sidebar becomes a slim **full-width bar across the
+  window's bottom, 26px** (the 40px top bar stays). Left, as before: the
+  sidebar toggle, history, the environment switcher (dot, environment, node,
+  age or *no data 3m*), *+*. Right: small symbols (14px in 22px buttons,
+  hover background, a tooltip above, right edges aligned), each with a 6px
+  state dot where it matters. Two symbols, kept both (user, 2026-10-08):
+  the **gauge**, the active environment's engine (dot = that engine's state;
+  red when stuck, 16p; tooltip *prod-cluster engine · running*), and the
+  **app symbol**, the **monitor** (chosen by the user; the same icon as the page's *app*
+  view; it replaced the scroll). Each opens its own page: the gauge
+  *diagnostics · engine* with the active environment's engine chosen (16g6,
+  16g8, gauge pressed), the app symbol *diagnostics · app* (16g5, monitor
+  pressed). Room for later
+  symbols to their left. `statusBar` in `v1.js` (`appWindow(…, {
+  statusBar })`, `appIcon` to swap the app symbol); page 16 draws it
+  everywhere, the other topics keep the old footer until they are redrawn.
+- **App symbol: the monitor, chosen** (user, 2026-10-08). 16q stays as the
+  record of the comparison (a monitor, b a small icygui mark, c a box, each
+  beside the gauge at 14px); b and c are dropped.
+- **Diagnostics are reached from the bar, not the sidebar:** the cluster
+  section's *diagnostics* entry is gone.
+- **Log day separators:** the log view breaks the days like the event
+  stream (*Wed 7 Oct*, *Thu 8 Oct*), times in order.
+
+## 17 Comments written in the handling view
+
+**Status: drawn for review** (user, 2026-10-08; PLAN.md §4.2, *Comment from
+the handling view*).
+
+**Shows** (`17-handling-comments.html`): 17a hover, *+ comment*; 17b the
+field open in place; 17c pending; 17d refused with retry; 17e in a stacked
+handling view; 17f without the add-comment permission.
+
+**Decisions**
+
+- ***+ comment* lives in the thread's last entry row** (user, 2026-10-08):
+  on hover or with `c` the last entry takes the hover background and shows
+  *+ comment* and the `c` key in its time slot at the right. No extra row
+  and no extra height, so nothing moves. Collapsed threads offer nothing;
+  without the permission it never appears (17f).
+- **The field opens as the thread's next entry** (17b): the comment mark,
+  below the entry that showed it: the configured author and *now*, the
+  pane's comment field (one
+  component), and one faint line of keys (↵ send, shift-↵ new line, esc
+  cancel). Only the open field grows the thread.
+- **Pending** (17c): dimmed, *sending…* in the time slot, until the event
+  stream confirms it; then normal, and the thread rises under *latest
+  activity*. **Refused** (17d): the text stays, the mark and one reason line
+  in the critical colour, *retry* · *discard* in the time slot.
+

@@ -17,11 +17,11 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement,
     KeyBinding, ParentElement as _, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _,
 };
 use ic_model::Timestamp;
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
-use ic_ui_kit::{ActiveTheme as _, Icon, IconName, KeyHint, StateDot, TextField, Theme};
+use ic_ui_kit::{ActiveTheme as _, Icon, IconName, KeyHint, StateDot, TextField, Theme, px};
 
 pub(crate) use self::model::{Focus, PaletteCommand, PaletteItem};
 use self::model::{PaletteIndex, Section};
@@ -383,7 +383,7 @@ impl Render for CommandPalette {
                         div()
                             .text_size(px(14.))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(colors.accent)
+                            .text_color(colors.accent_text)
                             .child("›"),
                     )
                     .child(
@@ -463,7 +463,7 @@ fn highlighted(label: &str, matched: &[usize], theme: &Theme) -> StyledText {
             highlights.push((
                 offset..offset + character.len_utf8(),
                 HighlightStyle {
-                    color: Some(theme.colors.accent),
+                    color: Some(theme.colors.accent_text),
                     ..HighlightStyle::default()
                 },
             ));
@@ -473,15 +473,17 @@ fn highlighted(label: &str, matched: &[usize], theme: &Theme) -> StyledText {
 }
 
 fn dot_of(dot: Dot, theme: &Theme) -> StateDot {
-    StateDot::with_color(dot_color(dot, theme)).size(px(7.))
+    StateDot::with_color(dot_color(dot, theme))
+        .size(px(7.))
+        .hollow(dot.is_hollow())
 }
 
 /// The colour of a row's dot.
 fn dot_color(dot: Dot, theme: &Theme) -> gpui::Hsla {
     match dot {
-        Dot::State(state) => theme.states.checkable(state),
-        Dot::Ok => theme.states.ok,
-        Dot::Empty => theme.states.pending,
+        Dot::State(state) | Dot::Handled(state) => theme.states.fill.checkable(state),
+        Dot::Ok => theme.states.fill.ok,
+        Dot::Empty => theme.states.fill.pending,
     }
 }
 

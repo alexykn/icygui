@@ -137,6 +137,9 @@ pub(crate) struct Session {
     demo_secrets: Arc<DemoSecrets>,
     demo_dir: Option<tempfile::TempDir>,
     pending_open: Option<OpenAtStart>,
+    /// The settings file's problem last reported (an edit that doesn't
+    /// read), so coming back to the window doesn't repeat it.
+    reported_file_error: Option<String>,
     /// Shows notifications on the desktop.
     desktop: Box<dyn Desktop>,
     /// Recent notifications' tags and objects, for their clicks.
@@ -259,6 +262,7 @@ impl Session {
             demo_secrets,
             demo_dir: None,
             pending_open,
+            reported_file_error: None,
             desktop,
             targets: VecDeque::new(),
             #[cfg(all(test, target_os = "linux"))]
@@ -285,7 +289,14 @@ impl Session {
             }),
         );
         match started {
-            Ok(persistence) => state.update(cx, |state, _| state.set_persistence(persistence)),
+            Ok(persistence) => state.update(cx, |state, _| {
+                // What the file holds now: an edit by hand shows as a
+                // difference from it (`reload_settings_file`).
+                if state.config_problem().is_none() {
+                    persistence.read_from_disk(state.config().clone());
+                }
+                state.set_persistence(persistence);
+            }),
             Err(error) => {
                 tracing::error!(%error, "the settings writer couldn't start; nothing will be saved");
                 state.update(cx, |state, _| {
@@ -295,18 +306,38 @@ impl Session {
                 });
             }
         }
-        let state = state.downgrade();
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             while let Some(report) = reports.next().await {
-                let alive = state.update(cx, |state, cx| {
-                    state.on_saved(report);
-                    cx.notify();
-                });
-                if alive.is_err() {
+                if this
+                    .update(cx, |session, cx| session.on_saved(report, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
         })
+    }
+
+    /// A save finished: an edited settings file is merged and taken over
+    /// (nothing was written over it), an unreadable one reported.
+    fn on_saved(&mut self, report: SaveReport, cx: &mut Context<Self>) {
+        match report {
+            SaveReport::FileEdited { file, known } => {
+                let current = self.state.read(cx).settings_on_disk();
+                if current.as_ref() == Some(&*known) {
+                    self.take_settings_file(*file, Some(&known), cx);
+                } else {
+                    // Taken over meanwhile (the window came to the front):
+                    // the refused save goes again, merged with it.
+                    self.state.update(cx, |state, _| state.save_settings());
+                }
+            }
+            SaveReport::FileUnreadable(error) => self.file_unreadable(&error, cx),
+            report => self.state.update(cx, |state, cx| {
+                state.on_saved(report);
+                cx.notify();
+            }),
+        }
     }
 
     /// Shows the core's notifications on the desktop, on the UI thread.
@@ -333,7 +364,8 @@ impl Session {
     /// it goes to that environment's engine, whichever is active by then.
     fn post(&mut self, raised: &Raised, cx: &mut Context<Self>) {
         let intent = &raised.intent;
-        let (acknowledge, name, prefix) = {
+        let trouble = ic_core::trouble::is_trouble_id(&intent.id);
+        let (acknowledge, name, prefix, output, persistent) = {
             let state = self.state.read(cx);
             let Some(environment) = state.environment_by_id(&raised.environment) else {
                 tracing::debug!(id = %intent.id, "a notification of a removed environment was dropped");
@@ -342,8 +374,18 @@ impl Session {
             let acknowledge = state
                 .action_denial_in(&raised.environment, &ObjectAction::Acknowledge)
                 .is_none();
-            let prefix = (state.environments().len() > 1).then(|| environment.name.clone());
-            (acknowledge, environment.name.clone(), prefix)
+            // A trouble alert names its environment already.
+            let prefix =
+                (state.environments().len() > 1 && !trouble).then(|| environment.name.clone());
+            let output = state.config().general.show_plugin_output;
+            let persistent = environment.trouble.policy == ic_config::TroublePolicy::Persistent;
+            (
+                acknowledge,
+                environment.name.clone(),
+                prefix,
+                output,
+                persistent,
+            )
         };
         if let Some(object) = &intent.object {
             self.targets.push_front(Target {
@@ -353,9 +395,12 @@ impl Session {
             });
             self.targets.truncate(MAX_TARGETS);
         }
-        let mut posted = desktop::posted(intent, &name, acknowledge);
+        let mut posted = desktop::posted(intent, &name, acknowledge, output);
         if let Some(name) = prefix {
             posted.title = desktop::prefixed_title(&posted.title, &name);
+        }
+        if trouble {
+            posted = desktop::trouble(posted, intent, persistent);
         }
         self.desktop.show(posted, cx);
     }
@@ -455,6 +500,15 @@ impl Session {
                 let _ = state.request(acknowledge);
                 cx.notify();
             });
+        }
+    }
+
+    /// Where the settings, data and logs are (`None` in the demo, which
+    /// keeps nothing).
+    pub(crate) fn paths(&self) -> Option<&Paths> {
+        match &self.launch {
+            Launch::Live { paths, .. } => Some(paths),
+            Launch::Demo { .. } => None,
         }
     }
 
@@ -599,6 +653,18 @@ impl Session {
     fn start_demo_core(&mut self, id: &str, cx: &mut Context<Self>) {
         match self.demo_data_dir() {
             Ok(data_dir) => {
+                // `prod-cluster`'s database hosts get a recent history
+                // (4a's event stream), once per demo.
+                if id == demo::ENVIRONMENT_ID && !ic_core::event_log_path(&data_dir, id).exists() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0., |since| since.as_secs_f64());
+                    if let Err(error) =
+                        ic_core::seed_event_log(&data_dir, id, &demo::recent_events(now))
+                    {
+                        tracing::warn!(%error, "couldn't seed the demo's event log");
+                    }
+                }
                 let secrets = self.secrets.clone();
                 self.start_core(id, data_dir, secrets, cx);
             }
@@ -614,11 +680,12 @@ impl Session {
         secrets: Arc<dyn SecretStore>,
         cx: &mut Context<Self>,
     ) {
-        let (environment, general, start) = {
+        let (environment, general, hide_handled, start) = {
             let state = self.state.read(cx);
             (
                 state.environment_by_id(id).cloned(),
                 state.config().general.clone(),
+                state.handled_defaults(),
                 state.start_mode(),
             )
         };
@@ -632,6 +699,7 @@ impl Session {
         let spec = EnvironmentSpec {
             environment,
             general,
+            hide_handled,
             data_dir,
             // Started at login without the window, the first load waits a
             // moment proportional to the installation (PERF-09) until the
@@ -1106,6 +1174,7 @@ impl Session {
                 ObjectKey::Host { name } => state.snapshot().hosts.contains_key(name),
                 ObjectKey::Service { key } => state.snapshot().services.contains_key(key),
             },
+            OpenAtStart::List { .. } => !state.snapshot().services.is_empty(),
         };
         if !ready {
             return;
@@ -1122,6 +1191,21 @@ impl Session {
             }
             OpenAtStart::Tab(key) => self.state.update(cx, |state, cx| {
                 if state.open_tab(key) {
+                    cx.notify();
+                }
+            }),
+            OpenAtStart::List { kind, chip, mode } => self.state.update(cx, |state, cx| {
+                if let Some(mode) = mode {
+                    let mut options =
+                        crate::lists::model::Options::saved(kind, &state.list_options(kind));
+                    options.pick_mode(mode);
+                    state.set_list_options(kind, options.to_saved(kind));
+                }
+                let changed = match chip {
+                    Some(chip) => state.open_list_on(kind, chip),
+                    None => state.open_list(kind),
+                };
+                if changed {
                     cx.notify();
                 }
             }),
@@ -1182,6 +1266,7 @@ impl Session {
                 Ok(config) => {
                     tracing::info!(?choice, "settings recovered");
                     session.state.update(cx, |state, cx| {
+                        state.settings_read(&config);
                         state.adopt_config(config);
                         cx.notify();
                     });
@@ -1204,6 +1289,114 @@ impl Session {
             });
         })
         .detach();
+    }
+
+    /// The window came back to the front: takes over the settings file
+    /// if it was edited meanwhile (*edit in settings file*), read off the
+    /// UI thread and merged with the window's own changes. A file that
+    /// can't be read is reported once and changes nothing; a missing one
+    /// is left alone.
+    pub(crate) fn reload_settings_file(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.paths().map(Paths::config_store) else {
+            return;
+        };
+        let known = {
+            let state = self.state.read(cx);
+            if state.config_problem().is_some() {
+                return;
+            }
+            state.settings_on_disk()
+        };
+        let Some(known) = known else {
+            return;
+        };
+        let read = cx
+            .background_executor()
+            .spawn(async move { store.read().map_err(|error| error.to_string()) });
+        cx.spawn(async move |this, cx| {
+            let result = read.await;
+            let _ = this.update(cx, |session, cx| {
+                let (current, in_window) = {
+                    let state = session.state.read(cx);
+                    (state.settings_on_disk(), state.config().clone())
+                };
+                if current.as_ref() != Some(&known) {
+                    // icygui wrote the file while it was read: this read is
+                    // out of date (the writer checks the file itself).
+                    return;
+                }
+                match result {
+                    Ok(None) => {}
+                    Ok(Some(file)) => {
+                        let had_error = session.reported_file_error.take().is_some();
+                        session.state.update(cx, |state, cx| {
+                            state.set_file_error(None);
+                            cx.notify();
+                        });
+                        // Edited, or holding back changes icygui couldn't
+                        // write while it didn't read.
+                        if file != known || (had_error && in_window != known) {
+                            session.take_settings_file(file, Some(&known), cx);
+                        }
+                    }
+                    Err(error) => session.file_unreadable(&error, cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The settings file can't be read (an edit by hand with a mistake):
+    /// said once per problem, in a banner and in the settings panel's
+    /// header; nothing is written over it until it reads again.
+    fn file_unreadable(&mut self, error: &str, cx: &mut Context<Self>) {
+        let repeated = self.reported_file_error.as_deref() == Some(error);
+        self.reported_file_error = Some(error.to_owned());
+        self.state.update(cx, |state, cx| {
+            state.set_file_error(Some(error.to_owned()));
+            if !repeated {
+                tracing::warn!(%error, "the edited settings file can't be read");
+                state.report(UserNotice::problem(
+                    "The settings file can't be read; icygui keeps its settings.",
+                    format!(
+                        "{error}. Nothing is written over the file until it reads again; \
+                         changes made in icygui meanwhile are kept and added to it then."
+                    ),
+                ));
+            }
+            cx.notify();
+        });
+    }
+
+    /// Takes over settings edited in the file, merged with the window's
+    /// changes since `known`: the state takes them, then engines stop,
+    /// restart or start as their environments changed, and the login
+    /// entry follows *start at login*.
+    fn take_settings_file(&mut self, file: Config, known: Option<&Config>, cx: &mut Context<Self>) {
+        let changes = self.state.update(cx, |state, cx| {
+            let changes = state.take_settings_from_file(file, known);
+            cx.notify();
+            changes
+        });
+        let Some(changes) = changes else {
+            return;
+        };
+        for (id, core) in changes.removed {
+            self.stop_engine(&id, core, None, cx);
+        }
+        for id in &changes.reconnect {
+            self.replace_engine(id, None, cx);
+        }
+        if !changes.added.is_empty() {
+            self.start(cx);
+        }
+        if let Some(enabled) = changes.launch_at_login {
+            crate::background::autostart::change(enabled, &self.state, cx);
+        }
+        self.state.update(cx, |state, cx| {
+            state.inform("Settings taken over from the settings file", None);
+            cx.notify();
+        });
     }
 
     /// Stops every engine (side by side, each with its bounded wait),

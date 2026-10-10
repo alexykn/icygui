@@ -207,6 +207,14 @@ impl Notify {
         self.announced_pause
     }
 
+    /// Whether notifications are paused at `now` (only a pause holds the
+    /// trouble alerts back).
+    pub(super) fn paused(&self, now: Timestamp) -> bool {
+        self.rules
+            .paused_until()
+            .is_some_and(|until| until.as_unix_seconds() > now.as_unix_seconds())
+    }
+
     /// Whether inputs (or seeds) wait for a snapshot.
     pub(super) fn has_pending(&self) -> bool {
         !self.pending.is_empty() || !self.seeds.is_empty()
@@ -387,7 +395,9 @@ impl Notify {
         at: Timestamp,
     ) {
         let found: Vec<(ObjectKey, ObjectView)> = views
-            .filter(|(_, view)| view.state.is_problem() || view.flapping)
+            .filter(|(object, view)| {
+                (view.state.is_problem() || view.flapping) && !store.is_excluded(object)
+            })
             .collect();
         tracing::debug!(count = found.len(), "seeding the rule engine");
         for (object, view) in found {
@@ -436,6 +446,10 @@ impl Notify {
         let Some(object) = entry.event.object() else {
             return;
         };
+        if store.is_excluded(object) {
+            // A heartbeat: no rule inputs, no history.
+            return;
+        }
         // What a load found about the object came before this event.
         self.flush_deferred(store, object, log);
         let (Some(before), Some(after)) = (entry.before, entry.after) else {
@@ -673,6 +687,9 @@ impl Notify {
             before,
             after,
         } = change;
+        if store.is_excluded(&object) {
+            return;
+        }
         let Some(after) = after else {
             // Gone: the rule engine forgets it (a change to pending never
             // notifies).
@@ -919,6 +936,11 @@ impl Notify {
         handled: bool,
         at: Timestamp,
     ) {
+        // A heartbeat is no problem of anyone's: its trouble alerts say
+        // what it means.
+        if store.is_excluded(object) {
+            return;
+        }
         let (host_display, service_display) = store.display_names(object);
         self.pending.push(RuleInput {
             object: object.clone(),
@@ -938,6 +960,7 @@ impl Engine {
     /// pause.
     pub(super) fn tick(&mut self, now: tokio::time::Instant) {
         self.tick_at = now + self.tuning.rule_tick;
+        self.alive(now);
         let (intents, pause_ended) = self
             .notify
             .tick(self.ports.clock.now(), self.ports.clock.local());
@@ -961,6 +984,7 @@ impl Engine {
             self.ports.clock.now().as_unix_seconds() - f64::from(hours) * 3_600.0,
         );
         self.event_log.prune(before);
+        self.prune_recent_events(before);
     }
 
     /// Judges the queued rule inputs with the dashboards' memberships:
@@ -1002,7 +1026,7 @@ impl Engine {
 
     /// Logs intents; they are emitted once logged
     /// ([`Engine::on_logged`]).
-    fn deliver(&mut self, intents: Vec<NotificationIntent>) {
+    pub(super) fn deliver(&mut self, intents: Vec<NotificationIntent>) {
         if intents.is_empty() {
             return;
         }

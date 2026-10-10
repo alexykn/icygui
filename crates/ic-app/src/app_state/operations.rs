@@ -223,6 +223,7 @@ impl AppState {
         );
         self.tracker
             .finish(id, outcome, &self.engine.snapshot, Instant::now());
+        self.drafts.finish(id, outcome, Instant::now());
     }
 
     /// The marker for `object` while an action on it is in flight or
@@ -270,7 +271,8 @@ impl AppState {
     pub(crate) fn tick_actions(&mut self, now: Instant) -> bool {
         let expired = self.tracker.expire(now);
         let settled = self.tracker.settle(&self.engine.snapshot, now);
-        expired || settled
+        let drafts = self.settle_drafts(now);
+        expired || settled || drafts
     }
 }
 

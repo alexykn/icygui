@@ -9,6 +9,9 @@
 //! without a key and copies the name, the output and a filter expression
 //! (PANE-05).
 //!
+//! A downtime in effect (or still to come) shows in a banner fixed under
+//! the header, above the scrolling body (topic 01, [`downtime`]).
+//!
 //! The object the pane shows is the one the user opens: it is asked for in
 //! full at once, ahead of everything else (`Command::Focus`; once the
 //! cursor rests when it moves through the list), and again when the
@@ -17,10 +20,12 @@
 //! hint in a fixed slot of its header when fresher details take longer
 //! than [`UPDATING_HINT_AFTER`].
 
+mod downtime;
 mod history;
 mod host;
 pub(crate) mod model;
 mod service;
+mod thread;
 
 use std::time::{Duration, Instant};
 
@@ -28,13 +33,13 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
     ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    Window, div, prelude::FluentBuilder as _, px,
+    Window, div, prelude::FluentBuilder as _,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::ObjectMode;
 use ic_ui_kit::{
     ActiveTheme as _, Button, Dismissal, EmptyState, GlyphButton, Icon, IconButton, IconName, Link,
-    Menu, MenuItem, PaneHeader, Popover, Scrollbar, Theme, Tooltip,
+    Menu, MenuItem, PaneHeader, Popover, Scrollbar, Theme, Tooltip, px,
 };
 
 use crate::actions::{
@@ -74,6 +79,9 @@ const TAB_TWO_COLUMNS_FROM: f32 = 1000.;
 const FOCUS_DEBOUNCE: Duration = Duration::from_millis(150);
 /// The `updating` hint shows when fresher details take longer than this.
 pub(crate) const UPDATING_HINT_AFTER: Duration = Duration::from_millis(300);
+/// The header's link that opens the pane as a tab; a tab keeps its place,
+/// empty.
+const OPEN_AS_TAB: &str = "↗ open as tab";
 /// The width of the hint's slot in the header, kept whether it shows or
 /// not, so nothing beside it moves.
 const UPDATING_SLOT_WIDTH: f32 = 84.;
@@ -181,6 +189,17 @@ pub(crate) struct ObjectPane {
     /// Rows are marked in the list beside the pane: the action keys act on
     /// them, not on this object, so the buttons show no key hints.
     keys_elsewhere: bool,
+    /// The thread's `add a comment` field (made at the first render; the
+    /// same field the handling view's threads open, topic 17), and the
+    /// object what is typed in it is for.
+    comment_input: Option<Entity<crate::comments::field::CommentField>>,
+    comment_events: Option<Subscription>,
+    comment_object: Option<ObjectKey>,
+    /// Why the last comment couldn't be sent.
+    comment_error: Option<String>,
+    /// Where the keyboard goes back to from the comment field: the list
+    /// beside the pane.
+    return_focus: Option<FocusHandle>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -236,8 +255,19 @@ impl ObjectPane {
             log: None,
             log_task: None,
             keys_elsewhere: false,
+            comment_input: None,
+            comment_events: None,
+            comment_object: None,
+            comment_error: None,
+            return_focus: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Where the keyboard goes back to from the comment field (the list
+    /// beside the pane).
+    pub(crate) fn set_return_focus(&mut self, handle: FocusHandle) {
+        self.return_focus = Some(handle);
     }
 
     /// The rows this pane offers the engine: a host pane's service rows
@@ -559,8 +589,11 @@ impl ObjectPane {
         self.request(ObjectAction::CheckNow, cx);
     }
 
-    fn on_comment(&mut self, _: &AddComment, _: &mut Window, cx: &mut Context<Self>) {
-        self.request(ObjectAction::AddComment, cx);
+    /// `c`: the thread's comment field when it shows, else the dialog.
+    fn on_comment(&mut self, _: &AddComment, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_comment_field(window, cx) {
+            self.request(ObjectAction::AddComment, cx);
+        }
     }
 
     /// Escape in a tab: back to the dashboard; the tab stays open.
@@ -601,27 +634,36 @@ impl ObjectPane {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.back(cx))),
             );
         }
-        header = header.label(label).status(updating_slot(updating, theme));
+        header = header
+            .label(label)
+            .status(updating_slot(updating, theme))
+            .on_close(cx.listener(|this, _: &ClickEvent, _, cx| this.close(cx)));
+        // The × sits left of `↗ open as tab` on every platform, never next
+        // to a window's close button; a tab keeps the link's place, empty,
+        // so the × stays where it is (topic 13).
         let header = match self.mode {
-            PaneMode::Split => header
-                .child(
-                    Link::new("open-as-tab", "↗ open as tab")
-                        .quiet()
-                        .text_size(theme.text.small)
-                        .tooltip(Tooltip::new("Open as tab").key(open_as_tab_key()))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            let object = this.object.clone();
-                            this.state.update(cx, |state, cx| {
-                                if state.open_tab(object) {
-                                    cx.notify();
-                                }
-                            });
-                        })),
-                )
-                .on_close(cx.listener(|this, _: &ClickEvent, _, cx| this.close(cx))),
-            PaneMode::Tab => {
-                header.on_close(cx.listener(|this, _: &ClickEvent, _, cx| this.close(cx)))
-            }
+            PaneMode::Split => header.child(
+                Link::new("open-as-tab", OPEN_AS_TAB)
+                    .quiet()
+                    .text_size(theme.text.small)
+                    .tooltip(Tooltip::new("Open as tab").key(open_as_tab_key()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        let object = this.object.clone();
+                        this.state.update(cx, |state, cx| {
+                            if state.open_tab(object) {
+                                cx.notify();
+                            }
+                        });
+                    })),
+            ),
+            PaneMode::Tab => header.child(
+                div()
+                    .flex_none()
+                    .invisible()
+                    .whitespace_nowrap()
+                    .text_size(theme.text.small)
+                    .child(OPEN_AS_TAB),
+            ),
         };
         // The pane's header is part of the window's top edge, beside the list
         // or as a tab.
@@ -636,6 +678,17 @@ impl Render for ObjectPane {
         self.want_focus(cx);
         self.want_details(cx);
         self.want_history(cx);
+        self.ensure_comment_input(window, cx);
+        // What was typed for another object never goes to this one.
+        if self.comment_object.as_ref() != Some(&self.object) {
+            self.comment_object = Some(self.object.clone());
+            self.comment_error = None;
+            if let Some(field) = self.comment_input.clone()
+                && !field.read(cx).value(cx).is_empty()
+            {
+                field.update(cx, |field, cx| field.set_value("", window, cx));
+            }
+        }
         let theme = cx.theme().clone();
         let snapshot = self.state.read(cx).snapshot().clone();
         let updating = self.updating_hint(snapshot.is_updating(&self.object), cx);
@@ -658,9 +711,23 @@ impl Render for ObjectPane {
         };
         // A tab is the whole main area: the connection banners show over it.
         let banners = if self.mode == PaneMode::Tab {
-            banner::banners(&self.state, now, cx)
+            banner::banners(&self.state, now, true, cx)
         } else {
             Vec::new()
+        };
+        // Fixed under the header, so it stays in view while the body
+        // scrolls.
+        let downtime = if body_object_known(&snapshot, &self.object) {
+            let width = match (self.mode, &self.object, layout) {
+                (PaneMode::Split, _, _) => None,
+                (_, ObjectKey::Service { .. }, BodyLayout::WideTab) => {
+                    Some(TAB_CONTENT_WIDTH + TAB_COLUMN_GAP + TAB_SIDE_WIDTH)
+                }
+                _ => Some(TAB_CONTENT_WIDTH),
+            };
+            downtime::banner(self, &snapshot, now, width, cx)
+        } else {
+            None
         };
         div()
             .id("object-pane")
@@ -680,6 +747,7 @@ impl Render for ObjectPane {
             })
             .child(header)
             .children(banners)
+            .children(downtime)
             .child(body)
     }
 }
@@ -711,6 +779,14 @@ fn updating_slot(updating: bool, theme: &Theme) -> impl IntoElement {
                 "Fetching the latest details from Icinga; shown meanwhile is what icygui has",
             ))
         })
+}
+
+/// Whether the snapshot has `object` (the pane shows its body).
+fn body_object_known(snapshot: &ic_core::snapshot::Snapshot, object: &ObjectKey) -> bool {
+    match object {
+        ObjectKey::Service { key } => snapshot.services.contains_key(key),
+        ObjectKey::Host { name } => snapshot.hosts.contains_key(name),
+    }
 }
 
 /// The pane body for an object the snapshot doesn't have: still loading,
@@ -941,7 +1017,7 @@ fn failure_line(pane: &ObjectPane, cx: &Context<ObjectPane>) -> Option<impl Into
                 div().pt(px(2.)).child(
                     Icon::new(IconName::TriangleAlert)
                         .size(theme.metrics.icon_small)
-                        .color(theme.states.critical),
+                        .color(theme.states.fill.critical),
                 ),
             )
             .child(
@@ -1001,6 +1077,31 @@ fn more_trigger(
 }
 
 /// The pane's `···`: the actions without a key, and copying (PANE-05).
+/// What the pane's `···` can offer to remove.
+enum Removable {
+    /// This many downtimes Icinga would remove.
+    Some(usize),
+    /// Only downtimes from the config (Icinga refuses), with the schedule.
+    OnlyConfig(Option<String>),
+    /// No downtime.
+    None,
+}
+
+/// Counts only what Icinga would remove: a downtime from the config can't
+/// be removed (it comes back with the config).
+fn removable_downtimes(state: &AppState, object: &ObjectKey) -> Removable {
+    let own = state
+        .snapshot()
+        .downtimes
+        .get(object)
+        .map_or(&[][..], Vec::as_slice);
+    match own.iter().filter(|downtime| !downtime.config_owned).count() {
+        0 if own.is_empty() => Removable::None,
+        0 => Removable::OnlyConfig(own.iter().find_map(|downtime| downtime.schedule.clone())),
+        count => Removable::Some(count),
+    }
+}
+
 fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>) -> Menu {
     let state = pane.state.read(cx);
     let item = |id: &'static str, label: &'static str, action: ObjectAction| {
@@ -1026,11 +1127,6 @@ fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>
         ))
     };
     let objects = std::slice::from_ref(&pane.object);
-    let downtimes = state
-        .snapshot()
-        .downtimes
-        .get(&pane.object)
-        .map_or(0, Vec::len);
     let mut menu = Menu::new("pane-menu")
         .item(item(
             "pane-result",
@@ -1042,16 +1138,27 @@ fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>
             "run command",
             ObjectAction::RunCommand,
         ));
-    if downtimes > 0 {
-        menu = menu.item(item(
-            "pane-remove-downtimes",
-            if downtimes == 1 {
-                "remove its downtime"
-            } else {
-                "remove all its downtimes"
-            },
-            ObjectAction::RemoveDowntimes,
-        ));
+    match removable_downtimes(state, &pane.object) {
+        Removable::Some(count) => {
+            menu = menu.item(item(
+                "pane-remove-downtimes",
+                if count == 1 {
+                    "remove its downtime"
+                } else {
+                    "remove all its downtimes"
+                },
+                ObjectAction::RemoveDowntimes,
+            ));
+        }
+        // As the banner's button: shown, disabled, with the reason.
+        Removable::OnlyConfig(schedule) => {
+            menu = menu.item(
+                MenuItem::new("pane-remove-downtimes", "remove its downtime")
+                    .disabled(true)
+                    .tooltip(Tooltip::new(downtime::config_reason(schedule.as_deref()))),
+            );
+        }
+        Removable::None => {}
     }
     menu = override_items(menu, pane, cx);
     menu = menu
@@ -1076,31 +1183,48 @@ fn more_menu(pane: &ObjectPane, output: Option<String>, cx: &Context<ObjectPane>
             output,
         ));
     }
-    // The notes and action URLs, macros resolved (PANE-05).
-    let links = object_links(state.snapshot(), &pane.object);
-    if !links.is_empty() {
-        menu = menu.separator();
-        for (index, (label, url)) in links.into_iter().enumerate() {
-            let target = url.clone();
-            menu = menu.item(
-                MenuItem::new(SharedString::from(format!("pane-open-{index}")), label)
-                    .tooltip(Tooltip::new(format!("Open {url} in the browser")))
-                    .on_click(
-                        cx.listener(move |this: &mut ObjectPane, _: &ClickEvent, _, cx| {
-                            this.menu.close();
-                            cx.open_url(&target);
-                            cx.notify();
-                        }),
-                    ),
-            );
-        }
+    // The banner's downtime by its full name, for another downtime's
+    // *triggered by*.
+    if let Some(banner) = crate::downtimes::banner(state.snapshot(), &pane.object, Timestamp::now())
+    {
+        menu = menu.item(copy(
+            "pane-copy-downtime",
+            "copy downtime name",
+            "the downtime's name",
+            banner.name,
+        ));
     }
+    menu = link_items(menu, object_links(state.snapshot(), &pane.object), cx);
     menu.on_dismiss(
         cx.listener(|this: &mut ObjectPane, dismissal: &Dismissal, _, cx| {
             this.menu.dismissed(*dismissal);
             cx.notify();
         }),
     )
+}
+
+/// The notes and action URLs, macros resolved (PANE-05), after a
+/// separator; nothing without links.
+fn link_items(mut menu: Menu, links: Vec<(String, String)>, cx: &Context<ObjectPane>) -> Menu {
+    if links.is_empty() {
+        return menu;
+    }
+    menu = menu.separator();
+    for (index, (label, url)) in links.into_iter().enumerate() {
+        let target = url.clone();
+        menu = menu.item(
+            MenuItem::new(SharedString::from(format!("pane-open-{index}")), label)
+                .tooltip(Tooltip::new(format!("Open {url} in the browser")))
+                .on_click(
+                    cx.listener(move |this: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                        this.menu.close();
+                        cx.open_url(&target);
+                        cx.notify();
+                    }),
+                ),
+        );
+    }
+    menu
 }
 
 /// The pane menu's watch and mute items (NOTE-02): local to this computer.
@@ -1122,16 +1246,11 @@ fn override_items(mut menu: Menu, pane: &ObjectPane, cx: &Context<ObjectPane>) -
     };
     menu = menu.separator().label("notifications");
     if current != Some(ObjectMode::Watch) {
-        menu = menu.item(
-            change(
-                "pane-watch",
-                "watch: always notify".to_owned(),
-                OverrideChange::Watch,
-            )
-            .tooltip(Tooltip::new(
-                "Notify with the environment's rule even when no dashboard does",
-            )),
-        );
+        menu = menu.item(change(
+            "pane-watch",
+            "watch".to_owned(),
+            OverrideChange::Watch,
+        ));
     }
     for (index, choice) in MuteChoice::ALL.into_iter().enumerate() {
         menu = menu.item(change(

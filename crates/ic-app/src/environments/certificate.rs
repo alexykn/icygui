@@ -10,11 +10,11 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Window, div, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
 };
 use ic_core::{CertificateInfo, ConnectionState};
 use ic_model::Timestamp;
-use ic_ui_kit::{ActiveTheme as _, Button, ButtonVariant, DialogBody, Theme};
+use ic_ui_kit::{ActiveTheme as _, Button, ButtonVariant, DialogBody, Theme, px};
 
 use crate::app_state::AppState;
 use crate::format;
@@ -97,7 +97,7 @@ pub(crate) fn certificate_details(
             "valid until",
             div()
                 .text_color(if expired {
-                    theme.states.critical
+                    theme.states.text.critical
                 } else {
                     colors.text
                 })
@@ -117,8 +117,8 @@ pub(crate) fn mismatch_warning(pinned: &str, presented: &str, theme: &Theme) -> 
         .p(px(12.))
         .rounded(theme.metrics.code_radius)
         .border_1()
-        .border_color(theme.states.warning.opacity(0.5))
-        .bg(theme.states.warning.opacity(0.08))
+        .border_color(theme.states.fill.warning.opacity(0.5))
+        .bg(theme.colors.warning_tint)
         .text_size(theme.text.small)
         .child(
             div()

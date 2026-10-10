@@ -11,6 +11,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# demo-config writes the demo's settings with the app's own settings code.
+ic-config.workspace = true
+ic-rules.workspace = true
 icns = "0.3"
 resvg = "0.46"
 serde_json.workspace = true

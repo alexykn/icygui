@@ -8,6 +8,13 @@ pins that down:
   contract tests read. The `icygui` API user deliberately lacks the
   `filter-expression` permission, and `enforce_filter_expression_permission`
   is on, as it will be by default from Icinga 2.17.
+- The same fixtures are part of the demo cluster (`demo/docker-compose.yml`,
+  docs/demo.md): `icinga/icygui-test.conf` in its master zone,
+  `icinga/icygui-groups.conf` (the groups, a file of their own for that) in
+  a global zone. `demo/up.sh` prints the same variables for its master-01,
+  so the contract tests run against a two-master cluster with satellites
+  and changing states as well; the engine's cluster tests
+  (`cargo test -p ic-core --test engine cluster::`) run there only.
 - `samples/` holds real responses recorded from that instance (Icinga
   v2.15.6): every object type, status, info, action results, error bodies
   and an event stream, plus a lean service query (`services-lean.json`,
@@ -26,17 +33,26 @@ pins that down:
   cargo test -p ic-api --test contract
   ```
 
-  The tests refuse any instance but this disposable one before sending a
+  The tests refuse any instance but these disposable ones before sending a
   query (the URL must point to this machine and the fixture-only `viewer`
   user must log in): they load every object several times, which a
   production Icinga must not get from a test run. Load and scale tests run
-  only against `ic-mock` or `scale/benchmark.sh`'s own local Icinga.
+  only against `ic-mock`, `scale/benchmark.sh`'s own local Icinga or the
+  demo cluster.
+
+  Against the demo cluster:
+
+  ```sh
+  set -a; eval "$(demo/up.sh)"; set +a
+  cargo test -p ic-api --test contract
+  ```
 
   Without the variables the tests pass without checking anything, unless
   `ICYGUI_CONTRACT_REQUIRED` is set. The `Contract` workflow
   (`.github/workflows/contract.yml`: nightly, on pull requests and pushes
   to `main` that change `ic-api`, `ic-model`, `contract/` or `Cargo.lock`,
-  and by hand with another image tag) sets it, so a broken setup fails instead of passing. The
+  and by hand with another image tag) sets it, so a broken setup fails instead of passing; so
+  does the `Demo cluster` workflow (`.github/workflows/cluster.yml`). The
   script returns as soon as the API answers; tests that need checked
   objects wait until Icinga has run every active check once (within a
   minute of a fresh start).
@@ -92,3 +108,37 @@ Facts learned from the real instance that the client must respect:
   unknown names are left out.
 - `all_joins`, `pretty` and `verbose` are read through numbers: `"0"` is
   false and `"true"` an error (`pretty=true` answers 500).
+
+Facts learned from the demo cluster (two masters, satellite zones; the
+cluster tests in `crates/ic-core/tests/engine/cluster.rs` hold them):
+
+- When an endpoint is gone (stopped or cut off), the relay queue
+  (`json_rpc.relay_queue_items`) stays flat: Icinga 2.15 queues nothing
+  for it.
+- A check pinned to an endpoint that isn't connected (`command_endpoint`)
+  gets an UNKNOWN result, `Remote Icinga instance 'X' is not connected to
+  'Y'` (Y the node running the check), but only once that node has run for
+  5 minutes (`Checkable::ExecuteCheck`'s cold-start window); until then the
+  check stays silent, its last result in place.
+- A zone with no connected endpoint goes silent: no other node runs its
+  checks, nothing turns UNKNOWN, `last_check` stays where it was; the
+  masters' `cluster-zone` check for it turns CRITICAL.
+- A frozen node (`docker pause`, a hung process) keeps its connections open;
+  its peers report it disconnected after about 90 s.
+- In an HA zone `CheckerComponent` and `NotificationComponent` objects
+  report `paused: true` on one of the masters (their own HA state), although
+  that master runs its share of the checks (`check_source`).
+- A passive check is overdue (`next_update`, and icygui's *late*) twice its
+  interval after its last result.
+- Attributes changed through the API (`enable_active_checks`) reach the
+  satellites that run the checks; `restore_attrs` puts the configuration's
+  value back.
+- Objects made at run time through one master of an HA zone (downtimes,
+  comments, acknowledgement comments) reach the other only if that one
+  accepts configuration (`accept_config`), the config master included;
+  Icinga ignores synced zone configuration for the zones a node has in
+  `zones.d`, so that is safe. Without it the config master logs `'api' does
+  not accept config` and the two masters show different downtimes.
+- A `ScheduledDowntime` creates only its running or its next segment, about
+  a minute after the start, and the range key `"monday - sunday"` creates
+  nothing in 2.15 (one key per day does).

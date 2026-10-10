@@ -8,22 +8,31 @@
 
 mod actions;
 mod app_state;
+mod appearance;
 mod background;
 mod banner;
 mod chrome;
 mod cli;
+mod cluster;
+mod comments;
+mod controls;
 mod dashboard;
 mod dev;
+mod downtimes;
 mod editor;
 mod environments;
 #[cfg(test)]
 mod fixture;
 mod format;
+mod home;
+mod keymap;
+mod lists;
 mod live;
 mod logging;
 mod menu_state;
 mod notifications;
 mod operate;
+mod paging;
 mod palette;
 mod pane;
 mod persist;
@@ -64,6 +73,7 @@ const APP_ID: &str = "io.github.alexykn.icygui";
 const APP_NAME: &str = "icygui";
 
 /// The main window's size at start: the design's.
+#[expect(clippy::disallowed_methods, reason = "window geometry is real pixels")]
 const WINDOW_SIZE: Size<Pixels> = Size {
     width: px(1440.),
     height: px(900.),
@@ -189,13 +199,24 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
         cx.set_global(ControlsPreference::from_env());
         workspace::bind_keys(cx);
         background::menus::install(cx);
+        // The user's own bindings on top of the defaults (the demo reads
+        // them too: they belong to the user, not to the settings).
+        if let Some(path) = keymap_file(&startup) {
+            keymap::install(path, cx);
+        }
 
         let now = Timestamp::now();
         let (state, launch, pending_open) = match startup {
             Startup::Live { paths } => {
                 let state = live_state(&paths, now);
-                let secrets = Arc::new(ic_platform::KeyringSecrets::new());
-                (state, Launch::Live { paths, secrets }, None)
+                (
+                    state,
+                    Launch::Live {
+                        paths,
+                        secrets: secrets(),
+                    },
+                    None,
+                )
             }
             Startup::Demo { options, dev } => {
                 if dev.any() {
@@ -204,6 +225,9 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
                 let mut config = live::demo::config();
                 if let Some(count) = dev.environments {
                     live::demo::set_count(&mut config, count);
+                }
+                if let Some(appearance) = dev.appearance {
+                    config.appearance = appearance;
                 }
                 let mut state = AppState::demo(config, now);
                 if let Some(name) = &dev.dashboard {
@@ -216,6 +240,8 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
                 (state, Launch::Demo { options }, dev.open)
             }
         };
+        // The settings are read: their log level from now on.
+        logging::apply_setting(state.config().general.log_level);
         let bounds = window_state::initial_bounds(
             state.window_state(),
             &cx.displays()
@@ -254,6 +280,20 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
             session.update(cx, Session::start);
         }
     });
+}
+
+/// Where passwords are: the OS secret store (the login keychain, the
+/// Secret Service), always; icygui keeps no credentials anywhere else.
+fn secrets() -> Arc<dyn ic_core::ports::SecretStore> {
+    Arc::new(ic_platform::KeyringSecrets::new())
+}
+
+/// Where the keymap file is: next to the settings file.
+fn keymap_file(startup: &Startup) -> Option<std::path::PathBuf> {
+    match startup {
+        Startup::Live { paths } => Some(paths.keymap_file()),
+        Startup::Demo { .. } => Paths::from_system().ok().map(|paths| paths.keymap_file()),
+    }
 }
 
 /// The instance lock and listener, held while the app runs.
@@ -301,6 +341,10 @@ fn live_state(paths: &Paths, now: Timestamp) -> AppState {
 }
 
 /// Opens the main window where `bounds` says.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "window geometry is real pixels; the traffic lights are the system's"
+)]
 fn open_main_window(
     state: Entity<AppState>,
     bounds: InitialBounds,

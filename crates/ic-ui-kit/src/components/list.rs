@@ -4,19 +4,26 @@
 use std::fmt;
 use std::ops::Range;
 
+use crate::px;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, HighlightStyle, InteractiveElement as _,
     IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _,
 };
 
-use crate::theme::{ActiveTheme as _, Metrics, Theme};
+use crate::components::{CircleSize, StateCircle};
+use crate::theme::{ActiveTheme as _, CHAR_WIDTH, Density, Metrics, Theme};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// Width of the accent bar on marked rows.
 const MARK_WIDTH: f32 = 2.;
+
+/// The longest time a compact row shows at its right end, in characters
+/// (`Oct 13`; `14m`, `213d` and `13:58` are shorter): the slot is this wide
+/// whatever it shows, so nothing moves.
+const TIME_SLOT_CHARS: f32 = 6.;
 
 /// How a [`ListRow`] is highlighted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -144,9 +151,14 @@ impl Title {
 /// are rows too ([`ListRow::header`]): a darker band with an emphasised
 /// name; the rows under them are indented ([`ListRow::indent`]).
 ///
+/// The theme's row density decides the layout: comfortable rows have two
+/// lines and the time under the circle; compact rows ([`Density::Compact`])
+/// are one line with a 14px circle, no detail line, and the time in a
+/// fixed slot at the right end.
+///
 /// ```text
 /// ListRow::new(("row", index))
-///     .leading(StateCircle::new(state).handled(handled).caption("14m"))
+///     .state(StateCircle::new(state).handled(handled), "14m")
 ///     .title("postgres-replication")
 ///     .context("on", "db-prod-03")
 ///     .detail("CRITICAL - standby lag 412s (> 300s)")
@@ -157,14 +169,18 @@ impl Title {
 pub struct ListRow {
     id: ElementId,
     leading: Option<AnyElement>,
+    state: Option<(StateCircle, SharedString)>,
     title: SharedString,
     context: Option<(SharedString, SharedString)>,
     detail: Option<SharedString>,
     tag: Option<SharedString>,
+    trailing: Option<AnyElement>,
+    after_title: Option<AnyElement>,
     flag: Option<SharedString>,
     emphasis: RowEmphasis,
     header: bool,
     indent: Pixels,
+    density: Option<Density>,
     on_click: Option<ClickHandler>,
 }
 
@@ -174,22 +190,44 @@ impl ListRow {
         Self {
             id: id.into(),
             leading: None,
+            state: None,
             title: SharedString::default(),
             context: None,
             detail: None,
             tag: None,
+            trailing: None,
+            after_title: None,
             flag: None,
             emphasis: RowEmphasis::None,
             header: false,
             indent: px(0.),
+            density: None,
             on_click: None,
         }
     }
 
-    /// The element in the 44px column at the left: a state circle with its
-    /// caption, or an icon.
+    /// Lays the row out at `density` instead of the theme's (a view whose
+    /// rows have a density of their own, topic 14 round 5).
+    pub fn density(mut self, density: Density) -> Self {
+        self.density = Some(density);
+        self
+    }
+
+    /// The element in the 44px column at the left, such as an icon. For a
+    /// state circle use [`ListRow::state`], which follows the row density.
     pub fn leading(mut self, element: impl IntoElement) -> Self {
         self.leading = Some(element.into_any_element());
+        self.state = None;
+        self
+    }
+
+    /// The state circle in the column at the left, with `time` (how long
+    /// in this state, or since when): under the circle in comfortable rows;
+    /// in compact rows the circle is 14px and the time sits at the right
+    /// end. The circle's own size and caption are set here.
+    pub fn state(mut self, circle: StateCircle, time: impl Into<SharedString>) -> Self {
+        self.state = Some((circle, time.into()));
+        self.leading = None;
         self
     }
 
@@ -219,6 +257,22 @@ impl ListRow {
     /// The right-aligned tag (`ack m.keller`, `downtime`, `flapping`).
     pub fn tag(mut self, tag: impl Into<SharedString>) -> Self {
         self.tag = Some(tag.into());
+        self
+    }
+
+    /// An element in the tag's place, for tags with more than words: the
+    /// downtime list's progress line and time left in fixed slots. It
+    /// replaces [`ListRow::tag`]; give it fixed widths, so every row's
+    /// trailing parts line up.
+    pub fn trailing(mut self, element: impl IntoElement) -> Self {
+        self.trailing = Some(element.into_any_element());
+        self
+    }
+
+    /// An element right after the title on its line (`+ 18 services`):
+    /// it never shrinks; the title is cut off first.
+    pub fn after_title(mut self, element: impl IntoElement) -> Self {
+        self.after_title = Some(element.into_any_element());
         self
     }
 
@@ -259,6 +313,12 @@ impl ListRow {
         self
     }
 
+    /// The time the row shows with its state circle, if it has one.
+    #[must_use]
+    pub fn time_text(&self) -> Option<&SharedString> {
+        self.state.as_ref().map(|(_, time)| time)
+    }
+
     /// The title line's text, as rendered.
     #[must_use]
     pub fn title_text(&self) -> SharedString {
@@ -275,8 +335,11 @@ impl fmt::Debug for ListRow {
         f.debug_struct("ListRow")
             .field("id", &self.id)
             .field("title", &self.title_text())
+            .field("time", &self.state.as_ref().map(|(_, time)| time))
             .field("detail", &self.detail)
             .field("tag", &self.tag)
+            .field("trailing", &self.trailing.is_some())
+            .field("after_title", &self.after_title.is_some())
             .field("flag", &self.flag)
             .field("emphasis", &self.emphasis)
             .field("header", &self.header)
@@ -286,10 +349,16 @@ impl fmt::Debug for ListRow {
 }
 
 impl RenderOnce for ListRow {
+    #[expect(clippy::too_many_lines, reason = "one row, its slots in reading order")]
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme();
+        let own = self
+            .density
+            .filter(|density| *density != cx.theme().density)
+            .map(|density| cx.theme().with_density(density));
+        let theme = own.as_ref().unwrap_or_else(|| cx.theme());
         let colors = theme.colors;
         let metrics = theme.metrics;
+        let compact = theme.density == Density::Compact;
         let context = self
             .context
             .as_ref()
@@ -301,6 +370,27 @@ impl RenderOnce for ListRow {
             None
         });
         let interactive = self.on_click.is_some();
+        // The circle and its time: under it, or in the slot at the right.
+        let (leading, time) = match self.state {
+            Some((circle, time)) if compact => (
+                Some(circle.size(CircleSize::Compact).into_any_element()),
+                Some(time),
+            ),
+            Some((circle, time)) => (Some(circle.caption(time).into_any_element()), None),
+            None => (self.leading, None),
+        };
+        let trailing = trailing(self.flag, self.tag, self.trailing, compact, time, theme);
+        let title_line = match self.after_title {
+            Some(after) => div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .min_w_0()
+                .text_size(theme.text.row)
+                .child(div().min_w_0().truncate().child(title))
+                .child(div().flex_none().child(after)),
+            None => div().truncate().text_size(theme.text.row).child(title),
+        };
         div()
             .id(self.id)
             .relative()
@@ -339,7 +429,7 @@ impl RenderOnce for ListRow {
                     .flex_none()
                     .justify_center()
                     .w(metrics.row_leading)
-                    .children(self.leading),
+                    .children(leading),
             )
             .child(
                 div()
@@ -348,8 +438,8 @@ impl RenderOnce for ListRow {
                     .flex_1()
                     .min_w_0()
                     .gap(px(4.))
-                    .child(div().truncate().text_size(theme.text.row).child(title))
-                    .when_some(self.detail, |column, detail| {
+                    .child(title_line)
+                    .when_some(self.detail.filter(|_| !compact), |column, detail| {
                         column.child(
                             div()
                                 .truncate()
@@ -359,34 +449,73 @@ impl RenderOnce for ListRow {
                         )
                     }),
             )
-            .when_some(self.flag, |row, flag| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .text_size(theme.text.label)
-                        .text_color(theme.states.warning)
-                        .child(flag),
-                )
-            })
-            .when_some(self.tag, |row, tag| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .max_w(px(220.))
-                        .truncate()
-                        .text_size(theme.text.label)
-                        .text_color(colors.text_faint)
-                        .child(tag),
-                )
-            })
+            .children(trailing)
             .when_some(self.on_click, |row, handler| {
                 row.cursor_pointer().on_click(handler)
             })
     }
 }
 
+/// What a row shows at its right end: the `late` flag, the tag (or an
+/// element in its place), and in `compact` rows the `time` in its fixed
+/// slot, empty or not, so every row's tag ends at the same x.
+fn trailing(
+    flag: Option<SharedString>,
+    tag: Option<SharedString>,
+    element: Option<AnyElement>,
+    compact: bool,
+    time: Option<SharedString>,
+    theme: &Theme,
+) -> Vec<AnyElement> {
+    let colors = theme.colors;
+    let flag = flag.map(|flag| {
+        div()
+            .flex_none()
+            .text_size(theme.text.label)
+            .text_color(theme.states.text.warning)
+            .child(flag)
+            .into_any_element()
+    });
+    let tag = match element {
+        Some(element) => Some(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .text_size(theme.text.label)
+                .text_color(colors.text_faint)
+                .whitespace_nowrap()
+                .child(element)
+                .into_any_element(),
+        ),
+        None => tag.map(|tag| {
+            div()
+                .flex_none()
+                .max_w(px(220.))
+                .truncate()
+                .text_size(theme.text.label)
+                .text_color(colors.text_faint)
+                .child(tag)
+                .into_any_element()
+        }),
+    };
+    let time = compact.then(|| {
+        div()
+            .flex_none()
+            .w(theme.text.label * (TIME_SLOT_CHARS * CHAR_WIDTH))
+            .text_right()
+            .whitespace_nowrap()
+            .text_size(theme.text.label)
+            .text_color(colors.text_faint)
+            .children(time)
+            .into_any_element()
+    });
+    [flag, tag, time].into_iter().flatten().collect()
+}
+
 /// A row of the host pane's service list: a 14px state circle, the name with
-/// the output under it, and the time in state at the right.
+/// the output under it, and the time in state at the right. In compact rows
+/// ([`Density::Compact`]) the output line goes, as in the dashboard list.
 #[derive(IntoElement)]
 #[must_use = "a row does nothing unless rendered"]
 pub struct CompactRow {
@@ -460,6 +589,7 @@ impl RenderOnce for CompactRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
+        let compact = theme.density == Density::Compact;
         div()
             .id(self.id)
             .flex()
@@ -467,7 +597,7 @@ impl RenderOnce for CompactRow {
             .items_center()
             .gap(px(14.))
             .px(theme.metrics.pane_inset)
-            .py(px(9.))
+            .py(px(if compact { 6. } else { 9. }))
             .border_b_1()
             .border_color(colors.border_row)
             .child(div().flex().flex_none().w(px(22.)).children(self.leading))
@@ -485,7 +615,7 @@ impl RenderOnce for CompactRow {
                             .text_color(colors.text_strong)
                             .child(self.title),
                     )
-                    .when_some(self.detail, |column, detail| {
+                    .when_some(self.detail.filter(|_| !compact), |column, detail| {
                         column.child(
                             div()
                                 .truncate()
@@ -500,6 +630,7 @@ impl RenderOnce for CompactRow {
                     .flex_none()
                     .w(px(48.))
                     .text_right()
+                    .whitespace_nowrap()
                     .text_size(theme.text.hint)
                     .text_color(colors.text_faint)
                     .children(self.trailing),
@@ -577,5 +708,38 @@ mod tests {
         let compact = CompactRow::new("svc").title("load").trailing("2d");
         assert_eq!(compact.trailing.as_deref(), Some("2d"));
         assert!(format!("{compact:?}").contains("load"));
+    }
+
+    #[test]
+    fn a_row_has_a_state_circle_or_another_leading_element() {
+        use ic_model::{CheckableState, ServiceState};
+        let critical = StateCircle::new(CheckableState::Service(ServiceState::Critical));
+        let row = ListRow::new("row").state(critical.clone(), "14m");
+        assert_eq!(row.time_text().map(AsRef::as_ref), Some("14m"));
+        assert!(format!("{row:?}").contains("14m"));
+        // Whichever comes last is the leading element.
+        let icon = row.leading(div());
+        assert_eq!(icon.time_text(), None);
+        assert!(icon.leading.is_some());
+        let back = icon.state(critical, "13:58");
+        assert!(back.leading.is_none());
+        assert_eq!(back.time_text().map(AsRef::as_ref), Some("13:58"));
+    }
+
+    #[test]
+    fn the_compact_time_slot_fits_the_longest_time() {
+        // What a list's time reads: relative (`59s`, `213d`) or a clock time
+        // (`13:58`, `Oct 13`, `2025`). The slot scales with the label size,
+        // so it fits them at any interface size.
+        let times = ["59s", "23h", "213d", "13:58", "Oct 13", "2025"];
+        for scale in [0.9, 1., 1.15] {
+            let theme = Theme::new(crate::ThemeMode::Dark, scale, Density::Compact);
+            let slot = theme.text.label * (TIME_SLOT_CHARS * CHAR_WIDTH);
+            for time in times {
+                #[expect(clippy::cast_precision_loss, reason = "a few characters")]
+                let width = theme.text.label * (time.chars().count() as f32 * CHAR_WIDTH);
+                assert!(width <= slot, "{time} at {scale}");
+            }
+        }
     }
 }

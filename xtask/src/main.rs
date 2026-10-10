@@ -19,6 +19,9 @@
 //! - `screenshots [--only NAME,…] [--no-gifs]`: Linux only, the README's
 //!   screenshots and clips from `icygui --demo` under Xvfb, into
 //!   `docs/screenshots`
+//! - `demo-config [--config-dir DIR] [--ca FILE] …`:
+//!   write the demo cluster's environment and dashboards (`demo/icygui`)
+//!   into icygui's settings ([`demo`])
 //!
 //! Signing and notarization read their secrets from the environment; see
 //! `docs/releasing.md`.
@@ -30,6 +33,7 @@
 )]
 
 mod bundle;
+mod demo;
 mod homebrew;
 mod icon;
 mod release;
@@ -113,7 +117,10 @@ const USAGE: &str = "usage: cargo xtask <command>
   version
   install                                 (Linux) install into ~/.local
   mock [args…]                            start mock Icinga environments
-  screenshots [--only NAME,…] [--no-gifs] (Linux) README images from --demo";
+  screenshots [--only NAME,…] [--no-gifs] (Linux) README images from --demo
+  demo-config [--config-dir DIR] [--data-dir DIR] [--ca FILE] [--via-proxy]
+              [--select GROUP/DASHBOARD] [--theme dark|light|system]
+                                          the demo cluster's environment and dashboards";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -121,6 +128,16 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    if command == "demo-config" {
+        // Its own arguments: the shared flags don't apply.
+        return match demo::demo_config(&root(), rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let result = parse_flags(rest).and_then(|flags| match command.as_str() {
         "icons" => icons(),
         "render" => render_command(&flags.positional),

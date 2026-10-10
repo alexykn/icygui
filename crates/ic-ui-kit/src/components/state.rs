@@ -1,10 +1,54 @@
 //! State indicators: the list's state circles and the sidebar's dots.
+//!
+//! **Hollow = handled.** An object's mark is a hollow ring in its state
+//! colour when it counts as handled ([`ObjectMark`]: acknowledged, behind
+//! a host problem, or in a downtime in effect whatever its state, so an
+//! OK service in downtime is a hollow green ring), filled otherwise; a
+//! downtime that hasn't started keeps the filled mark. Every place that
+//! draws an object's mark builds it from [`ObjectMark::host`] or
+//! [`ObjectMark::service`] ([`StateCircle::mark`], [`StateDot::mark`]), so
+//! the rule is the same in every list, the palette, the panes, the tabs
+//! and the dialogs.
 
+use crate::px;
 use gpui::{
     App, FontWeight, Hsla, IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
-use ic_model::CheckableState;
+use ic_model::{CheckableState, Host, Service};
+
+/// What an object's mark shows: its state's colour, filled or hollow
+/// (hollow = handled, see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ObjectMark {
+    /// The state, for the colour.
+    pub state: CheckableState,
+    /// A hollow ring: the object counts as handled.
+    pub hollow: bool,
+}
+
+impl ObjectMark {
+    /// A host's mark: hollow when it counts as handled
+    /// ([`Host::counts_as_handled`]).
+    #[must_use]
+    pub fn host(host: &Host) -> Self {
+        Self {
+            state: CheckableState::Host(host.state),
+            hollow: host.counts_as_handled(),
+        }
+    }
+
+    /// A service's mark: hollow when it counts as handled
+    /// ([`Service::counts_as_handled`]); `host` is its host, whose problem
+    /// handles the service's.
+    #[must_use]
+    pub fn service(service: &Service, host: Option<&Host>) -> Self {
+        Self {
+            state: CheckableState::Service(service.state),
+            hollow: service.counts_as_handled(host.is_some_and(Host::is_problem)),
+        }
+    }
+}
 
 use crate::theme::{ActiveTheme as _, Metrics, Theme};
 
@@ -18,11 +62,20 @@ pub enum Paint {
 }
 
 impl Paint {
-    /// The colour in `theme`.
+    /// The colour in `theme`, for a shape (the state's fill shade).
     #[must_use]
     pub fn resolve(self, theme: &Theme) -> Hsla {
         match self {
-            Self::State(state) => theme.states.checkable(state),
+            Self::State(state) => theme.states.fill.checkable(state),
+            Self::Color(color) => color,
+        }
+    }
+
+    /// The colour in `theme`, for words (the state's text shade).
+    #[must_use]
+    pub fn resolve_text(self, theme: &Theme) -> Hsla {
+        match self {
+            Self::State(state) => theme.states.text.checkable(state),
             Self::Color(color) => color,
         }
     }
@@ -114,6 +167,12 @@ impl StateCircle {
         }
     }
 
+    /// An object's circle: its state's colour, hollow when it counts as
+    /// handled.
+    pub fn mark(mark: ObjectMark) -> Self {
+        Self::new(mark.state).handled(mark.hollow)
+    }
+
     /// Sets the size preset.
     pub fn size(mut self, size: CircleSize) -> Self {
         self.size = size;
@@ -171,7 +230,7 @@ impl RenderOnce for StateCircle {
                 div()
                     .text_size(theme.text.caption)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color)
+                    .text_color(self.paint.resolve_text(theme))
                     .whitespace_nowrap()
                     .child(state.short_label())
             }),
@@ -220,6 +279,12 @@ impl StateDot {
         }
     }
 
+    /// An object's dot: its state's colour, hollow when it counts as
+    /// handled.
+    pub fn mark(mark: ObjectMark) -> Self {
+        Self::new(mark.state).hollow(mark.hollow)
+    }
+
     /// Sets the diameter (default: [`Metrics::sidebar_dot`]).
     pub fn size(mut self, size: Pixels) -> Self {
         self.size = Some(size);
@@ -227,8 +292,7 @@ impl StateDot {
     }
 
     /// Draws a ring instead of a filled dot, as [`StateCircle::handled`]
-    /// does for handled problems: something that is there but quieter (a
-    /// notification recorded without a system notification). Same size.
+    /// does: the object counts as handled. Same size.
     pub fn hollow(mut self, hollow: bool) -> Self {
         self.hollow = hollow;
         self
@@ -261,9 +325,12 @@ mod tests {
     fn paint_resolves_states_through_the_theme() {
         let theme = Theme::dark();
         let critical = Paint::from(CheckableState::Service(ServiceState::Critical));
-        assert_eq!(critical.resolve(&theme), theme.states.critical);
+        assert_eq!(critical.resolve(&theme), theme.states.fill.critical);
         let down = Paint::from(CheckableState::Host(HostState::Down));
-        assert_eq!(down.resolve(&theme), theme.states.critical);
+        assert_eq!(down.resolve(&theme), theme.states.fill.critical);
+        let light = Theme::light();
+        assert_eq!(critical.resolve_text(&light), light.states.text.critical);
+        assert_ne!(critical.resolve_text(&light), critical.resolve(&light));
         let custom = Paint::from(theme.colors.accent);
         assert_eq!(custom.resolve(&theme), theme.colors.accent);
     }
@@ -274,6 +341,32 @@ mod tests {
         assert_eq!(CircleSize::Row.dimensions(&metrics), (px(22.), px(3.)));
         assert_eq!(CircleSize::Compact.dimensions(&metrics), (px(14.), px(2.)));
         assert_eq!(CircleSize::Pane.dimensions(&metrics).0, px(34.));
+    }
+
+    #[test]
+    fn marks_are_hollow_when_the_object_counts_as_handled() {
+        let mut service = Service::new("h", "s");
+        service.state = ServiceState::Ok;
+        let mark = ObjectMark::service(&service, None);
+        assert!(!mark.hollow);
+        service.check.downtime_depth = 1;
+        let mark = ObjectMark::service(&service, None);
+        assert!(mark.hollow, "an OK service in downtime is a hollow ring");
+        assert_eq!(mark.state, CheckableState::Service(ServiceState::Ok));
+        assert!(StateCircle::mark(mark).handled);
+        assert!(StateDot::mark(mark).hollow);
+
+        let mut down = Host::new("h");
+        down.state = HostState::Down;
+        let mut critical = Service::new("h", "t");
+        critical.state = ServiceState::Critical;
+        assert!(
+            ObjectMark::service(&critical, Some(&down)).hollow,
+            "behind a host problem"
+        );
+        assert!(!ObjectMark::host(&down).hollow);
+        down.check.acknowledgement = ic_model::AckKind::Normal;
+        assert!(ObjectMark::host(&down).hollow);
     }
 
     #[test]

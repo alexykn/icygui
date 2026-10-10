@@ -48,7 +48,7 @@ mod apply;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use ic_api::Detail;
+use ic_api::{Detail, EndpointState};
 use ic_model::{
     CheckInfo, CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
     InstanceStatus, Notification, ObjectCounts, ObjectKey, Service, ServiceGroup, ServiceKey,
@@ -56,6 +56,7 @@ use ic_model::{
 };
 use ic_rules::DashboardRef;
 
+use crate::health::ClusterHealth;
 use crate::snapshot::{DashboardResult, Snapshot};
 use crate::summary::Tally;
 
@@ -147,6 +148,8 @@ pub(crate) struct Store {
     endpoints: Arc<Vec<Endpoint>>,
     zones: Arc<Vec<Zone>>,
     status: Option<Arc<InstanceStatus>>,
+    /// The cluster health page's data (`Snapshot::health`).
+    health: Arc<ClusterHealth>,
     /// Icinga's own `Notification` objects, by host or service, each list
     /// by name.
     icinga_notifications: Arc<BTreeMap<ObjectKey, Arc<[Notification]>>>,
@@ -184,6 +187,9 @@ pub(crate) struct Store {
     /// While recording: objects answers brought that the store neither
     /// held nor hid (see [`Store::track_appeared`]).
     appeared: Option<Vec<ObjectKey>>,
+    /// The heartbeat objects (`Snapshot::excluded`): left out of lists,
+    /// counts, rules and notifications.
+    excluded: Arc<BTreeSet<ServiceKey>>,
 }
 
 impl Store {
@@ -555,6 +561,7 @@ impl Store {
             endpoints: Arc::clone(&self.endpoints),
             zones: Arc::clone(&self.zones),
             status: self.status.clone(),
+            health: Arc::clone(&self.health),
             icinga_notifications: Arc::clone(&self.icinga_notifications),
             dashboards,
             last_event_at: self.last_event_at,
@@ -564,6 +571,10 @@ impl Store {
             // Set by the engine.
             quiet: false,
             updating: Arc::default(),
+            events: Arc::default(),
+            excluded: Arc::clone(&self.excluded),
+            heartbeats: Arc::default(),
+            trouble: Arc::default(),
         }
     }
 
@@ -576,6 +587,9 @@ impl Store {
         // Services are sorted by host: each host is looked up once.
         let mut current: Option<(&HostName, Option<&Host>)> = None;
         for service in self.services.values() {
+            if self.excluded.contains(&service.key) {
+                continue;
+            }
             let host = match current {
                 Some((name, host)) if *name == service.key.host => host,
                 _ => {
@@ -895,12 +909,23 @@ impl Store {
 
     /// Sets the endpoints' `connected` as Icinga reported it (by name;
     /// `local`, the node the engine talks to, stays connected: Icinga
-    /// reports its own endpoint as not connected).
-    pub(crate) fn set_endpoint_states(&mut self, states: &[(String, bool)], local: &str) {
+    /// reports its own endpoint as not connected), and keeps their numbers
+    /// for the cluster health page.
+    pub(crate) fn set_endpoint_states(&mut self, states: &[EndpointState], local: &str) {
+        let stats_changed = states
+            .iter()
+            .any(|state| self.health.endpoints.get(&state.name) != Some(&state.stats));
+        if stats_changed {
+            let health = Arc::make_mut(&mut self.health);
+            for state in states {
+                health.endpoints.insert(state.name.clone(), state.stats);
+            }
+            self.changes.any = true;
+        }
         let changed = self.endpoints.iter().any(|endpoint| {
             endpoint.name != local
-                && states.iter().any(|(name, connected)| {
-                    *name == endpoint.name && *connected != endpoint.connected
+                && states.iter().any(|state| {
+                    state.name == endpoint.name && state.connected != endpoint.connected
                 })
         });
         if !changed {
@@ -910,11 +935,51 @@ impl Store {
             if endpoint.name == local {
                 continue;
             }
-            if let Some((_, connected)) = states.iter().find(|(name, _)| *name == endpoint.name) {
-                endpoint.connected = *connected;
+            if let Some(state) = states.iter().find(|state| state.name == endpoint.name) {
+                endpoint.connected = state.connected;
             }
         }
         self.changes.any = true;
+    }
+
+    /// The heartbeat objects, left out of lists, counts, rules and
+    /// notifications.
+    pub(crate) fn excluded(&self) -> &Arc<BTreeSet<ServiceKey>> {
+        &self.excluded
+    }
+
+    /// Whether `key` is a heartbeat object.
+    pub(crate) fn is_excluded(&self, key: &ObjectKey) -> bool {
+        key.as_service()
+            .is_some_and(|service| self.excluded.contains(service))
+    }
+
+    /// Sets the heartbeat objects; those that join or leave the set are
+    /// marked changed, so the dashboards take them out (or back in).
+    pub(crate) fn set_excluded(&mut self, excluded: BTreeSet<ServiceKey>) {
+        if *self.excluded == excluded {
+            return;
+        }
+        for key in excluded.symmetric_difference(&self.excluded) {
+            self.changes.objects.insert(ObjectKey::from(key.clone()));
+        }
+        self.excluded = Arc::new(excluded);
+        self.changes.any = true;
+    }
+
+    /// The cluster health page's data.
+    pub(crate) fn health(&self) -> &ClusterHealth {
+        &self.health
+    }
+
+    /// Changes the cluster health page's data (marks the store changed).
+    pub(crate) fn update_health(&mut self, change: impl FnOnce(&mut ClusterHealth)) {
+        let mut health = (*self.health).clone();
+        change(&mut health);
+        if health != *self.health {
+            self.health = Arc::new(health);
+            self.changes.any = true;
+        }
     }
 
     /// The endpoints and zones (for the node list's states).

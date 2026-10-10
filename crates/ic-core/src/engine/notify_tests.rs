@@ -173,6 +173,7 @@ fn downtime(name: &str, object: ObjectKey, in_effect: bool, triggered: bool) -> 
         parent: None,
         in_effect,
         config_owned: false,
+        schedule: None,
     }
 }
 
@@ -756,7 +757,7 @@ fn memberships_come_from_the_dashboards_and_rules_from_the_environment() {
     let mut h = Harness::new();
     h.notify = Notify::new(&environment);
     let mut dashboards = Dashboards::default();
-    dashboards.configure(&environment);
+    dashboards.configure(&environment, ic_config::HideHandled::ALL);
     let snapshot = h.store.snapshot(1, t(0.0), Arc::default(), Arc::default());
     let data = crate::dashboards::Data {
         hosts: snapshot.hosts.clone(),
@@ -764,6 +765,8 @@ fn memberships_come_from_the_dashboards_and_rules_from_the_environment() {
         host_groups: snapshot.host_groups.clone(),
         service_groups: snapshot.service_groups.clone(),
         now: t(0.0),
+        events: Arc::default(),
+        excluded: Arc::default(),
     };
     let changes = crate::store::Changes {
         all: true,

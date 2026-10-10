@@ -192,6 +192,9 @@ fn post_loop(
                 }
             },
         };
+        if let Some(tag) = &posted.closes {
+            close(connected, tag);
+        }
         match notify(&connected.proxy, &posted, app_name, app_id, markup) {
             Ok(id) => {
                 backoff.succeeded();
@@ -327,6 +330,25 @@ fn action_list(posted: &Posted) -> Vec<&str> {
     actions
 }
 
+/// Takes the notification posted with `tag` away (`CloseNotification`),
+/// if the server still shows it.
+fn close(server: &Server, tag: &str) {
+    let id = server
+        .posts
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .tags
+        .iter()
+        .find(|(_, posted)| posted.as_str() == tag)
+        .map(|(id, _)| *id);
+    if let Some(id) = id {
+        let closed: zbus::Result<()> = server.proxy.call("CloseNotification", &(id,));
+        if let Err(error) = closed {
+            tracing::debug!(%error, id, "a notification couldn't be closed");
+        }
+    }
+}
+
 /// Calls `Notify`; returns the server's id for it.
 fn notify(
     proxy: &Proxy<'_>,
@@ -358,7 +380,8 @@ fn notify(
             body.as_str(),
             actions,
             hints,
-            -1_i32,
+            // Persistent: until dismissed (or closed by its recovery).
+            if posted.persistent { 0_i32 } else { -1_i32 },
         ),
     )
 }
@@ -376,6 +399,8 @@ mod tests {
             urgency: Urgency::Critical,
             sound: None,
             actions,
+            persistent: false,
+            closes: None,
         }
     }
 

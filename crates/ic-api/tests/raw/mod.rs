@@ -104,4 +104,20 @@ impl Raw {
         let body = response.bytes().await.unwrap().to_vec();
         Answer { status, body }
     }
+
+    /// `GET /<path>` (`v1/status/ApiListener`).
+    pub(crate) async fn get(&self, path: &str) -> Answer {
+        let url = self.base.join(path).unwrap();
+        let response = self
+            .http
+            .get(url)
+            .basic_auth(&self.user, Some(&self.password))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body = response.bytes().await.unwrap().to_vec();
+        Answer { status, body }
+    }
 }

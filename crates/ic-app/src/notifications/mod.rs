@@ -1,7 +1,7 @@
 //! Client-side notifications in the window (PLAN.md §2.7, D5): what the
 //! notification centre lists, watching and muting objects, pausing, and
 //! the local event log's history (PANE-04). The rules themselves run in
-//! the core (`ic-rules`); the settings dialog that edits them is
+//! the core (`ic-rules`); the settings panel that edits them is
 //! `crate::settings`.
 //!
 //! - [`timing`]: pause and mute choices and how their ends read;

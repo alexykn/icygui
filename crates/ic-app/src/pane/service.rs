@@ -1,29 +1,28 @@
-//! The service pane's body (screen 2b): state and name, actions, plugin
-//! output, performance data, check details, comments and downtimes, custom
-//! variables, groups, notes and links.
+//! The service pane's body (screen 2b): state and name, actions, the
+//! object's thread (topic 14: its acknowledgement, downtimes and comments,
+//! with a field to add one; the downtime in effect is also the banner
+//! under the pane's header), plugin output, performance data, check
+//! details, custom variables, groups, notes and links.
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Styled as _, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
+    prelude::FluentBuilder as _,
 };
 use ic_core::snapshot::Snapshot;
-use ic_model::{CheckableState, CommentKind, Links, ObjectKey, Service, ServiceState, Timestamp};
+use ic_model::{Links, ObjectKey, Service, ServiceState, Timestamp};
 use ic_ui_kit::{
-    ActiveTheme as _, CircleSize, CodeBlock, IconButton, IconName, KvTable, Link, NoteEntry,
-    PerfdataTable, SectionLabel, StateCircle, Theme, Tooltip, TreeTable,
+    ActiveTheme as _, CircleSize, CodeBlock, Icon, IconName, KvTable, Link, ObjectMark,
+    PerfdataTable, SectionLabel, StateCircle, Theme, Tooltip, TreeTable, px,
 };
 
 use super::{
     BodyLayout, ObjectPane, TAB_COLUMN_GAP, TAB_CONTENT_WIDTH, TAB_SIDE_WIDTH, TITLE_GROUP,
     action_buttons, copy_button, model, scroll_area, web_link,
 };
-use crate::actions::ObjectAction;
 
 /// The hover group of the plugin output (reveals its copy button).
 const OUTPUT_GROUP: &str = "pane-output";
-
-/// The hover group of a comment or downtime (reveals its remove button).
-const NOTE_GROUP: &str = "pane-note";
 
 /// Space between the body's sections.
 const SECTION_GAP: f32 = 24.;
@@ -39,8 +38,6 @@ pub(super) fn render(
     let theme = cx.theme();
     let key = service.object_key();
     let host = snapshot.host_of(&service.key);
-    let host_problem = host.is_some_and(|host| host.is_problem());
-    let handled = service.is_handled(host_problem);
     let acknowledged = service.check.acknowledgement.is_acknowledged();
 
     let output = output(service, theme);
@@ -58,7 +55,7 @@ pub(super) fn render(
         });
     let readable = pane.state.read(cx).can_read_notifications();
     let check = check_table(snapshot, &key, service, readable, now).into_any_element();
-    let notes = notes(pane, snapshot, &key, now, cx);
+    let thread = super::thread::section(pane, snapshot, &key, now, cx);
     let vars = vars(service).map(IntoElement::into_any_element);
     let groups =
         groups(snapshot, service, host.map(|host| host.groups.as_slice())).into_any_element();
@@ -77,8 +74,8 @@ pub(super) fn render(
         .py(theme.metrics.pane_padding)
         .child(title(
             service,
-            host.map(|host| host.display_name.as_str()),
-            handled,
+            host.map(AsRef::as_ref),
+            crate::downtimes::host_marker(snapshot, service, now),
             crate::dashboard::rows::late_label(snapshot, &key, now),
             now,
             cx,
@@ -95,10 +92,10 @@ pub(super) fn render(
             .when(layout == BodyLayout::Tab, |column| {
                 column.max_w(px(TAB_CONTENT_WIDTH))
             })
+            .children(thread)
             .child(output)
             .children(perfdata)
             .child(check)
-            .children(notes)
             .children(vars)
             .child(groups)
             .children(links)
@@ -114,9 +111,9 @@ pub(super) fn render(
                         sections()
                             .flex_1()
                             .min_w_0()
+                            .children(thread)
                             .child(output)
                             .children(perfdata)
-                            .children(notes)
                             .child(history),
                     )
                     .child(
@@ -148,10 +145,14 @@ fn sections() -> gpui::Div {
     div().flex().flex_col().gap(px(SECTION_GAP))
 }
 
+/// The state circle, the name, and the host line: `on <host> · 14m · hard
+/// 3/3`, with the host's downtime marker after the host when the host is
+/// in a downtime that leaves the service alone (`host_downtime`, `until
+/// 15:00`; as in Icinga Web, the service itself isn't in downtime).
 fn title(
     service: &Service,
-    host_name: Option<&str>,
-    handled: bool,
+    host: Option<&ic_model::Host>,
+    host_downtime: Option<String>,
     late: Option<String>,
     now: Timestamp,
     cx: &Context<ObjectPane>,
@@ -161,16 +162,19 @@ fn title(
     let host_key = ObjectKey::Host {
         name: service.key.host.clone(),
     };
-    let host_label = host_name.map_or_else(|| service.key.host.to_string(), str::to_owned);
+    let host_label = host.map_or_else(
+        || service.key.host.to_string(),
+        |host| host.display_name.clone(),
+    );
+    let marker_target = host_key.clone();
     div()
         .group(TITLE_GROUP)
         .flex()
         .items_center()
         .gap(px(16.))
         .child(
-            StateCircle::new(CheckableState::Service(service.state))
+            StateCircle::mark(ObjectMark::service(service, host))
                 .size(CircleSize::Pane)
-                .handled(handled)
                 .state_label(),
         )
         .child(
@@ -218,15 +222,59 @@ fn title(
                                     },
                                 )),
                         )
+                        .when_some(host_downtime, |line, until| {
+                            line.child(host_downtime_marker(until, marker_target, cx))
+                        })
                         .child(format!("\u{a0}· {}", model::service_subtitle(service, now)))
                         .when_some(late, |line, late| {
                             line.child(
                                 div()
-                                    .text_color(theme.states.warning)
+                                    .text_color(theme.states.text.warning)
                                     .child(format!("\u{a0}· {late}")),
                             )
                         }),
                 ),
+        )
+}
+
+/// The host's downtime marker on the host line: the calendar and `host in
+/// downtime` in the accent (a link to the host's pane, where its banner
+/// is), `until 15:00` faint.
+fn host_downtime_marker(
+    until: String,
+    host: ObjectKey,
+    cx: &Context<ObjectPane>,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .id("host-downtime-marker")
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(6.))
+        .pl(px(8.))
+        .cursor_pointer()
+        .child(
+            Icon::new(IconName::CalendarClock)
+                .size(px(13.))
+                .color(theme.colors.accent),
+        )
+        .child(
+            div()
+                .text_color(theme.colors.accent_text)
+                .child("host in downtime"),
+        )
+        .when(!until.is_empty(), |marker| {
+            marker.child(div().text_color(theme.colors.text_faint).child(until))
+        })
+        .tooltip(Tooltip::text(
+            "The host is in a downtime that doesn't cover this service: the service \
+             isn't in downtime and still notifies. Show the host",
+        ))
+        .on_click(
+            cx.listener(move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
+                pane.navigate(host.clone(), cx);
+            }),
         )
 }
 
@@ -291,108 +339,6 @@ fn check_table(
         .fold(KvTable::new().title("check"), |table, (key, value)| {
             table.row(key, value)
         })
-}
-
-/// Comments, acknowledgements and downtimes, each with a remove button
-/// (acknowledgements are removed with the "remove ack" button).
-pub(super) fn notes(
-    pane: &ObjectPane,
-    snapshot: &Snapshot,
-    key: &ObjectKey,
-    now: Timestamp,
-    cx: &Context<ObjectPane>,
-) -> Option<AnyElement> {
-    let theme = cx.theme();
-    let comments = snapshot
-        .comments
-        .get(key)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let downtimes = snapshot
-        .downtimes
-        .get(key)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    if comments.is_empty() && downtimes.is_empty() {
-        return None;
-    }
-    let state = pane.state.read(cx);
-    // Shown while the mouse is over its note, like the copy buttons;
-    // disabled with the reason when the API user may not remove it.
-    let remove = |id: String, tooltip: &'static str, action: ObjectAction| {
-        let button = IconButton::new(gpui::SharedString::from(id), IconName::Close)
-            .size(px(20.))
-            .icon_size(px(12.))
-            .color(theme.colors.text_faint);
-        let button = match state.action_denial(&action) {
-            Some(denial) => button.disabled(true).tooltip(Tooltip::new(denial)),
-            None => button.tooltip(Tooltip::new(tooltip)).on_click(cx.listener(
-                move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
-                    pane.request(action.clone(), cx);
-                },
-            )),
-        };
-        div()
-            .flex_none()
-            .invisible()
-            .group_hover(NOTE_GROUP, gpui::Styled::visible)
-            .child(button)
-    };
-    let mut column = div().flex().flex_col().gap(px(14.));
-    for comment in comments {
-        let note = model::comment_note(comment, now);
-        let mut entry = note_entry(&note);
-        if comment.kind != CommentKind::Acknowledgement {
-            entry = entry.child(remove(
-                format!("remove-comment-{}", note.name),
-                "Remove comment",
-                ObjectAction::RemoveComment(note.name.clone()),
-            ));
-        }
-        column = column.child(div().group(NOTE_GROUP).child(entry));
-    }
-    // A downtime's full name, for the schedule-downtime dialog's
-    // "triggered by" (shown nowhere else).
-    let copy_name = |id: String, name: String| {
-        div()
-            .flex_none()
-            .invisible()
-            .group_hover(NOTE_GROUP, gpui::Styled::visible)
-            .child(
-                IconButton::new(gpui::SharedString::from(id), IconName::Copy)
-                    .size(px(20.))
-                    .icon_size(px(12.))
-                    .color(theme.colors.text_faint)
-                    .tooltip(Tooltip::new("Copy the downtime's name"))
-                    .on_click(
-                        cx.listener(move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
-                            pane.copy("the downtime's name", name.clone(), cx);
-                        }),
-                    ),
-            )
-    };
-    for downtime in downtimes {
-        let note = model::downtime_note(downtime, now);
-        let entry = note_entry(&note)
-            .child(copy_name(
-                format!("copy-downtime-{}", note.name),
-                note.name.clone(),
-            ))
-            .child(remove(
-                format!("remove-downtime-{}", note.name),
-                "Remove downtime",
-                ObjectAction::RemoveDowntime(note.name.clone()),
-            ));
-        column = column.child(div().group(NOTE_GROUP).child(entry));
-    }
-    Some(column.into_any_element())
-}
-
-fn note_entry(note: &model::Note) -> NoteEntry {
-    note.meta.iter().fold(
-        NoteEntry::new(note.author.clone(), note.body.clone()).marker(note.marker),
-        |entry, meta| entry.meta(meta.clone()),
-    )
 }
 
 fn vars(service: &Service) -> Option<TreeTable> {

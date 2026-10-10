@@ -89,7 +89,7 @@ fn full_config_survives_save_and_load() {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(dir.path().join("config.toml"));
         let mut config = full_config();
-        config.general.theme = theme;
+        config.appearance.theme = theme;
         store.save(&config).unwrap();
         assert_eq!(store.load().unwrap(), config, "theme {theme:?}");
     }
@@ -141,7 +141,9 @@ fn the_file_is_readable_toml() {
     for expected in [
         "# icygui settings. Passwords are kept in the system keychain, not in this file.\n",
         &format!("\nversion = {CONFIG_VERSION}\n"),
-        "\n[general]\ntheme = \"system\"\n",
+        "\n[general]\nclose_to_tray = false\n",
+        "\nshow_plugin_output = false\nlog_level = \"debug\"\n",
+        "\n[appearance]\ntheme = \"dark\"\ninterface_size = \"large\"\nrow_density = \"compact\"\nlist_times = \"clock\"\n",
         "\n[[environments]]\n",
         "\n[environments.auth]\nkind = \"basic\"\nusername = \"icygui\"\n",
         "kind = \"client_certificate\"\n",

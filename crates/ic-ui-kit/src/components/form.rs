@@ -5,12 +5,14 @@
 use std::fmt;
 use std::rc::Rc;
 
+use crate::px;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, Entity, Focusable as _, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Pixels, RenderOnce, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
-    relative,
+    AnyElement, App, BoxShadow, ClickEvent, ElementId, Entity, Focusable as _, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, RenderOnce,
+    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, point,
+    prelude::FluentBuilder as _, relative,
 };
+use gpui_component::Sizable as _;
 use gpui_component::input::{Textarea, TextareaState};
 
 use crate::theme::{ActiveTheme as _, Theme};
@@ -32,13 +34,13 @@ pub enum FieldTone {
 }
 
 impl FieldTone {
-    /// The tone's colour.
+    /// The tone's colour (the state text shades: it colours words).
     #[must_use]
     pub fn color(self, theme: &Theme) -> Hsla {
         match self {
             Self::Neutral => theme.colors.text_faint,
-            Self::Good => theme.states.ok,
-            Self::Bad => theme.states.critical,
+            Self::Good => theme.states.text.ok,
+            Self::Bad => theme.states.text.critical,
         }
     }
 }
@@ -121,7 +123,7 @@ impl RenderOnce for Field {
         let theme = cx.theme();
         let colors = theme.colors;
         let below = match (self.error, self.hint) {
-            (Some(error), _) => Some((error, theme.states.critical)),
+            (Some(error), _) => Some((error, theme.states.text.critical)),
             (None, Some(hint)) => Some((hint, colors.text_faint)),
             (None, None) => None,
         };
@@ -252,9 +254,18 @@ impl RenderOnce for Switch {
                     .size(px(12.))
                     .rounded_full()
                     .bg(if on {
-                        colors.text_emphasis
+                        colors.switch_thumb_on
                     } else {
-                        colors.text_muted
+                        colors.switch_thumb
+                    })
+                    .when(!colors.switch_thumb_shadow.is_transparent(), |knob| {
+                        knob.shadow(vec![BoxShadow {
+                            color: colors.switch_thumb_shadow,
+                            offset: point(px(0.), px(1.)),
+                            blur_radius: px(2.),
+                            spread_radius: px(0.),
+                            inset: false,
+                        }])
                     }),
             );
         div()
@@ -282,11 +293,18 @@ impl RenderOnce for Switch {
 /// A row of mutually exclusive choices (`services | hosts`), one selected.
 #[derive(IntoElement)]
 #[must_use = "a segmented control does nothing unless rendered"]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent looks of one control"
+)]
 pub struct Segmented {
     id: ElementId,
     options: Vec<SharedString>,
     selected: usize,
     disabled: bool,
+    hug: bool,
+    by_content: bool,
+    compact: bool,
     on_select: Option<SelectHandler>,
 }
 
@@ -298,8 +316,35 @@ impl Segmented {
             options: Vec::new(),
             selected: 0,
             disabled: false,
+            hug: false,
+            by_content: false,
+            compact: false,
             on_select: None,
         }
+    }
+
+    /// The small form, for a 36px view header: 24px high, 8px either side
+    /// of each label (sized to it, as [`Segmented::hug`]).
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self.hug = true;
+        self
+    }
+
+    /// Fills the width given, sharing it by the options' labels (each its
+    /// label and 14px either side, then an equal share of what is left)
+    /// rather than equally: for options of very different lengths, so the
+    /// long one keeps its padding.
+    pub fn by_content(mut self) -> Self {
+        self.by_content = true;
+        self
+    }
+
+    /// Sizes each option to its label (14px either side) instead of
+    /// sharing the width given: for a control at the end of a settings row.
+    pub fn hug(mut self) -> Self {
+        self.hug = true;
+        self
     }
 
     /// Adds an option.
@@ -351,16 +396,28 @@ impl RenderOnce for Segmented {
         let enabled = !self.disabled;
         let id = self.id.clone();
         let count = self.options.len();
+        let hug = self.hug;
+        let compact = self.compact;
+        let by_content = self.by_content && !hug;
         div()
             .id(self.id)
             .role(Role::RadioGroup)
             .flex()
-            .h(theme.metrics.field_height)
+            .when(hug, gpui::Styled::flex_none)
+            .h(if compact {
+                px(24.)
+            } else {
+                theme.metrics.field_height
+            })
             .rounded(theme.metrics.code_radius)
             .border_1()
             .border_color(colors.border_header)
             .overflow_hidden()
-            .text_size(theme.text.small)
+            .text_size(if compact {
+                theme.text.label
+            } else {
+                theme.text.small
+            })
             .when(self.disabled, |row| row.opacity(0.5))
             .children(self.options.into_iter().enumerate().map(|(index, label)| {
                 let selected = index == self.selected;
@@ -372,7 +429,11 @@ impl RenderOnce for Segmented {
                     ))
                     .role(Role::RadioButton)
                     .flex()
-                    .flex_1()
+                    .when(hug, |option| {
+                        option.flex_none().px(px(if compact { 8. } else { 14. }))
+                    })
+                    .when(by_content, |option| option.flex_auto().px(px(14.)))
+                    .when(!hug && !by_content, gpui::Styled::flex_1)
                     .items_center()
                     .justify_center()
                     .when(index + 1 < count, |option| {
@@ -433,6 +494,7 @@ const CHIP_PADDING: f32 = 8.;
 pub struct Chip {
     id: ElementId,
     label: SharedString,
+    leading: Option<AnyElement>,
     selected: bool,
     filled: bool,
     marked: bool,
@@ -446,6 +508,7 @@ impl Chip {
         Self {
             id: id.into(),
             label: label.into(),
+            leading: None,
             selected: false,
             filled: false,
             marked: false,
@@ -459,6 +522,13 @@ impl Chip {
     /// the lists, filled, its text bright. Its size doesn't change.
     pub fn filled(mut self, filled: bool) -> Self {
         self.filled = filled;
+        self
+    }
+
+    /// Puts a small mark before the label (a filter chip's kind: a state
+    /// dot, a check, an icon), 6px from it.
+    pub fn leading(mut self, leading: impl IntoElement) -> Self {
+        self.leading = Some(leading.into_any_element());
         self
     }
 
@@ -537,13 +607,17 @@ impl RenderOnce for Chip {
             })
             .text_size(theme.text.label)
             .text_color(if self.selected || self.marked {
-                colors.accent
+                colors.accent_text
             } else if self.filled {
                 colors.text_strong
             } else {
                 colors.text_muted
             })
             .whitespace_nowrap()
+            .when_some(self.leading, |chip, leading| {
+                chip.gap(px(6.))
+                    .child(div().flex().flex_none().items_center().child(leading))
+            })
             .child(self.label)
             .when(self.disabled, |chip| chip.opacity(0.5))
             .when(enabled, |chip| {
@@ -582,8 +656,10 @@ impl RenderOnce for Chip {
 #[must_use = "a text area does nothing unless rendered"]
 pub struct TextArea {
     state: Entity<TextareaState>,
-    height: Pixels,
+    /// `None`: as tall as the state's rows (a growing field).
+    height: Option<Pixels>,
     invalid: bool,
+    prose: bool,
 }
 
 impl TextArea {
@@ -591,14 +667,25 @@ impl TextArea {
     pub fn new(state: &Entity<TextareaState>) -> Self {
         Self {
             state: state.clone(),
-            height: px(96.),
+            height: Some(px(96.)),
             invalid: false,
+            prose: false,
         }
     }
 
     /// Sets the height of the text (the frame adds its padding).
     pub fn height(mut self, height: Pixels) -> Self {
-        self.height = height;
+        self.height = Some(height);
+        self
+    }
+
+    /// Text people write to each other (a comment), not code: the body
+    /// size in the text colour, 6px above and below it and 10px beside it
+    /// inside the border (a framed field's inset), as tall as the state's
+    /// rows (make the state with `auto_grow` to grow with what is typed).
+    pub fn prose(mut self) -> Self {
+        self.prose = true;
+        self.height = None;
         self
     }
 
@@ -615,20 +702,37 @@ impl RenderOnce for TextArea {
         let theme = cx.theme();
         let colors = theme.colors;
         let border = field_border(theme, focused, self.invalid);
+        let text = Textarea::new(&self.state)
+            .appearance(false)
+            .text_size(if self.prose {
+                theme.text.body
+            } else {
+                theme.text.small
+            });
+        // Prose: the editor's own inset at its smallest (4px beside the
+        // text, none above or below), the frame adds the rest.
+        let text = if self.prose {
+            text.with_size(gpui_component::Size::XSmall)
+        } else {
+            text
+        };
+        let text = match self.height {
+            Some(height) => text.h(height),
+            None => text,
+        };
         div()
-            .px(px(4.))
-            .py(px(4.))
+            .px(px(if self.prose { 6. } else { 4. }))
+            .py(px(if self.prose { 6. } else { 4. }))
             .rounded(theme.metrics.code_radius)
             .border_1()
             .border_color(border)
             .bg(colors.code_background)
-            .text_color(colors.text_code)
-            .child(
-                Textarea::new(&self.state)
-                    .appearance(false)
-                    .h(self.height)
-                    .text_size(theme.text.small),
-            )
+            .text_color(if self.prose {
+                colors.text
+            } else {
+                colors.text_code
+            })
+            .child(text)
     }
 }
 
@@ -636,7 +740,7 @@ impl RenderOnce for TextArea {
 /// invalid, the header rule otherwise.
 pub(crate) fn field_border(theme: &Theme, focused: bool, invalid: bool) -> Hsla {
     if invalid {
-        theme.states.critical
+        theme.states.fill.critical
     } else if focused {
         theme.colors.accent
     } else {
@@ -666,8 +770,8 @@ mod tests {
     #[test]
     fn tones_use_the_state_colours() {
         let theme = Theme::dark();
-        assert_eq!(FieldTone::Good.color(&theme), theme.states.ok);
-        assert_eq!(FieldTone::Bad.color(&theme), theme.states.critical);
+        assert_eq!(FieldTone::Good.color(&theme), theme.states.text.ok);
+        assert_eq!(FieldTone::Bad.color(&theme), theme.states.text.critical);
         assert_eq!(FieldTone::Neutral.color(&theme), theme.colors.text_faint);
     }
 
@@ -699,7 +803,7 @@ mod tests {
     #[test]
     fn field_borders_prefer_errors_over_focus() {
         let theme = Theme::dark();
-        assert_eq!(field_border(&theme, true, true), theme.states.critical);
+        assert_eq!(field_border(&theme, true, true), theme.states.fill.critical);
         assert_eq!(field_border(&theme, true, false), theme.colors.accent);
         assert_eq!(
             field_border(&theme, false, false),

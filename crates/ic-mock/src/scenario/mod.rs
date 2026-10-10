@@ -9,6 +9,7 @@
 //! minutes" is still true at startup no matter when the scenario was built.
 
 mod build;
+mod heartbeats;
 mod lab;
 mod large;
 mod prod_cluster;
@@ -21,6 +22,7 @@ use ic_model::{
 
 pub(crate) use build::format_perfdata;
 pub use build::raw_check_result;
+pub use heartbeats::HEARTBEAT_VARIABLE;
 pub use lab::lab;
 pub use large::{large, large_with_hosts};
 pub use prod_cluster::prod_cluster;
@@ -89,6 +91,41 @@ pub struct Scenario {
     pub anchor: Option<Timestamp>,
     /// Objects the simulator never changes, so a demo keeps showing them.
     pub pinned: Vec<ObjectKey>,
+    /// Services the server checks in real time at their `check_interval`,
+    /// whether the simulation runs or not (heartbeats,
+    /// [`Scenario::with_heartbeats`]): OK, or UNKNOWN while the endpoint
+    /// they are pinned to (`command_endpoint`) isn't connected.
+    pub realtime: Vec<ObjectKey>,
+    /// The node's features the cluster health page shows (checker and
+    /// notification by default): their objects exist, their status
+    /// functions report them.
+    pub features: ScenarioFeatures,
+    /// Endpoints running another Icinga version than the scenario's
+    /// (`status.version`): endpoint name and version string.
+    pub endpoint_versions: Vec<(String, String)>,
+}
+
+/// Which of the node's features are enabled (each has one object named
+/// like the feature: `checker`, `notification`, `icingadb`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScenarioFeatures {
+    /// The `checker` feature.
+    pub checker: bool,
+    /// The `notification` feature.
+    pub notification: bool,
+    /// The `icingadb` feature.
+    pub icingadb: bool,
+}
+
+impl Default for ScenarioFeatures {
+    /// A master's usual features: checker and notification.
+    fn default() -> Self {
+        Self {
+            checker: true,
+            notification: true,
+            icingadb: false,
+        }
+    }
 }
 
 /// A cluster zone.
@@ -214,8 +251,11 @@ impl Scenario {
                 flap_detection_enabled: true,
                 perfdata_enabled: true,
                 checks_per_minute: 0.0,
+                passive_checks_per_minute: 0.0,
                 avg_latency: 0.0,
+                max_latency: 0.0,
                 avg_execution_time: 0.0,
+                max_execution_time: 0.0,
                 counts: ic_model::ObjectCounts::default(),
             },
             zones: Vec::new(),
@@ -224,6 +264,9 @@ impl Scenario {
             time_base: Timestamp::now(),
             anchor: None,
             pinned: Vec::new(),
+            realtime: Vec::new(),
+            features: ScenarioFeatures::default(),
+            endpoint_versions: Vec::new(),
         }
     }
 
@@ -414,6 +457,7 @@ impl Scenario {
             .notifications
             .retain(|notification| kept(&notification.object));
         scenario.pinned.retain(|object| kept(object));
+        scenario.realtime.retain(|object| kept(object));
         scenario
     }
 
@@ -493,8 +537,10 @@ mod tests {
     #[test]
     fn prod_cluster_matches_the_design_summary() {
         let summary = prod_cluster().summary();
+        // The design's 12, plus topic 07's acknowledged problems
+        // (pg-autovacuum, disk /srv).
         assert!(
-            (11..=14).contains(&summary.services_critical),
+            (11..=16).contains(&summary.services_critical),
             "{summary:?}"
         );
         assert!((27..=31).contains(&summary.services_warning), "{summary:?}");

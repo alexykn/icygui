@@ -1,14 +1,16 @@
-//! Contract tests against a real Icinga 2 (see `contract/run-icinga.sh`).
+//! Contract tests against a real Icinga 2: the single master of
+//! `contract/run-icinga.sh`, or master-01 of the demo cluster
+//! (`demo/up.sh`, which loads the same fixtures from `contract/icinga`).
 //!
 //! They run only when `ICYGUI_CONTRACT_URL` is set (with the other
-//! `ICYGUI_CONTRACT_*` variables the script prints) and otherwise pass
+//! `ICYGUI_CONTRACT_*` variables either script prints) and otherwise pass
 //! without doing anything, unless `ICYGUI_CONTRACT_REQUIRED` is set (the
 //! nightly contract workflow sets it): then missing variables fail every
 //! test. They only read: queries, status, the event streams (all types, and
 //! quiet mode's), and a refused action as the read-only `viewer` user.
 //!
 //! They load every object several times, which is fine for the small
-//! disposable instance but is load a production Icinga must not get from a
+//! disposable instances but is load a production Icinga must not get from a
 //! test run. So [`fixture`] refuses any other instance before sending a
 //! single query: the URL must point to this machine and the fixture-only
 //! `viewer` user must log in. Load and scale tests belong against `ic-mock`
@@ -40,7 +42,7 @@ use ic_model::{
 };
 use raw::Raw;
 use secrecy::SecretString;
-use serde_json::json;
+use serde_json::{Value, json};
 
 struct Contract {
     url: Url,
@@ -57,7 +59,7 @@ fn contract() -> Option<Contract> {
         assert!(
             std::env::var_os("ICYGUI_CONTRACT_REQUIRED").is_none(),
             "ICYGUI_CONTRACT_REQUIRED is set but ICYGUI_CONTRACT_URL is not: \
-             export the variables contract/run-icinga.sh prints"
+             export the variables contract/run-icinga.sh or demo/up.sh prints"
         );
         return None;
     };
@@ -72,12 +74,13 @@ fn contract() -> Option<Contract> {
 }
 
 /// [`contract`], after making sure it is the disposable Icinga from
-/// `contract/run-icinga.sh` and never a real one (see the module docs).
+/// `contract/run-icinga.sh` or `demo/up.sh` and never a real one (see the
+/// module docs).
 /// Panics otherwise, before any query is sent.
 async fn fixture() -> Option<Contract> {
-    const REFUSED: &str = "ICYGUI_CONTRACT_URL is not the disposable Icinga from \
-                           contract/run-icinga.sh; contract tests never run against \
-                           other instances";
+    const REFUSED: &str = "ICYGUI_CONTRACT_URL is not a disposable Icinga from \
+                           contract/run-icinga.sh or demo/up.sh; contract tests never \
+                           run against other instances";
     let contract = contract()?;
     let host = contract.url.host_str().unwrap_or_default();
     let host = host.trim_start_matches('[').trim_end_matches(']');
@@ -254,8 +257,19 @@ async fn real_icinga_node_states_and_counts() {
 
     // The node's own endpoint says it isn't connected (to itself): the
     // engine never asks for it, the node it talks to is connected.
-    let states = client.endpoint_states(std::slice::from_ref(&node)).await;
-    assert_eq!(states.unwrap(), [(node.clone(), false)]);
+    let states = client
+        .endpoint_states(std::slice::from_ref(&node))
+        .await
+        .unwrap();
+    assert_eq!(states.len(), 1);
+    assert_eq!(
+        (states[0].name.as_str(), states[0].connected),
+        (node.as_str(), false)
+    );
+    // Every number the cluster health page reads is an attribute Icinga
+    // knows (an unknown one would fail the query); its own endpoint has
+    // none of them set.
+    assert_eq!(states[0].stats, ic_model::EndpointStats::default());
     // A name Icinga doesn't know fails the whole request ("No objects
     // found.", 404), so the client leaves every name of it out.
     let names = [node.clone(), "icygui-no-such-endpoint".to_owned()];
@@ -274,13 +288,23 @@ async fn real_icinga_node_states_and_counts() {
 
     // The counts by state are the services' raw states: a service never
     // checked (the fixtures' passive ones) counts as unknown. The fixtures'
-    // states never change, so the two answers agree.
-    let services = client.services(Detail::Lean).await.unwrap();
-    let counts = client.status().await.unwrap().counts;
-    let mut expected = [0_u32; 4];
-    for service in &services {
-        expected[ObjectCounts::service_index(service.state)] += 1;
-    }
+    // states never change, so the two answers agree at once; the demo
+    // cluster's change all the time, so a few pairs may be asked for until
+    // one agrees.
+    let mut attempts = 0;
+    let (services, counts, expected) = loop {
+        let services = client.services(Detail::Lean).await.unwrap();
+        let counts = client.status().await.unwrap().counts;
+        let mut expected = [0_u32; 4];
+        for service in &services {
+            expected[ObjectCounts::service_index(service.state)] += 1;
+        }
+        attempts += 1;
+        if counts.service_states() == expected || attempts == 10 {
+            break (services, counts, expected);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
     assert!(
         services
             .iter()
@@ -295,6 +319,115 @@ async fn real_icinga_node_states_and_counts() {
     assert_eq!(usize::try_from(counts.services_pending).unwrap(), pending);
     assert_eq!(usize::try_from(counts.services()).unwrap(), services.len());
     assert_eq!(usize::try_from(counts.hosts()).unwrap(), hosts.len());
+}
+
+/// What the cluster health page reads besides the status poll (topic
+/// 06): the `ApiListener` status entry (its connections and queues: every
+/// field read is there, so none silently reads as 0), the CIB's passive
+/// checks and maxima, and the features by their objects (`paused`, which
+/// every configuration object has). The fixture is one master, or the
+/// demo cluster's master-01, with the `checker` and `notification`
+/// features and without `icingadb`, which has no status entry of its own
+/// in 2.15 (so its object tells).
+#[tokio::test]
+async fn real_icinga_cluster_health() {
+    let Some(contract) = fixture().await else {
+        return;
+    };
+    let raw = contract.raw();
+    wait_for_first_checks(&raw).await;
+    let listener = raw.get("v1/status/ApiListener").await;
+    assert_eq!(listener.status, 200);
+    let api = listener.json()["results"][0]["status"]["api"].clone();
+    for pointer in [
+        "/http/clients",
+        "/num_endpoints",
+        "/num_conn_endpoints",
+        "/json_rpc/relay_queue_items",
+        "/json_rpc/relay_queue_item_rate",
+        "/json_rpc/sync_queue_items",
+        "/json_rpc/work_queue_item_rate",
+    ] {
+        assert!(
+            api.pointer(pointer).is_some_and(Value::is_number),
+            "{pointer}: {api}"
+        );
+    }
+    assert_eq!(
+        raw.get("v1/status/IcingaDB").await.status,
+        404,
+        "no status entry for IcingaDB"
+    );
+    let client = contract.client();
+    let status = client.listener_status().await.unwrap();
+    assert!(status.http_clients >= 1, "this client: {status:?}");
+    // The endpoints a node counts: the others of its own zone, its parent
+    // zone's and its child zones' (`ApiListener::GetStatus`). None for a
+    // single master; the other master and the satellites on the demo
+    // cluster, all connected while it is healthy.
+    let node = client.status().await.unwrap().node_name;
+    let cluster = client.cluster().await.unwrap();
+    let zone_of = |name: &str| {
+        cluster
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == name)
+            .map(|endpoint| endpoint.zone.clone())
+    };
+    let own = zone_of(&node).expect("the node's own endpoint");
+    let parent_of = |zone: &str| {
+        cluster
+            .zones
+            .iter()
+            .find(|candidate| candidate.name == zone)
+            .and_then(|zone| zone.parent.clone())
+    };
+    let counted = cluster
+        .endpoints
+        .iter()
+        .filter(|endpoint| endpoint.name != node)
+        .filter(|endpoint| {
+            endpoint.zone == own
+                || parent_of(&endpoint.zone).as_deref() == Some(own.as_str())
+                || parent_of(&own).as_deref() == Some(endpoint.zone.as_str())
+        })
+        .count();
+    assert_eq!(
+        (status.endpoints, status.connected_endpoints),
+        (
+            u32::try_from(counted).unwrap(),
+            u32::try_from(counted).unwrap()
+        ),
+        "{status:?}"
+    );
+    let read = client.node_features(&[]).await.unwrap();
+    assert!(read.refused.is_empty(), "{read:?}");
+    // A single master runs both. In an HA zone 2.15 pauses the checker's
+    // and the notification feature's objects on one of the masters
+    // (`paused` is the object's own HA state), although that master still
+    // runs its share of the checks (the cluster tests check both masters:
+    // `cluster_ha_masters_share_the_checks`).
+    let ha = cluster
+        .endpoints
+        .iter()
+        .filter(|endpoint| endpoint.zone == own)
+        .count()
+        > 1;
+    let either = |state: Option<ic_model::FeatureState>| {
+        state == Some(ic_model::FeatureState::Running)
+            || ha && state == Some(ic_model::FeatureState::Paused)
+    };
+    assert!(either(read.features.checker), "{read:?}");
+    assert!(either(read.features.notification), "{read:?}");
+    assert_eq!(read.features.icingadb, Some(ic_model::FeatureState::Off));
+    let instance = client.status().await.unwrap();
+    assert!(instance.max_latency >= instance.avg_latency, "{instance:?}");
+    assert!(
+        instance.max_execution_time >= instance.avg_execution_time,
+        "{instance:?}"
+    );
+    assert!(instance.passive_checks_per_minute >= 0.0);
+    assert_eq!(client.unknown_attributes(), []);
 }
 
 /// Every attribute the client asks for exists: Icinga 2.15 rejects a
@@ -533,9 +666,125 @@ async fn real_icinga_objects_by_name_with_missing_names() {
     assert_eq!(fetched.missing, gone);
 }
 
-/// Icinga's own `Notification` objects (the default `conf.d` notifies
-/// `icingaadmins` about every host and service): the whole list, by name
-/// with unknown names, and the read-only `viewer`'s missing permission.
+/// Removing downtimes and comments by name sends their names as lists
+/// (`"downtimes": [...]`, `"comments": [...]`); Icinga resolves them in
+/// `FilterUtility::GetFilterTargets`, the same for queries and actions.
+/// Checked read-only with a query: a list holding an unknown name is "No
+/// objects found." (were the key not recognised, Icinga would answer with
+/// every object of the type, and a removal would remove them all).
+#[tokio::test]
+async fn real_icinga_resolves_downtime_and_comment_name_lists() {
+    let Some(contract) = fixture().await else {
+        return;
+    };
+    let raw = contract.raw();
+    for (plural, key) in [("downtimes", "downtimes"), ("comments", "comments")] {
+        let answer = raw
+            .query(
+                plural,
+                &json!({ key: ["icygui-contract-no-such-host!icygui-no-such-name"] }),
+            )
+            .await;
+        assert_eq!(
+            answer.status,
+            404,
+            "{plural}: {}",
+            String::from_utf8_lossy(&answer.body)
+        );
+        assert!(
+            String::from_utf8_lossy(&answer.body).contains("No objects found"),
+            "{plural}: {}",
+            String::from_utf8_lossy(&answer.body)
+        );
+    }
+}
+
+/// `match()` in Icinga's filter language is the matcher every crate shares
+/// (`ic_model::glob_matches`): ASCII case folds, `?` is one byte, only `\*`
+/// and `\?` escape. Each case is asked of the real Icinga as one by-name
+/// query of a single host (`filter_vars` carry the pattern and the text,
+/// which sidesteps the filter lexer), as the fixture's `root`, because
+/// filter expressions need a permission the `icygui` user lacks on purpose.
+#[tokio::test]
+async fn real_icinga_match_is_the_shared_matcher() {
+    let Some(contract) = fixture().await else {
+        return;
+    };
+    let (Ok(user), Ok(password)) = (
+        std::env::var("ICYGUI_CONTRACT_ADMIN_USER"),
+        std::env::var("ICYGUI_CONTRACT_ADMIN_PASSWORD"),
+    ) else {
+        assert!(
+            std::env::var_os("ICYGUI_CONTRACT_REQUIRED").is_none(),
+            "ICYGUI_CONTRACT_ADMIN_USER and _PASSWORD are required"
+        );
+        return;
+    };
+    let raw = Raw::new(
+        &contract.url,
+        Some(&contract.server_name),
+        &contract.ca_pem,
+        &user,
+        &password,
+    );
+    let hosts = contract.client().hosts().await.unwrap();
+    let host = hosts[0].name.as_str();
+    let cases = [
+        ("ICINGA*", "icinga-master"),
+        ("icinga*", "ICINGA-MASTER"),
+        ("Ä", "ä"),
+        ("ä*", "ä-x"),
+        ("a?c", "aäc"),
+        ("a??c", "aäc"),
+        ("a\\*b", "a*b"),
+        ("a\\*b", "axb"),
+        ("a\\?b", "a?b"),
+        ("a\\\\b", "a\\b"),
+        ("a\\\\b", "a\\\\b"),
+        ("a\\xb", "a\\xb"),
+        ("a\\xb", "axb"),
+        ("a\\", "a\\"),
+        ("a\\", "a"),
+        ("a\\\\*", "a\\*"),
+        ("a\\\\*", "a\\zz"),
+        ("*", ""),
+        ("", ""),
+        ("", "x"),
+        ("a**b", "ab"),
+    ];
+    for (pattern, text) in cases {
+        let answer = raw
+            .query(
+                "hosts",
+                &json!({
+                    "attrs": ["name"],
+                    "filter": "host.name == h && match(p, t)",
+                    "filter_vars": { "h": host, "p": pattern, "t": text },
+                }),
+            )
+            .await;
+        // Icinga answers 200 with no results (or 404 "No objects found")
+        // when the filter is false.
+        let icinga = match answer.status {
+            200 => !answer.json()["results"].as_array().unwrap().is_empty(),
+            404 => false,
+            other => panic!(
+                "match({pattern:?}, {text:?}): {other} {}",
+                String::from_utf8_lossy(&answer.body)
+            ),
+        };
+        assert_eq!(
+            ic_model::glob_matches(pattern, text),
+            icinga,
+            "match({pattern:?}, {text:?}): shared matcher against Icinga"
+        );
+    }
+}
+
+/// Icinga's own `Notification` objects (the single master's default
+/// `conf.d` notifies `icingaadmins` about every host and service, the demo
+/// cluster its teams): the whole list, by name with unknown names, and the
+/// read-only `viewer`'s missing permission.
 #[tokio::test]
 async fn real_icinga_notifications() {
     let Some(contract) = fixture().await else {
@@ -645,4 +894,64 @@ async fn real_icinga_event_stream() {
             "a check result on the quiet stream: {event:?}"
         );
     }
+}
+
+/// The heartbeat on a quiet stream (PLAN.md §4.2 B): quiet mode's event
+/// types plus `CheckResult`, narrowed by Icinga's stream filter to the
+/// named objects, brings exactly their check results and nothing else's;
+/// and the filter needs the `filter-expression` permission, which the
+/// least-privilege `icygui` user doesn't have (the fixture enforces it, as
+/// Icinga 2.17 will by default), so icygui must fall back without it.
+#[tokio::test]
+async fn real_icinga_quiet_stream_filter_carries_only_the_heartbeat() {
+    let Some(contract) = fixture().await else {
+        return;
+    };
+    let admin = std::env::var("ICYGUI_CONTRACT_ADMIN_USER").expect("ICYGUI_CONTRACT_ADMIN_USER");
+    let admin_password =
+        std::env::var("ICYGUI_CONTRACT_ADMIN_PASSWORD").expect("ICYGUI_CONTRACT_ADMIN_PASSWORD");
+    let mut kinds = EventKind::QUIET.to_vec();
+    kinds.push(EventKind::CheckResult);
+    // `load` on db-prod-03 runs every 20 s; `ping4` on k8s-node-07 too,
+    // and every host every 30 s: their results must stay out.
+    let filter =
+        r#"event.type != "CheckResult" || event.host == "db-prod-03" && event.service == "load""#;
+    let refused = contract
+        .client()
+        .events_filtered("icygui-contract-filter-refused", &kinds, Some(filter))
+        .await;
+    assert!(
+        matches!(&refused, Err(ApiError::Forbidden(message)) if message.contains("filter-expression")),
+        "the icygui user may not filter the stream: {:?}",
+        refused.map(|_| ())
+    );
+    let mut stream = contract
+        .client_as(&admin, &admin_password)
+        .events_filtered("icygui-contract-filter", &kinds, Some(filter))
+        .await
+        .unwrap();
+    // Two of its results (20 s apart) within 70 s, none of another object.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(70);
+    let mut beats = Vec::new();
+    while beats.len() < 2 {
+        let event = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .expect("two results of the named object within 70 s")
+            .expect("the stream is open")
+            .unwrap();
+        if let Event::CheckResult { object, result, .. } = &event {
+            assert_eq!(
+                *object,
+                ObjectKey::service("db-prod-03", "load"),
+                "only the named object's check results: {event:?}"
+            );
+            // Icinga's own times, which the heartbeat's time budget
+            // measures (scheduling latency and delivery).
+            assert!(result.schedule_start.as_unix_seconds() > 0.0);
+            assert!(result.execution_start >= result.schedule_start);
+            assert!(result.execution_end >= result.execution_start);
+            beats.push(result.execution_end);
+        }
+    }
+    assert!(beats[1] > beats[0]);
 }

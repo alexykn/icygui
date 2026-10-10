@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 00 baseline</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">00</span><span class="topic-name">Baseline: the rc1 app redrawn with the mock-up kit</span></div>
+<p class="topic-intro">Not a proposal. The service pane of rc1 (docs/screenshots/service-pane.png) redrawn with v1.css and v1.js, to check that the kit matches the real app before anything new is drawn on top of it.</p>
+<div class="shots"></div>
+<script>
+const pane = `<div class="pane">${paneHeader('service')}
+  <div class="pbody">
+    ${paneTitle({ name: 'postgres-replication', sub: 'on <a>db-prod-03</a> · 14m · hard 1/3' })}
+    ${actionButtons()}
+    ${codeBlock('CRITICAL - standby lag 412s (&gt; 300s)\nprimary  db-prod-01  lsn 4A/9C21F0D8\nstandby  db-prod-03  lsn 4A/2E77A120\nslot     repl_db03   retained 1.8 GiB')}
+    ${perf([['replication_lag', '412s', '60', '300', 'crit'], ['wal_retained', '1.8GiB', '4', '8'], ['active_connections', '182', '400', '450']])}
+    ${kv('check', [['command', 'check_postgres'], ['interval', '60s · retry 15s'], ['last / next', '17s ago / in 42s'], ['endpoint', 'sat-ams-01'], ['zone', 'ams'], ['attempt', 'hard 1/3'], ['latency / runtime', '0.004s / 1.82s'], ['notifications', 'enabled'], ['flapping', 'no · 4.2%'], ['notified', 'dba-oncall, m.keller · 01:13']])}
+    ${note({ author: 'j.berg', meta: ['00:39', 'expires 02:41'], body: 'Failover drill on db-prod-01 at 15:00. Expect lag on 03.' })}
+  </div></div>`;
+const main = `<div class="split" style="grid-template-columns:minmax(0,1fr) 620px">
+  <div class="col">${listHeader({ demo: true })}${summary()}<div class="list">${rows(ROWS, (r, i) => ({ sel: i === 2 }))}</div></div>${pane}</div>`;
+shot('00', '00-baseline', 'rc1 service pane, redrawn', appWindow(main));
+</script>
+</body></html>

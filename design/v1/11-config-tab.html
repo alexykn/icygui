@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 11 config tab</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script>
+<style>
+.cmdl { background: var(--code-bg); border: 1px solid var(--bd-header); border-radius: 6px; padding: 12px 14px; font-size: 12.5px; line-height: 1.75; color: var(--t-code); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cmdl .r { color: var(--t-strong); background: var(--accent-tint-strong); border-radius: 3px; padding: 0 2px; }
+.cmdl .p { color: var(--t-faint); }
+.cmdl .a { white-space: nowrap; }  /* one argument (flag and value) never breaks; lines break only between arguments */
+.args { display: flex; flex-direction: column; }
+.args .r { display: grid; grid-template-columns: 120px 150px minmax(0,1fr); gap: 10px; font-size: 12.5px; padding: 5px 0; border-top: 1px solid var(--bd-row); white-space: nowrap; }
+.args .r > * { overflow: hidden; text-overflow: ellipsis; }
+.args .h { font-size: 11.5px; color: var(--t-faint); border-top: 0; padding: 0 0 6px; }
+.argf { display: flex; align-items: center; gap: 10px; height: 28px; font-size: 12px; color: var(--t-muted); white-space: nowrap; }
+.argf .chev { width: 12px; flex: none; display: flex; color: var(--t-faint); }  /* fixed slot: the chevron turns, nothing moves */
+.argf .n { color: var(--t-sec); flex: none; }
+.args.open { margin-top: -2px; }
+.nt { display: flex; flex-direction: column; gap: 2px; }
+.nt .th { display: flex; align-items: baseline; gap: 10px; padding: 0 0 6px; white-space: nowrap; }
+.nt .th .nm { font-size: 12.5px; color: var(--t-strong); }
+.nt .th .mt { font-size: 12px; color: var(--t-faint); overflow: hidden; text-overflow: ellipsis; }
+.nt .u { display: grid; grid-template-columns: 14px 130px minmax(0,1fr) auto; gap: 10px; align-items: center; font-size: 12.5px; padding: 5px 0; border-top: 1px solid var(--bd-row); white-space: nowrap; }
+.nt .u.sub { grid-template-columns: 14px 116px minmax(0,1fr) auto; padding-left: 14px; }
+.nt .u .ic { color: var(--t-muted); }
+.nt .u > span { overflow: hidden; text-overflow: ellipsis; }
+.nt .cond { font-size: 12px; color: var(--t-muted); padding: 6px 0 0; border-top: 1px solid var(--bd-row); line-height: 1.6; white-space: normal; }
+.need { display: flex; gap: 10px; padding: 10px 12px; border-radius: 6px; border: 1px dashed var(--bd-window); font-size: 12px; line-height: 1.55; color: var(--t-muted); }
+.need .ic { color: var(--t-faint); margin-top: 2px; }
+</style></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">11</span><span class="topic-name">Read-only Icinga config: the command line, and who Icinga notifies</span></div>
+<p class="topic-intro">Approved in the review, both parts, each shown when its permission is granted. It adds two read-only things to the host pane's <i>config</i> tab and the service pane's <i>check</i> section. <b>First</b>, the check command's actual command line, with every argument resolved from the object's macros; the table of where each value comes from <b>folds under the command line</b> and is folded by default (11a, 11b; unfolded in 11d). <b>Second</b>, who Icinga would notify: each notification object with its users and user groups, their email and pager, the time period, and the states and types. Both need API permissions icygui doesn't ask for today: <b>objects/query/CheckCommand</b> for the first, <b>objects/query/User</b>, <b>UserGroup</b> and <b>TimePeriod</b> for the second. Without them the sections say what is missing and show what is known from today's objects (frame 11c). Protected values (passwords, tokens, community strings) are always <b>***</b>.</p>
+<div class="shots"></div>
+<script>
+const groupsDb = [{ name: 'overview', items: [['overview', 'crit', 38], ['production', 'crit', 38], ['databases', 'crit', 7], ['host problems', 'crit', 7]] }, SIDEBAR_GROUPS[1], SIDEBAR_GROUPS[2]];
+const dbRows = [
+  ['crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'],
+  ['unk', 'mysql-replication', 'db-mysql-03', 'UNKNOWN - connection refused', '2h'],
+  ['warn', 'pg-connections', 'db-prod-03', 'WARNING - 182 of 200 per-db limit (orders)', '22m'],
+  ['warn', 'pg-bloat', 'db-prod-05', 'WARNING - check_postgres degraded', '50m'],
+  ['warn', 'load', 'db-prod-01', 'WARNING - load average 14.2, 12.8, 11.1', '1h'],
+  ['warn', 'mysql-slow-queries', 'db-mysql-01', 'WARNING - 41 slow queries in 5m (> 20)', '3h'],
+];
+const list = (sel) => listHeader({ title: 'databases', subtitle: 'service problems' }) + summary([['crit', 1, 'critical'], ['warn', 4, 'warning'], ['unk', 1, 'unknown']], handledEnd(2)) + `<div class="list">${rows(dbRows, (r, i) => ({ sel: i === sel }))}</div>`;
+const R = (s) => `<span class="r">${s}</span>`;
+// one unbreakable argument of the command line: the flag and its value
+const A = (flag, value = '') => `<span class="a">${flag}${value}</span>`;
+const P = (s) => `<span class="p">${s}</span>`;
+// The argument table folds under the command line: a fold row (chevron in a
+// fixed slot, "N arguments", what the table holds), folded by default; the
+// table opens below it, so nothing above it ever moves.
+const args = (title, rowsA, { open = false } = {}) => `<div class="argf"><span class="chev">${icon(open ? 'chevron-down' : 'chevron-right', 12)}</span><span class="n">${rowsA.length} arguments</span><span class="faint">where each value comes from</span></div>` +
+  (open ? `<div class="args open"><div class="r h"><span>${title}</span><span>value</span><span>from</span></div>${rowsA.map(([a, v, f]) => `<div class="r"><span class="sec">${a}</span><span>${v}</span><span class="faint">${f}</span></div>`).join('')}</div>` : '');
+const u = (ic, name, contact, right = '', sub = false) => `<div class="u${sub ? ' sub' : ''}"><span class="ic">${icon(ic, 12)}</span><span>${name}</span><span class="muted">${contact}</span><span class="faint" style="font-size:12px">${right}</span></div>`;
+
+// ---- 11a: host pane, config tab ----------------------------------------
+const hostConfig = `<div class="pane">${paneHeader('host')}
+  <div class="col" style="gap:20px;padding:20px 24px 0;flex:none">
+    ${paneTitle({ st: 'ok', label: 'UP', name: 'db-prod-03', sub: '10.0.2.13 · up 41d · PING OK - Packet loss = 0%, RTA = 0.42 ms' })}
+    ${actionButtons({ firstDis: true })}
+    <div class="subtabs"><span>services 23</span><span>history</span><span>vars</span><span class="on">config</span></div></div>
+  <div class="col stack" style="gap:22px;padding:16px 24px;overflow:hidden">
+    ${kv('check', [['command', 'hostalive'], ['interval', '60s · retry 30s'], ['last / next', '18s ago / in 42s'], ['endpoint', 'sat-ams-01'], ['zone', 'ams'], ['attempt', 'hard 1/3']])}
+    <div class="col" style="gap:8px"><div style="display:flex;align-items:baseline;gap:10px">${seclabel('command line')}<span class="faint" style="font-size:11.5px">CheckCommand hostalive · runs on sat-ams-01</span><span class="grow"></span><span class="faint">${icon('copy', 12)}</span></div>
+      <div class="cmdl">${A('/usr/lib/nagios/plugins/check_ping')} ${A('-H ', R('10.0.2.13'))} ${A('-w ', R('100,20%'))} ${A('-c ', R('500,60%'))} ${A('-p ', R('5'))}</div>
+      ${args('argument', [['-H', '10.0.2.13', '$check_address$ → host.address'], ['-w', '100,20%', '$ping_wrta$,$ping_wpl$% · command default'], ['-c', '500,60%', '$ping_crta$,$ping_cpl$% · command default'], ['-p', '5', '$ping_packets$ · command default']])}</div>
+    <div class="col" style="gap:10px"><div style="display:flex;align-items:baseline;gap:10px">${seclabel('notifications')}<span class="faint" style="font-size:11.5px">who Icinga notifies about this host</span></div>
+      <div class="nt"><div class="th"><span class="nm">mail-host-notification</span><span class="mt">apply rule host-mail · command mail-host-notification</span></div>
+        ${u('users', 'linux-admins', 'user group · 2 users')}
+        ${u('user', 'm.keller', 'm.keller@example.com', '24x7', true)}
+        ${u('user', 'a.ivanova', 'a.ivanova@example.com', 'workhours', true)}
+        <div class="cond">period 24x7 · states down, up · types problem, recovery, acknowledgement, downtime · every 30m</div></div>
+    </div>
+    ${kv("Icinga's switches", [['active checks', 'on'], ['notifications', 'on'], ['flap detection', 'on']])}
+  </div></div>`;
+shot('11a', '11-config-a-host-tab', 'The host pane’s <i>config</i> tab. Under today’s check table: the command line with every macro resolved (resolved values tinted, copy at the right). The table of where each value came from is <b>folded under it</b>, by default: a chevron in a fixed slot and <i>4 arguments</i> (a click, or →/← on the row, unfolds and folds it; 11d shows it open). Then the notification objects for the host: the user group with its members, each user’s email and own time period, and the conditions (period, states, types, interval). Icinga’s switches stay last, read-only.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${list(-1)}</div>${hostConfig}</div>`, { groups: groupsDb, activeItem: 'databases' }),
+  { crops: '11-config-a-zoom:820,280,620,620' });
+
+// ---- 11b: service pane, check section -----------------------------------
+const svcCheck = (open) => `<div class="pane">${paneHeader('service')}
+  <div class="col stack" style="gap:22px;padding:20px 24px;overflow:hidden">
+    ${paneTitle({ st: 'crit', label: 'CRIT', name: 'postgres-replication', sub: 'on <a>db-prod-03</a> · 14m · hard 3/3' })}
+    ${kv('check', [['command', 'check_postgres'], ['interval', '60s · retry 15s'], ['last / next', '12s ago / in 48s'], ['endpoint', 'sat-ams-01'], ['notified', 'dba-oncall · 12:58']])}
+    <div class="col" style="gap:8px"><div style="display:flex;align-items:baseline;gap:10px">${seclabel('command line')}<span class="faint" style="font-size:11.5px">CheckCommand check_postgres · runs on sat-ams-01</span><span class="grow"></span><span class="faint">${icon('copy', 12)}</span></div>
+      <div class="cmdl">${A('/usr/lib/nagios/plugins/check_postgres.pl')} ${A('--action=hot_standby_delay')} ${A('--host=', R('10.0.2.11,10.0.2.13'))} ${A('--port=', R('5432'))} ${A('--dbuser=', R('monitoring'))} ${A('--dbpass=', R('***'))} ${A('--warning=', R('60'))} ${A('--critical=', R('300'))}</div>
+      ${args('argument', [['--action', 'hot_standby_delay', 'set in the command'], ['--host', '10.0.2.11,10.0.2.13', 'host.vars.pg_primary, host.address'], ['--port', '5432', '$postgres_port$ · command default'], ['--dbuser', 'monitoring', 'host.vars.pg_user'], ['--dbpass', '***', 'host.vars.pg_password · protected'], ['--warning', '60', 'service.vars.lag_warn'], ['--critical', '300', 'service.vars.lag_crit']], { open })}</div>
+    <div class="col" style="gap:10px"><div style="display:flex;align-items:baseline;gap:10px">${seclabel('notifications')}<span class="faint" style="font-size:11.5px">now: dba-oncall by mail at once; dba-pager from 18:00</span></div>
+      <div class="nt"><div class="th"><span class="nm">mail-service-notification</span><span class="mt">apply rule dba-mail</span></div>
+        ${u('users', 'dba-oncall', 'user group · 2 users')}
+        ${u('user', 'j.berg', 'j.berg@example.com · +49 151 2345 6789', '24x7', true)}
+        ${u('user', 'a.ivanova', 'a.ivanova@example.com', 'workhours', true)}
+        <div class="cond">period 24x7 · states critical, warning, unknown · types problem, recovery, acknowledgement · every 30m</div></div>
+      <div class="nt"><div class="th"><span class="nm">pager-dba</span><span class="mt">apply rule dba-pager · command sms-notification</span></div>
+        ${u('user', 'dba-pager', '+49 160 9876 5432 (pager)')}
+        <div class="cond">period oncall-nights (weekdays 18:00 to 08:00, weekends) · states critical · types problem, recovery · after 5m · every 15m</div></div>
+    </div>
+  </div></div>`;
+shot('11b', '11-config-b-service-check', 'The service pane’s <i>check</i> section. Under the check table: the resolved command line (the password shows as ***), with its argument table folded under it (<i>7 arguments</i>), then both notification objects with their users, contacts, periods and conditions. The section label sums them up for <i>now</i>: who gets what, and when.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${list(0)}</div>${svcCheck(false)}</div>`, { groups: groupsDb, activeItem: 'databases' }),
+  { crops: '11-config-b-zoom:820,180,620,720' });
+
+// ---- 11c: without the permissions ---------------------------------------
+const svcNoPerm = `<div class="pane">${paneHeader('service')}
+  <div class="col stack" style="gap:22px;padding:20px 24px;overflow:hidden">
+    ${paneTitle({ st: 'crit', label: 'CRIT', name: 'postgres-replication', sub: 'on <a>db-prod-03</a> · 14m · hard 3/3' })}
+    ${kv('check', [['command', 'check_postgres'], ['interval', '60s · retry 15s'], ['last / next', '12s ago / in 48s'], ['endpoint', 'sat-ams-01'], ['notified', 'dba-oncall · 12:58']])}
+    <div class="col" style="gap:8px">${seclabel('command line')}
+      <div class="need">${icon('lock', 13)}<span>The command line needs <span class="sec">objects/query/CheckCommand</span>, which this API user doesn’t have. The command is known by name only: check_postgres. <a class="lnk">how to grant it</a></span></div></div>
+    <div class="col" style="gap:8px">${seclabel('notifications')}
+      <div class="nt"><div class="th"><span class="nm">mail-service-notification</span><span class="mt">to dba-oncall (user group)</span></div>
+        <div class="th"><span class="nm">pager-dba</span><span class="mt">to dba-pager (user)</span></div></div>
+      <div class="need">${icon('lock', 13)}<span>Members, addresses and periods need <span class="sec">objects/query/User</span>, <span class="sec">UserGroup</span> and <span class="sec">TimePeriod</span>. Without them, icygui shows the notifications and the names they send to, from the Notification objects it reads already.</span></div></div>
+  </div></div>`;
+shot('11c', '11-config-c-without-permission', 'Without the extra permissions (today’s least-privilege API user): each section says which permission it needs, in a dashed box with a lock, and shows what icygui knows anyway. The command is shown by name. The notifications and the names they send to come from the Notification objects rc1 already reads. Nothing is greyed out without a reason.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${list(0)}</div>${svcNoPerm}</div>`, { groups: groupsDb, activeItem: 'databases' }),
+  { crops: '11-config-c-zoom:820,180,620,560' });
+
+// ---- 11d: the argument table unfolded -------------------------------------
+shot('11d', '11-config-d-arguments-open', 'The argument table unfolded (a click on <i>7 arguments</i>, or → on the row): the chevron turns in its slot and the table opens below the row: argument, value, and where the value comes from (<i>host.vars.pg_user</i>, <i>service.vars.lag_warn</i>). The protected password shows <i>***</i> and says <i>protected</i>. The command line and everything above it stay where they were (compare 11b); only what is below the table moves down.',
+  appWindow(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${list(0)}</div>${svcCheck(true)}</div>`, { groups: groupsDb, activeItem: 'databases' }),
+  { crops: '11-config-d-zoom:820,180,620,720' });
+</script>
+</body></html>

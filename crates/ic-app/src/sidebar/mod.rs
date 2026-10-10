@@ -21,34 +21,34 @@
 
 mod centre;
 mod menus;
-mod model;
+pub(crate) mod model;
 
 use gpui::{
     AnyElement, AppContext as _, ClickEvent, Context, Div, Entity, EventEmitter, FontWeight,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
     Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, prelude::FluentBuilder as _, px,
+    Window, div, prelude::FluentBuilder as _,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::{DashboardRef, ScopeSetting};
 use ic_ui_kit::input::{Escape, InputEvent, InputState};
 use ic_ui_kit::{
     ActiveTheme as _, Divider, DividerColor, GlyphButton, Icon, IconButton, IconName, Link,
-    Metrics, Popover, StateDot, TextField, Theme, Tooltip,
+    Metrics, Popover, StateDot, TextField, Theme, Tooltip, px,
 };
 
 use crate::actions::FocusMain;
 use crate::app_state::{AppState, Health};
 use crate::chrome::{Controls, WindowControls, WindowDrag};
 use crate::menu_state::{OpenMenu, down_position};
-use crate::settings::{ScopeKey, SettingsTab};
+use crate::settings::{ScopeKey, SettingsPage};
 use crate::workspace::ToggleSidebar;
 
 pub(crate) use self::menus::new_key;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use self::menus::switcher_rows;
 pub(crate) use self::model::Dot;
-use self::model::{OpenTab, SidebarGroup, SidebarItem};
+use self::model::{ClusterRow, Mark, OpenTab, SidebarGroup, SidebarItem};
 
 /// What the sidebar asks the workspace to do: open an editor, a dialog
 /// or a file prompt, or switch environments.
@@ -81,8 +81,11 @@ pub(crate) enum SidebarEvent {
         /// The object.
         object: ObjectKey,
     },
+    /// Show this environment's cluster health page (a trouble alert's
+    /// entry), switching to the environment first.
+    OpenHealthIn(String),
     /// Open the settings on this tab.
-    OpenSettings(SettingsTab),
+    OpenSettings(SettingsPage),
     /// Give this group or dashboard a custom notification rule, in the
     /// notification settings.
     CustomRule(ScopeKey),
@@ -135,6 +138,9 @@ pub(crate) struct Sidebar {
     /// their controls).
     viewport: Pixels,
     rename: Option<Rename>,
+    /// A dashboard being created, shown as a selected row under its group
+    /// while its editor is open.
+    provisional: Option<model::Provisional>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -172,6 +178,7 @@ impl Sidebar {
             mute_target: None,
             viewport: crate::WINDOW_SIZE.height,
             rename: None,
+            provisional: None,
             _subscriptions: subscriptions,
         }
     }
@@ -213,9 +220,10 @@ impl Sidebar {
             state.environment().and_then(|environment| {
                 model::groups(
                     environment,
-                    &state.snapshot().dashboards,
+                    state.snapshot(),
                     state.selected(),
                     &self.query,
+                    Timestamp::now(),
                 )
                 .into_iter()
                 .flat_map(|group| group.items)
@@ -375,27 +383,47 @@ impl Sidebar {
         let Some(environment) = state.environment() else {
             return empty_note("No dashboards yet", None, &theme, cx);
         };
-        // While a tab is shown, no dashboard is highlighted.
-        let selected = state.selected().filter(|_| state.active_tab().is_none());
-        let groups = model::groups(
-            environment,
-            &state.snapshot().dashboards,
-            selected,
-            &self.query,
-        );
+        let now = Timestamp::now();
+        // While a tab or a cluster entry is shown, or a new dashboard is
+        // being made (its provisional row is the selected one), no
+        // dashboard is highlighted.
+        let selected = state.selected().filter(|_| {
+            state.active_tab().is_none()
+                && state.active_cluster().is_none()
+                && self.provisional.is_none()
+        });
+        let mut groups = model::groups(environment, state.snapshot(), selected, &self.query, now);
+        // The group a new dashboard goes into holds the selected row.
+        if let Some(provisional) = &self.provisional {
+            for group in &mut groups {
+                group.active |= group.group.id == provisional.group_id;
+            }
+        }
         let tabs = model::open_tabs(state.tabs(), state.active_tab(), state.snapshot());
+        let cluster_state =
+            crate::cluster::sidebar_state(state.snapshot(), state.connection(), now);
+        let cluster =
+            model::cluster_rows(state.snapshot(), state.active_cluster(), cluster_state, now);
+        let environment_name = environment.name.clone();
+        let mut rows: Vec<AnyElement> = vec![Self::render_cluster(
+            &cluster,
+            &environment_name,
+            &theme,
+            cx,
+        )];
         if groups.is_empty() && tabs.is_empty() {
-            return if self.query.trim().is_empty() {
+            rows.push(if self.query.trim().is_empty() {
                 empty_note("No dashboards yet", Some("new dashboard"), &theme, cx)
             } else {
                 empty_note("No matching dashboards", None, &theme, cx)
-            };
+            });
         }
         let count = environment.groups.len();
-        let mut rows: Vec<AnyElement> = groups
-            .iter()
-            .map(|group| self.render_group(group, count, &theme, cx))
-            .collect();
+        rows.extend(
+            groups
+                .iter()
+                .map(|group| self.render_group(group, count, &theme, cx)),
+        );
         if !tabs.is_empty() {
             rows.push(Self::render_open_tabs(&tabs, &theme, cx));
         }
@@ -410,7 +438,109 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// The "open" section: objects opened as tabs ("↗ open as tab").
+    /// The fixed **cluster** section at the top (topic 14): `cluster` with
+    /// the environment's name faint beside it, then handling, downtimes,
+    /// events and health, each with its mark in the dot slot and its count
+    /// in the count slot; a rule under it, above the groups.
+    fn render_cluster(
+        rows: &[ClusterRow],
+        environment: &str,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let metrics = theme.metrics;
+        let header = div()
+            .id("cluster-section")
+            .flex()
+            .flex_none()
+            .items_baseline()
+            .gap(px(8.))
+            .h(metrics.group_row_height)
+            .pt(px(9.))
+            .px(metrics.sidebar_padding)
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(theme.text.heading)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors.text_secondary)
+                    .child("cluster"),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.text.row)
+                    .text_color(colors.text_faint)
+                    .child(environment.to_owned()),
+            );
+        let entries = rows.iter().map(|row| {
+            let entry = row.entry;
+            div()
+                .id(entry.id())
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(12.))
+                .h(metrics.item_row_height)
+                .pl(px(14.))
+                .pr(metrics.sidebar_padding)
+                .cursor_pointer()
+                .when(row.active, |item| item.bg(colors.item_active))
+                .when(!row.active, |item| {
+                    item.hover(|style| style.bg(colors.item_hover))
+                })
+                .child(mark(row.mark, theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(theme.text.row)
+                        .text_color(if row.active {
+                            colors.text_emphasis
+                        } else {
+                            colors.text_secondary
+                        })
+                        .child(entry.title()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .justify_end()
+                        .min_w(px(22.))
+                        .pr(GlyphButton::reach())
+                        .text_size(theme.text.label)
+                        .text_color(colors.text_muted)
+                        .children(row.count.map(|count| count.to_string())),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.state.update(cx, |state, cx| {
+                        if state.show_cluster(entry) {
+                            cx.notify();
+                        }
+                    });
+                }))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .pb(px(6.))
+            .mb(px(6.))
+            .border_b_1()
+            .border_color(colors.border_header)
+            .child(header)
+            .children(entries)
+            .into_any_element()
+    }
+
+    /// The "open" section, shown only while there are any: objects opened
+    /// as tabs ("↗ open as tab").
     fn render_open_tabs(tabs: &[OpenTab], theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let colors = theme.colors;
         let active = tabs.iter().any(|tab| tab.active);
@@ -577,6 +707,59 @@ impl Sidebar {
                     .iter()
                     .map(|item| self.render_item(item, theme, cx)),
             )
+            .children(
+                self.provisional
+                    .as_ref()
+                    .filter(|provisional| provisional.group_id == group.group.id)
+                    .map(|provisional| Self::render_provisional(provisional, theme)),
+            )
+            .into_any_element()
+    }
+
+    /// Shows `provisional` (a dashboard being created) under its group, or
+    /// nothing; redraws only when that changes.
+    pub(crate) fn set_provisional(
+        &mut self,
+        provisional: Option<model::Provisional>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.provisional != provisional {
+            self.provisional = provisional;
+            cx.notify();
+        }
+    }
+
+    /// The dashboard being created that the sidebar shows (UI tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn provisional(&self) -> Option<&model::Provisional> {
+        self.provisional.as_ref()
+    }
+
+    /// The row of a dashboard being created (14-r5-a): as a dashboard's,
+    /// selected, with the draft's mark and name; it is the editor's, so
+    /// it has no count, no `···` and no click of its own.
+    fn render_provisional(provisional: &model::Provisional, theme: &Theme) -> AnyElement {
+        let colors = theme.colors;
+        div()
+            .id("dashboard-provisional")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(12.))
+            .h(theme.metrics.item_row_height)
+            .pl(px(14.))
+            .pr(theme.metrics.sidebar_padding)
+            .bg(colors.item_active)
+            .child(mark(provisional.mark, theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.text.row)
+                    .text_color(colors.text_emphasis)
+                    .child(SharedString::from(provisional.name.clone())),
+            )
             .into_any_element()
     }
 
@@ -646,7 +829,7 @@ impl Sidebar {
             .h(theme.metrics.group_row_height)
             .pl(theme.metrics.sidebar_padding)
             // The `···` button's reach makes up the rest of the 12px.
-            .pr(theme.metrics.sidebar_padding - GlyphButton::REACH)
+            .pr(theme.metrics.sidebar_padding - GlyphButton::reach())
             .cursor_pointer()
             .when(group.active || menu_open, |row| row.bg(colors.group_active))
             .when(!group.active && !menu_open, |row| {
@@ -739,7 +922,6 @@ impl Sidebar {
     fn render_item(&self, item: &SidebarItem<'_>, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let colors = theme.colors;
         let metrics = theme.metrics;
-        let dot = dot(item.dot, theme);
         let reference = item.reference.clone();
         let menu = SidebarMenu::Dashboard(item.reference.clone());
         let menu_open = self.menus.is_open(&menu);
@@ -778,13 +960,13 @@ impl Sidebar {
             .gap(px(12.))
             .h(metrics.item_row_height)
             .pl(px(14.))
-            .pr(metrics.sidebar_padding - GlyphButton::REACH)
+            .pr(metrics.sidebar_padding - GlyphButton::reach())
             .cursor_pointer()
             .when(item.selected || menu_open, |row| row.bg(colors.item_active))
             .when(!item.selected && !menu_open, |row| {
                 row.hover(|style| style.bg(colors.item_hover))
             })
-            .child(dot.size(metrics.sidebar_dot))
+            .child(mark(item.mark, theme))
             .child(label)
             .when(item.muted && renaming.is_none(), |row| {
                 row.child(
@@ -864,7 +1046,7 @@ impl Sidebar {
                 div()
                     .when(menu_open, gpui::Styled::invisible)
                     .group_hover(hover.clone(), gpui::Styled::invisible)
-                    .pr(GlyphButton::REACH)
+                    .pr(GlyphButton::reach())
                     .text_size(theme.text.label)
                     .text_color(colors.text_muted)
                     .children(item.count.map(|count| count.to_string())),
@@ -904,10 +1086,14 @@ impl Sidebar {
         let connection = state.connection();
         let health = connection.health(now);
         let (endpoint, suffix) = connection.label_parts(now);
-        let connected = connection.is_connected() && health != Health::Failed;
+        // No live data (or an engine that stopped saying it runs): the
+        // node stays, `no data 3m` takes the age's place (16f).
+        let no_data = connection.no_data_for(now).is_some();
+        let connected = (connection.is_connected() && health != Health::Failed) || no_data;
         let name = state
             .environment()
             .map(|environment| environment.name.clone());
+        let name_chars = name.as_ref().map_or(0, |name| name.chars().count());
         // A node that doesn't see the whole cluster says so (ENV-12).
         let marker = connection.view_marker();
         let partial = marker.as_ref().is_some_and(|marker| marker.partial);
@@ -947,12 +1133,12 @@ impl Sidebar {
             .active(|style| style.bg(colors.element_active))
             .child(StateDot::with_color(health_color(health, theme)).size(metrics.status_dot))
             .when_some(name, |status, name| {
-                // The name gives way to the node (at most
-                // `STATUS_NODE_MAX`): both stay readable (ENV-06, ENV-12).
+                // The name (at most `STATUS_NAME_MAX`) stays readable:
+                // the node beside it is cut short first (ENV-06, ENV-12).
                 status.child(
                     div()
                         .min_w_0()
-                        .ml(px(5.))
+                        .ml(px(STATUS_NAME_GAP))
                         .max_w(px(STATUS_NAME_MAX))
                         .truncate()
                         .text_color(if open {
@@ -963,11 +1149,21 @@ impl Sidebar {
                         .child(name),
                 )
             })
-            .map(|status| Self::status_detail(status, connected, endpoint, suffix, partial, theme))
+            .map(|status| {
+                let detail = StatusDetail {
+                    connected,
+                    endpoint,
+                    suffix,
+                    partial,
+                    no_data,
+                    name_chars,
+                };
+                Self::status_detail(status, detail, theme)
+            })
             .child(
-                div().flex_none().ml(px(2.)).child(
+                div().flex_none().ml(px(STATUS_CHEVRON_GAP)).child(
                     Icon::new(IconName::ChevronDown)
-                        .size(px(10.))
+                        .size(px(STATUS_CHEVRON))
                         .color(if elsewhere.is_empty() {
                             colors.text_muted
                         } else {
@@ -994,48 +1190,61 @@ impl Sidebar {
     /// The footer switcher's middle: connected, the node (its first DNS
     /// label: `icinga-master-02` of `icinga-master-02.example.com`; the
     /// tooltip and the details have it in full), cut short beyond
-    /// [`STATUS_NODE_MAX`] (the name gives way first), then at the right the age of the
-    /// last event in a slot of its own (it never shortens the node as it
-    /// ticks, ENV-06). A node that sees only part of the cluster
-    /// (a satellite) is coloured, nothing more (ENV-12): the tooltip, the
-    /// details and the summary bar say what it means. Otherwise what the
-    /// connection does (`retry in 12s`).
-    fn status_detail(
-        status: Stateful<Div>,
-        connected: bool,
-        endpoint: String,
-        suffix: Option<String>,
-        partial: bool,
-        theme: &Theme,
-    ) -> Stateful<Div> {
-        match (connected, suffix) {
+    /// [`STATUS_NODE_MAX`] and before the environment's name when room is
+    /// short, then the age of the last event (or `no data 3m`) in a slot of
+    /// its own right after it (it never shortens the node as it ticks,
+    /// ENV-06). Without room for a few characters of the node it gives way
+    /// whole ([`node_has_room`]) rather than leave a lone ellipsis. A node
+    /// that sees only part of the cluster (a satellite) is coloured,
+    /// nothing more (ENV-12): the tooltip, the details and the summary bar
+    /// say what it means. Otherwise what the connection does
+    /// (`retry in 12s`).
+    fn status_detail(status: Stateful<Div>, detail: StatusDetail, theme: &Theme) -> Stateful<Div> {
+        let slot = if detail.no_data {
+            NO_DATA_SLOT_CHARS
+        } else {
+            AGE_SLOT_CHARS
+        };
+        match (detail.connected, detail.suffix) {
+            // The node stays while it has room (the connected node is
+            // visible, PLAN §4.3); it is cut short before the environment's
+            // name. The age (or `no data 3m`) follows it, left-aligned in
+            // its fixed slot, so the free room sits before the chevron and
+            // nothing after the slot moves with what it says (16f).
             (true, Some(age)) => status
-                .child(
-                    div()
-                        .flex_none()
-                        .max_w(px(STATUS_NODE_MAX))
-                        .ml(px(5.))
-                        .truncate()
-                        .when(partial, |node| node.text_color(theme.states.warning))
-                        .child(short_node(&endpoint).to_owned()),
-                )
-                .child(div().flex_1())
+                .when(node_has_room(theme, detail.name_chars, slot), |status| {
+                    status.child(
+                        div()
+                            .flex_shrink(8.)
+                            .min_w_0()
+                            .max_w(px(STATUS_NODE_MAX))
+                            .ml(px(STATUS_NODE_GAP))
+                            .truncate()
+                            .when(detail.partial, |node| {
+                                node.text_color(theme.states.text.warning)
+                            })
+                            .child(short_node(&detail.endpoint).to_owned()),
+                    )
+                })
                 .child(
                     div()
                         .flex()
                         .flex_none()
-                        .ml(px(2.))
-                        .justify_end()
-                        .w(theme.text.hint * (AGE_SLOT_CHARS * ic_ui_kit::CHAR_WIDTH))
+                        .ml(px(STATUS_AGE_GAP))
+                        .w(theme.text.hint * (slot * ic_ui_kit::CHAR_WIDTH))
+                        .when(detail.no_data, |age| {
+                            age.text_color(theme.states.text.warning)
+                        })
                         .child(age),
-                ),
+                )
+                .child(div().flex_1()),
             (_, suffix) => status
                 .child(
                     div()
                         .min_w_0()
-                        .ml(px(5.))
+                        .ml(px(STATUS_NAME_GAP))
                         .truncate()
-                        .child(suffix.unwrap_or(endpoint)),
+                        .child(suffix.unwrap_or(detail.endpoint)),
                 )
                 .child(div().flex_1()),
         }
@@ -1097,7 +1306,7 @@ impl Sidebar {
                         .justify_center()
                         .rounded_full()
                         .border_1()
-                        .border_color(colors.window_background)
+                        .border_color(colors.sidebar_background)
                         .bg(colors.accent)
                         .text_size(px(8.5))
                         .font_weight(FontWeight::SEMIBOLD)
@@ -1135,10 +1344,10 @@ impl Sidebar {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(8.))
+            .gap(px(FOOTER_GAP))
             .h(Metrics::with_rule(metrics.footer_height))
-            .pl(px(9.))
-            .pr(px(5.))
+            .pl(px(FOOTER_LEFT))
+            .pr(px(FOOTER_RIGHT))
             .border_t_1()
             .border_color(colors.border_header)
             .child(
@@ -1171,12 +1380,7 @@ impl Sidebar {
                         add.tooltip(Tooltip::new("New dashboard or group").key(new_key()))
                     })
                     .when(footer_open, |slot| {
-                        slot.child(
-                            Popover::new(self.footer_menu(cx))
-                                .above()
-                                .align_right()
-                                .gap(px(8.)),
-                        )
+                        slot.child(Popover::new(self.footer_menu(cx)).above().align_right())
                     }),
             )
     }
@@ -1206,15 +1410,75 @@ pub(super) fn short_node(name: &str) -> &str {
 }
 /// The footer age's slot, in characters (`59s`, `23h`).
 const AGE_SLOT_CHARS: f32 = 3.;
+/// The slot of `no data 59m`, in characters.
+const NO_DATA_SLOT_CHARS: f32 = 11.;
+/// The footer's padding left and right of its buttons, and the gap
+/// between them (the icons sit where the design draws them).
+const FOOTER_LEFT: f32 = 9.;
+const FOOTER_RIGHT: f32 = 5.;
+const FOOTER_GAP: f32 = 8.;
+/// Room before the environment's name (after the dot), the node, the age
+/// and the chevron in the footer switcher, and the chevron's size: about
+/// 16f's spacing, so `prod-cluster master-01 59s` fits whole.
+const STATUS_NAME_GAP: f32 = 5.;
+const STATUS_NODE_GAP: f32 = 4.;
+const STATUS_AGE_GAP: f32 = 3.;
+const STATUS_CHEVRON_GAP: f32 = 1.;
+const STATUS_CHEVRON: f32 = 10.;
+/// The fewest characters of the node the footer shows (`stg-m…`); with
+/// less room it gives way whole.
+const NODE_MIN_CHARS: f32 = 6.;
+
+/// What the footer switcher's middle shows (see `Sidebar::status_detail`).
+struct StatusDetail {
+    connected: bool,
+    endpoint: String,
+    suffix: Option<String>,
+    partial: bool,
+    no_data: bool,
+    /// The environment name's length, in characters.
+    name_chars: usize,
+}
+
+/// Whether the footer switcher has room for at least [`NODE_MIN_CHARS`]
+/// of the node beside an environment name of `name_chars` characters and
+/// an age slot of `slot_chars`. The text is monospaced and every width in
+/// the footer is the theme's, so this is arithmetic: with less room the
+/// node gives way whole (`prod-cluster no data 4m`; the banner and the
+/// details name it) rather than leave a lone ellipsis.
+fn node_has_room(theme: &Theme, name_chars: usize, slot_chars: f32) -> bool {
+    let metrics = theme.metrics;
+    let char_width = theme.text.hint * ic_ui_kit::CHAR_WIDTH;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "an environment name is far shorter than 2^23 characters"
+    )]
+    let name = (char_width * name_chars as f32).min(px(STATUS_NAME_MAX));
+    // The footer (less the sidebar's border and a pixel of rounding), its
+    // padding, gaps and three icon buttons, then the switcher's own
+    // padding (it reaches a pixel to the left), dot, gaps and chevron.
+    let buttons = metrics.icon_button * 3.;
+    let footer = px(FOOTER_LEFT + FOOTER_RIGHT + 3. * FOOTER_GAP + 2.);
+    let switcher = px(STATUS_PADDING
+        + 2.
+        + STATUS_NAME_GAP
+        + STATUS_NODE_GAP
+        + STATUS_AGE_GAP
+        + STATUS_CHEVRON_GAP
+        + STATUS_CHEVRON)
+        + metrics.status_dot;
+    let room = metrics.sidebar_width - footer - buttons - switcher - name - char_width * slot_chars;
+    room >= char_width * NODE_MIN_CHARS
+}
 
 /// The footer dot's colour (ENV-06): green while live, yellow when stale,
 /// red when reconnecting or failed, grey otherwise.
-pub(super) fn health_color(health: Health, theme: &Theme) -> gpui::Hsla {
+pub(crate) fn health_color(health: Health, theme: &Theme) -> gpui::Hsla {
     match health {
-        Health::Live => theme.states.ok,
-        Health::Stale => theme.states.warning,
-        Health::Reconnecting | Health::Failed => theme.states.critical,
-        Health::Connecting | Health::Idle => theme.states.pending,
+        Health::Live => theme.states.fill.ok,
+        Health::Stale => theme.states.fill.warning,
+        Health::Reconnecting | Health::Failed => theme.states.fill.critical,
+        Health::Connecting | Health::Idle => theme.states.fill.pending,
     }
 }
 
@@ -1224,6 +1488,7 @@ impl Render for Sidebar {
         let theme = cx.theme();
         let width = theme.metrics.sidebar_width;
         let border = theme.colors.border_split;
+        let background = theme.colors.sidebar_background;
         let header = self.render_header(window, cx);
         let groups = self.render_groups(cx);
         let footer = self.render_footer(cx);
@@ -1233,6 +1498,7 @@ impl Render for Sidebar {
             .flex_none()
             .w(width)
             .h_full()
+            .bg(background)
             .border_r_1()
             .border_color(border)
             .child(header)
@@ -1241,12 +1507,32 @@ impl Render for Sidebar {
     }
 }
 
+/// A row's mark in its fixed slot: a state dot, or an icon (faint and
+/// neutral, so colour keeps meaning state).
+pub(crate) fn mark(mark: Mark, theme: &Theme) -> AnyElement {
+    let slot = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(theme.metrics.sidebar_dot);
+    match mark {
+        Mark::Dot(state) => slot
+            .child(dot(state, theme).size(theme.metrics.sidebar_dot))
+            .into_any_element(),
+        Mark::Icon(icon) => slot
+            .child(Icon::new(icon).size(px(11.)).color(theme.colors.text_faint))
+            .into_any_element(),
+    }
+}
+
 /// The state dot of a dashboard or an open tab.
 fn dot(dot: Dot, theme: &Theme) -> StateDot {
     match dot {
         Dot::State(state) => StateDot::new(state),
-        Dot::Ok => StateDot::with_color(theme.states.ok),
-        Dot::Empty => StateDot::with_color(theme.states.pending),
+        Dot::Handled(state) => StateDot::new(state).hollow(true),
+        Dot::Ok => StateDot::with_color(theme.states.fill.ok),
+        Dot::Empty => StateDot::with_color(theme.states.fill.pending),
     }
 }
 
@@ -1273,7 +1559,7 @@ fn empty_note(
                 .pr(metrics.sidebar_padding)
                 .text_size(theme.text.row)
                 .text_color(theme.colors.text_muted)
-                .child(StateDot::with_color(theme.states.pending).size(metrics.sidebar_dot))
+                .child(StateDot::with_color(theme.states.fill.pending).size(metrics.sidebar_dot))
                 .child(text),
         )
         .when_some(link, |note, link| {

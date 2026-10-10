@@ -3,9 +3,10 @@
 
 use std::fmt;
 
+use crate::px;
 use gpui::{
     AnyElement, App, Hsla, IntoElement, ParentElement, Pixels, RenderOnce, SharedString,
-    Styled as _, Window, div, px,
+    Styled as _, Window, div,
 };
 use ic_model::CheckableState;
 

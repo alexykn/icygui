@@ -201,24 +201,25 @@ fn arity_error(function: &Function, given: usize) -> String {
 
 /// Something a pattern function tests text against.
 trait Matcher {
-    fn test(&self, text: &str) -> bool;
+    fn test(&self, text: &str, budget: &Budget) -> Result<bool, String>;
 }
 
 impl Matcher for Glob {
-    fn test(&self, text: &str) -> bool {
-        self.is_match(text)
+    fn test(&self, text: &str, budget: &Budget) -> Result<bool, String> {
+        budget.steps(self.extra_steps(text.len()))?;
+        Ok(self.is_match(text))
     }
 }
 
 impl Matcher for IcingaRegex {
-    fn test(&self, text: &str) -> bool {
-        self.is_match(text)
+    fn test(&self, text: &str, _: &Budget) -> Result<bool, String> {
+        Ok(self.is_match(text))
     }
 }
 
 impl Matcher for Cidr {
-    fn test(&self, text: &str) -> bool {
-        self.contains(text)
+    fn test(&self, text: &str, _: &Budget) -> Result<bool, String> {
+        Ok(self.contains(text))
     }
 }
 
@@ -297,13 +298,15 @@ fn apply_pattern<T: Matcher>(
         }
     };
     let Value::Array(items) = &inputs.value else {
-        return Ok(Value::Bool(matcher.test(&budget.text_of(&inputs.value)?)));
+        return Ok(Value::Bool(
+            matcher.test(&budget.text_of(&inputs.value)?, budget)?,
+        ));
     };
     if items.is_empty() {
         return Ok(Value::Bool(false));
     }
     for item in items.iter() {
-        let hit = matcher.test(&budget.text_of(item)?);
+        let hit = matcher.test(&budget.text_of(item)?, budget)?;
         if mode == MATCH_ANY && hit {
             return Ok(Value::Bool(true));
         }

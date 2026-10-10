@@ -131,7 +131,7 @@ holidays = ["2026-12-25"]
 "#
     );
     let config = store_with(dir.path(), &text).load().unwrap();
-    assert_eq!(config.general.theme, ThemeChoice::Light);
+    assert_eq!(config.appearance.theme, ThemeChoice::Light);
     let environment = &config.environments[0];
     assert_eq!(environment.id, PROD_ID);
     assert_eq!(
@@ -142,7 +142,7 @@ holidays = ["2026-12-25"]
     );
     assert!(environment.tls.use_system_roots);
     assert_eq!(environment.groups[0].notifications, ScopeSetting::On);
-    assert!(!environment.groups[0].dashboards[0].view.problems_only);
+    assert!(!environment.groups[0].dashboards[0].views[0].problems_only);
     assert!(!environment.notifications.enabled);
 }
 
@@ -186,11 +186,11 @@ fn unversioned_files_are_upgraded_in_memory() {
     let config = store.load().unwrap();
     assert_eq!(config.version, CONFIG_VERSION);
     assert_eq!(config.active_environment.as_deref(), Some(PROD_ID));
-    assert_eq!(config.general.theme, ThemeChoice::Light);
+    assert_eq!(config.appearance.theme, ThemeChoice::Light);
     let dashboard = config.environments[0]
         .dashboard(GROUP_ID, DASHBOARD_ID)
         .unwrap();
-    assert_eq!(dashboard.view.filter, r#"host.vars.role == "postgres""#);
+    assert_eq!(dashboard.views[0].filter, r#"host.vars.role == "postgres""#);
     assert!(config.validate().is_empty(), "{:?}", config.validate());
 
     // Loading alone doesn't rewrite the file; the next save upgrades it and
@@ -331,9 +331,14 @@ fn values_of_the_wrong_kind_are_reported_with_a_line() {
     let dir = tempfile::tempdir().unwrap();
     let cases = [
         (
-            "version = 1\n[general]\n\ntheme = \"sepia\"\n",
+            "version = 3\n[appearance]\n\ntheme = \"sepia\"\n",
             "line 4",
             "unknown variant `sepia`",
+        ),
+        (
+            "version = 1\n[general]\n\nlog_level = \"loud\"\n",
+            "line 4",
+            "unknown variant `loud`",
         ),
         (
             "version = 1\n[general]\nclose_to_tray = \"yes\"\n",
@@ -357,8 +362,11 @@ fn values_of_the_wrong_kind_are_reported_with_a_line() {
         assert!(message.contains(problem), "{message}");
     }
     // Unversioned files are read from the text too.
-    let message = parse_message(store_with(dir.path(), "[general]\ntheme = 3\n").load());
+    let message = parse_message(store_with(dir.path(), "[appearance]\ntheme = 3\n").load());
     assert!(message.contains("line 2"), "{message}");
+    // A theme from before version 3 moved, so its error names where it went.
+    let message = parse_message(store_with(dir.path(), "[general]\ntheme = 3\n").load());
+    assert!(message.contains("appearance.theme"), "{message}");
 }
 
 #[test]
@@ -370,7 +378,7 @@ fn byte_order_marks_are_accepted() {
     )
     .load()
     .unwrap();
-    assert_eq!(config.general.theme, ThemeChoice::Light);
+    assert_eq!(config.appearance.theme, ThemeChoice::Light);
 }
 
 #[test]
@@ -591,7 +599,7 @@ fn files_this_version_cannot_read_survive_starting_fresh() {
         let mut config = Config::default();
         store.save(&config).unwrap();
         for theme in [ThemeChoice::Light, ThemeChoice::System, ThemeChoice::Dark] {
-            config.general.theme = theme;
+            config.appearance.theme = theme;
             store.save(&config).unwrap();
         }
         let kept: Vec<String> = entries(dir.path())
@@ -638,7 +646,7 @@ fn readable_files_are_not_kept_apart() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path(), WITHOUT_IDS);
     let mut config = store.load().unwrap();
-    config.general.theme = ThemeChoice::Light;
+    config.appearance.theme = ThemeChoice::Light;
     store.save(&config).unwrap();
     assert_eq!(entries(dir.path()), ["config.toml", "config.toml.bak"]);
 }
@@ -649,7 +657,7 @@ fn saves_and_loads_at_the_same_time_never_see_a_partial_file() {
     let store = ConfigStore::new(dir.path().join("config.toml"));
     let first = full_config();
     let mut second = first.clone();
-    second.general.theme = ThemeChoice::Light;
+    second.appearance.theme = ThemeChoice::Light;
     second.environments.truncate(1);
     store.save(&first).unwrap();
 
@@ -742,7 +750,7 @@ fn the_backup_restores_settings_after_corruption() {
 
     let older = full_config();
     let mut newer = older.clone();
-    newer.general.theme = ThemeChoice::Light;
+    newer.appearance.theme = ThemeChoice::Light;
     store.save(&older).unwrap();
     store.save(&newer).unwrap();
     fs::write(store.path(), "version = 1\n[general\n").unwrap();
@@ -794,4 +802,129 @@ fn saved_files_are_private() {
     assert_eq!(mode(store.path()), 0o600);
     assert_eq!(mode(&store.backup_path()), 0o600);
     assert_eq!(mode(&dir.path().join("icygui")), 0o700);
+}
+
+/// Files from before topic 16 (format version 4 without `trouble` or
+/// `health_page`) load with the trouble alerts' defaults and the approved
+/// layout of the cluster health page, and a save leaves both out while
+/// they are unchanged, so a later version's defaults still apply.
+#[test]
+fn environments_from_before_the_health_page_get_its_default_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = format!(
+        r#"
+version = 4
+active_environment = "{PROD_ID}"
+
+[[environments]]
+id = "{PROD_ID}"
+name = "prod-cluster"
+urls = ["https://master-01.example.com:5665"]
+auth = {{ kind = "basic", username = "icygui" }}
+"#
+    );
+    let store = store_with(dir.path(), &file);
+    let config = store.load().unwrap();
+    let environment = &config.environments[0];
+    assert_eq!(environment.health_page, ic_config::HealthPage::default());
+    let kinds: Vec<ic_config::ViewDisplay> = environment
+        .health_page
+        .views
+        .iter()
+        .map(|view| view.display)
+        .collect();
+    assert_eq!(kinds, ic_config::ViewDisplay::HEALTH);
+    assert_eq!(environment.trouble, ic_config::Trouble::default());
+    assert_eq!(
+        environment.trouble.heartbeats.variable_name(),
+        "icygui_heartbeat"
+    );
+    assert!(config.validate().is_empty(), "{:?}", config.validate());
+    store.save(&config).unwrap();
+    let saved = fs::read_to_string(store.path()).unwrap();
+    assert!(!saved.contains("health_page"), "{saved}");
+    assert!(!saved.contains("trouble"), "{saved}");
+    assert_eq!(store.load().unwrap(), config);
+}
+
+/// An edited health page and trouble settings are written and read back;
+/// a hand-edited page keeps only the health kinds, once each, and a
+/// sidebar dashboard loses a health view written into it by hand.
+#[test]
+fn edited_health_pages_round_trip_and_hand_edits_are_repaired() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = format!(
+        r#"
+version = 4
+
+[[environments]]
+id = "{PROD_ID}"
+name = "prod-cluster"
+urls = ["https://master-01.example.com:5665"]
+auth = {{ kind = "basic", username = "icygui" }}
+
+[environments.trouble]
+policy = "persistent"
+
+[environments.trouble.heartbeats]
+mode = "list"
+list = ["icygui-hb-master-01!beat"]
+
+[[environments.health_page.views]]
+display = "global_switches"
+
+[[environments.health_page.views]]
+display = "checks"
+health = {{ hidden_tiles = ["pending"], sparklines = false }}
+
+[[environments.health_page.views]]
+display = "list"
+
+[[environments.health_page.views]]
+display = "checks"
+
+[[environments.groups]]
+id = "{GROUP_ID}"
+name = "databases"
+
+[[environments.groups.dashboards]]
+id = "{DASHBOARD_ID}"
+name = "replication"
+
+[[environments.groups.dashboards.views]]
+display = "zones_and_endpoints"
+"#
+    );
+    let store = store_with(dir.path(), &file);
+    let config = store.load().unwrap();
+    let environment = &config.environments[0];
+    assert_eq!(
+        environment.trouble.policy,
+        ic_config::TroublePolicy::Persistent
+    );
+    assert_eq!(
+        environment.trouble.heartbeats.mode,
+        ic_config::HeartbeatMode::List
+    );
+    let page = &environment.health_page;
+    let kinds: Vec<(&str, ic_config::ViewDisplay)> = page
+        .views
+        .iter()
+        .map(|view| (view.id.as_str(), view.display))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("switches", ic_config::ViewDisplay::GlobalSwitches),
+            ("checks", ic_config::ViewDisplay::Checks)
+        ]
+    );
+    assert!(!page.views[1].health.sparklines);
+    assert!(!page.views[1].health.shows(ic_config::HealthTile::Pending));
+    let dashboard = environment.dashboard(GROUP_ID, DASHBOARD_ID).unwrap();
+    assert_eq!(dashboard.views.len(), 1);
+    assert_eq!(dashboard.views[0].display, ic_config::ViewDisplay::List);
+    assert!(config.validate().is_empty(), "{:?}", config.validate());
+    store.save(&config).unwrap();
+    assert_eq!(store.load().unwrap(), config);
 }

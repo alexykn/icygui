@@ -1,0 +1,29 @@
+# The demo cluster (demo/docker-compose.yml) as an icygui environment, in the
+# settings file's format (config.toml). demo/icygui/write-config.sh writes it
+# into icygui's settings, with the cluster's CA certificate (made fresh for
+# every new cluster, so it isn't in this file) and the dashboards of
+# dashboards.toml. Until icygui can import environments (topic 08), that is
+# the way in; docs/demo.md also shows how to add it by hand.
+#
+# No password here, ever: the demo's API user icygui-demo has the documented
+# demo password `icygui-demo-password` (docs/demo.md), which icygui keeps in
+# the keychain like any other.
+
+version = 4
+
+[[environments]]
+id = "6f1d3c2e-7a44-4b8e-9c1d-5e7a0d3f9b21"
+name = "demo"
+# The person the demo plays: their comments and downtimes are "mine".
+author = "j.berg"
+urls = [
+  { url = "https://127.0.0.1:5665", server_name = "master-01" },
+  { url = "https://127.0.0.1:5666", server_name = "master-02" },
+]
+
+[environments.auth]
+kind = "basic"
+username = "icygui-demo"
+
+[environments.tls]
+use_system_roots = false

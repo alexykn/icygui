@@ -298,6 +298,35 @@ fn pathological_input_takes_linear_time() {
             .starts_with("evaluation limit reached"),
         "a million parts are over the limit"
     );
+    // `match()` never backtracks: one star before a long literal tail took
+    // seconds per evaluation when it did (review of 025864c). The pattern
+    // and text are built from literals inside the filter, as a shared
+    // dashboard could.
+    let tenfold = ".replace(\"a\", \"aaaaaaaaaa\")";
+    let pattern = format!("\"*\" + \"a\"{} + \"b\"", tenfold.repeat(4));
+    let text = format!("\"a\"{}", tenfold.repeat(5));
+    for filter in [
+        format!("match({pattern}, {text})"),
+        format!("match({pattern} + \"*\", {text})"),
+        format!("match(\"*\" + {pattern} + \"*\", {text})"),
+    ] {
+        assert_eq!(evaluate(&filter, &vars), Ok(Value::Bool(false)), "{filter}");
+    }
+    // A run of `?` longer than 64 bytes is the one case that isn't linear;
+    // its cost is charged to the evaluation, which fails instead of taking
+    // seconds.
+    let wild_tenfold = ".replace(\"?\", \"??????????\")";
+    let wild = format!("\"*\" + \"?\"{} + \"b*\"", wild_tenfold.repeat(4));
+    assert!(
+        evaluate(&format!("match({wild}, {text})"), &vars)
+            .unwrap_err()
+            .starts_with("evaluation limit reached"),
+    );
+    assert_eq!(
+        evaluate(&format!("match(\"*{}b*\", {text})", "?".repeat(200)), &vars),
+        Ok(Value::Bool(false)),
+        "a modest run of `?` on a long text is within the budget",
+    );
     // The lexer checks for include paths (`<…>`) in one pass.
     for source in [
         "<".repeat(200_000),

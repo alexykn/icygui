@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 17 comments in the handling view</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="views.js"></script><script src="threads.js"></script></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">17</span><span class="topic-name">Comments, written in the handling view</span><span class="topic-id" style="background:#f2d974">new</span></div>
+<p class="topic-intro">PLAN.md §4.2, <i>Comment from the handling view</i>. On hover (or with <b>c</b> on the focused thread) <b>+ comment</b> appears at the right end of the thread’s last entry row, in its time slot: no extra row, no extra height, so nothing moves when it shows. The field opens in place as the thread’s next entry: the author (the configured name), <i>now</i>, and the pane’s comment field, the same component. <b>Enter</b> sends through the existing add-comment action, <b>shift-Enter</b> is a new line, <b>Esc</b> cancels. A sent comment shows dimmed as pending until the event stream confirms it; refused, it keeps its text with the error and <i>retry</i>. Without the add-comment permission it never appears. A comment belongs to the object (host or service), as in Icinga. Data: the demo’s prod-cluster; the author is <i>n.weber</i>. Wall clock: Thu 8 Oct, 02:20.</p>
+<div class="shots"></div>
+<script>
+const L = { theme: 'light' };
+const AUTHOR = 'n.weber';
+// '+ comment': on hover (or c on the focused thread) at the right end of the
+// thread's LAST entry row, in its time slot; no extra height. The row shows
+// the hover background. Without the permission it never appears.
+const plusComment = `<span class="acc" style="display:inline-flex;align-items:center;gap:4px">${icon('plus', 11)}comment</span> ${kh('c')}`;
+// the open field: the thread's next entry, in the pane's comment field look
+const fieldEntry = (text) => `<div class="te"><span class="mk acc">${icon('message-square', 13)}</span>
+  <div style="min-width:0"><div class="hd"><span class="au">${AUTHOR}</span><span>now</span></div>
+    <div class="cfield">${text}<span class="caret" style="height:14px"></span></div>
+    <div class="hd" style="margin-top:6px;gap:14px"><span>${kh('↵')} send</span><span>${kh('shift-↵')} new line</span><span>${kh('esc')} cancel</span></div></div>
+  <span class="tg"><span class="tsa"></span><span class="tsb"></span></span></div>`;
+const MSG = 'Hardware swap scheduled for 03:00 with the DC team (INC-20418).';
+const pendingEntry = () => `<div class="te pending"><span class="mk">${icon('message-square', 13)}</span>
+  <div style="min-width:0"><div class="hd"><span class="au">${AUTHOR}</span><span>02:20</span></div><div class="tx re">${MSG}</div></div>
+  <span class="tg"><span class="tsa"></span><span class="tsb">sending…</span></span></div>`;
+const refusedEntry = () => `<div class="te"><span class="mk c-crit">${icon('message-square', 13)}</span>
+  <div style="min-width:0"><div class="hd"><span class="au">${AUTHOR}</span><span>02:20</span></div><div class="tx re">${MSG}</div>
+    <div class="cerr">not sent: Icinga refused it (403, no permission for comments)</div></div>
+  <span class="tg"><span class="tsa"></span><span class="tsb"><span class="acc">retry</span><span class="faint"> · </span><span class="muted">discard</span></span></span></div>`;
+
+// ---- the threads (the demo's prod-cluster) -------------------------------------------------
+const K11 = (end = '', o = {}, hover = false) => tBand({ st: 'crit', name: 'k8s-node-11', out: 'DOWN · PING CRITICAL - Packet loss = 100%', slot: '1 comment', ...o }) +
+  tEntry({ kind: 'comment', au: 'infra-oncall', at: '02:13', text: 'Node unresponsive, hardware ticket INC-20418 opened.', b: hover ? plusComment : '' }).replace('<div class="te">', hover ? '<div class="te" style="background:var(--row-hover)">' : '<div class="te">') + end;
+const FRA = (end = '') => tBand({ st: 'crit', ring: true, name: 'edge-fra-04', out: 'DOWN · host and 3 services in downtime', slot: 'in downtime' }) +
+  tEntry({ kind: 'on', au: 'a.ivanova', at: '01:31', meta: 'fixed 01:31 → 03:31 · host and 3 services', text: 'Rack maintenance.', a: { progress: 40 }, b: '1h 11m left', bTone: 'acc' }) + tFold({ n: 3, host: 'edge-fra-04' }) + end;
+const PG = (end = '') => tBand({ st: 'crit', ring: true, name: 'postgres-replication', host: 'db-prod-03', out: 'CRITICAL - standby lag 412s (> 300s)', slot: 'acknowledged · 1 comment' }) +
+  tEntry({ kind: 'ack', au: 'dba-oncall', at: '01:58', text: 'Replica rebuild on db-prod-03, about 45 minutes.', b: 'expires 04:00' }) +
+  tEntry({ kind: 'comment', au: 'j.berg', at: '02:05', text: 'Watching the lag; failover not needed.', re: true }) + end;
+const STORE = () => tBand({ st: 'crit', ring: true, name: 'store-ams-02', out: 'DOWN · PING CRITICAL - Packet loss = 100%', slot: 'acknowledged', collapsed: true });
+const page = (k11End, { pgEnd = '', fraEnd = '', sel = false, hover = false } = {}) => tHeader({ title: 'handling', subtitle: 'prod-cluster · 20 objects', sort: 'latest activity ↓', kind: 'handling' }) +
+  tChips(HANDLING_CHIPS, 'all') + `<div class="list">${K11(k11End, { sel }, hover)}${PG(pgEnd)}${FRA(fraEnd)}${STORE()}</div>`;
+const win = (main) => clusterWindow(main, { cluster: 'handling' });
+const pointer = (x, y) => `<svg style="position:absolute;left:${x}px;top:${y}px;width:16px;height:22px;z-index:60" viewBox="0 0 16 22"><path d="M1 1 L1 17 L5 13 L8 20 L11 19 L8 12 L14 12 Z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></svg>`;
+
+shot('17a', '17-comments-a-hover', '<b>Hover: + comment.</b> The pointer over k8s-node-11’s thread: its last entry row takes the hover background and shows <b>+ comment</b> and the <i>c</i> key at its right end, in the entry’s time slot. No row is added and no thread grows, so nothing moves. A click on it (or <b>c</b> on the focused thread) opens the field below that entry (b). A collapsed thread (store-ams-02) offers nothing until it is opened.',
+  win(page('', { hover: true })) + pointer(1180, 138), { crops: '17-comments-a-zoom:300,90,1140,240' });
+shot('17a-l', '17-comments-a-hover-light', '<b>Hover: + comment</b>, light.', win(page('', { hover: true })) + pointer(1180, 138), L);
+
+shot('17b', '17-comments-b-field', '<b>The field, open in place.</b> A click on <i>+ comment</i> (or <b>c</b>) turns the slot into the thread’s next entry: the comment mark, the author (<i>n.weber</i>, the configured name) and <i>now</i>, then the pane’s comment field (the same component, accent border while focused) with the text being typed, and its keys in one faint line: <b>↵</b> send, <b>shift-↵</b> new line, <b>esc</b> cancel. The field opens below the entry that showed <i>+ comment</i>; only the open field grows the thread, and everything below moves down once, as when a thread unfolds.',
+  win(page(fieldEntry(MSG))), { crops: '17-comments-b-zoom:300,90,1140,300' });
+shot('17b-l', '17-comments-b-field-light', '<b>The field, open in place</b>, light.', win(page(fieldEntry(MSG))), L);
+
+shot('17c', '17-comments-c-pending', '<b>Pending.</b> After Enter the comment shows as the thread’s last entry at once, dimmed, with <i>sending…</i> in the time slot, until the event stream confirms it; then it turns normal and, with <i>latest activity</i>, the thread rises to the top (it already is here).',
+  win(page(pendingEntry())), { crops: '17-comments-c-zoom:300,90,1140,240' });
+shot('17c-l', '17-comments-c-pending-light', '<b>Pending</b>, light.', win(page(pendingEntry())), L);
+
+shot('17d', '17-comments-d-refused', '<b>Refused.</b> Icinga refused it: the entry stays with its text (never lost), its mark in the critical colour, the reason in one line under it (<i>not sent: Icinga refused it (403, no permission for comments)</i>), and <b>retry</b> or <i>discard</i> in the time slot. A failed connection reads the same with its own reason; retry sends the same text again.',
+  win(page(refusedEntry())), { crops: '17-comments-d-zoom:300,90,1140,260' });
+shot('17d-l', '17-comments-d-refused-light', '<b>Refused</b>, light.', win(page(refusedEntry())), L);
+
+// ---- e. a stacked handling view with the field open ---------------------------------------------
+const stacked = `<div class="col" style="min-height:0;overflow:hidden"><div class="hbar"><span class="title">infra</span><span class="subtitle">2 views</span><span class="grow"></span><span class="glyph">···</span></div>
+  ${viewHeader({ name: 'host problems', display: 'list', filter: 'host.problem', counts: [['crit', 2], ['unk', 5]], handled: [1, false] })}
+  <div class="vbody">${rows([['crit', 'k8s-node-11', '', 'PING CRITICAL - Packet loss = 100%', '12m'], ['unk', 'edge-ams-08', '', 'CRITICAL - Host Unreachable (10.8.2.18)', '11m']], (r) => ({ hostRow: true, compact: true }))}</div>
+  ${viewHeader({ name: 'handling', display: 'handling', filter: 'host.vars.team == "infra"', controls: tStackedControls(HANDLING_CHIPS, 'all'), sort: 'latest activity ↓', focus: true })}
+  <div class="vbody">${K11(fieldEntry(MSG))}${FRA()}</div></div>`;
+const infraWin = (main) => appWindow(main, { groups: [SIDEBAR_GROUPS[0], { name: 'platform', items: [...SIDEBAR_GROUPS[1].items, ['infra', 'crit', 7]] }, SIDEBAR_GROUPS[2]], activeGroup: 'platform', activeItem: 'infra' });
+shot('17e', '17-comments-e-stacked', '<b>In a stacked handling view.</b> The <i>infra</i> dashboard stacks a host-problems list and a handling view; the field opens the same way inside the stacked view’s thread (the view holds the cursor, its header has the focus bar). Only problem views count toward the sidebar (04’s rule); writing a comment changes nothing there.',
+  infraWin(stacked));
+shot('17e-l', '17-comments-e-stacked-light', '<b>In a stacked handling view</b>, light.', infraWin(stacked), L);
+
+shot('17f', '17-comments-f-no-permission', '<b>Without the add-comment permission</b> (the API user may not add comments): hovering a thread shows no <i>+ comment</i>, so nothing offers what would be refused. <b>c</b> does nothing; the palette has no <i>comment</i> command for this environment.',
+  win(page('')));
+</script>
+</body></html>

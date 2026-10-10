@@ -1,0 +1,114 @@
+name: Demo cluster
+
+# The real-Icinga tests against the demo cluster (demo/docker-compose.yml:
+# two masters, the satellite zone ams, the HA satellite zone fra, about
+# 3 000 services): the contract tests (ic-api) on its master-01, and the
+# engine's cluster tests (ic-core), which stop and start its nodes through
+# demo/scenario.sh. Nightly, on demand, and for changes to the cluster, the
+# fixtures, the API client, the engine and every crate it builds on
+# (ic-config, ic-filter, ic-model, ic-rules), or the lock file.
+#
+# The whole cluster fits a standard runner (measured at about 0.3 GB of
+# memory after the start, 0.5 GB after hours, and a tenth of one core at
+# idle: docs/demo.md), so there is no smaller CI profile. Starting it takes
+# about 90 s, the cluster tests about 5 minutes.
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "demo/**"
+      - "contract/**"
+      - "crates/ic-api/**"
+      - "crates/ic-config/**"
+      - "crates/ic-core/**"
+      - "crates/ic-filter/**"
+      - "crates/ic-model/**"
+      - "crates/ic-rules/**"
+      - "Cargo.lock"
+      - ".github/workflows/cluster.yml"
+  pull_request:
+    paths:
+      - "demo/**"
+      - "contract/**"
+      - "crates/ic-api/**"
+      - "crates/ic-config/**"
+      - "crates/ic-core/**"
+      - "crates/ic-filter/**"
+      - "crates/ic-model/**"
+      - "crates/ic-rules/**"
+      - "Cargo.lock"
+      - ".github/workflows/cluster.yml"
+  workflow_dispatch:
+    inputs:
+      icinga_tag:
+        description: "icinga/icinga2 image tag"
+        required: false
+        default: "2.15"
+
+# Read-only token: nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  ICINGA_TAG: ${{ inputs.icinga_tag || '2.15' }}
+  # Missing variables fail the tests instead of letting them pass without
+  # checking anything.
+  ICYGUI_CONTRACT_REQUIRED: "1"
+  ICYGUI_CLUSTER_REQUIRED: "1"
+
+jobs:
+  cluster:
+    name: real Icinga ${{ inputs.icinga_tag || '2.15' }} cluster
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build the tests
+        run: |
+          cargo test -p ic-api --test contract --locked --no-run
+          cargo test -p ic-core --test engine --locked --no-run
+
+      - name: Start the demo cluster
+        run: |
+          set -euo pipefail
+          # Waits until every node is healthy (connected and seeded) and
+          # prints the tests' variables (demo values, not secrets).
+          vars=$(ICYGUI_DEMO_CA="$RUNNER_TEMP/demo-ca.crt" demo/up.sh)
+          if ! grep -q '^ICYGUI_CLUSTER_SCENARIO=' <<<"$vars"; then
+            echo "::error::demo/up.sh printed no ICYGUI_CLUSTER_SCENARIO"
+            exit 1
+          fi
+          echo "$vars" >> "$GITHUB_ENV"
+
+      - name: Contract tests on master-01
+        run: cargo test -p ic-api --test contract --locked
+
+      - name: Cluster tests (nodes stopped and started)
+        run: cargo test -p ic-core --test engine --locked 'cluster::' -- --test-threads=1
+
+      - name: Resources of the cluster
+        if: always()
+        run: docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}'
+
+      - name: Cluster logs
+        if: failure()
+        run: |
+          docker compose -f demo/docker-compose.yml ps -a
+          docker compose -f demo/docker-compose.yml logs --tail 80
+          docker compose -f demo/docker-compose.yml exec -T master-01 cat /var/log/icinga2/seed.log || true
+
+      - name: Stop the demo cluster
+        if: always()
+        run: docker compose -f demo/docker-compose.yml down -v --remove-orphans

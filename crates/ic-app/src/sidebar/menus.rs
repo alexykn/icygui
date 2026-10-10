@@ -8,14 +8,14 @@ use std::time::Instant;
 
 use gpui::{
     ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use ic_config::DashboardGroup;
 use ic_model::{Timestamp, format_compact};
 use ic_rules::{DashboardRef, ScopeSetting};
 use ic_ui_kit::{
     ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissal, IconName, ItemAction, Link, Menu, MenuItem,
-    Tooltip,
+    Tooltip, px,
 };
 
 use super::{RenameTarget, Sidebar, SidebarEvent};
@@ -49,8 +49,9 @@ mod budget {
     pub(super) const OUTSIDE: f32 = 50.;
     /// The title, its separator, *Reload* and its separator.
     pub(super) const TOP: f32 = 42. + 9. + ROW + 9.;
-    /// Above the node list: its separator and label.
-    pub(super) const NODES: f32 = 9. + 23.;
+    /// Around the node list: its separator and label, and the *cluster
+    /// health* row under it.
+    pub(super) const NODES: f32 = 9. + 23. + ROW;
     /// Around the environment list: its separator and label, the mute row
     /// (several environments), a separator, *add*, the card's padding and
     /// border.
@@ -119,7 +120,7 @@ fn height_of(count: usize, height: f32) -> f32 {
 const SCOPE_SETTINGS: [(&str, &str, ScopeSetting); 3] = [
     ("inherit", "inherit", ScopeSetting::Inherit),
     ("on", "on", ScopeSetting::On),
-    ("off", "off (muted)", ScopeSetting::Off),
+    ("off", "off", ScopeSetting::Off),
 ];
 
 impl Sidebar {
@@ -427,12 +428,14 @@ impl Sidebar {
             DETAILS_WIDTH
         };
         let nodes = node_rows(state);
+        // In the design's pixels: the popover's rows scale with the
+        // interface size, the window doesn't.
         let budget = switcher_budget(
-            f32::from(self.viewport),
+            f32::from(self.viewport) / ic_ui_kit::scale(),
             state.environments().len(),
             nodes.len(),
         );
-        let mut menu = Menu::new("connection-details").width(px(width));
+        let mut menu = Menu::new("connection-details").status_popover(px(width));
         match state.environment() {
             Some(environment) => {
                 let title = if state.is_demo_environment() {
@@ -484,7 +487,8 @@ impl Sidebar {
                             "cluster-nodes",
                             Self::node_items(nodes, theme),
                             px(height_of(budget.nodes, budget::ROW)),
-                        );
+                        )
+                        .item(Self::cluster_health_item(cx));
                 }
                 let can_reload = !connection.is_starting();
                 menu = menu.separator().item(
@@ -513,6 +517,23 @@ impl Sidebar {
             .on_dismiss(Self::dismiss_listener(cx))
     }
 
+    /// The *cluster health* row under the nodes: the whole picture, the
+    /// cluster health page (topic 06), as *health* in the cluster section.
+    fn cluster_health_item(cx: &Context<Self>) -> MenuItem {
+        MenuItem::new("cluster-health", "cluster health")
+            .icon(IconName::HeartPulse)
+            .key_hint("zones, queues, checks/min")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.menus.close();
+                this.state.update(cx, |state, cx| {
+                    if state.show_cluster(crate::cluster::ClusterEntry::Health) {
+                        cx.notify();
+                    }
+                });
+                cx.notify();
+            }))
+    }
+
     /// The cluster's masters and satellites (`node_rows`) as menu rows in
     /// the environments' style: a dot (green connected, red not, grey
     /// when the connected node can't tell), the name, the zone dimmed; the
@@ -524,9 +545,9 @@ impl Sidebar {
             .enumerate()
             .map(|(index, node)| {
                 let color = match node.state {
-                    Some(NodeState::Connected) => theme.states.ok,
-                    Some(NodeState::Disconnected) => theme.states.critical,
-                    Some(NodeState::Unknown) | None => theme.states.pending,
+                    Some(NodeState::Connected) => theme.states.fill.ok,
+                    Some(NodeState::Disconnected) => theme.states.fill.critical,
+                    Some(NodeState::Unknown) | None => theme.states.fill.pending,
                 };
                 MenuItem::new(("cluster-node", index), node.name)
                     .dot(color)
@@ -618,7 +639,7 @@ impl Sidebar {
         .selected(is_active)
         .dot(super::health_color(health, theme));
         let item = if partial {
-            item.detail_colored(detail, theme.states.warning)
+            item.detail_colored(detail, theme.states.text.warning)
         } else {
             item.detail(detail)
         };
@@ -705,7 +726,7 @@ impl Sidebar {
                         .min_w_0()
                         .truncate()
                         .line_height(px(CHIP_HEIGHT))
-                        .text_color(theme.states.warning)
+                        .text_color(theme.states.text.warning)
                         .child(format!(
                             "{} muted until {}",
                             environment.name,
@@ -1184,6 +1205,23 @@ mod tests {
         assert_eq!(super::super::short_node("10.0.4.24"), "10.0.4.24");
         assert_eq!(super::super::short_node("::1"), "::1");
         assert_eq!(super::super::short_node(".odd"), ".odd");
+    }
+
+    /// The footer keeps the node while a few characters of it fit beside
+    /// the name and the age slot, and drops it rather than show a lone
+    /// ellipsis without live data.
+    #[test]
+    fn the_footer_keeps_the_node_while_it_has_room() {
+        use super::super::{AGE_SLOT_CHARS, NO_DATA_SLOT_CHARS, node_has_room};
+        // Every length scales with the interface size, so 100 % stands for
+        // all of them.
+        let theme = ic_ui_kit::Theme::dark();
+        // `prod-cluster master-01 59s` fits; `prod-cluster no data 4m`.
+        assert!(node_has_room(&theme, 12, AGE_SLOT_CHARS));
+        assert!(!node_has_room(&theme, 12, NO_DATA_SLOT_CHARS));
+        // `staging stg-m… no data 4m`, `lab master-01 no data 4m`.
+        assert!(node_has_room(&theme, 7, NO_DATA_SLOT_CHARS));
+        assert!(node_has_room(&theme, 3, NO_DATA_SLOT_CHARS));
     }
 
     #[test]

@@ -31,7 +31,7 @@ use crate::snapshot::{DashboardResult, Snapshot};
 #[derive(Debug, Default)]
 pub(super) struct Previews {
     running: bool,
-    waiting: Option<(View, oneshot::Sender<Result<DashboardResult, String>>)>,
+    waiting: Option<(Vec<View>, oneshot::Sender<DashboardResult>)>,
 }
 
 impl Engine {
@@ -44,6 +44,10 @@ impl Engine {
             || self.notify.has_pending()
             || self.updating_changed
             || self.mode_changed
+            || self.beats.changed
+            || self.beats.news
+            || self.trouble.news
+            || self.streams_wait()
     }
 
     /// When the next throttled snapshot (or the time-dependent dashboards'
@@ -87,9 +91,15 @@ impl Engine {
         self.watchdog
             .update(&self.store, &changes.objects, changes.all);
         let late_changed = self.watchdog.take_changed();
+        if late_changed {
+            // The alerts quote how many checks are late: worked out again
+            // from the late flags this snapshot carries, so the health
+            // page's alert and its late tile say the same number.
+            self.assess_trouble(Instant::now());
+        }
         let reconfigured = std::mem::take(&mut self.dashboards_configured);
         if reconfigured {
-            dashboards.configure(&self.spec.environment);
+            dashboards.configure(&self.spec.environment, self.spec.hide_handled);
         }
         // Quiet mode keeps only the memberships notifications depend on
         // current; rows, summaries and the other dashboards come back when
@@ -100,11 +110,20 @@ impl Engine {
         } else {
             dashboards::Scope::All
         });
-        // The stream's mode and the objects being updated are news of
-        // their own: such a snapshot goes out even if nothing else changed.
-        let news =
-            std::mem::take(&mut self.updating_changed) | std::mem::take(&mut self.mode_changed);
+        // New events: the snapshot carries them (the cluster section's
+        // events), and the event stream views show them.
+        let new_events = std::mem::take(&mut self.events_changed);
+        // The stream's mode, the objects being updated and new events are
+        // news of their own: such a snapshot goes out even if nothing else
+        // changed.
+        self.refresh_beats();
+        let news = std::mem::take(&mut self.updating_changed)
+            | std::mem::take(&mut self.mode_changed)
+            | std::mem::take(&mut self.beats.news)
+            | std::mem::take(&mut self.trouble.news)
+            | new_events;
         let refresh_time = self.time_dependent && self.time_refreshed.elapsed() >= TIME_REFRESH;
+        let events = new_events && dashboards.has_streams();
         let mut snapshot = self.store.snapshot(
             0,
             self.ports.clock.now(),
@@ -113,8 +132,12 @@ impl Engine {
         );
         snapshot.quiet = self.stream_quiet();
         snapshot.updating = Arc::clone(&self.updating);
+        snapshot.events = Arc::clone(&self.recent_events);
+        snapshot.heartbeats = Arc::clone(self.beats.published());
+        snapshot.trouble = Arc::clone(self.trouble.published());
         let evaluate = reconfigured
             || resumed
+            || events
             || refresh_time
             || changes.all
             || changes.groups
@@ -139,6 +162,8 @@ impl Engine {
             host_groups: Arc::clone(&snapshot.host_groups),
             service_groups: Arc::clone(&snapshot.service_groups),
             now: self.evaluation_time(),
+            events: Arc::clone(&self.recent_events),
+            excluded: Arc::clone(&snapshot.excluded),
         };
         let tx = self.internal_tx.clone();
         let cancel = Arc::clone(&self.cancel);
@@ -227,35 +252,39 @@ impl Engine {
             host_groups: Arc::clone(self.store.host_groups()),
             service_groups: Arc::clone(self.store.service_groups()),
             now: self.evaluation_time(),
+            events: Arc::clone(&self.recent_events),
+            excluded: Arc::clone(self.store.excluded()),
         }
     }
 
-    /// `Command::PreviewDashboard`: evaluates `view` over the current
-    /// objects on a blocking thread.
-    pub(super) fn preview(
-        &mut self,
-        view: View,
-        reply: oneshot::Sender<Result<DashboardResult, String>>,
-    ) {
+    /// `Command::PreviewDashboard`: evaluates `views` over the current
+    /// objects on a blocking thread. If the evaluation fails (a bug), the
+    /// reply is dropped: the receiver sees `Canceled`.
+    pub(super) fn preview(&mut self, views: Vec<View>, reply: oneshot::Sender<DashboardResult>) {
         if self.previews.running {
-            self.previews.waiting = Some((view, reply));
+            self.previews.waiting = Some((views, reply));
             return;
         }
         self.previews.running = true;
         let data = self.data();
+        let defaults = self.spec.hide_handled;
         let tx = self.internal_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let result = catch_unwind(AssertUnwindSafe(|| dashboards::preview(&view, &data)))
-                .unwrap_or_else(|_| Err("the preview failed (an internal error)".to_owned()));
-            let _ = reply.send(result);
+            if let Ok(result) = catch_unwind(AssertUnwindSafe(|| {
+                dashboards::preview(&views, &data, defaults)
+            })) {
+                let _ = reply.send(result);
+            } else {
+                tracing::error!("a dashboard preview failed");
+            }
             let _ = tx.send(Internal::PreviewDone);
         });
     }
 
     pub(super) fn on_preview_done(&mut self) {
         self.previews.running = false;
-        if let Some((view, reply)) = self.previews.waiting.take() {
-            self.preview(view, reply);
+        if let Some((views, reply)) = self.previews.waiting.take() {
+            self.preview(views, reply);
         }
     }
 }

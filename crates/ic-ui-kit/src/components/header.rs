@@ -4,10 +4,11 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::px;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _, relative,
 };
 
 use crate::components::{GlyphButton, Tooltip};
@@ -16,11 +17,15 @@ use crate::theme::{ActiveTheme as _, Metrics};
 type CloseHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// A 40px header bar with a rule underneath: the detail pane's header
-/// (`service … ↗ open as tab ×`) and the list header
+/// (`service … × ↗ open as tab`) and the list header
 /// (`production service problems … severity ↓ ···`).
 ///
 /// The left side shows a title, a subtitle and/or a muted label; children
-/// added with [`ParentElement`] go on the right.
+/// added with [`ParentElement`] go on the right. The `×` of
+/// [`PaneHeader::on_close`] sits left of them, in a fixed place on every
+/// platform, so it never sits next to a window's own close button (topic
+/// 13); a header that keeps a child's place empty keeps the `×` where it
+/// is.
 #[derive(IntoElement)]
 #[must_use = "a header does nothing unless rendered"]
 pub struct PaneHeader {
@@ -90,7 +95,8 @@ impl PaneHeader {
         self
     }
 
-    /// Adds a `×` button at the right end that runs `handler`.
+    /// Adds a `×` button that runs `handler`, left of the children at the
+    /// right end.
     pub fn on_close(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -144,9 +150,13 @@ impl RenderOnce for PaneHeader {
                         .child(label),
                 )
             })
+            // The title stays whole while the subtitle gives way (a
+            // dashboard's name before its filter), up to half the header.
             .when_some(self.title, |header, title| {
                 header.child(
                     div()
+                        .flex_none()
+                        .max_w(relative(0.5))
                         .min_w_0()
                         .truncate()
                         .text_size(text.heading)
@@ -167,7 +177,6 @@ impl RenderOnce for PaneHeader {
             })
             .children(self.status)
             .child(div().flex_1())
-            .children(self.trailing)
             .when_some(self.on_close, |header, handler| {
                 header.child(
                     GlyphButton::new(close_id, "×")
@@ -177,6 +186,7 @@ impl RenderOnce for PaneHeader {
                         .on_click(handler),
                 )
             })
+            .children(self.trailing)
     }
 }
 
@@ -323,7 +333,7 @@ impl RenderOnce for SubTabs {
                     .text_color(if selected {
                         colors.text_strong
                     } else if marked {
-                        colors.accent
+                        colors.accent_text
                     } else {
                         colors.text_muted
                     })
@@ -372,8 +382,11 @@ pub fn sub_tab_width(label: &str, text_size: Pixels) -> Pixels {
     text_size * (chars * crate::theme::CHAR_WIDTH)
 }
 
-/// The space [`SubTabs`] puts between two tabs.
-pub const SUB_TAB_GAP: Pixels = px(TAB_GAP);
+/// The space [`SubTabs`] puts between two tabs, at the interface size.
+#[must_use]
+pub fn sub_tab_gap() -> Pixels {
+    px(TAB_GAP)
+}
 
 #[cfg(test)]
 mod tests {

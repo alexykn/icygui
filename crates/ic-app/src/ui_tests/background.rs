@@ -54,7 +54,7 @@ fn the_app_menus_open_settings_and_about() {
         assert_eq!(app.workspace.read(cx).modal(cx), None);
         cx.dispatch_action(&OpenSettings);
         app.draw(cx);
-        assert_eq!(app.workspace.read(cx).modal(cx), Some(ModalKind::Settings));
+        assert!(app.workspace.read(cx).settings().is_some());
     });
 }
 

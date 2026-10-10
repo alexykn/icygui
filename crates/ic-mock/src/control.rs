@@ -31,6 +31,8 @@ pub struct EventStreamStats {
     pub lines: u64,
     /// Bytes sent to it so far.
     pub bytes: u64,
+    /// It has a `filter`.
+    pub filtered: bool,
 }
 
 /// A request the server received (recorded before authentication, so
@@ -332,7 +334,16 @@ impl MockControl {
     /// Unknown endpoint.
     pub fn set_endpoint_connected(&self, name: &str, connected: bool) -> Result<(), MockError> {
         let mut world = self.world();
+        let now = world.now();
+        let version = crate::model::version_number(&world.app.version);
         let endpoint = world.endpoints.get_mut(name).ok_or_else(|| unknown(name))?;
+        if endpoint.connected && !connected {
+            // Its last message came just before it went away.
+            endpoint.last_message = now;
+        }
+        if connected && endpoint.icinga_version == 0 {
+            endpoint.icinga_version = version;
+        }
         endpoint.connected = connected;
         Ok(())
     }
@@ -349,6 +360,23 @@ impl MockControl {
         for zone in world.zones.values_mut() {
             zone.endpoints.retain(|endpoint| endpoint != name);
         }
+        Ok(())
+    }
+
+    /// Deletes a service, as a configuration deployment that drops it does:
+    /// `ObjectDeleted` goes to the event streams.
+    ///
+    /// # Errors
+    /// Unknown service.
+    pub fn remove_service(&self, host: &str, name: &str) -> Result<(), MockError> {
+        let full = format!("{host}!{name}");
+        let mut world = self.world();
+        world
+            .services
+            .get_mut(host)
+            .and_then(|services| services.remove(name))
+            .ok_or_else(|| unknown(&full))?;
+        world.emit_object_change(EventType::ObjectDeleted, "Service", &full);
         Ok(())
     }
 
@@ -385,6 +413,57 @@ impl MockControl {
         self.world().bus.publish_line_bytes(&Bytes::from(bytes));
     }
 
+    /// Stops every check, like a checker that hangs: no scheduled,
+    /// simulated, forced or real-time check runs until
+    /// [`MockControl::start_checks`] (passive results are still processed).
+    pub fn stop_checks(&self) {
+        self.world().checks_stopped = true;
+    }
+
+    /// Runs checks again after [`MockControl::stop_checks`]; the real-time
+    /// checks run at once.
+    pub fn start_checks(&self) {
+        let mut world = self.world();
+        world.checks_stopped = false;
+        let now = world.now();
+        for at in world.realtime.values_mut() {
+            *at = (*at).min(now);
+        }
+    }
+
+    /// Makes endpoint `name`'s checker hang while it stays connected (a
+    /// stuck satellite): it runs none of its zone's checks and answers no
+    /// check pinned to it, until [`MockControl::start_checks_on`]. A zone
+    /// whose connected endpoints all hang sends no results.
+    pub fn stop_checks_on(&self, name: &str) {
+        self.world().checkers_stopped.insert(name.to_owned());
+    }
+
+    /// Endpoint `name` runs checks again after
+    /// [`MockControl::stop_checks_on`].
+    pub fn start_checks_on(&self, name: &str) {
+        self.world().checkers_stopped.remove(name);
+    }
+
+    /// Delays the next run of the real-time check `host!service` (a
+    /// heartbeat) by `by`, once: a beat that comes late, as a busy checker
+    /// or a slow cluster sync makes it. Unknown objects are ignored.
+    pub fn delay_realtime(&self, host: &str, service: &str, by: Duration) {
+        let mut world = self.world();
+        let object = format!("{host}!{service}");
+        if let Some(at) = world.realtime.get_mut(&object) {
+            *at += by.as_secs_f64();
+        }
+    }
+
+    /// Runs the real-time checks that are due now (the timers do so every
+    /// housekeeping interval).
+    pub fn run_realtime_checks(&self) {
+        let mut world = self.world();
+        let now = world.now();
+        world.run_realtime_checks(now);
+    }
+
     /// Disconnects every event stream (the connections are aborted, like a
     /// network failure). Returns how many there were.
     pub fn drop_event_streams(&self) -> usize {
@@ -418,6 +497,7 @@ impl MockControl {
                 types: info.types,
                 lines: info.lines,
                 bytes: info.bytes,
+                filtered: info.filtered,
             })
             .collect()
     }

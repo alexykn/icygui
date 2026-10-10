@@ -3,9 +3,10 @@
 
 use std::fmt;
 
+use crate::px;
 use gpui::{
     AnyElement, App, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px, relative,
+    Window, div, prelude::FluentBuilder as _, relative,
 };
 
 use crate::components::SectionLabel;

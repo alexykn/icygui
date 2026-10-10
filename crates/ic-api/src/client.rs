@@ -8,7 +8,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use ic_model::{
     Action, ActionTarget, Comment, Dependency, Downtime, Endpoint, EventKind, Host, HostGroup,
-    InstanceStatus, Notification, ObjectKey, Service, ServiceGroup, Timestamp, Zone,
+    InstanceStatus, ListenerStatus, NodeFeatures, Notification, ObjectKey, Service, ServiceGroup,
+    Timestamp, Zone,
 };
 use reqwest::header::{ACCEPT, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
@@ -16,9 +17,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::actions::{self, Batch, TargetKind};
+use crate::actions::{self, Batch};
 use crate::budget::RequestBudget;
-use crate::detail::{Cluster, Detail, Fetched, FetchedNotifications};
+use crate::detail::{Cluster, Detail, EndpointState, Fetched, FetchedNotifications};
 use crate::error::ApiError;
 use crate::events::EventStream;
 use crate::info::ApiInfo;
@@ -26,8 +27,8 @@ use crate::settings::{CONNECT_TIMEOUT, ConnectionSettings, Credentials};
 use crate::tls;
 use crate::wire::{
     self, ActionResultWire, CheckableAttrs, CommentAttrs, DependencyAttrs, DowntimeAttrs,
-    EndpointAttrs, GroupAttrs, InfoResult, NotificationAttrs, QueryResult, Results, StatusResult,
-    ZoneAttrs,
+    EndpointAttrs, FeatureAttrs, GroupAttrs, InfoResult, NotificationAttrs, QueryResult, Results,
+    StatusResult, ZoneAttrs,
 };
 
 /// How many names one targeted query or action request carries. Icinga
@@ -145,6 +146,20 @@ impl fmt::Debug for Client {
             )
             .finish_non_exhaustive()
     }
+}
+
+/// The object types [`Client::node_features`] reads: the checker,
+/// notification and `IcingaDB` features.
+pub const FEATURE_TYPES: [&str; 3] = ["checkercomponents", "notificationcomponents", "icingadbs"];
+
+/// What one read of the node's features found ([`Client::node_features`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FeaturesRead {
+    /// The features, `None` where not read.
+    pub features: NodeFeatures,
+    /// The types (of [`FEATURE_TYPES`]) Icinga refused or doesn't know:
+    /// not worth asking for again on this connection.
+    pub refused: Vec<&'static str>,
 }
 
 impl Client {
@@ -320,6 +335,72 @@ impl Client {
     pub async fn node_name(&self) -> Result<Option<String>, ApiError> {
         let application = self.status_entry("IcingaApplication").await?;
         Ok(wire::node_name(&application))
+    }
+
+    /// The node's cluster and API connections and its JSON-RPC queues
+    /// (`/v1/status/ApiListener`): the cluster health page asks for it
+    /// with its status polls while it is open (topic 06). One request,
+    /// taken from the request budget. Its size grows with the zones the
+    /// node talks to directly (an installation whose agents sit right
+    /// under the masters lists every agent's zone).
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::status`].
+    pub async fn listener_status(&self) -> Result<ListenerStatus, ApiError> {
+        self.spend().await;
+        let listener = self.status_entry("ApiListener").await?;
+        Ok(wire::listener_status(&listener))
+    }
+
+    /// Which of the node's checker, notification and `IcingaDB` features
+    /// run (their objects, attribute `paused` only): one small request per
+    /// type not in `skip`, each taken from the request budget. A type the
+    /// API user may not read (403) or Icinga doesn't know (400 *Invalid
+    /// type specified*, 404: no `IcingaDB` type before Icinga 2.13) is
+    /// `None` and listed in [`FeaturesRead::refused`], so the caller asks
+    /// for it no more; any other error fails the whole call.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::hosts`], except `Forbidden`, `NotFound` and HTTP 400.
+    pub async fn node_features(&self, skip: &[&str]) -> Result<FeaturesRead, ApiError> {
+        let mut read = FeaturesRead::default();
+        for (plural, slot) in [
+            (FEATURE_TYPES[0], &mut read.features.checker),
+            (FEATURE_TYPES[1], &mut read.features.notification),
+            (FEATURE_TYPES[2], &mut read.features.icingadb),
+        ] {
+            if skip.contains(&plural) {
+                continue;
+            }
+            self.spend().await;
+            match self
+                .query::<FeatureAttrs>(plural, None, wire::FEATURE_ATTRS)
+                .await
+            {
+                Ok(results) => {
+                    let objects: Vec<FeatureAttrs> = results
+                        .into_iter()
+                        .filter_map(|entry| entry.attrs)
+                        .collect();
+                    *slot = Some(wire::feature_state(&objects));
+                }
+                Err(
+                    ApiError::Forbidden(message)
+                    | ApiError::NotFound(message)
+                    | ApiError::Http {
+                        status: 400,
+                        message,
+                    },
+                ) => {
+                    tracing::debug!(%message, plural, "the feature's objects can't be read");
+                    read.refused.push(plural);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(read)
     }
 
     /// Every zone with its member endpoints, its parent and whether it is
@@ -520,8 +601,10 @@ impl Client {
 
     /// Whether each of the endpoints `names` is connected to the node the
     /// client talks to (Icinga's `connected`; the node's own endpoint says
-    /// `false`), in one small request per [`NAMES_PER_REQUEST`] names:
-    /// keeps a cluster's node list current between loads. Icinga fails a
+    /// `false`), with its version, last message and message rates (the
+    /// cluster health page's columns), in one small request per
+    /// [`NAMES_PER_REQUEST`] names: keeps a cluster's node list current
+    /// between loads. Icinga fails a
     /// whole request with `404 No objects found.` if one of its names is
     /// unknown; then none of its names comes back (no halving: the caller
     /// reloads the endpoint list instead).
@@ -529,7 +612,7 @@ impl Client {
     /// # Errors
     ///
     /// As [`Client::hosts`].
-    pub async fn endpoint_states(&self, names: &[String]) -> Result<Vec<(String, bool)>, ApiError> {
+    pub async fn endpoint_states(&self, names: &[String]) -> Result<Vec<EndpointState>, ApiError> {
         let answer = self
             .query_names::<EndpointAttrs>(
                 "endpoints",
@@ -681,10 +764,12 @@ impl Client {
     /// child options, which Icinga multiplies). `author` is sent for
     /// acknowledgements, downtimes, comments and removals.
     ///
-    /// A [`ActionTarget::Downtime`] removes that downtime and a
-    /// [`ActionTarget::Comment`] removes that comment; both only with
-    /// [`Action::RemoveAllDowntimes`] (the model has no separate "remove
-    /// comment" action).
+    /// [`ActionTarget::Downtimes`] removes those downtimes and
+    /// [`ActionTarget::Comments`] those comments, by name, in batches of
+    /// [`NAMES_PER_REQUEST`] (`"downtimes": [...]`, `"comments": [...]`);
+    /// both only with [`Action::RemoveAllDowntimes`] (the model has no
+    /// separate "remove comment" action). A name that no longer exists
+    /// gets a 404 result, as an object does.
     ///
     /// Per-object failures (`code >= 400`) are returned as results, not as
     /// errors, whatever HTTP status Icinga derives from them (it answers a
@@ -794,7 +879,7 @@ impl Client {
                     if let [name] = names.as_slice() {
                         tracing::debug!(%name, action = batch.endpoint, "action target no longer exists");
                         run.fail([name.clone()], 404, &message);
-                    } else if matches!(batch.kind, TargetKind::Host | TargetKind::Service) {
+                    } else {
                         let (first, second) = names.split_at(names.len() / 2);
                         pending.push(second.to_vec());
                         pending.push(first.to_vec());
@@ -942,6 +1027,29 @@ impl Client {
     ///   request timeout;
     /// - other transport, TLS and HTTP errors as [`ApiError`].
     pub async fn events(&self, queue: &str, kinds: &[EventKind]) -> Result<EventStream, ApiError> {
+        self.events_filtered(queue, kinds, None).await
+    }
+
+    /// [`Client::events`] with Icinga's stream `filter`: an expression on
+    /// `event` (`event.type`, `event.host`, `event.service`, …) that every
+    /// event must match to be sent, such as quiet mode's `event.type !=
+    /// "CheckResult" || event.host == "icygui-hb" && event.service ==
+    /// "beat"` (only the heartbeats' check results). A blank filter is
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::events`]; a filter needs Icinga's `filter-expression`
+    /// permission where Icinga enforces it (by default from 2.17, or with
+    /// `enforce_filter_expression_permission`): without it the stream is
+    /// refused with [`ApiError::Forbidden`] (`Missing permission:
+    /// filter-expression`).
+    pub async fn events_filtered(
+        &self,
+        queue: &str,
+        kinds: &[EventKind],
+        filter: Option<&str>,
+    ) -> Result<EventStream, ApiError> {
         if kinds.is_empty() {
             return Err(ApiError::InvalidSettings(
                 "subscribe to at least one event type".to_owned(),
@@ -953,7 +1061,10 @@ impl Client {
             ));
         }
         let types: Vec<&str> = kinds.iter().map(|kind| kind.api_name()).collect();
-        let body = json!({ "queue": queue, "types": types });
+        let mut body = json!({ "queue": queue, "types": types });
+        if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
+            body["filter"] = Value::String(filter.to_owned());
+        }
         let request = self
             .request(reqwest::Method::POST, "v1/events")?
             .json(&body);
@@ -1039,12 +1150,31 @@ impl Client {
     }
 
     /// Sends a request; done when the response headers have arrived, which
-    /// must happen within the request timeout (connecting included).
+    /// must happen within the request timeout (connecting included). At
+    /// the `debug` level each request's method, path, status and time to
+    /// the headers are logged (the path only: no query, no credentials).
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, ApiError> {
-        tokio::time::timeout(self.inner.timeout, request.send())
+        let (http, request) = request.build_split();
+        let request = request.map_err(|error| ApiError::from_reqwest(&error))?;
+        let method = request.method().clone();
+        let path = request.url().path().to_owned();
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(self.inner.timeout, http.execute(request))
             .await
-            .map_err(|_| ApiError::Timeout)?
-            .map_err(|error| ApiError::from_reqwest(&error))
+            .map_err(|_| ApiError::Timeout)
+            .and_then(|sent| sent.map_err(|error| ApiError::from_reqwest(&error)));
+        let elapsed_ms = started.elapsed().as_millis();
+        match &result {
+            Ok(response) => tracing::debug!(
+                %method,
+                path,
+                status = response.status().as_u16(),
+                elapsed_ms,
+                "request"
+            ),
+            Err(error) => tracing::debug!(%method, path, %error, elapsed_ms, "request failed"),
+        }
+        result
     }
 
     /// Sends a request and parses its JSON body; non-success statuses are

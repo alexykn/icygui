@@ -306,6 +306,48 @@ fn naming<'a>(snapshot: &'a Snapshot, word: &str) -> Vec<&'a ic_core::trouble::A
         .collect()
 }
 
+/// The number an alert's detail gives for `zone`'s late checks
+/// (`… 1,204 checks in zone fra are late`), if it gives one.
+fn late_in_detail(detail: &str, zone: &str) -> Option<usize> {
+    let end = detail.find(&format!(" in zone {zone} "))?;
+    let words: Vec<&str> = detail[..end].split(' ').collect();
+    let number = words.iter().rev().nth(1)?;
+    number.replace(',', "").parse().ok()
+}
+
+/// How many late checks the snapshot has in `zone`.
+fn late_in_zone(snapshot: &Snapshot, zone: &str) -> usize {
+    snapshot
+        .late
+        .keys()
+        .filter(|key| {
+            let check = match key {
+                ObjectKey::Host { name } => snapshot.hosts.get(name).map(|host| &host.check),
+                ObjectKey::Service { key } => {
+                    snapshot.services.get(key).map(|service| &service.check)
+                }
+            };
+            check.and_then(|check| check.zone.as_deref()) == Some(zone)
+        })
+        .count()
+}
+
+#[test]
+fn a_late_count_is_read_from_an_alert() {
+    assert_eq!(
+        late_in_detail(
+            "zone fra’s results are stale; 1,204 checks in zone fra are late.",
+            "fra"
+        ),
+        Some(1_204)
+    );
+    assert_eq!(
+        late_in_detail("1 check in zone ams is late.", "ams"),
+        Some(1)
+    );
+    assert_eq!(late_in_detail("zone fra’s results are stale.", "fra"), None);
+}
+
 /// Lets the engine run for `period` (its events kept), then returns the
 /// latest snapshot.
 async fn run_for(engine: &mut Engine, period: Duration) -> Arc<Snapshot> {
@@ -486,6 +528,7 @@ async fn cluster_cut_off_zone_goes_silent() {
     let recover = Recover(&cluster.scenario);
     cluster.scenario(&["zone-cut-off"]);
     let started = Instant::now();
+    let seen_before = engine.seen.len();
     let snapshot = wait_snapshot(
         &mut engine,
         Duration::from_mins(5),
@@ -543,6 +586,32 @@ async fn cluster_cut_off_zone_goes_silent() {
     let alerts = naming(&snapshot, "fra");
     assert_eq!(alerts.len(), 1, "{:?}", snapshot.trouble.alerts);
     assert!(alerts[0].key == "zone:fra", "{:?}", alerts[0]);
+    // Whenever the alert says how many of the zone's checks are late, it is
+    // what the same snapshot's late flags say (the health page's late tile):
+    // one moment, one number.
+    let mut counted = 0;
+    for event in &engine.seen[seen_before..] {
+        let CoreEvent::Snapshot(snapshot) = event else {
+            continue;
+        };
+        let Some(said) = snapshot
+            .trouble
+            .alerts
+            .iter()
+            .find(|alert| alert.key == "zone:fra")
+            .and_then(|alert| late_in_detail(&alert.detail, "fra"))
+        else {
+            continue;
+        };
+        assert_eq!(
+            said,
+            late_in_zone(snapshot, "fra"),
+            "{:?}",
+            snapshot.trouble
+        );
+        counted += 1;
+    }
+    eprintln!("{counted} snapshots quoted zone fra's late checks");
     drop(recover);
     engine.shutdown();
 }

@@ -159,6 +159,7 @@ Trying it against production for the first time? Read the [first-run checklist](
 |---|---|
 | [User guide](docs/user-guide.md) | Installation, the `ApiUser`, TLS, environments, dashboards and filters, keyboard shortcuts, actions, notifications, files, troubleshooting |
 | [First run](docs/first-run.md) | Checklist for the first connection to a production Icinga |
+| [Demo cluster](docs/demo.md) | A real Icinga cluster in Docker with ready-made dashboards, to try icygui and break it on purpose |
 | [Development](docs/development.md) | Building, testing, the demo's switches, `cargo xtask` |
 | [Architecture](docs/architecture.md) · [Plan](PLAN.md) | Crate contracts, decisions |
 | [Performance](docs/performance.md) | Measurements at production scale and how the client stays gentle on the master |

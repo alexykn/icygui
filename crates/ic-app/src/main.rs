@@ -282,21 +282,10 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
     });
 }
 
-/// Where passwords are: the OS keychain, or for development and headless
-/// runs only the plain files that `ICYGUI_DEV_SECRETS_DIR` names (never a
-/// default; it says so in the log).
+/// Where passwords are: the OS secret store (the login keychain, the
+/// Secret Service), always; icygui keeps no credentials anywhere else.
 fn secrets() -> Arc<dyn ic_core::ports::SecretStore> {
-    match ic_platform::DirSecrets::from_env() {
-        Some(files) => {
-            tracing::warn!(
-                dir = %files.dir().display(),
-                "passwords are read from plain files ({}), not the keychain: for development only",
-                ic_platform::DEV_SECRETS_ENV
-            );
-            Arc::new(files)
-        }
-        None => Arc::new(ic_platform::KeyringSecrets::new()),
-    }
+    Arc::new(ic_platform::KeyringSecrets::new())
 }
 
 /// Where the keymap file is: next to the settings file.

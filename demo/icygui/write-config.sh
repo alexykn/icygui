@@ -8,8 +8,6 @@
 #   --config-dir DIR      the directory of config.toml (default: icygui's own)
 #   --data-dir DIR        icygui's data directory, for --select (default: its own)
 #   --ca FILE             the CA certificate (default: read from the cluster)
-#   --secrets-dir DIR     also store the demo password as DIR/<environment id>,
-#                         for ICYGUI_DEV_SECRETS_DIR (development only)
 #   --via-proxy           master-01 through the proxy (dead-network scenario)
 #   --select GROUP/DASHBOARD   the dashboard shown at start
 #   --theme dark|light|system

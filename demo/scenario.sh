@@ -26,11 +26,16 @@ usage: demo/scenario.sh <scenario> [argument] | recover | list
   frozen-master         freeze master-01 (docker pause): its connections stay
                         open and say nothing
   checks-stopped [zone] stop every active check (in one zone: master, ams, fra)
-  beat-late [seconds]   hold zone ams's heartbeat back once (45 s by default)
+  beat-late [seconds]   hold zone ams's heartbeat back once (12 s by default)
   problem-storm [count] a burst of hard CRITICAL results (40 services by default)
+  blips [count]         a few database services fail and recover within seconds
+                        (4 by default): lines for the event streams; demo/screenshot.sh
+                        start runs it
   dead-network          the proxy in front of master-01 (port 5667) passes
                         nothing any more while connections stay open
   recover               undo all of the above, wait until the cluster is healthy
+                        and no check is overdue (ICYGUI_DEMO_SETTLE seconds at most,
+                        default 300)
 EOF
 }
 
@@ -69,6 +74,21 @@ api() {
 py() { "${COMPOSE[@]}" exec -T "$(master)" python3 -Ic "$1"; }
 
 cid() { "${COMPOSE[@]}" ps -a -q "$1"; }
+
+# overdue: how many checks with active checks on are past Icinga's own
+# next_update (overdue, icygui's late), as one number.
+overdue() {
+  local kind total=0 count
+  for kind in hosts services; do
+    count=$(api QUERY "/v1/objects/$kind" '{ "attrs": ["next_update", "enable_active_checks"] }' |
+      py "import json, sys, time
+now = time.time()
+print(sum(1 for r in json.load(sys.stdin)['results']
+          if r['attrs']['enable_active_checks'] and 0 < r['attrs']['next_update'] < now))") || count=0
+    total=$((total + count))
+  done
+  echo "$total"
+}
 
 require_up() {
   if [ -z "$(cid master-01)" ]; then
@@ -140,9 +160,14 @@ case "$scenario" in
     api POST /v1/objects/hosts "{ $filter \"attrs\": { \"enable_active_checks\": false } }" >/dev/null
     api POST /v1/objects/services "{ $sfilter \"attrs\": { \"enable_active_checks\": false } }" >/dev/null
     if [ -n "$zone" ]; then
+      case "$zone" in
+        master) endpoints="master-01 and master-02" ;;
+        ams) endpoints=sat-ams-01 ;;
+        fra) endpoints="sat-fra-01 and sat-fra-02" ;;
+      esac
       say "Active checks are off in zone $zone (its endpoints stay connected). icygui shows:" \
         "- its heartbeats stop; the REST query finds their last check old:" \
-        "  zone $zone runs no checks (<its endpoints> connected)" \
+        "  zone $zone runs no checks ($endpoints connected)" \
         "- the zone's checks turn late as their intervals pass"
     else
       say "Active checks are off everywhere, as with a hung checker. icygui shows:" \
@@ -209,6 +234,50 @@ print(len(names))
       "Nothing to undo."
     ;;
 
+  blips)
+    require_up
+    count=${2:-4}
+    # Connection checks of the databases: half of them WARNING, half
+    # CRITICAL, hard (three results each), and five seconds later OK again:
+    # state changes and recoveries that the event streams (the databases
+    # dashboard's "db events") show.
+    sent=$(py "
+import base64, http.client, json, random, socket, ssl, time
+node = socket.gethostname()
+auth = 'Basic ' + base64.b64encode(b'$ADMIN').decode()
+context = ssl.create_default_context(cafile='/var/lib/icinga2/certs/ca.crt')
+def call(path, body, query=False):
+    connection = http.client.HTTPSConnection(node, 5665, context=context, timeout=60)
+    headers = {'Authorization': auth, 'Accept': 'application/json', 'Content-Type': 'application/json'}
+    if query:
+        headers['X-HTTP-Method-Override'] = 'GET'
+    connection.request('POST', path, json.dumps(body), headers)
+    answer = json.loads(connection.getresponse().read())
+    connection.close()
+    return answer
+names = sorted(r['name'] for r in call('/v1/objects/services', {'attrs': ['name'], 'filter':
+    'service.state == 0 && service.vars.demo && service.vars.demo.profile == \"ok\" && host.vars.env == \"prod\"'
+    ' && service.name in [\"pg-connections\", \"pg-slow-queries\", \"pgbouncer\", \"mysql-connections\",'
+    ' \"mongodb-connections\", \"redis-connections\"]'
+    ' && !service.acknowledgement && service.downtime_depth == 0'}, query=True)['results'])
+names = random.Random(7).sample(names, min($count, len(names)))
+outputs = {1: 'WARNING - answers take 1.8 s (demo blip)', 2: 'CRITICAL - connection refused (demo blip)'}
+for _ in range(3):
+    for index, name in enumerate(names):
+        state = 1 + index % 2
+        call('/v1/actions/process-check-result', {'type': 'Service', 'service': name,
+             'exit_status': state, 'plugin_output': outputs[state]})
+time.sleep(5)
+for name in names:
+    call('/v1/actions/process-check-result', {'type': 'Service', 'service': name, 'exit_status': 0,
+         'plugin_output': 'OK - back to normal (demo blip)'})
+print(len(names))
+" </dev/null)
+    say "$sent database services failed and recovered five seconds later. icygui shows:" \
+      "- their problems and recoveries in the event streams (overview/databases' db events)" \
+      "Nothing to undo."
+    ;;
+
   dead-network)
     require_up
     "${COMPOSE[@]}" exec -T proxy touch /tmp/dead
@@ -230,7 +299,27 @@ print(len(names))
     for kind in host service; do
       api POST "/v1/objects/${kind}s" "{ \"filter\": \"$kind.enable_active_checks == false\", \"attrs\": {}, \"restore_attrs\": [\"enable_active_checks\"] }" >/dev/null || true
     done
-    say "Recovered: every node runs and is connected, every check is active, the proxy passes again."
+    # Connected is not caught up: after a frozen master or a cut-off zone
+    # the checks that were due meanwhile are overdue (Icinga's own
+    # next_update, which icygui calls late) until they have run again.
+    settle=${ICYGUI_DEMO_SETTLE:-300}
+    deadline=$(( $(date +%s) + settle ))
+    while :; do
+      late=$(overdue)
+      [ "$late" = 0 ] && break
+      checks="$late checks are"
+      [ "$late" = 1 ] && checks="1 check is"
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        say "After ${settle}s $checks still overdue (demo/scenario.sh recover again, or look at" \
+          "docker compose -f demo/docker-compose.yml logs)." >&2
+        break
+      fi
+      echo "recover: $checks overdue, waiting for them to run" >&2
+      sleep 5
+    done
+    say "Recovered: every node runs and is connected, every check is active and none is overdue," \
+      "the proxy passes again. Icinga's latency figures (the health page's checks view) settle" \
+      "as the checks that ran late run again, within their intervals."
     ;;
 
   *)

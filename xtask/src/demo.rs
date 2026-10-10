@@ -8,8 +8,8 @@
 //!
 //! ```text
 //! cargo xtask demo-config [--config-dir DIR] [--data-dir DIR] [--ca FILE]
-//!                         [--secrets-dir DIR] [--via-proxy]
-//!                         [--select GROUP/DASHBOARD] [--theme dark|light|system]
+//!                         [--via-proxy] [--select GROUP/DASHBOARD]
+//!                         [--theme dark|light|system]
 //! ```
 //!
 //! - `--config-dir`: where `config.toml` is (default: icygui's own, from
@@ -21,12 +21,16 @@
 //! - `--ca`: the cluster's CA certificate; by default it is read from the
 //!   running cluster (`docker compose exec master-01`). It is copied next
 //!   to `config.toml` as `demo-ca.crt`, which the environment trusts.
-//! - `--secrets-dir`: also stores the demo password (a documented demo
-//!   value) as `<DIR>/<environment id>`, the format `ICYGUI_DEV_SECRETS_DIR`
-//!   reads (development and headless runs only; `ic_platform::DirSecrets`).
-//!   Without it icygui asks for the password like for any environment.
+//! - No password: icygui asks for it like for any environment and keeps it
+//!   in the OS secret store. The screenshot harness stores the demo value
+//!   in its own throwaway keyring (`demo/screenshot.sh`,
+//!   `ic-platform`'s `store_secret` example).
 //! - `--via-proxy`: master-01 through the cluster's proxy
 //!   (`https://127.0.0.1:5667`), for the dead-network scenario.
+//! - The ports: `ICYGUI_DEMO_PORT_1`, `ICYGUI_DEMO_PORT_2` and
+//!   `ICYGUI_DEMO_PORT_PROXY` move master-01, master-02 and the proxy, as
+//!   they do in `demo/docker-compose.yml` and `demo/up.sh`, so the
+//!   environment points where the cluster listens.
 //! - `--select`: the dashboard shown at start, by names (`overview/databases`;
 //!   written to the UI state file next to the data).
 //! - `--theme`: the appearance's theme.
@@ -43,17 +47,12 @@ use ic_rules::DashboardRef;
 
 use crate::Result;
 
-/// The demo API user's password: a documented demo value (docs/demo.md),
-/// not a secret.
-const DEMO_PASSWORD: &str = "icygui-demo-password";
-
 /// What `demo-config` was asked to do.
 #[derive(Debug, Default)]
 struct Options {
     config_dir: Option<PathBuf>,
     data_dir: Option<PathBuf>,
     ca: Option<PathBuf>,
-    secrets_dir: Option<PathBuf>,
     via_proxy: bool,
     select: Option<String>,
     theme: Option<ThemeChoice>,
@@ -72,7 +71,6 @@ fn parse(args: &[String]) -> Result<Options> {
             "--config-dir" => options.config_dir = Some(PathBuf::from(value()?)),
             "--data-dir" => options.data_dir = Some(PathBuf::from(value()?)),
             "--ca" => options.ca = Some(PathBuf::from(value()?)),
-            "--secrets-dir" => options.secrets_dir = Some(PathBuf::from(value()?)),
             "--via-proxy" => options.via_proxy = true,
             "--select" => options.select = Some(value()?),
             "--theme" => {
@@ -119,11 +117,8 @@ pub(crate) fn demo_config(root: &Path, args: &[String]) -> Result<()> {
 
     let mut environment = demo_environment(&demo)?;
     environment.tls.ca_file = Some(ca_file);
-    if options.via_proxy
-        && let Some(first) = environment.urls.first_mut()
-    {
-        "https://127.0.0.1:5667".clone_into(&mut first.url);
-    }
+    let ports = Ports::from_env(|name| std::env::var(name).ok())?;
+    ports.apply(&mut environment, options.via_proxy)?;
     environment.groups = demo_groups(&demo)?;
 
     let store = ConfigStore::new(config_file.clone());
@@ -173,15 +168,69 @@ pub(crate) fn demo_config(root: &Path, args: &[String]) -> Result<()> {
             .save(&state)
             .map_err(|error| format!("cannot save the UI state: {error}"))?;
     }
-
-    if let Some(dir) = &options.secrets_dir {
-        write_password(dir, &id)?;
-        println!(
-            "stored the demo password in {} (ICYGUI_DEV_SECRETS_DIR)",
-            dir.display()
-        );
-    }
     Ok(())
+}
+
+/// The ports the demo cluster publishes on this machine: master-01,
+/// master-02 and the proxy in front of master-01. Like
+/// `demo/docker-compose.yml`, from `ICYGUI_DEMO_PORT_1`, `_2` and `_PROXY`
+/// when they are set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ports {
+    first: u16,
+    second: u16,
+    proxy: u16,
+}
+
+impl Ports {
+    /// What `docker-compose.yml` uses without the variables.
+    const DEFAULT: Self = Self {
+        first: 5665,
+        second: 5666,
+        proxy: 5667,
+    };
+
+    /// The ports, from the variables `var` reads (unset or empty: the
+    /// default).
+    fn from_env(var: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let port = |name: &str, default: u16| match var(name).filter(|value| !value.is_empty()) {
+            None => Ok(default),
+            Some(value) => value
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .ok_or_else(|| format!("{name}={value} is not a port")),
+        };
+        Ok(Self {
+            first: port("ICYGUI_DEMO_PORT_1", Self::DEFAULT.first)?,
+            second: port("ICYGUI_DEMO_PORT_2", Self::DEFAULT.second)?,
+            proxy: port("ICYGUI_DEMO_PORT_PROXY", Self::DEFAULT.proxy)?,
+        })
+    }
+
+    /// Points the environment's URLs (master-01, then master-02) at these
+    /// ports; master-01 through the proxy with `via_proxy`.
+    fn apply(self, environment: &mut ic_config::Environment, via_proxy: bool) -> Result<()> {
+        let first = if via_proxy { self.proxy } else { self.first };
+        for (url, port) in environment.urls.iter_mut().zip([first, self.second]) {
+            url.url = with_port(&url.url, port)?;
+        }
+        Ok(())
+    }
+}
+
+/// `url` with its port replaced (`https://127.0.0.1:5665` → `…:5675`).
+fn with_port(url: &str, port: u16) -> Result<String> {
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| format!("{url}: not a URL"))?;
+    let (authority, path) = rest.find('/').map_or((rest, ""), |at| rest.split_at(at));
+    let host = match authority.rsplit_once(':') {
+        Some((host, digits)) if digits.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => authority,
+    };
+    Ok(format!("{scheme}://{host}:{port}{path}"))
 }
 
 /// The environment of `demo/icygui/environment.toml`, read as a settings
@@ -265,30 +314,67 @@ fn cluster_ca(demo: &Path) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// The demo password as `<dir>/<id>`, user-only.
-fn write_password(dir: &Path, id: &str) -> Result<()> {
-    fs::create_dir_all(dir).map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
-    let file = dir.join(id);
-    fs::write(&file, DEMO_PASSWORD)
-        .map_err(|error| format!("cannot write {}: {error}", file.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        for (path, mode) in [(dir, 0o700), (file.as_path(), 0o600)] {
-            fs::set_permissions(path, fs::Permissions::from_mode(mode))
-                .map_err(|error| format!("cannot protect {}: {error}", path.display()))?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
-    use ic_config::{DowntimesMode, GridCells, ObjectKind, SidebarMark, ViewDisplay};
+    use ic_config::{
+        DowntimesMode, GridCells, HandledMode, HideHandled, ObjectKind, SidebarMark, ViewDisplay,
+    };
+    use ic_rules::ScopeSetting;
 
     use super::*;
+
+    /// The ports the compose file and up.sh read move the environment too
+    /// (and `--via-proxy` takes the proxy's).
+    #[test]
+    fn the_demo_ports_move_the_environment_with_the_cluster() {
+        let demo = crate::root().join("demo");
+        let urls = |ports: Ports, via_proxy: bool| {
+            let mut environment = demo_environment(&demo).unwrap();
+            ports.apply(&mut environment, via_proxy).unwrap();
+            environment
+                .urls
+                .iter()
+                .map(|url| url.url.clone())
+                .collect::<Vec<_>>()
+        };
+        let none = Ports::from_env(|_| None).unwrap();
+        assert_eq!(none, Ports::DEFAULT);
+        assert_eq!(
+            urls(none, false),
+            ["https://127.0.0.1:5665", "https://127.0.0.1:5666"]
+        );
+        assert_eq!(
+            urls(none, true),
+            ["https://127.0.0.1:5667", "https://127.0.0.1:5666"]
+        );
+        let moved = Ports::from_env(|name| {
+            match name {
+                "ICYGUI_DEMO_PORT_1" => Some("15665"),
+                "ICYGUI_DEMO_PORT_2" => Some("15666"),
+                "ICYGUI_DEMO_PORT_PROXY" => Some("15667"),
+                _ => None,
+            }
+            .map(str::to_owned)
+        })
+        .unwrap();
+        assert_eq!(
+            urls(moved, false),
+            ["https://127.0.0.1:15665", "https://127.0.0.1:15666"]
+        );
+        assert_eq!(urls(moved, true)[0], "https://127.0.0.1:15667");
+        assert!(Ports::from_env(|_| Some("http".to_owned())).is_err());
+        assert!(Ports::from_env(|_| Some("0".to_owned())).is_err());
+        assert_eq!(
+            with_port("https://[::1]:5665/v1", 7000).unwrap(),
+            "https://[::1]:7000/v1"
+        );
+        assert_eq!(
+            with_port("https://master-01", 5665).unwrap(),
+            "https://master-01:5665"
+        );
+    }
 
     /// The demo's files load through ic-config, and the dashboards show
     /// every view kind and layout the showcase list asks for (PLAN.md 4.2,
@@ -352,6 +438,29 @@ mod tests {
             dashboards
                 .iter()
                 .any(|dashboard| matches!(dashboard.mark, SidebarMark::Icon(_)))
+        );
+        // Handled problems hidden per kind (PLAN.md 4.2: "handled per
+        // kind"): a view that hides some kinds and shows the others.
+        assert!(
+            views
+                .iter()
+                .any(|view| view.handled.mode == HandledMode::Hide
+                    && view.handled.hide != HideHandled::ALL
+                    && view.handled.hide.any()),
+            "a view hiding some kinds of handled problems"
+        );
+        // Notification settings (groups on/off): a group off, a group and
+        // a dashboard with their own setting.
+        let group = |name: &str| groups.iter().find(|group| group.name == name).unwrap();
+        assert_eq!(group("lab").notifications, ScopeSetting::Off);
+        assert!(matches!(
+            group("dba").notifications,
+            ScopeSetting::Custom(ref rule) if rule.min_duration_secs > 0 && rule.states.warning
+        ));
+        assert!(
+            dashboards
+                .iter()
+                .any(|dashboard| dashboard.notifications == ScopeSetting::On)
         );
         for names in ["overview/databases", "platform/fleet", "dba/dba"] {
             select(

@@ -19,7 +19,7 @@
 //! - `screenshots [--only NAME,…] [--no-gifs]`: Linux only, the README's
 //!   screenshots and clips from `icygui --demo` under Xvfb, into
 //!   `docs/screenshots`
-//! - `demo-config [--config-dir DIR] [--ca FILE] [--secrets-dir DIR] …`:
+//! - `demo-config [--config-dir DIR] [--ca FILE] …`:
 //!   write the demo cluster's environment and dashboards (`demo/icygui`)
 //!   into icygui's settings ([`demo`])
 //!
@@ -118,7 +118,7 @@ const USAGE: &str = "usage: cargo xtask <command>
   install                                 (Linux) install into ~/.local
   mock [args…]                            start mock Icinga environments
   screenshots [--only NAME,…] [--no-gifs] (Linux) README images from --demo
-  demo-config [--config-dir DIR] [--ca FILE] [--secrets-dir DIR] [--via-proxy]
+  demo-config [--config-dir DIR] [--data-dir DIR] [--ca FILE] [--via-proxy]
               [--select GROUP/DASHBOARD] [--theme dark|light|system]
                                           the demo cluster's environment and dashboards";
 

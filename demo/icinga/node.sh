@@ -24,8 +24,9 @@ esac
 ETC=/etc/icinga2
 LIB=/var/lib/icinga2
 
-# Certificates (the CA's key only on the config master, which could sign
-# requests from new nodes).
+# Certificates: the node's own from the `pki` volume; the CA with its key
+# only on the config master, which could sign requests from new nodes (the
+# `ca` volume, mounted by master-01 alone; docker-compose.yml).
 for _ in $(seq 1 120); do
   [ -f "/pki/$NODE/$NODE.crt" ] && break
   sleep 1
@@ -34,7 +35,7 @@ mkdir -p "$LIB/certs"
 cp "/pki/$NODE/$NODE.crt" "/pki/$NODE/$NODE.key" "/pki/$NODE/ca.crt" "$LIB/certs/"
 if [ "$NODE" = master-01 ]; then
   mkdir -p "$LIB/ca"
-  cp /pki/ca/ca.crt /pki/ca/ca.key "$LIB/ca/"
+  cp /ca/ca.crt /ca/ca.key "$LIB/ca/"
 fi
 
 cat >"$ETC/constants.conf" <<EOF
@@ -123,6 +124,17 @@ if [ "$NODE" = master-01 ]; then
   python3 -I /demo/icinga/generate.py "$ETC/zones.d"
   cp /contract/icinga/icygui-test.conf "$ETC/zones.d/master/"
   cp /contract/icinga/icygui-groups.conf "$ETC/zones.d/global-templates/"
+  # The production-size workload for measurements (docker-compose.yml):
+  # N hosts x 15 services of the scale benchmark in the master zone, so
+  # both masters check them (HA) and serve them, as at the user's site.
+  scale=${ICYGUI_DEMO_SCALE_HOSTS:-0}
+  case "$scale" in
+    '' | *[!0-9]*) echo "node.sh: ICYGUI_DEMO_SCALE_HOSTS=$scale is not a number" >&2; exit 1 ;;
+  esac
+  if [ "$scale" -gt 0 ]; then
+    python3 -I /contract/scale/generate.py "$scale" >"$ETC/zones.d/master/scale.conf"
+    echo "node.sh: the scale workload, $scale hosts x 15 services" >&2
+  fi
 fi
 
 if ! check=$(icinga2 daemon -C 2>&1); then

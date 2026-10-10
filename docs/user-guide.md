@@ -26,7 +26,7 @@ Other ways:
 
 **Linux desktop requirements.** A Vulkan driver (every desktop Mesa or NVIDIA install has one). For the tray icon, a StatusNotifierItem host: KDE, most other desktops, and GNOME with the *AppIndicator* extension. For desktop notifications, a notification server (every desktop has one). For saved passwords, a Secret Service keyring (GNOME Keyring, KWallet, KeePassXC).
 
-**Try it without an Icinga:** `icygui --demo` runs the whole app against a simulated Icinga in the same process (a 150-host estate with live changes, problem storms and notifications). Actions work against it; nothing is saved and the keychain isn't touched. A *demo* badge sits in every dashboard's header.
+**Try it without an Icinga:** `icygui --demo` runs the whole app against a simulated Icinga in the same process (a 150-host estate with live changes, problem storms and notifications). Actions work against it; nothing is saved and the keychain isn't touched. A *demo* badge sits in every dashboard's header. To try it against a real Icinga instead, run [the demo cluster](demo.md): two masters and two satellite zones in Docker on your machine, with ready-made dashboards and scenarios that break it on purpose.
 
 Command line: `icygui [--demo] [--background]`, `icygui --version`, `icygui --help`. `--background` starts in the tray without a window (what launch at login runs); the window opens if no tray shows the icon within 20 seconds.
 

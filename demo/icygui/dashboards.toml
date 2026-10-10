@@ -6,7 +6,10 @@
 # grouped list with host bands, host-group grids in squares and labelled
 # cells, summary tiles, event streams, handling and downtimes (timeline and
 # list), one-view and stacked dashboards, sidebar marks (state dots and
-# chosen icons), and handled problems shown or hidden per view.
+# chosen icons), handled problems shown, hidden, or hidden per kind, and
+# notification settings per group and dashboard (the lab off, the DBAs
+# with their own rule, a dashboard on). Notification times per group come
+# with the notifications part of stage 5 (topic 12).
 
 format = "icygui-dashboards"
 version = 4
@@ -36,11 +39,14 @@ filter = 'host.vars.role in ["postgres", "mysql", "mongodb", "redis"]'
 problems_only = false
 groups = { by = "custom_var", custom_var = "role", order = "name" }
 
+# Acknowledged problems and downtimes hidden, but the services of a
+# database host that is down stay: the DBAs want to see what it took down.
 [[groups.dashboards.views]]
 name = "failing services"
 display = "list"
 filter = 'host.vars.role in ["postgres", "mysql", "mongodb", "redis"] && host.vars.env == "prod"'
 problems_only = true
+handled = { mode = "hide", hide = { acknowledged = true, in_downtime = true, host_down = false } }
 
 [[groups.dashboards.views]]
 name = "replication slots"
@@ -56,6 +62,8 @@ stream = { recoveries = true, lines = 8 }
 
 [[groups.dashboards]]
 name = "host problems"
+# Notifies even when its group follows a setting that is off.
+notifications = { mode = "on" }
 
 [[groups.dashboards.views]]
 display = "list"
@@ -96,6 +104,9 @@ grid = { cells = "labelled_cells" }
 
 [[groups]]
 name = "dba"
+# The DBAs' own rule: warnings too, but only once a problem has lasted
+# five minutes (replication lag comes and goes).
+notifications = { mode = "custom", rule = { states = { critical = true, warning = true, unknown = true, down = true, recovery = true }, min_duration_secs = 300 } }
 
 [[groups.dashboards]]
 name = "dba"
@@ -231,6 +242,8 @@ handled = { mode = "show" }
 [[groups]]
 name = "lab"
 collapsed = true
+# Nobody is notified about the lab.
+notifications = { mode = "off" }
 
 [[groups.dashboards]]
 name = "sandbox"

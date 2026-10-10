@@ -16,6 +16,11 @@
 #   demo/scenario.sh <name> | recover                       # break something, mend it
 #   docker compose -f demo/docker-compose.yml down -v       # stop and delete everything
 #
+# ICYGUI_DEMO_SCALE_HOSTS=2000 adds contract/scale/generate.py's workload
+# (2 000 hosts x 15 services) to the master zone, for measurements at a
+# production size (docs/development.md, "Many clients on the demo
+# cluster"); ICYGUI_DEMO_PORT_1, _2 and _PROXY move the published ports.
+#
 # It is disposable: certificates, state and configuration live in the
 # volumes below and are made fresh by `up` after a `down -v`. Never point
 # it at, or let it join, a real Icinga.
@@ -40,11 +45,15 @@ x-node: &node
     start_interval: 3s
 
 services:
+  # The certificates: the CA (with its key) in `ca`, which only master-01
+  # mounts besides this one-shot service; every node's certificate and key
+  # in `pki` (each node copies its own).
   pki:
     image: icinga/icinga2:${ICINGA_TAG:-2.15}
     entrypoint: ["sh", "/demo/icinga/pki.sh"]
     user: "0"
     volumes:
+      - ca:/ca
       - pki:/pki
       - ./icinga:/demo/icinga:ro
     networks: [cluster]
@@ -52,9 +61,13 @@ services:
   master-01:
     <<: *node
     hostname: master-01
+    environment:
+      # The size of the extra scale workload (node.sh); 0: none.
+      ICYGUI_DEMO_SCALE_HOSTS: ${ICYGUI_DEMO_SCALE_HOSTS:-0}
     ports: ["127.0.0.1:${ICYGUI_DEMO_PORT_1:-5665}:5665"]
     volumes:
       - master-01:/data
+      - ca:/ca:ro
       - pki:/pki:ro
       - ./icinga:/demo/icinga:ro
       - ../contract/icinga:/contract/icinga:ro
@@ -116,6 +129,7 @@ networks:
   cluster: {}
 
 volumes:
+  ca: {}
   pki: {}
   master-01: {}
   master-02: {}

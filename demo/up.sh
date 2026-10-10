@@ -4,12 +4,14 @@
 # environment variables of the tests that run against it:
 #
 #   set -a; eval "$(demo/up.sh)"; set +a
-#   cargo test -p ic-api --test contract        # the contract tests
-#   cargo test -p ic-core --test engine cluster # the cluster tests
+#   cargo test -p ic-api --test contract                               # the contract tests
+#   cargo test -p ic-core --test engine cluster:: -- --test-threads=1  # the cluster tests
 #
-# Idempotent: a running cluster is only waited for. The CA certificate
-# goes to $ICYGUI_DEMO_CA (default: demo-ca.crt in a temporary directory).
-# The passwords printed are the demo's documented demo values.
+# Idempotent: a running cluster is only waited for (stopped nodes are
+# started again). The CA certificate goes to $ICYGUI_DEMO_CA (default:
+# target/demo-ca.crt in this repository, replaced in one step, so every
+# call reuses the one file). The passwords printed are the demo's
+# documented demo values.
 #   ICYGUI_DEMO_TIMEOUT  seconds to wait (default 900)
 set -euo pipefail
 
@@ -43,8 +45,13 @@ while :; do
   sleep 3
 done
 
-CA=${ICYGUI_DEMO_CA:-$(mktemp -d)/demo-ca.crt}
-"${COMPOSE[@]}" exec -T master-01 cat /var/lib/icinga2/certs/ca.crt >"$CA"
+CA=${ICYGUI_DEMO_CA:-$HERE/../target/demo-ca.crt}
+mkdir -p "$(dirname "$CA")"
+CA=$(cd "$(dirname "$CA")" && pwd)/$(basename "$CA")
+staged=$(mktemp "$CA.XXXXXX")
+trap 'rm -f "$staged"' EXIT
+"${COMPOSE[@]}" exec -T master-01 cat /var/lib/icinga2/certs/ca.crt >"$staged"
+mv -f "$staged" "$CA"
 cat <<EOF
 ICYGUI_CONTRACT_URL=https://127.0.0.1:${ICYGUI_DEMO_PORT_1:-5665}
 ICYGUI_CONTRACT_USER=icygui

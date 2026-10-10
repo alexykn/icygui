@@ -91,6 +91,12 @@ impl Engine {
         self.watchdog
             .update(&self.store, &changes.objects, changes.all);
         let late_changed = self.watchdog.take_changed();
+        if late_changed {
+            // The alerts quote how many checks are late: worked out again
+            // from the late flags this snapshot carries, so the health
+            // page's alert and its late tile say the same number.
+            self.assess_trouble(Instant::now());
+        }
         let reconfigured = std::mem::take(&mut self.dashboards_configured);
         if reconfigured {
             dashboards.configure(&self.spec.environment, self.spec.hide_handled);

@@ -5,7 +5,8 @@ name: Demo cluster
 # 3 000 services): the contract tests (ic-api) on its master-01, and the
 # engine's cluster tests (ic-core), which stop and start its nodes through
 # demo/scenario.sh. Nightly, on demand, and for changes to the cluster, the
-# fixtures, the API client, the engine or the lock file.
+# fixtures, the API client, the engine and every crate it builds on
+# (ic-config, ic-filter, ic-model, ic-rules), or the lock file.
 #
 # The whole cluster fits a standard runner (measured at about 0.3 GB of
 # memory after the start, 0.5 GB after hours, and a tenth of one core at
@@ -21,7 +22,11 @@ on:
       - "demo/**"
       - "contract/**"
       - "crates/ic-api/**"
+      - "crates/ic-config/**"
       - "crates/ic-core/**"
+      - "crates/ic-filter/**"
+      - "crates/ic-model/**"
+      - "crates/ic-rules/**"
       - "Cargo.lock"
       - ".github/workflows/cluster.yml"
   pull_request:
@@ -29,7 +34,11 @@ on:
       - "demo/**"
       - "contract/**"
       - "crates/ic-api/**"
+      - "crates/ic-config/**"
       - "crates/ic-core/**"
+      - "crates/ic-filter/**"
+      - "crates/ic-model/**"
+      - "crates/ic-rules/**"
       - "Cargo.lock"
       - ".github/workflows/cluster.yml"
   workflow_dispatch:

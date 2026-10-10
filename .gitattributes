@@ -1,0 +1,9 @@
+# Scripts run inside Linux containers and on Linux/macOS shells: keep LF
+# line endings on every checkout (Git for Windows would otherwise turn them
+# into CRLF with core.autocrlf=true, and `sh node.sh` fails in the demo's
+# containers).
+*.sh text eol=lf
+*.py text eol=lf
+demo/** text eol=lf
+contract/icinga/** text eol=lf
+contract/scale/** text eol=lf

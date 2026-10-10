@@ -212,14 +212,26 @@ async fn a_satellite_is_a_labelled_partial_view_until_the_master_is_back() {
 
     // Meanwhile the engine asks the master again, gently: with growing
     // waits (40 ms doubling to 160 ms here), never in a burst.
-    tokio::time::sleep(Duration::from_millis(900)).await;
-    let probes = master
-        .control()
-        .requests()
-        .iter()
-        .filter(|request| request.path == "/v1")
-        .count();
-    assert!((3..=20).contains(&probes), "{probes} probes in 0.9 s");
+    let probing = std::time::Instant::now();
+    let probes = || {
+        master
+            .control()
+            .requests()
+            .iter()
+            .filter(|request| request.path == "/v1")
+            .count()
+    };
+    // At least three (waited for: a busy runner is slower), and never a
+    // burst: no more than the growing waits allow in the time it took.
+    assert!(crate::support::wait_until(|| probes() >= 3).await);
+    tokio::time::sleep(Duration::from_millis(900).saturating_sub(probing.elapsed())).await;
+    let elapsed = probing.elapsed();
+    let most = 20 + usize::try_from(elapsed.as_millis() / 80).unwrap_or(usize::MAX);
+    assert!(
+        (3..=most).contains(&probes()),
+        "{} probes in {elapsed:?}",
+        probes()
+    );
 
     // The master answers again: the engine switches back to it and
     // reloads; the snapshot says partial until the whole cluster is in.

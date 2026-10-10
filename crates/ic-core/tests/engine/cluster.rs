@@ -199,6 +199,7 @@ impl Cluster {
             tuning: Tuning {
                 status_interval: Duration::from_secs(3),
                 trouble_grace: Duration::from_secs(5),
+                seed: Some(crate::support::SEED),
                 ..Tuning::default()
             },
             general: ic_config::General::default(),

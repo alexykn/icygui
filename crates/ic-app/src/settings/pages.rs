@@ -295,6 +295,11 @@ fn connection_words(connection: &ConnectionStatus, hosts: &[String], now: Timest
                 format!("connected to {node}{quiet}")
             }
         }
+        // No live data (or the engine silent): the footer's `no data 3m`
+        // is no event's age.
+        Health::Stale if connection.no_data_for(now).is_some() => {
+            connection.short_state().to_owned()
+        }
         Health::Stale => match connection.label_parts(now).1 {
             Some(age) => format!("stale, last event {age} ago"),
             None => "stale".to_owned(),

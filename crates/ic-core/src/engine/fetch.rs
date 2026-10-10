@@ -14,7 +14,10 @@
 //! user with filtered `objects/query/*` permissions receives the events of
 //! every object (`events/*` can't be filtered) but may query only some, and
 //! isolating each hidden name would cost about two requests per name. A
-//! batch Icinga can't answer as a whole counts as missing.
+//! batch Icinga can't answer as a whole counts as missing. An event about
+//! an object whose lookup is in flight waits for its answer: asked for
+//! again only if the lookup found it (the event may be newer than the
+//! answer), not if Icinga doesn't know it.
 //!
 //! **Priorities** (PERF-09): full fetches (hydration of the rows on
 //! screen, a notified object's prefetch) go first in every round, then
@@ -117,6 +120,9 @@ pub(super) struct FetchQueue {
     missing_ttl: Duration,
     /// Unknown objects seen while a load ran: re-queried after it.
     deferred: BTreeSet<ObjectKey>,
+    /// Unknown objects events mentioned while their own lookup was in
+    /// flight: re-queried after it if it found them, else not again.
+    recheck: BTreeSet<ObjectKey>,
     /// `Notification` objects to re-read, by full name.
     notifications: BTreeSet<String>,
     /// Kinds the API user may not query: never asked for.
@@ -207,6 +213,7 @@ impl FetchQueue {
             missing: HashMap::new(),
             missing_ttl,
             deferred: BTreeSet::new(),
+            recheck: BTreeSet::new(),
             notifications: BTreeSet::new(),
             refused: Refused::default(),
         }
@@ -262,6 +269,11 @@ impl FetchQueue {
     pub(super) fn mark_unknown(&mut self, key: ObjectKey, now: Instant) -> bool {
         if self.refused.covers(&key) || self.recently_missing(&key, now) {
             return false;
+        }
+        if self.flying.contains(&key) {
+            // Its lookup is under way: decided by the answer.
+            self.recheck.insert(key);
+            return true;
         }
         if !self.full.contains(&key) && !self.pending.contains(&key) {
             self.unknown.insert(key);
@@ -337,6 +349,7 @@ impl FetchQueue {
         self.full.remove(key);
         self.background.remove(key);
         self.pending.remove(key);
+        self.recheck.remove(key);
     }
 
     /// The objects waiting for or in a full fetch.
@@ -503,8 +516,17 @@ impl FetchQueue {
     /// A round finished; `missing` weren't found. Each waits before it is
     /// asked for again for events: `missing_ttl` the first time, twice as
     /// long each time it comes back missing (up to [`MAX_MISSING_TTL`]).
-    /// A name not asked for during a whole further wait starts over.
+    /// A name not asked for during a whole further wait starts over. The
+    /// unknown objects events mentioned during the round are re-queried if
+    /// it found them.
     pub(super) fn finished(&mut self, missing: &[ObjectKey], now: Instant) {
+        for key in std::mem::take(&mut self.recheck) {
+            if !missing.contains(&key) && !self.full.contains(&key) {
+                self.unknown.remove(&key);
+                self.pending.insert(key);
+                self.touch(now);
+            }
+        }
         self.in_flight = false;
         self.flying.clear();
         self.flying_full.clear();
@@ -540,6 +562,7 @@ impl FetchQueue {
         self.urgent = false;
         self.in_flight = false;
         self.deferred.clear();
+        self.recheck.clear();
         self.notifications.clear();
     }
 }
@@ -677,6 +700,34 @@ mod tests {
         queue.finished(std::slice::from_ref(&a), now);
         queue.mark(a.clone(), now + Duration::from_mins(11));
         assert!(queue.due(Duration::ZERO).is_some());
+    }
+
+    /// An event about an object whose lookup is in flight costs no second
+    /// lookup when Icinga doesn't know it, and one when the lookup found it
+    /// (the event may be newer than the answer).
+    #[test]
+    fn an_event_during_a_lookup_waits_for_its_answer() {
+        let now = Instant::now();
+        let mut queue = FetchQueue::new(Duration::from_mins(10));
+        let ghost = ObjectKey::service("h", "ghost");
+        assert!(queue.mark_unknown(ghost.clone(), now));
+        assert_eq!(queue.take(now).unknown, std::slice::from_ref(&ghost));
+        // A second event while the lookup runs.
+        assert!(queue.mark_unknown(ghost.clone(), now));
+        queue.finished(std::slice::from_ref(&ghost), now);
+        assert_eq!(queue.due(Duration::ZERO), None, "not found: not again");
+
+        // Found: asked for again, by name.
+        let new = ObjectKey::service("h", "new");
+        queue.mark_unknown(new.clone(), now);
+        assert_eq!(queue.take(now).unknown, std::slice::from_ref(&new));
+        queue.mark_unknown(new.clone(), now);
+        queue.finished(&[], now);
+        let round = queue.take(now);
+        assert_eq!(round.keys, [new]);
+        assert!(round.unknown.is_empty());
+        queue.finished(&[], now);
+        assert_eq!(queue.due(Duration::ZERO), None);
     }
 
     #[test]

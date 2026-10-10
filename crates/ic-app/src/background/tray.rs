@@ -1,7 +1,9 @@
 //! The tray / menu-bar icon (BG-01, BG-02, REL-07, A4) through
 //! `ic_platform::tray`: the logo's mark tinted with the worst unhandled
 //! state of every environment (they all run; grey while none is
-//! connected), a tooltip with each environment, its connection and its
+//! connected), or the blind look while one can't see (its node red while a
+//! connection is lost, yellow while connected but silent: the footer
+//! dot's tone), a tooltip with each environment, its connection and its
 //! counts, and the menu: open, pause notifications in every environment
 //! (30 minutes, an hour, until 08:00) or resume, switch environment,
 //! quit.
@@ -20,6 +22,7 @@ use ic_model::{CheckableState, Timestamp};
 use ic_platform::tray::{Tray, TrayCommand, TrayLook, TrayTone};
 
 use crate::app_state::AppState;
+use crate::app_state::connection::Tone;
 use crate::notifications::when;
 
 /// What the tray shows.
@@ -35,10 +38,13 @@ pub(crate) struct TrayView {
     /// What each one's menu line says after its name, `(id, status)`:
     /// `live`, `no data 3m`, `connecting` (16e).
     pub(crate) statuses: Vec<(String, String)>,
-    /// An environment has had no live data for a while (or its engine
-    /// stopped answering): the icon takes the blind look, whatever the
-    /// states say, since they may be outdated (no false green).
-    pub(crate) blind: bool,
+    /// An environment can't see (its connection is lost or refused, or
+    /// connected but nothing arrives, or its engine stopped answering):
+    /// the icon takes the blind look, whatever the states say, since they
+    /// may be outdated (no false green). Its node is in the worst such
+    /// environment's tone, as its footer dot: red from the moment a
+    /// connection is lost until it recovers, else yellow (rule 5).
+    pub(crate) blind: Option<TrayTone>,
     /// The active one.
     pub(crate) active: Option<String>,
     /// Until when notifications are paused, as the menu says it.
@@ -61,7 +67,7 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
     let mut worst: Option<Option<CheckableState>> = None;
     let mut lines = Vec::new();
     let mut statuses = Vec::new();
-    let mut blind = false;
+    let mut blind: Option<TrayTone> = None;
     for environment in environments {
         let demo = if state.is_demo_environment_id(&environment.id) {
             " (demo)"
@@ -76,8 +82,13 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
         };
         let connection = slot.connection();
         let connected = connection.is_connected();
-        let no_data = connection.no_data_for(now);
-        blind |= no_data.is_some();
+        // The footer dot's tone, the one rule (a lost connection is red
+        // at once, not grey for two minutes and yellow after).
+        blind = match (blind, connection.health(now).tone()) {
+            (_, Some(Tone::Critical)) | (Some(TrayTone::Critical), _) => Some(TrayTone::Critical),
+            (_, Some(Tone::Warning)) => Some(TrayTone::Warning),
+            (blind, None) => blind,
+        };
         statuses.push((environment.id.clone(), menu_status(connection, now)));
         let overall = &slot.snapshot().overall;
         if connected {
@@ -318,10 +329,9 @@ fn sync(state: &Entity<AppState>, cx: &mut App) {
     if shown.view.as_ref() == Some(&view) {
         return;
     }
-    let look = if view.blind {
-        TrayLook::Blind
-    } else {
-        TrayLook::State(view.tone)
+    let look = match view.blind {
+        Some(node) => TrayLook::Blind(node),
+        None => TrayLook::State(view.tone),
     };
     shown.tray.set_look(look, &view.tooltip);
     shown
@@ -500,7 +510,7 @@ mod tests {
         let mut state = AppState::fixture(now());
         let id = state.active_environment_id().unwrap().to_owned();
         let view = tray_view(&state, now());
-        assert!(!view.blind);
+        assert_eq!(view.blind, None);
         assert_eq!(view.statuses, [(id.clone(), "live".to_owned())]);
         // The engine says live data stopped 3 minutes ago: the icon claims
         // no state (its states may be outdated), the menu says how long.
@@ -516,11 +526,47 @@ mod tests {
             ..(**state.snapshot()).clone()
         }));
         let view = tray_view(&state, now());
-        assert!(view.blind);
+        // Connected, but nothing arrives: the node yellow.
+        assert_eq!(view.blind, Some(TrayTone::Warning));
         assert_eq!(view.statuses, [(id, "no data 3m".to_owned())]);
         assert!(view.tooltip.contains("no live data"), "{}", view.tooltip);
         assert_eq!(menu_age(Duration::from_secs(40)), "no data");
         assert_eq!(menu_age(Duration::from_mins(61)), "no data 1h");
+    }
+
+    /// Rule 5: a lost connection takes the blind look with a red node at
+    /// once (not grey for two minutes, then yellow), and keeps it once no
+    /// live data is raised; recovered, the state colour is back.
+    #[test]
+    fn a_lost_connection_is_red_in_the_tray_until_it_recovers() {
+        let mut state = AppState::fixture(now());
+        let id = state.active_environment_id().unwrap().to_owned();
+        assert_eq!(tray_view(&state, now()).blind, None);
+        state.apply(ic_core::CoreEvent::Connection(
+            ConnectionState::Reconnecting {
+                error: "connection reset".to_owned(),
+                attempt: 1,
+                retry_at: Timestamp::from_unix_seconds(now().as_unix_seconds() + 5.0),
+                untrusted: None,
+            },
+        ));
+        let view = tray_view(&state, now());
+        assert_eq!(view.blind, Some(TrayTone::Critical));
+        assert_eq!(view.statuses, [(id.clone(), "reconnecting".to_owned())]);
+        let since = Timestamp::from_unix_seconds(now().as_unix_seconds() - 185.0);
+        state.set_snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+            trouble: std::sync::Arc::new(ic_core::trouble::Trouble {
+                alerts: Vec::new(),
+                blind: Some(ic_core::trouble::Blind {
+                    since,
+                    reason: "connection lost".to_owned(),
+                }),
+            }),
+            ..(**state.snapshot()).clone()
+        }));
+        let view = tray_view(&state, now());
+        assert_eq!(view.blind, Some(TrayTone::Critical), "not calmer later");
+        assert_eq!(view.statuses, [(id, "no data 3m".to_owned())]);
     }
 
     /// No false green: from 30 s without events (the footer yellow) until

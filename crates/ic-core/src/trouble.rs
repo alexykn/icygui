@@ -6,8 +6,10 @@
 //!   more than [`GRACE`] (connection lost, refused credentials, a stalled
 //!   stream, a heartbeat the stream doesn't deliver) is *blind*
 //!   ([`Trouble::blind`]): one notification naming the environment, the
-//!   reason and since when, one when it is live again; every page shows
-//!   the banner, the footer `no data 3m`, the tray its blind look.
+//!   reason and since when (critical while the connection is lost, a
+//!   warning while connected but silent), one when it is live again;
+//!   every page shows the banner, the footer `no data 3m`, the tray its
+//!   blind look.
 //! - **Icinga health alerts** (E), from data the health page already has
 //!   (no new periodic requests): an endpoint disconnected, a zone without a
 //!   connected endpoint, no checks running, the checker or notification

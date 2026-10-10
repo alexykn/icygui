@@ -141,10 +141,16 @@ impl Clock for FakeClock {
 /// The fake clock's time.
 pub(crate) const NOW: f64 = 1_800_000_000.0;
 
+/// The seed of the engines' timer jitter in tests: the random phases
+/// and spreads (and the backoff's jitter) repeat from run to run.
+pub(crate) const SEED: u64 = 42;
+
 /// Fast timing for tests. Every reconnect reloads (the gap counts as long
-/// from the start); `gentle.rs` tests the production rule.
+/// from the start); `gentle.rs` tests the production rule. The timers'
+/// jitter is seeded ([`SEED`]), so a run repeats.
 pub(crate) fn tuning() -> Tuning {
     Tuning {
+        seed: Some(SEED),
         backoff_initial: Duration::from_millis(40),
         backoff_max: Duration::from_millis(320),
         publish_interval: Duration::from_millis(20),
@@ -158,16 +164,26 @@ pub(crate) fn tuning() -> Tuning {
     }
 }
 
-/// Polls `condition` every 10 ms for at most ten seconds; whether it
-/// held.
+/// Polls `condition` every 10 ms for at most [`WAIT_FOR`] by the clock;
+/// whether it held. For what only the mock sees (the requests it got);
+/// what the engine shows is waited for on its own events
+/// ([`Engine::snapshot`], [`Engine::wait_for`]), which nothing paced or
+/// timed can outrun.
 pub(crate) async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
-    for _ in 0..1_000 {
+    // Bounded by the clock, not by a number of polls: on a busy runner
+    // (the tests run side by side, CI has two cores) paced or timed work
+    // takes longer, and a thousand short sleeps took ten seconds only on
+    // an idle machine.
+    let deadline = std::time::Instant::now() + WAIT_FOR;
+    loop {
         if condition() {
             return true;
         }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    false
 }
 
 /// Starts a mock with `config`.

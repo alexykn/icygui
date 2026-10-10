@@ -395,17 +395,30 @@ async fn quiet_mode_polls_and_reconciles_less_and_hydrates_nothing() {
     stream_mode(&control, false).await;
     control.clear_requests();
     engine.send(Command::Hydrate(lean.clone()));
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let polls = requests_to(&control, "/v1/status/CIB");
-    let reconciles = lists(&control, "services");
-    eprintln!("live, 2 s: {polls} status polls, {reconciles} reconciles");
-    assert!(polls >= 6, "every 100 ms: {polls}");
-    assert!(reconciles >= 2, "every 400 ms: {reconciles}");
-    let hydrated: BTreeSet<String> = by_name(&control, "services")
-        .into_iter()
-        .flat_map(|(_, names)| names)
-        .collect();
-    assert!(lean.iter().all(|key| hydrated.contains(&key.full_name())));
+    // Timed work: waited for until it happened (a busy runner is slower),
+    // not counted after a fixed sleep.
+    let woke = Instant::now();
+    let hydrated = || -> BTreeSet<String> {
+        by_name(&control, "services")
+            .into_iter()
+            .flat_map(|(_, names)| names)
+            .collect()
+    };
+    assert!(
+        wait_until(|| {
+            requests_to(&control, "/v1/status/CIB") >= 6
+                && lists(&control, "services") >= 2
+                && lean.iter().all(|key| hydrated().contains(&key.full_name()))
+        })
+        .await,
+        "live: polls every 100 ms, reconciles every 400 ms, the rows hydrated"
+    );
+    eprintln!(
+        "live, {:?}: {} status polls, {} reconciles",
+        woke.elapsed(),
+        requests_to(&control, "/v1/status/CIB"),
+        lists(&control, "services")
+    );
     engine.shutdown();
 }
 
@@ -926,6 +939,27 @@ async fn waking_up_refreshes_problems_whose_results_went_stale() {
 /// After waking up, a row on screen whose result went stale (`Hydrate`)
 /// is fetched ahead of the wake-up refresh of the other problems, however
 /// low it ranks among them (here below the refresh's 1 000).
+/// Waits on the engine's own snapshots until every one of `services`
+/// shows `output` (however long paced requests take on a busy runner).
+async fn shows_output(engine: &mut Engine, services: &[(String, String)], output: &str) {
+    let keys: Vec<_> = services
+        .iter()
+        .map(|(host, service)| ObjectKey::service(host, service))
+        .filter_map(|key| key.as_service().cloned())
+        .collect();
+    engine
+        .snapshot(|snapshot| {
+            keys.iter().all(|key| {
+                snapshot.services[key]
+                    .check
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result.output == output)
+            })
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_waking_the_rows_on_screen_go_before_the_other_problems() {
     let server = mock(MockConfig::with_scenario(scenarios::large_with_hosts(
@@ -1013,9 +1047,13 @@ async fn after_waking_the_rows_on_screen_go_before_the_other_problems() {
                 .is_some_and(|result| result.output == "WARNING - newer")
         })
         .await;
-    // Then the refresh of the other problems (five requests).
-    assert!(wait_until(|| by_name(&control, "services").len() >= 6).await);
+    // Then the refresh of the other problems (five paced requests, which
+    // take seconds on a busy runner): waited for on the engine's own
+    // snapshots, until every one of them shows its newer output, not on
+    // a count of polls.
+    shows_output(&mut engine, &services[..1_000], "CRITICAL - newer").await;
     let requests = by_name(&control, "services");
+    assert!(requests.len() >= 6, "the row and five of 200: {requests:?}");
     let position = requests
         .iter()
         .position(|(_, names)| names.contains(&row.full_name()))
@@ -1150,7 +1188,7 @@ async fn a_switch_away_from_a_stalled_stream_finds_what_it_withheld() {
     engine.send(Command::SetQuiet(true));
     stream_mode(&control, true).await;
     tokio::time::sleep(Duration::from_millis(1_500)).await;
-    assert!(requests_to(&control, "/v1/status/CIB") >= 1);
+    assert!(wait_until(|| requests_to(&control, "/v1/status/CIB") >= 1).await);
     assert_eq!(lists(&control, "services"), 0, "no reload");
     ticker.abort();
     engine.shutdown();

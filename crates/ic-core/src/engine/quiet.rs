@@ -259,18 +259,19 @@ fn line_hash(line: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// How long a background start waits before its first load: random, up to
-/// `per_thousand` per 1 000 services (`max` when the size couldn't be
-/// read at all), at most `max`.
+/// How long a background start waits before its first load: random (from
+/// `jitter`), up to `per_thousand` per 1 000 services (`max` when the size
+/// couldn't be read at all), at most `max`.
 pub(super) fn start_delay(
     services: Option<u32>,
     per_thousand: Duration,
     max: Duration,
+    jitter: &mut crate::jitter::Jitter,
 ) -> Duration {
     let ceiling = services.map_or(max, |services| {
         per_thousand.mul_f64(f64::from(services) / 1_000.0).min(max)
     });
-    ceiling.mul_f64(fastrand::f64())
+    jitter.up_to(ceiling)
 }
 
 /// The installation's size for a background start's delay: Icinga's
@@ -349,7 +350,7 @@ impl Engine {
             // The reconcile moves out to the quiet interval; the status
             // poll after the next one follows the quiet pace by itself.
             if self.reconcile_at.is_some() {
-                self.schedule_reconcile();
+                self.schedule_reconcile(super::sync::Cadence::Next);
             }
         } else {
             let interval = self.tuning.status_interval;
@@ -488,7 +489,7 @@ impl Engine {
         {
             reader.abort();
         }
-        let wait = self.switch_backoff.fail();
+        let wait = self.switch_backoff.fail(self.jitter.unit());
         tracing::warn!(%why, ?wait, "couldn't switch the event stream; trying again later");
         self.switch_retry_at = Some(Instant::now() + wait);
     }
@@ -1007,6 +1008,7 @@ impl Engine {
             services,
             self.tuning.start_delay_per_thousand,
             self.tuning.start_delay_max,
+            &mut self.jitter,
         );
         tracing::info!(
             ?services,
@@ -1302,17 +1304,18 @@ mod tests {
     fn start_delays_scale_with_the_installation() {
         let per = Duration::from_secs(3);
         let max = Duration::from_secs(90);
+        let jitter = &mut crate::jitter::Jitter::new(Some(5));
         for _ in 0..1_000 {
-            assert!(start_delay(Some(200), per, max) < Duration::from_millis(600));
-            assert!(start_delay(Some(3_000), per, max) < Duration::from_secs(9));
-            assert!(start_delay(Some(30_000), per, max) < Duration::from_secs(90));
-            assert!(start_delay(Some(300_000), per, max) < Duration::from_secs(90));
-            assert!(start_delay(None, per, max) < Duration::from_secs(90));
+            assert!(start_delay(Some(200), per, max, jitter) < Duration::from_millis(600));
+            assert!(start_delay(Some(3_000), per, max, jitter) < Duration::from_secs(9));
+            assert!(start_delay(Some(30_000), per, max, jitter) < Duration::from_secs(90));
+            assert!(start_delay(Some(300_000), per, max, jitter) < Duration::from_secs(90));
+            assert!(start_delay(None, per, max, jitter) < Duration::from_secs(90));
         }
-        assert_eq!(start_delay(Some(0), per, max), Duration::ZERO);
+        assert_eq!(start_delay(Some(0), per, max, jitter), Duration::ZERO);
         // Spread over the whole range.
         let samples: Vec<Duration> = (0..1_000)
-            .map(|_| start_delay(Some(30_000), per, max))
+            .map(|_| start_delay(Some(30_000), per, max, jitter))
             .collect();
         assert!(samples.iter().any(|delay| *delay > Duration::from_secs(80)));
         assert!(samples.iter().any(|delay| *delay < Duration::from_secs(10)));

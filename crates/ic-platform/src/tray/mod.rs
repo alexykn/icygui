@@ -98,15 +98,17 @@ impl TrayTone {
 }
 
 /// What the tray icon shows: a state's tint, or the blind look (a dashed
-/// grey orbit around a hollow core, the node yellow) while an
-/// environment has had no live data for a while: its states may be
-/// outdated, so the icon claims none of them.
+/// grey orbit around a hollow core, the node in the given tone) while an
+/// environment can't see: its states may be outdated, so the icon claims
+/// none of them. The node is red while a connection is lost (from its
+/// first moment until it recovers), yellow while one is connected but
+/// nothing arrives (no false green rule 5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TrayLook {
     /// Tinted with this tone (`None`: grey).
     State(Option<TrayTone>),
-    /// No live data.
-    Blind,
+    /// No live data: the node in this tone (critical or warning).
+    Blind(TrayTone),
 }
 
 /// What the user chose in the tray.

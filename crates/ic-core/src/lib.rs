@@ -50,6 +50,7 @@ mod event_log;
 mod handle;
 pub mod health;
 pub mod heartbeat;
+mod jitter;
 pub mod ports;
 mod probe;
 pub mod snapshot;

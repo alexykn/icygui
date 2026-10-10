@@ -15,7 +15,10 @@
 //! *No live data* is the engine's own: it begins when a session fails
 //! (or, for a stalled stream, when the last line came) and ends when one
 //! goes live again; after [`crate::trouble::GRACE`] the environment is *blind*. A beat the
-//! stream doesn't deliver even after a reconnect makes it blind too.
+//! stream doesn't deliver even after a reconnect makes it blind too. Its
+//! notification is critical while the connection is lost (no false green
+//! rule 5: an outage never looks calmer the longer it lasts), a warning
+//! for a beat the connected stream doesn't deliver.
 //! While the engine has no live connection, the other alerts stay as they
 //! are: its data isn't current.
 
@@ -319,6 +322,10 @@ impl Engine {
                 )
             })
             .min_by(|a, b| a.0.as_unix_seconds().total_cmp(&b.0.as_unix_seconds()));
+        // A session that failed and hasn't come back is a lost connection
+        // (critical, no false green rule 5); a beat the connected stream
+        // doesn't deliver is connected but silent (a warning).
+        let lost = self.trouble.dark.is_some();
         let dark = self
             .trouble
             .dark
@@ -353,7 +360,8 @@ impl Engine {
                     let id = format!("trouble:blind:{}", millis(since));
                     let title = format!("no live data from {}", self.spec.environment.name);
                     let body = format!("since {} · {reason}", clock_time(since));
-                    self.trouble_notify(id.clone(), title, body, Tone::Warning);
+                    let tone = if lost { Tone::Critical } else { Tone::Warning };
+                    self.trouble_notify(id.clone(), title, body, tone);
                     self.trouble.blind = Some((id, Blind { since, reason }));
                     self.trouble.news = true;
                 }

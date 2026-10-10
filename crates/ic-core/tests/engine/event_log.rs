@@ -224,8 +224,11 @@ async fn the_log_is_pruned_every_interval() {
     fence(&mut engine, &control, "stg-web-01", "http").await;
     assert_eq!(engine.history(None).await.len(), 2);
     engine.clock.advance(Duration::from_mins(61));
+    // Pruned within a few intervals: waited for by the clock (a busy
+    // runner is slower), not for a number of looks.
+    let deadline = std::time::Instant::now() + crate::support::WAIT_FOR;
     let mut empty = false;
-    for _ in 0..200 {
+    while std::time::Instant::now() < deadline {
         if engine.history(None).await.is_empty() {
             empty = true;
             break;

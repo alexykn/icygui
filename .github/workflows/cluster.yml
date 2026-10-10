@@ -11,7 +11,12 @@ name: Demo cluster
 # The whole cluster fits a standard runner (measured at about 0.3 GB of
 # memory after the start, 0.5 GB after hours, and a tenth of one core at
 # idle: docs/demo.md), so there is no smaller CI profile. Starting it takes
-# about 90 s, the cluster tests about 5 minutes.
+# about 90 s on a 2-core runner, the cluster tests about 5 minutes. A start
+# that fails explains itself: demo/up.sh stops at once when a node exits or
+# the seed fails, says every minute what each node still lacks, and prints
+# `docker compose ps`, every node's health check and last log lines and the
+# seed's log, also as annotations on the job (readable through the API when
+# the job's log isn't).
 
 on:
   schedule:
@@ -81,11 +86,13 @@ jobs:
           cargo test -p ic-core --test engine --locked --no-run
 
       - name: Start the demo cluster
+        timeout-minutes: 25
         run: |
           set -euo pipefail
-          # Waits until every node is healthy (connected and seeded) and
-          # prints the tests' variables (demo values, not secrets).
-          vars=$(ICYGUI_DEMO_CA="$RUNNER_TEMP/demo-ca.crt" demo/up.sh)
+          # Waits until every node is healthy (connected and seeded), at
+          # most 20 minutes, and prints the tests' variables (demo values,
+          # not secrets); on a failure it says why (see the top).
+          vars=$(ICYGUI_DEMO_CA="$RUNNER_TEMP/demo-ca.crt" ICYGUI_DEMO_TIMEOUT=1200 demo/up.sh)
           if ! grep -q '^ICYGUI_CLUSTER_SCENARIO=' <<<"$vars"; then
             echo "::error::demo/up.sh printed no ICYGUI_CLUSTER_SCENARIO"
             exit 1
@@ -106,7 +113,12 @@ jobs:
         if: failure()
         run: |
           docker compose -f demo/docker-compose.yml ps -a
-          docker compose -f demo/docker-compose.yml logs --tail 80
+          for node in master-01 master-02 sat-ams-01 sat-fra-01 sat-fra-02; do
+            echo "::group::$node"
+            docker inspect -f '{{json .State.Health}}' "icygui-demo-$node-1" || true
+            docker compose -f demo/docker-compose.yml logs --no-color --tail 200 "$node" || true
+            echo "::endgroup::"
+          done
           docker compose -f demo/docker-compose.yml exec -T master-01 cat /var/log/icinga2/seed.log || true
 
       - name: Stop the demo cluster

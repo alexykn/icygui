@@ -12,7 +12,8 @@
 //! listener less than a poll interval ago, so toggling the page never
 //! sends more than the polls would. Otherwise the trouble alerts still
 //! need them (a feature turned off, a growing relay queue): both come with
-//! a status poll every [`TROUBLE_INTERVAL`] (PLAN.md §4.2 E2). Each
+//! a status poll every [`TROUBLE_INTERVAL`] (PLAN.md §4.2 E2), ±20 % like
+//! every periodic request (no synchronised clients, [`crate::jitter`]). Each
 //! request takes a token from the request budget. A refused one
 //! (`Forbidden`) isn't asked for again in the session, nor is a feature
 //! type Icinga refuses or doesn't know (an Icinga before 2.13 has no
@@ -62,6 +63,10 @@ pub(super) struct Asked {
     listener_at: Option<Instant>,
     /// When the features were last asked for (`None`: due).
     pub(super) features_at: Option<Instant>,
+    /// When the listener status and the features are due next without the
+    /// page (each interval ±20 %, [`crate::jitter`]).
+    listener_due: Option<Instant>,
+    features_due: Option<Instant>,
     /// Icinga refused them: not asked for again in the session.
     listener_refused: bool,
     features_refused: bool,
@@ -140,27 +145,27 @@ impl Engine {
             return None;
         }
         let watched = self.health_watch && !self.quiet();
+        let listener_wait = self.jitter.spread(TROUBLE_INTERVAL);
+        let features_wait = self.jitter.spread(FEATURES_INTERVAL);
         let conn = self.conn.as_mut()?;
         conn.next_status?;
+        let due = |at: Option<Instant>, next: Option<Instant>| {
+            at.is_none() || next.is_none_or(|next| now >= next)
+        };
         let listener = !conn.health.listener_refused
-            && (watched
-                || conn
-                    .health
-                    .listener_at
-                    .is_none_or(|at| now.saturating_duration_since(at) >= TROUBLE_INTERVAL));
-        let features = !conn.health.features_refused
-            && conn
-                .health
-                .features_at
-                .is_none_or(|at| now.saturating_duration_since(at) >= FEATURES_INTERVAL);
+            && (watched || due(conn.health.listener_at, conn.health.listener_due));
+        let features =
+            !conn.health.features_refused && due(conn.health.features_at, conn.health.features_due);
         if !listener && !features {
             return None;
         }
         if listener {
             conn.health.listener_at = Some(now);
+            conn.health.listener_due = Some(now + listener_wait);
         }
         if features {
             conn.health.features_at = Some(now);
+            conn.health.features_due = Some(now + features_wait);
         }
         let skip = conn.health.refused_types.clone();
         Some(Ask {

@@ -12,7 +12,9 @@ text. So a restart keeps what is there, and expired downtimes come back
 relative to the new start.
 
 Usage: seed.py [--marker FILE] [--feed SECONDS]
-  --marker  touched once the seed is done (the health check waits for it)
+  --marker  written once the seed is done (the health check waits for
+            it); FILE.failed instead if it failed (the health check says
+            so, and demo/up.sh stops waiting)
   --feed    then keeps going as the outside system that feeds the passive
             checks: their results again every SECONDS, so they stay fresh
             (Icinga, and icygui with it, calls a passive check late after
@@ -25,6 +27,7 @@ import os
 import ssl
 import sys
 import time
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -39,7 +42,30 @@ def log(message):
     print(time.strftime("%H:%M:%S"), message, flush=True)
 
 
+# Transient failures of a call (Icinga busy starting or reloading on a slow
+# machine): retried this often, a few seconds apart, before they count.
+RETRIES = 6
+
+
 def call(method, path, body=None):
+    """One API call; connection errors and 5xx are retried (Icinga may be
+    busy starting or reloading), the last error raised."""
+    for attempt in range(1, RETRIES + 1):
+        try:
+            status, answer = call_once(method, path, body)
+        except (OSError, http.client.HTTPException) as error:
+            if attempt == RETRIES:
+                raise
+            log(f"{method} {path}: {error!r}; retrying")
+        else:
+            if status < 500 or attempt == RETRIES:
+                return status, answer
+            log(f"{method} {path}: {status}; retrying")
+        time.sleep(min(2 * attempt, 10))
+    raise AssertionError("unreachable")
+
+
+def call_once(method, path, body=None):
     connection = http.client.HTTPSConnection("master-01", 5665, context=CONTEXT, timeout=60)
     headers = {"Authorization": AUTH, "Accept": "application/json"}
     if body is not None:
@@ -57,18 +83,34 @@ def call(method, path, body=None):
     return response.status, answer
 
 
+# All the seed's waits together (the API, the cluster, the first checks,
+# the problems to acknowledge) end within this, so the seed is done well
+# before demo/up.sh gives up (20 minutes by default): a slow 2-core runner
+# takes about two minutes for all of them; one that never finishes (a
+# check that never runs) is logged and the seed goes on with what it has.
+BUDGET = 600
+STARTED = time.time()
+
+
 def wait(what, condition, seconds):
-    deadline = time.time() + seconds
+    """Waits for `condition`, saying what it waits for (the health check's
+    output and seed.log show it), at most `seconds` and never past the
+    seed's [`BUDGET`]."""
+    seconds = max(5, min(seconds, STARTED + BUDGET - time.time()))
+    log(f"waiting for {what} (at most {seconds:.0f} s)")
+    started = time.time()
+    deadline = started + seconds
     while True:
         try:
             if condition():
+                log(f"{what}: after {time.time() - started:.0f} s")
                 return True
-        except (OSError, http.client.HTTPException, KeyError, IndexError) as error:
+        except (OSError, http.client.HTTPException, KeyError, IndexError, ValueError) as error:
             last = error
         else:
             last = None
         if time.time() > deadline:
-            log(f"gave up waiting for {what}" + (f" ({last})" if last else ""))
+            log(f"gave up waiting for {what}" + (f" ({last!r})" if last else ""))
             return False
         time.sleep(5)
 
@@ -127,10 +169,12 @@ def existing(kind):
 
 
 def main():
-    if not wait("the API", lambda: call("GET", "/v1")[0] == 200, 300):
+    # Within the BUDGET: the cluster usually connects within a minute and
+    # checks everything within its longest check interval (5 minutes).
+    if not wait("the API", lambda: call_once("GET", "/v1")[0] == 200, 300):
         return 1
-    wait("the cluster to connect", connected, 600)
-    wait("every object's first check", lambda: unchecked() == 0, 900)
+    wait("the cluster to connect", connected, 300)
+    wait("every object's first check", lambda: unchecked() == 0, 420)
     seed = generate.SEED
 
     for host, service, state, output, perfdata in seed["results"]:
@@ -198,13 +242,31 @@ def feed(seconds):
                 log(f"feeding {host}!{service}: {error}")
 
 
+def seed_until_done(attempts=3):
+    """`main`, again after an error that the retries of each call didn't
+    cover (a reload in the middle): it only adds what is missing. An error
+    is logged in full, so the health check's `seeding` says why."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return main()
+        except Exception:  # noqa: BLE001 - logged, then tried again
+            log(f"seeding failed (attempt {attempt} of {attempts}):\n{traceback.format_exc()}")
+            time.sleep(10)
+    return 1
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     marker = args[args.index("--marker") + 1] if "--marker" in args else None
     every = float(args[args.index("--feed") + 1]) if "--feed" in args else None
-    status = main()
-    if status == 0 and marker:
-        open(marker, "w").close()
+    status = seed_until_done()
+    log("seeded" if status == 0 else "seeding failed")
+    if marker:
+        # The health check reads it: `ok`, or that the seed failed (so a
+        # start that can't succeed says so at once instead of waiting out
+        # demo/up.sh's whole timeout).
+        with open(marker if status == 0 else marker + ".failed", "w") as out:
+            out.write("ok\n" if status == 0 else "seeding failed, see /var/log/icinga2/seed.log\n")
     if status == 0 and every:
         feed(every)
     sys.exit(status)

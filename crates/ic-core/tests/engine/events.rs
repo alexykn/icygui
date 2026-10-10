@@ -246,7 +246,11 @@ async fn config_changes_and_unknown_objects_are_requeried_by_name() {
     );
 
     // An event about an object the client doesn't know: re-queried once;
-    // Icinga doesn't know it either, so later events don't re-query it.
+    // Icinga doesn't know it either, so later events don't re-query it,
+    // nor does one that arrives while the lookup is under way (the mock
+    // holds its answers back for a moment; the second event comes during
+    // the lookup, or before it starts on a busy machine: one lookup either
+    // way).
     control.clear_requests();
     let ghost = |output: &str| {
         json!({
@@ -261,25 +265,20 @@ async fn config_changes_and_unknown_objects_are_requeried_by_name() {
             },
         })
     };
+    control.set_latency(Duration::from_millis(500));
     control.emit_raw(ghost("first"));
-    assert!(wait_until(|| !requeried(&control).is_empty()).await);
-    assert_eq!(
-        requeried(&control),
-        [(
-            "/v1/objects/services".to_owned(),
-            vec!["lab-01!ghost".to_owned()]
-        )]
-    );
+    tokio::time::sleep(Duration::from_millis(150)).await;
     control.emit_raw(ghost("second"));
+    assert!(wait_until(|| !requeried(&control).is_empty()).await);
+    control.set_latency(Duration::ZERO);
+    control.emit_raw(ghost("third"));
     // A barrier: a known object's change re-queries alone.
     control.touch_object("Service", "lab-01!ssh").unwrap();
     assert!(wait_until(|| requeried(&control).len() >= 2).await);
+    let service = |name: &str| ("/v1/objects/services".to_owned(), vec![name.to_owned()]);
     assert_eq!(
-        requeried(&control)[1],
-        (
-            "/v1/objects/services".to_owned(),
-            vec!["lab-01!ssh".to_owned()]
-        )
+        requeried(&control),
+        [service("lab-01!ghost"), service("lab-01!ssh")]
     );
 
     // Created again: re-queried even though it was missing.
@@ -308,7 +307,7 @@ async fn config_changes_and_unknown_objects_are_requeried_by_name() {
             .any(|request| request.path == "/v1/objects/hostgroups"))
         .await
     );
-    assert!(requeried(&control).is_empty());
+    assert!(requeried(&control).is_empty(), "{:?}", requeried(&control));
     assert!(
         !control
             .requests()

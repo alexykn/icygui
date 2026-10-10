@@ -196,6 +196,12 @@ pub struct Tuning {
     /// alert) must hold before it is raised ([`crate::trouble::GRACE`],
     /// 2 minutes).
     pub trouble_grace: Duration,
+    /// The seed of the engine's timer jitter (no synchronised clients:
+    /// the reconcile's random phase and ±20 %, the quiet status polls, the
+    /// health reads for the trouble alerts, the reconnect backoff;
+    /// `crate::jitter`). `None` (the default): a random seed, so every
+    /// engine draws its own; tests pass one, so a run repeats exactly.
+    pub seed: Option<u64>,
     /// With several URLs, how long logging in at one and finding out its
     /// node (`GET /v1`, the node's name, the zones) may take while other
     /// URLs remain to try, and in a probe (8 s): a node that accepts
@@ -240,6 +246,7 @@ impl Default for Tuning {
             start_delay_max: Duration::from_secs(90),
             heartbeat: crate::heartbeat::Timing::default(),
             trouble_grace: crate::trouble::GRACE,
+            seed: None,
         }
     }
 }

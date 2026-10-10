@@ -36,12 +36,17 @@ x-node: &node
   restart: "no"
   stop_grace_period: 20s
   networks: [cluster]
+  # Sized for a slow 2-core CI runner: Icinga may take seconds to answer
+  # while it starts and the seed waits up to 10 minutes (seed.py), so a
+  # check may take 15 s, failures count only after 15 minutes, and five in
+  # a row make a node unhealthy (demo/up.sh waits for healthy, at most 20
+  # minutes, and stops at once when a node exits or the seed failed).
   healthcheck:
     test: ["CMD", "sh", "/demo/icinga/healthcheck.sh"]
     interval: 5s
-    timeout: 4s
-    retries: 3
-    start_period: 10m
+    timeout: 15s
+    retries: 5
+    start_period: 15m
     start_interval: 3s
 
 services:

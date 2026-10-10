@@ -369,6 +369,9 @@ pub(crate) struct Engine {
     /// Spaces the retries of a failing first load (its answers are the
     /// big ones), independently of the connection's backoff.
     load_backoff: Backoff,
+    /// The randomness of every timer (no synchronised clients:
+    /// [`crate::jitter`]), from `Tuning::seed`.
+    jitter: crate::jitter::Jitter,
     /// Counts connection sessions; answers of older ones are dropped.
     session: u64,
     /// The current session's background tasks.
@@ -606,6 +609,7 @@ impl Engine {
             notifications_current: false,
             backoff: Backoff::new(tuning.backoff_initial, tuning.backoff_max),
             load_backoff: Backoff::new(tuning.load_retry_initial, sync::LOAD_RETRY_MAX),
+            jitter: crate::jitter::Jitter::new(tuning.seed),
             fetch: FetchQueue::new(tuning.missing_ttl),
             spec,
             ports,
@@ -1069,7 +1073,7 @@ impl Engine {
         if healthy {
             self.backoff.reset();
         }
-        let delay = self.backoff.fail().max(at_least);
+        let delay = self.backoff.fail(self.jitter.unit()).max(at_least);
         tracing::info!(%error, ?delay, "connection lost; retrying");
         self.phase = Phase::Idle {
             retry_at: Some(Instant::now() + delay),
@@ -1130,9 +1134,13 @@ impl Engine {
             );
             self.lines = Some(rx);
         }
+        // The session's first status poll at a random phase: clients that
+        // reconnected together (a master restart) don't poll together
+        // ([`crate::jitter`]).
+        let first_poll = self.jitter.phase(self.tuning.status_interval);
         let next_status = info
             .allows("status/query")
-            .then(|| Instant::now() + self.tuning.status_interval);
+            .then(|| Instant::now() + first_poll);
         let notifications_allowed = info.allows("objects/query/Notification");
         let notification_events = self.lines.is_some()
             && info.allows(&format!("events/{}", EventKind::Notification.api_name()));
@@ -1348,7 +1356,8 @@ impl Engine {
                         // failing one is retried after a growing wait (up
                         // to the reconcile interval), not with every quick
                         // reconnect.
-                        let wait = self.load_backoff.fail_up_to(self.load_retry_cap());
+                        let cap = self.load_retry_cap();
+                        let wait = self.load_backoff.fail_up_to(cap, self.jitter.unit());
                         self.fail_with(failure, wait);
                     }
                     // An answer that can't be used needs the user.
@@ -1359,14 +1368,16 @@ impl Engine {
                         // now, so a struggling master (or a proxy answering
                         // 502) isn't asked again right away.
                         tracing::warn!(%error, "reload failed; the next one follows at the usual interval");
-                        self.schedule_reconcile();
+                        // Clients whose loads failed together (a master
+                        // restarting) don't retry together.
+                        self.schedule_reconcile(sync::Cadence::Failed);
                     }
                     other => {
                         tracing::warn!(
                             ?other,
                             "reload failed; the next one follows at the usual interval"
                         );
-                        self.schedule_reconcile();
+                        self.schedule_reconcile(sync::Cadence::Failed);
                     }
                 }
             }
@@ -1389,7 +1400,14 @@ impl Engine {
         self.fetch
             .release_deferred(now, |key| self.store.contains(key));
         self.watchdog.loaded(&self.store);
-        self.schedule_reconcile();
+        // A periodic reconcile's successor follows ±20 %; after any other
+        // load (which clients may have run together: a master restart) the
+        // series starts at a random phase.
+        self.schedule_reconcile(if kind == LoadKind::Reconcile {
+            sync::Cadence::Next
+        } else {
+            sync::Cadence::First
+        });
         if self.store.hidden_count() > 0
             && self
                 .conn
@@ -1532,7 +1550,7 @@ impl Engine {
             self.probe_backoff.reset();
             self.probe_at = None;
         } else {
-            self.probe_at = Some(Instant::now() + self.probe_backoff.fail());
+            self.probe_at = Some(Instant::now() + self.probe_backoff.fail(self.jitter.unit()));
         }
     }
 
@@ -1616,11 +1634,12 @@ impl Engine {
     fn poll_status(&mut self) {
         let now = Instant::now();
         let names = self.node_names();
-        let quiet = if self.active {
+        // ±20 %, like every periodic request ([`crate::jitter`]).
+        let quiet = self.jitter.spread(if self.active {
             self.tuning.status_interval
         } else {
             NODES_QUIET_INTERVAL
-        };
+        });
         let Some(conn) = &mut self.conn else {
             return;
         };
@@ -1768,11 +1787,14 @@ impl Engine {
         } else {
             self.tuning.status_interval
         };
+        // ±20 %: the quiet polls of clients that went quiet together
+        // drift apart (no synchronised clients, [`crate::jitter`]).
+        let wait = self.jitter.spread(interval);
         let Some(conn) = &mut self.conn else {
             return;
         };
         conn.status_in_flight = false;
-        conn.next_status = Some(Instant::now() + interval);
+        conn.next_status = Some(Instant::now() + wait);
         let connected = conn.since;
         let sent = conn.status_sent;
         match result {

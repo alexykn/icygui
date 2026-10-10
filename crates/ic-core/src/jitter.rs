@@ -1,0 +1,149 @@
+//! No synchronised clients (PLAN.md §4.2, docs/performance.md): after a
+//! master restart every client reloads at once, and timers counted from
+//! that moment would stay lined up for as long as the clients run, so
+//! fifty of them would ask for the same heavy answer in the same second,
+//! interval after interval. Every engine's periodic heavy requests (the
+//! reconcile, the quiet status polls, the health page's reads for the
+//! trouble alerts, the cluster nodes' states) are spread instead:
+//!
+//! - **a random phase** for the first of a series (the first reconcile
+//!   after a load that wasn't one, a session's first status poll):
+//!   anywhere in [`PHASE`] of the interval, a whole interval wide, so
+//!   clients that loaded together are spread over a whole interval at
+//!   once, and the average cadence stays the interval;
+//! - **±[`SPREAD`]** on every interval after that, so they keep drifting
+//!   apart rather than back together.
+//!
+//! The randomness is the engine's own ([`Jitter`]), from
+//! `Tuning::seed`: random in production, fixed in tests, so a test run
+//! repeats exactly. The reconnect backoff, the reload jitter and a
+//! background start's delay draw from it too.
+
+use std::time::Duration;
+
+/// How far every periodic interval is spread: ±20 %.
+pub(crate) const SPREAD: f64 = 0.2;
+
+/// Where the first of a series falls, as fractions of its interval: from
+/// half an interval to one and a half (a whole interval wide, the
+/// interval on average).
+pub(crate) const PHASE: (f64, f64) = (0.5, 1.5);
+
+/// An engine's source of randomness for its timers.
+#[derive(Debug)]
+pub(crate) struct Jitter {
+    rng: fastrand::Rng,
+}
+
+impl Jitter {
+    /// Seeded with `seed` (tests), or randomly (`None`: every engine its
+    /// own, as in production).
+    pub(crate) fn new(seed: Option<u64>) -> Self {
+        Self {
+            rng: seed.map_or_else(fastrand::Rng::new, fastrand::Rng::with_seed),
+        }
+    }
+
+    /// A number in `[0, 1)`.
+    pub(crate) fn unit(&mut self) -> f64 {
+        self.rng.f64()
+    }
+
+    /// `interval` ±[`SPREAD`]: the next of a series.
+    pub(crate) fn spread(&mut self, interval: Duration) -> Duration {
+        interval.mul_f64(1.0 - SPREAD + 2.0 * SPREAD * self.unit())
+    }
+
+    /// The first of a series: a random phase in [`PHASE`] of `interval`.
+    pub(crate) fn phase(&mut self, interval: Duration) -> Duration {
+        let (from, to) = PHASE;
+        interval.mul_f64(from + (to - from) * self.unit())
+    }
+
+    /// Up to `most`, uniformly (a reload's jitter, a background start's
+    /// delay).
+    pub(crate) fn up_to(&mut self, most: Duration) -> Duration {
+        most.mul_f64(self.unit())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_same_seed_gives_the_same_timers() {
+        let interval = Duration::from_mins(5);
+        let draw = |seed| {
+            let mut jitter = Jitter::new(Some(seed));
+            (0..50)
+                .map(|_| (jitter.phase(interval), jitter.spread(interval)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(draw(7), draw(7));
+        assert_ne!(draw(7), draw(8));
+    }
+
+    #[test]
+    fn intervals_are_spread_twenty_percent_either_way() {
+        let interval = Duration::from_mins(5);
+        let mut jitter = Jitter::new(Some(1));
+        let spread: Vec<f64> = (0..10_000)
+            .map(|_| jitter.spread(interval).as_secs_f64() / interval.as_secs_f64())
+            .collect();
+        assert!(
+            spread.iter().all(|&x| (0.8..1.2).contains(&x)),
+            "within ±20 %"
+        );
+        // They use the whole range, not a corner of it.
+        assert!(spread.iter().any(|&x| x < 0.82) && spread.iter().any(|&x| x > 1.18));
+        let mean = spread.iter().sum::<f64>() / 10_000.0;
+        assert!((mean - 1.0).abs() < 0.01, "{mean}");
+    }
+
+    /// Fifty clients that loaded in the same second: their first
+    /// reconciles spread over a whole interval (no two minutes of the
+    /// five without one), not over ±10 % of it as before.
+    #[test]
+    fn a_random_phase_spreads_clients_that_started_together_over_an_interval() {
+        let interval = Duration::from_mins(5);
+        let firsts: Vec<f64> = (0..50_u64)
+            .map(|client| Jitter::new(Some(client)).phase(interval).as_secs_f64())
+            .collect();
+        assert!(firsts.iter().all(|&at| (150.0..450.0).contains(&at)));
+        let mut minutes = [0_usize; 5];
+        for at in &firsts {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "0..5 by the assertion above"
+            )]
+            let minute = ((at - 150.0) / 60.0) as usize;
+            minutes[minute] += 1;
+        }
+        assert!(minutes.iter().all(|&count| count > 0), "{minutes:?}");
+        assert!(minutes.iter().all(|&count| count < 25), "{minutes:?}");
+    }
+
+    /// Clients whose timers lined up drift apart with every interval,
+    /// rather than staying together.
+    #[test]
+    fn lined_up_clients_drift_apart() {
+        let interval = Duration::from_mins(5);
+        let mut clients: Vec<(Jitter, f64)> = (0..50_u64)
+            .map(|client| (Jitter::new(Some(1_000 + client)), 0.0))
+            .collect();
+        for _ in 0..10 {
+            for (jitter, at) in &mut clients {
+                *at += jitter.spread(interval).as_secs_f64();
+            }
+        }
+        let (min, max) = clients
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(min, max), (_, at)| {
+                (min.min(*at), max.max(*at))
+            });
+        // Ten intervals on, they are spread over more than a whole one.
+        assert!(max - min > interval.as_secs_f64(), "{}", max - min);
+    }
+}

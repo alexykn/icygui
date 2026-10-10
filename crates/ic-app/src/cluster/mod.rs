@@ -114,11 +114,14 @@ pub(crate) fn cluster_state(snapshot: &Snapshot, connected: bool, now: Timestamp
 /// (no false green, PLAN.md §4.2): the connection is live by the same
 /// timestamps the footer reads (events, the engine's ticks, no live data),
 /// and the endpoints' states (else the latest status) came within three
-/// status polls. Without
-/// that, what icygui knows of its own connection to the node: lost once
-/// it isn't connected (after it was) or the engine stopped, silent while
-/// connected without live data, up when only the numbers are old; in the
-/// connection banner's tone (critical while it is, else a warning).
+/// status polls. Without that, what icygui knows of its own connection to
+/// the node: lost while it isn't connected and the connection is red, or
+/// the engine stopped; silent while connected without live data; up when
+/// only the numbers are old; in the footer's and the
+/// connection banner's tone ([`Health::tone`]: critical from the moment
+/// the connection is lost until it recovers, else a warning; rule 5).
+///
+/// [`Health::tone`]: crate::app_state::connection::Health::tone
 pub(crate) fn liveness(
     snapshot: &Snapshot,
     connection: &crate::app_state::ConnectionStatus,
@@ -139,14 +142,17 @@ pub(crate) fn liveness(
     if state == Health::Live && !old {
         return health::Liveness::Live;
     }
-    // The banner's tone (its words don't matter here).
-    let tone = match connection.notice("", now).map(|notice| notice.tone) {
-        Some(crate::app_state::connection::Tone::Critical) => health::Tone::Critical,
-        _ => health::Tone::Warning,
+    // The footer's and the banner's tone, from the one rule.
+    let lost = connection.is_lost(now);
+    let tone = if lost {
+        health::Tone::Critical
+    } else {
+        health::Tone::Warning
     };
-    let link = if connection.engine_error.is_some()
-        || (connection.ever_connected && !connection.is_connected())
-    {
+    // Lost: not connected while the connection is red, or the engine
+    // stopped (always red). Connecting on purpose (a changed environment)
+    // or a stuck engine on a connected session is silent, in its tone.
+    let link = if connection.engine_error.is_some() || (lost && !connection.is_connected()) {
         health::Link::Lost(tone)
     } else if state == Health::Live {
         health::Link::Up
@@ -156,20 +162,19 @@ pub(crate) fn liveness(
     health::Liveness::Stale { as_of, link }
 }
 
-/// The sidebar's *health* dot (no false green, PLAN.md §4.2): the
-/// cluster's state while what icygui shows is current; without that,
+/// The sidebar's *health* dot (no false green, PLAN.md §4.2), a summary
+/// at least as severe as the worst thing it summarises: red while the
+/// connection is (the footer's and the banner's red: lost, refused, the
+/// engine stuck), from the first moment until it recovers (rule 5); else
+/// the cluster's state while what icygui shows is current; without that,
 /// never green or grey once a session was live (yellow, or the last known
-/// state when it was worse), and red once the engine stopped saying it
-/// runs. Grey only before the first connection.
+/// state when it was worse). Grey only before the first connection.
 pub(crate) fn sidebar_state(
     snapshot: &Snapshot,
     connection: &crate::app_state::ConnectionStatus,
     now: Timestamp,
 ) -> ClusterState {
-    if connection
-        .engine_silent(now)
-        .is_some_and(|silent| silent > crate::app_state::connection::ENGINE_STUCK_AFTER)
-    {
+    if connection.is_lost(now) {
         return ClusterState::Critical;
     }
     let state = cluster_state(snapshot, connection.is_connected(), now);
@@ -241,11 +246,12 @@ mod tests {
         );
     }
 
-    /// After a live session was lost (reconnecting), the dot is yellow,
-    /// not grey, from the first moment; a stale event stream turns it
-    /// yellow with the footer.
+    /// After a live session was lost (reconnecting), the dot is red, not
+    /// grey or yellow, from the first moment until it recovers, with the
+    /// footer and the banner (rule 5), connecting attempts and no live data
+    /// included; only connected but silent is yellow.
     #[test]
-    fn a_lost_session_is_yellow_at_once() {
+    fn a_lost_session_is_red_at_once_and_stays_red() {
         let now = Timestamp::from_unix_seconds(2_000.0);
         let mut connection = crate::app_state::ConnectionStatus::starting("master-01", None);
         connection.on_state(ic_core::ConnectionState::Connected {
@@ -267,7 +273,45 @@ mod tests {
         });
         assert_eq!(
             sidebar_state(&Snapshot::default(), &connection, now),
+            ClusterState::Critical
+        );
+        // The next attempt runs: still lost.
+        connection.on_state(ic_core::ConnectionState::Connecting { attempt: 2 });
+        assert_eq!(
+            sidebar_state(&Snapshot::default(), &connection, now),
+            ClusterState::Critical
+        );
+        // Two minutes on, no live data is raised: still red, not yellow.
+        connection.on_state(ic_core::ConnectionState::Reconnecting {
+            error: "connection refused".to_owned(),
+            attempt: 2,
+            retry_at: Timestamp::from_unix_seconds(2_010.0),
+            untrusted: None,
+        });
+        connection.blind = Some(ic_core::trouble::Blind {
+            since: Timestamp::from_unix_seconds(1_850.0),
+            reason: "connection lost".to_owned(),
+        });
+        assert_eq!(
+            sidebar_state(&Snapshot::default(), &connection, now),
+            ClusterState::Critical
+        );
+        // Connected again, but silent (no live data while connected): a
+        // warning.
+        connection.on_state(ic_core::ConnectionState::Connected {
+            node: crate::app_state::connection::full_node("master-01"),
+            version: "r2.15.6".to_owned(),
+            since: Timestamp::from_unix_seconds(1_995.0),
+        });
+        assert_eq!(
+            sidebar_state(&Snapshot::default(), &connection, now),
             ClusterState::Warning
+        );
+        connection.blind = None;
+        assert_eq!(
+            sidebar_state(&Snapshot::default(), &connection, now),
+            ClusterState::Unknown,
+            "live again: no nodes known"
         );
     }
 
@@ -362,8 +406,8 @@ mod tests {
                 link: Link::Lost(Tone::Critical)
             }
         );
-        // Lost for longer than the grace: no live data is raised, and the
-        // banner (and the row) turn to its warning tone.
+        // Lost for longer than the grace: no live data is raised, the
+        // banner and the row stay red (rule 5).
         let mut blind = lost.clone();
         blind.blind = Some(ic_core::trouble::Blind {
             since: Timestamp::from_unix_seconds(1_850.0),
@@ -373,7 +417,7 @@ mod tests {
             liveness(&fresh, &blind, now),
             Liveness::Stale {
                 as_of: Some(polled),
-                link: Link::Lost(Tone::Warning)
+                link: Link::Lost(Tone::Critical)
             }
         );
         // Lost: the engine stopped.
@@ -385,6 +429,57 @@ mod tests {
                 as_of: Some(polled),
                 link: Link::Lost(Tone::Critical)
             }
+        );
+    }
+
+    /// Rule 5: the node's row stays `connection lost` in red through the
+    /// next attempts; a connect the user asked for (the environment
+    /// changed) is no lost connection.
+    #[test]
+    fn a_lost_link_stays_lost_through_its_attempts() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use health::{Link, Liveness, Tone};
+        let now = Timestamp::from_unix_seconds(2_000.0);
+        let polled = Timestamp::from_unix_seconds(1_990.0);
+        let fresh = Snapshot {
+            health: Arc::new(ic_core::health::ClusterHealth {
+                endpoints_at: Some(polled),
+                interval: Duration::from_secs(30),
+                ..ic_core::health::ClusterHealth::default()
+            }),
+            ..Snapshot::default()
+        };
+        let mut connection = crate::app_state::ConnectionStatus::starting("master-01", None);
+        connection.on_state(ic_core::ConnectionState::Connected {
+            node: crate::app_state::connection::full_node("master-01"),
+            version: "r2.15.6".to_owned(),
+            since: Timestamp::from_unix_seconds(1_000.0),
+        });
+        connection.last_event_at = Some(Timestamp::from_unix_seconds(1_999.0));
+        let stale = |link| Liveness::Stale {
+            as_of: Some(polled),
+            link,
+        };
+        // Connecting on purpose (the environment changed): not lost.
+        let mut changed = connection.clone();
+        changed.on_state(ic_core::ConnectionState::Connecting { attempt: 1 });
+        assert_eq!(
+            liveness(&fresh, &changed, now),
+            stale(Link::Silent(Tone::Warning))
+        );
+        // Lost, then the next attempt: still lost, still red.
+        connection.on_state(ic_core::ConnectionState::Reconnecting {
+            error: "connection reset".to_owned(),
+            attempt: 1,
+            retry_at: Timestamp::from_unix_seconds(2_004.0),
+            untrusted: None,
+        });
+        connection.on_state(ic_core::ConnectionState::Connecting { attempt: 2 });
+        assert_eq!(
+            liveness(&fresh, &connection, now),
+            stale(Link::Lost(Tone::Critical))
         );
     }
 

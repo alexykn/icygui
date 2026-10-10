@@ -11,8 +11,13 @@
 //!   `General::reconcile_interval_secs` if set (never below 5 minutes from
 //!   5 000 objects on); quiet mode makes it at least
 //!   `Tuning::quiet_reconcile_interval`. Counted from the end of the last
-//!   load, complete or failed (a failed one waits a whole interval), ±10 %
-//!   jitter so clients drift apart. Its tier 3 fetches only the problems
+//!   load, complete or failed, with no synchronised clients
+//!   ([`crate::jitter`]): the first reconcile after a load that wasn't one
+//!   (the first load, a reload, `Refresh`) at a random phase (half an
+//!   interval to one and a half; after a failed load one to two intervals,
+//!   so it waits at least a whole interval), every later one ±20 %, so
+//!   clients that reloaded together after a master restart spread over a
+//!   whole interval and keep drifting apart. Its tier 3 fetches only the problems
 //!   not held in full or whose result is older than their last check (in
 //!   quiet mode only those without a result: outputs may be stale there).
 //! - *Reconnects:* the engine goes live on the objects it has. Only after
@@ -149,6 +154,39 @@ pub(super) fn long_gap(tuning: &crate::spec::Tuning, quiet: bool) -> Duration {
     }
 }
 
+/// Where a periodic reconcile falls in its series (no synchronised
+/// clients, [`crate::jitter`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Cadence {
+    /// The first after a load that wasn't a periodic reconcile (the first
+    /// load, a reload after a restart or a reconnect, `Refresh`): clients
+    /// that loaded together (a master restart) would stay lined up, so it
+    /// falls at a random phase.
+    First,
+    /// The first after a load that failed (clients whose loads failed
+    /// together, a master restarting, would retry together): a random
+    /// phase too, but never sooner than an interval.
+    Failed,
+    /// The next of the series (after a periodic reconcile, or planned
+    /// again for a new interval or mode): ±20 %.
+    Next,
+}
+
+/// How long after the last load the next periodic reconcile falls, for
+/// its place in the series ([`Cadence`]).
+pub(super) fn reconcile_wait(
+    cadence: Cadence,
+    interval: Duration,
+    jitter: &mut crate::jitter::Jitter,
+) -> Duration {
+    match cadence {
+        Cadence::First => jitter.phase(interval),
+        // Never sooner than an interval after a failure.
+        Cadence::Failed => interval / 2 + jitter.phase(interval),
+        Cadence::Next => jitter.spread(interval),
+    }
+}
+
 impl Engine {
     /// The periodic reconcile's interval (see the module notes).
     pub(super) fn reconcile_interval(&self) -> Duration {
@@ -237,10 +275,10 @@ impl Engine {
                 ?gap,
                 "reconnected after a short gap; the next reconcile catches up"
             );
-            self.schedule_reconcile();
+            self.schedule_reconcile(Cadence::Next);
         } else {
             // A restart can't be told: reload, but not often.
-            let jitter = self.tuning.reload_jitter.mul_f64(fastrand::f64());
+            let jitter = self.jitter.up_to(self.tuning.reload_jitter);
             let at = self
                 .last_load_start
                 .map_or(now, |start| (start + MIN_INTERVAL).max(now))
@@ -248,18 +286,20 @@ impl Engine {
             self.reload_full = true;
             self.notifications_current = false;
             self.reload_at = Some(self.reload_at.map_or(at, |pending| pending.min(at)));
-            self.schedule_reconcile();
+            self.schedule_reconcile(Cadence::Next);
         }
     }
 
-    /// Schedules the next periodic reconcile, an interval (±10 %) after
-    /// the last load ended, complete or failed.
-    pub(super) fn schedule_reconcile(&mut self) {
+    /// Schedules the next periodic reconcile after the last load ended
+    /// (complete or failed): no synchronised clients ([`crate::jitter`]),
+    /// so the first of a series at a random phase (half an interval to one
+    /// and a half; after a failed load one to two intervals, so a
+    /// struggling master gets a whole interval's rest), every other one an
+    /// interval ±20 % after the last.
+    pub(super) fn schedule_reconcile(&mut self, cadence: Cadence) {
         let base = self.last_load_end.unwrap_or_else(Instant::now);
-        let interval = self
-            .reconcile_interval()
-            .mul_f64(0.9 + 0.2 * fastrand::f64());
-        self.reconcile_at = Some(base + interval);
+        let interval = self.reconcile_interval();
+        self.reconcile_at = Some(base + reconcile_wait(cadence, interval, &mut self.jitter));
     }
 
     /// When a reload or the periodic reconcile is due: only while live and
@@ -323,7 +363,7 @@ impl Engine {
             .last_reload
             .map_or(now, |last| (last + spacing).max(now));
         if cause == ReloadCause::Reconnect {
-            at += self.tuning.reload_jitter.mul_f64(fastrand::f64());
+            at += self.jitter.up_to(self.tuning.reload_jitter);
         }
         if at > now + self.tuning.reload_jitter {
             tracing::debug!(?cause, wait = ?(at - now), "reload: one ran moments ago; the next follows later");
@@ -370,7 +410,7 @@ impl Engine {
             self.spec.general.event_log_retention_hours != general.event_log_retention_hours;
         self.spec.general = general;
         if interval_changed && self.reconcile_at.is_some() {
-            self.schedule_reconcile();
+            self.schedule_reconcile(Cadence::Next);
         }
         if retention_changed {
             // A shorter retention applies at once.
@@ -488,6 +528,55 @@ pub(super) fn reconcile_interval(secs: u32, objects: usize, streak: u32) -> Dura
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No synchronised clients (PLAN.md §4.2): fifty clients whose loads
+    /// ended in the same instant (a master restart) reconcile first at a
+    /// random phase across a whole interval (half to one and a half),
+    /// after a failed load one to two intervals on (never sooner than an
+    /// interval), and after that an interval ±20 % apart, each client
+    /// differently; the same seed gives the same plan.
+    #[test]
+    fn reconciles_are_spread_and_never_line_up() {
+        let interval = Duration::from_mins(5);
+        let fraction = |wait: Duration| wait.as_secs_f64() / interval.as_secs_f64();
+        let plan = |seed: u64| {
+            let jitter = &mut crate::jitter::Jitter::new(Some(seed));
+            let first = reconcile_wait(Cadence::First, interval, jitter);
+            let failed = reconcile_wait(Cadence::Failed, interval, jitter);
+            let next: Vec<Duration> = (0..20)
+                .map(|_| reconcile_wait(Cadence::Next, interval, jitter))
+                .collect();
+            (first, failed, next)
+        };
+        let plans: Vec<_> = (0..50).map(plan).collect();
+        for (first, failed, next) in &plans {
+            assert!((0.5..1.5).contains(&fraction(*first)), "{first:?}");
+            assert!((1.0..2.0).contains(&fraction(*failed)), "{failed:?}");
+            for wait in next {
+                assert!((0.8..1.2).contains(&fraction(*wait)), "{wait:?}");
+            }
+        }
+        assert_eq!(plan(7), plan(7), "a seed repeats");
+        // The first reconciles cover the whole interval they may fall in:
+        // no fifth of it is left out, none holds half the clients.
+        let mut fifths = [0_usize; 5];
+        for (first, _, _) in &plans {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "0..5 by the assertion above"
+            )]
+            let fifth = ((fraction(*first) - 0.5) * 5.0) as usize;
+            fifths[fifth] += 1;
+        }
+        assert!(fifths.iter().all(|&n| (1..25).contains(&n)), "{fifths:?}");
+        // No two clients share a plan.
+        for (i, a) in plans.iter().enumerate() {
+            for b in &plans[i + 1..] {
+                assert_ne!(a.0, b.0);
+            }
+        }
+    }
 
     fn status(node: &str, program_start: f64) -> InstanceStatus {
         InstanceStatus {

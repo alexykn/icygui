@@ -22,15 +22,20 @@ pub(crate) const ENGINE_STALE_AFTER: std::time::Duration =
 /// … and for this long, stuck (red).
 pub(crate) const ENGINE_STUCK_AFTER: std::time::Duration = std::time::Duration::from_mins(1);
 
-/// How the footer colours the connection status.
+/// How the footer colours the connection status. A lost connection is
+/// red from the moment it is lost until it recovers, connecting attempts
+/// and no live data included; yellow is only for connected, but nothing
+/// arrives (no false green rule 5, PLAN.md §4.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Health {
     /// Connected with recent events (green).
     Live,
-    /// Connected, but no event for more than 30 seconds while Icinga is
-    /// checking and the stream isn't quiet (yellow).
+    /// Connected, but nothing arrives: no event for more than 30 seconds
+    /// while Icinga is checking and the stream isn't quiet, the engine
+    /// not answering, or no live data while connected (yellow).
     Stale,
-    /// Lost; retrying with backoff (red).
+    /// Lost; retrying with backoff, or connecting again after it was
+    /// lost (red).
     Reconnecting,
     /// Stopped: the login, the certificate or the settings need the user
     /// (red).
@@ -39,6 +44,29 @@ pub(crate) enum Health {
     Connecting,
     /// No environment, or not started (grey).
     Idle,
+}
+
+impl Health {
+    /// The tone everything that shows the connection takes from it (the
+    /// footer, the banner, the sidebar's health dot, the health page's own
+    /// row and *as of*, the tray): critical while lost or failed, a
+    /// warning while connected but nothing arrives, none otherwise.
+    pub(crate) fn tone(self) -> Option<Tone> {
+        match self {
+            Self::Reconnecting | Self::Failed => Some(Tone::Critical),
+            Self::Stale => Some(Tone::Warning),
+            Self::Live | Self::Connecting | Self::Idle => None,
+        }
+    }
+
+    /// At least as bad as stale: what has no live data is never green or
+    /// grey, and never calmer than it is (a lost connection stays red).
+    fn at_least_stale(self) -> Self {
+        match self {
+            Self::Live | Self::Connecting | Self::Idle => Self::Stale,
+            health => health,
+        }
+    }
 }
 
 /// How urgent a [`ConnectionNotice`] is.
@@ -199,6 +227,10 @@ pub(crate) struct ConnectionStatus {
     live_since: Option<Timestamp>,
     /// Whether this session was connected at some point.
     pub(crate) ever_connected: bool,
+    /// The connection broke or couldn't be made (the engine said it
+    /// reconnects or waits for the user) and hasn't come up since: its
+    /// connecting attempts are still red (no false green rule 5).
+    lost: bool,
     /// The engine couldn't start (a thread or runtime error), or stopped
     /// on its own.
     pub(crate) engine_error: Option<String>,
@@ -241,6 +273,7 @@ impl ConnectionStatus {
             stream: Stream::Live,
             live_since: None,
             ever_connected: false,
+            lost: false,
             engine_error: None,
             engine_stopped: false,
             version: None,
@@ -270,6 +303,19 @@ impl ConnectionStatus {
                 self.version = Some(version.clone());
             }
             self.ever_connected = true;
+        }
+        match &state {
+            // Up again (a first load runs on a connection that was made).
+            ConnectionState::Connected { .. } | ConnectionState::Loading { .. } => {
+                self.lost = false;
+            }
+            // Another attempt: as lost as before.
+            ConnectionState::Connecting { .. } => {}
+            ConnectionState::Reconnecting { .. }
+            | ConnectionState::AuthFailed { .. }
+            | ConnectionState::TlsFailed { .. }
+            | ConnectionState::MissingSecret
+            | ConnectionState::Misconfigured { .. } => self.lost = true,
         }
         self.engine_error = None;
         self.engine_stopped = false;
@@ -411,23 +457,35 @@ impl ConnectionStatus {
     }
 
     /// The colour class at `now`: an engine that stopped saying it runs,
-    /// or an environment without live data, is never green.
+    /// or an environment without live data, is never green; a lost
+    /// connection is red until it recovers, whatever else holds (no false
+    /// green rule 5: an outage never looks calmer the longer it lasts).
     pub(crate) fn health(&self, now: Timestamp) -> Health {
         if self.engine_error.is_some() {
             return Health::Failed;
         }
+        let health = match self.state_health(now) {
+            // Connecting again after the connection was lost: still lost.
+            Health::Connecting if self.lost => Health::Reconnecting,
+            health => health,
+        };
         if let Some(silent) = self.engine_silent(now) {
             return if silent > ENGINE_STUCK_AFTER {
                 Health::Failed
             } else {
-                Health::Stale
+                health.at_least_stale()
             };
         }
-        let health = self.state_health(now);
-        if self.blind.is_some() && health != Health::Failed {
-            return Health::Stale;
+        if self.blind.is_some() {
+            return health.at_least_stale();
         }
         health
+    }
+
+    /// The connection was lost (or never made, after attempts failed) and
+    /// hasn't recovered: what everything that shows it is red for.
+    pub(crate) fn is_lost(&self, now: Timestamp) -> bool {
+        self.health(now).tone() == Some(Tone::Critical)
     }
 
     /// The colour class of the connection state alone.
@@ -756,7 +814,9 @@ impl ConnectionStatus {
         }
         Some(ConnectionNotice {
             kind: NoticeKind::Blind,
-            tone: Tone::Warning,
+            // Red while the connection is lost, from its first moment to
+            // its recovery; yellow while connected but silent (rule 5).
+            tone: self.health(now).tone().unwrap_or(Tone::Warning),
             title: format!(
                 "no live data for {} — states may be outdated",
                 format_compact(age)
@@ -1010,6 +1070,115 @@ mod tests {
         assert_eq!(status.health(at(182.)), Health::Live);
         assert_eq!(status.label(at(182.)), "master-01 · 1s");
         assert!(status.notice("prod", at(182.)).is_none());
+    }
+
+    /// No false green rule 5 (PLAN.md §4.2): a lost connection is red
+    /// from the moment it is lost until it recovers: while it retries,
+    /// while the next attempt connects, and once no live data is raised
+    /// two minutes on (16d drew it yellow from then); the banner too.
+    /// Yellow is only for connected, but nothing arrives.
+    #[test]
+    fn an_outage_never_looks_calmer_the_longer_it_lasts() {
+        let mut status = connected();
+        status.on_snapshot_at(&snapshot(Some(10.), Some(120.)), at(10.));
+        assert_eq!(status.health(at(11.)), Health::Live);
+        let lost = |status: &mut ConnectionStatus, attempt: u32, retry: f64| {
+            status.on_state(ConnectionState::Reconnecting {
+                error: "connection reset".to_owned(),
+                attempt,
+                retry_at: at(retry),
+                untrusted: None,
+            });
+        };
+        lost(&mut status, 1, 14.);
+        assert_eq!(status.health(at(12.)), Health::Reconnecting);
+        assert_eq!(status.health(at(12.)).tone(), Some(Tone::Critical));
+        assert_eq!(
+            status.notice("prod", at(12.)).map(|notice| notice.tone),
+            Some(Tone::Critical)
+        );
+        // The next attempt: still lost, not grey.
+        status.on_state(ConnectionState::Connecting { attempt: 2 });
+        assert_eq!(status.health(at(14.)), Health::Reconnecting);
+        assert!(status.is_lost(at(14.)));
+        lost(&mut status, 2, 20.);
+        // Two minutes on, the engine raises no live data: still red, the
+        // banner's words change, not its tone.
+        let mut blind = snapshot(None, Some(120.));
+        blind.trouble = Arc::new(ic_core::trouble::Trouble {
+            alerts: Vec::new(),
+            blind: Some(ic_core::trouble::Blind {
+                since: at(12.),
+                reason: "connection lost".to_owned(),
+            }),
+        });
+        status.on_snapshot_at(&blind, at(132.));
+        for at_ in [at(140.), at(600.), at(3_600.)] {
+            assert_eq!(status.health(at_), Health::Reconnecting);
+            let notice = status.notice("prod", at_).unwrap();
+            assert_eq!(
+                (notice.kind, notice.tone),
+                (NoticeKind::Blind, Tone::Critical)
+            );
+        }
+        status.on_state(ConnectionState::Connecting { attempt: 3 });
+        assert_eq!(status.health(at(700.)), Health::Reconnecting);
+        // An engine silent on top of it doesn't make it calmer either.
+        status.on_alive(at(700.));
+        let silent = 700. + ENGINE_STALE_AFTER.as_secs_f64() + 1.;
+        assert_eq!(status.health(at(silent)), Health::Reconnecting);
+        status.on_alive(at(silent));
+        // Recovered: connected, the snapshot live.
+        status.on_state(ConnectionState::Connected {
+            node: full_node("master-01"),
+            version: "r2.15.6-1".to_owned(),
+            since: at(800.),
+        });
+        status.on_snapshot_at(&snapshot(Some(800.), Some(120.)), at(800.));
+        assert_eq!(status.health(at(801.)), Health::Live);
+        assert!(!status.is_lost(at(801.)));
+        assert!(status.notice("prod", at(801.)).is_none());
+        // Connected but nothing arrives: yellow, never red.
+        assert_eq!(status.health(at(840.)), Health::Stale);
+        assert_eq!(status.health(at(840.)).tone(), Some(Tone::Warning));
+    }
+
+    /// Connecting on purpose (the environment's settings changed) is not a
+    /// lost connection: grey, as the first connect; a refused login or a
+    /// missing password is red until a connection is made again.
+    #[test]
+    fn only_a_broken_connection_counts_as_lost() {
+        let mut status = connected();
+        status.on_state(ConnectionState::Connecting { attempt: 1 });
+        assert_eq!(status.health(at(1.)), Health::Connecting);
+        assert!(!status.is_lost(at(1.)));
+        status.on_state(ConnectionState::AuthFailed {
+            message: "401".to_owned(),
+        });
+        status.on_state(ConnectionState::Connecting { attempt: 1 });
+        assert_eq!(status.health(at(2.)), Health::Reconnecting);
+        status.on_state(ConnectionState::Loading {
+            phase: LoadPhase::Hosts,
+            done: 0,
+            total: None,
+        });
+        assert_eq!(
+            status.health(at(3.)),
+            Health::Connecting,
+            "connected, loading"
+        );
+        // Before the first connection, too: a failed attempt keeps the
+        // next one red (it never flickers grey between attempts).
+        let mut never = ConnectionStatus::starting("master-01", None);
+        assert_eq!(never.health(at(0.)), Health::Connecting);
+        never.on_state(ConnectionState::Reconnecting {
+            error: "refused".to_owned(),
+            attempt: 1,
+            retry_at: at(1.),
+            untrusted: None,
+        });
+        never.on_state(ConnectionState::Connecting { attempt: 2 });
+        assert_eq!(never.health(at(1.)), Health::Reconnecting);
     }
 
     #[test]

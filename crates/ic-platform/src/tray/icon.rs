@@ -58,7 +58,7 @@ const MARK_PIXELS: f64 = 50.0;
 pub(crate) fn tray_icon(look: TrayLook) -> Result<Icon, BadIcon> {
     let rgba = match look {
         TrayLook::State(tone) => render(tone),
-        TrayLook::Blind => render_blind(),
+        TrayLook::Blind(node) => render_blind(node),
     };
     Icon::from_rgba(rgba, SIZE, SIZE)
 }
@@ -72,11 +72,13 @@ const HOLLOW_RADIUS: f64 = 130.0;
 const HOLLOW_HALF_WIDTH: f64 = 32.0;
 
 /// The blind look (16e): the orbit dashed and the core hollow, both grey,
-/// the node in the warning colour. Straight-alpha RGBA like [`render`].
-pub(crate) fn render_blind() -> Vec<u8> {
+/// the node in `node`'s colour (16e draws the warning colour; a lost
+/// connection turns it critical, no false green rule 5). Straight-alpha
+/// RGBA like [`render`].
+pub(crate) fn render_blind(node: TrayTone) -> Vec<u8> {
     let mark = Mark::new();
     let centre = f64::from(SIZE) / 2.0;
-    let node = TrayTone::Warning.rgb();
+    let node = node.rgb();
     let period = 2.0 * PI / DASHES;
     let mut rgba = Vec::with_capacity(BYTES);
     for y in 0..SIZE {
@@ -235,8 +237,11 @@ mod tests {
             assert_eq!(render(tone).len(), (SIZE * SIZE * 4) as usize);
         }
         assert!(tray_icon(TrayLook::State(Some(TrayTone::Critical))).is_ok());
-        assert!(tray_icon(TrayLook::Blind).is_ok());
-        assert_eq!(render_blind().len(), (SIZE * SIZE * 4) as usize);
+        assert!(tray_icon(TrayLook::Blind(TrayTone::Warning)).is_ok());
+        assert_eq!(
+            render_blind(TrayTone::Critical).len(),
+            (SIZE * SIZE * 4) as usize
+        );
     }
 
     #[test]
@@ -448,8 +453,8 @@ mod tests {
     }
 
     #[test]
-    fn the_blind_look_is_grey_with_a_hollow_core_and_a_yellow_node() {
-        let rgba = render_blind();
+    fn the_blind_look_is_grey_with_a_hollow_core_and_a_toned_node() {
+        let rgba = render_blind(TrayTone::Warning);
         // The core's centre is empty; its ring is grey.
         assert_eq!(pixel_at(&rgba, 0.0, 0.0)[3], 0, "hollow");
         assert_eq!(pixel_at(&rgba, 90.0, HOLLOW_RADIUS), opaque(NO_STATE));
@@ -458,6 +463,13 @@ mod tests {
             pixel_at(&rgba, NODE_DEGREES, ORBIT_RADIUS),
             opaque(TrayTone::Warning.rgb())
         );
+        // A lost connection: the same look, the node red (rule 5).
+        let lost = render_blind(TrayTone::Critical);
+        assert_eq!(
+            pixel_at(&lost, NODE_DEGREES, ORBIT_RADIUS),
+            opaque(TrayTone::Critical.rgb())
+        );
+        assert_eq!(pixel_at(&lost, 90.0, HOLLOW_RADIUS), opaque(NO_STATE));
         // The orbit is dashed: on it, some points are drawn and some not.
         let on_orbit: Vec<u8> = (0..72)
             .map(|step| pixel_at(&rgba, f64::from(step) * 5.0 + 2.5, ORBIT_RADIUS)[3])
@@ -479,11 +491,12 @@ mod tests {
     fn write_the_looks() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tray-looks");
         std::fs::create_dir_all(&dir).unwrap();
-        let looks: [(&str, Vec<u8>); 4] = [
+        let looks: [(&str, Vec<u8>); 5] = [
             ("ok", render(Some(TrayTone::Ok))),
             ("problem", render(Some(TrayTone::Critical))),
             ("no-state", render(None)),
-            ("blind", render_blind()),
+            ("blind", render_blind(TrayTone::Warning)),
+            ("blind-lost", render_blind(TrayTone::Critical)),
         ];
         for (panel, background) in [("dark", [0x1e, 0x21, 0x24]), ("light", [0xf4, 0xf5, 0xf6])] {
             for (name, rgba) in &looks {

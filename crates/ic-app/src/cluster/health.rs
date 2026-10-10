@@ -86,6 +86,22 @@ impl Liveness {
         matches!(self, Self::Live)
     }
 
+    /// The tone of what isn't current (the health line's *as of*, the
+    /// header's age): the connection's own (red from the moment it is
+    /// lost until it recovers, a warning while connected but silent,
+    /// rule 5), a warning when only the numbers are old; `None` while
+    /// live.
+    pub(crate) fn tone(self) -> Option<Tone> {
+        match self {
+            Self::Live => None,
+            Self::Stale {
+                link: Link::Lost(tone) | Link::Silent(tone),
+                ..
+            } => Some(tone),
+            Self::Stale { link: Link::Up, .. } => Some(Tone::Warning),
+        }
+    }
+
     /// When the last known states came, as the page marks them (`as of
     /// 09:14`, `not current` when unknown); `None` while live.
     pub(crate) fn as_of_text(self, now: Timestamp) -> Option<String> {

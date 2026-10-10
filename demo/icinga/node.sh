@@ -146,7 +146,7 @@ if [ "$NODE" = master-01 ]; then
   # checked everything (demo/icinga/seed.py; the health check waits for
   # it). Again after every start: it only adds what is missing.
   # It then feeds the passive checks as an outside system would.
-  rm -f /tmp/seeded
+  rm -f /tmp/seeded /tmp/seeded.failed
   (python3 -I /demo/icinga/seed.py --marker /tmp/seeded --feed 50 >/var/log/icinga2/seed.log 2>&1 &)
 fi
 exec icinga2 daemon

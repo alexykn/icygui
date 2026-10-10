@@ -374,8 +374,10 @@ async fn no_live_data_is_blind_after_its_grace_and_live_again_after() {
     // Every request fails for a while: the stream breaks, reconnects fail.
     control.fail_next(10_000, 503);
     control.drop_event_streams();
+    // The connection is lost: critical, as everything else shows it (no
+    // false green rule 5).
     let tone = notified(&mut engine, "no live data from test").await;
-    assert_eq!(tone, Tone::Warning);
+    assert_eq!(tone, Tone::Critical);
     let record = engine.notifications().last().cloned().unwrap();
     assert!(
         record.intent.body.starts_with("since "),

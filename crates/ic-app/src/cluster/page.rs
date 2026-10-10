@@ -561,11 +561,7 @@ impl HealthPage {
                 div()
                     .flex_none()
                     .text_size(theme.text.small)
-                    .text_color(if report.live.is_live() {
-                        colors.text_faint
-                    } else {
-                        theme.states.text.warning
-                    })
+                    .text_color(stale_color(report.live, colors.text_faint, theme))
                     .child(updated_text(report, now)),
             )
             .child(self.options_trigger(cx));
@@ -629,7 +625,7 @@ impl HealthPage {
                 div()
                     .id("health-as-of")
                     .flex_none()
-                    .text_color(theme.states.text.warning)
+                    .text_color(stale_color(report.live, colors.text_muted, theme))
                     .child(as_of)
             }))
             .child(div().flex_1().min_w_0())
@@ -1090,14 +1086,16 @@ impl HealthPage {
     }
 
     /// A view's 36px header (as a stacked view's): the fold chevron, the
-    /// icon, the name, what it shows (faint), and anything at the right.
+    /// icon, the name, what it shows (faint; while the page isn't current
+    /// ` · as of 09:14` after it, which the words give way to), and
+    /// anything at the right (the zones' counts, which never move).
     /// In the editor's preview the selected view's header is marked, and a
     /// click selects a view.
     fn render_section_header(
         &self,
         view: &View,
         first: bool,
-        about: String,
+        about: About,
         right: Option<AnyElement>,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -1183,13 +1181,16 @@ impl HealthPage {
                     .text_color(colors.text_secondary)
                     .child(name),
             )
+            // What it shows, then (while not current) when it came, in a
+            // slot the words before it give way to.
             .child(
                 div()
+                    .flex()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
                     .text_color(colors.text_faint)
-                    .child(about),
+                    .child(div().min_w_0().truncate().child(about.about))
+                    .children(about.as_of.map(|as_of| div().flex_none().child(as_of))),
             )
             .children(right)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1220,7 +1221,8 @@ impl HealthPage {
             let first = index == 0;
             let folded = self.is_folded(view.display);
             let header = Some(Stop::Header(view.display));
-            let about = section_about(view.display, report);
+            let (about, as_of) = section_about(view.display, report);
+            let about = About { about, as_of };
             match view.display {
                 ViewDisplay::ZonesAndEndpoints => {
                     body.push((
@@ -1612,6 +1614,18 @@ fn updated_text(report: &Report, now: Timestamp) -> String {
             format_compact(at.elapsed_until(now))
         ),
         None => "waiting for the status poll".to_owned(),
+    }
+}
+
+/// The colour of what says the page isn't current (the header's age, the
+/// health line's *as of*): the connection's tone ([`Liveness::tone`]: red
+/// while it is lost, yellow while connected but silent or the numbers are
+/// old), `live` while current.
+fn stale_color(liveness: Liveness, live: Hsla, theme: &Theme) -> Hsla {
+    match liveness.tone() {
+        None | Some(Tone::Normal) => live,
+        Some(Tone::Warning) => theme.states.text.warning,
+        Some(Tone::Critical) => theme.states.text.critical,
     }
 }
 
@@ -2023,34 +2037,45 @@ fn render_tile(tile: &Tile, sparklines: bool, live: Liveness, theme: &Theme) -> 
 /// view's source, with the as-of marker while the states aren't current
 /// (`read-only · as of 09:14`; the checks are no longer the last
 /// minute's).
-fn section_about(display: ViewDisplay, report: &Report) -> String {
+fn section_about(display: ViewDisplay, report: &Report) -> (String, Option<String>) {
     let about = match display {
-        ViewDisplay::ZonesAndEndpoints => {
-            return format!(
-                "{} · {} · {}",
-                plural(report.zones.len(), "zone", "zones"),
-                plural(
-                    report.zones.iter().map(|zone| zone.endpoints.len()).sum(),
-                    "endpoint",
-                    "endpoints"
-                ),
-                plural(report.global_zones.len(), "global zone", "global zones")
+        ViewDisplay::ZonesAndEndpoints => format!(
+            "{} · {} · {}",
+            plural(report.zones.len(), "zone", "zones"),
+            plural(
+                report.zones.iter().map(|zone| zone.endpoints.len()).sum(),
+                "endpoint",
+                "endpoints"
+            ),
+            plural(report.global_zones.len(), "global zone", "global zones")
+        ),
+        ViewDisplay::Checks => {
+            return (
+                match &report.as_of {
+                    Some(as_of) => format!("{as_of}, from /v1/status"),
+                    None => "last minute, from /v1/status".to_owned(),
+                },
+                None,
             );
         }
-        ViewDisplay::Checks => {
-            return match &report.as_of {
-                Some(as_of) => format!("{as_of}, from /v1/status"),
-                None => "last minute, from /v1/status".to_owned(),
-            };
-        }
-        ViewDisplay::QueuesAndConnections => "ApiListener, JsonRpc",
-        ViewDisplay::GlobalSwitches => "read-only",
-        _ => "",
+        ViewDisplay::QueuesAndConnections => "ApiListener, JsonRpc".to_owned(),
+        ViewDisplay::GlobalSwitches => "read-only".to_owned(),
+        _ => String::new(),
     };
-    match &report.as_of {
-        Some(as_of) => format!("{about} · {as_of}"),
-        None => about.to_owned(),
-    }
+    // The zones' counts (`● 5`) and the tiles are last known too: the
+    // header says so after what it shows, in a slot of its own that the
+    // words before it give way to (the counts at the right never move).
+    (
+        about,
+        report.as_of.as_ref().map(|as_of| format!(" · {as_of}")),
+    )
+}
+
+/// What a view's header says it shows (faint), and, while the page isn't
+/// current, ` · as of 09:14` after it ([`section_about`]).
+struct About {
+    about: String,
+    as_of: Option<String>,
 }
 
 /// `1 zone`, `3 zones`.
@@ -2059,5 +2084,51 @@ fn plural(count: usize, one: &str, many: &str) -> String {
         format!("1 {one}")
     } else {
         format!("{count} {many}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Without live data every view header says *as of* when its numbers
+    /// came, the zones' too (its `● 5` counts are last known like the
+    /// tiles), after what it shows, in a slot of its own (the counts at
+    /// the right never move); while live none does.
+    #[test]
+    fn every_view_header_says_as_of_without_live_data() {
+        let mut report = Report::default();
+        let headers = [
+            ViewDisplay::ZonesAndEndpoints,
+            ViewDisplay::QueuesAndConnections,
+            ViewDisplay::GlobalSwitches,
+        ];
+        for display in headers {
+            assert_eq!(section_about(display, &report).1, None, "{display:?}");
+        }
+        assert_eq!(
+            section_about(ViewDisplay::Checks, &report),
+            ("last minute, from /v1/status".to_owned(), None)
+        );
+        report.as_of = Some("as of 09:14".to_owned());
+        assert_eq!(
+            section_about(ViewDisplay::ZonesAndEndpoints, &report),
+            (
+                "0 zones · 0 endpoints · 0 global zones".to_owned(),
+                Some(" · as of 09:14".to_owned())
+            )
+        );
+        for display in headers {
+            assert_eq!(
+                section_about(display, &report).1.as_deref(),
+                Some(" · as of 09:14"),
+                "{display:?}"
+            );
+        }
+        // The checks say it first, as before.
+        assert_eq!(
+            section_about(ViewDisplay::Checks, &report),
+            ("as of 09:14, from /v1/status".to_owned(), None)
+        );
     }
 }

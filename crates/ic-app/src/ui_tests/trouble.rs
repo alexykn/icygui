@@ -215,7 +215,9 @@ fn blind_since(snapshot: &Snapshot, since: Timestamp) -> Snapshot {
 /// No false green in the health page's endpoint rows without live data:
 /// the statuses are the last known ones, marked as of when they came; the
 /// node icygui talks to isn't, its row says what icygui knows of its own
-/// connection (silent, then lost) in the banner's tone.
+/// connection (silent in yellow, then lost in red) in the banner's tone,
+/// and the health line's *as of* and the sidebar's dot follow it (rule 5:
+/// an outage never looks calmer the longer it lasts).
 fn endpoint_statuses_are_last_known(app: &Harness, cx: &mut App, now: Timestamp, since: Timestamp) {
     let page = app.workspace.read(cx).health_page().clone();
     let report = page.read(cx).report(cx);
@@ -236,6 +238,7 @@ fn endpoint_statuses_are_last_known(app: &Harness, cx: &mut App, now: Timestamp,
         ("no live data · this node", Tone::Warning, None)
     );
     assert!(report.as_of.is_some());
+    assert_eq!(report.live.tone(), Some(Tone::Warning), "connected, silent");
     assert!(!others.is_empty());
     for row in others {
         assert_eq!(row.as_of, report.as_of, "{}", row.name);
@@ -262,7 +265,29 @@ fn endpoint_statuses_are_last_known(app: &Harness, cx: &mut App, now: Timestamp,
         .expect("this node");
     assert_eq!(
         (master.status.as_str(), master.tone, master.as_of.as_deref()),
-        ("connection lost · this node", Tone::Warning, None)
+        ("connection lost · this node", Tone::Critical, None)
+    );
+    // Lost: red everywhere it shows, though no live data was raised long
+    // ago (the banner, the footer, the health line's *as of*, the
+    // sidebar's dot, the tray's node).
+    let state = app.state.read(cx);
+    assert_eq!(report.live.tone(), Some(Tone::Critical));
+    assert_eq!(state.connection().health(now), Health::Reconnecting);
+    let notice = state.connection_notice(now).expect("the banner");
+    assert_eq!(
+        (notice.kind, notice.tone),
+        (
+            NoticeKind::Blind,
+            crate::app_state::connection::Tone::Critical
+        )
+    );
+    assert_eq!(
+        crate::cluster::sidebar_state(state.snapshot(), state.connection(), now),
+        crate::cluster::ClusterState::Critical
+    );
+    assert_eq!(
+        crate::background::tray::tray_view(state, now).blind,
+        Some(ic_platform::tray::TrayTone::Critical)
     );
     app.state.update(cx, |state, cx| {
         let mut status = state.connection().clone();
@@ -316,7 +341,13 @@ fn no_live_data_shows_on_every_page_the_footer_and_the_tray() {
             );
             let (_, age) = state.connection().label_parts(now);
             assert_eq!(age.as_deref(), Some("no data 3m"), "{page}");
+            // Connected, but nothing arrives: yellow (rule 5).
             assert_eq!(state.connection().health(now), Health::Stale, "{page}");
+            assert_eq!(
+                notice.tone,
+                crate::app_state::connection::Tone::Warning,
+                "{page}"
+            );
         };
         check(app, cx, "a dashboard");
         for entry in [
@@ -351,7 +382,7 @@ fn no_live_data_shows_on_every_page_the_footer_and_the_tray() {
         assert_ne!(report.beats.tone, BeatTone::Ok);
         endpoint_statuses_are_last_known(app, cx, now, since);
         let tray = crate::background::tray::tray_view(app.state.read(cx), now);
-        assert!(tray.blind);
+        assert_eq!(tray.blind, Some(ic_platform::tray::TrayTone::Warning));
         assert!(
             tray.statuses
                 .iter()
@@ -373,7 +404,7 @@ fn no_live_data_shows_on_every_page_the_footer_and_the_tray() {
         let state = app.state.read(cx);
         assert!(state.connection_notice(now).is_none());
         assert_ne!(state.connection().health(now), Health::Stale);
-        assert!(!crate::background::tray::tray_view(state, now).blind);
+        assert_eq!(crate::background::tray::tray_view(state, now).blind, None);
     });
 }
 

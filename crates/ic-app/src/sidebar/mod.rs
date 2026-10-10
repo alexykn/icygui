@@ -1156,6 +1156,7 @@ impl Sidebar {
                     suffix,
                     partial,
                     no_data,
+                    health,
                     name_chars,
                 };
                 Self::status_detail(status, detail, theme)
@@ -1233,7 +1234,7 @@ impl Sidebar {
                         .ml(px(STATUS_AGE_GAP))
                         .w(theme.text.hint * (slot * ic_ui_kit::CHAR_WIDTH))
                         .when(detail.no_data, |age| {
-                            age.text_color(theme.states.text.warning)
+                            age.text_color(health_text_color(detail.health, theme))
                         })
                         .child(age),
                 )
@@ -1436,6 +1437,9 @@ struct StatusDetail {
     suffix: Option<String>,
     partial: bool,
     no_data: bool,
+    /// The connection's colour class: `no data 3m` is red while the
+    /// connection is lost, yellow while connected but silent (rule 5).
+    health: Health,
     /// The environment name's length, in characters.
     name_chars: usize,
 }
@@ -1471,14 +1475,25 @@ fn node_has_room(theme: &Theme, name_chars: usize, slot_chars: f32) -> bool {
     room >= char_width * NODE_MIN_CHARS
 }
 
-/// The footer dot's colour (ENV-06): green while live, yellow when stale,
-/// red when reconnecting or failed, grey otherwise.
+/// The footer dot's colour (ENV-06): green while live, yellow when stale
+/// (connected, but nothing arrives), red when reconnecting or failed (a
+/// lost connection, from its first moment until it recovers, rule 5),
+/// grey otherwise.
 pub(crate) fn health_color(health: Health, theme: &Theme) -> gpui::Hsla {
     match health {
         Health::Live => theme.states.fill.ok,
         Health::Stale => theme.states.fill.warning,
         Health::Reconnecting | Health::Failed => theme.states.fill.critical,
         Health::Connecting | Health::Idle => theme.states.fill.pending,
+    }
+}
+
+/// The text colour of what says there is no live data (`no data 3m`), in
+/// the dot's tone: red while the connection is lost, else yellow.
+fn health_text_color(health: Health, theme: &Theme) -> gpui::Hsla {
+    match health.tone() {
+        Some(crate::app_state::connection::Tone::Critical) => theme.states.text.critical,
+        _ => theme.states.text.warning,
     }
 }
 

@@ -140,7 +140,8 @@ case "$scenario" in
     require_up
     "${COMPOSE[@]}" pause master-01
     say "master-01 is frozen: connections to it stay open and say nothing. icygui shows:" \
-      "- after about 2 minutes without a line: event stream stalled, reconnecting" \
+      "- within about half a minute a heartbeat falls late and the query about it times out:" \
+      "  connection lost, reconnecting (without heartbeats: 2 minutes without a line, event stream stalled)" \
       "- the reconnect fails over to master-02 (the footer names it); master-02 reports master-01" \
       "  disconnected and its pinned beat UNKNOWN: heartbeat master-01 dead: Remote Icinga instance" \
       "  'master-01' is not connected to 'master-02'" \
@@ -283,7 +284,8 @@ print(len(names))
     "${COMPOSE[@]}" exec -T proxy touch /tmp/dead
     say "The proxy at https://127.0.0.1:5667 (master-01 behind it) passes nothing; connections stay open." \
       "An environment that connects through it (demo/screenshot.sh --via-proxy writes one) shows:" \
-      "- after about 2 minutes without a line: event stream stalled, reconnecting" \
+      "- within about half a minute a heartbeat falls late and the query about it times out:" \
+      "  connection lost, reconnecting (without heartbeats: 2 minutes without a line, event stream stalled)" \
       "- the reconnect through the proxy hangs until its timeout, then fails over to master-02" \
       "  (or, without a second URL: no live data for <n>m, states may be outdated)" \
       "Undo: demo/scenario.sh recover"
@@ -291,7 +293,14 @@ print(len(names))
 
   recover)
     require_up
-    "${COMPOSE[@]}" unpause master-01 master-02 sat-ams-01 sat-fra-01 sat-fra-02 2>/dev/null || true
+    # One at a time, only the paused ones: `compose unpause` of a list
+    # fails on the first node that isn't paused and may leave a frozen
+    # one paused (then up.sh can't start it).
+    for node in master-01 master-02 sat-ams-01 sat-fra-01 sat-fra-02; do
+      if [ "$(docker inspect -f '{{.State.Status}}' "$(cid "$node")" 2>/dev/null)" = paused ]; then
+        "${COMPOSE[@]}" unpause "$node"
+      fi
+    done
     "${COMPOSE[@]}" exec -T proxy rm -f /tmp/dead 2>/dev/null || true
     "$HERE/up.sh" >/dev/null
     # Only the objects checks-stopped turned off: restoring an attribute

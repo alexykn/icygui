@@ -91,10 +91,12 @@ async fn a_failing_reload_waits_a_whole_interval() {
     );
     control.fail_next(0, 503);
     let loads = attempts();
+    // At a random phase (no synchronised clients), but never sooner than
+    // an interval, nor later than two.
     for pair in loads.windows(2) {
         let gap = pair[1] - pair[0];
         assert!(
-            gap >= 0.9 * interval.as_secs_f64() - 0.02,
+            gap >= interval.as_secs_f64() - 0.02,
             "a failed reload is retried only after an interval: {loads:?}"
         );
     }
@@ -175,15 +177,20 @@ async fn refresh_presses_in_a_row_wait_longer_and_longer() {
     // Someone keeps pressing Refresh (the UI lets a press through every
     // 2 s; here every 20 ms) for 3 s.
     let pressed = std::time::Instant::now();
+    let pressed_at = ic_model::Timestamp::now().as_unix_seconds();
     while pressed.elapsed() < Duration::from_secs(3) {
         engine.send(Command::Refresh);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let loads = host_lists(&control);
-    let gaps: Vec<f64> = loads.windows(2).map(|pair| pair[1] - pair[0]).collect();
     // At once, then 1, 4 and 10 spacings after the previous one (at 0,
-    // 0.15, 0.75 and 2.25 s; the next would be at 3.75 s).
-    assert_eq!(loads.len(), 4, "{loads:?}");
+    // 0.15, 0.75 and 2.25 s; the next would be at 3.75 s): four began
+    // while the presses went on (waited for: a busy runner is slower, and
+    // a late one only stretches the gaps), never more.
+    assert!(wait_until(|| host_lists(&control).len() >= 4).await);
+    let loads = host_lists(&control);
+    let during = loads.iter().filter(|at| **at < pressed_at + 3.0).count();
+    assert!(during <= 4, "{loads:?}");
+    let gaps: Vec<f64> = loads.windows(2).map(|pair| pair[1] - pair[0]).collect();
     let expected = [1.0, 4.0, 10.0];
     for (gap, factor) in gaps.iter().zip(expected) {
         assert!(

@@ -113,25 +113,47 @@ pub(crate) fn cluster_state(snapshot: &Snapshot, connected: bool, now: Timestamp
 /// Whether what the health page shows for this environment is current
 /// (no false green, PLAN.md §4.2): the connection is live by the same
 /// timestamps the footer reads (events, the engine's ticks, no live data),
-/// and the endpoints' states came within three status polls.
+/// and the endpoints' states (else the latest status) came within three
+/// status polls. Without
+/// that, what icygui knows of its own connection to the node: lost once
+/// it isn't connected (after it was) or the engine stopped, silent while
+/// connected without live data, up when only the numbers are old; in the
+/// connection banner's tone (critical while it is, else a warning).
 pub(crate) fn liveness(
     snapshot: &Snapshot,
     connection: &crate::app_state::ConnectionStatus,
     now: Timestamp,
 ) -> health::Liveness {
+    use crate::app_state::connection::Health;
     let health = &snapshot.health;
     let as_of = health
         .endpoints_at
         .or_else(|| health.latest().map(|sample| sample.at));
+    // The endpoints' states, else the status they came with (before the
+    // first endpoints poll, or right after a reconnect).
     let old = !health.interval.is_zero()
-        && health.endpoints_at.is_some_and(|at| {
+        && as_of.is_some_and(|at| {
             at.elapsed_until(now) > health.interval * 3 + std::time::Duration::from_secs(30)
         });
-    if connection.health(now) == crate::app_state::connection::Health::Live && !old {
-        health::Liveness::Live
-    } else {
-        health::Liveness::Stale { as_of }
+    let state = connection.health(now);
+    if state == Health::Live && !old {
+        return health::Liveness::Live;
     }
+    // The banner's tone (its words don't matter here).
+    let tone = match connection.notice("", now).map(|notice| notice.tone) {
+        Some(crate::app_state::connection::Tone::Critical) => health::Tone::Critical,
+        _ => health::Tone::Warning,
+    };
+    let link = if connection.engine_error.is_some()
+        || (connection.ever_connected && !connection.is_connected())
+    {
+        health::Link::Lost(tone)
+    } else if state == Health::Live {
+        health::Link::Up
+    } else {
+        health::Link::Silent(tone)
+    };
+    health::Liveness::Stale { as_of, link }
 }
 
 /// The sidebar's *health* dot (no false green, PLAN.md §4.2): the
@@ -246,6 +268,123 @@ mod tests {
         assert_eq!(
             sidebar_state(&Snapshot::default(), &connection, now),
             ClusterState::Warning
+        );
+    }
+
+    /// Without live data the health page knows what icygui knows of its
+    /// own connection to the node: lost while reconnecting (or the engine
+    /// stopped), silent while connected without live data, up when only
+    /// the endpoints' numbers are old.
+    #[test]
+    fn liveness_says_what_icygui_knows_of_its_own_connection() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use health::{Link, Liveness, Tone};
+        let now = Timestamp::from_unix_seconds(2_000.0);
+        let mut connection = crate::app_state::ConnectionStatus::starting("master-01", None);
+        connection.on_state(ic_core::ConnectionState::Connected {
+            node: crate::app_state::connection::full_node("master-01"),
+            version: "r2.15.6".to_owned(),
+            since: Timestamp::from_unix_seconds(1_000.0),
+        });
+        connection.last_event_at = Some(Timestamp::from_unix_seconds(1_999.0));
+        let polled = Timestamp::from_unix_seconds(1_990.0);
+        let fresh = Snapshot {
+            health: Arc::new(ic_core::health::ClusterHealth {
+                endpoints_at: Some(polled),
+                interval: Duration::from_secs(30),
+                ..ic_core::health::ClusterHealth::default()
+            }),
+            ..Snapshot::default()
+        };
+        assert_eq!(liveness(&fresh, &connection, now), Liveness::Live);
+        // The numbers are old (no status poll for 4m), the stream live.
+        let old_at = Timestamp::from_unix_seconds(1_760.0);
+        let old = Snapshot {
+            health: Arc::new(ic_core::health::ClusterHealth {
+                endpoints_at: Some(old_at),
+                interval: Duration::from_secs(30),
+                ..ic_core::health::ClusterHealth::default()
+            }),
+            ..Snapshot::default()
+        };
+        assert_eq!(
+            liveness(&old, &connection, now),
+            Liveness::Stale {
+                as_of: Some(old_at),
+                link: Link::Up
+            }
+        );
+        // No endpoints' states yet (the first poll after a reconnect is
+        // due), the latest status 4m old: the page says so too.
+        let status_old = Snapshot {
+            health: Arc::new(ic_core::health::ClusterHealth {
+                samples: std::iter::once(ic_core::health::HealthSample {
+                    at: old_at,
+                    ..ic_core::health::HealthSample::default()
+                })
+                .collect(),
+                interval: Duration::from_secs(30),
+                ..ic_core::health::ClusterHealth::default()
+            }),
+            ..Snapshot::default()
+        };
+        assert_eq!(
+            liveness(&status_old, &connection, now),
+            Liveness::Stale {
+                as_of: Some(old_at),
+                link: Link::Up
+            }
+        );
+        // Connected, but the stream went silent.
+        let mut silent = connection.clone();
+        silent.last_event_at = Some(Timestamp::from_unix_seconds(1_900.0));
+        assert_eq!(
+            liveness(&fresh, &silent, now),
+            Liveness::Stale {
+                as_of: Some(polled),
+                link: Link::Silent(Tone::Warning)
+            }
+        );
+        // Lost: reconnecting.
+        let mut lost = connection.clone();
+        lost.on_state(ic_core::ConnectionState::Reconnecting {
+            error: "connection reset".to_owned(),
+            attempt: 1,
+            retry_at: Timestamp::from_unix_seconds(2_004.0),
+            untrusted: None,
+        });
+        assert_eq!(
+            liveness(&fresh, &lost, now),
+            Liveness::Stale {
+                as_of: Some(polled),
+                link: Link::Lost(Tone::Critical)
+            }
+        );
+        // Lost for longer than the grace: no live data is raised, and the
+        // banner (and the row) turn to its warning tone.
+        let mut blind = lost.clone();
+        blind.blind = Some(ic_core::trouble::Blind {
+            since: Timestamp::from_unix_seconds(1_850.0),
+            reason: "connection lost".to_owned(),
+        });
+        assert_eq!(
+            liveness(&fresh, &blind, now),
+            Liveness::Stale {
+                as_of: Some(polled),
+                link: Link::Lost(Tone::Warning)
+            }
+        );
+        // Lost: the engine stopped.
+        let mut stopped = connection;
+        stopped.on_engine_stopped("the event stream ended".to_owned());
+        assert_eq!(
+            liveness(&fresh, &stopped, now),
+            Liveness::Stale {
+                as_of: Some(polled),
+                link: Link::Lost(Tone::Critical)
+            }
         );
     }
 

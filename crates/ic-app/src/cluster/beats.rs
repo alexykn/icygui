@@ -516,7 +516,10 @@ mod tests {
     /// the row says so; what is dead stays red.
     #[test]
     fn without_live_data_no_beat_is_green() {
-        let stale = Liveness::Stale { as_of: None };
+        let stale = Liveness::Stale {
+            as_of: None,
+            link: super::super::health::Link::Lost(Tone::Warning),
+        };
         let list = beats(vec![
             beat("ams", BeatState::OnTime, 3.0),
             beat("fra", BeatState::OnTime, 8.0),

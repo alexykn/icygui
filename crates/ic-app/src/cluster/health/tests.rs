@@ -394,6 +394,7 @@ fn without_live_data_nothing_is_green() {
     let snapshot = cluster();
     let stale = Liveness::Stale {
         as_of: Some(at(240.0)),
+        link: Link::Lost(Tone::Warning),
     };
     let report = report(&snapshot, stale, now());
     assert_eq!(report.live, stale);
@@ -416,6 +417,165 @@ fn without_live_data_nothing_is_green() {
     assert_eq!(report.zones[1].endpoints[0].last_message, "4m 1s ago");
     let live = super::report(&old, Liveness::Live, now());
     assert_eq!(live.zones[1].endpoints[0].last_message, "1s ago");
+}
+
+/// The endpoints' rows by name.
+fn rows(report: &Report) -> Vec<&EndpointRow> {
+    report
+        .zones
+        .iter()
+        .flat_map(|zone| &zone.endpoints)
+        .collect()
+}
+
+/// No false green in the endpoints' statuses: live, each says what Icinga
+/// reports, unmarked. Without live data the others keep their words (a
+/// problem its tone) but each is marked as the last known one (`as of`,
+/// faint on the page), and the node icygui talks to says what icygui
+/// knows of its own connection to it, in the banner's warning tone: lost
+/// or silent, never `connected` from before.
+#[test]
+fn without_live_data_statuses_are_last_known_and_this_node_says_so() {
+    let snapshot = cluster();
+    let as_of = at(240.0);
+    let marker = format!("as of {}", crate::format::list_clock(as_of, now()));
+    let live = report(&snapshot, Liveness::Live, now());
+    assert_eq!(live.as_of, None);
+    let words: Vec<(&str, Tone, Option<&str>)> = rows(&live)
+        .iter()
+        .map(|row| (row.status.as_str(), row.tone, row.as_of.as_deref()))
+        .collect();
+    assert_eq!(
+        words,
+        [
+            ("connected · this node", Tone::Normal, None),
+            ("connected", Tone::Normal, None),
+            ("connected", Tone::Normal, None),
+            ("connected · older version", Tone::Normal, None),
+        ]
+    );
+    for (link, status, tone) in [
+        (
+            Link::Lost(Tone::Warning),
+            "connection lost · this node",
+            Tone::Warning,
+        ),
+        (
+            Link::Lost(Tone::Critical),
+            "connection lost · this node",
+            Tone::Critical,
+        ),
+        (
+            Link::Silent(Tone::Warning),
+            "no live data · this node",
+            Tone::Warning,
+        ),
+    ] {
+        let stale = report(
+            &snapshot,
+            Liveness::Stale {
+                as_of: Some(as_of),
+                link,
+            },
+            now(),
+        );
+        assert_eq!(stale.as_of.as_deref(), Some(marker.as_str()), "{link:?}");
+        let words: Vec<(&str, Tone, Option<&str>)> = rows(&stale)
+            .iter()
+            .map(|row| (row.status.as_str(), row.tone, row.as_of.as_deref()))
+            .collect();
+        let last_known = Some(marker.as_str());
+        assert_eq!(
+            words,
+            [
+                // What icygui knows now, in the banner's tone: no last
+                // known state, no marker.
+                (status, tone, None),
+                ("connected", Tone::Normal, last_known),
+                ("connected", Tone::Normal, last_known),
+                ("connected · older version", Tone::Normal, last_known),
+            ],
+            "{link:?}"
+        );
+        assert!(rows(&stale).iter().all(|row| row.dot != Dot::Ok));
+    }
+}
+
+/// Only the endpoints' numbers are old: icygui's own connection is live,
+/// so its node's row is current while the others are as of their poll. A
+/// problem keeps its tone, marked as the last known state too.
+#[test]
+fn without_live_numbers_only_the_others_are_last_known() {
+    let snapshot = cluster();
+    let as_of = at(240.0);
+    let marker = format!("as of {}", crate::format::list_clock(as_of, now()));
+    let numbers_old = report(
+        &snapshot,
+        Liveness::Stale {
+            as_of: Some(as_of),
+            link: Link::Up,
+        },
+        now(),
+    );
+    let master = rows(&numbers_old)[0];
+    assert_eq!(
+        (master.status.as_str(), master.tone, master.as_of.as_deref()),
+        ("connected · this node", Tone::Normal, None)
+    );
+    assert_eq!(
+        rows(&numbers_old)[1].as_of.as_deref(),
+        Some(marker.as_str())
+    );
+    // When the states came isn't known: they still aren't current.
+    let unknown = report(
+        &snapshot,
+        Liveness::Stale {
+            as_of: None,
+            link: Link::Lost(Tone::Warning),
+        },
+        now(),
+    );
+    assert_eq!(unknown.as_of.as_deref(), Some("not current"));
+    assert_eq!(rows(&unknown)[1].as_of.as_deref(), Some("not current"));
+    // A problem keeps its tone and is marked as last known too.
+    let down = report(
+        &degraded(&[]),
+        Liveness::Stale {
+            as_of: Some(as_of),
+            link: Link::Lost(Tone::Warning),
+        },
+        now(),
+    );
+    let fra = rows(&down)[3];
+    assert_eq!(
+        (fra.status.as_str(), fra.tone, fra.as_of.as_deref()),
+        ("not connected", Tone::Critical, Some(marker.as_str()))
+    );
+}
+
+/// Without live data uptime stops at the latest status: nothing says
+/// Icinga still runs.
+#[test]
+fn without_live_data_uptime_is_as_of_the_latest_status() {
+    let mut snapshot = cluster();
+    let mut health = (*snapshot.health).clone();
+    if let Some(latest) = health.samples.back_mut() {
+        latest.at = at(2.0 * 3_600.0);
+    }
+    snapshot.health = Arc::new(health);
+    let live = report(&snapshot, Liveness::Live, now());
+    assert_eq!(live.instance, "Icinga r2.14.3-1 · up 41d 6h");
+    assert_eq!(live.queues[4].value, "41d 6h");
+    let stale = report(
+        &snapshot,
+        Liveness::Stale {
+            as_of: Some(at(2.0 * 3_600.0)),
+            link: Link::Lost(Tone::Warning),
+        },
+        now(),
+    );
+    assert_eq!(stale.instance, "Icinga r2.14.3-1 · up 41d 4h");
+    assert_eq!(stale.queues[4].value, "41d 4h");
 }
 
 #[test]

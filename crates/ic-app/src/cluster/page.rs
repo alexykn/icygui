@@ -26,8 +26,9 @@
 //! scrolls to it. *show master-02* puts it on that endpoint's row.
 //!
 //! **No false green:** without live data the page draws no green dot
-//! ([`super::health::Liveness`]); the health line says *as of* when the
-//! states came.
+//! ([`super::health::Liveness`]); the health line, the endpoints'
+//! statuses (faint) and the tile and switch views say *as of* when the
+//! states came, and the node icygui talks to says *connection lost*.
 
 use std::time::Duration;
 
@@ -581,7 +582,7 @@ impl HealthPage {
     /// slots of the same kind (dot, label, age) beside them, and Icinga's
     /// version and uptime at the right. Without live data the dots turn
     /// grey and a third slot says when the states came (`as of 06:56`).
-    fn render_health_line(report: &Report, now: Timestamp, theme: &Theme) -> AnyElement {
+    fn render_health_line(report: &Report, theme: &Theme) -> AnyElement {
         let colors = theme.colors;
         let live = report.live.is_live();
         let connected = if live && report.connected > 0 {
@@ -608,13 +609,7 @@ impl HealthPage {
                 theme,
             ),
         ];
-        let as_of = match report.live {
-            Liveness::Live => None,
-            Liveness::Stale { as_of } => Some(as_of.map_or_else(
-                || "not current".to_owned(),
-                |at| format!("as of {}", crate::format::list_clock(at, now)),
-            )),
-        };
+        let as_of = report.as_of.clone();
         div()
             .id("health-line")
             .flex()
@@ -1225,18 +1220,9 @@ impl HealthPage {
             let first = index == 0;
             let folded = self.is_folded(view.display);
             let header = Some(Stop::Header(view.display));
+            let about = section_about(view.display, report);
             match view.display {
                 ViewDisplay::ZonesAndEndpoints => {
-                    let about = format!(
-                        "{} · {} · {}",
-                        plural(report.zones.len(), "zone", "zones"),
-                        plural(
-                            report.zones.iter().map(|zone| zone.endpoints.len()).sum(),
-                            "endpoint",
-                            "endpoints"
-                        ),
-                        plural(report.global_zones.len(), "global zone", "global zones")
-                    );
                     body.push((
                         header,
                         self.render_section_header(
@@ -1254,13 +1240,7 @@ impl HealthPage {
                 ViewDisplay::Checks => {
                     body.push((
                         header,
-                        self.render_section_header(
-                            view,
-                            first,
-                            "last minute, from /v1/status".to_owned(),
-                            None,
-                            cx,
-                        ),
+                        self.render_section_header(view, first, about, None, cx),
                     ));
                     if !folded {
                         body.push((
@@ -1279,13 +1259,7 @@ impl HealthPage {
                 ViewDisplay::QueuesAndConnections => {
                     body.push((
                         header,
-                        self.render_section_header(
-                            view,
-                            first,
-                            "ApiListener, JsonRpc".to_owned(),
-                            None,
-                            cx,
-                        ),
+                        self.render_section_header(view, first, about, None, cx),
                     ));
                     if !folded {
                         body.push((
@@ -1304,7 +1278,7 @@ impl HealthPage {
                 ViewDisplay::GlobalSwitches => {
                     body.push((
                         header,
-                        self.render_section_header(view, first, "read-only".to_owned(), None, cx),
+                        self.render_section_header(view, first, about, None, cx),
                     ));
                     if !folded {
                         body.push((None, Self::render_switches(report, cx.theme())));
@@ -1320,7 +1294,6 @@ impl HealthPage {
     /// stop.
     fn render_zones(&self, report: &Report, theme: &Theme) -> Vec<(Option<Stop>, AnyElement)> {
         let colors = theme.colors;
-        let live = report.live.is_live();
         let mut rows: Vec<(Option<Stop>, AnyElement)> = vec![(
             None,
             table_row(
@@ -1353,7 +1326,7 @@ impl HealthPage {
             for endpoint in &zone.endpoints {
                 let stop = Stop::Endpoint(endpoint.name.clone());
                 let cursor = self.cursor.as_ref() == Some(&stop);
-                rows.push((Some(stop), endpoint_row(endpoint, cursor, live, theme)));
+                rows.push((Some(stop), endpoint_row(endpoint, cursor, theme)));
             }
         }
         if !report.global_zones.is_empty() {
@@ -1567,7 +1540,7 @@ impl Render for HealthPage {
             self.cursor = None;
         }
         let theme = cx.theme();
-        let health_line = Self::render_health_line(&report, now, theme);
+        let health_line = Self::render_health_line(&report, theme);
         let beats = self.render_beat_row(&report.beats, policy, cx);
         let alerts = self.render_alerts(&report.alerts, cx);
         let mut rows = self.render_late(&report, now, cx);
@@ -1702,18 +1675,26 @@ fn zone_counts(report: &Report, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A table cell's text and colour.
+/// A table cell's text and colour, and a marker after it (`· as of
+/// 09:14`): when the column is short, the text gives way first, down to
+/// its first [`MARKED_KEEPS`] characters, then the marker.
 struct Cell {
     text: SharedString,
     color: Hsla,
+    marker: Option<(SharedString, Hsla)>,
 }
 
 fn cell(text: impl Into<SharedString>, color: Hsla) -> Cell {
     Cell {
         text: text.into(),
         color,
+        marker: None,
     }
 }
+
+/// How much of a marked cell's text stays before its marker gives way
+/// (`connected`).
+const MARKED_KEEPS: usize = 9;
 
 /// The table's column widths, as shares of the row (the mock-up's
 /// `1.2fr .8fr .8fr .9fr 1.1fr 1.6fr`).
@@ -1765,14 +1746,30 @@ fn table_row(
         )
         .children(cells.into_iter().zip(COLUMNS).map(|(cell, share)| {
             // `fr` columns: shares of what the gaps leave.
-            div()
+            let column = div()
                 .flex_basis(px(0.))
                 .flex_grow(share)
                 .flex_shrink(share)
-                .min_w_0()
-                .truncate()
-                .text_color(cell.color)
-                .child(cell.text)
+                .min_w_0();
+            match cell.marker {
+                None => column.truncate().text_color(cell.color).child(cell.text),
+                Some((marker, color)) => {
+                    #[expect(clippy::cast_precision_loss, reason = "a handful of characters")]
+                    let keep = cell.text.chars().count().min(MARKED_KEEPS) as f32;
+                    column
+                        .flex()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .flex_shrink(1_000.)
+                                .min_w((size * (ic_ui_kit::CHAR_WIDTH * keep)).ceil())
+                                .truncate()
+                                .text_color(cell.color)
+                                .child(cell.text),
+                        )
+                        .child(div().min_w_0().truncate().text_color(color).child(marker))
+                }
+            }
         }))
         .child(beat_slot(beat))
         .into_any_element()
@@ -1895,15 +1892,23 @@ fn zone_row(zone: &ZoneGroup, cursor: bool, theme: &Theme) -> AnyElement {
 }
 
 /// An endpoint's line; the node icygui talks to has the selected-row
-/// background. Without live data its status is faint (the last known
-/// one) and its dot grey where it was green.
-fn endpoint_row(row: &EndpointRow, cursor: bool, live: bool, theme: &Theme) -> AnyElement {
+/// background. Without live data its status is the last known one: faint
+/// (a problem keeps its colour), `· as of 09:14` after it, its dot grey
+/// where it was green.
+fn endpoint_row(row: &EndpointRow, cursor: bool, theme: &Theme) -> AnyElement {
     let colors = theme.colors;
     let status = match row.tone {
         Tone::Critical => theme.states.text.critical,
         Tone::Warning => theme.states.text.warning,
-        Tone::Normal if !live => colors.text_faint,
+        Tone::Normal if row.as_of.is_some() => colors.text_faint,
         Tone::Normal => colors.text_muted,
+    };
+    let status = Cell {
+        marker: row
+            .as_of
+            .as_ref()
+            .map(|as_of| (format!(" · {as_of}").into(), colors.text_faint)),
+        ..cell(row.status.clone(), status)
     };
     table_row(
         [
@@ -1912,7 +1917,7 @@ fn endpoint_row(row: &EndpointRow, cursor: bool, live: bool, theme: &Theme) -> A
             cell(row.version.clone(), colors.text_secondary),
             cell(row.last_message.clone(), colors.text_secondary),
             cell(row.traffic.clone(), colors.text_muted),
-            cell(row.status.clone(), status),
+            status,
         ],
         Some(row.dot.fill(theme)),
         row.beat.as_ref().map(|beat| beat_element(beat, theme)),
@@ -2012,6 +2017,40 @@ fn render_tile(tile: &Tile, sparklines: bool, live: Liveness, theme: &Theme) -> 
         )
         .children(trend)
         .into_any_element()
+}
+
+/// What a view shows, in its header: the zones' counts; a tile or switch
+/// view's source, with the as-of marker while the states aren't current
+/// (`read-only · as of 09:14`; the checks are no longer the last
+/// minute's).
+fn section_about(display: ViewDisplay, report: &Report) -> String {
+    let about = match display {
+        ViewDisplay::ZonesAndEndpoints => {
+            return format!(
+                "{} · {} · {}",
+                plural(report.zones.len(), "zone", "zones"),
+                plural(
+                    report.zones.iter().map(|zone| zone.endpoints.len()).sum(),
+                    "endpoint",
+                    "endpoints"
+                ),
+                plural(report.global_zones.len(), "global zone", "global zones")
+            );
+        }
+        ViewDisplay::Checks => {
+            return match &report.as_of {
+                Some(as_of) => format!("{as_of}, from /v1/status"),
+                None => "last minute, from /v1/status".to_owned(),
+            };
+        }
+        ViewDisplay::QueuesAndConnections => "ApiListener, JsonRpc",
+        ViewDisplay::GlobalSwitches => "read-only",
+        _ => "",
+    };
+    match &report.as_of {
+        Some(as_of) => format!("{about} · {as_of}"),
+        None => about.to_owned(),
+    }
 }
 
 /// `1 zone`, `3 zones`.

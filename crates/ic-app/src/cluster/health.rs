@@ -28,10 +28,13 @@
 //! ([`Liveness::Stale`]: no live data, the engine silent, the connection
 //! lost, or the endpoints' numbers old), no dot on it is green: the last
 //! known states keep their words but their green turns grey, the health
-//! line says *as of* when they came, the last messages age against the
-//! UI's clock, and the heartbeat row says *no live data*. A beat past its
-//! deadline is late (yellow) by the UI's clock, whatever the engine last
-//! said ([`super::beats`]).
+//! line, each endpoint's status and the tile and switch views say *as of*
+//! when they came, the last messages age against the UI's clock, uptime
+//! stops at the last status, and the heartbeat row says *no live data*.
+//! The node icygui talks to is no last known state: its row says what
+//! icygui knows of its own connection to it ([`Link`]: *connection lost*,
+//! *no live data*). A beat past its deadline is late (yellow) by the UI's
+//! clock, whatever the engine last said ([`super::beats`]).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -40,7 +43,9 @@ use ic_config::HealthTile;
 use ic_core::health::{ClusterHealth, HealthSample};
 use ic_core::snapshot::Snapshot;
 use ic_core::{ClusterNode, NodeState};
-use ic_model::{FeatureState, InstanceStatus, ObjectKey, Timestamp, Version, format_two_units};
+use ic_model::{
+    EndpointStats, FeatureState, InstanceStatus, ObjectKey, Timestamp, Version, format_two_units,
+};
 
 use super::ClusterState;
 
@@ -55,13 +60,42 @@ pub(crate) enum Liveness {
     Stale {
         /// When the endpoints' states came.
         as_of: Option<Timestamp>,
+        /// icygui's own connection to the node it talks to.
+        link: Link,
     },
+}
+
+/// icygui's own connection to the node it talks to, while what the page
+/// shows isn't current: that node's row says this instead of a last known
+/// state, in the connection banner's tone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Link {
+    /// Connected and live: only the endpoints' numbers are old.
+    #[default]
+    Up,
+    /// Connected, but nothing live arrives (the event stream is silent or
+    /// stalled, or the engine isn't answering).
+    Silent(Tone),
+    /// Lost: reconnecting, refused, or the engine stopped.
+    Lost(Tone),
 }
 
 impl Liveness {
     /// Whether the data is current.
     pub(crate) fn is_live(self) -> bool {
         matches!(self, Self::Live)
+    }
+
+    /// When the last known states came, as the page marks them (`as of
+    /// 09:14`, `not current` when unknown); `None` while live.
+    pub(crate) fn as_of_text(self, now: Timestamp) -> Option<String> {
+        match self {
+            Self::Live => None,
+            Self::Stale { as_of, .. } => Some(as_of.map_or_else(
+                || "not current".to_owned(),
+                |at| format!("as of {}", crate::format::list_clock(at, now)),
+            )),
+        }
     }
 }
 
@@ -126,6 +160,10 @@ pub(crate) struct Report {
     pub(crate) quiet: bool,
     /// Whether what the page shows is current.
     pub(crate) live: Liveness,
+    /// When the last known states came (`as of 09:14`), while they aren't
+    /// current: the health line, the endpoints' statuses and the tile and
+    /// switch views carry it.
+    pub(crate) as_of: Option<String>,
     /// The health line: endpoints connected and not.
     pub(crate) connected: usize,
     pub(crate) not_connected: usize,
@@ -184,6 +222,9 @@ pub(crate) struct EndpointRow {
     pub(crate) status: String,
     /// The status's colour.
     pub(crate) tone: Tone,
+    /// The status is the last known one, which came then (`as of 09:14`):
+    /// drawn faint, the marker after it.
+    pub(crate) as_of: Option<String>,
     /// The heartbeat pinned to it, if it has one.
     pub(crate) beat: Option<super::beats::BeatCell>,
 }
@@ -265,7 +306,14 @@ pub(crate) fn report(snapshot: &Snapshot, live: Liveness, now: Timestamp) -> Rep
         })
         .max()
         .unwrap_or_default();
-    let queues = queue_tiles(health, status, connections, now);
+    // Uptime as of the latest status without live data: nothing says
+    // Icinga still runs.
+    let up_until = if live.is_live() {
+        now
+    } else {
+        health.latest().map_or(now, |sample| sample.at)
+    };
+    let queues = queue_tiles(health, status, connections, up_until);
     let alerts = super::beats::alert_lines(snapshot, now);
     // The worst alert's late checks: its zone's, or every one.
     let late = match alerts.first().and_then(|alert| alert.link.as_ref()) {
@@ -287,7 +335,7 @@ pub(crate) fn report(snapshot: &Snapshot, live: Liveness, now: Timestamp) -> Rep
             let uptime = status
                 .program_start
                 .non_zero()
-                .map(|start| format!(" · up {}", format_two_units(start.elapsed_until(now))));
+                .map(|start| format!(" · up {}", format_two_units(start.elapsed_until(up_until))));
             format!("Icinga {}{}", status.version, uptime.unwrap_or_default())
         }
         None => String::new(),
@@ -298,6 +346,7 @@ pub(crate) fn report(snapshot: &Snapshot, live: Liveness, now: Timestamp) -> Rep
         interval: health.interval,
         quiet: snapshot.quiet,
         live,
+        as_of: live.as_of_text(now),
         connected: connected_count,
         not_connected,
         instance,
@@ -565,16 +614,22 @@ fn endpoint_row(
         ),
     };
     let lagging = lags(snapshot, node, now);
-    let (status_text, tone) = match node.state {
-        NodeState::Connected if this_node => ("connected · this node".to_owned(), Tone::Normal),
-        NodeState::Connected if lagging => ("connected · no message".to_owned(), Tone::Warning),
-        NodeState::Connected if older => ("connected · older version".to_owned(), Tone::Normal),
-        NodeState::Connected => ("connected".to_owned(), Tone::Normal),
-        NodeState::Disconnected if numbers.is_some_and(|numbers| numbers.connecting) => {
-            ("not connected · retrying".to_owned(), Tone::Critical)
-        }
-        NodeState::Disconnected => ("not connected".to_owned(), Tone::Critical),
-        NodeState::Unknown => ("not seen from here".to_owned(), Tone::Normal),
+    // The node icygui talks to: what icygui knows of its own connection
+    // to it is current, never a last known state.
+    let link = match live {
+        Liveness::Stale { link, .. } if this_node => Some(link),
+        Liveness::Stale { .. } => None,
+        Liveness::Live => this_node.then_some(Link::Up),
+    };
+    let as_of = match link {
+        Some(_) => None,
+        None => live.as_of_text(now),
+    };
+    let (status_text, tone) = match (link, node.state) {
+        (Some(Link::Lost(tone)), _) => ("connection lost · this node".to_owned(), tone),
+        (Some(Link::Silent(tone)), _) => ("no live data · this node".to_owned(), tone),
+        (Some(Link::Up), _) => ("connected · this node".to_owned(), Tone::Normal),
+        (None, state) => endpoint_status(state, lagging, older, numbers),
     };
     let dot = match node.state {
         NodeState::Connected => Dot::Ok,
@@ -593,7 +648,27 @@ fn endpoint_row(
         traffic,
         status: status_text,
         tone,
+        as_of,
         beat: super::beats::endpoint_cell(&snapshot.heartbeats, &node.name, live, now),
+    }
+}
+
+/// Another endpoint's status as Icinga reports it, and its tone.
+fn endpoint_status(
+    state: NodeState,
+    lagging: bool,
+    older: bool,
+    numbers: Option<&EndpointStats>,
+) -> (String, Tone) {
+    match state {
+        NodeState::Connected if lagging => ("connected · no message".to_owned(), Tone::Warning),
+        NodeState::Connected if older => ("connected · older version".to_owned(), Tone::Normal),
+        NodeState::Connected => ("connected".to_owned(), Tone::Normal),
+        NodeState::Disconnected if numbers.is_some_and(|numbers| numbers.connecting) => {
+            ("not connected · retrying".to_owned(), Tone::Critical)
+        }
+        NodeState::Disconnected => ("not connected".to_owned(), Tone::Critical),
+        NodeState::Unknown => ("not seen from here".to_owned(), Tone::Normal),
     }
 }
 
@@ -799,7 +874,7 @@ fn queue_tiles(
     health: &ClusterHealth,
     status: Option<&InstanceStatus>,
     connections: Tone,
-    now: Timestamp,
+    up_until: Timestamp,
 ) -> Vec<Tile> {
     let samples = &health.samples;
     let listener = health.listener.as_ref();
@@ -913,7 +988,9 @@ fn queue_tiles(
     tiles.push(Tile {
         label: "uptime",
         kind: Some(HealthTile::Uptime),
-        value: start.map_or_else(missing, |start| format_two_units(start.elapsed_until(now))),
+        value: start.map_or_else(missing, |start| {
+            format_two_units(start.elapsed_until(up_until))
+        }),
         detail: start.map_or_else(String::new, |start| {
             crate::format::date_time(start, &chrono::Local).map_or_else(String::new, |at| {
                 format!("since {}", at.format("%a %-d %b %H:%M"))

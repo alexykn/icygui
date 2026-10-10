@@ -21,7 +21,7 @@ use super::environments::{CONNECT, connected_to};
 use super::{Body, Harness, run, run_app, wait_for};
 use crate::app_state::{ConnectionStatus, Health, NoticeKind};
 use crate::cluster::beats::BeatTone;
-use crate::cluster::health::Dot;
+use crate::cluster::health::{Dot, EndpointRow, Tone};
 use crate::cluster::{ClusterEntry, HealthPageEvent, HealthStop};
 use crate::editor::DashboardEditor;
 use crate::fixture::FixtureOptions;
@@ -212,6 +212,70 @@ fn blind_since(snapshot: &Snapshot, since: Timestamp) -> Snapshot {
     }
 }
 
+/// No false green in the health page's endpoint rows without live data:
+/// the statuses are the last known ones, marked as of when they came; the
+/// node icygui talks to isn't, its row says what icygui knows of its own
+/// connection (silent, then lost) in the banner's tone.
+fn endpoint_statuses_are_last_known(app: &Harness, cx: &mut App, now: Timestamp, since: Timestamp) {
+    let page = app.workspace.read(cx).health_page().clone();
+    let report = page.read(cx).report(cx);
+    let rows: Vec<&EndpointRow> = report
+        .zones
+        .iter()
+        .flat_map(|zone| &zone.endpoints)
+        .collect();
+    let (this_node, others): (Vec<&EndpointRow>, Vec<&EndpointRow>) =
+        rows.into_iter().partition(|row| row.this_node);
+    assert_eq!(this_node.len(), 1, "{this_node:?}");
+    assert_eq!(
+        (
+            this_node[0].status.as_str(),
+            this_node[0].tone,
+            this_node[0].as_of.as_deref()
+        ),
+        ("no live data · this node", Tone::Warning, None)
+    );
+    assert!(report.as_of.is_some());
+    assert!(!others.is_empty());
+    for row in others {
+        assert_eq!(row.as_of, report.as_of, "{}", row.name);
+    }
+    // The connection lost (reconnecting): the row says that.
+    app.state.update(cx, |state, cx| {
+        let mut status = state.connection().clone();
+        status.on_state(ConnectionState::Reconnecting {
+            error: "connection reset".to_owned(),
+            attempt: 2,
+            retry_at: Timestamp::from_unix_seconds(now.as_unix_seconds() + 30.),
+            untrusted: None,
+        });
+        state.set_connection(status);
+        cx.notify();
+    });
+    app.draw(cx);
+    let report = page.read(cx).report(cx);
+    let master = report
+        .zones
+        .iter()
+        .flat_map(|zone| &zone.endpoints)
+        .find(|row| row.this_node)
+        .expect("this node");
+    assert_eq!(
+        (master.status.as_str(), master.tone, master.as_of.as_deref()),
+        ("connection lost · this node", Tone::Warning, None)
+    );
+    app.state.update(cx, |state, cx| {
+        let mut status = state.connection().clone();
+        status.on_state(ConnectionState::Connected {
+            node: crate::app_state::connection::full_node("master-01"),
+            version: "r2.15.6-1".to_owned(),
+            since,
+        });
+        state.set_connection(status);
+        cx.notify();
+    });
+}
+
 /// A: no live data for three minutes shows on every page (the banner),
 /// in the footer (`no data 3m`, the warning colour, never green) and in
 /// the tray (its blind look, the environment's line), and goes once the
@@ -222,7 +286,12 @@ fn no_live_data_shows_on_every_page_the_footer_and_the_tray() {
         let now = Timestamp::now();
         let since = Timestamp::from_unix_seconds(now.as_unix_seconds() - 180.);
         let live = app.state.read(cx).snapshot().clone();
-        let blind = blind_since(&live, since);
+        let blind = Snapshot {
+            node: Some(Arc::new(crate::app_state::connection::full_node(
+                "master-01",
+            ))),
+            ..blind_since(&live, since)
+        };
         app.state.update(cx, |state, cx| {
             let mut status = ConnectionStatus::starting("master-01", Some("icygui".to_owned()));
             status.on_state(ConnectionState::Connected {
@@ -280,6 +349,7 @@ fn no_live_data_shows_on_every_page_the_footer_and_the_tray() {
             }
         }
         assert_ne!(report.beats.tone, BeatTone::Ok);
+        endpoint_statuses_are_last_known(app, cx, now, since);
         let tray = crate::background::tray::tray_view(app.state.read(cx), now);
         assert!(tray.blind);
         assert!(

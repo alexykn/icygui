@@ -142,6 +142,9 @@ pub(crate) struct EventBus {
     published: u64,
     /// Lines and bytes queued for every stream ever connected.
     delivered: (u64, u64),
+    /// Streams opened from now on are stalled from the start (a proxy that
+    /// accepts the connection but never relays anything).
+    stall_new: bool,
 }
 
 impl std::fmt::Debug for EventBus {
@@ -186,6 +189,7 @@ impl EventBus {
             buffer: buffer.max(1),
             published: 0,
             delivered: (0, 0),
+            stall_new: false,
         }
     }
 
@@ -205,7 +209,7 @@ impl EventBus {
             filter,
             user: user.to_owned(),
             queue,
-            stalled: false,
+            stalled: self.stall_new,
             lines: 0,
             bytes: 0,
         });
@@ -271,6 +275,11 @@ impl EventBus {
     /// Lines and bytes queued for every stream ever connected.
     pub(crate) fn delivered(&self) -> (u64, u64) {
         self.delivered
+    }
+
+    /// Whether streams opened from now on are stalled from the start.
+    pub(crate) fn stall_new(&mut self, stall: bool) {
+        self.stall_new = stall;
     }
 
     /// Stalls every connected stream: it stays open but receives nothing
@@ -459,6 +468,30 @@ mod tests {
             0.0,
         );
         assert_eq!(bus.streams().len(), 1, "a closed stalled stream is pruned");
+    }
+
+    #[test]
+    fn streams_opened_while_stalling_new_ones_receive_nothing() {
+        let mut bus = EventBus::new(NumberFormat::Float, 4);
+        let (_, mut before) = bus.subscribe(types(&[EventType::CheckResult]), None, "root");
+        bus.stall_new(true);
+        let (_, mut stalled) = bus.subscribe(types(&[EventType::CheckResult]), None, "root");
+        bus.stall_new(false);
+        let (_, mut after) = bus.subscribe(types(&[EventType::CheckResult]), None, "root");
+        bus.publish(
+            EventType::CheckResult,
+            json!({ "type": "CheckResult" }),
+            0.0,
+        );
+        assert!(
+            before.try_recv().is_ok(),
+            "open streams are left as they are"
+        );
+        assert!(after.try_recv().is_ok());
+        assert!(matches!(
+            stalled.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

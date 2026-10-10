@@ -350,7 +350,7 @@ impl Engine {
             // The reconcile moves out to the quiet interval; the status
             // poll after the next one follows the quiet pace by itself.
             if self.reconcile_at.is_some() {
-                self.schedule_reconcile(super::sync::Cadence::Next);
+                self.replan_reconcile();
             }
         } else {
             let interval = self.tuning.status_interval;

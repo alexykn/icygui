@@ -3,7 +3,8 @@
 //! state of every environment (they all run; grey while none is
 //! connected), or the blind look while one can't see (its node red while a
 //! connection is lost, yellow while connected but silent: the footer
-//! dot's tone), a tooltip with each environment, its connection and its
+//! dot's tone; never milder than the worst unhandled state it hides), a
+//! tooltip with each environment, its connection and its
 //! counts, and the menu: open, pause notifications in every environment
 //! (30 minutes, an hour, until 08:00) or resume, switch environment,
 //! quit.
@@ -43,7 +44,9 @@ pub(crate) struct TrayView {
     /// the icon takes the blind look, whatever the states say, since they
     /// may be outdated (no false green). Its node is in the worst such
     /// environment's tone, as its footer dot: red from the moment a
-    /// connection is lost until it recovers, else yellow (rule 5).
+    /// connection is lost until it recovers, else yellow (rule 5); never
+    /// milder than the worst unhandled state of the connected ones, which
+    /// the look hides (a critical problem elsewhere makes it red).
     pub(crate) blind: Option<TrayTone>,
     /// The active one.
     pub(crate) active: Option<String>,
@@ -84,10 +87,14 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
         let connected = connection.is_connected();
         // The footer dot's tone, the one rule (a lost connection is red
         // at once, not grey for two minutes and yellow after).
-        blind = match (blind, connection.health(now).tone()) {
-            (_, Some(Tone::Critical)) | (Some(TrayTone::Critical), _) => Some(TrayTone::Critical),
-            (_, Some(Tone::Warning)) => Some(TrayTone::Warning),
-            (blind, None) => blind,
+        let seeing = match connection.health(now).tone() {
+            Some(Tone::Critical) => Some(TrayTone::Critical),
+            Some(Tone::Warning) => Some(TrayTone::Warning),
+            None => None,
+        };
+        blind = match (blind, seeing) {
+            (Some(blind), Some(seeing)) => Some(more_severe(blind, seeing)),
+            (blind, seeing) => blind.or(seeing),
         };
         statuses.push((environment.id.clone(), menu_status(connection, now)));
         let overall = &slot.snapshot().overall;
@@ -165,8 +172,18 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
             "notifications paused until {until}, trouble alerts too"
         ));
     }
+    let tone = worst.and_then(TrayTone::for_worst_unhandled);
+    // The blind look stands for every environment, so its node is never
+    // milder than the worst unhandled state it hides (a summary is at
+    // least as severe as the worst thing it summarises, rule 5): an
+    // environment silent for 30 s (yellow) and a critical problem in
+    // another one make a red node.
+    let blind = blind.map(|node| match tone {
+        Some(TrayTone::Ok) | None => node,
+        Some(state) => more_severe(node, state),
+    });
     TrayView {
-        tone: worst.and_then(TrayTone::for_worst_unhandled),
+        tone,
         tooltip: lines.join("\n"),
         environments: environments
             .iter()
@@ -177,6 +194,18 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
         active: state.active_environment_id().map(str::to_owned),
         paused,
     }
+}
+
+/// The more severe of two tones: critical, then unknown, then warning
+/// (`CheckableState::severity_rank`'s order), then ok.
+fn more_severe(a: TrayTone, b: TrayTone) -> TrayTone {
+    let rank = |tone| match tone {
+        TrayTone::Critical => 3,
+        TrayTone::Unknown => 2,
+        TrayTone::Warning => 1,
+        TrayTone::Ok => 0,
+    };
+    if rank(b) > rank(a) { b } else { a }
 }
 
 /// How long an environment has had no live data, as its menu line says
@@ -515,21 +544,32 @@ mod tests {
         // The engine says live data stopped 3 minutes ago: the icon claims
         // no state (its states may be outdated), the menu says how long.
         let since = Timestamp::from_unix_seconds(now().as_unix_seconds() - 185.0);
-        state.set_snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
-            trouble: std::sync::Arc::new(ic_core::trouble::Trouble {
-                alerts: Vec::new(),
-                blind: Some(ic_core::trouble::Blind {
-                    since,
-                    reason: "event stream stalled".to_owned(),
-                }),
+        let trouble = std::sync::Arc::new(ic_core::trouble::Trouble {
+            alerts: Vec::new(),
+            blind: Some(ic_core::trouble::Blind {
+                since,
+                reason: "event stream stalled".to_owned(),
             }),
-            ..(**state.snapshot()).clone()
+        });
+        let shown = (**state.snapshot()).clone();
+        // Nothing unhandled (as far as it last saw).
+        state.set_snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+            trouble: std::sync::Arc::clone(&trouble),
+            overall: ic_core::snapshot::Summary::default(),
+            ..shown.clone()
         }));
         let view = tray_view(&state, now());
         // Connected, but nothing arrives: the node yellow.
         assert_eq!(view.blind, Some(TrayTone::Warning));
         assert_eq!(view.statuses, [(id, "no data 3m".to_owned())]);
         assert!(view.tooltip.contains("no live data"), "{}", view.tooltip);
+        // The fixture's unhandled criticals are still on screen: the look
+        // that hides them is never milder (rule 5), so the node is red.
+        state.set_snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+            trouble,
+            ..shown
+        }));
+        assert_eq!(tray_view(&state, now()).blind, Some(TrayTone::Critical));
         assert_eq!(menu_age(Duration::from_secs(40)), "no data");
         assert_eq!(menu_age(Duration::from_mins(61)), "no data 1h");
     }
@@ -567,6 +607,77 @@ mod tests {
         let view = tray_view(&state, now());
         assert_eq!(view.blind, Some(TrayTone::Critical), "not calmer later");
         assert_eq!(view.statuses, [(id, "no data 3m".to_owned())]);
+    }
+
+    /// Rule 5, every summary at least as severe as the worst thing it
+    /// summarises: one environment connected but silent (yellow) and
+    /// another with an unhandled critical make the blind look's node red,
+    /// an unknown one purple; with nothing unhandled it stays yellow.
+    #[test]
+    fn the_blind_look_is_never_milder_than_the_worst_state_it_hides() {
+        let mut state = AppState::fixture(now());
+        let staging = ic_config::Environment::new(
+            "staging",
+            "https://stg-master:5665",
+            ic_config::AuthConfig::Basic {
+                username: "icygui".to_owned(),
+            },
+        );
+        let staging_id = staging.id.clone();
+        state.save_environment(staging, false);
+        state.apply_from(
+            &staging_id,
+            ic_core::CoreEvent::Connection(ConnectionState::Connected {
+                node: crate::app_state::connection::full_node("stg-master"),
+                version: "r2.15.6-1".to_owned(),
+                since: Timestamp::from_unix_seconds(now().as_unix_seconds() - 600.0),
+            }),
+        );
+        // Staging: checks run, but its last event came 45 s ago (stale).
+        state.apply_from(
+            &staging_id,
+            ic_core::CoreEvent::Snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+                last_event_at: Some(Timestamp::from_unix_seconds(now().as_unix_seconds() - 45.0)),
+                status: Some(std::sync::Arc::new(ic_model::InstanceStatus {
+                    checks_per_minute: 120.0,
+                    ..ic_model::InstanceStatus::default()
+                })),
+                ..ic_core::snapshot::Snapshot::default()
+            })),
+        );
+        assert_eq!(
+            state
+                .slot(&staging_id)
+                .unwrap()
+                .connection()
+                .health(now())
+                .tone(),
+            Some(Tone::Warning),
+            "staging is connected but silent"
+        );
+        // Production (the fixture) has unhandled criticals.
+        let view = tray_view(&state, now());
+        assert_eq!(view.tone, Some(TrayTone::Critical));
+        assert_eq!(view.blind, Some(TrayTone::Critical), "not a yellow node");
+        // Production's worst is an unknown: purple, more severe than
+        // yellow.
+        let shown = (**state.snapshot()).clone();
+        state.set_snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+            overall: ic_core::snapshot::Summary {
+                unknown: 1,
+                unhandled: 1,
+                worst_unhandled: Some(CheckableState::Service(ic_model::ServiceState::Unknown)),
+                ..ic_core::snapshot::Summary::default()
+            },
+            ..shown.clone()
+        }));
+        assert_eq!(tray_view(&state, now()).blind, Some(TrayTone::Unknown));
+        // Nothing unhandled anywhere: yellow, the silence's own tone.
+        state.set_snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+            overall: ic_core::snapshot::Summary::default(),
+            ..shown
+        }));
+        assert_eq!(tray_view(&state, now()).blind, Some(TrayTone::Warning));
     }
 
     /// No false green: from 30 s without events (the footer yellow) until

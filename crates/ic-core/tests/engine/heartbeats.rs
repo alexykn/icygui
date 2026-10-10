@@ -404,6 +404,50 @@ async fn no_live_data_is_blind_after_its_grace_and_live_again_after() {
     engine.shutdown();
 }
 
+/// No false green rule 5: a heartbeat the connected stream doesn't
+/// deliver is *no live data* as a warning (connected, but nothing
+/// arrives); when the connection is then lost, the outage got worse, and
+/// a critical notification follows (once), as the banner, the footer and
+/// the tray turn red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_outage_that_loses_the_connection_is_notified_again_critical() {
+    let server = server().await;
+    let mut engine = launch(&server).start();
+    engine.connected().await;
+    beating(&mut engine).await;
+    let control = server.control();
+    // Every stream from now on is accepted but relays nothing: the beats
+    // run, a query finds them fresh, the reconnect doesn't help.
+    control.stall_new_event_streams(true);
+    control.stall_event_streams();
+    let tone = notified(&mut engine, "no live data from test").await;
+    assert_eq!(tone, Tone::Warning, "connected, but nothing arrives");
+    // Now the connection is lost: every request fails.
+    control.fail_next(10_000, 503);
+    control.drop_event_streams();
+    let tone = notified(&mut engine, "no live data from test").await;
+    assert_eq!(tone, Tone::Critical, "lost: critical");
+    let record = engine.notifications().last().cloned().unwrap();
+    assert!(
+        record.intent.body.ends_with(" · connection lost"),
+        "{}",
+        record.intent.body
+    );
+    // Once: further failed attempts notify nothing more.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let blind: Vec<Tone> = engine
+        .notifications()
+        .iter()
+        .filter(|record| record.intent.title == "no live data from test")
+        .map(|record| record.intent.tone)
+        .collect();
+    assert_eq!(blind, [Tone::Warning, Tone::Critical]);
+    control.stall_new_event_streams(false);
+    control.fail_next(0, 503);
+    notified(&mut engine, "test live again").await;
+    engine.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pause_holds_trouble_alerts_back() {
     let server = server().await;

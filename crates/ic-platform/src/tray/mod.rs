@@ -107,7 +107,9 @@ impl TrayTone {
 pub enum TrayLook {
     /// Tinted with this tone (`None`: grey).
     State(Option<TrayTone>),
-    /// No live data: the node in this tone (critical or warning).
+    /// No live data: the node in this tone (the worse of the blind
+    /// connections' tone, critical or warning, and the worst unhandled
+    /// state it hides).
     Blind(TrayTone),
 }
 

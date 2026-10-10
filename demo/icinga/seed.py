@@ -47,26 +47,44 @@ def log(message):
 RETRIES = 6
 
 
+class OutOfTime(Exception):
+    """The seed ran past its whole budget ([`DEADLINE`]): it gives up (and
+    writes its failure marker) instead of retrying on."""
+
+
+def remaining():
+    """Seconds left until the seed's [`DEADLINE`] (no limit once seeded:
+    the feed runs on)."""
+    if not SEEDING:
+        return float("inf")
+    return STARTED + DEADLINE - time.time()
+
+
 def call(method, path, body=None):
     """One API call; connection errors and 5xx are retried (Icinga may be
-    busy starting or reloading), the last error raised."""
+    busy starting or reloading), the last error raised. Never past the
+    seed's [`DEADLINE`]: a hung master can't keep it retrying."""
     for attempt in range(1, RETRIES + 1):
+        if remaining() <= 0:
+            raise OutOfTime(f"{method} {path}: out of time after {DEADLINE} s")
         try:
             status, answer = call_once(method, path, body)
         except (OSError, http.client.HTTPException) as error:
-            if attempt == RETRIES:
+            if attempt == RETRIES or remaining() <= 0:
                 raise
             log(f"{method} {path}: {error!r}; retrying")
         else:
             if status < 500 or attempt == RETRIES:
                 return status, answer
             log(f"{method} {path}: {status}; retrying")
-        time.sleep(min(2 * attempt, 10))
+        time.sleep(max(0, min(2 * attempt, 10, remaining())))
     raise AssertionError("unreachable")
 
 
 def call_once(method, path, body=None):
-    connection = http.client.HTTPSConnection("master-01", 5665, context=CONTEXT, timeout=60)
+    # A request never outlasts the seed's deadline by more than a moment.
+    timeout = max(5, min(60, remaining()))
+    connection = http.client.HTTPSConnection("master-01", 5665, context=CONTEXT, timeout=timeout)
     headers = {"Authorization": AUTH, "Accept": "application/json"}
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -89,7 +107,14 @@ def call_once(method, path, body=None):
 # takes about two minutes for all of them; one that never finishes (a
 # check that never runs) is logged and the seed goes on with what it has.
 BUDGET = 600
+# And the whole seed, its calls and their retries too, ends within this
+# (the waits' budget and two minutes for the seeding itself; a call in
+# flight at the deadline may take 5 s more): then it gives up and writes
+# its failure marker, still well before demo/up.sh's 20 minutes.
+DEADLINE = BUDGET + 120
 STARTED = time.time()
+# The deadline holds while seeding; the feed afterwards has none.
+SEEDING = True
 
 
 def wait(what, condition, seconds):
@@ -249,8 +274,14 @@ def seed_until_done(attempts=3):
     for attempt in range(1, attempts + 1):
         try:
             return main()
+        except OutOfTime as error:
+            log(f"seeding failed: {error}")
+            return 1
         except Exception:  # noqa: BLE001 - logged, then tried again
             log(f"seeding failed (attempt {attempt} of {attempts}):\n{traceback.format_exc()}")
+            if remaining() <= 10:
+                log(f"seeding failed: out of time after {DEADLINE} s")
+                return 1
             time.sleep(10)
     return 1
 
@@ -260,6 +291,7 @@ if __name__ == "__main__":
     marker = args[args.index("--marker") + 1] if "--marker" in args else None
     every = float(args[args.index("--feed") + 1]) if "--feed" in args else None
     status = seed_until_done()
+    SEEDING = False
     log("seeded" if status == 0 else "seeding failed")
     if marker:
         # The health check reads it: `ok`, or that the seed failed (so a

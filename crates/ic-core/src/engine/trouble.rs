@@ -17,8 +17,11 @@
 //! goes live again; after [`crate::trouble::GRACE`] the environment is *blind*. A beat the
 //! stream doesn't deliver even after a reconnect makes it blind too. Its
 //! notification is critical while the connection is lost (no false green
-//! rule 5: an outage never looks calmer the longer it lasts), a warning
-//! for a beat the connected stream doesn't deliver.
+//! rule 5: an outage never looks calmer the longer it lasts), which a
+//! stall is once confirmed (the session fails), and a warning only for a
+//! beat a connected stream doesn't deliver even after a reconnect. Should
+//! that silent outage then lose the connection, a second notification
+//! says so, critical, once.
 //! While the engine has no live connection, the other alerts stay as they
 //! are: its data isn't current.
 
@@ -118,6 +121,11 @@ pub(super) struct Tracker {
     /// The raised *no live data* alert: its notification's id, and what
     /// the snapshots show.
     blind: Option<(String, Blind)>,
+    /// Its notification came at critical urgency (the connection was lost
+    /// when it was raised, or became lost since): a silent-but-connected
+    /// outage that turns into a lost connection is notified again,
+    /// critical, once (no false green rule 5).
+    blind_critical: bool,
     /// The next assessment.
     assess_at: Option<Instant>,
     /// Restarts announced (node, start time in seconds).
@@ -363,13 +371,23 @@ impl Engine {
                     let tone = if lost { Tone::Critical } else { Tone::Warning };
                     self.trouble_notify(id.clone(), title, body, tone);
                     self.trouble.blind = Some((id, Blind { since, reason }));
+                    self.trouble.blind_critical = lost;
                     self.trouble.news = true;
                 }
             }
             (Some((_, reason, _)), Some((id, mut blind))) => {
                 if blind.reason != reason {
-                    blind.reason = reason;
+                    blind.reason.clone_from(&reason);
                     self.trouble.news = true;
+                }
+                if lost && !self.trouble.blind_critical {
+                    // Connected but silent, now lost: the outage got worse,
+                    // and its notification says so at critical urgency
+                    // (the banner, the footer and the tray turn red too).
+                    let title = format!("no live data from {}", self.spec.environment.name);
+                    let body = format!("since {} · {reason}", clock_time(blind.since));
+                    self.trouble_notify(format!("{id}:lost"), title, body, Tone::Critical);
+                    self.trouble.blind_critical = true;
                 }
                 self.trouble.blind = Some((id, blind));
             }

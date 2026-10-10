@@ -478,6 +478,14 @@ impl MockControl {
         self.world().bus.stall_all()
     }
 
+    /// Makes every event stream opened from now on stall from the start
+    /// (`true`): the connection is accepted, but nothing is relayed, like a
+    /// proxy that buffers forever; `false` opens working streams again.
+    /// Streams already open are left as they are.
+    pub fn stall_new_event_streams(&self, stall: bool) {
+        self.world().bus.stall_new(stall);
+    }
+
     /// Number of connected event streams.
     pub fn event_streams(&self) -> usize {
         self.world().bus.streams().len()

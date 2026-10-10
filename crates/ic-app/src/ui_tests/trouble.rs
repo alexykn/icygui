@@ -382,7 +382,10 @@ fn no_live_data_shows_on_every_page_the_footer_and_the_tray() {
         assert_ne!(report.beats.tone, BeatTone::Ok);
         endpoint_statuses_are_last_known(app, cx, now, since);
         let tray = crate::background::tray::tray_view(app.state.read(cx), now);
-        assert_eq!(tray.blind, Some(ic_platform::tray::TrayTone::Warning));
+        // The blind look's node: connected but silent is yellow, but the
+        // demo's unhandled criticals it hides make it red (a summary is
+        // never milder than what it sums up, rule 5).
+        assert_eq!(tray.blind, Some(ic_platform::tray::TrayTone::Critical));
         assert!(
             tray.statuses
                 .iter()

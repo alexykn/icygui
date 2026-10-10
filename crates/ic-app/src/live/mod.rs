@@ -711,7 +711,7 @@ impl Session {
             notifier: Arc::new(notifier),
             clock: Arc::new(SystemClock),
         };
-        match ic_core::start(spec, ports) {
+        match ic_core::start_with_tuning(spec, ports, engine_tuning()) {
             Ok(mut handle) => {
                 let events = handle.take_events();
                 let recent = self.state.update(cx, |state, cx| {
@@ -1619,5 +1619,17 @@ fn desktop_for(responses: UnboundedSender<Response>) -> Box<dyn Desktop> {
     {
         drop(responses);
         Box::new(desktop::GpuiDesktop)
+    }
+}
+
+/// An engine's timing: the defaults. In tests its timer jitter (the
+/// reconcile's phase, the status polls' spread, the backoff; no
+/// synchronised clients) is seeded with a fixed seed (environment ids are
+/// random), so the app's UI tests against `ic-mock` draw the same timers
+/// every run; in production every engine draws its own.
+fn engine_tuning() -> ic_core::Tuning {
+    ic_core::Tuning {
+        seed: cfg!(test).then_some(42),
+        ..ic_core::Tuning::default()
     }
 }

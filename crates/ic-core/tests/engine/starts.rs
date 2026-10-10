@@ -232,6 +232,10 @@ async fn many_clients_start_at_once() {
         .unwrap()
         .expect("the container's certificate");
     let pin = ic_api::format_fingerprint(&certificate.sha256);
+    // Production timing, the timer jitter's seed included: random on
+    // purpose, so the many clients draw their own start delays, reconcile
+    // phases and spreads, as real ones do (no synchronised clients); the
+    // measurement is of that, not of one repeatable draw.
     let mut tuning = Tuning::default();
     if let Some(per_thousand) = std::env::var("ICYGUI_SCALE_DELAY_PER_THOUSAND_MS")
         .ok()

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use ic_core::{Command, ConnectionState, CoreEvent, LoadPhase, LogKind, Start, Tuning};
 use ic_mock::{MockConfig, MockControl, scenarios};
-use ic_model::{HostName, HostState, ObjectKey, ServiceState, StateType, Timestamp};
+use ic_model::{HostName, HostState, ObjectKey, ServiceKey, ServiceState, StateType, Timestamp};
 use ic_rules::{DashboardRef, ScopeSetting};
 use serde_json::Value;
 
@@ -936,9 +936,6 @@ async fn waking_up_refreshes_problems_whose_results_went_stale() {
     engine.shutdown();
 }
 
-/// After waking up, a row on screen whose result went stale (`Hydrate`)
-/// is fetched ahead of the wake-up refresh of the other problems, however
-/// low it ranks among them (here below the refresh's 1 000).
 /// Waits on the engine's own snapshots until every one of `services`
 /// shows `output` (however long paced requests take on a busy runner).
 async fn shows_output(engine: &mut Engine, services: &[(String, String)], output: &str) {
@@ -960,6 +957,87 @@ async fn shows_output(engine: &mut Engine, services: &[(String, String)], output
         .await;
 }
 
+/// The first snapshot from `seen[from..]` on in which `key` shows
+/// `output`, by its place in `seen`.
+fn first_showing(engine: &Engine, from: usize, key: &ServiceKey, output: &str) -> Option<usize> {
+    engine.seen[from..]
+        .iter()
+        .position(|event| match event {
+            CoreEvent::Snapshot(snapshot) => snapshot.services[key]
+                .check
+                .result
+                .as_ref()
+                .is_some_and(|result| result.output == output),
+            _ => false,
+        })
+        .map(|at| from + at)
+}
+
+/// After waking at `seen[woke]`: the row on screen (the last of
+/// `services`, `row`) showed its newer output no later than any of the
+/// others, and when it was asked for by name, that was the first by-name
+/// request, on its own.
+#[expect(
+    clippy::print_stderr,
+    reason = "says which request brought the row, for the test's output"
+)]
+fn the_row_came_first(
+    engine: &Engine,
+    control: &MockControl,
+    woke: usize,
+    services: &[(String, String)],
+    row: &ObjectKey,
+) {
+    let key = row.as_service().unwrap().clone();
+    let services = &services[..services.len() - 1];
+    let row_at = first_showing(engine, woke, &key, "WARNING - newer").unwrap();
+    let others_at = services
+        .iter()
+        .filter_map(|(host, service)| {
+            first_showing(
+                engine,
+                woke,
+                &ServiceKey::new(host, service),
+                "CRITICAL - newer",
+            )
+        })
+        .min()
+        .unwrap();
+    assert!(
+        row_at <= others_at,
+        "the row on screen showed its newer output at event {row_at}, another problem at {others_at}"
+    );
+    let requests = by_name(control, "services");
+    let sizes: Vec<usize> = requests.iter().map(|(_, names)| names.len()).collect();
+    match requests
+        .iter()
+        .position(|(_, names)| names.contains(&row.full_name()))
+    {
+        Some(position) => {
+            eprintln!(
+                "the row on screen came with by-name request {} of {} ({sizes:?})",
+                position + 1,
+                requests.len(),
+            );
+            assert_eq!(position, 0, "{sizes:?}");
+            assert_eq!(sizes[0], 1, "on its own, not in the refresh's order");
+        }
+        None => eprintln!("a reconcile brought the row on screen ({sizes:?})"),
+    }
+}
+
+/// After waking up, a row on screen whose result went stale (`Hydrate`)
+/// is fetched ahead of the wake-up refresh of the other problems, however
+/// low it ranks among them (here below the refresh's 1 000): its newer
+/// output shows no later than any of theirs, and when it is asked for by
+/// name, it is the first such request, on its own.
+///
+/// The reconciles are seconds apart, so none runs across the wake (the
+/// one that brought the newer last checks has just ended). Should one
+/// still overlap it on a slow runner (one whose list brings the row and
+/// some of the others along, so the row is current and `Hydrate` asks
+/// for nothing), the row still shows no later than they do: that is the
+/// property, not the order of requests a reconcile happens to cut in on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_waking_the_rows_on_screen_go_before_the_other_problems() {
     let server = mock(MockConfig::with_scenario(scenarios::large_with_hosts(
@@ -969,8 +1047,10 @@ async fn after_waking_the_rows_on_screen_go_before_the_other_problems() {
     let control = server.control();
     let mut launch = Launch::new(&server);
     launch.tuning = Tuning {
-        reconcile_interval: Some(Duration::from_millis(300)),
-        quiet_reconcile_interval: Duration::from_millis(300),
+        // Seconds apart (4 to 6 s, ±20 %): the quiet one brings the newer
+        // last checks, and the next is far off when the engine wakes.
+        reconcile_interval: Some(Duration::from_secs(5)),
+        quiet_reconcile_interval: Duration::from_secs(5),
         // The wake-up refresh takes a while (as at production size).
         request_interval: Duration::from_millis(400),
         request_burst: 1,
@@ -1035,37 +1115,17 @@ async fn after_waking_the_rows_on_screen_go_before_the_other_problems() {
         .await;
 
     control.clear_requests();
+    let woke = engine.seen.len();
     // Waking up, the dashboard asks again for its rows on screen.
     engine.send(Command::SetQuiet(false));
     engine.send(Command::Hydrate(vec![row.clone()]));
-    engine
-        .snapshot(|snapshot| {
-            snapshot.services[&key]
-                .check
-                .result
-                .as_ref()
-                .is_some_and(|result| result.output == "WARNING - newer")
-        })
-        .await;
     // Then the refresh of the other problems (five paced requests, which
     // take seconds on a busy runner): waited for on the engine's own
     // snapshots, until every one of them shows its newer output, not on
     // a count of polls.
     shows_output(&mut engine, &services[..1_000], "CRITICAL - newer").await;
-    let requests = by_name(&control, "services");
-    assert!(requests.len() >= 6, "the row and five of 200: {requests:?}");
-    let position = requests
-        .iter()
-        .position(|(_, names)| names.contains(&row.full_name()))
-        .unwrap();
-    let sizes: Vec<usize> = requests.iter().map(|(_, names)| names.len()).collect();
-    eprintln!(
-        "the row on screen came with by-name request {} of {} ({sizes:?})",
-        position + 1,
-        requests.len(),
-    );
-    assert_eq!(position, 0, "{sizes:?}");
-    assert_eq!(sizes[0], 1, "on its own, not in the refresh's order");
+    shows_output(&mut engine, &services[1_000..], "WARNING - newer").await;
+    the_row_came_first(&engine, &control, woke, &services, &row);
     engine.shutdown();
 }
 
@@ -1332,7 +1392,7 @@ async fn quiet_mode_evaluates_only_what_notifications_need() {
     let record = engine.notification().await;
     assert_eq!(record.intent.title, "CRITICAL · http on stg-web-01");
     assert_eq!(record.intent.subtitle, "overview / problems");
-    let key = ic_model::ServiceKey::new("stg-web-01", "http");
+    let key = ServiceKey::new("stg-web-01", "http");
     let snapshot = engine
         .snapshot(|snapshot| snapshot.services[&key].state == ServiceState::Critical)
         .await;

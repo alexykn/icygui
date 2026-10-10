@@ -3,8 +3,8 @@
 //! that moment would stay lined up for as long as the clients run, so
 //! fifty of them would ask for the same heavy answer in the same second,
 //! interval after interval. Every engine's periodic heavy requests (the
-//! reconcile, the quiet status polls, the health page's reads for the
-//! trouble alerts, the cluster nodes' states) are spread instead:
+//! reconcile, the status polls, and with them the health page's reads for
+//! the trouble alerts and the cluster nodes' states) are spread instead:
 //!
 //! - **a random phase** for the first of a series (the first reconcile
 //!   after a load that wasn't one, a session's first status poll):
@@ -13,6 +13,17 @@
 //!   once, and the average cadence stays the interval;
 //! - **±[`SPREAD`]** on every interval after that, so they keep drifting
 //!   apart rather than back together.
+//!
+//! The reconcile's windows never start below its documented minimum (the
+//! engine's `sync` module lifts them above it), and a reconcile planned
+//! again keeps the point of its window it was drawn at.
+//!
+//! What only ever comes with another request (the health page's reads
+//! for the trouble alerts and the cluster nodes' states, which come with a
+//! status poll) is not spread a second time: it is due [`carried`] after
+//! the last, the spread poll's lower bound, so every poll whose turn it is
+//! carries it, and its pace is the poll's (spread already), not one or two
+//! polls at random.
 //!
 //! The randomness is the engine's own ([`Jitter`]), from
 //! `Tuning::seed`: random in production, fixed in tests, so a test run
@@ -28,6 +39,16 @@ pub(crate) const SPREAD: f64 = 0.2;
 /// half an interval to one and a half (a whole interval wide, the
 /// interval on average).
 pub(crate) const PHASE: (f64, f64) = (0.5, 1.5);
+
+/// When a request that only comes with a spread periodic one (a status
+/// poll) is due again, `interval` after it was last sent: at the carrier's
+/// earliest, `interval × (1 − SPREAD)`, so the carrier poll whose turn it
+/// is always finds it due (spread again on top, half the polls would come
+/// a moment too early and leave it for the next one: 5 minutes would
+/// become 4 to 12).
+pub(crate) fn carried(interval: Duration) -> Duration {
+    interval.mul_f64(1.0 - SPREAD)
+}
 
 /// An engine's source of randomness for its timers.
 #[derive(Debug)]
@@ -123,6 +144,29 @@ mod tests {
         }
         assert!(minutes.iter().all(|&count| count > 0), "{minutes:?}");
         assert!(minutes.iter().all(|&count| count < 25), "{minutes:?}");
+    }
+
+    /// A read that comes with a spread poll every `interval` comes with
+    /// every one of them (the poll's pace, spread once), not one or two
+    /// polls at random: the gaps stay within the poll's ±20 %.
+    #[test]
+    fn a_read_carried_by_a_spread_poll_keeps_the_polls_pace() {
+        let interval = Duration::from_mins(5);
+        let mut jitter = Jitter::new(Some(3));
+        let (mut now, mut last_read, mut due) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let mut gaps = Vec::new();
+        for _ in 0..10_000 {
+            now += jitter.spread(interval).as_secs_f64();
+            if now >= due {
+                gaps.push(now - last_read);
+                last_read = now;
+                due = now + carried(interval).as_secs_f64();
+            }
+        }
+        assert_eq!(gaps.len(), 10_000, "every poll carries it");
+        let mean = gaps.iter().sum::<f64>() / 10_000.0;
+        assert!((mean - 300.0).abs() < 3.0, "{mean}");
+        assert!(gaps.iter().all(|&gap| (240.0..360.0).contains(&gap)));
     }
 
     /// Clients whose timers lined up drift apart with every interval,

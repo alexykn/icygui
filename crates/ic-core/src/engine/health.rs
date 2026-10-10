@@ -12,8 +12,9 @@
 //! listener less than a poll interval ago, so toggling the page never
 //! sends more than the polls would. Otherwise the trouble alerts still
 //! need them (a feature turned off, a growing relay queue): both come with
-//! a status poll every [`TROUBLE_INTERVAL`] (PLAN.md §4.2 E2), ±20 % like
-//! every periodic request (no synchronised clients, [`crate::jitter`]). Each
+//! a status poll every [`TROUBLE_INTERVAL`] (PLAN.md §4.2 E2): due from
+//! 80 % of it on, so the poll whose turn it is (spread ±20 % itself, no
+//! synchronised clients) always carries them ([`crate::jitter::carried`]). Each
 //! request takes a token from the request budget. A refused one
 //! (`Forbidden`) isn't asked for again in the session, nor is a feature
 //! type Icinga refuses or doesn't know (an Icinga before 2.13 has no
@@ -145,8 +146,10 @@ impl Engine {
             return None;
         }
         let watched = self.health_watch && !self.quiet();
-        let listener_wait = self.jitter.spread(TROUBLE_INTERVAL);
-        let features_wait = self.jitter.spread(FEATURES_INTERVAL);
+        // They come with a status poll, spread already: due at its
+        // earliest, so each poll whose turn it is carries them.
+        let listener_wait = crate::jitter::carried(TROUBLE_INTERVAL);
+        let features_wait = crate::jitter::carried(FEATURES_INTERVAL);
         let conn = self.conn.as_mut()?;
         conn.next_status?;
         let due = |at: Option<Instant>, next: Option<Instant>| {

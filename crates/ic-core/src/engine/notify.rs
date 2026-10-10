@@ -79,6 +79,13 @@ pub(super) struct Notify {
     seeded: HashMap<String, (ObjectKey, CheckableState, Timestamp)>,
     /// Ids of seeded problems the event log hasn't been asked about yet.
     lookups: Vec<String>,
+    /// The objects of `seeded`: their inputs wait for the event log's
+    /// answer (`held`), so a problem an earlier run notified that recovers
+    /// before the answer is in still notifies its recovery.
+    awaiting: HashSet<ObjectKey>,
+    /// Inputs (with their memberships) about objects in `awaiting`, in
+    /// order; judged once the event log answered.
+    held: Vec<RuleInput>,
     /// Objects whose `handled` turned false: their next check result
     /// repeats their state.
     confirm: HashSet<ObjectKey>,
@@ -172,6 +179,8 @@ impl Notify {
             seeds_evaluating: Vec::new(),
             seeded: HashMap::new(),
             lookups: Vec::new(),
+            awaiting: HashSet::new(),
+            held: Vec::new(),
             confirm: HashSet::new(),
             started: HashSet::new(),
             discovered: Deferred::default(),
@@ -269,6 +278,7 @@ impl Notify {
                 let since = since.non_zero().unwrap_or(input.at);
                 let id = state_intent_id(&input.object, *current, since);
                 self.lookups.push(id.clone());
+                self.awaiting.insert(input.object.clone());
                 self.seeded
                     .insert(id, (input.object.clone(), *current, since));
             }
@@ -277,6 +287,11 @@ impl Notify {
         let mut intents = Vec::new();
         for mut input in inputs {
             input.memberships = dashboards.memberships(&input.object);
+            if self.awaiting.contains(&input.object) {
+                // Whether an earlier run notified it isn't known yet.
+                self.held.push(input);
+                continue;
+            }
             intents.extend(self.rules.on_input(input, now, local));
         }
         intents
@@ -291,18 +306,38 @@ impl Notify {
     /// The event log answered about the seeded problems `asked`: it has
     /// `known`, which an earlier run notified, so their recoveries and
     /// acknowledgements follow (if the objects are still in those states).
-    pub(super) fn restore(&mut self, asked: &[String], known: &[String], now: Timestamp) {
+    /// The inputs held for these objects are judged now, in order;
+    /// returns the intents.
+    pub(super) fn restore(
+        &mut self,
+        asked: &[String],
+        known: &[String],
+        now: Timestamp,
+        local: LocalTime,
+    ) -> Vec<NotificationIntent> {
         for id in known {
             if let Some((object, state, since)) = self.seeded.remove(id) {
+                self.awaiting.remove(&object);
                 self.rules.restore_notified(&object, state, since, now);
             }
         }
         for id in asked {
-            self.seeded.remove(id);
+            if let Some((object, ..)) = self.seeded.remove(id) {
+                self.awaiting.remove(&object);
+            }
         }
         if self.seeded.is_empty() {
             self.seeded = HashMap::new();
+            self.awaiting = HashSet::new();
         }
+        let (ready, still): (Vec<RuleInput>, Vec<RuleInput>) = mem::take(&mut self.held)
+            .into_iter()
+            .partition(|input| !self.awaiting.contains(&input.object));
+        self.held = still;
+        ready
+            .into_iter()
+            .flat_map(|input| self.rules.on_input(input, now, local))
+            .collect()
     }
 
     /// The session's first load is complete: the rule engine learns what
@@ -1003,10 +1038,19 @@ impl Engine {
         let asked = self.notify.take_lookups();
         if !asked.is_empty() {
             let tx = self.internal_tx.clone();
+            let delay = self.tuning.event_log_delay;
             self.event_log.known(
                 asked.clone(),
                 Box::new(move |known| {
-                    let _ = tx.send(Internal::NotifiedBefore { asked, known });
+                    if delay.is_zero() {
+                        let _ = tx.send(Internal::NotifiedBefore { asked, known });
+                    } else {
+                        // Tests: a busy disk (never block the log's thread).
+                        std::thread::spawn(move || {
+                            std::thread::sleep(delay);
+                            let _ = tx.send(Internal::NotifiedBefore { asked, known });
+                        });
+                    }
                 }),
             );
         }
@@ -1021,7 +1065,13 @@ impl Engine {
                 "problems open at the start were notified before"
             );
         }
-        self.notify.restore(asked, known, self.ports.clock.now());
+        let intents = self.notify.restore(
+            asked,
+            known,
+            self.ports.clock.now(),
+            self.ports.clock.local(),
+        );
+        self.deliver(intents);
     }
 
     /// Logs intents; they are emitted once logged

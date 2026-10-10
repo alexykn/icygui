@@ -223,6 +223,8 @@ mod steady {
         let mut engine = start(
             environment(&server),
             FakeSecrets::with(ENV_ID, PASSWORD),
+            // Production timing (a random jitter seed, on purpose: the
+            // measurement is of a real engine's pace).
             Tuning::default(),
         );
         engine.connected().await;
@@ -378,6 +380,8 @@ mod steady {
         let mut engine = start(
             environment(&server),
             FakeSecrets::with(ENV_ID, PASSWORD),
+            // Production timing (a random jitter seed, on purpose: the
+            // measurement is of a real engine's pace).
             Tuning::default(),
         );
         engine.connected().await;

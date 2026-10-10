@@ -443,6 +443,9 @@ pub(crate) struct Engine {
     last_heard: Option<(Instant, Timestamp)>,
     /// The next periodic reconcile.
     reconcile_at: Option<Instant>,
+    /// Where in its window the planned reconcile falls (kept across a
+    /// session's end, so a short reconnect plans it where it was).
+    reconcile_draw: Option<sync::Draw>,
     /// When the last load ended, complete or failed: the next reconcile
     /// counts from it.
     last_load_end: Option<Instant>,
@@ -651,6 +654,7 @@ impl Engine {
             last_user_reload: None,
             last_heard: None,
             reconcile_at: None,
+            reconcile_draw: None,
             last_load_end: None,
             restarts: Restarts::default(),
             state: None,
@@ -1634,8 +1638,9 @@ impl Engine {
     fn poll_status(&mut self) {
         let now = Instant::now();
         let names = self.node_names();
-        // ±20 %, like every periodic request ([`crate::jitter`]).
-        let quiet = self.jitter.spread(if self.active {
+        // They come with this poll, spread already: due at its earliest,
+        // so each poll whose turn it is carries them ([`crate::jitter`]).
+        let quiet = crate::jitter::carried(if self.active {
             self.tuning.status_interval
         } else {
             NODES_QUIET_INTERVAL

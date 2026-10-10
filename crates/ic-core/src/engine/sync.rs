@@ -17,7 +17,9 @@
 //!   interval to one and a half; after a failed load one to two intervals,
 //!   so it waits at least a whole interval), every later one ±20 %, so
 //!   clients that reloaded together after a master restart spread over a
-//!   whole interval and keep drifting apart. Its tier 3 fetches only the problems
+//!   whole interval and keep drifting apart; no window starts below the
+//!   documented minimum ([`Engine::reconcile_floor`], [`reconcile_wait`]),
+//!   and one planned again keeps its drawn point ([`Draw`]). Its tier 3 fetches only the problems
 //!   not held in full or whose result is older than their last check (in
 //!   quiet mode only those without a result: outputs may be stale there).
 //! - *Reconnects:* the engine goes live on the objects it has. Only after
@@ -167,24 +169,42 @@ pub(super) enum Cadence {
     /// together, a master restarting, would retry together): a random
     /// phase too, but never sooner than an interval.
     Failed,
-    /// The next of the series (after a periodic reconcile, or planned
-    /// again for a new interval or mode): ±20 %.
+    /// The next of the series (after a periodic reconcile): ±20 %.
     Next,
 }
 
-/// How long after the last load the next periodic reconcile falls, for
-/// its place in the series ([`Cadence`]).
-pub(super) fn reconcile_wait(
-    cadence: Cadence,
-    interval: Duration,
-    jitter: &mut crate::jitter::Jitter,
-) -> Duration {
-    match cadence {
-        Cadence::First => jitter.phase(interval),
+/// Where in its window a reconcile falls: its [`Cadence`] and the drawn
+/// point in it (`[0, 1)`). Kept with the plan, so planning it again (a new
+/// interval or mode, a short reconnect) moves the same point to the new
+/// window instead of drawing again: a pending random phase isn't pulled
+/// back into ±20 % of a moment clients share (a master's restart), and
+/// redrawing again and again from one base doesn't favour the early end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Draw {
+    pub(super) cadence: Cadence,
+    pub(super) unit: f64,
+}
+
+/// How long after the last load the reconcile `draw` falls, for an
+/// `interval` that may not go below `floor` (the documented minimum: 5
+/// minutes, or the quiet interval; `None` when the tuning sets the
+/// interval): its window ([`Cadence`]: from half an interval to one and a
+/// half, one to two after a failure, ±20 % for the next of a series),
+/// lifted where it would start below the floor, so the jitter spreads
+/// clients above the floor rather than below it (at the floor the next
+/// ones fall 5 to 7 minutes apart, the first after a load 5 to 10).
+pub(super) fn reconcile_wait(draw: Draw, interval: Duration, floor: Option<Duration>) -> Duration {
+    let (from, to) = crate::jitter::PHASE;
+    let spread = crate::jitter::SPREAD;
+    let (low, width) = match draw.cadence {
+        Cadence::First => (from, to - from),
         // Never sooner than an interval after a failure.
-        Cadence::Failed => interval / 2 + jitter.phase(interval),
-        Cadence::Next => jitter.spread(interval),
-    }
+        Cadence::Failed => (1.0, to - from),
+        Cadence::Next => (1.0 - spread, 2.0 * spread),
+    };
+    let lowest = interval.mul_f64(low);
+    let lift = floor.map_or(Duration::ZERO, |floor| floor.saturating_sub(lowest));
+    lowest + lift + interval.mul_f64(width * draw.unit.clamp(0.0, 1.0))
 }
 
 impl Engine {
@@ -202,6 +222,28 @@ impl Engine {
         } else {
             interval
         }
+    }
+
+    /// The documented minimum of the reconcile interval, which the jitter
+    /// doesn't go below ([`reconcile_wait`]): [`MIN_INTERVAL`] (a fixed
+    /// setting below [`ADAPTIVE_THRESHOLD`] objects: its 60 s minimum), at
+    /// least `Tuning::quiet_reconcile_interval` in quiet mode; none when the
+    /// tuning sets the interval (tests).
+    pub(super) fn reconcile_floor(&self) -> Option<Duration> {
+        if self.tuning.reconcile_interval.is_some() {
+            return None;
+        }
+        let floor = match self.spec.general.reconcile_interval_secs {
+            secs if secs > 0 && self.store.object_count() < ADAPTIVE_THRESHOLD => {
+                Duration::from_secs(u64::from(ic_config::MIN_RECONCILE_INTERVAL_SECS))
+            }
+            _ => MIN_INTERVAL,
+        };
+        Some(if self.quiet() {
+            floor.max(self.tuning.quiet_reconcile_interval)
+        } else {
+            floor
+        })
     }
 
     /// How long a failing first load waits at most between attempts: as
@@ -275,7 +317,7 @@ impl Engine {
                 ?gap,
                 "reconnected after a short gap; the next reconcile catches up"
             );
-            self.schedule_reconcile(Cadence::Next);
+            self.replan_reconcile();
         } else {
             // A restart can't be told: reload, but not often.
             let jitter = self.jitter.up_to(self.tuning.reload_jitter);
@@ -286,7 +328,7 @@ impl Engine {
             self.reload_full = true;
             self.notifications_current = false;
             self.reload_at = Some(self.reload_at.map_or(at, |pending| pending.min(at)));
-            self.schedule_reconcile(Cadence::Next);
+            self.replan_reconcile();
         }
     }
 
@@ -297,9 +339,29 @@ impl Engine {
     /// struggling master gets a whole interval's rest), every other one an
     /// interval ±20 % after the last.
     pub(super) fn schedule_reconcile(&mut self, cadence: Cadence) {
+        let draw = Draw {
+            cadence,
+            unit: self.jitter.unit(),
+        };
+        self.plan_reconcile(draw);
+    }
+
+    /// Plans the reconcile again after the last load (a new interval or
+    /// mode, a reconnect after a short gap, whose session end forgot it):
+    /// at the same point of its window as drawn, for the interval that
+    /// holds now ([`Draw`]); drawn as the next of a series if none was.
+    pub(super) fn replan_reconcile(&mut self) {
+        match self.reconcile_draw {
+            Some(draw) => self.plan_reconcile(draw),
+            None => self.schedule_reconcile(Cadence::Next),
+        }
+    }
+
+    fn plan_reconcile(&mut self, draw: Draw) {
         let base = self.last_load_end.unwrap_or_else(Instant::now);
-        let interval = self.reconcile_interval();
-        self.reconcile_at = Some(base + reconcile_wait(cadence, interval, &mut self.jitter));
+        let wait = reconcile_wait(draw, self.reconcile_interval(), self.reconcile_floor());
+        self.reconcile_draw = Some(draw);
+        self.reconcile_at = Some(base + wait);
     }
 
     /// When a reload or the periodic reconcile is due: only while live and
@@ -410,7 +472,7 @@ impl Engine {
             self.spec.general.event_log_retention_hours != general.event_log_retention_hours;
         self.spec.general = general;
         if interval_changed && self.reconcile_at.is_some() {
-            self.schedule_reconcile(Cadence::Next);
+            self.replan_reconcile();
         }
         if retention_changed {
             // A shorter retention applies at once.
@@ -541,11 +603,13 @@ mod tests {
         let fraction = |wait: Duration| wait.as_secs_f64() / interval.as_secs_f64();
         let plan = |seed: u64| {
             let jitter = &mut crate::jitter::Jitter::new(Some(seed));
-            let first = reconcile_wait(Cadence::First, interval, jitter);
-            let failed = reconcile_wait(Cadence::Failed, interval, jitter);
-            let next: Vec<Duration> = (0..20)
-                .map(|_| reconcile_wait(Cadence::Next, interval, jitter))
-                .collect();
+            let mut wait = |cadence| {
+                let unit = jitter.unit();
+                reconcile_wait(Draw { cadence, unit }, interval, None)
+            };
+            let first = wait(Cadence::First);
+            let failed = wait(Cadence::Failed);
+            let next: Vec<Duration> = (0..20).map(|_| wait(Cadence::Next)).collect();
             (first, failed, next)
         };
         let plans: Vec<_> = (0..50).map(plan).collect();
@@ -575,6 +639,69 @@ mod tests {
             for b in &plans[i + 1..] {
                 assert_ne!(a.0, b.0);
             }
+        }
+    }
+
+    /// The jitter never takes a reconcile below its documented floor (5
+    /// minutes, the quiet interval): at the floor its window is lifted
+    /// above it, as wide as before (the first after a load 5 to 10
+    /// minutes, the next ones 5 to 7), and an interval well above the
+    /// floor keeps its window.
+    #[test]
+    fn the_jitter_never_goes_below_the_floor() {
+        let floor = MIN_INTERVAL;
+        let wait = |cadence, unit, interval| {
+            reconcile_wait(Draw { cadence, unit }, interval, Some(floor)).as_secs_f64()
+        };
+        let mins = |m: f64| m * 60.0;
+        for unit in [0.0, 0.25, 0.5, 0.999] {
+            for cadence in [Cadence::First, Cadence::Failed, Cadence::Next] {
+                for interval in [MIN_INTERVAL, Duration::from_mins(6), PER_OBJECT * 32_000] {
+                    assert!(wait(cadence, unit, interval) >= floor.as_secs_f64());
+                }
+            }
+        }
+        assert!((wait(Cadence::First, 0.0, floor) - mins(5.0)).abs() < 1e-6);
+        assert!((wait(Cadence::First, 0.999, floor) - mins(10.0)).abs() < 1.0);
+        assert!((wait(Cadence::Next, 0.0, floor) - mins(5.0)).abs() < 1e-6);
+        assert!((wait(Cadence::Next, 0.999, floor) - mins(7.0)).abs() < 1.0);
+        // 32 000 objects (about 15 minutes): unchanged, 7.5 to 22.5.
+        let large = PER_OBJECT * 32_000;
+        let first = wait(Cadence::First, 0.0, large);
+        assert!((first - large.as_secs_f64() * 0.5).abs() < 1e-6, "{first}");
+    }
+
+    /// Planned again (a short reconnect, a new interval or mode), a
+    /// reconcile keeps its point in the window it was drawn in: a random
+    /// phase after a master's restart stays a whole interval wide instead
+    /// of ±20 % of the moment the clients reconnected together, and a new
+    /// interval moves it proportionally.
+    #[test]
+    fn a_replan_keeps_the_drawn_point_of_the_window() {
+        let interval = MIN_INTERVAL;
+        let draws: Vec<Draw> = (0..50_u64)
+            .map(|seed| Draw {
+                cadence: Cadence::First,
+                unit: crate::jitter::Jitter::new(Some(seed)).unit(),
+            })
+            .collect();
+        let waits = |interval| -> Vec<f64> {
+            draws
+                .iter()
+                .map(|draw| reconcile_wait(*draw, interval, None).as_secs_f64())
+                .collect()
+        };
+        let before = waits(interval);
+        // The same interval (a reconnect after a short gap): the same plan.
+        assert_eq!(waits(interval), before);
+        // Spread over the whole first window still, not ±20 %.
+        let (min, max) = before.iter().fold((f64::MAX, f64::MIN), |(min, max), at| {
+            (min.min(*at), max.max(*at))
+        });
+        assert!(max - min > 0.8 * interval.as_secs_f64(), "{min} … {max}");
+        // A doubled interval: each at the same point of the doubled window.
+        for (old, new) in before.iter().zip(waits(interval * 2)) {
+            assert!((new - 2.0 * old).abs() < 1e-6, "{old} → {new}");
         }
     }
 

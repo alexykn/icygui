@@ -491,12 +491,14 @@ mod tests {
     fn write_the_looks() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tray-looks");
         std::fs::create_dir_all(&dir).unwrap();
-        let looks: [(&str, Vec<u8>); 5] = [
+        let looks: [(&str, Vec<u8>); 6] = [
             ("ok", render(Some(TrayTone::Ok))),
             ("problem", render(Some(TrayTone::Critical))),
             ("no-state", render(None)),
             ("blind", render_blind(TrayTone::Warning)),
             ("blind-lost", render_blind(TrayTone::Critical)),
+            // Blind, an unknown the worst state it hides.
+            ("blind-unknown", render_blind(TrayTone::Unknown)),
         ];
         for (panel, background) in [("dark", [0x1e, 0x21, 0x24]), ("light", [0xf4, 0xf5, 0xf6])] {
             for (name, rgba) in &looks {

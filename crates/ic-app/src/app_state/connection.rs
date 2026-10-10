@@ -231,6 +231,12 @@ pub(crate) struct ConnectionStatus {
     /// reconnects or waits for the user) and hasn't come up since: its
     /// connecting attempts are still red (no false green rule 5).
     lost: bool,
+    /// Why the last attempt failed, as the engine said while it retries on
+    /// its own (the banner keeps saying it while the next attempt
+    /// connects); none after a failure that waited for the user (a refused
+    /// login, a missing password: the attempt after it is the user's, and
+    /// the old reason may no longer hold).
+    lost_reason: Option<String>,
     /// The engine couldn't start (a thread or runtime error), or stopped
     /// on its own.
     pub(crate) engine_error: Option<String>,
@@ -274,6 +280,7 @@ impl ConnectionStatus {
             live_since: None,
             ever_connected: false,
             lost: false,
+            lost_reason: None,
             engine_error: None,
             engine_stopped: false,
             version: None,
@@ -308,14 +315,21 @@ impl ConnectionStatus {
             // Up again (a first load runs on a connection that was made).
             ConnectionState::Connected { .. } | ConnectionState::Loading { .. } => {
                 self.lost = false;
+                self.lost_reason = None;
             }
             // Another attempt: as lost as before.
             ConnectionState::Connecting { .. } => {}
-            ConnectionState::Reconnecting { .. }
-            | ConnectionState::AuthFailed { .. }
+            ConnectionState::Reconnecting { error, .. } => {
+                self.lost = true;
+                self.lost_reason = Some(error.clone());
+            }
+            ConnectionState::AuthFailed { .. }
             | ConnectionState::TlsFailed { .. }
             | ConnectionState::MissingSecret
-            | ConnectionState::Misconfigured { .. } => self.lost = true,
+            | ConnectionState::Misconfigured { .. } => {
+                self.lost = true;
+                self.lost_reason = None;
+            }
         }
         self.engine_error = None;
         self.engine_stopped = false;
@@ -771,6 +785,28 @@ impl ConnectionStatus {
         }
     }
 
+    /// The notice while an attempt connects after the connection was lost
+    /// (or never made): the reconnecting notice's words, *reconnecting* for
+    /// its wait, and why the last attempt failed.
+    fn connecting_again_notice(&self, attempt: u32) -> ConnectionNotice {
+        let endpoint = &self.endpoint;
+        let what = if self.ever_connected {
+            format!("Connection to {endpoint} lost.")
+        } else {
+            format!("Can't connect to {endpoint}.")
+        };
+        ConnectionNotice {
+            kind: NoticeKind::Reconnecting,
+            tone: Tone::Critical,
+            title: format!("{what} Reconnecting…"),
+            detail: Some(match &self.lost_reason {
+                Some(reason) => format!("attempt {attempt} · {reason}"),
+                None => format!("attempt {attempt}"),
+            }),
+            actions: vec![NoticeAction::RetryNow],
+        }
+    }
+
     /// The notice while the environment has no live data (16d): how long,
     /// that states may be outdated, why and since when, and what the
     /// connection does.
@@ -904,6 +940,12 @@ impl ConnectionStatus {
                 detail: Some(message.clone()),
                 actions: vec![NoticeAction::EditEnvironment, NoticeAction::RetryNow],
             },
+            // The next attempt after the connection was lost: as red as
+            // the wait before it, so the banner never comes and goes with
+            // the attempts (no false green rule 5).
+            ConnectionState::Connecting { attempt } if self.lost => {
+                self.connecting_again_notice(*attempt)
+            }
             ConnectionState::Connecting { .. }
             | ConnectionState::Loading { .. }
             | ConnectionState::Connected { .. } => return None,
@@ -1097,10 +1139,23 @@ mod tests {
             status.notice("prod", at(12.)).map(|notice| notice.tone),
             Some(Tone::Critical)
         );
-        // The next attempt: still lost, not grey.
+        // The next attempt: still lost, not grey, and the banner stays.
         status.on_state(ConnectionState::Connecting { attempt: 2 });
         assert_eq!(status.health(at(14.)), Health::Reconnecting);
         assert!(status.is_lost(at(14.)));
+        let notice = status.notice("prod", at(14.)).expect("the banner stays");
+        assert_eq!(
+            (notice.kind, notice.tone, notice.title.as_str()),
+            (
+                NoticeKind::Reconnecting,
+                Tone::Critical,
+                "Connection to master-01 lost. Reconnecting…"
+            )
+        );
+        assert_eq!(
+            notice.detail.as_deref(),
+            Some("attempt 2 · connection reset")
+        );
         lost(&mut status, 2, 20.);
         // Two minutes on, the engine raises no live data: still red, the
         // banner's words change, not its tone.
@@ -1179,6 +1234,22 @@ mod tests {
         });
         never.on_state(ConnectionState::Connecting { attempt: 2 });
         assert_eq!(never.health(at(1.)), Health::Reconnecting);
+        let notice = never.notice("prod", at(1.)).expect("the banner stays");
+        assert_eq!(notice.title, "Can't connect to master-01. Reconnecting…");
+        assert_eq!(notice.detail.as_deref(), Some("attempt 2 · refused"));
+        // A connect the user asked for has no banner.
+        assert!(
+            ConnectionStatus::starting("master-01", None)
+                .notice("prod", at(0.))
+                .is_none()
+        );
+        // Connected again, loading: the banner goes.
+        never.on_state(ConnectionState::Loading {
+            phase: LoadPhase::Hosts,
+            done: 0,
+            total: None,
+        });
+        assert!(never.notice("prod", at(2.)).is_none());
     }
 
     #[test]
@@ -1549,7 +1620,26 @@ mod tests {
             Some("invalid pinned fingerprint")
         );
 
+        // Tried again (the user fixed the settings, or pressed *Retry
+        // now*): still not connected, so still red, the banner too (no
+        // false green rule 5), without the reason that may no longer hold.
         status.on_state(ConnectionState::Connecting { attempt: 1 });
+        let again = status.notice("prod-cluster", at(0.)).unwrap();
+        assert_eq!(
+            (again.kind, again.tone, again.title.as_str()),
+            (
+                NoticeKind::Reconnecting,
+                Tone::Critical,
+                "Can't connect to master-01. Reconnecting…"
+            )
+        );
+        assert_eq!(again.detail.as_deref(), Some("attempt 1"));
+        // Connected: the banner goes.
+        status.on_state(ConnectionState::Loading {
+            phase: LoadPhase::Hosts,
+            done: 0,
+            total: None,
+        });
         assert_eq!(status.notice("prod-cluster", at(0.)), None);
     }
 

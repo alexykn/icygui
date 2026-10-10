@@ -202,6 +202,10 @@ pub struct Tuning {
     /// `crate::jitter`). `None` (the default): a random seed, so every
     /// engine draws its own; tests pass one, so a run repeats exactly.
     pub seed: Option<u64>,
+    /// How much later than it does the event log's answer about which
+    /// problems an earlier run notified reaches the engine (zero; tests
+    /// make it a busy disk).
+    pub event_log_delay: Duration,
     /// With several URLs, how long logging in at one and finding out its
     /// node (`GET /v1`, the node's name, the zones) may take while other
     /// URLs remain to try, and in a probe (8 s): a node that accepts
@@ -247,6 +251,7 @@ impl Default for Tuning {
             heartbeat: crate::heartbeat::Timing::default(),
             trouble_grace: crate::trouble::GRACE,
             seed: None,
+            event_log_delay: Duration::ZERO,
         }
     }
 }

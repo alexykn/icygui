@@ -99,6 +99,7 @@ fn cluster() -> Snapshot {
             notification: Some(FeatureState::Paused),
             icingadb: Some(FeatureState::Off),
         }),
+        features_forbidden: Vec::new(),
         samples: (0..12)
             .map(|index| HealthSample {
                 at: at(f64::from(12 - index) * 30.0),
@@ -254,13 +255,16 @@ fn a_healthy_cluster_reads_like_the_mock_up() {
     let features: Vec<(&str, &str)> = report
         .features
         .iter()
-        .map(|feature| (feature.label, feature.word()))
+        .map(|feature| (feature.label, feature.word.as_str()))
         .collect();
+    // master-01 is in the HA zone master with master-02 connected: the
+    // checks and notifications are shared, whatever Icinga's paused flag
+    // on the feature objects says.
     assert_eq!(
         features,
         [
-            ("checker", "running"),
-            ("notification", "paused here"),
+            ("checker", "shared with master-02"),
+            ("notification", "shared with master-02"),
             ("IcingaDB", "off")
         ]
     );
@@ -394,6 +398,7 @@ fn without_live_data_nothing_is_green() {
     let snapshot = cluster();
     let stale = Liveness::Stale {
         as_of: Some(at(240.0)),
+        heard: None,
         link: Link::Lost(Tone::Warning),
     };
     let report = report(&snapshot, stale, now());
@@ -475,6 +480,7 @@ fn without_live_data_statuses_are_last_known_and_this_node_says_so() {
             &snapshot,
             Liveness::Stale {
                 as_of: Some(as_of),
+                heard: None,
                 link,
             },
             now(),
@@ -513,6 +519,7 @@ fn without_live_numbers_only_the_others_are_last_known() {
         &snapshot,
         Liveness::Stale {
             as_of: Some(as_of),
+            heard: None,
             link: Link::Up,
         },
         now(),
@@ -531,6 +538,7 @@ fn without_live_numbers_only_the_others_are_last_known() {
         &snapshot,
         Liveness::Stale {
             as_of: None,
+            heard: None,
             link: Link::Lost(Tone::Warning),
         },
         now(),
@@ -542,6 +550,7 @@ fn without_live_numbers_only_the_others_are_last_known() {
         &degraded(&[]),
         Liveness::Stale {
             as_of: Some(as_of),
+            heard: None,
             link: Link::Lost(Tone::Warning),
         },
         now(),
@@ -570,6 +579,7 @@ fn without_live_data_uptime_is_as_of_the_latest_status() {
         &snapshot,
         Liveness::Stale {
             as_of: Some(at(2.0 * 3_600.0)),
+            heard: None,
             link: Link::Lost(Tone::Warning),
         },
         now(),
@@ -723,4 +733,95 @@ fn counts_get_thousands_separators() {
     assert_eq!(count_text(1_204), "1,204");
     assert_eq!(count_text(18_402), "18,402");
     assert_eq!(count_text(1_234_567), "1,234,567");
+}
+
+/// Ledger rows 72 and 74: in an HA zone the feature objects' `paused` is
+/// Icinga's HA bookkeeping, not a stop (the paused master runs its share of
+/// the checks and notifications, checked on the demo cluster), so the page
+/// says the work is shared while another endpoint of the zone is
+/// connected; alone, a paused feature says so. Without the permission to
+/// read a feature the page names it.
+#[test]
+fn features_say_what_is_true_in_an_ha_zone_and_what_is_missing() {
+    let words = |snapshot: &Snapshot| -> Vec<(String, bool, bool)> {
+        report(snapshot, Liveness::Live, now())
+            .features
+            .iter()
+            .map(|feature| {
+                (
+                    format!("{} {}", feature.label, feature.word),
+                    feature.running,
+                    feature.missing,
+                )
+            })
+            .collect()
+    };
+    let mut snapshot = cluster();
+    let mut health = (*snapshot.health).clone();
+    health.features = Some(NodeFeatures {
+        checker: Some(FeatureState::Paused),
+        notification: Some(FeatureState::Paused),
+        icingadb: Some(FeatureState::Paused),
+    });
+    snapshot.health = Arc::new(health.clone());
+    assert_eq!(
+        words(&snapshot),
+        [
+            ("checker shared with master-02".to_owned(), true, false),
+            ("notification shared with master-02".to_owned(), true, false),
+            (
+                "IcingaDB paused here · master-02 writes".to_owned(),
+                false,
+                false
+            ),
+        ]
+    );
+    // master-02 gone: alone in the zone, paused is paused.
+    let mut endpoints = (*snapshot.endpoints).clone();
+    endpoints
+        .iter_mut()
+        .filter(|endpoint| endpoint.name == "master-02")
+        .for_each(|endpoint| endpoint.connected = false);
+    snapshot.endpoints = Arc::new(endpoints);
+    assert_eq!(
+        words(&snapshot)[0],
+        ("checker paused here".to_owned(), false, false)
+    );
+    // Off is off, shared or not.
+    health.features = Some(NodeFeatures {
+        checker: Some(FeatureState::Off),
+        ..health.features.unwrap()
+    });
+    snapshot.health = Arc::new(health.clone());
+    assert_eq!(
+        words(&snapshot)[0],
+        ("checker off".to_owned(), false, false)
+    );
+    // A user who may not read two of them: the page says what to grant.
+    health.features = Some(NodeFeatures {
+        checker: None,
+        notification: None,
+        icingadb: Some(FeatureState::Off),
+    });
+    health.features_forbidden = vec![
+        "objects/query/CheckerComponent",
+        "objects/query/NotificationComponent",
+    ];
+    snapshot.health = Arc::new(health);
+    assert_eq!(
+        words(&snapshot),
+        [
+            (
+                "checker needs objects/query/CheckerComponent".to_owned(),
+                false,
+                true
+            ),
+            (
+                "notification needs objects/query/NotificationComponent".to_owned(),
+                false,
+                true
+            ),
+            ("IcingaDB off".to_owned(), false, false),
+        ]
+    );
 }

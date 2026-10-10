@@ -307,11 +307,19 @@ fn switching_is_instant_and_keeps_every_stream() {
                         .map(|id| session.read(cx).demo_control_of(id).unwrap())
                         .collect()
                 });
+                // List queries: a load. (Waking up may ask for a few
+                // problems by name, `{"hosts": [...]}`: no reload.)
                 let loads = |control: &MockControl| {
                     control
                         .requests()
                         .iter()
                         .filter(|request| request.path == "/v1/objects/hosts")
+                        .filter(|request| {
+                            request
+                                .body
+                                .as_ref()
+                                .is_none_or(|body| body.get("hosts").is_none())
+                        })
                         .count()
                 };
                 let before: Vec<usize> = controls.iter().map(loads).collect();

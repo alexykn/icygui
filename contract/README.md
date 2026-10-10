@@ -127,9 +127,27 @@ cluster tests in `crates/ic-core/tests/engine/cluster.rs` hold them):
   its peers report it disconnected after about 90 s.
 - In an HA zone `CheckerComponent` and `NotificationComponent` objects
   report `paused: true` on one of the masters (their own HA state), although
-  that master runs its share of the checks (`check_source`).
+  that master runs its share of the checks (`check_source`) and sends its
+  share of the notifications (the `Notification` objects' authority is
+  split between the masters, and both log *Completed sending*).
+- A checker feature that is off on one master of an HA zone isn't made up
+  for: the other master keeps to its own share, and the off master's share
+  goes unchecked (about 500 of the demo's 2 200 master-zone checks late 2.5
+  minutes after `icinga2 feature disable checker` on master-02).
+- Without `objects/query/CheckerComponent` (and the other feature types)
+  Icinga answers `403 Missing permission: objects/query/checkercomponent`.
 - A passive check is overdue (`next_update`, and icygui's *late*) twice its
   interval after its last result.
+- Icinga 2.15.6 writes each `/v1/events` stream in batches 5.0 s apart,
+  idle or busy: a raw stream got bursts at 0, 5, 10 and 15 s, the oldest
+  event of each 5 s old, the newest fresh. A new stream sends its first
+  events at once. A client that closes a stream loses what it still held
+  (icygui's quiet/live switch waits 7 s for the old stream's batch;
+  `cluster_switching_modes_during_a_problem_storm_logs_and_notifies_each_change_once`).
+- A burst of passive results (`process-check-result`, three per service)
+  makes a `StateChange` of every attempt; a soft state that turns hard
+  keeps its `last_state_change` (the first attempt) and gets
+  `last_hard_state_change` (the hard one).
 - Attributes changed through the API (`enable_active_checks`) reach the
   satellites that run the checks; `restore_attrs` puts the configuration's
   value back.

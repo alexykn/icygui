@@ -40,7 +40,7 @@ use gpui::{
 };
 use ic_config::{HealthPage as HealthLayout, View, ViewDisplay};
 use ic_core::trouble::AlertAction;
-use ic_model::{FeatureState, ObjectKey, Timestamp, format_compact};
+use ic_model::{ObjectKey, Timestamp, format_compact};
 use ic_ui_kit::{
     ActiveTheme as _, BannerTone, Dismissal, EmptyState, GlyphButton, Icon, IconName, Link, Menu,
     MenuItem, Metrics, ObjectMark, PaneHeader, Popover, StateDot, Theme, Tooltip, px,
@@ -1397,7 +1397,7 @@ impl HealthPage {
         } else {
             theme.states.fill.pending
         };
-        let item = |dot: Hsla, label: &'static str, word: &'static str, word_color: Hsla| {
+        let item = |dot: Hsla, label: &'static str, word: String, word_color: Hsla| {
             div()
                 .flex()
                 .flex_none()
@@ -1409,22 +1409,30 @@ impl HealthPage {
         };
         let switches = report.switches.iter().map(|switch| {
             if switch.on {
-                item(ok, switch.label, "on", colors.text_faint)
+                item(ok, switch.label, "on".to_owned(), colors.text_faint)
             } else {
                 item(
                     theme.states.fill.warning,
                     switch.label,
-                    "off",
+                    "off".to_owned(),
                     theme.states.text.warning,
                 )
             }
         });
         let features = report.features.iter().map(|feature| {
-            let dot = match feature.state {
-                FeatureState::Running => ok,
-                FeatureState::Paused | FeatureState::Off => theme.states.fill.pending,
+            let dot = if feature.running {
+                ok
+            } else {
+                theme.states.fill.pending
             };
-            item(dot, feature.label, feature.word(), colors.text_faint)
+            // A missing permission says what to grant, in the warning
+            // colour.
+            let word_color = if feature.missing {
+                theme.states.text.warning
+            } else {
+                colors.text_faint
+            };
+            item(dot, feature.label, feature.word.clone(), word_color)
         });
         let node = report.seen_from.clone().unwrap_or_default();
         div()
@@ -1811,11 +1819,15 @@ const STATUS_SLOT_CHARS: f32 = 18.;
 /// The heartbeat row's age slot, in characters (`59m 59s`, 16a2's 8ch).
 const AGE_SLOT_CHARS: f32 = 8.;
 
-/// A beat's dot and age (`● 8s`, `● disappeared`).
+/// A beat's dot and age (`● 8s`, `● disappeared`; without live data the
+/// last known age, faint).
 fn beat_element(beat: &BeatCell, theme: &Theme) -> AnyElement {
     let text = match beat.tone {
         BeatTone::Critical => theme.states.text.critical,
         BeatTone::Warning => theme.states.text.warning,
+        // A last known age, without live data: faint like the page's
+        // other last known values.
+        BeatTone::Ok | BeatTone::Off if beat.last_known => theme.colors.text_faint,
         BeatTone::Ok | BeatTone::Off => theme.colors.text_secondary,
     };
     div()

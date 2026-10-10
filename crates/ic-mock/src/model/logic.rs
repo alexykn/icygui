@@ -11,6 +11,12 @@ use super::{PendingExecution, World};
 use crate::events::EventType;
 use crate::json::{int, num};
 
+/// How long Icinga must have run before it answers a check pinned to an
+/// endpoint that isn't connected with UNKNOWN (`Checkable::ExecuteCheck`:
+/// the application started more than 300 s ago); before, such a check
+/// stays silent.
+pub(crate) const COLD_START: f64 = 300.0;
+
 /// `DependencyType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DepType {
@@ -1134,9 +1140,12 @@ impl World {
     /// zone, a satellite for its zone). A zone that is cut off, or whose
     /// connected endpoints all hang, sends nothing: its beats go silent (the
     /// master never schedules them). A check pinned to an endpoint that
-    /// isn't connected comes back UNKNOWN with Icinga's words; one pinned to
-    /// an endpoint that hangs never answers. Nothing runs while checks are
-    /// stopped.
+    /// isn't connected comes back UNKNOWN with Icinga's words, but only
+    /// once Icinga has run for [`COLD_START`] (before that it stays silent,
+    /// as Icinga 2.15's `Checkable::ExecuteCheck` does: checked on the
+    /// demo cluster, `cluster_pinned_check_of_a_gone_endpoint_turns_unknown`);
+    /// one pinned to an endpoint that hangs never answers. Nothing runs
+    /// while checks are stopped.
     pub(crate) fn run_realtime_checks(&mut self, now: f64) {
         if self.checks_stopped {
             return;
@@ -1169,6 +1178,11 @@ impl World {
                     .is_none_or(|endpoint| !endpoint.connected);
             if !disconnected && self.checkers_stopped.contains(&pinned) {
                 // Pinned to an endpoint that hangs: no answer comes.
+                continue;
+            }
+            if disconnected && now - self.app.program_start < COLD_START {
+                // Icinga makes no result up for an endpoint that may still
+                // connect after its own start: the check stays silent.
                 continue;
             }
             // The pinned endpoint is the check's source even while it isn't

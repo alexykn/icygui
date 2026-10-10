@@ -94,6 +94,10 @@ pub struct ClusterHealth {
     /// The connected node's features, once the page asked (`None` before,
     /// and again after a reconnect).
     pub features: Option<NodeFeatures>,
+    /// The permissions the API user lacks to read the node's features
+    /// (`objects/query/CheckerComponent`, …): the page names them where
+    /// the feature would be.
+    pub features_forbidden: Vec<&'static str>,
     /// The status polls of the last [`TREND_WINDOW`], oldest first.
     pub samples: VecDeque<HealthSample>,
     /// How often the status poll runs now (30 s, or 5 minutes while
@@ -131,6 +135,7 @@ impl ClusterHealth {
         self.listener = None;
         self.listener_at = None;
         self.features = None;
+        self.features_forbidden.clear();
     }
 }
 

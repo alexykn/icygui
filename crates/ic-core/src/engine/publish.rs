@@ -44,7 +44,7 @@ impl Engine {
             || self.notify.has_pending()
             || self.updating_changed
             || self.mode_changed
-            || self.beats.changed
+            || self.beats_need_refresh()
             || self.beats.news
             || self.trouble.news
             || self.streams_wait()

@@ -3,8 +3,10 @@
 //! server runs them in real time at their `check_interval`
 //! ([`Scenario::realtime`]), simulation or not; a check pinned to an
 //! endpoint that isn't connected comes back UNKNOWN with Icinga's own
-//! output, and [`crate::MockControl::stop_checks`] stops every check, the
-//! way a hung checker does.
+//! output once the mock's Icinga has run for 5 minutes (before that it
+//! stays silent, as Icinga 2.15 does), and
+//! [`crate::MockControl::stop_checks`] stops every check, the way a hung
+//! checker does.
 
 use ic_model::{Host, HostState, ObjectKey, Service, ServiceState, StateType, Timestamp, Vars};
 

@@ -94,7 +94,7 @@ fn the_health_page_shows_the_cluster_and_asks_only_while_open() {
                     assert_eq!((report.connected, report.not_connected), (5, 0));
                     assert_eq!(report.global_zones, ["director-global", "global-templates"]);
                     assert!(report.zones[0].endpoints[0].this_node);
-                    let features: Vec<(&str, FeatureState)> = report
+                    let features: Vec<(&str, Option<FeatureState>)> = report
                         .features
                         .iter()
                         .map(|feature| (feature.label, feature.state))
@@ -102,9 +102,9 @@ fn the_health_page_shows_the_cluster_and_asks_only_while_open() {
                     assert_eq!(
                         features,
                         [
-                            ("checker", FeatureState::Running),
-                            ("notification", FeatureState::Running),
-                            ("IcingaDB", FeatureState::Off)
+                            ("checker", Some(FeatureState::Running)),
+                            ("notification", Some(FeatureState::Running)),
+                            ("IcingaDB", Some(FeatureState::Off))
                         ]
                     );
                     assert_eq!(report.queues[2].value, "4 of 4");

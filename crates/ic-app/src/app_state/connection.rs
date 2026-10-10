@@ -881,6 +881,11 @@ impl ConnectionStatus {
         if let Some(notice) = self.blind_notice(now) {
             return Some(notice);
         }
+        // A failure that waits for the user (credentials refused, a
+        // certificate not trusted, no password, settings that can't work)
+        // keeps icygui blind there, whoever has to fix it: red, as the
+        // footer, the sidebar's dot and the tray show it (rule 5).
+        let failed = self.health(now).tone().unwrap_or(Tone::Critical);
         let notice = match self.state.as_ref()? {
             ConnectionState::Reconnecting {
                 error,
@@ -890,7 +895,7 @@ impl ConnectionStatus {
             } => self.reconnecting_notice(error, *attempt, *retry_at, untrusted.is_some(), now),
             ConnectionState::AuthFailed { message } => ConnectionNotice {
                 kind: NoticeKind::AuthFailed,
-                tone: Tone::Critical,
+                tone: failed,
                 title: match &self.user {
                     Some(user) => format!("Icinga refused the login of {user}."),
                     None => "Icinga refused the client certificate.".to_owned(),
@@ -906,7 +911,7 @@ impl ConnectionStatus {
                 certificate,
             } => ConnectionNotice {
                 kind: NoticeKind::TlsFailed,
-                tone: Tone::Critical,
+                tone: failed,
                 title: format!(
                     "The certificate of {} isn't trusted.",
                     ic_config::ApiUrl::new(url).label()
@@ -923,7 +928,7 @@ impl ConnectionStatus {
             },
             ConnectionState::MissingSecret => ConnectionNotice {
                 kind: NoticeKind::MissingSecret,
-                tone: Tone::Warning,
+                tone: failed,
                 title: match &self.user {
                     Some(user) => {
                         format!("No password for {user} on {environment} in the keychain.")
@@ -935,7 +940,7 @@ impl ConnectionStatus {
             },
             ConnectionState::Misconfigured { message } => ConnectionNotice {
                 kind: NoticeKind::Misconfigured,
-                tone: Tone::Warning,
+                tone: failed,
                 title: format!("The settings of {environment} can't work."),
                 detail: Some(message.clone()),
                 actions: vec![NoticeAction::EditEnvironment, NoticeAction::RetryNow],
@@ -1608,13 +1613,19 @@ mod tests {
             missing.title,
             "No password for icygui on prod-cluster in the keychain."
         );
-        assert_eq!(missing.tone, Tone::Warning);
+        // A setup problem keeps icygui blind there: red like the footer,
+        // the sidebar's dot and the tray (rule 5), whoever has to fix it.
+        assert_eq!(missing.tone, Tone::Critical);
+        assert_eq!(status.health(at(0.)).tone(), Some(Tone::Critical));
 
         status.on_state(ConnectionState::Misconfigured {
             message: "invalid pinned fingerprint".to_owned(),
         });
         let settings = status.notice("prod-cluster", at(0.)).unwrap();
         assert_eq!(settings.title, "The settings of prod-cluster can't work.");
+        assert_eq!(settings.tone, Tone::Critical);
+        assert_eq!(auth.tone, Tone::Critical);
+        assert_eq!(tls.tone, Tone::Critical);
         assert_eq!(
             settings.detail.as_deref(),
             Some("invalid pinned fingerprint")

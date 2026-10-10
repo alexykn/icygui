@@ -30,7 +30,8 @@ use ic_ui_kit::{
 use super::keyboard::Region;
 use super::rows::{self, Row, SUB_INDENT};
 use super::{SettingsMenu, SettingsPage, SettingsPanel};
-use crate::cluster::beats::{BeatTone, tone_of};
+use crate::cluster::beats::{BeatTone, shown_age, shown_tone};
+use crate::cluster::health::Liveness;
 use crate::menu_state::down_position;
 
 /// The heartbeat variable's field (content width).
@@ -232,6 +233,10 @@ impl SettingsPanel {
             .snapshot_of(&page.id)
             .map(|snapshot| snapshot.heartbeats.as_ref().clone())
             .unwrap_or_default();
+        // Without live data no beat is judged against the clock (rule 5).
+        let live = state.slot(&page.id).map_or(Liveness::Live, |slot| {
+            crate::cluster::liveness(slot.snapshot(), slot.connection(), now)
+        });
         let trouble = &environment.trouble;
         let colors = theme.colors;
         let id = page.id.clone();
@@ -302,7 +307,7 @@ impl SettingsPanel {
         alerts = match trouble.heartbeats.mode {
             HeartbeatMode::Find => alerts
                 .child(self.variable_row(page, &heartbeats, theme, cx))
-                .children(beats_table(&heartbeats, now, &page.id, theme, cx)),
+                .children(beats_table(&heartbeats, live, now, &page.id, theme, cx)),
             HeartbeatMode::List => alerts.children(self.list_rows(page, &heartbeats, theme, cx)),
         };
         alerts = alerts.child(
@@ -605,6 +610,7 @@ fn interval_text(beat: &Heartbeat) -> String {
 )]
 fn beats_table(
     heartbeats: &Heartbeats,
+    live: Liveness,
     now: Timestamp,
     environment: &str,
     theme: &Theme,
@@ -636,13 +642,10 @@ fn beats_table(
         );
     let mut rows = vec![header.into_any_element()];
     for beat in &heartbeats.beats {
-        let tone = tone_of(beat, now);
+        let tone = shown_tone(beat, live, now);
         let gone = beat.state == BeatState::Disappeared;
         let not_found = beat.state == BeatState::NotFound;
-        let age = beat.last_beat.map_or_else(
-            || "—".to_owned(),
-            |at| format_two_units(at.elapsed_until(now)),
-        );
+        let age = shown_age(beat, live, now);
         let row = div()
             .id(ElementId::Name(
                 format!("settings-beat-{}", beat.object()).into(),
@@ -738,6 +741,8 @@ fn beats_table(
                     .text_color(match tone {
                         BeatTone::Critical => theme.states.text.critical,
                         BeatTone::Warning => theme.states.text.warning,
+                        // The last known age, without live data.
+                        BeatTone::Ok | BeatTone::Off if !live.live_data() => colors.text_faint,
                         BeatTone::Ok | BeatTone::Off => colors.text,
                     })
                     .child(if not_found {

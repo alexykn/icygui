@@ -18,6 +18,12 @@
 //! engine's `sync` module lifts them above it), and a reconcile planned
 //! again keeps the point of its window it was drawn at.
 //!
+//! The heartbeat polls (only for an API user who may not filter the event
+//! stream, while quiet) take a random phase too, but every later one comes
+//! at most an interval after the last ([`Jitter::within`]: 80 to 100 % of
+//! it): a polled beat's deadline counts on a poll seeing it within an
+//! interval of its check, so a longer gap would make it late.
+//!
 //! What only ever comes with another request (the health page's reads
 //! for the trouble alerts and the cluster nodes' states, which come with a
 //! status poll) is not spread a second time: it is due [`carried`] after
@@ -75,6 +81,14 @@ impl Jitter {
         interval.mul_f64(1.0 - SPREAD + 2.0 * SPREAD * self.unit())
     }
 
+    /// The next of a series that must never come later than `interval`
+    /// after the last (the heartbeat polls: a beat's deadline counts on
+    /// being seen within an interval of its check): from `1 − SPREAD` of
+    /// it to all of it, so clients still drift apart.
+    pub(crate) fn within(&mut self, interval: Duration) -> Duration {
+        interval.mul_f64(1.0 - SPREAD * self.unit())
+    }
+
     /// The first of a series: a random phase in [`PHASE`] of `interval`.
     pub(crate) fn phase(&mut self, interval: Duration) -> Duration {
         let (from, to) = PHASE;
@@ -91,6 +105,39 @@ impl Jitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A series that must never be later than its interval (the heartbeat
+    /// polls) still spreads: every gap within 80–100 % of it, fifty clients
+    /// that started together end up apart.
+    #[test]
+    fn a_series_within_its_interval_never_comes_late_and_still_drifts() {
+        let interval = Duration::from_secs(30);
+        let mut jitter = Jitter::new(Some(9));
+        for _ in 0..10_000 {
+            let gap = jitter.within(interval);
+            assert!(gap <= interval, "{gap:?}");
+            assert!(gap >= interval.mul_f64(1.0 - SPREAD), "{gap:?}");
+        }
+        // Fifty clients polling from the same moment: after ten polls each
+        // fifth of the interval holds some of them.
+        let mut buckets = [0_u32; 5];
+        for client in 0..50 {
+            let mut jitter = Jitter::new(Some(client));
+            let mut at = jitter.phase(interval);
+            for _ in 0..10 {
+                at += jitter.within(interval);
+            }
+            let fraction = (at.as_secs_f64() / interval.as_secs_f64()).fract();
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "0..5"
+            )]
+            let bucket = (fraction * 5.0) as usize;
+            buckets[bucket.min(4)] += 1;
+        }
+        assert!(buckets.iter().all(|count| *count > 0), "{buckets:?}");
+    }
 
     #[test]
     fn the_same_seed_gives_the_same_timers() {

@@ -217,7 +217,17 @@ impl Engine {
                     }
                 }
                 // What was not read stays as it was (a refused type: none).
+                let forbidden: Vec<&'static str> = read
+                    .forbidden
+                    .iter()
+                    .filter_map(|plural| ic_api::feature_permission(plural))
+                    .collect();
                 self.store.update_health(|health| {
+                    for permission in forbidden {
+                        if !health.features_forbidden.contains(&permission) {
+                            health.features_forbidden.push(permission);
+                        }
+                    }
                     let mut features = health.features.unwrap_or_default();
                     let read = read.features;
                     features.checker = read.checker.or(features.checker);
@@ -231,6 +241,12 @@ impl Engine {
                 if let Some(conn) = &mut self.conn {
                     conn.health.features_refused = true;
                 }
+                self.store.update_health(|health| {
+                    health.features_forbidden = FEATURE_TYPES
+                        .iter()
+                        .filter_map(|plural| ic_api::feature_permission(plural))
+                        .collect();
+                });
             }
             // A broken read waits for the normal pace (no retry with every
             // status poll).

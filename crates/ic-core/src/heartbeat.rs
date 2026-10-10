@@ -173,7 +173,9 @@ pub struct Heartbeat {
     pub last_check: Option<Timestamp>,
     /// When [`Heartbeat::state`] began (local clock).
     pub since: Timestamp,
-    /// The next beat is due by then (local clock): late after it.
+    /// The next beat is due by then (local clock): late after it. Only
+    /// while the session is live (without live data nothing can be judged
+    /// against it; once live again it is the grace's).
     pub deadline: Option<Timestamp>,
     /// The time budget's allowance on top of the interval.
     pub allowance: Duration,

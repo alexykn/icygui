@@ -20,7 +20,11 @@
 //! - **Polled:** while the stream can't carry the beats' results (quiet
 //!   without Icinga's stream filter, or no check result events for this
 //!   user), one request reads them once per interval (the shortest beat's)
-//!   instead, and a newer `last_check` counts as a beat.
+//!   instead, and a newer `last_check` counts as a beat. No synchronised
+//!   clients: the first poll of a series at a random phase, every later
+//!   one 80 to 100 % of the interval after the last (never later: a polled
+//!   beat's deadline, two intervals and its allowance, counts on a poll
+//!   within an interval; [`crate::jitter::Jitter::within`]).
 //! - **Grace:** after a reconnect, the computer waking up or an Icinga
 //!   restart, every beat that isn't dead gets
 //!   [`heartbeat::GRACE_INTERVALS`] intervals before it can be late.
@@ -103,6 +107,25 @@ impl Watch {
     }
 }
 
+/// Whether the published heartbeats carry their deadlines: only while
+/// live (without live data no beat is judged against one).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Deadlines {
+    #[default]
+    Withheld,
+    Published,
+}
+
+impl Deadlines {
+    fn when(live: bool) -> Self {
+        if live {
+            Self::Published
+        } else {
+            Self::Withheld
+        }
+    }
+}
+
 /// The heartbeats of the environment, as the engine watches them.
 #[derive(Debug, Default)]
 pub(super) struct Beats {
@@ -124,6 +147,8 @@ pub(super) struct Beats {
     next_poll: Option<Instant>,
     /// What the snapshots carry.
     published: Arc<Heartbeats>,
+    /// Whether `published` carries the deadlines (built while live).
+    deadlines: Deadlines,
     /// Something the snapshots show changed (`published` is rebuilt).
     pub(super) changed: bool,
     /// `published` was rebuilt since the last snapshot.
@@ -554,7 +579,11 @@ impl Engine {
             return;
         }
         if self.beats.next_poll.is_none() {
-            self.beats.next_poll = Some(Instant::now() + self.poll_interval());
+            // No synchronised clients: the first of a series at a random
+            // phase (at most 1.5 intervals: within a new beat's grace and a
+            // switched stream's extended deadline, both two intervals).
+            let first = self.jitter.phase(self.poll_interval());
+            self.beats.next_poll = Some(Instant::now() + first);
         }
     }
 
@@ -608,8 +637,10 @@ impl Engine {
                         watch.state = BeatState::Waiting;
                         watch.query_at = None;
                         watch.rechecked = false;
-                        self.beats.changed = true;
                     }
+                    // The snapshots carry the new deadline: the UI judges
+                    // a beat by it (an older one would make it late).
+                    self.beats.changed = true;
                     any = true;
                 }
             }
@@ -684,7 +715,10 @@ impl Engine {
             return;
         }
         let keys: Vec<ServiceKey> = if poll {
-            self.beats.next_poll = Some(now + self.poll_interval());
+            // Never more than an interval after the last (a polled beat's
+            // deadline counts on that), but spread below it.
+            let gap = self.jitter.within(self.poll_interval());
+            self.beats.next_poll = Some(now + gap);
             self.beats.watches.keys().cloned().collect()
         } else {
             due.clone()
@@ -874,12 +908,24 @@ impl Engine {
         }
     }
 
+    /// Whether the heartbeats the snapshots carry are to be rebuilt:
+    /// something changed, or the session went live or stopped being live.
+    pub(super) fn beats_need_refresh(&self) -> bool {
+        self.beats.changed || Deadlines::when(self.phase == Phase::Live) != self.beats.deadlines
+    }
+
     /// Rebuilds the heartbeats as the snapshots (and the trouble alerts)
-    /// see them, if something changed.
+    /// see them, if something changed. The deadlines go out only while
+    /// live: without live data no beat can be judged against one (the UI
+    /// says *no live data*, PLAN.md §4.2 rule 5), and once live again each
+    /// has its grace's.
     pub(super) fn refresh_beats(&mut self) {
-        if !std::mem::take(&mut self.beats.changed) {
+        if !self.beats_need_refresh() {
             return;
         }
+        self.beats.changed = false;
+        let live = self.phase == Phase::Live;
+        self.beats.deadlines = Deadlines::when(live);
         let instant = Instant::now();
         let now = self.ports.clock.now();
         let polled = self.beats_polled() && !self.beats.watches.is_empty();
@@ -897,7 +943,7 @@ impl Engine {
                 since: watch.since,
                 deadline: watch
                     .deadline
-                    .filter(|_| watch.running())
+                    .filter(|_| live && watch.running())
                     .map(|at| now.plus(at.saturating_duration_since(instant))),
                 allowance: watch.allowance,
                 reason: watch.reason.clone(),

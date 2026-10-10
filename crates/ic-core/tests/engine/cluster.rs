@@ -623,25 +623,23 @@ async fn cluster_ha_masters_share_the_checks() {
     let Some(cluster) = setup().await else {
         return;
     };
-    // Icinga reports the checker feature's object paused on one master of
-    // the HA zone (its own HA state), running on the other (read as the
-    // fixtures' `icygui` user: the recommended icygui-demo user may not
-    // read feature objects)...
-    let user = std::env::var("ICYGUI_CONTRACT_USER").expect("ICYGUI_CONTRACT_USER");
-    let password = std::env::var("ICYGUI_CONTRACT_PASSWORD").expect("ICYGUI_CONTRACT_PASSWORD");
+    // Icinga reports the checker's and the notification feature's objects
+    // paused on one master of the HA zone (their own HA state), running on
+    // the other (read as the recommended icygui-demo user, who may read
+    // them)...
     let mut states = Vec::new();
     for index in 0..2 {
-        let read = cluster
-            .client_as(index, &user, &password)
-            .node_features(&[])
-            .await
-            .unwrap();
-        states.push(read.features.checker);
+        let read = cluster.client(index).node_features(&[]).await.unwrap();
+        assert!(read.forbidden.is_empty(), "{:?}", read.forbidden);
+        states.push((read.features.checker, read.features.notification));
     }
     states.sort_by_key(|state| format!("{state:?}"));
     assert_eq!(
         states,
-        [Some(FeatureState::Paused), Some(FeatureState::Running)],
+        [
+            (Some(FeatureState::Paused), Some(FeatureState::Paused)),
+            (Some(FeatureState::Running), Some(FeatureState::Running))
+        ],
         "one paused, one running"
     );
     // ...yet both run their share of the master zone's checks.
@@ -665,4 +663,219 @@ async fn cluster_ha_masters_share_the_checks() {
         sources.contains("master-01") && sources.contains("master-02"),
         "{sources:?}"
     );
+}
+
+/// Ledger row 74: an API user set up exactly as the user guide recommends
+/// (the demo's icygui-demo has the guide's list, checked here) sees every
+/// field the health page shows: the status, the endpoints' numbers, the
+/// listener's queues and the node's three features, none of them refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cluster_the_documented_api_user_sees_every_field_of_the_health_page() {
+    let _turn = CLUSTER.lock().await;
+    let Some(cluster) = setup().await else {
+        return;
+    };
+    // The guide's snippet, as the demo's user has it.
+    let guide = std::fs::read_to_string(
+        cluster
+            .scenario
+            .parent()
+            .unwrap()
+            .join("../docs/user-guide.md"),
+    )
+    .expect("docs/user-guide.md");
+    let start = guide
+        .find("object ApiUser \"icygui\" {")
+        .expect("the snippet");
+    let snippet = &guide[start..];
+    let snippet = &snippet[..snippet.find("\n}").unwrap()];
+    let mut documented: Vec<String> = snippet
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix('"')
+                .and_then(|line| line.strip_suffix("\","))
+                .map(str::to_owned)
+        })
+        .collect();
+    documented.sort();
+    let info = cluster.client(0).info().await.unwrap();
+    let mut granted = info.permissions.clone();
+    granted.sort();
+    assert_eq!(
+        granted, documented,
+        "icygui-demo has the guide's permissions"
+    );
+
+    let mut engine = cluster.engine();
+    engine.send(ic_core::Command::WatchHealth(true));
+    let snapshot = wait_snapshot(
+        &mut engine,
+        Duration::from_mins(2),
+        "the health page's data",
+        |snapshot| {
+            let health = &snapshot.health;
+            snapshot.status.is_some()
+                && !health.endpoints.is_empty()
+                && health.listener.is_some()
+                && health.features.is_some_and(|features| {
+                    features.checker.is_some()
+                        && features.notification.is_some()
+                        && features.icingadb.is_some()
+                })
+        },
+    )
+    .await;
+    assert!(
+        snapshot.health.features_forbidden.is_empty(),
+        "{:?}",
+        snapshot.health.features_forbidden
+    );
+    engine.shutdown();
+}
+
+/// Ledger row (quiet/live overlap): against the real Icinga, an engine
+/// switched between quiet and live over and over while a problem storm
+/// lands (40 services hard CRITICAL at once, three results each) logs each
+/// state change once and notifies each problem once: no object's log goes
+/// back from a hard state to the soft one before it, or has the same state
+/// twice in a row, and no notification comes twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cluster_switching_modes_during_a_problem_storm_logs_and_notifies_each_change_once() {
+    use ic_core::Command;
+
+    let _turn = CLUSTER.lock().await;
+    let Some(cluster) = setup().await else {
+        return;
+    };
+    let mut engine = cluster.engine();
+    engine.connected().await;
+    // Settled: the first load and Icinga's notifications are in.
+    wait_snapshot(&mut engine, Duration::from_mins(2), "loaded", |snapshot| {
+        !snapshot.icinga_notifications.is_empty()
+    })
+    .await;
+    let before = engine.seen.len();
+    let scenario = cluster.scenario.clone();
+    let storm = std::thread::spawn(move || {
+        // Let the first switches begin, then the storm.
+        std::thread::sleep(Duration::from_millis(700));
+        let status = Process::new("bash")
+            .arg(&scenario)
+            .args(["problem-storm", "40"])
+            .status()
+            .expect("demo/scenario.sh");
+        assert!(status.success(), "problem-storm failed");
+    });
+    let mut quiet = false;
+    for _ in 0..14 {
+        quiet = !quiet;
+        engine.send(Command::SetQuiet(quiet));
+        let wanted = quiet;
+        wait_snapshot(
+            &mut engine,
+            Duration::from_secs(30),
+            "the switched stream",
+            |snapshot| snapshot.quiet == wanted,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    storm.join().unwrap();
+    if quiet {
+        engine.send(Command::SetQuiet(false));
+        wait_snapshot(&mut engine, Duration::from_secs(30), "live", |snapshot| {
+            !snapshot.quiet
+        })
+        .await;
+    }
+    // Whatever was on its way is in.
+    run_for(&mut engine, Duration::from_secs(10)).await;
+
+    // The log: each change once, in order, none missing.
+    let logged = check_storm_log(&engine.history(None).await);
+    // Notifications: never the same one twice in a row for an object (a
+    // problem that recovered and came back has another one between).
+    let mut last: std::collections::BTreeMap<ObjectKey, String> = std::collections::BTreeMap::new();
+    let mut all = 0;
+    for event in &engine.seen[before..] {
+        if let CoreEvent::Notification(record) = event
+            && let Some(object) = &record.intent.object
+        {
+            all += 1;
+            let previous = last.insert(object.clone(), record.intent.title.clone());
+            assert_ne!(
+                previous.as_deref(),
+                Some(record.intent.title.as_str()),
+                "{object}: notified twice"
+            );
+        }
+    }
+    eprintln!("{logged} objects with state changes, {all} notifications, none twice");
+    engine.shutdown();
+}
+
+/// The storm test's log, per object, oldest first: never the same state
+/// twice in a row, never back from hard to the soft state before it, the
+/// storm's changes there, and every storm problem logged hard logged soft
+/// first (a lost attempt leaves only what a reload found: Icinga writes
+/// each stream every 5 s, and the switch waits for the old stream's
+/// batch). Returns how many objects changed state.
+fn check_storm_log(history: &[ic_core::LogEntry]) -> usize {
+    use ic_core::LogKind;
+    use ic_model::{CheckableState, StateType};
+    use std::collections::BTreeMap;
+
+    let mut states: BTreeMap<String, Vec<(CheckableState, StateType)>> = BTreeMap::new();
+    let mut texts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in history.iter().rev() {
+        if let LogKind::State { state, state_type } = entry.kind {
+            let object = entry.object.to_string();
+            states
+                .entry(object.clone())
+                .or_default()
+                .push((state, state_type));
+            texts.entry(object).or_default().push(format!(
+                "{:.3} {state:?}/{state_type:?} {}",
+                entry.at.as_unix_seconds(),
+                entry.text
+            ));
+        }
+    }
+    let critical = CheckableState::Service(ServiceState::Critical);
+    let mut stormed = 0;
+    for (object, entries) in &states {
+        if entries.iter().any(|(state, _)| *state == critical) {
+            stormed += 1;
+        }
+        for pair in entries.windows(2) {
+            let ((a, a_type), (b, b_type)) = (pair[0], pair[1]);
+            assert!(
+                !(a == b && a_type == b_type),
+                "{object}: the same state twice in a row: {:#?}",
+                texts[object]
+            );
+            assert!(
+                !(a == b && a_type == StateType::Hard && b_type == StateType::Soft),
+                "{object}: back from hard to soft: {:#?}",
+                texts[object]
+            );
+        }
+    }
+    // (A service still critical from an earlier storm changes nothing.)
+    assert!(stormed >= 10, "the storm's changes are logged: {stormed}");
+    let unseen: Vec<&String> = texts
+        .iter()
+        .filter(|(_, lines)| {
+            let storm = |kind: &str| {
+                lines
+                    .iter()
+                    .position(|line| line.contains(kind) && line.contains("problem storm"))
+            };
+            storm("/Hard").is_some_and(|hard| storm("/Soft").is_none_or(|soft| soft > hard))
+        })
+        .map(|(object, _)| object)
+        .collect();
+    assert!(unseen.is_empty(), "soft attempts never seen: {unseen:?}");
+    states.len()
 }

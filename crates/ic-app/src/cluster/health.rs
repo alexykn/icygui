@@ -33,8 +33,10 @@
 //! stops at the last status, and the heartbeat row says *no live data*.
 //! The node icygui talks to is no last known state: its row says what
 //! icygui knows of its own connection to it ([`Link`]: *connection lost*,
-//! *no live data*). A beat past its deadline is late (yellow) by the UI's
-//! clock, whatever the engine last said ([`super::beats`]).
+//! *no live data*). With live data a beat past its deadline is late
+//! (yellow) by the UI's clock, whatever the engine last said; without, no
+//! beat is late: icygui's blindness is not the cluster's fault
+//! ([`super::beats`]).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -60,6 +62,9 @@ pub(crate) enum Liveness {
     Stale {
         /// When the endpoints' states came.
         as_of: Option<Timestamp>,
+        /// When live data last came (the event stream's last line, UI
+        /// clock): the heartbeats' last known ages count to it.
+        heard: Option<Timestamp>,
         /// icygui's own connection to the node it talks to.
         link: Link,
     },
@@ -84,6 +89,31 @@ impl Liveness {
     /// Whether the data is current.
     pub(crate) fn is_live(self) -> bool {
         matches!(self, Self::Live)
+    }
+
+    /// Whether live data arrives (connected, the stream and the engine
+    /// working; at most the endpoints' numbers are old): only then can a
+    /// heartbeat be judged against the clock. Without it no beat could
+    /// have come, and icygui's blindness must not read as late beats in
+    /// the cluster (no false green rule 5).
+    pub(crate) fn live_data(self) -> bool {
+        matches!(self, Self::Live | Self::Stale { link: Link::Up, .. })
+    }
+
+    /// When live data last came: the later of the endpoints' states and
+    /// the stream's last line (`None` while live, or unknown).
+    pub(crate) fn last_live(self) -> Option<Timestamp> {
+        match self {
+            Self::Live => None,
+            Self::Stale { as_of, heard, .. } => match (as_of, heard) {
+                (Some(a), Some(b)) => Some(if a.as_unix_seconds() < b.as_unix_seconds() {
+                    b
+                } else {
+                    a
+                }),
+                (a, b) => a.or(b),
+            },
+        }
     }
 
     /// The tone of what isn't current (the health line's *as of*, the
@@ -271,18 +301,16 @@ pub(crate) struct Switch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Feature {
     pub(crate) label: &'static str,
-    pub(crate) state: FeatureState,
-}
-
-impl Feature {
-    /// What the page says about it.
-    pub(crate) fn word(&self) -> &'static str {
-        match self.state {
-            FeatureState::Running => "running",
-            FeatureState::Paused => "paused here",
-            FeatureState::Off => "off",
-        }
-    }
+    /// Its state on the node; `None` while the API user may not read it.
+    pub(crate) state: Option<FeatureState>,
+    /// What the page says about it: `running`, `shared with master-02`,
+    /// `paused here`, `off`, `needs objects/query/CheckerComponent`.
+    pub(crate) word: String,
+    /// Whether the work is done (its dot green while live): running here,
+    /// or shared in an HA zone.
+    pub(crate) running: bool,
+    /// What it says is the API user's missing permission (warning text).
+    pub(crate) missing: bool,
 }
 
 /// The page for `snapshot` at `now`; `live`: whether it is current.
@@ -373,7 +401,7 @@ pub(crate) fn report(snapshot: &Snapshot, live: Liveness, now: Timestamp) -> Rep
         checks,
         queues,
         switches: status.map(switches).unwrap_or_default(),
-        features: health.features.map(features).unwrap_or_default(),
+        features: features(snapshot, &nodes),
         late,
     }
 }
@@ -450,7 +478,7 @@ fn zone_dot((connected, down): (usize, usize), snapshot: &Snapshot, zone: &str) 
     let beat_dead = snapshot
         .heartbeats
         .of_zone(zone)
-        .is_some_and(|beat| beat.state.is_dead());
+        .is_some_and(super::beats::dead_in_cluster);
     match (connected, down) {
         (0, 0) => Dot::Unknown,
         (0, _) => Dot::Critical,
@@ -1130,14 +1158,90 @@ fn switches(status: &InstanceStatus) -> Vec<Switch> {
 }
 
 /// The node's features, as far as the API user may read them.
-fn features(features: ic_model::NodeFeatures) -> Vec<Feature> {
+/// The connected node's features as the page says them (topic 06; ledger
+/// rows 72 and 74).
+///
+/// **In an HA zone** Icinga splits the checks and the notifications between
+/// the zone's connected endpoints, object by object, and the checker's and
+/// the notification feature's own objects report `paused` on all but one
+/// of them although each runs its share (checked on the demo cluster: the
+/// master with `paused: true` ran half the checks, `check_source`, and
+/// sent its share of the notifications). So while another endpoint of the
+/// node's zone is connected, either says `shared with master-02`, running
+/// or paused, and only `off` is off; `IcingaDB` writes from one master at a
+/// time (`paused here · master-02 writes`).
+///
+/// **Without the permission** to read a feature's objects the page names it
+/// (`needs objects/query/CheckerComponent`) instead of leaving the feature
+/// out, so a user set up without it sees why.
+fn features(snapshot: &Snapshot, nodes: &[ClusterNode]) -> Vec<Feature> {
+    let health = &snapshot.health;
+    let node = snapshot.node.as_ref().map(|node| node.name.as_str());
+    let zone = node.and_then(|node| {
+        nodes
+            .iter()
+            .find(|other| other.name == node)
+            .map(|other| other.zone.as_str())
+    });
+    // The other endpoints of the node's zone that are connected.
+    let partners: Vec<&str> = nodes
+        .iter()
+        .filter(|other| Some(other.zone.as_str()) == zone && Some(other.name.as_str()) != node)
+        .filter(|other| other.state == NodeState::Connected)
+        .map(|other| other.name.as_str())
+        .collect();
+    let shared = if partners.is_empty() {
+        None
+    } else {
+        Some(partners.join(", "))
+    };
+    let read = health.features.unwrap_or_default();
     [
-        ("checker", features.checker),
-        ("notification", features.notification),
-        ("IcingaDB", features.icingadb),
+        (
+            "checker",
+            read.checker,
+            "objects/query/CheckerComponent",
+            true,
+        ),
+        (
+            "notification",
+            read.notification,
+            "objects/query/NotificationComponent",
+            true,
+        ),
+        ("IcingaDB", read.icingadb, "objects/query/IcingaDB", false),
     ]
     .into_iter()
-    .filter_map(|(label, state)| state.map(|state| Feature { label, state }))
+    .filter_map(|(label, state, permission, splits)| {
+        if health.features_forbidden.contains(&permission) {
+            return Some(Feature {
+                label,
+                state: None,
+                word: format!("needs {permission}"),
+                running: false,
+                missing: true,
+            });
+        }
+        let state = state?;
+        let (word, running) = match (state, &shared) {
+            (FeatureState::Off, _) => ("off".to_owned(), false),
+            (FeatureState::Running | FeatureState::Paused, Some(partners)) if splits => {
+                (format!("shared with {partners}"), true)
+            }
+            (FeatureState::Paused, Some(partners)) => {
+                (format!("paused here · {partners} writes"), false)
+            }
+            (FeatureState::Running, _) => ("running".to_owned(), true),
+            (FeatureState::Paused, None) => ("paused here".to_owned(), false),
+        };
+        Some(Feature {
+            label,
+            state: Some(state),
+            word,
+            running,
+            missing: false,
+        })
+    })
     .collect()
 }
 

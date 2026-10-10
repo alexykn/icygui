@@ -661,14 +661,34 @@ pub(crate) fn assess(facts: &Facts<'_>) -> Vec<Finding> {
         });
     }
 
-    // --- The connected node's features.
+    // --- The connected node's features. `paused` is no finding: in an HA
+    // zone the feature objects report it on all but one endpoint although
+    // each runs its share. A checker that is off is, even in an HA zone:
+    // Icinga doesn't hand its share of the zone's checks to the other
+    // endpoint, they go late (checked on the demo cluster).
     if let (Some(node), Some(features)) = (facts.connected, facts.health.features) {
+        let zone = facts
+            .nodes
+            .iter()
+            .find(|other| other.name == node)
+            .map(|other| other.zone.as_str());
+        let partners = zone.map_or(0, |zone| {
+            facts
+                .nodes_in(zone)
+                .filter(|other| other.name != node && other.state == NodeState::Connected)
+                .count()
+        });
         if features.checker == Some(FeatureState::Off) {
             findings.push(Finding {
                 key: "feature:checker".to_owned(),
                 tone: AlertTone::Critical,
                 title: format!("the checker feature is off on {node}"),
-                detail: format!("{node} runs no checks while it is off."),
+                detail: match zone {
+                    Some(zone) if partners > 0 => format!(
+                        "{node}'s share of zone {zone}'s checks doesn't run while it is off: Icinga doesn't hand it to the other endpoints."
+                    ),
+                    _ => format!("{node} runs no checks while it is off."),
+                },
                 action: Some(AlertAction::ShowNode(node.to_owned())),
                 since: None,
                 grace: GRACE,
@@ -696,17 +716,7 @@ pub(crate) fn assess(facts: &Facts<'_>) -> Vec<Finding> {
         if features.icingadb == Some(FeatureState::Paused) {
             // Paused is normal on the second master of an HA zone while the
             // first writes; it is trouble when no other master is there.
-            let zone = facts
-                .nodes
-                .iter()
-                .find(|other| other.name == node)
-                .map(|other| other.zone.as_str());
-            let partner = zone.is_some_and(|zone| {
-                facts
-                    .nodes_in(zone)
-                    .any(|other| other.name != node && other.state == NodeState::Connected)
-            });
-            if !partner {
+            if partners == 0 {
                 findings.push(Finding {
                     key: "icingadb".to_owned(),
                     tone: AlertTone::Warning,

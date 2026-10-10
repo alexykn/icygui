@@ -37,7 +37,9 @@ mod tls;
 mod wire;
 
 pub use budget::RequestBudget;
-pub use client::{ActionResult, Client, FEATURE_TYPES, FeaturesRead, NAMES_PER_REQUEST};
+pub use client::{
+    ActionResult, Client, FEATURE_TYPES, FeaturesRead, NAMES_PER_REQUEST, feature_permission,
+};
 pub use detail::{Cluster, Detail, EndpointState, Fetched, FetchedNotifications};
 pub use error::ApiError;
 pub use events::{EventLines, EventStream, parse_event};

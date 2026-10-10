@@ -411,6 +411,132 @@ fn no_live_data_shows_on_every_page_the_footer_and_the_tray() {
     });
 }
 
+/// Rule 5 (no false green; ledger row 100): icygui's own blindness never
+/// reads as late beats in the cluster. With the connection lost the
+/// beats' deadlines pass by the clock, but the heartbeat row says *no live
+/// data*, each zone's beat keeps its last known age in grey, and nothing
+/// on the page says late; once live again (the engine's grace moved the
+/// deadlines) they are judged, on time.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: live, lost, live again, every place that shows the beats"
+)]
+fn a_lost_connection_never_reads_as_late_beats() {
+    use ic_core::heartbeat::{Heartbeat, Heartbeats, Proves};
+    run(FixtureOptions::default(), |app, cx| {
+        let now = Timestamp::now();
+        let at = |offset: f64| Timestamp::from_unix_seconds(now.as_unix_seconds() + offset);
+        let beats = |deadline: Timestamp, last: Timestamp| {
+            Arc::new(Heartbeats {
+                setup: HeartbeatSetup::Find {
+                    variable: "icygui_heartbeat".to_owned(),
+                },
+                beats: ["ams", "fra"]
+                    .into_iter()
+                    .map(|zone| Heartbeat {
+                        key: ic_model::ServiceKey::new(&format!("hb-{zone}"), "beat"),
+                        proves: Proves::Zone(zone.to_owned()),
+                        interval: Duration::from_secs(30),
+                        state: BeatState::OnTime,
+                        last_beat: Some(last),
+                        last_check: None,
+                        since: at(-900.),
+                        deadline: Some(deadline),
+                        allowance: Duration::from_secs(5),
+                        reason: None,
+                    })
+                    .collect(),
+                polled: false,
+            })
+        };
+        let live = app.state.read(cx).snapshot().clone();
+        // The last snapshot before the outage: its deadlines passed long
+        // ago by the clock.
+        let blind = Snapshot {
+            heartbeats: beats(at(-165.), at(-200.)),
+            ..with_zones(&live)
+        };
+        app.state.update(cx, |state, cx| {
+            let mut status = ConnectionStatus::starting("master-01", Some("icygui".to_owned()));
+            status.on_state(ConnectionState::Connected {
+                node: crate::app_state::connection::full_node("master-01"),
+                version: "r2.15.6-1".to_owned(),
+                since: at(-900.),
+            });
+            status.on_snapshot_at(&blind, at(-190.));
+            status.on_state(ConnectionState::Reconnecting {
+                error: "connection reset".to_owned(),
+                attempt: 4,
+                retry_at: at(20.),
+                untrusted: None,
+            });
+            state.set_connection(status);
+            state.set_snapshot(Arc::new(blind.clone()));
+            state.show_cluster(ClusterEntry::Health);
+            cx.notify();
+        });
+        app.draw(cx);
+        let page = app.workspace.read(cx).health_page().clone();
+        let report = page.read(cx).report(cx);
+        assert!(!report.live.live_data(), "{:?}", report.live);
+        assert_eq!(
+            (report.beats.tone, report.beats.status.as_str()),
+            (BeatTone::Off, "no live data")
+        );
+        let cells: Vec<_> = report
+            .zones
+            .iter()
+            .filter_map(|zone| zone.beat.clone())
+            .collect();
+        assert!(!cells.is_empty(), "the zones show their beats");
+        for cell in &cells {
+            assert_eq!(cell.tone, BeatTone::Off, "{cell:?}");
+            assert!(cell.last_known, "{cell:?}");
+        }
+        assert!(
+            report
+                .zones
+                .iter()
+                .flat_map(|zone| &zone.endpoints)
+                .all(|row| !row.status.contains("late")),
+            "{:?}",
+            report.zones
+        );
+
+        // Live again: the engine's grace gave each beat a new deadline.
+        app.state.update(cx, |state, cx| {
+            let mut fresh = Snapshot {
+                heartbeats: beats(at(60.), at(-200.)),
+                ..blind.clone()
+            };
+            fresh.last_event_at = Some(now);
+            let mut status = state.connection().clone();
+            status.on_state(ConnectionState::Connected {
+                node: crate::app_state::connection::full_node("master-01"),
+                version: "r2.15.6-1".to_owned(),
+                since: now,
+            });
+            status.on_snapshot_at(&fresh, now);
+            state.set_connection(status);
+            state.set_snapshot(Arc::new(fresh));
+            cx.notify();
+        });
+        app.draw(cx);
+        let report = page.read(cx).report(cx);
+        assert!(report.live.live_data(), "{:?}", report.live);
+        assert!(
+            report.beats.status.starts_with("on time"),
+            "{:?}",
+            report.beats
+        );
+        for cell in report.zones.iter().filter_map(|zone| zone.beat.as_ref()) {
+            assert_ne!(cell.tone, BeatTone::Warning, "{cell:?}");
+            assert!(!cell.last_known, "{cell:?}");
+        }
+    });
+}
+
 /// H: the health page's `···` → *edit page* opens the dashboard editor
 /// on the page's own kinds (06's layout); a view switched off is left out
 /// of the page once saved, and *reset to default* brings the layout back

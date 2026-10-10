@@ -31,11 +31,20 @@
 //!    and what its reader had read is applied. The new stream's lines are
 //!    then applied in order, skipping those the old stream already
 //!    brought (by hash, once each); the new stream goes on from there.
+//!    Icinga 2.15 writes each stream in batches 5 s apart (a new stream's
+//!    first events go out at once): the window (7 s) outlasts the old
+//!    stream's next batch, which brings what it held from before the
+//!    switch and, with it, the line both streams carry. A window shorter
+//!    than the batches closed the old stream with those events unsent
+//!    (every switch during the demo cluster's problem storm, until the
+//!    status counts made a reload find them).
 //! 4. Waking up, the new stream's check results from the overlap can be
 //!    older than a state change the old stream already applied: while
 //!    duplicates are being skipped, a check result older than the stored
 //!    one is skipped too (Icinga itself drops results older than the
-//!    current one).
+//!    current one). The refresh after waking (below) can be answered
+//!    before the new stream brings the events its answer already shows;
+//!    the store skips those (`Store::overtaken`), as after any query.
 //!
 //! Lines are numbered by one counter over every stream (the reader numbers
 //! a line when it reads it), so the store's ordering against query answers
@@ -739,14 +748,8 @@ impl Engine {
         else {
             return false;
         };
-        // Strictly older: a check's result and its state change carry the
-        // same end, and the attempts of one problem can come within a
-        // millisecond (passive results, a burst).
-        let end = result.execution_end.non_zero().unwrap_or(*at);
         self.store
-            .check(object)
-            .and_then(|check| check.last_check)
-            .is_some_and(|last| end.as_unix_seconds() < last.as_unix_seconds())
+            .older_result(object, result.execution_end.non_zero().unwrap_or(*at))
     }
 
     // --- waking up -----------------------------------------------------------------

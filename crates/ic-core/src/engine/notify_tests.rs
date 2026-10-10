@@ -944,6 +944,57 @@ fn a_problem_found_begun_again_is_a_new_problem() {
     assert!(h.notify.pending.is_empty());
 }
 
+/// A soft problem the stream announced, then found hard by a query (the
+/// attempt that made it hard came while no stream delivered it: the real
+/// cluster's mode switches during a problem storm). The hard entry is
+/// logged when it turned hard, after the soft one; not when the problem
+/// began with its first attempt, which put it before the soft entry and
+/// read "back from hard to soft".
+#[test]
+fn a_soft_problem_found_hard_is_logged_when_it_turned_hard() {
+    let found_hard = |hard_since: f64| {
+        let mut h = Harness::new();
+        let a = key("a");
+        h.apply(check(
+            &a,
+            svc(ServiceState::Critical),
+            StateType::Soft,
+            200.0,
+        ));
+        let soft = h.log();
+        assert_eq!(soft.len(), 1);
+        // Begun with the first attempt at 198 (the stream missed it),
+        // hard since the third at 204.
+        let mut hard = Service::new("h", "a");
+        hard.display_name = "Service a".to_owned();
+        hard.state = ServiceState::Critical;
+        hard.check.state_type = StateType::Hard;
+        hard.check.last_state_change = t(198.0);
+        hard.check.last_hard_state_change = t(hard_since);
+        hard.check.last_check = Some(t(204.0));
+        h.store
+            .apply_fetched(Vec::new(), vec![hard], Detail::Lean, &[], 30);
+        let found = h.store.take_discovered();
+        h.notify
+            .discovered(&h.store, found, false, t(206.0), &mut h.log);
+        let log = h.log();
+        assert_eq!(log.len(), 1, "{log:#?}");
+        assert_eq!(
+            log[0].kind,
+            LogKind::State {
+                state: svc(ServiceState::Critical),
+                state_type: StateType::Hard,
+            }
+        );
+        assert!(log[0].at.as_unix_seconds() > soft[0].at.as_unix_seconds());
+        log[0].at
+    };
+    assert_eq!(found_hard(204.0), t(204.0), "when it turned hard");
+    // Icinga's time missing (or older than the state): when it was found.
+    assert_eq!(found_hard(0.0), t(206.0));
+    assert_eq!(found_hard(100.0), t(206.0));
+}
+
 #[test]
 fn the_first_load_seeds_problems_and_flapping_objects() {
     let mut h = Harness::new();

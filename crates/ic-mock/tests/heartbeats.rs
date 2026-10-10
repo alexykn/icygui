@@ -80,6 +80,46 @@ async fn beats_run_in_real_time_and_a_disconnected_endpoint_makes_its_beat_unkno
     assert_eq!(other["check_result"]["state"], json!(0));
 }
 
+/// Icinga 2.15 makes up the UNKNOWN of a check pinned to an endpoint that
+/// isn't connected only once it has run for five minutes (its cold-start
+/// window, `Checkable::ExecuteCheck`; checked on the demo cluster): right
+/// after a start such a check stays silent, while the others beat.
+#[tokio::test]
+async fn a_check_pinned_to_a_gone_endpoint_stays_silent_for_the_first_five_minutes() {
+    let (server, client) = start(config()).await;
+    let control = server.control();
+    // Started just now.
+    control.set_program_start(control.now());
+    control.set_endpoint_connected("master-02", false).unwrap();
+    let mut stream = EventStream::open(
+        &client,
+        &server,
+        &json!({"types": ["CheckResult"], "queue": "beats"}),
+    )
+    .await;
+    // Three intervals of master-01's beat: none from the pinned one.
+    let started = last_check(&control, "icygui-hb-master", "beat-master-02");
+    for _ in 0..3 {
+        let beat = result_of(&mut stream, "beat-master-01").await;
+        assert_eq!(beat["check_result"]["state"], json!(0));
+    }
+    assert_eq!(
+        last_check(&control, "icygui-hb-master", "beat-master-02"),
+        started,
+        "silent within the cold-start window"
+    );
+    // Five minutes after the start: Icinga's words.
+    control.set_program_start(ic_model::Timestamp::from_unix_seconds(
+        control.now().as_unix_seconds() - 301.0,
+    ));
+    let pinned = result_of(&mut stream, "beat-master-02").await;
+    assert_eq!(pinned["check_result"]["state"], json!(3));
+    assert_eq!(
+        pinned["check_result"]["output"],
+        "Remote Icinga instance 'master-02' is not connected to 'master-01'"
+    );
+}
+
 #[tokio::test]
 async fn a_stopped_checker_sends_no_beats() {
     let (server, client) = start(config()).await;

@@ -486,6 +486,34 @@ impl MockControl {
         self.world().bus.stall_new(stall);
     }
 
+    /// Makes every event stream opened from now on hold its lines back
+    /// (`true`), like a slow link or a proxy that buffers: the connection
+    /// is accepted and every line is kept, in order, until
+    /// [`MockControl::release_event_streams`]; queries are answered at once
+    /// meanwhile, so an answer can be newer than events still on their
+    /// way. `false` opens streams that send at once again. Streams already
+    /// open are left as they are.
+    pub fn hold_new_event_streams(&self, hold: bool) {
+        self.world().bus.hold_new(hold);
+    }
+
+    /// Makes every connected event stream hold its lines back until
+    /// [`MockControl::release_event_streams`], like Icinga 2.15 between two
+    /// of a stream's batches (it writes each stream every 5 s): a client
+    /// that closes it meanwhile never gets them. Streams opened later send
+    /// at once (Icinga's new stream sends its first events at once).
+    /// Returns how many hold.
+    pub fn hold_event_streams(&self) -> usize {
+        self.world().bus.hold_all()
+    }
+
+    /// Sends what the holding streams held back, in order; they send at
+    /// once from then on, and streams opened later don't hold. Returns how
+    /// many lines went out.
+    pub fn release_event_streams(&self) -> usize {
+        self.world().bus.release_held()
+    }
+
     /// Number of connected event streams.
     pub fn event_streams(&self) -> usize {
         self.world().bus.streams().len()

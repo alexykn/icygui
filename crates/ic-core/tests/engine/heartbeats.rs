@@ -404,6 +404,93 @@ async fn no_live_data_is_blind_after_its_grace_and_live_again_after() {
     engine.shutdown();
 }
 
+/// Rule 5: icygui's own blindness is never the cluster's fault. While the
+/// connection is lost no beat is judged: none turns late (the engine runs
+/// no deadline without live data), and the snapshots carry no deadline
+/// the UI could judge one by. Once live again every beat has its grace's
+/// deadline at once, before any beat came.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_live_data_no_beat_is_judged_and_once_back_each_has_its_grace() {
+    let server = server().await;
+    let mut engine = launch(&server).start();
+    engine.connected().await;
+    beating(&mut engine).await;
+    let control = server.control();
+    control.fail_next(10_000, 503);
+    control.drop_event_streams();
+    engine
+        .wait_state(|state| !matches!(state, ConnectionState::Connected { .. }))
+        .await;
+    let lost = engine.seen.len();
+    // Many intervals (0.3 s) and allowances later.
+    engine
+        .snapshot(|snapshot| {
+            snapshot.trouble.blind.is_some()
+                && snapshot
+                    .heartbeats
+                    .beats
+                    .iter()
+                    .all(|beat| beat.deadline.is_none())
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let blind = engine.latest().unwrap();
+    for event in engine.seen[lost..]
+        .iter()
+        .chain(std::iter::once(&ic_core::CoreEvent::Snapshot(blind)))
+    {
+        if let ic_core::CoreEvent::Snapshot(snapshot) = event {
+            for beat in &snapshot.heartbeats.beats {
+                assert!(
+                    !matches!(
+                        beat.state,
+                        BeatState::Late | BeatState::Checking | BeatState::Dead(_)
+                    ),
+                    "judged without live data: {beat:?}"
+                );
+            }
+        }
+    }
+    // Live again: deadlines at once, each its grace's (no late beat
+    // on the way).
+    let back = engine.seen.len();
+    control.fail_next(0, 503);
+    engine.connected().await;
+    let snapshot = engine
+        .snapshot(|snapshot| {
+            snapshot
+                .heartbeats
+                .beats
+                .iter()
+                .all(|beat| beat.deadline.is_some())
+        })
+        .await;
+    let now = snapshot.taken_at.as_unix_seconds();
+    assert!(
+        snapshot
+            .heartbeats
+            .beats
+            .iter()
+            .all(|beat| beat.deadline.is_some_and(|at| at.as_unix_seconds() > now)),
+        "{:?}",
+        snapshot.heartbeats.beats
+    );
+    for event in &engine.seen[back..] {
+        if let ic_core::CoreEvent::Snapshot(snapshot) = event {
+            assert!(
+                snapshot
+                    .heartbeats
+                    .beats
+                    .iter()
+                    .all(|beat| beat.state != BeatState::Late),
+                "{:?}",
+                snapshot.heartbeats.beats
+            );
+        }
+    }
+    engine.shutdown();
+}
+
 /// No false green rule 5: a heartbeat the connected stream doesn't
 /// deliver is *no live data* as a warning (connected, but nothing
 /// arrives); when the connection is then lost, the outage got worse, and

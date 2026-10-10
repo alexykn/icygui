@@ -174,9 +174,13 @@ pub struct Tuning {
     /// least this.
     pub quiet_reconcile_interval: Duration,
     /// How long the old and the new event stream may overlap when quiet
-    /// mode switches the subscription (2 s): the old one is closed once a
+    /// mode switches the subscription (7 s): the old one is closed once a
     /// line came on both (it has delivered everything sent before the new
-    /// one subscribed), or after this.
+    /// one subscribed), or after this. Icinga 2.15 writes a stream's events
+    /// in batches 5 s apart (idle or busy, measured on the demo cluster),
+    /// so the old stream's next batch, with what it still holds from
+    /// before the switch, can take that long; a shorter window closed it
+    /// first and lost those events (`docs/performance.md`).
     pub stream_handover: Duration,
     /// The request budget for by-name queries ([`ic_api::RequestBudget`]):
     /// one request per `request_interval` (200 ms: 5 per second) after a
@@ -243,7 +247,7 @@ impl Default for Tuning {
             identify_timeout: Duration::from_secs(8),
             quiet_status_interval: Duration::from_mins(5),
             quiet_reconcile_interval: Duration::from_mins(30),
-            stream_handover: Duration::from_secs(2),
+            stream_handover: Duration::from_secs(7),
             request_interval: Duration::from_millis(200),
             request_burst: 10,
             start_delay_per_thousand: Duration::from_secs(3),

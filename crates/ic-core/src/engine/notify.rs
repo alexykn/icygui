@@ -751,9 +751,13 @@ impl Notify {
         let host_problem = host_problem_of(store, &object);
         let handled_before = handled(&before, host_problem);
         let handled_after = handled(&after, host_problem);
-        let when = after.since.non_zero().unwrap_or(at);
-        let mut own_input = false;
         let began_again = began_again(&before, &after);
+        let when = if before.state == after.state && !began_again {
+            hard_since(store, &object, &after).unwrap_or(at)
+        } else {
+            after.since.non_zero().unwrap_or(at)
+        };
+        let mut own_input = false;
         let state_input = began_again || state_changed(&before, &after);
         if state_input {
             // The stored output, unless an event moved the object on since
@@ -1272,6 +1276,19 @@ fn began_again(before: &ObjectView, after: &ObjectView) -> bool {
         && before.state == after.state
         && before.since.non_zero().is_some()
         && after.since.as_unix_seconds() - before.since.as_unix_seconds() > 0.001
+}
+
+/// When a soft state a query found hard turned hard: Icinga's
+/// `last_hard_state_change`, if it is no older than the state itself. Not
+/// `since` (when the state began, with its first soft attempt): the soft
+/// entry the stream logged for a later attempt would then follow the hard
+/// one in the log.
+fn hard_since(store: &Store, object: &ObjectKey, after: &ObjectView) -> Option<Timestamp> {
+    if after.state_type != StateType::Hard {
+        return None;
+    }
+    let hard = store.check(object)?.last_hard_state_change.non_zero()?;
+    (hard.as_unix_seconds() >= after.since.as_unix_seconds()).then_some(hard)
 }
 
 /// The state a problem of `state`'s kind recovers to: OK or UP.

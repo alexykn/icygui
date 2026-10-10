@@ -382,7 +382,8 @@ fn flapping_and_unknown_objects() {
             object: key("h", "a"),
             flapping: true,
             current: 42.0,
-            at: t(1.0),
+            // After the loaded check (an older one would be overtaken).
+            at: t(101.0),
         },
     );
     let a = stored(&store, "h", "a");
@@ -434,6 +435,116 @@ fn events_already_reflected_in_a_query_answer_are_skipped() {
         ),
         Applied::Stale
     );
+    assert_eq!(stored(&store, "h", "a").state, ServiceState::Ok);
+}
+
+/// A query answer can overtake events still on their way (a slow stream):
+/// Icinga composed it after it processed them, so it shows a later check.
+/// Those events change nothing (no hard problem soft again, no change
+/// twice); the first that isn't older applies, and from then on events
+/// wrote the object last and apply in their order.
+#[test]
+fn events_an_answer_overtook_change_nothing_until_the_stream_catches_up() {
+    let mut store = loaded();
+    // Sent at 11, answered with the hard problem of the check at 300.
+    let mut answer = service("h", "a", ServiceState::Critical);
+    answer.check.state_type = StateType::Hard;
+    answer.check.last_state_change = t(200.0);
+    answer.check.last_hard_state_change = t(300.0);
+    answer.check.last_check = Some(t(300.0));
+    store.apply_fetched(Vec::new(), vec![answer], Detail::Lean, &[], 11);
+    assert_eq!(store.take_discovered().len(), 1);
+    let hard = stored(&store, "h", "a");
+    // The soft attempts at 200 and 250 come after it: older.
+    for (seq, end) in [(12, 200.0), (13, 250.0)] {
+        for event in [
+            check_result(
+                key("h", "a"),
+                svc(ServiceState::Critical),
+                StateType::Soft,
+                1,
+                end,
+            ),
+            Event::StateChange {
+                object: key("h", "a"),
+                state: svc(ServiceState::Critical),
+                state_type: StateType::Soft,
+                result: result(2, "soft", end),
+                downtime_depth: Some(0),
+                acknowledgement: None,
+                at: t(end + 0.1),
+            },
+            Event::Flapping {
+                object: key("h", "a"),
+                flapping: true,
+                current: 40.0,
+                at: t(end + 0.1),
+            },
+        ] {
+            assert_eq!(store.apply(seq, &event), Applied::Stale, "{event:?}");
+        }
+        assert_eq!(stored(&store, "h", "a"), hard);
+    }
+    // The check the answer showed: applied (its output), the same state.
+    let Applied::Changed { before, after } = store.apply(
+        14,
+        &check_result(
+            key("h", "a"),
+            svc(ServiceState::Critical),
+            StateType::Hard,
+            1,
+            300.0,
+        ),
+    ) else {
+        panic!("the answer's own check applies");
+    };
+    assert_eq!(before, after);
+    // Events wrote it last now: they apply in Icinga's order.
+    assert!(matches!(
+        store.apply(
+            15,
+            &check_result(
+                key("h", "a"),
+                svc(ServiceState::Ok),
+                StateType::Hard,
+                1,
+                290.0
+            )
+        ),
+        Applied::Changed { .. }
+    ));
+    assert_eq!(stored(&store, "h", "a").state, ServiceState::Ok);
+    // Lines read before an answer's request went out stay stale as ever;
+    // a later answer starts over.
+    let mut answer = service("h", "a", ServiceState::Warning);
+    answer.check.last_check = Some(t(500.0));
+    store.apply_fetched(Vec::new(), vec![answer], Detail::Lean, &[], 16);
+    assert_eq!(
+        store.apply(
+            17,
+            &check_result(
+                key("h", "a"),
+                svc(ServiceState::Ok),
+                StateType::Hard,
+                1,
+                450.0
+            )
+        ),
+        Applied::Stale
+    );
+    assert!(matches!(
+        store.apply(
+            18,
+            &check_result(
+                key("h", "a"),
+                svc(ServiceState::Ok),
+                StateType::Hard,
+                1,
+                510.0
+            )
+        ),
+        Applied::Changed { .. }
+    ));
     assert_eq!(stored(&store, "h", "a").state, ServiceState::Ok);
 }
 

@@ -160,6 +160,21 @@ pub struct FeaturesRead {
     /// The types (of [`FEATURE_TYPES`]) Icinga refused or doesn't know:
     /// not worth asking for again on this connection.
     pub refused: Vec<&'static str>,
+    /// Those of them the API user may not read (403): the permission the
+    /// page names ([`feature_permission`]).
+    pub forbidden: Vec<&'static str>,
+}
+
+/// The permission that reads the objects of feature type `plural` (of
+/// [`FEATURE_TYPES`]): `objects/query/CheckerComponent`, …
+#[must_use]
+pub fn feature_permission(plural: &str) -> Option<&'static str> {
+    match plural {
+        "checkercomponents" => Some("objects/query/CheckerComponent"),
+        "notificationcomponents" => Some("objects/query/NotificationComponent"),
+        "icingadbs" => Some("objects/query/IcingaDB"),
+        _ => None,
+    }
 }
 
 impl Client {
@@ -386,9 +401,13 @@ impl Client {
                         .collect();
                     *slot = Some(wire::feature_state(&objects));
                 }
+                Err(ApiError::Forbidden(message)) => {
+                    tracing::debug!(%message, plural, "the API user may not read the feature's objects");
+                    read.refused.push(plural);
+                    read.forbidden.push(plural);
+                }
                 Err(
-                    ApiError::Forbidden(message)
-                    | ApiError::NotFound(message)
+                    ApiError::NotFound(message)
                     | ApiError::Http {
                         status: 400,
                         message,

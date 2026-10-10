@@ -5,7 +5,7 @@
 //! by every stream that receives them.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use bytes::Bytes;
 use serde_json::Value as Json;
@@ -91,6 +91,9 @@ struct Subscriber {
     queue: mpsc::Sender<StreamItem>,
     /// Receives nothing more but stays open (a stalled proxy or queue).
     stalled: bool,
+    /// Its lines held back, in order, until released (a slow link or a
+    /// buffering proxy); `None` while lines go out at once.
+    held: Option<VecDeque<StreamItem>>,
     /// Lines and bytes queued for it so far.
     lines: u64,
     bytes: u64,
@@ -145,6 +148,8 @@ pub(crate) struct EventBus {
     /// Streams opened from now on are stalled from the start (a proxy that
     /// accepts the connection but never relays anything).
     stall_new: bool,
+    /// Streams opened from now on hold their lines back until released.
+    hold_new: bool,
 }
 
 impl std::fmt::Debug for EventBus {
@@ -190,6 +195,7 @@ impl EventBus {
             published: 0,
             delivered: (0, 0),
             stall_new: false,
+            hold_new: false,
         }
     }
 
@@ -210,6 +216,7 @@ impl EventBus {
             user: user.to_owned(),
             queue,
             stalled: self.stall_new,
+            held: self.hold_new.then(VecDeque::new),
             lines: 0,
             bytes: 0,
         });
@@ -282,6 +289,44 @@ impl EventBus {
         self.stall_new = stall;
     }
 
+    /// Whether streams opened from now on hold their lines back.
+    pub(crate) fn hold_new(&mut self, hold: bool) {
+        self.hold_new = hold;
+    }
+
+    /// Sends what every holding stream held back, in order; they send at
+    /// once from then on, and streams opened later don't hold. Returns how
+    /// many lines went out.
+    pub(crate) fn release_held(&mut self) -> usize {
+        self.hold_new = false;
+        let mut released = 0;
+        let delivered = &mut self.delivered;
+        self.subscribers.retain_mut(|subscriber| {
+            let Some(held) = subscriber.held.take() else {
+                return !subscriber.queue.is_closed();
+            };
+            for line in held {
+                released += 1;
+                if !deliver(subscriber, line, delivered) {
+                    return false;
+                }
+            }
+            true
+        });
+        released
+    }
+
+    /// Makes every connected stream hold its lines back until
+    /// [`Self::release_held`] (Icinga's writer between two of its batches).
+    /// Streams opened later send at once. Returns how many hold.
+    pub(crate) fn hold_all(&mut self) -> usize {
+        self.subscribers.retain(|s| !s.queue.is_closed());
+        for subscriber in &mut self.subscribers {
+            subscriber.held.get_or_insert_with(VecDeque::new);
+        }
+        self.subscribers.len()
+    }
+
     /// Stalls every connected stream: it stays open but receives nothing
     /// more. Streams opened later aren't stalled. Returns how many.
     pub(crate) fn stall_all(&mut self) -> usize {
@@ -325,6 +370,10 @@ impl EventBus {
 /// nothing and stays while its connection does.
 fn deliver(subscriber: &mut Subscriber, line: Bytes, delivered: &mut (u64, u64)) -> bool {
     if subscriber.stalled {
+        return !subscriber.queue.is_closed();
+    }
+    if let Some(held) = &mut subscriber.held {
+        held.push_back(line);
         return !subscriber.queue.is_closed();
     }
     let bytes = line.len() as u64;
@@ -492,6 +541,71 @@ mod tests {
             stalled.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn held_streams_send_what_they_held_in_order_once_released() {
+        let mut bus = EventBus::new(NumberFormat::Float, 8);
+        let (_, mut prompt) = bus.subscribe(types(&[EventType::StateChange]), None, "root");
+        bus.hold_new(true);
+        let (_, mut held) = bus.subscribe(types(&[EventType::StateChange]), None, "root");
+        for state in 0..3 {
+            bus.publish(
+                EventType::StateChange,
+                json!({ "type": "StateChange", "state": state }),
+                0.0,
+            );
+        }
+        assert!(
+            prompt.try_recv().is_ok(),
+            "streams opened before send at once"
+        );
+        assert!(matches!(
+            held.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(bus.release_held(), 3);
+        for state in 0..3 {
+            let line = held.try_recv().unwrap();
+            assert!(String::from_utf8_lossy(&line).contains(&format!("\"state\":{state}")));
+        }
+        // From now on at once, and new streams don't hold.
+        let (_, mut later) = bus.subscribe(types(&[EventType::StateChange]), None, "root");
+        bus.publish(
+            EventType::StateChange,
+            json!({ "type": "StateChange", "state": 3 }),
+            0.0,
+        );
+        assert!(held.try_recv().is_ok());
+        assert!(later.try_recv().is_ok());
+    }
+
+    #[test]
+    fn open_streams_hold_until_released_and_new_ones_send_at_once() {
+        let mut bus = EventBus::new(NumberFormat::Float, 8);
+        let (_, mut old) = bus.subscribe(types(&[EventType::StateChange]), None, "root");
+        assert_eq!(bus.hold_all(), 1);
+        let publish = |bus: &mut EventBus, state: u8| {
+            bus.publish(
+                EventType::StateChange,
+                json!({ "type": "StateChange", "state": state }),
+                0.0,
+            );
+        };
+        publish(&mut bus, 0);
+        let (_, mut new) = bus.subscribe(types(&[EventType::StateChange]), None, "root");
+        publish(&mut bus, 1);
+        assert!(matches!(
+            old.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let line = new.try_recv().unwrap();
+        assert!(String::from_utf8_lossy(&line).contains("\"state\":1"));
+        assert_eq!(bus.release_held(), 2);
+        for state in 0..2 {
+            let line = old.try_recv().unwrap();
+            assert!(String::from_utf8_lossy(&line).contains(&format!("\"state\":{state}")));
+        }
     }
 
     #[test]

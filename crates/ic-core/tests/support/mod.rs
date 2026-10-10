@@ -160,6 +160,10 @@ pub(crate) fn tuning() -> Tuning {
         reload_after_gap: Duration::ZERO,
         load_retry_initial: Duration::from_millis(40),
         rule_tick: Duration::from_millis(20),
+        // ic-mock writes every line at once; the default's 7 s outlast
+        // Icinga's 5 s batches (`a_switch_keeps_the_old_stream_until_its_next_batch`
+        // keeps it).
+        stream_handover: Duration::from_secs(2),
         ..Tuning::default()
     }
 }

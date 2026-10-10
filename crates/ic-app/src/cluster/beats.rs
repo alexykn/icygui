@@ -4,10 +4,22 @@
 //! *heartbeat* column, and the alert block (the worst alert in full, the
 //! others one line each). Every age and every verdict on time is worked
 //! out here, against the UI's clock, from the times the engine reports: a
-//! beat past its deadline is late (yellow) even when the engine, stuck or
-//! offline, last said it was on time (no false green).
+//! beat past its deadline is late (yellow) even when the engine last said
+//! it was on time (no false green).
+//!
+//! **icygui's own blindness is never the cluster's fault** (PLAN.md §4.2,
+//! no false green rule 5): without live data ([`Liveness::live_data`]:
+//! the connection lost, the stream or the engine silent) no beat is judged
+//! against the clock, since none could have come. The row says *no live
+//! data*, the column keeps each beat's last known age (as of the page's
+//! *as of*, faint, grey), and only what was proven while live keeps its
+//! words: a dead beat (red), one discovery no longer finds. A beat Icinga
+//! ran but the stream didn't bring (`Death::NotDelivered`) is *not
+//! delivered* (yellow: connected, but nothing arrives), never *dead*. Once
+//! live again each beat is judged by the deadline of its grace (the
+//! engine publishes deadlines only while live).
 
-use ic_core::heartbeat::{BeatState, Heartbeat, HeartbeatSetup, Heartbeats};
+use ic_core::heartbeat::{BeatState, Death, Heartbeat, HeartbeatSetup, Heartbeats};
 use ic_core::snapshot::Snapshot;
 use ic_core::trouble::{Alert, AlertAction, AlertTone};
 use ic_model::{Timestamp, format_compact, format_two_units};
@@ -74,6 +86,8 @@ pub(crate) struct BeatRow {
 pub(crate) struct BeatCell {
     pub(crate) tone: BeatTone,
     pub(crate) text: String,
+    /// Without live data: the last known age (drawn faint).
+    pub(crate) last_known: bool,
 }
 
 /// An alert of the block.
@@ -101,24 +115,55 @@ fn late(beat: &Heartbeat, now: Timestamp) -> bool {
     matches!(beat.state, BeatState::Late | BeatState::Checking) || overdue(beat, now)
 }
 
-/// A beat's tone at `now`.
+/// Whether a beat is dead by the cluster's doing: Icinga stopped running
+/// it, or its result isn't OK. One Icinga ran but the stream didn't bring
+/// is icygui's blindness ([`undelivered`]).
+pub(crate) fn dead_in_cluster(beat: &Heartbeat) -> bool {
+    matches!(beat.state, BeatState::Dead(Death::NotOk | Death::Stopped))
+}
+
+/// Whether Icinga ran a beat but the stream didn't bring it, even after a
+/// reconnect: icygui can't see it (connected, but nothing arrives).
+fn undelivered(beat: &Heartbeat) -> bool {
+    beat.state == BeatState::Dead(Death::NotDelivered)
+}
+
+/// A beat's tone at `now`, with live data.
 pub(crate) fn tone_of(beat: &Heartbeat, now: Timestamp) -> BeatTone {
     if overdue(beat, now) {
         return BeatTone::Warning;
     }
     match beat.state {
         BeatState::OnTime => BeatTone::Ok,
-        BeatState::Late | BeatState::Checking | BeatState::Disappeared | BeatState::NotFound => {
-            BeatTone::Warning
-        }
-        BeatState::Dead(_) => BeatTone::Critical,
+        BeatState::Late
+        | BeatState::Checking
+        | BeatState::Disappeared
+        | BeatState::NotFound
+        | BeatState::Dead(Death::NotDelivered) => BeatTone::Warning,
+        BeatState::Dead(Death::NotOk | Death::Stopped) => BeatTone::Critical,
         BeatState::Waiting => BeatTone::Off,
     }
 }
 
-/// A tone without live data: on time turns grey (not proven now).
-fn stale(tone: BeatTone, live: Liveness) -> BeatTone {
-    match tone {
+/// A beat's tone without live data: only what was proven while live (a
+/// dead beat, one that disappeared) keeps its colour; nothing about time
+/// can be judged, so the rest is grey.
+fn last_known_tone(beat: &Heartbeat) -> BeatTone {
+    match beat.state {
+        BeatState::Dead(Death::NotOk | Death::Stopped) => BeatTone::Critical,
+        BeatState::Disappeared | BeatState::NotFound => BeatTone::Warning,
+        _ => BeatTone::Off,
+    }
+}
+
+/// A beat's tone as the page shows it: judged with live data, its green
+/// grey while what the page shows isn't current (the endpoints' numbers
+/// old); the last known one without live data.
+pub(crate) fn shown_tone(beat: &Heartbeat, live: Liveness, now: Timestamp) -> BeatTone {
+    if !live.live_data() {
+        return last_known_tone(beat);
+    }
+    match tone_of(beat, now) {
         BeatTone::Ok if !live.is_live() => BeatTone::Off,
         tone => tone,
     }
@@ -132,16 +177,35 @@ fn age_of(beat: &Heartbeat, now: Timestamp) -> String {
     )
 }
 
+/// A beat's age as the page shows it: against the UI's clock with live
+/// data; without, the last known one, as of when live data last came (the
+/// stream's last line, or the endpoints' states if later: it doesn't
+/// count up while nothing can arrive).
+pub(crate) fn shown_age(beat: &Heartbeat, live: Liveness, now: Timestamp) -> String {
+    if live.live_data() {
+        age_of(beat, now)
+    } else {
+        let as_of = live
+            .last_live()
+            .filter(|at| at.as_unix_seconds() < now.as_unix_seconds())
+            .unwrap_or(now);
+        age_of(beat, as_of)
+    }
+}
+
 /// A beat's cell in the table.
 pub(crate) fn cell(beat: &Heartbeat, live: Liveness, now: Timestamp) -> BeatCell {
+    let last_known = !live.live_data();
     let text = match beat.state {
         BeatState::Disappeared => "disappeared".to_owned(),
         BeatState::NotFound => "not found".to_owned(),
-        _ => age_of(beat, now),
+        BeatState::Dead(Death::NotDelivered) if !last_known => "not delivered".to_owned(),
+        _ => shown_age(beat, live, now),
     };
     BeatCell {
-        tone: stale(tone_of(beat, now), live),
+        tone: shown_tone(beat, live, now),
         text,
+        last_known,
     }
 }
 
@@ -165,19 +229,47 @@ pub(crate) fn zone_cell(
     beats.of_zone(name).map(|beat| cell(beat, live, now))
 }
 
-/// The heartbeat row while what the page shows may not be current: an
-/// on-time or waiting row says *no live data* in grey (nothing proves the
-/// beats now); a late, dead or gone one keeps its words.
+/// The heartbeat row as the page shows it. With live data, judged at
+/// `now` (its green grey while the endpoints' numbers are old). Without,
+/// *no live data* in grey, never *late* (icygui's blindness is not the
+/// cluster's fault, rule 5): only a dead beat (red) and what discovery no
+/// longer finds keep their words, as proven while live.
 pub(crate) fn row_when(beats: &Heartbeats, live: Liveness, now: Timestamp) -> BeatRow {
     let row = row(beats, now);
-    if live.is_live() || !row.watched || !matches!(row.tone, BeatTone::Ok | BeatTone::Off) {
+    if live.live_data() {
+        return match row.tone {
+            BeatTone::Ok if !live.is_live() => BeatRow {
+                tone: BeatTone::Off,
+                ..row
+            },
+            _ => row,
+        };
+    }
+    // Off, none found, or a dead beat: the row's words hold.
+    if !row.watched || row.tone == BeatTone::Critical {
         return row;
     }
+    let findings: Vec<String> = beats
+        .beats
+        .iter()
+        .filter_map(|beat| match beat.state {
+            BeatState::Disappeared => Some(format!("{} disappeared", beat.proves.subject())),
+            BeatState::NotFound => Some(format!("{} not found", beat.object())),
+            _ => None,
+        })
+        .collect();
     BeatRow {
-        tone: BeatTone::Off,
+        tone: if findings.is_empty() {
+            BeatTone::Off
+        } else {
+            BeatTone::Warning
+        },
         label: "heartbeats",
         subject: String::new(),
-        status: "no live data".to_owned(),
+        status: std::iter::once("no live data".to_owned())
+            .chain(findings)
+            .collect::<Vec<_>>()
+            .join(" · "),
         age: None,
         watched: true,
     }
@@ -237,7 +329,12 @@ pub(crate) fn row(beats: &Heartbeats, now: Timestamp) -> BeatRow {
     let dead: Vec<&Heartbeat> = watched
         .iter()
         .copied()
-        .filter(|beat| beat.state.is_dead())
+        .filter(|beat| dead_in_cluster(beat))
+        .collect();
+    let undelivered: Vec<&Heartbeat> = watched
+        .iter()
+        .copied()
+        .filter(|beat| undelivered(beat))
         .collect();
     let late: Vec<&Heartbeat> = watched
         .iter()
@@ -307,6 +404,33 @@ pub(crate) fn row(beats: &Heartbeats, now: Timestamp) -> BeatRow {
                 label: "heartbeats",
                 subject: count,
                 status: format!("{} late", late.len()),
+                age: None,
+                watched: true,
+            }
+        };
+    }
+    if !undelivered.is_empty() {
+        // Icinga ran them; icygui doesn't see them: not the cluster's
+        // fault (the banner says why).
+        return if named(&undelivered) {
+            BeatRow {
+                tone: BeatTone::Warning,
+                label: "heartbeat",
+                subject: undelivered[0].proves.subject().to_owned(),
+                status: "not delivered".to_owned(),
+                age: None,
+                watched: true,
+            }
+        } else {
+            BeatRow {
+                tone: BeatTone::Warning,
+                label: "heartbeats",
+                subject: count,
+                status: if undelivered.len() == total {
+                    "not delivered".to_owned()
+                } else {
+                    format!("{} not delivered", undelivered.len())
+                },
                 age: None,
                 watched: true,
             }
@@ -518,6 +642,7 @@ mod tests {
     fn without_live_data_no_beat_is_green() {
         let stale = Liveness::Stale {
             as_of: None,
+            heard: None,
             link: super::super::health::Link::Lost(Tone::Warning),
         };
         let list = beats(vec![
@@ -533,5 +658,126 @@ mod tests {
         );
         let dead = beats(vec![beat("ams", BeatState::Dead(Death::Stopped), 400.0)]);
         assert_eq!(row_when(&dead, stale, now()).tone, BeatTone::Critical);
+    }
+
+    /// Rule 5: icygui's own blindness is never the cluster's fault. While
+    /// the connection is lost (or the stream or engine is silent) no beat
+    /// is late, whatever its deadline or the engine last said: the row says
+    /// *no live data*, the cells keep their last known age (as of the
+    /// page's *as of*, not counting up) in grey. With live data again, and
+    /// while only the endpoints' numbers are old, they are judged.
+    #[test]
+    fn without_live_data_no_beat_is_late() {
+        use super::super::health::Link;
+        let mut overdue = beat("ams", BeatState::OnTime, 230.0);
+        overdue.deadline = Some(Timestamp::from_unix_seconds(NOW - 195.0));
+        let late = beat("fra", BeatState::Late, 400.0);
+        let list = beats(vec![overdue.clone(), late.clone()]);
+        let as_of = Some(Timestamp::from_unix_seconds(NOW - 200.0));
+        for link in [
+            Link::Lost(Tone::Critical),
+            Link::Silent(Tone::Warning),
+            Link::Silent(Tone::Critical),
+        ] {
+            let blind = Liveness::Stale {
+                as_of,
+                heard: None,
+                link,
+            };
+            let row = row_when(&list, blind, now());
+            assert_eq!(
+                (row.tone, row.status.as_str(), row.age.as_ref()),
+                (BeatTone::Off, "no live data", None),
+                "{link:?}"
+            );
+            let ams = cell(&overdue, blind, now());
+            assert_eq!(
+                (ams.tone, ams.text.as_str(), ams.last_known),
+                (BeatTone::Off, "30s", true),
+                "the age as of the last known states: {link:?}"
+            );
+            let fra = cell(&late, blind, now());
+            assert_eq!((fra.tone, fra.text.as_str()), (BeatTone::Off, "3m 20s"));
+            // Later in the outage: the same.
+            let later = Timestamp::from_unix_seconds(NOW + 600.0);
+            assert_eq!(cell(&overdue, blind, later).text, "30s");
+            assert_eq!(row_when(&list, blind, later).status, "no live data");
+            assert_eq!(shown_tone(&late, blind, later), BeatTone::Off);
+        }
+        // The stream was heard after the endpoints' states came (beats
+        // arrive between status polls): the ages count to its last line,
+        // so a beat that came after the last poll doesn't read 0s.
+        let heard_later = Liveness::Stale {
+            as_of,
+            heard: Some(Timestamp::from_unix_seconds(NOW - 100.0)),
+            link: Link::Lost(Tone::Critical),
+        };
+        let fresh = beat("fra", BeatState::OnTime, 150.0);
+        assert_eq!(cell(&fresh, heard_later, now()).text, "50s");
+        assert_eq!(cell(&overdue, heard_later, now()).text, "2m 10s");
+        // Proven while live: a dead beat stays red, a disappeared one keeps
+        // its words (after *no live data*).
+        let blind = Liveness::Stale {
+            as_of,
+            heard: None,
+            link: Link::Lost(Tone::Critical),
+        };
+        let mut gone = beat("sat-fra-02", BeatState::Disappeared, 0.0);
+        gone.last_beat = None;
+        let row = row_when(&beats(vec![overdue.clone(), gone]), blind, now());
+        assert_eq!(
+            (row.tone, row.status.as_str()),
+            (BeatTone::Warning, "no live data · sat-fra-02 disappeared")
+        );
+        let dead = beat("ams", BeatState::Dead(Death::NotOk), 400.0);
+        assert_eq!(cell(&dead, blind, now()).tone, BeatTone::Critical);
+        // Live data (or only the endpoints' numbers old): judged again.
+        let row = row_when(&list, Liveness::Live, now());
+        assert_eq!(
+            (row.tone, row.status.as_str()),
+            (BeatTone::Warning, "2 late")
+        );
+        let numbers_old = Liveness::Stale {
+            as_of,
+            heard: None,
+            link: Link::Up,
+        };
+        assert_eq!(row_when(&list, numbers_old, now()).status, "2 late");
+        assert_eq!(cell(&overdue, numbers_old, now()).tone, BeatTone::Warning);
+        assert!(!cell(&overdue, numbers_old, now()).last_known);
+        // An on-time row while the numbers are old: on time, but not green.
+        let fine = beats(vec![beat("ams", BeatState::OnTime, 3.0)]);
+        let row = row_when(&fine, numbers_old, now());
+        assert_eq!((row.tone, row.status.as_str()), (BeatTone::Off, "on time"));
+    }
+
+    /// A beat Icinga ran that the stream didn't bring is icygui's
+    /// blindness, not the cluster's fault: *not delivered*, yellow, never
+    /// *dead* (and its zone isn't cut off for it).
+    #[test]
+    fn an_undelivered_beat_is_not_dead() {
+        let undelivered = beat("ams", BeatState::Dead(Death::NotDelivered), 400.0);
+        assert!(!dead_in_cluster(&undelivered));
+        let list = beats(vec![
+            undelivered.clone(),
+            beat("fra", BeatState::OnTime, 3.0),
+        ]);
+        let row = row(&list, now());
+        assert_eq!(
+            (
+                row.tone,
+                row.label,
+                row.subject.as_str(),
+                row.status.as_str()
+            ),
+            (BeatTone::Warning, "heartbeat", "ams", "not delivered")
+        );
+        let shown = cell(&undelivered, Liveness::Live, now());
+        assert_eq!(
+            (shown.tone, shown.text.as_str()),
+            (BeatTone::Warning, "not delivered")
+        );
+        let all = beats(vec![undelivered]);
+        assert_eq!(super::row(&all, now()).status, "not delivered");
     }
 }

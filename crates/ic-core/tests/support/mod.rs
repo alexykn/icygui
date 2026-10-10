@@ -219,6 +219,9 @@ pub(crate) struct Launch {
     /// How the engine starts (a background start waits before its first
     /// load).
     pub(crate) start: Start,
+    /// The engine's clock is the system's, not the fake one (against a real
+    /// Icinga, whose heartbeats and alerts follow the wall clock).
+    pub(crate) real_clock: bool,
 }
 
 impl Launch {
@@ -234,6 +237,7 @@ impl Launch {
             now: Timestamp::now().as_unix_seconds(),
             data_dir: None,
             start: Start::User,
+            real_clock: false,
         }
     }
 
@@ -252,6 +256,7 @@ pub(crate) fn start(environment: Environment, secrets: Arc<FakeSecrets>, tuning:
         now: NOW,
         data_dir: None,
         start: Start::User,
+        real_clock: false,
     })
 }
 
@@ -264,6 +269,7 @@ fn launch(launch: Launch) -> Engine {
         now,
         data_dir,
         start,
+        real_clock,
     } = launch;
     let (dir, data_dir) = if let Some(data_dir) = data_dir {
         (None, data_dir)
@@ -284,7 +290,11 @@ fn launch(launch: Launch) -> Engine {
     let ports = Ports {
         secrets: Arc::clone(&secrets) as Arc<dyn SecretStore>,
         notifier: Arc::clone(&notifier) as Arc<dyn Notifier>,
-        clock: Arc::clone(&clock) as Arc<dyn Clock>,
+        clock: if real_clock {
+            Arc::new(ic_core::SystemClock) as Arc<dyn Clock>
+        } else {
+            Arc::clone(&clock) as Arc<dyn Clock>
+        },
     };
     let mut handle = ic_core::start_with_tuning(spec, ports, tuning).unwrap();
     let events = handle.take_events().unwrap();

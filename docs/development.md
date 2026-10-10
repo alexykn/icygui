@@ -31,9 +31,51 @@ The first build compiles GPUI and takes a few minutes. Dependencies are built wi
 
 ## Tests against Icinga, and load
 
-- **Against a real Icinga:** only the disposable one from `contract/run-icinga.sh`, through `cargo test -p ic-api --test contract` (see `contract/README.md`). The contract tests refuse any other instance before sending a query: the URL must point to this machine and the fixture-only `viewer` user must log in.
+- **Against a real Icinga:** only the disposable ones: the single master from `contract/run-icinga.sh` and the demo cluster from `demo/docker-compose.yml` (below). `cargo test -p ic-api --test contract` runs against either (see `contract/README.md`); the engine's cluster tests (`cargo test -p ic-core --test engine cluster::`) only against the demo cluster. Both refuse any other instance before sending a query: the URL must point to this machine and the fixture-only `viewer` user must log in; the cluster tests also check that the node is the cluster's `master-01` and that the compose project runs, since they stop its nodes.
 - **Load and scale tests** run only against `ic-mock` (its `large` scenario and `MockControl::burst`) or `contract/scale/benchmark.sh`, which starts its own Icinga in Docker on localhost. Never point a load test at a production Icinga. The production-size tests are `#[ignore]`d; `.github/workflows/perf.yml` runs them nightly with `--release`, where they assert docs/performance.md's budgets (its steps are the commands to run them yourself).
 - **Against a production Icinga,** the only test is normal use of the app: connect and look around, which costs one lean load like an Icinga Web session.
+
+## The demo cluster (real Icinga in Docker)
+
+`demo/` holds a real Icinga 2.15 cluster for Docker Compose: the demo users run icygui against (docs/demo.md), the harness for tests about Icinga's behaviour, the source of screenshots, and the base of the many-clients measurements. Two masters (`master-01` holds the configuration), the satellite zone `ams` and the HA satellite zone `fra`, about 280 hosts and 2 900 services whose states change by themselves, the six heartbeats of PLAN.md B3, acknowledgements, comments, downtimes and notifications.
+
+| File | What it does |
+|---|---|
+| `demo/docker-compose.yml` | The cluster: a one-shot `pki` service makes the certificates with Icinga's CA, five nodes (health checks: connected to every endpoint they talk to, master-01 also seeded), a TCP proxy for the dead-network scenario. Only the masters' API is published, on 127.0.0.1:5665 and 5666 (proxy 5667). |
+| `demo/icinga/node.sh` | Each node's start: certificates, constants, zones (children connect to parents, masters to each other), features, API listener (masters enforce the filter-expression permission like contract/icinga/api.conf), then `icinga2 daemon`. |
+| `demo/icinga/generate.py` | The objects, the same every run, into master-01's `zones.d` at every start; reuses `contract/scale/generate.py`'s outputs. Checks are Icinga's dummy check under plugin names; `vars.demo` holds each one's schedule (steady, short problems now and then, flapping, stuck). The contract fixtures (`contract/icinga/icygui-test.conf`, `icygui-groups.conf`) are loaded as they are, so the contract tests run here too. |
+| `demo/icinga/seed.py` | After every start of master-01: passive results for the fixtures' passive checks, acknowledgements, comments and downtimes (only what is missing), then it keeps feeding the passive checks every 50 s as an outside system would. |
+| `demo/up.sh` | `up -d`, waits until every node is healthy (also after a scenario left nodes unhealthy, where `up --wait` gives up), prints the tests' variables. |
+| `demo/scenario.sh` | Breaks the cluster (`satellite-down`, `zone-cut-off`, `master-down`, `frozen-master`, `checks-stopped [zone]`, `beat-late [s]`, `problem-storm [n]`, `dead-network`) and says what icygui should show; `recover` mends it. API calls go through `docker compose exec` as `demo-admin`. |
+| `demo/icygui/environment.toml`, `dashboards.toml` | The environment (settings file format) and the dashboards (the share format) for this cluster. |
+| `demo/icygui/write-config.sh` | `cargo xtask demo-config`: writes both into a settings directory through `ic-config` (the environment loads like a settings file, the dashboards import like a shared export, ids from their names), copies the cluster's CA next to it, and with `--secrets-dir` stores the demo password for `ICYGUI_DEV_SECRETS_DIR`. |
+| `demo/screenshot.sh` | The screenshot harness (below). |
+
+Start and stop: `docker compose -f demo/docker-compose.yml up -d --wait`, `… down -v` (everything is made fresh on the next `up`). The real-Icinga tests:
+
+```sh
+set -a; eval "$(demo/up.sh)"; set +a
+cargo test -p ic-api --test contract                          # 13 contract tests on master-01
+cargo test -p ic-core --test engine cluster:: -- --test-threads=1   # stops and starts nodes, about 5 minutes
+```
+
+`ICYGUI_CONTRACT_REQUIRED=1` and `ICYGUI_CLUSTER_REQUIRED=1` turn missing variables into failures (the `Demo cluster` workflow, `.github/workflows/cluster.yml`, sets both: nightly and for changes to `demo/`, `contract/`, `ic-api`, `ic-core` or `Cargo.lock`). The cluster tests are what the mock had wrong before: the relay queue when an endpoint is gone (flat), a pinned check whose endpoint is gone (UNKNOWN with Icinga's words, after the checking node's 5-minute cold start), a cut-off zone (silent: no results, nothing UNKNOWN, `cluster-zone` critical), and an HA master pair (both check, one reports its checker feature paused). Each leaves the cluster recovered.
+
+**Screenshots from the demo cluster** (builders and reviewers; replaces `--demo` once the builders switch): `demo/screenshot.sh` brings the cluster up (idempotent), builds the debug app, writes a throwaway settings directory under `target/demo-shots/` with the demo environment and dashboards and the demo password as a plain file (`ICYGUI_DEV_SECRETS_DIR`, below), and starts icygui on Xvfb `:93` (started if nothing answers there; `DISPLAY_NUMBER` picks another) with a private home and no D-Bus session:
+
+```sh
+demo/screenshot.sh start --theme dark --select platform/fleet   # returns once connected and settled (SETTLE, 10 s)
+demo/screenshot.sh shot /tmp/fleet.png
+demo/screenshot.sh open cluster health                           # the palette: ctrl-k, the text, enter
+demo/screenshot.sh scenario master-down                          # demo/scenario.sh
+demo/screenshot.sh shot /tmp/health-master-down.png 60           # wait 60 s first
+demo/scenario.sh recover; demo/screenshot.sh stop
+demo/screenshot.sh capture /tmp/x.png --theme light --select overview/databases --open "Handling" --scenario zone-cut-off --wait 120
+```
+
+`key` and `type` send keys and text with `xdotool`; `shot` captures the icygui window with ImageMagick's `import`. The app's log is `target/demo-shots/home/.local/state/icygui/logs/icygui.log` (its terminal output `target/demo-shots/app.log`; `ICYGUI_SHOT_DIR` moves the work directory). `start --keep` keeps the last start's data directory, so event streams and history have something to show. Start the app before the scenario: `start` runs `demo/up.sh`, which starts stopped nodes again. A check pinned to a stopped endpoint turns UNKNOWN only once the node running it has been up for 5 minutes, so take master-down shots at least 5 minutes after master-01 started. Remember `demo/scenario.sh recover` after a scenario: it stays in effect.
+
+**`ICYGUI_DEV_SECRETS_DIR`** (development and headless runs only, never a default): the live app reads and stores passwords as plain files `<dir>/<environment id>` instead of the keychain (`ic_platform::DirSecrets`; user-only files, a warning in the log at start). For Xvfb, CI and the harness, where no Secret Service runs; never for real passwords.
 
 ## Running the app
 

@@ -209,8 +209,14 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
         let (state, launch, pending_open) = match startup {
             Startup::Live { paths } => {
                 let state = live_state(&paths, now);
-                let secrets = Arc::new(ic_platform::KeyringSecrets::new());
-                (state, Launch::Live { paths, secrets }, None)
+                (
+                    state,
+                    Launch::Live {
+                        paths,
+                        secrets: secrets(),
+                    },
+                    None,
+                )
             }
             Startup::Demo { options, dev } => {
                 if dev.any() {
@@ -274,6 +280,23 @@ fn run(startup: Startup, background: bool, mut instance: Option<Instance>) {
             session.update(cx, Session::start);
         }
     });
+}
+
+/// Where passwords are: the OS keychain, or for development and headless
+/// runs only the plain files that `ICYGUI_DEV_SECRETS_DIR` names (never a
+/// default; it says so in the log).
+fn secrets() -> Arc<dyn ic_core::ports::SecretStore> {
+    match ic_platform::DirSecrets::from_env() {
+        Some(files) => {
+            tracing::warn!(
+                dir = %files.dir().display(),
+                "passwords are read from plain files ({}), not the keychain: for development only",
+                ic_platform::DEV_SECRETS_ENV
+            );
+            Arc::new(files)
+        }
+        None => Arc::new(ic_platform::KeyringSecrets::new()),
+    }
 }
 
 /// Where the keymap file is: next to the settings file.

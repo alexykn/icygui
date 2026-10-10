@@ -24,7 +24,7 @@ done
 docker stop "$NAME" >/dev/null
 docker run --rm -v "$NAME-data:/data" -v "$HERE/icinga:/fixtures:ro" -v "$WORK/scale.conf:/scale.conf:ro" \
   --entrypoint sh icinga/icinga2:2.15 -c '
-    cp /fixtures/icygui-test.conf /fixtures/services.conf /data/etc/icinga2/conf.d/
+    cp /fixtures/icygui-test.conf /fixtures/icygui-groups.conf /fixtures/services.conf /data/etc/icinga2/conf.d/
     cp /fixtures/api.conf /data/etc/icinga2/features-enabled/api.conf
     cp /scale.conf /data/etc/icinga2/conf.d/scale.conf'
 docker start "$NAME" >/dev/null

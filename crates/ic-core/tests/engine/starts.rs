@@ -234,6 +234,7 @@ async fn many_clients_start_at_once() {
             general: General::default(),
             now: ic_model::Timestamp::now().as_unix_seconds(),
             data_dir: None,
+            real_clock: false,
             start: if background {
                 Start::Background
             } else {

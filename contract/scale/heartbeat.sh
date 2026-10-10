@@ -67,7 +67,7 @@ start() { # start <with load: 0|1>
   docker stop "$NAME" >/dev/null
   docker run --rm -v "$NAME-data:/data" -v "$HERE/icinga:/fixtures:ro" -v "$WORK:/work:ro" \
     --entrypoint sh icinga/icinga2:2.15 -c "
-      cp /fixtures/icygui-test.conf /fixtures/services.conf /work/heartbeat.conf /data/etc/icinga2/conf.d/
+      cp /fixtures/icygui-test.conf /fixtures/icygui-groups.conf /fixtures/services.conf /work/heartbeat.conf /data/etc/icinga2/conf.d/
       cp /fixtures/api.conf /data/etc/icinga2/features-enabled/api.conf
       if [ $1 = 1 ]; then cp /work/load.conf /data/etc/icinga2/conf.d/load.conf; fi"
   docker start "$NAME" >/dev/null

@@ -5,6 +5,8 @@
 //! - `connect`: connecting, the tiered load, reconnects and failures;
 //! - `events`: the live event stream, re-queries and bursts;
 //! - `actions`: every action end to end;
+//! - `cluster`: the demo cluster of `demo/docker-compose.yml` with nodes
+//!   stopped (a real Icinga; run with `demo/up.sh`'s variables);
 //! - `background`: engines whose environment isn't on screen, several
 //!   side by side;
 //! - `dashboards`: dashboard evaluation and previews;
@@ -30,6 +32,7 @@ mod support;
 
 mod actions;
 mod background;
+mod cluster;
 mod connect;
 mod dashboards;
 mod event_log;

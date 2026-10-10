@@ -1,0 +1,124 @@
+# The icygui demo: a real Icinga 2.15 cluster in Docker (docs/demo.md).
+#
+#   master   master-01, master-02  HA pair; master-01 holds the configuration
+#   ams      sat-ams-01            a satellite zone
+#   fra      sat-fra-01, sat-fra-02 an HA satellite zone
+#   global   global-templates, director-global
+#
+# About 260 hosts and 3 000 services that change state by themselves,
+# heartbeats per zone and endpoint, acknowledgements, comments, downtimes
+# and notifications. Only the masters' API is published, on this machine:
+# master-01 at https://127.0.0.1:5665, master-02 at https://127.0.0.1:5666,
+# and master-01 again through a proxy at https://127.0.0.1:5667 (for the
+# dead-network scenario).
+#
+#   docker compose -f demo/docker-compose.yml up -d --wait   # start (ready when it returns)
+#   demo/scenario.sh <name> | recover                       # break something, mend it
+#   docker compose -f demo/docker-compose.yml down -v       # stop and delete everything
+#
+# It is disposable: certificates, state and configuration live in the
+# volumes below and are made fresh by `up` after a `down -v`. Never point
+# it at, or let it join, a real Icinga.
+
+name: icygui-demo
+
+x-node: &node
+  image: icinga/icinga2:${ICINGA_TAG:-2.15}
+  command: ["sh", "/demo/icinga/node.sh"]
+  depends_on:
+    pki:
+      condition: service_completed_successfully
+  restart: "no"
+  stop_grace_period: 20s
+  networks: [cluster]
+  healthcheck:
+    test: ["CMD", "sh", "/demo/icinga/healthcheck.sh"]
+    interval: 5s
+    timeout: 4s
+    retries: 3
+    start_period: 10m
+    start_interval: 3s
+
+services:
+  pki:
+    image: icinga/icinga2:${ICINGA_TAG:-2.15}
+    entrypoint: ["sh", "/demo/icinga/pki.sh"]
+    user: "0"
+    volumes:
+      - pki:/pki
+      - ./icinga:/demo/icinga:ro
+    networks: [cluster]
+
+  master-01:
+    <<: *node
+    hostname: master-01
+    ports: ["127.0.0.1:${ICYGUI_DEMO_PORT_1:-5665}:5665"]
+    volumes:
+      - master-01:/data
+      - pki:/pki:ro
+      - ./icinga:/demo/icinga:ro
+      - ../contract/icinga:/contract/icinga:ro
+      - ../contract/scale:/contract/scale:ro
+
+  master-02:
+    <<: *node
+    hostname: master-02
+    ports: ["127.0.0.1:${ICYGUI_DEMO_PORT_2:-5666}:5665"]
+    volumes:
+      - master-02:/data
+      - pki:/pki:ro
+      - ./icinga:/demo/icinga:ro
+      - ../contract/icinga:/contract/icinga:ro
+      - ../contract/scale:/contract/scale:ro
+
+  sat-ams-01:
+    <<: *node
+    hostname: sat-ams-01
+    volumes:
+      - sat-ams-01:/data
+      - pki:/pki:ro
+      - ./icinga:/demo/icinga:ro
+      - ../contract/icinga:/contract/icinga:ro
+      - ../contract/scale:/contract/scale:ro
+
+  sat-fra-01:
+    <<: *node
+    hostname: sat-fra-01
+    volumes:
+      - sat-fra-01:/data
+      - pki:/pki:ro
+      - ./icinga:/demo/icinga:ro
+      - ../contract/icinga:/contract/icinga:ro
+      - ../contract/scale:/contract/scale:ro
+
+  sat-fra-02:
+    <<: *node
+    hostname: sat-fra-02
+    volumes:
+      - sat-fra-02:/data
+      - pki:/pki:ro
+      - ./icinga:/demo/icinga:ro
+      - ../contract/icinga:/contract/icinga:ro
+      - ../contract/scale:/contract/scale:ro
+
+  # master-01's API once more, through a TCP proxy that the dead-network
+  # scenario turns into a dead network (demo/icinga/proxy.py).
+  proxy:
+    image: icinga/icinga2:${ICINGA_TAG:-2.15}
+    entrypoint: ["python3", "-I", "/demo/icinga/proxy.py", "5665", "master-01", "5665"]
+    ports: ["127.0.0.1:${ICYGUI_DEMO_PORT_PROXY:-5667}:5665"]
+    volumes:
+      - ./icinga:/demo/icinga:ro
+    networks: [cluster]
+    stop_grace_period: 2s
+
+networks:
+  cluster: {}
+
+volumes:
+  pki: {}
+  master-01: {}
+  master-02: {}
+  sat-ams-01: {}
+  sat-fra-01: {}
+  sat-fra-02: {}

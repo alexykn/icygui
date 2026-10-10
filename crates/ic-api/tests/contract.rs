@@ -1,14 +1,16 @@
-//! Contract tests against a real Icinga 2 (see `contract/run-icinga.sh`).
+//! Contract tests against a real Icinga 2: the single master of
+//! `contract/run-icinga.sh`, or master-01 of the demo cluster
+//! (`demo/up.sh`, which loads the same fixtures from `contract/icinga`).
 //!
 //! They run only when `ICYGUI_CONTRACT_URL` is set (with the other
-//! `ICYGUI_CONTRACT_*` variables the script prints) and otherwise pass
+//! `ICYGUI_CONTRACT_*` variables either script prints) and otherwise pass
 //! without doing anything, unless `ICYGUI_CONTRACT_REQUIRED` is set (the
 //! nightly contract workflow sets it): then missing variables fail every
 //! test. They only read: queries, status, the event streams (all types, and
 //! quiet mode's), and a refused action as the read-only `viewer` user.
 //!
 //! They load every object several times, which is fine for the small
-//! disposable instance but is load a production Icinga must not get from a
+//! disposable instances but is load a production Icinga must not get from a
 //! test run. So [`fixture`] refuses any other instance before sending a
 //! single query: the URL must point to this machine and the fixture-only
 //! `viewer` user must log in. Load and scale tests belong against `ic-mock`
@@ -57,7 +59,7 @@ fn contract() -> Option<Contract> {
         assert!(
             std::env::var_os("ICYGUI_CONTRACT_REQUIRED").is_none(),
             "ICYGUI_CONTRACT_REQUIRED is set but ICYGUI_CONTRACT_URL is not: \
-             export the variables contract/run-icinga.sh prints"
+             export the variables contract/run-icinga.sh or demo/up.sh prints"
         );
         return None;
     };
@@ -72,12 +74,13 @@ fn contract() -> Option<Contract> {
 }
 
 /// [`contract`], after making sure it is the disposable Icinga from
-/// `contract/run-icinga.sh` and never a real one (see the module docs).
+/// `contract/run-icinga.sh` or `demo/up.sh` and never a real one (see the
+/// module docs).
 /// Panics otherwise, before any query is sent.
 async fn fixture() -> Option<Contract> {
-    const REFUSED: &str = "ICYGUI_CONTRACT_URL is not the disposable Icinga from \
-                           contract/run-icinga.sh; contract tests never run against \
-                           other instances";
+    const REFUSED: &str = "ICYGUI_CONTRACT_URL is not a disposable Icinga from \
+                           contract/run-icinga.sh or demo/up.sh; contract tests never \
+                           run against other instances";
     let contract = contract()?;
     let host = contract.url.host_str().unwrap_or_default();
     let host = host.trim_start_matches('[').trim_end_matches(']');
@@ -285,13 +288,23 @@ async fn real_icinga_node_states_and_counts() {
 
     // The counts by state are the services' raw states: a service never
     // checked (the fixtures' passive ones) counts as unknown. The fixtures'
-    // states never change, so the two answers agree.
-    let services = client.services(Detail::Lean).await.unwrap();
-    let counts = client.status().await.unwrap().counts;
-    let mut expected = [0_u32; 4];
-    for service in &services {
-        expected[ObjectCounts::service_index(service.state)] += 1;
-    }
+    // states never change, so the two answers agree at once; the demo
+    // cluster's change all the time, so a few pairs may be asked for until
+    // one agrees.
+    let mut attempts = 0;
+    let (services, counts, expected) = loop {
+        let services = client.services(Detail::Lean).await.unwrap();
+        let counts = client.status().await.unwrap().counts;
+        let mut expected = [0_u32; 4];
+        for service in &services {
+            expected[ObjectCounts::service_index(service.state)] += 1;
+        }
+        attempts += 1;
+        if counts.service_states() == expected || attempts == 10 {
+            break (services, counts, expected);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
     assert!(
         services
             .iter()
@@ -312,9 +325,10 @@ async fn real_icinga_node_states_and_counts() {
 /// 06): the `ApiListener` status entry (its connections and queues: every
 /// field read is there, so none silently reads as 0), the CIB's passive
 /// checks and maxima, and the features by their objects (`paused`, which
-/// every configuration object has). The fixture is one master with the
-/// `checker` and `notification` features and without `icingadb`, which
-/// has no status entry of its own in 2.15 (so its object tells).
+/// every configuration object has). The fixture is one master, or the
+/// demo cluster's master-01, with the `checker` and `notification`
+/// features and without `icingadb`, which has no status entry of its own
+/// in 2.15 (so its object tells).
 #[tokio::test]
 async fn real_icinga_cluster_health() {
     let Some(contract) = fixture().await else {
@@ -347,21 +361,65 @@ async fn real_icinga_cluster_health() {
     let client = contract.client();
     let status = client.listener_status().await.unwrap();
     assert!(status.http_clients >= 1, "this client: {status:?}");
+    // The endpoints a node counts: the others of its own zone, its parent
+    // zone's and its child zones' (`ApiListener::GetStatus`). None for a
+    // single master; the other master and the satellites on the demo
+    // cluster, all connected while it is healthy.
+    let node = client.status().await.unwrap().node_name;
+    let cluster = client.cluster().await.unwrap();
+    let zone_of = |name: &str| {
+        cluster
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == name)
+            .map(|endpoint| endpoint.zone.clone())
+    };
+    let own = zone_of(&node).expect("the node's own endpoint");
+    let parent_of = |zone: &str| {
+        cluster
+            .zones
+            .iter()
+            .find(|candidate| candidate.name == zone)
+            .and_then(|zone| zone.parent.clone())
+    };
+    let counted = cluster
+        .endpoints
+        .iter()
+        .filter(|endpoint| endpoint.name != node)
+        .filter(|endpoint| {
+            endpoint.zone == own
+                || parent_of(&endpoint.zone).as_deref() == Some(own.as_str())
+                || parent_of(&own).as_deref() == Some(endpoint.zone.as_str())
+        })
+        .count();
     assert_eq!(
         (status.endpoints, status.connected_endpoints),
-        (0, 0),
-        "a single master talks to no other endpoint"
+        (
+            u32::try_from(counted).unwrap(),
+            u32::try_from(counted).unwrap()
+        ),
+        "{status:?}"
     );
     let read = client.node_features(&[]).await.unwrap();
     assert!(read.refused.is_empty(), "{read:?}");
-    assert_eq!(
-        read.features,
-        ic_model::NodeFeatures {
-            checker: Some(ic_model::FeatureState::Running),
-            notification: Some(ic_model::FeatureState::Running),
-            icingadb: Some(ic_model::FeatureState::Off),
-        }
-    );
+    // A single master runs both. In an HA zone 2.15 pauses the checker's
+    // and the notification feature's objects on one of the masters
+    // (`paused` is the object's own HA state), although that master still
+    // runs its share of the checks (the cluster tests check both masters:
+    // `cluster_ha_masters_share_the_checks`).
+    let ha = cluster
+        .endpoints
+        .iter()
+        .filter(|endpoint| endpoint.zone == own)
+        .count()
+        > 1;
+    let either = |state: Option<ic_model::FeatureState>| {
+        state == Some(ic_model::FeatureState::Running)
+            || ha && state == Some(ic_model::FeatureState::Paused)
+    };
+    assert!(either(read.features.checker), "{read:?}");
+    assert!(either(read.features.notification), "{read:?}");
+    assert_eq!(read.features.icingadb, Some(ic_model::FeatureState::Off));
     let instance = client.status().await.unwrap();
     assert!(instance.max_latency >= instance.avg_latency, "{instance:?}");
     assert!(
@@ -723,9 +781,10 @@ async fn real_icinga_match_is_the_shared_matcher() {
     }
 }
 
-/// Icinga's own `Notification` objects (the default `conf.d` notifies
-/// `icingaadmins` about every host and service): the whole list, by name
-/// with unknown names, and the read-only `viewer`'s missing permission.
+/// Icinga's own `Notification` objects (the single master's default
+/// `conf.d` notifies `icingaadmins` about every host and service, the demo
+/// cluster its teams): the whole list, by name with unknown names, and the
+/// read-only `viewer`'s missing permission.
 #[tokio::test]
 async fn real_icinga_notifications() {
     let Some(contract) = fixture().await else {

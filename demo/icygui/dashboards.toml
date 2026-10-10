@@ -1,0 +1,241 @@
+# icygui dashboards for the demo cluster (demo/docker-compose.yml, docs/demo.md).
+# Import them with "import dashboards" in the sidebar's ··· (or the palette);
+# demo/icygui/write-config.sh writes them into a settings file directly.
+#
+# They show every view kind and layout on this Icinga's estate: lists, a
+# grouped list with host bands, host-group grids in squares and labelled
+# cells, summary tiles, event streams, handling and downtimes (timeline and
+# list), one-view and stacked dashboards, sidebar marks (state dots and
+# chosen icons), and handled problems shown or hidden per view.
+
+format = "icygui-dashboards"
+version = 4
+
+# --- overview -------------------------------------------------------------
+
+[[groups]]
+name = "overview"
+
+[[groups.dashboards]]
+name = "problems"
+
+[[groups.dashboards.views]]
+display = "list"
+object_kind = "services"
+problems_only = true
+handled = { mode = "settings" }
+
+[[groups.dashboards]]
+name = "databases"
+
+[[groups.dashboards.views]]
+name = "clusters"
+display = "summary_tiles"
+object_kind = "services"
+filter = 'host.vars.role in ["postgres", "mysql", "mongodb", "redis"]'
+problems_only = false
+groups = { by = "custom_var", custom_var = "role", order = "name" }
+
+[[groups.dashboards.views]]
+name = "failing services"
+display = "list"
+filter = 'host.vars.role in ["postgres", "mysql", "mongodb", "redis"] && host.vars.env == "prod"'
+problems_only = true
+
+[[groups.dashboards.views]]
+name = "replication slots"
+display = "list"
+filter = 'service.name == "pg-replication-slots" && host.vars.env == "prod"'
+problems_only = true
+
+[[groups.dashboards.views]]
+name = "db events"
+display = "event_stream"
+filter = 'host.vars.role in ["postgres", "mysql", "mongodb", "redis"]'
+stream = { recoveries = true, lines = 8 }
+
+[[groups.dashboards]]
+name = "host problems"
+
+[[groups.dashboards.views]]
+display = "list"
+object_kind = "hosts"
+problems_only = true
+handled = { mode = "show" }
+
+[[groups.dashboards]]
+name = "orders cluster"
+
+[[groups.dashboards.views]]
+display = "grouped_list"
+group_by = "host"
+filter = 'host.vars.pg_cluster == "orders-main"'
+problems_only = false
+handled = { mode = "settings" }
+
+[[groups.dashboards]]
+name = "sites"
+mark = { icon = "layers" }
+
+[[groups.dashboards.views]]
+name = "by site"
+display = "summary_tiles"
+object_kind = "hosts"
+problems_only = false
+groups = { by = "custom_var", custom_var = "site", order = "worst_first" }
+
+[[groups.dashboards.views]]
+name = "edge"
+display = "host_group_grid"
+object_kind = "hosts"
+filter = 'host.vars.role == "edge"'
+groups = { by = "host_group", host_groups = ["edge-*"] }
+grid = { cells = "labelled_cells" }
+
+# --- dba ------------------------------------------------------------------
+
+[[groups]]
+name = "dba"
+
+[[groups.dashboards]]
+name = "dba"
+
+[[groups.dashboards.views]]
+name = "problems"
+display = "list"
+filter = 'host.vars.team == "dba"'
+problems_only = true
+
+[[groups.dashboards.views]]
+name = "handling"
+display = "handling"
+filter = 'host.vars.team == "dba"'
+
+[[groups.dashboards.views]]
+name = "downtimes"
+display = "downtimes"
+filter = 'host.vars.team == "dba"'
+threads = { mode = "timeline" }
+
+[[groups.dashboards]]
+name = "dba handling"
+mark = { icon = "users" }
+
+[[groups.dashboards.views]]
+name = "handling"
+display = "handling"
+filter = 'host.vars.team == "dba"'
+threads = { chip = "all" }
+
+[[groups.dashboards]]
+name = "dba downtimes"
+
+[[groups.dashboards.views]]
+name = "downtimes"
+display = "downtimes"
+filter = 'host.vars.team == "dba"'
+threads = { mode = "list" }
+
+# --- platform -------------------------------------------------------------
+
+[[groups]]
+name = "platform"
+
+[[groups.dashboards]]
+name = "fleet"
+
+[[groups.dashboards.views]]
+name = "hosts by group"
+display = "host_group_grid"
+object_kind = "hosts"
+
+[[groups.dashboards.views]]
+name = "service problems"
+display = "list"
+filter = "service.problem && !service.handled"
+problems_only = true
+
+[[groups.dashboards]]
+name = "kubernetes"
+
+[[groups.dashboards.views]]
+display = "grouped_list"
+group_by = "host"
+filter = 'match("k8s-*", host.vars.role)'
+problems_only = true
+handled = { mode = "show" }
+
+[[groups.dashboards]]
+name = "network"
+mark = { icon = "network" }
+
+[[groups.dashboards.views]]
+display = "list"
+object_kind = "hosts"
+filter = 'host.vars.role in ["switch", "edge", "haproxy", "vpn"]'
+problems_only = false
+handled = { mode = "show" }
+
+[[groups.dashboards]]
+name = "certificates"
+
+[[groups.dashboards.views]]
+display = "list"
+filter = 'match("*cert*", service.name) || service.name == "http-tls"'
+problems_only = false
+handled = { mode = "show" }
+
+[[groups.dashboards]]
+name = "queues"
+
+[[groups.dashboards.views]]
+display = "grouped_list"
+group_by = "service_group"
+filter = '"queue" in service.groups || "cache" in service.groups'
+problems_only = false
+handled = { mode = "settings" }
+
+[[groups.dashboards]]
+name = "storage and backups"
+
+[[groups.dashboards.views]]
+name = "storage"
+display = "summary_tiles"
+object_kind = "services"
+problems_only = false
+groups = { by = "host_group", host_groups = ["storage", "databases", "kubernetes"], order = "worst_first" }
+
+[[groups.dashboards.views]]
+name = "backups"
+display = "list"
+filter = '"backups" in service.groups'
+problems_only = false
+handled = { mode = "show" }
+
+[[groups.dashboards.views]]
+name = "backup window"
+display = "downtimes"
+filter = '"backups" in service.groups'
+threads = { chip = "from_config" }
+
+[[groups.dashboards]]
+name = "all services"
+
+[[groups.dashboards.views]]
+display = "list"
+problems_only = false
+handled = { mode = "show" }
+
+# --- lab ------------------------------------------------------------------
+
+[[groups]]
+name = "lab"
+collapsed = true
+
+[[groups.dashboards]]
+name = "sandbox"
+
+[[groups.dashboards.views]]
+display = "list"
+filter = 'host.vars.env == "lab"'
+problems_only = true

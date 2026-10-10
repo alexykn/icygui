@@ -88,7 +88,8 @@ pub(crate) enum DemoFault {
     /// server presents (renewed, or intercepted: both fingerprints show).
     PinMismatch,
     /// `outage`: 20 seconds in, the server drops every stream and answers
-    /// 503 (the connection is lost and retried).
+    /// 503 (the connection is lost and retried); four minutes later it
+    /// answers again (16c's `live again after 4m`).
     Outage,
     /// `slow`: every answer takes 0.9 s (the load's progress shows).
     Slow,
@@ -100,21 +101,33 @@ pub(crate) enum DemoFault {
     /// `prod-cluster` environment's second URL): a partial view, labelled
     /// as such, while the engine keeps asking the master (ENV-12).
     Partial,
-    /// `satellite-down`: 20 seconds in, `prod-cluster`'s satellite
-    /// `sat-fra-01` drops out of the cluster, so zone `fra` is cut off:
-    /// its checks go late, the relay queue grows, and the cluster health
-    /// page and its sidebar dot turn critical (topic 06).
+    /// `satellite-down`: 20 seconds in, both of `prod-cluster`'s
+    /// satellites in zone `fra` (`sat-fra-01`, `sat-fra-02`) drop out of the
+    /// cluster, so the zone is cut off: its beats go silent, its checks go
+    /// late, and the cluster health page and its sidebar dot turn critical
+    /// (06c, 16t: `zone fra: sat-fra-01 and sat-fra-02 disconnected,
+    /// heartbeat lost`).
     SatelliteDown,
+    /// `satellite-checks-stopped`: 20 seconds in, `sat-fra-02` drops out
+    /// and `sat-fra-01`'s checker hangs while it stays connected: zone
+    /// `fra` runs no checks though an endpoint answers (16s).
+    SatelliteChecksStopped,
+    /// `beat-late`: zone `ams`'s heartbeat comes 13 seconds late every
+    /// two minutes: the heartbeat row shows it *1 interval late* for a few
+    /// seconds, before it arrives (16a2), and no alert.
+    BeatLate,
     /// `no-comments`: the API user may do everything but add comments, so
     /// nothing offers to write one (topic 17, frame 17f).
     NoComments,
     /// `master-down`: 20 seconds in, the second master `master-02`
     /// disconnects: its pinned heartbeat comes back UNKNOWN with Icinga's
-    /// words, and the endpoint and its beat make one alert (16t).
+    /// words, and the endpoint and its beat make one alert (16r); four
+    /// minutes later it connects again (16c2's recovery).
     MasterDown,
     /// `checks-stopped`: 20 seconds in, the simulated Icinga stops running
     /// checks, as a hung checker does: the heartbeats stop and the REST
-    /// query finds them old, *Icinga runs no checks* (16s).
+    /// query finds them old, the check rates fall to 0 and the checks go
+    /// late, *Icinga runs no checks* (16a3).
     ChecksStopped,
     /// `beat-gone`: 20 seconds in, zone `fra`'s heartbeat is deleted from
     /// the configuration: a finding until its removal is confirmed (16u).
@@ -136,6 +149,8 @@ impl DemoFault {
             "frozen" => Some(Self::Frozen),
             "partial" => Some(Self::Partial),
             "satellite-down" => Some(Self::SatelliteDown),
+            "satellite-checks-stopped" => Some(Self::SatelliteChecksStopped),
+            "beat-late" => Some(Self::BeatLate),
             "no-comments" => Some(Self::NoComments),
             "master-down" => Some(Self::MasterDown),
             "checks-stopped" => Some(Self::ChecksStopped),
@@ -266,6 +281,8 @@ impl DemoServer {
                     | DemoFault::MasterDown
                     | DemoFault::ChecksStopped
                     | DemoFault::BeatGone
+                    | DemoFault::SatelliteChecksStopped
+                    | DemoFault::BeatLate
             )
         );
         std::iter::once(master)
@@ -310,10 +327,14 @@ pub(crate) fn start(
         tracing::warn!(scenario = %options.scenario, known = ?scenarios::NAMES, "unknown demo scenario; using prod-cluster");
         scenarios::prod_cluster()
     });
-    // `prod-cluster` has heartbeats, as the user guide sets them up: one
-    // per zone, and one per endpoint of its masters' HA zone (topic 16).
+    // `prod-cluster` has heartbeats, as the user guide sets them up and
+    // mock-up 16a draws them: zone `fra` is an HA zone of two satellites,
+    // every HA zone's endpoints have a pinned beat each, every satellite
+    // zone its own (six in all, topic 16).
     let scenario = if scenario.name == DEFAULT_SCENARIO {
-        scenario.with_heartbeats(HEARTBEAT_EVERY)
+        scenario
+            .with_endpoint(SECOND_SATELLITE, "fra")
+            .with_heartbeats(HEARTBEAT_EVERY)
     } else {
         scenario
     };
@@ -387,8 +408,16 @@ fn child_zone_nodes(scenario: &ic_mock::Scenario) -> Vec<String> {
         .collect()
 }
 
-/// The satellite [`DemoFault::SatelliteDown`] drops.
+/// The satellite [`DemoFault::SatelliteDown`] drops (with
+/// [`SECOND_SATELLITE`]).
 const DROPPED_SATELLITE: &str = "sat-fra-01";
+/// The demo's second satellite in zone `fra` (an HA zone, as in 16a).
+const SECOND_SATELLITE: &str = "sat-fra-02";
+/// How long the outage and the master's absence last before they recover.
+const RECOVER_AFTER: Duration = Duration::from_mins(4);
+/// How late [`DemoFault::BeatLate`]'s beat comes, and how often.
+const BEAT_LATE_BY: Duration = Duration::from_secs(13);
+const BEAT_LATE_EVERY: Duration = Duration::from_mins(2);
 /// The master [`DemoFault::MasterDown`] drops.
 const DROPPED_MASTER: &str = "master-02";
 /// How often the demo's heartbeats run (seconds).
@@ -459,22 +488,46 @@ fn serve(
                             tracing::info!("the demo's outage begins");
                             control.fail_next(u32::MAX, 503);
                             control.drop_connections();
+                            tokio::time::sleep(RECOVER_AFTER).await;
+                            tracing::info!("the demo's outage ends");
+                            control.fail_next(0, 503);
                         });
                     }
-                    Some(fault @ (DemoFault::SatelliteDown | DemoFault::MasterDown)) => {
+                    Some(DemoFault::MasterDown) => {
                         let control = control.clone();
-                        let node = if fault == DemoFault::MasterDown {
-                            DROPPED_MASTER
-                        } else {
-                            DROPPED_SATELLITE
-                        };
                         tokio::spawn(async move {
                             tokio::time::sleep(OUTAGE_AFTER).await;
-                            match control.set_endpoint_connected(node, false) {
-                                Ok(()) => tracing::info!(%node, "a demo node drops out"),
-                                Err(error) => {
-                                    tracing::warn!(%error, "the demo has no such node to drop");
-                                }
+                            drop_node(&control, DROPPED_MASTER, false);
+                            tokio::time::sleep(RECOVER_AFTER).await;
+                            drop_node(&control, DROPPED_MASTER, true);
+                        });
+                    }
+                    Some(DemoFault::SatelliteDown) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(OUTAGE_AFTER).await;
+                            drop_node(&control, DROPPED_SATELLITE, false);
+                            drop_node(&control, SECOND_SATELLITE, false);
+                        });
+                    }
+                    Some(DemoFault::SatelliteChecksStopped) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(OUTAGE_AFTER).await;
+                            drop_node(&control, SECOND_SATELLITE, false);
+                            tracing::info!(
+                                node = DROPPED_SATELLITE,
+                                "a demo satellite's checker hangs"
+                            );
+                            control.stop_checks_on(DROPPED_SATELLITE);
+                        });
+                    }
+                    Some(DemoFault::BeatLate) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(BEAT_LATE_EVERY).await;
+                                control.delay_realtime("icygui-hb-ams", "beat", BEAT_LATE_BY);
                             }
                         });
                     }
@@ -511,6 +564,16 @@ fn serve(
             }
         }
     });
+}
+
+/// Disconnects (or, with `connected`, connects again) the demo's node
+/// `node`.
+fn drop_node(control: &MockControl, node: &str, connected: bool) {
+    match control.set_endpoint_connected(node, connected) {
+        Ok(()) if connected => tracing::info!(%node, "a demo node connects again"),
+        Ok(()) => tracing::info!(%node, "a demo node drops out"),
+        Err(error) => tracing::warn!(%error, "the demo has no such node"),
+    }
 }
 
 /// A password for this run only: the demo server listens on 127.0.0.1.
@@ -1295,6 +1358,11 @@ mod tests {
             Some(DemoFault::ChecksStopped)
         );
         assert_eq!(DemoFault::parse("beat-gone"), Some(DemoFault::BeatGone));
+        assert_eq!(
+            DemoFault::parse("satellite-checks-stopped"),
+            Some(DemoFault::SatelliteChecksStopped)
+        );
+        assert_eq!(DemoFault::parse("beat-late"), Some(DemoFault::BeatLate));
         assert_eq!(
             DemoFault::parse("satellite-down"),
             Some(DemoFault::SatelliteDown)

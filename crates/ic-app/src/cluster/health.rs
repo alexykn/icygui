@@ -6,8 +6,11 @@
 //!
 //! When a value is wrong (and only then) it turns warning or critical:
 //!
-//! - an endpoint the connected node talks to is down: critical (it, its
-//!   zone, the cluster connections tile, the cluster);
+//! - an endpoint the connected node talks to is down: critical (its row);
+//!   its zone is a warning while another of its endpoints is connected
+//!   (the zone still runs its checks; the redundancy is lost) and critical
+//!   once none is (cut off) or the zone's own heartbeat is dead (the
+//!   cluster connections tile and the cluster likewise);
 //! - a connected endpoint sent nothing for [`LAG_AFTER`]: warning;
 //! - late checks: warning; critical from 1 % of the checks, or while a
 //!   zone is cut off;
@@ -15,10 +18,20 @@
 //!   30-minute median: warning (critical at none);
 //! - average latency at least five times its median and above 50 ms, or
 //!   above a second: warning; above ten seconds: critical;
-//! - the relay queue grew over the last three polls: warning; critical
-//!   beyond 10 000 messages;
+//! - the relay queue grew over the last three polls, or holds more than
+//!   10 000 messages: warning; both: critical (the alert's tone too:
+//!   [`ic_core::trouble::relay_tone`]);
 //! - a global switch that is off: warning (on the page only; switches are
 //!   settings, not health, so they leave the sidebar's dot alone).
+//!
+//! **No false green:** while what the page shows isn't current
+//! ([`Liveness::Stale`]: no live data, the engine silent, the connection
+//! lost, or the endpoints' numbers old), no dot on it is green: the last
+//! known states keep their words but their green turns grey, the health
+//! line says *as of* when they came, the last messages age against the
+//! UI's clock, and the heartbeat row says *no live data*. A beat past its
+//! deadline is late (yellow) by the UI's clock, whatever the engine last
+//! said ([`super::beats`]).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -30,6 +43,61 @@ use ic_core::{ClusterNode, NodeState};
 use ic_model::{FeatureState, InstanceStatus, ObjectKey, Timestamp, Version, format_two_units};
 
 use super::ClusterState;
+
+/// Whether what the page shows is current.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum Liveness {
+    /// Live data: the states are current.
+    #[default]
+    Live,
+    /// Not current: the last known states, which came at `as_of` (if
+    /// known).
+    Stale {
+        /// When the endpoints' states came.
+        as_of: Option<Timestamp>,
+    },
+}
+
+impl Liveness {
+    /// Whether the data is current.
+    pub(crate) fn is_live(self) -> bool {
+        matches!(self, Self::Live)
+    }
+}
+
+/// A state dot on the page: green only for a current, good state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Dot {
+    /// Unknown, or not current (grey).
+    #[default]
+    Unknown,
+    /// Fine (green).
+    Ok,
+    /// Degraded (yellow).
+    Warning,
+    /// Down (red).
+    Critical,
+}
+
+impl Dot {
+    /// The dot without live data: green turns grey, the rest stays.
+    fn when(self, live: Liveness) -> Self {
+        match self {
+            Self::Ok if !live.is_live() => Self::Unknown,
+            dot => dot,
+        }
+    }
+
+    /// Its colour.
+    pub(crate) fn fill(self, theme: &ic_ui_kit::Theme) -> gpui::Hsla {
+        match self {
+            Self::Ok => theme.states.fill.ok,
+            Self::Warning => theme.states.fill.warning,
+            Self::Critical => theme.states.fill.critical,
+            Self::Unknown => theme.states.fill.pending,
+        }
+    }
+}
 
 /// A connected endpoint that sent nothing for this long lags.
 pub(crate) const LAG_AFTER: Duration = Duration::from_mins(1);
@@ -56,6 +124,8 @@ pub(crate) struct Report {
     pub(crate) interval: Duration,
     /// The environment is quiet (`quiet: every 5 min`).
     pub(crate) quiet: bool,
+    /// Whether what the page shows is current.
+    pub(crate) live: Liveness,
     /// The health line: endpoints connected and not.
     pub(crate) connected: usize,
     pub(crate) not_connected: usize,
@@ -80,16 +150,16 @@ pub(crate) struct Report {
     /// The late checks the worst alert's *show the late checks* lists
     /// (its zone's, or every one), most overdue first.
     pub(crate) late: Vec<ObjectKey>,
-    /// The verdict (the sidebar's dot).
-    pub(crate) state: ClusterState,
 }
 
 /// A zone and its endpoints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ZoneGroup {
     pub(crate) name: String,
-    /// Its worst endpoint's state.
-    pub(crate) state: NodeState,
+    /// Its dot: red when none of its endpoints is connected or its own
+    /// heartbeat is dead, yellow while some (not all) are down, green when
+    /// all are connected (grey without live data).
+    pub(crate) dot: Dot,
     /// `top level · 2 endpoints · checks shared between them`,
     /// `parent master · 1 endpoint · 188 hosts`.
     pub(crate) detail: String,
@@ -104,6 +174,8 @@ pub(crate) struct EndpointRow {
     pub(crate) name: String,
     pub(crate) zone: String,
     pub(crate) state: NodeState,
+    /// Its dot (grey without live data).
+    pub(crate) dot: Dot,
     /// The node icygui talks to (the selected-row background).
     pub(crate) this_node: bool,
     pub(crate) version: String,
@@ -156,15 +228,15 @@ impl Feature {
     }
 }
 
-/// The page for `snapshot` at `now`; `connected`: the engine is connected.
+/// The page for `snapshot` at `now`; `live`: whether it is current.
 #[must_use]
-pub(crate) fn report(snapshot: &Snapshot, connected: bool, now: Timestamp) -> Report {
+pub(crate) fn report(snapshot: &Snapshot, live: Liveness, now: Timestamp) -> Report {
     let health = &snapshot.health;
     let nodes = snapshot.cluster_nodes();
     let seen_from = snapshot.node.as_ref().map(|node| node.name.clone());
     let status = snapshot.status.as_deref();
     let masters_version = masters_version(&nodes, snapshot, status);
-    let zones = zone_groups(&nodes, snapshot, status, masters_version, now);
+    let zones = zone_groups(&nodes, snapshot, status, masters_version, live, now);
     let connected_count = nodes
         .iter()
         .filter(|node| node.state == NodeState::Connected)
@@ -184,7 +256,16 @@ pub(crate) fn report(snapshot: &Snapshot, connected: bool, now: Timestamp) -> Re
         &late_in_zone,
         !cut_off.is_empty(),
     );
-    let queues = queue_tiles(health, status, now);
+    let connections = zones
+        .iter()
+        .map(|zone| match zone.dot {
+            Dot::Critical => Tone::Critical,
+            Dot::Warning => Tone::Warning,
+            Dot::Ok | Dot::Unknown => Tone::Normal,
+        })
+        .max()
+        .unwrap_or_default();
+    let queues = queue_tiles(health, status, connections, now);
     let alerts = super::beats::alert_lines(snapshot, now);
     // The worst alert's late checks: its zone's, or every one.
     let late = match alerts.first().and_then(|alert| alert.link.as_ref()) {
@@ -211,15 +292,16 @@ pub(crate) fn report(snapshot: &Snapshot, connected: bool, now: Timestamp) -> Re
         }
         None => String::new(),
     };
-    let mut report = Report {
+    Report {
         seen_from,
         updated: health.latest().map(|sample| sample.at),
         interval: health.interval,
         quiet: snapshot.quiet,
+        live,
         connected: connected_count,
         not_connected,
         instance,
-        beats: super::beats::row(&snapshot.heartbeats, now),
+        beats: super::beats::row_when(&snapshot.heartbeats, live, now),
         alerts,
         zones,
         global_zones,
@@ -228,30 +310,20 @@ pub(crate) fn report(snapshot: &Snapshot, connected: bool, now: Timestamp) -> Re
         switches: status.map(switches).unwrap_or_default(),
         features: health.features.map(features).unwrap_or_default(),
         late,
-        state: ClusterState::Unknown,
-    };
-    report.state = if connected && !nodes.is_empty() {
-        verdict(&report, now)
-    } else {
-        ClusterState::Unknown
-    };
-    report
+    }
 }
 
 /// The cluster's state as the sidebar's *health* dot shows it, by the
 /// page's rules (cheaper than the whole [`report`]: no zone is worked
-/// out for the late checks).
+/// out for the late checks): a zone cut off is critical, an endpoint down
+/// while its zone still has another connected a warning (its own row is
+/// red; the zone still runs its checks), and the trouble alerts and
+/// heartbeats count too.
 #[must_use]
 pub(crate) fn assess(snapshot: &Snapshot, connected: bool, now: Timestamp) -> ClusterState {
     let nodes = snapshot.cluster_nodes();
     if !connected || nodes.is_empty() {
         return ClusterState::Unknown;
-    }
-    if nodes
-        .iter()
-        .any(|node| node.state == NodeState::Disconnected)
-    {
-        return ClusterState::Critical;
     }
     let health = &snapshot.health;
     let status = snapshot.status.as_deref();
@@ -263,7 +335,9 @@ pub(crate) fn assess(snapshot: &Snapshot, connected: bool, now: Timestamp) -> Cl
         None => Tone::Normal,
     };
     let beats = super::beats::row(&snapshot.heartbeats, now).tone.text();
+    let zones = zones_down(&nodes, snapshot);
     let tones = [
+        zones,
         late_tone(snapshot.late.len(), status, false),
         active_checks_tone(health),
         latency_tone(health),
@@ -280,22 +354,44 @@ pub(crate) fn assess(snapshot: &Snapshot, connected: bool, now: Timestamp) -> Cl
     }
 }
 
-/// The page's verdict: critical with a node down or a critical tile,
-/// warning with a lagging node or a warning tile (switches don't count).
-fn verdict(report: &Report, _now: Timestamp) -> ClusterState {
-    let rows = report.zones.iter().flat_map(|zone| &zone.endpoints);
-    let worst = rows
-        .map(|row| row.tone)
-        .chain(report.checks.iter().map(|tile| tile.tone))
-        .chain(report.queues.iter().map(|tile| tile.tone))
-        .chain(report.alerts.iter().map(|alert| alert.tone))
-        .chain(std::iter::once(report.beats.tone.text()))
+/// How bad the endpoints that are down are, zone by zone: critical once a
+/// zone has none connected (or its own beat is dead), a warning while it
+/// still has one.
+fn zones_down(nodes: &[ClusterNode], snapshot: &Snapshot) -> Tone {
+    let mut zones: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for node in nodes {
+        let entry = zones.entry(node.zone.as_str()).or_default();
+        match node.state {
+            NodeState::Connected => entry.0 += 1,
+            NodeState::Disconnected => entry.1 += 1,
+            NodeState::Unknown => {}
+        }
+    }
+    zones
+        .iter()
+        .map(|(zone, counts)| match zone_dot(*counts, snapshot, zone) {
+            Dot::Critical => Tone::Critical,
+            Dot::Warning => Tone::Warning,
+            Dot::Ok | Dot::Unknown => Tone::Normal,
+        })
         .max()
-        .unwrap_or_default();
-    match worst {
-        Tone::Critical => ClusterState::Critical,
-        Tone::Warning => ClusterState::Warning,
-        Tone::Normal => ClusterState::Ok,
+        .unwrap_or_default()
+}
+
+/// A zone's dot from its endpoints connected and down: critical with none
+/// connected or its own heartbeat dead, warning with some down, ok with
+/// all connected, unknown with none known.
+fn zone_dot((connected, down): (usize, usize), snapshot: &Snapshot, zone: &str) -> Dot {
+    let beat_dead = snapshot
+        .heartbeats
+        .of_zone(zone)
+        .is_some_and(|beat| beat.state.is_dead());
+    match (connected, down) {
+        (0, 0) => Dot::Unknown,
+        (0, _) => Dot::Critical,
+        _ if beat_dead => Dot::Critical,
+        (_, 0) => Dot::Ok,
+        _ => Dot::Warning,
     }
 }
 
@@ -358,6 +454,7 @@ fn zone_groups(
     snapshot: &Snapshot,
     status: Option<&InstanceStatus>,
     masters: Option<Version>,
+    live: Liveness,
     now: Timestamp,
 ) -> Vec<ZoneGroup> {
     // Hosts per zone, for a child zone's line.
@@ -369,25 +466,30 @@ fn zone_groups(
     }
     let mut groups: Vec<ZoneGroup> = Vec::new();
     for node in nodes {
-        let row = endpoint_row(node, snapshot, status, masters, now);
+        let row = endpoint_row(node, snapshot, status, masters, live, now);
         match groups.last_mut() {
             Some(group) if group.name == node.zone => group.endpoints.push(row),
             _ => groups.push(ZoneGroup {
                 name: node.zone.clone(),
-                state: NodeState::Connected,
+                dot: Dot::Unknown,
                 detail: String::new(),
                 endpoints: vec![row],
-                beat: super::beats::zone_cell(&snapshot.heartbeats, &node.zone, now),
+                beat: super::beats::zone_cell(&snapshot.heartbeats, &node.zone, live, now),
             }),
         }
     }
     for group in &mut groups {
-        group.state = group
+        let connected = group
             .endpoints
             .iter()
-            .map(|row| row.state)
-            .max_by_key(|state| node_rank(*state))
-            .unwrap_or(NodeState::Unknown);
+            .filter(|row| row.state == NodeState::Connected)
+            .count();
+        let down = group
+            .endpoints
+            .iter()
+            .filter(|row| row.state == NodeState::Disconnected)
+            .count();
+        group.dot = zone_dot((connected, down), snapshot, &group.name).when(live);
         let count = group.endpoints.len();
         let endpoints = if count == 1 {
             "1 endpoint".to_owned()
@@ -416,21 +518,13 @@ fn zone_groups(
     groups
 }
 
-/// Worst first: down, unknown, connected.
-fn node_rank(state: NodeState) -> u8 {
-    match state {
-        NodeState::Disconnected => 2,
-        NodeState::Unknown => 1,
-        NodeState::Connected => 0,
-    }
-}
-
 /// One endpoint's line.
 fn endpoint_row(
     node: &ClusterNode,
     snapshot: &Snapshot,
     status: Option<&InstanceStatus>,
     masters: Option<Version>,
+    live: Liveness,
     now: Timestamp,
 ) -> EndpointRow {
     let this_node = snapshot
@@ -447,9 +541,11 @@ fn endpoint_row(
         numbers.and_then(|numbers| numbers.last_message.non_zero())
     };
     // A connected endpoint's last message as of when its numbers came (it
-    // keeps talking between polls); a gone one's ages from then on.
+    // keeps talking between polls), while they are current; a gone one's,
+    // or any without live data, ages from then on (no false green: a
+    // frozen `0s ago`).
     let as_of = match snapshot.health.endpoints_at {
-        Some(at) if node.state == NodeState::Connected && !this_node => at,
+        Some(at) if node.state == NodeState::Connected && !this_node && live.is_live() => at,
         _ => now,
     };
     let last_message = match (node.state, last) {
@@ -480,17 +576,24 @@ fn endpoint_row(
         NodeState::Disconnected => ("not connected".to_owned(), Tone::Critical),
         NodeState::Unknown => ("not seen from here".to_owned(), Tone::Normal),
     };
+    let dot = match node.state {
+        NodeState::Connected => Dot::Ok,
+        NodeState::Disconnected => Dot::Critical,
+        NodeState::Unknown => Dot::Unknown,
+    }
+    .when(live);
     EndpointRow {
         name: node.name.clone(),
         zone: node.zone.clone(),
         state: node.state,
+        dot,
         this_node,
         version: version.map_or_else(|| "—".to_owned(), |version| version.to_string()),
         last_message,
         traffic,
         status: status_text,
         tone,
-        beat: super::beats::endpoint_cell(&snapshot.heartbeats, &node.name, now),
+        beat: super::beats::endpoint_cell(&snapshot.heartbeats, &node.name, live, now),
     }
 }
 
@@ -695,6 +798,7 @@ fn check_tiles(
 fn queue_tiles(
     health: &ClusterHealth,
     status: Option<&InstanceStatus>,
+    connections: Tone,
     now: Timestamp,
 ) -> Vec<Tile> {
     let samples = &health.samples;
@@ -736,7 +840,7 @@ fn queue_tiles(
             kind: Some(HealthTile::RelayQueue),
             value: listener.map_or_else(missing, |listener| count_text(rate(listener.relay_queue))),
             detail: match listener {
-                Some(_) if relay_growing(health) => "growing".to_owned(),
+                Some(_) if ic_core::trouble::relay_growing(health) => "growing".to_owned(),
                 Some(_) => "for other zones".to_owned(),
                 None => waiting.to_owned(),
             },
@@ -759,9 +863,11 @@ fn queue_tiles(
             } else {
                 waiting.to_owned()
             },
+            // Its zones' tone: a cut-off zone critical, an HA zone that
+            // lost an endpoint a warning.
             tone: match listener {
                 Some(listener) if listener.connected_endpoints < listener.endpoints => {
-                    Tone::Critical
+                    connections.max(Tone::Warning)
                 }
                 _ => Tone::Normal,
             },
@@ -889,32 +995,14 @@ fn latency_tone(health: &ClusterHealth) -> Tone {
     }
 }
 
-/// Whether the relay queue grew over the last three polls that asked.
-fn relay_growing(health: &ClusterHealth) -> bool {
-    let relay: Vec<f64> = health
-        .samples
-        .iter()
-        .filter_map(|sample| sample.relay_queue)
-        .collect();
-    relay.len() >= 3
-        && relay[relay.len() - 3..]
-            .windows(2)
-            .all(|pair| pair[1] > pair[0])
-}
-
-/// The relay queue: warning while it grows; critical beyond 10 000
-/// messages.
+/// The relay queue, as its alert has it ([`ic_core::trouble::relay_tone`]):
+/// warning while it grows or holds more than 10 000 messages, critical
+/// with both.
 fn relay_tone(health: &ClusterHealth) -> Tone {
-    let items = health
-        .listener
-        .as_ref()
-        .map_or(0.0, |listener| listener.relay_queue);
-    if items > 10_000.0 {
-        Tone::Critical
-    } else if relay_growing(health) {
-        Tone::Warning
-    } else {
-        Tone::Normal
+    match ic_core::trouble::relay_tone(health) {
+        Some(ic_core::trouble::AlertTone::Critical) => Tone::Critical,
+        Some(ic_core::trouble::AlertTone::Warning) => Tone::Warning,
+        None => Tone::Normal,
     }
 }
 

@@ -1,5 +1,5 @@
 //! The banners over the main area (ENV-07): the connection's problems
-//! (reconnecting with a countdown and "Retry now", login refused,
+//! (reconnecting with a countdown and *retry now*, login refused,
 //! certificate not trusted, password missing, settings that can't work)
 //! and settings that couldn't be saved; and the same problems as the whole
 //! body while there is nothing else to show (UI-05).

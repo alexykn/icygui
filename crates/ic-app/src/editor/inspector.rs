@@ -323,10 +323,11 @@ impl DashboardEditor {
     /// list's counts and the tile chips.
     fn health_facts(&self, cx: &Context<Self>) -> HealthFacts {
         let state = self.state.read(cx);
+        let now = Timestamp::now();
         let report = crate::cluster::health::report(
             state.snapshot(),
-            state.connection().is_connected(),
-            Timestamp::now(),
+            crate::cluster::liveness(state.snapshot(), state.connection(), now),
+            now,
         );
         HealthFacts {
             endpoints: report.connected + report.not_connected,
@@ -442,8 +443,11 @@ impl DashboardEditor {
                         colors.text_muted
                     }),
             )
+            // The name takes the room (one gap before the count, 16k: no
+            // spacer with a gap of its own that would cut it short).
             .child(
                 div()
+                    .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_color(if off {
@@ -455,7 +459,6 @@ impl DashboardEditor {
                     })
                     .child(name),
             )
-            .child(div().flex_1())
             .child(
                 div()
                     .flex_none()

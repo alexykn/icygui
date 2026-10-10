@@ -468,4 +468,101 @@ mod tests {
         );
         assert_ne!(rgba, render(None));
     }
+
+    /// Writes every look as a PNG (scaled 4×, on a dark and a light panel
+    /// colour) under `target/tray-looks/`, for a reviewer to set beside
+    /// mock-up 16e: a tray can't be photographed under Xvfb (no
+    /// `StatusNotifier` host). Run with `cargo test -p ic-platform -- --ignored
+    /// write_the_looks`.
+    #[test]
+    #[ignore = "writes PNG files for a visual review"]
+    fn write_the_looks() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tray-looks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let looks: [(&str, Vec<u8>); 4] = [
+            ("ok", render(Some(TrayTone::Ok))),
+            ("problem", render(Some(TrayTone::Critical))),
+            ("no-state", render(None)),
+            ("blind", render_blind()),
+        ];
+        for (panel, background) in [("dark", [0x1e, 0x21, 0x24]), ("light", [0xf4, 0xf5, 0xf6])] {
+            for (name, rgba) in &looks {
+                let png = png_of(&scaled(rgba, 4, background), SIZE * 4);
+                std::fs::write(dir.join(format!("{name}-{panel}.png")), png).unwrap();
+            }
+        }
+    }
+
+    /// `rgba` scaled up `by` times, blended over `background` (opaque RGB).
+    fn scaled(rgba: &[u8], by: u32, background: [u8; 3]) -> Vec<u8> {
+        let side = SIZE * by;
+        let mut out = Vec::with_capacity((side * side * 3) as usize);
+        for y in 0..side {
+            for x in 0..side {
+                let index = (((y / by) * SIZE + x / by) * 4) as usize;
+                let alpha = u32::from(rgba[index + 3]);
+                for channel in 0..3 {
+                    let over = u32::from(rgba[index + channel]) * alpha
+                        + u32::from(background[channel]) * (255 - alpha);
+                    out.push(u8::try_from(over / 255).unwrap_or(u8::MAX));
+                }
+            }
+        }
+        out
+    }
+
+    /// A minimal PNG (RGB, 8 bits, stored deflate blocks) of `rgb`, `side`
+    /// pixels square.
+    fn png_of(rgb: &[u8], side: u32) -> Vec<u8> {
+        fn crc(bytes: &[u8]) -> u32 {
+            let mut crc = 0xffff_ffff_u32;
+            for byte in bytes {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xedb8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        fn chunk(out: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
+            out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+            let mut body = kind.to_vec();
+            body.extend_from_slice(data);
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc(&body).to_be_bytes());
+        }
+        let mut raw = Vec::new();
+        for row in rgb.chunks((side * 3) as usize) {
+            raw.push(0);
+            raw.extend_from_slice(row);
+        }
+        let mut zlib = vec![0x78, 0x01];
+        let blocks: Vec<&[u8]> = raw.chunks(65_535).collect();
+        for (index, block) in blocks.iter().enumerate() {
+            zlib.push(u8::from(index + 1 == blocks.len()));
+            let length = u16::try_from(block.len()).unwrap();
+            zlib.extend_from_slice(&length.to_le_bytes());
+            zlib.extend_from_slice(&(!length).to_le_bytes());
+            zlib.extend_from_slice(block);
+        }
+        let (mut a, mut b) = (1_u32, 0_u32);
+        for byte in &raw {
+            a = (a + u32::from(*byte)) % 65_521;
+            b = (b + a) % 65_521;
+        }
+        zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let mut header = Vec::new();
+        header.extend_from_slice(&side.to_be_bytes());
+        header.extend_from_slice(&side.to_be_bytes());
+        header.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut out, *b"IHDR", &header);
+        chunk(&mut out, *b"IDAT", &zlib);
+        chunk(&mut out, *b"IEND", &[]);
+        out
+    }
 }

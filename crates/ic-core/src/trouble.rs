@@ -286,7 +286,10 @@ pub(crate) fn assess(facts: &Facts<'_>) -> Vec<Finding> {
             .map(|sample| sample.active_checks);
         let late = facts.late_in(None);
         let mut parts = Vec::new();
-        if let Some(before) = before {
+        // Only what the data says: the fall to 0 once a status poll read
+        // it (Icinga's one-minute rate takes about a minute to get there),
+        // else the beats alone.
+        if let Some(before) = before.filter(|_| polled_none) {
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
@@ -732,7 +735,7 @@ pub(crate) fn assess(facts: &Facts<'_>) -> Vec<Finding> {
         let items = items.max(0.0).round() as usize;
         findings.push(Finding {
             key: "queues".to_owned(),
-            tone: AlertTone::Warning,
+            tone: relay_tone(facts.health).unwrap_or(AlertTone::Warning),
             title: format!("the relay queue keeps growing ({} messages)", count(items)),
             detail: "messages for other zones wait on the connected node; a zone may be slow to take them."
                 .to_owned(),
@@ -786,9 +789,32 @@ fn first_line(output: &str, subject: &str) -> String {
     }
 }
 
+/// A relay queue beyond this many messages is critical (the tile red, a
+/// growing queue's alert critical).
+pub const RELAY_CRITICAL: f64 = 10_000.0;
+
+/// How the relay queue stands, for its tile and its alert alike (one level
+/// per concept): critical while it grows beyond [`RELAY_CRITICAL`]
+/// messages, a warning while it grows or stays beyond that, `None` when
+/// it is fine. Only a growing queue raises the alert.
+#[must_use]
+pub fn relay_tone(health: &ClusterHealth) -> Option<AlertTone> {
+    let items = health
+        .listener
+        .as_ref()
+        .map_or(0.0, |listener| listener.relay_queue);
+    let big = items > RELAY_CRITICAL;
+    match (relay_growing(health), big) {
+        (true, true) => Some(AlertTone::Critical),
+        (true, false) | (false, true) => Some(AlertTone::Warning),
+        (false, false) => None,
+    }
+}
+
 /// Whether the relay queue grew over the last three polls that asked for
 /// the listener status.
-pub(crate) fn relay_growing(health: &ClusterHealth) -> bool {
+#[must_use]
+pub fn relay_growing(health: &ClusterHealth) -> bool {
     let relay: Vec<f64> = health
         .samples
         .iter()

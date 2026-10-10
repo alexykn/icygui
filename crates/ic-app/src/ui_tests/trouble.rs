@@ -14,13 +14,15 @@ use ic_config::{HealthPage, ViewDisplay};
 use ic_core::ConnectionState;
 use ic_core::heartbeat::{BeatState, HeartbeatSetup};
 use ic_core::snapshot::Snapshot;
-use ic_core::trouble::{Blind, Trouble};
+use ic_core::trouble::{Alert, AlertAction, AlertTone, Blind, Trouble};
 use ic_model::Timestamp;
 
 use super::environments::{CONNECT, connected_to};
 use super::{Body, Harness, run, run_app, wait_for};
 use crate::app_state::{ConnectionStatus, Health, NoticeKind};
-use crate::cluster::{ClusterEntry, HealthPageEvent};
+use crate::cluster::beats::BeatTone;
+use crate::cluster::health::Dot;
+use crate::cluster::{ClusterEntry, HealthPageEvent, HealthStop};
 use crate::editor::DashboardEditor;
 use crate::fixture::FixtureOptions;
 use crate::live::demo;
@@ -49,11 +51,13 @@ fn show_health(app: &Harness, cx: &mut App) {
     assert_eq!(app.workspace.read(cx).shown_page(), "health");
 }
 
-/// B, B3: the demo's five heartbeats (a beat per zone, one per master of
-/// the HA master zone) are found by their custom variable, beat on the
-/// live stream, and show on the health page's heartbeat row and in its
-/// table; their objects stay out of the palette's search.
+/// B, B3: the demo's six heartbeats (16a: one pinned per master, one per
+/// satellite zone, one pinned per satellite of the HA zone fra) are found
+/// by their custom variable, beat on the live stream, and show on the
+/// health page's heartbeat row and in its table; their objects stay out
+/// of the palette's search.
 #[test]
+#[expect(clippy::too_many_lines, reason = "one story, step by step")]
 fn heartbeats_are_found_shown_and_kept_out_of_searches() {
     run_app(
         crate::WINDOW_SIZE,
@@ -73,7 +77,7 @@ fn heartbeats_are_found_shown_and_kept_out_of_searches() {
                     Duration::from_secs(75),
                     |app, cx| {
                         let beats = &app.state.read(cx).snapshot().heartbeats;
-                        beats.beats.len() == 5
+                        beats.beats.len() == 6
                             && beats
                                 .beats
                                 .iter()
@@ -100,9 +104,16 @@ fn heartbeats_are_found_shown_and_kept_out_of_searches() {
                     proves.sort();
                     assert_eq!(
                         proves,
-                        ["master-01", "master-02", "zone ams", "zone fra", "zone master"]
+                        [
+                            "master-01",
+                            "master-02",
+                            "sat-fra-01",
+                            "sat-fra-02",
+                            "zone ams",
+                            "zone fra"
+                        ]
                     );
-                    assert_eq!(snapshot.excluded.len(), 5, "left out of everything");
+                    assert_eq!(snapshot.excluded.len(), 6, "left out of everything");
                 });
                 cx.update(|cx| {
                     app.state.update(cx, |state, cx| {
@@ -116,18 +127,28 @@ fn heartbeats_are_found_shown_and_kept_out_of_searches() {
                     let page = app.workspace.read(cx).health_page().clone();
                     let report = page.read(cx).report(cx);
                     assert_eq!(report.beats.label, "heartbeats");
-                    assert_eq!(report.beats.subject, "5 of 5");
+                    assert_eq!(report.beats.subject, "6 of 6");
                     assert_eq!(report.beats.status, "on time");
                     assert!(report.alerts.is_empty(), "{:?}", report.alerts);
                     // A zone's beat on its zone's line, a pinned beat on
-                    // its endpoint's.
+                    // its endpoint's (16a): the masters pinned only, the
+                    // HA satellite zone fra both.
                     let master = &report.zones[0];
                     assert_eq!(master.name, "master");
-                    assert!(master.beat.is_some());
+                    assert!(master.beat.is_none());
                     assert!(master.endpoints.iter().all(|row| row.beat.is_some()));
                     let ams = &report.zones[1];
                     assert!(ams.beat.is_some());
                     assert!(ams.endpoints.iter().all(|row| row.beat.is_none()));
+                    let fra = &report.zones[2];
+                    assert!(fra.beat.is_some());
+                    let pinned: Vec<&str> = fra
+                        .endpoints
+                        .iter()
+                        .filter(|row| row.beat.is_some())
+                        .map(|row| row.name.as_str())
+                        .collect();
+                    assert_eq!(pinned, ["sat-fra-01", "sat-fra-02"]);
                 });
                 // The palette doesn't find them.
                 cx.update(|cx| app.keys(cx, "ctrl-k"));
@@ -156,9 +177,29 @@ fn heartbeats_are_found_shown_and_kept_out_of_searches() {
     );
 }
 
+/// `snapshot` with the fixture's endpoints in their zones (master, ams
+/// and fra under it), so the health page has its table.
+fn with_zones(snapshot: &Snapshot) -> Snapshot {
+    let zone = |name: &str, parent: Option<&str>, endpoint: &str| ic_model::Zone {
+        name: name.to_owned(),
+        parent: parent.map(str::to_owned),
+        endpoints: vec![endpoint.to_owned()],
+        global: false,
+    };
+    Snapshot {
+        zones: Arc::new(vec![
+            zone("master", None, "master-01"),
+            zone("ams", Some("master"), "sat-ams-01"),
+            zone("fra", Some("master"), "sat-fra-01"),
+        ]),
+        ..snapshot.clone()
+    }
+}
+
 /// A snapshot whose engine says the environment has had no live data
 /// since `since`, because the stream stalled.
 fn blind_since(snapshot: &Snapshot, since: Timestamp) -> Snapshot {
+    let snapshot = &with_zones(snapshot);
     Snapshot {
         trouble: Arc::new(Trouble {
             alerts: Vec::new(),
@@ -221,6 +262,24 @@ fn no_live_data_shows_on_every_page_the_footer_and_the_tray() {
             });
             check(app, cx, &format!("{entry:?}"));
         }
+        // No false green on the health page: the last known states keep
+        // their words, but no dot is green and the line says as of when.
+        app.state.update(cx, |state, cx| {
+            state.show_cluster(ClusterEntry::Health);
+            cx.notify();
+        });
+        app.draw(cx);
+        let page = app.workspace.read(cx).health_page().clone();
+        let report = page.read(cx).report(cx);
+        assert!(!report.live.is_live(), "{:?}", report.live);
+        assert!(!report.zones.is_empty());
+        for zone in &report.zones {
+            assert_ne!(zone.dot, Dot::Ok, "{}", zone.name);
+            for endpoint in &zone.endpoints {
+                assert_ne!(endpoint.dot, Dot::Ok, "{}", endpoint.name);
+            }
+        }
+        assert_ne!(report.beats.tone, BeatTone::Ok);
         let tray = crate::background::tray::tray_view(app.state.read(cx), now);
         assert!(tray.blind);
         assert!(
@@ -337,5 +396,89 @@ fn the_health_page_is_edited_as_a_built_in_dashboard() {
             app.state.read(cx).environment().unwrap().health_page,
             HealthPage::default()
         );
+    });
+}
+
+/// The health page by keyboard alone (a dashboard's keys): the cursor
+/// moves over the links, the views' headers, the zones and the endpoints;
+/// Enter on an alert's *show sat-fra-01* puts the cursor on that row;
+/// `←`/`→` fold and unfold the view, `tab` jumps to the next view, `End`
+/// to the last stop, `Esc` leaves the cursor.
+#[test]
+fn the_health_page_works_by_keyboard_alone() {
+    run(FixtureOptions::default(), |app, cx| {
+        let now = Timestamp::now();
+        app.state.update(cx, |state, cx| {
+            let snapshot = Snapshot {
+                trouble: Arc::new(Trouble {
+                    alerts: vec![Alert {
+                        key: "endpoint:sat-fra-01".to_owned(),
+                        tone: AlertTone::Critical,
+                        title: "zone fra: sat-fra-01 disconnected".to_owned(),
+                        detail: String::new(),
+                        action: Some(AlertAction::ShowNode("sat-fra-01".to_owned())),
+                        since: now,
+                    }],
+                    blind: None,
+                }),
+                ..with_zones(state.snapshot())
+            };
+            state.set_snapshot(Arc::new(snapshot));
+            state.show_cluster(ClusterEntry::Health);
+            cx.notify();
+        });
+        app.draw(cx);
+        let page = app.workspace.read(cx).health_page().clone();
+        app.in_window(cx, |window, cx| {
+            let handle = gpui::Focusable::focus_handle(page.read(cx), cx);
+            window.focus(&handle, cx);
+        });
+        app.draw(cx);
+        let cursor = |cx: &App| page.read(cx).cursor().cloned();
+        app.keys(cx, "j");
+        assert_eq!(cursor(cx), Some(HealthStop::BeatSettings));
+        app.keys(cx, "down");
+        assert_eq!(cursor(cx), Some(HealthStop::AlertLink));
+        // The alert's link: the node's row, unfolded and under the cursor.
+        app.keys(cx, "enter");
+        app.draw(cx);
+        assert_eq!(
+            cursor(cx),
+            Some(HealthStop::Endpoint("sat-fra-01".to_owned()))
+        );
+        // ← folds the view the cursor is in, the cursor going up to its
+        // header; the next stop is then the next view's header.
+        app.keys(cx, "left");
+        app.draw(cx);
+        assert_eq!(
+            cursor(cx),
+            Some(HealthStop::Header(ViewDisplay::ZonesAndEndpoints))
+        );
+        app.keys(cx, "j");
+        assert_eq!(cursor(cx), Some(HealthStop::Header(ViewDisplay::Checks)));
+        // Back up, → unfolds it: its first zone follows the header.
+        app.keys(cx, "k");
+        app.keys(cx, "right");
+        app.draw(cx);
+        app.keys(cx, "j");
+        assert!(
+            matches!(cursor(cx), Some(HealthStop::Zone(_))),
+            "{:?}",
+            cursor(cx)
+        );
+        // Tab: the next view's header; End: the last stop; Esc: none.
+        app.keys(cx, "tab");
+        assert_eq!(cursor(cx), Some(HealthStop::Header(ViewDisplay::Checks)));
+        app.keys(cx, "end");
+        app.draw(cx);
+        assert_eq!(
+            cursor(cx),
+            Some(HealthStop::Header(ViewDisplay::GlobalSwitches))
+        );
+        // Enter on a header folds it.
+        app.keys(cx, "enter");
+        app.draw(cx);
+        app.keys(cx, "escape");
+        assert_eq!(cursor(cx), None);
     });
 }

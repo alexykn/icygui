@@ -431,6 +431,31 @@ impl MockControl {
         }
     }
 
+    /// Makes endpoint `name`'s checker hang while it stays connected (a
+    /// stuck satellite): it runs none of its zone's checks and answers no
+    /// check pinned to it, until [`MockControl::start_checks_on`]. A zone
+    /// whose connected endpoints all hang sends no results.
+    pub fn stop_checks_on(&self, name: &str) {
+        self.world().checkers_stopped.insert(name.to_owned());
+    }
+
+    /// Endpoint `name` runs checks again after
+    /// [`MockControl::stop_checks_on`].
+    pub fn start_checks_on(&self, name: &str) {
+        self.world().checkers_stopped.remove(name);
+    }
+
+    /// Delays the next run of the real-time check `host!service` (a
+    /// heartbeat) by `by`, once: a beat that comes late, as a busy checker
+    /// or a slow cluster sync makes it. Unknown objects are ignored.
+    pub fn delay_realtime(&self, host: &str, service: &str, by: Duration) {
+        let mut world = self.world();
+        let object = format!("{host}!{service}");
+        if let Some(at) = world.realtime.get_mut(&object) {
+            *at += by.as_secs_f64();
+        }
+    }
+
     /// Runs the real-time checks that are due now (the timers do so every
     /// housekeeping interval).
     pub fn run_realtime_checks(&self) {

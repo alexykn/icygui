@@ -1,9 +1,10 @@
 //! The cluster health page (topic 06) through the real core and the
-//! demo's `prod-cluster` (two masters, a satellite in `ams` and one in
+//! demo's `prod-cluster` (two masters, a satellite in `ams` and two in
 //! `fra`): it opens from the sidebar, the switcher and the palette; while
 //! it shows, the engine asks for the node's listener status with every
-//! poll (closed, every 5 minutes for the trouble alerts); the satellite
-//! dropping out turns the page and the sidebar's dot critical.
+//! poll (closed, every 5 minutes for the trouble alerts); one satellite of
+//! `fra` dropping out turns its zone yellow (still checked), both turn it
+//! and the sidebar's dot red (cut off).
 
 use std::time::Duration;
 
@@ -90,7 +91,7 @@ fn the_health_page_shows_the_cluster_and_asks_only_while_open() {
                     let zones: Vec<&str> =
                         report.zones.iter().map(|zone| zone.name.as_str()).collect();
                     assert_eq!(zones, ["master", "ams", "fra"]);
-                    assert_eq!((report.connected, report.not_connected), (4, 0));
+                    assert_eq!((report.connected, report.not_connected), (5, 0));
                     assert_eq!(report.global_zones, ["director-global", "global-templates"]);
                     assert!(report.zones[0].endpoints[0].this_node);
                     let features: Vec<(&str, FeatureState)> = report
@@ -106,18 +107,25 @@ fn the_health_page_shows_the_cluster_and_asks_only_while_open() {
                             ("IcingaDB", FeatureState::Off)
                         ]
                     );
-                    assert_eq!(report.queues[2].value, "3 of 3");
+                    assert_eq!(report.queues[2].value, "4 of 4");
                     assert!(report.queues.last().unwrap().wide, "no IcingaDB tile");
                     assert!(!report.checks.is_empty());
-                    assert_ne!(report.state, ClusterState::Critical);
+                    let state = app.state.read(cx);
+                    assert_ne!(
+                        crate::cluster::cluster_state(state.snapshot(), true, Timestamp::now()),
+                        ClusterState::Critical
+                    );
                 });
 
-                // The satellite in `fra` drops out: once the cluster
+                // Both satellites in `fra` drop out: once the cluster
                 // nodes' states come (the page asks for them now), its
                 // zone is cut off and the sidebar's dot turns critical.
                 cx.update(|cx| {
                     control(cx)
                         .set_endpoint_connected("sat-fra-01", false)
+                        .unwrap();
+                    control(cx)
+                        .set_endpoint_connected("sat-fra-02", false)
                         .unwrap();
                     app.state.update(cx, |state, cx| {
                         if state.refresh(std::time::Instant::now()) {
@@ -128,7 +136,7 @@ fn the_health_page_shows_the_cluster_and_asks_only_while_open() {
                 wait_for(
                     &app,
                     &cx,
-                    "sat-fra-01 down",
+                    "zone fra cut off",
                     Duration::from_secs(90),
                     |app, cx| {
                         app.state
@@ -136,17 +144,20 @@ fn the_health_page_shows_the_cluster_and_asks_only_while_open() {
                             .snapshot()
                             .cluster_nodes()
                             .iter()
-                            .any(|node| {
-                                node.name == "sat-fra-01" && node.state == NodeState::Disconnected
+                            .filter(|node| {
+                                node.name.starts_with("sat-fra-")
+                                    && node.state == NodeState::Disconnected
                             })
+                            .count()
+                            == 2
                     },
                 )
                 .await;
                 cx.update(|cx| {
                     let page = app.workspace.read(cx).health_page().clone();
                     let report = page.read(cx).report(cx);
-                    assert_eq!(report.state, ClusterState::Critical);
-                    assert_eq!((report.connected, report.not_connected), (3, 1));
+                    assert_eq!((report.connected, report.not_connected), (3, 2));
+                    assert_eq!(report.zones[2].dot, crate::cluster::health::Dot::Critical);
                     let fra = &report.zones[2].endpoints[0];
                     assert_eq!(fra.tone, Tone::Critical);
                     // Its alert is raised after the 2-minute grace (the

@@ -69,10 +69,10 @@ impl NoticeAction {
     /// The link's text.
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::RetryNow => "Retry now",
-            Self::ReviewCertificate => "Review certificate",
-            Self::EditEnvironment => "Edit environment",
-            Self::RestartEngine => "Restart",
+            Self::RetryNow => "retry now",
+            Self::ReviewCertificate => "review certificate",
+            Self::EditEnvironment => "edit environment",
+            Self::RestartEngine => "restart",
         }
     }
 }
@@ -455,6 +455,15 @@ impl ConnectionStatus {
         }
     }
 
+    /// How long the connected event stream has been silent (the tray's
+    /// `no events 1m`); `None` while not connected.
+    pub(crate) fn silent_for(&self, now: Timestamp) -> Option<std::time::Duration> {
+        match &self.state {
+            Some(ConnectionState::Connected { since, .. }) => Some(self.quiet_for(*since, now)),
+            _ => None,
+        }
+    }
+
     /// How long nothing arrived: since the last event, or since the
     /// connection came up (or the stream came back from quiet mode) if no
     /// event arrived after that.
@@ -666,7 +675,7 @@ impl ConnectionStatus {
         Some(Progress { fraction, text })
     }
 
-    /// The notice while reconnecting: when, why, *Retry now*, and
+    /// The notice while reconnecting: when, why, *retry now*, and
     /// *Review certificate* while another URL's certificate isn't trusted
     /// (`untrusted`).
     fn reconnecting_notice(

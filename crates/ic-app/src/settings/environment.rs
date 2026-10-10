@@ -41,6 +41,10 @@ const ENTRY_FIELD: f32 = 300.;
 const POLICY_DROPDOWN: f32 = 160.;
 /// The beats table's columns: the dot, *proves*, *every*, *last beat*.
 const DOT_COLUMN: f32 = 18.;
+
+/// The *persistent* policy's tooltip on macOS, where the app can't keep a
+/// notification on screen itself.
+const PERSISTENT_ON_MACOS: &str = "macOS keeps it on screen when icygui's alert style is Alerts (System Settings → Notifications)";
 const PROVES_COLUMN: f32 = 150.;
 const EVERY_COLUMN: f32 = 110.;
 const LAST_COLUMN: f32 = 90.;
@@ -323,17 +327,21 @@ impl SettingsPanel {
         let open = self.menus.is_open(&SettingsMenu::TroublePolicy);
         let mut menu = Menu::new("settings-trouble-policy-menu");
         for choice in TroublePolicy::ALL {
-            menu = menu.item(
-                MenuItem::new(
-                    ElementId::Name(format!("settings-trouble-policy-{}", choice.label()).into()),
-                    choice.label(),
-                )
-                .checked(policy == choice)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.menus.close();
-                    this.change_trouble(cx, |trouble| trouble.policy = choice);
-                })),
-            );
+            let mut item = MenuItem::new(
+                ElementId::Name(format!("settings-trouble-policy-{}", choice.label()).into()),
+                choice.label(),
+            )
+            .checked(policy == choice)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.menus.close();
+                this.change_trouble(cx, |trouble| trouble.policy = choice);
+            }));
+            // macOS decides itself how long a notification stays: say how
+            // to keep it, in the item's tooltip (no hint sentence).
+            if cfg!(target_os = "macos") && choice == TroublePolicy::Persistent {
+                item = item.tooltip(Tooltip::new(PERSISTENT_ON_MACOS));
+            }
+            menu = menu.item(item);
         }
         let menu = menu.on_dismiss(
             cx.listener(|this, dismissal: &ic_ui_kit::Dismissal, _, cx| {
@@ -494,7 +502,7 @@ impl SettingsPanel {
                     .flex()
                     .items_center()
                     .gap(px(16.))
-                    .py(px(8.))
+                    .py(px(4.))
                     .pl(px(SUB_INDENT))
                     .border_t_1()
                     .border_color(colors.border_row)
@@ -547,9 +555,16 @@ impl SettingsPanel {
                 .pl(px(SUB_INDENT))
                 .border_t_1()
                 .border_color(colors.border_row)
-                .child(Link::new("settings-heartbeat-add", "+ add").on_click(
-                    cx.listener(|this, _: &ClickEvent, window, cx| this.add_beat_entry(window, cx)),
-                ))
+                // At the entries' size (16b2), not the panel's.
+                .child(
+                    div().text_size(theme.text.body).child(
+                        Link::new("settings-heartbeat-add", "+ add")
+                            .text_size(theme.text.body)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.add_beat_entry(window, cx);
+                            })),
+                    ),
+                )
                 .into_any_element(),
         );
         rows
@@ -621,7 +636,7 @@ fn beats_table(
         );
     let mut rows = vec![header.into_any_element()];
     for beat in &heartbeats.beats {
-        let tone = tone_of(beat);
+        let tone = tone_of(beat, now);
         let gone = beat.state == BeatState::Disappeared;
         let not_found = beat.state == BeatState::NotFound;
         let age = beat.last_beat.map_or_else(
@@ -635,7 +650,7 @@ fn beats_table(
             .flex()
             .items_center()
             .gap(px(12.))
-            .h(px(40.))
+            .h(px(32.))
             .pl(px(SUB_INDENT))
             .border_t_1()
             .border_color(colors.border_row)
@@ -667,28 +682,44 @@ fn beats_table(
         let row = if gone {
             let key = beat.key.clone();
             let environment = environment.to_owned();
+            // The words start at the *every* column and the button ends at
+            // the row's right (16b3), in the columns' own width.
             row.child(
                 div()
+                    .flex()
                     .flex_none()
-                    .text_size(theme.text.small)
-                    .text_color(theme.states.text.warning)
-                    .child(format!(
-                        "disappeared since {}",
-                        crate::format::list_clock(beat.since, now)
-                    )),
-            )
-            .child(
-                Button::new(
-                    ElementId::Name(format!("settings-beat-confirm-{}", beat.object()).into()),
-                    "confirm removal",
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    let key = key.clone();
-                    this.state.update(cx, |state, cx| {
-                        state.confirm_heartbeat_removal(&environment, key);
-                        cx.notify();
-                    });
-                })),
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .w(px(EVERY_COLUMN + 12. + LAST_COLUMN))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.text.small)
+                            .text_color(theme.states.text.warning)
+                            .child(format!(
+                                "disappeared since {}",
+                                crate::format::list_clock(beat.since, now)
+                            )),
+                    )
+                    .child(
+                        Button::new(
+                            ElementId::Name(
+                                format!("settings-beat-confirm-{}", beat.object()).into(),
+                            ),
+                            "confirm removal",
+                        )
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
+                                let key = key.clone();
+                                this.state.update(cx, |state, cx| {
+                                    state.confirm_heartbeat_removal(&environment, key);
+                                    cx.notify();
+                                });
+                            },
+                        )),
+                    ),
             )
         } else {
             row.child(

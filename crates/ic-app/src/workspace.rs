@@ -1369,6 +1369,14 @@ impl Workspace {
                     cx.notify();
                 }
             }),
+            PaletteCommand::EditHealthPage => {
+                self.state.update(cx, |state, cx| {
+                    if state.show_cluster(ClusterEntry::Health) {
+                        cx.notify();
+                    }
+                });
+                self.open_editor(EditorTarget::Health, "", window, cx);
+            }
             PaletteCommand::Act(action, targets) => self.act_on_named(action, targets, window, cx),
             PaletteCommand::Copy { what, text } => self.copy(what, text, cx),
             PaletteCommand::Reload => self.state.update(cx, |state, cx| {

@@ -313,7 +313,6 @@ impl MenuNode {
             .skip_while(|child| !child.is_separator())
             .skip(1)
             .take_while(|child| !child.is_separator())
-            .filter(|child| child.label().starts_with('✓') || child.label().starts_with('\u{2003}'))
             .collect()
     }
 }
@@ -333,18 +332,13 @@ fn environments(bus: &Connection, item: &str) -> Vec<String> {
         .collect()
 }
 
-/// An environment's name without the mark or indentation in front, and
-/// without its status after ` · `.
+/// An environment's name, without its status after ` · `.
 fn environment_name(label: &str) -> &str {
-    let name = label
-        .strip_prefix("✓ ")
-        .or_else(|| label.strip_prefix('\u{2003}'))
-        .unwrap_or(label);
-    name.split(" · ").next().unwrap_or(name)
+    label.split(" · ").next().unwrap_or(label)
 }
 
-/// The environments the host shows as the current one: checked (a check
-/// item's toggle state) or marked with `✓`.
+/// The environments the host shows as checked or marked: none (selection
+/// is never a check mark; 16e draws none).
 fn current_environments(bus: &Connection, item: &str) -> Vec<String> {
     let menu = menu(bus, item);
     menu.environment_entries()
@@ -475,7 +469,6 @@ fn other_environments() -> Vec<String> {
         format!("{}…", "x".repeat(59)),
     ]
     .into_iter()
-    .map(|name| format!("\u{2003}{name}"))
     .collect()
 }
 
@@ -513,44 +506,41 @@ fn tray_menu_over_dbus() {
 
     let list = some_environments();
     tray.set_environments(&list, Some("env-a"));
-    assert_eq!(current_environments(&bus, &item), ["prod"]);
+    // No check-mark column (16e): every environment a plain item, none
+    // checked or marked, the active one too.
+    assert!(current_environments(&bus, &item).is_empty());
 
-    // The user picks staging, but the switch doesn't happen (it fails, or
-    // the app refuses): prod stays the only current one, both before and
-    // after the app sends the unchanged list again.
+    // The user picks staging: the app is told; the menu changes nothing by
+    // itself, before and after the app sends the unchanged list again.
     click_environment(&bus, &item, "staging");
     assert_eq!(
         next_command(&mut commands),
         TrayCommand::SwitchEnvironment("env-b".to_owned())
     );
-    assert_eq!(current_environments(&bus, &item), ["prod"]);
     tray.set_environments(&list, Some("env-a"));
-    assert_eq!(current_environments(&bus, &item), ["prod"]);
 
-    // How the host shows it: plain items, the active one marked and
-    // disabled.
+    // How the host shows it: plain items, all enabled.
     assert_eq!(
         environments(&bus, &item),
-        shown_environments("✓ prod (off)", "\u{2003}staging")
+        shown_environments("prod", "staging")
     );
     assert!(
         !menu(&bus, &item).has_toggles(),
         "no check items: muda ticks those itself when clicked"
     );
 
-    // A switch that happens moves the mark.
+    // A switch that happens shows nothing more in the menu.
     tray.set_environments(&list, Some("env-b"));
-    assert_eq!(current_environments(&bus, &item), ["staging"]);
+    assert!(current_environments(&bus, &item).is_empty());
     assert_eq!(
         environments(&bus, &item),
-        shown_environments("\u{2003}prod", "✓ staging (off)")
+        shown_environments("prod", "staging")
     );
     click_environment(&bus, &item, "prod_cluster");
     assert_eq!(
         next_command(&mut commands),
         TrayCommand::SwitchEnvironment("env-d".to_owned())
     );
-    assert_eq!(current_environments(&bus, &item), ["staging"]);
 
     // Each environment's status follows its name (A: `no data 3m`).
     tray.set_environment_statuses(&[
@@ -559,9 +549,9 @@ fn tray_menu_over_dbus() {
     ]);
     assert_eq!(
         environments(&bus, &item)[..2],
-        ["\u{2003}prod · no data 3m", "✓ staging · live (off)"]
+        ["prod · no data 3m", "staging · live"]
     );
-    assert_eq!(current_environments(&bus, &item), ["staging"]);
+    assert!(current_environments(&bus, &item).is_empty());
     assert_eq!(
         menu(&bus, &item).shown().last().map(String::as_str),
         Some("Quit icygui")

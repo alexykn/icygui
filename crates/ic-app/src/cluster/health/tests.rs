@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ic_core::health::{ClusterHealth, HealthSample};
 use ic_core::snapshot::Snapshot;
-use ic_core::{ClusterView, ConnectedNode, NodeState};
+use ic_core::{ClusterView, ConnectedNode};
 use ic_model::{
     Endpoint, EndpointStats, FeatureState, Host, HostName, InstanceStatus, ListenerStatus,
     NodeFeatures, ObjectCounts, ObjectKey, Timestamp, Zone,
@@ -191,9 +191,9 @@ fn degraded(late: &[&str]) -> Snapshot {
 
 #[test]
 fn a_healthy_cluster_reads_like_the_mock_up() {
-    let report = report(&cluster(), true, now());
-    assert_eq!(report.state, ClusterState::Ok);
+    let report = report(&cluster(), Liveness::Live, now());
     assert_eq!((report.connected, report.not_connected), (4, 0));
+    assert!(report.zones.iter().all(|zone| zone.dot == Dot::Ok));
     assert_eq!(report.instance, "Icinga r2.14.3-1 · up 41d 6h");
     assert_eq!(report.seen_from.as_deref(), Some("master-01"));
     assert!(report.alerts.is_empty());
@@ -284,12 +284,12 @@ fn a_satellite_gone_cuts_its_zone_off() {
         }],
         blind: None,
     });
-    let report = report(&snapshot, true, now());
-    assert_eq!(report.state, ClusterState::Critical);
+    let report = report(&snapshot, Liveness::Live, now());
     assert_eq!(assess(&snapshot, true, now()), ClusterState::Critical);
     assert_eq!((report.connected, report.not_connected), (3, 1));
     let fra = &report.zones[2];
-    assert_eq!(fra.state, NodeState::Disconnected);
+    assert_eq!(fra.dot, Dot::Critical, "cut off");
+    assert_eq!(fra.endpoints[0].dot, Dot::Critical);
     assert_eq!(fra.endpoints[0].status, "not connected");
     assert_eq!(fra.endpoints[0].tone, Tone::Critical);
     assert_eq!(fra.endpoints[0].last_message, "3m 12s ago");
@@ -311,19 +311,111 @@ fn a_satellite_gone_cuts_its_zone_off() {
     assert_eq!(report.queues[2].tone, Tone::Critical, "2 of 3 connected");
 }
 
+/// An HA zone that lost one endpoint still runs its checks: its band is
+/// yellow (the redundancy is lost), not red (16r draws it green, which
+/// would hide the loss; red would say the zone is broken); the endpoint's
+/// own row is red. The sidebar's dot is yellow too, unless an alert says
+/// worse (the endpoint's pinned beat dead: critical).
 #[test]
 fn a_master_gone_from_an_ha_pair_warns_without_cutting_off() {
     let mut snapshot = cluster();
     let mut endpoints = (*snapshot.endpoints).clone();
     endpoints[1].connected = false;
     snapshot.endpoints = Arc::new(endpoints);
-    let report = report(&snapshot, true, now());
-    // The engine raises its alert after the grace; until then the page
-    // shows the endpoint's row only.
+    let mut health = (*snapshot.health).clone();
+    if let Some(listener) = &mut health.listener {
+        listener.connected_endpoints = 2;
+    }
+    snapshot.health = Arc::new(health);
+    let report = report(&snapshot, Liveness::Live, now());
     assert!(report.alerts.is_empty());
     assert!(report.late.is_empty());
-    // The endpoint is down all the same: the sidebar's dot is critical.
-    assert_eq!(report.state, ClusterState::Critical);
+    let master = &report.zones[0];
+    assert_eq!(master.dot, Dot::Warning);
+    assert_eq!(master.endpoints[1].dot, Dot::Critical);
+    assert_eq!(
+        report.queues[2].tone,
+        Tone::Warning,
+        "2 of 3, zone still runs"
+    );
+    assert_eq!(assess(&snapshot, true, now()), ClusterState::Warning);
+    // Its pinned beat dead with Icinga's reason: the alert is critical.
+    snapshot.trouble = Arc::new(ic_core::trouble::Trouble {
+        alerts: vec![ic_core::trouble::Alert {
+            key: "endpoint:master-02".to_owned(),
+            tone: ic_core::trouble::AlertTone::Critical,
+            title: "heartbeat master-02 dead: Remote Icinga instance 'master-02' is not connected"
+                .to_owned(),
+            detail: String::new(),
+            action: Some(ic_core::trouble::AlertAction::ShowNode(
+                "master-02".to_owned(),
+            )),
+            since: at(60.0),
+        }],
+        blind: None,
+    });
+    assert_eq!(assess(&snapshot, true, now()), ClusterState::Critical);
+}
+
+/// A zone whose own heartbeat is dead is red, though its endpoints answer
+/// (16s: the zone runs no checks).
+#[test]
+fn a_zone_whose_beat_is_dead_is_red() {
+    use ic_core::heartbeat::{BeatState, Death, Heartbeat, HeartbeatSetup, Heartbeats, Proves};
+    let mut snapshot = cluster();
+    snapshot.heartbeats = Arc::new(Heartbeats {
+        setup: HeartbeatSetup::Find {
+            variable: "icygui_heartbeat".to_owned(),
+        },
+        beats: vec![Heartbeat {
+            key: ic_model::ServiceKey::new("icygui-hb-fra", "beat"),
+            proves: Proves::Zone("fra".to_owned()),
+            interval: Duration::from_secs(30),
+            state: BeatState::Dead(Death::Stopped),
+            last_beat: Some(at(300.0)),
+            last_check: Some(at(300.0)),
+            since: at(250.0),
+            deadline: None,
+            allowance: Duration::from_secs(5),
+            reason: None,
+        }],
+        polled: false,
+    });
+    let report = report(&snapshot, Liveness::Live, now());
+    assert_eq!(report.zones[2].dot, Dot::Critical);
+    assert_eq!(report.zones[2].endpoints[0].dot, Dot::Ok, "it answers");
+    assert_eq!(assess(&snapshot, true, now()), ClusterState::Critical);
+}
+
+/// No false green: without live data no dot of the page is green, the
+/// last messages age against the UI's clock, and the beats' row says so.
+#[test]
+fn without_live_data_nothing_is_green() {
+    let snapshot = cluster();
+    let stale = Liveness::Stale {
+        as_of: Some(at(240.0)),
+    };
+    let report = report(&snapshot, stale, now());
+    assert_eq!(report.live, stale);
+    for zone in &report.zones {
+        assert_ne!(zone.dot, Dot::Ok, "{}", zone.name);
+        for endpoint in &zone.endpoints {
+            assert_ne!(endpoint.dot, Dot::Ok, "{}", endpoint.name);
+        }
+    }
+    // Connected endpoints' last messages age from their numbers no more:
+    // sat-ams-01's 1 s before the (old) poll reads as against now.
+    let mut old = cluster();
+    let mut health = (*old.health).clone();
+    health.endpoints_at = Some(at(240.0));
+    health
+        .endpoints
+        .insert("sat-ams-01".to_owned(), stats(21_403, 241.0, 201.0));
+    old.health = Arc::new(health);
+    let report = super::report(&old, stale, now());
+    assert_eq!(report.zones[1].endpoints[0].last_message, "4m 1s ago");
+    let live = super::report(&old, Liveness::Live, now());
+    assert_eq!(live.zones[1].endpoints[0].last_message, "1s ago");
 }
 
 #[test]
@@ -333,14 +425,17 @@ fn late_checks_warn_and_turn_critical_from_one_percent() {
         ObjectKey::host("sw-core-ams-01"),
         at(90.0),
     )]));
-    assert_eq!(report(&snapshot, true, now()).checks[5].tone, Tone::Warning);
+    assert_eq!(
+        report(&snapshot, Liveness::Live, now()).checks[5].tone,
+        Tone::Warning
+    );
     assert_eq!(assess(&snapshot, true, now()), ClusterState::Warning);
     let late: BTreeMap<ObjectKey, Timestamp> = (0..40)
         .map(|index| (ObjectKey::host(&format!("h{index}")), at(90.0)))
         .collect();
     snapshot.late = Arc::new(late);
     assert_eq!(
-        report(&snapshot, true, now()).checks[5].tone,
+        report(&snapshot, Liveness::Live, now()).checks[5].tone,
         Tone::Critical
     );
 }
@@ -354,10 +449,10 @@ fn fewer_checks_and_slow_latency_need_a_look() {
         latest.latency = 0.064;
     }
     snapshot.health = Arc::new(health);
-    let report = report(&snapshot, true, now());
+    let report = report(&snapshot, Liveness::Live, now());
     assert_eq!(report.checks[0].tone, Tone::Warning, "a fall by a third");
     assert_eq!(report.checks[2].tone, Tone::Warning, "16 times the median");
-    assert_eq!(report.state, ClusterState::Warning);
+    assert_eq!(assess(&snapshot, true, now()), ClusterState::Warning);
 }
 
 #[test]
@@ -369,10 +464,10 @@ fn a_connected_nodes_last_message_is_as_of_its_numbers() {
         .endpoints
         .insert("sat-ams-01".to_owned(), stats(21_403, 21.0, 201.0));
     snapshot.health = Arc::new(health);
-    let report = report(&snapshot, true, now());
+    let report = report(&snapshot, Liveness::Live, now());
     assert_eq!(report.zones[1].endpoints[0].last_message, "1s ago");
     assert_eq!(
-        report.state,
+        assess(&snapshot, true, now()),
         ClusterState::Ok,
         "no lag: 20 s since the poll"
     );
@@ -386,11 +481,10 @@ fn a_lagging_node_warns() {
         .endpoints
         .insert("sat-ams-01".to_owned(), stats(21_403, 150.0, 201.0));
     snapshot.health = Arc::new(health);
-    let report = report(&snapshot, true, now());
+    let report = report(&snapshot, Liveness::Live, now());
     let ams = &report.zones[1].endpoints[0];
     assert_eq!(ams.status, "connected · no message");
     assert_eq!(ams.tone, Tone::Warning);
-    assert_eq!(report.state, ClusterState::Warning);
     assert_eq!(assess(&snapshot, true, now()), ClusterState::Warning);
 }
 
@@ -403,7 +497,7 @@ fn icingadb_takes_a_tile_only_while_enabled() {
         ..NodeFeatures::default()
     });
     snapshot.health = Arc::new(health);
-    let report = report(&snapshot, true, now());
+    let report = report(&snapshot, Liveness::Live, now());
     let labels: Vec<&str> = report.queues.iter().map(|tile| tile.label).collect();
     assert_eq!(
         labels,
@@ -425,9 +519,13 @@ fn switches_off_warn_on_the_page_only() {
     let mut status = (**snapshot.status.as_ref().unwrap()).clone();
     status.perfdata_enabled = false;
     snapshot.status = Some(Arc::new(status));
-    let report = report(&snapshot, true, now());
+    let report = report(&snapshot, Liveness::Live, now());
     assert!(!report.switches[5].on);
-    assert_eq!(report.state, ClusterState::Ok, "a setting, not health");
+    assert_eq!(
+        assess(&snapshot, true, now()),
+        ClusterState::Ok,
+        "a setting, not health"
+    );
 }
 
 #[test]
@@ -438,7 +536,7 @@ fn before_the_page_asks_the_queues_say_so() {
     health.features = None;
     health.endpoints.clear();
     snapshot.health = Arc::new(health);
-    let report = report(&snapshot, true, now());
+    let report = report(&snapshot, Liveness::Live, now());
     assert_eq!(report.queues[0].value, "—");
     assert_eq!(report.queues[0].detail, "not read yet");
     assert!(report.features.is_empty());
@@ -451,10 +549,7 @@ fn before_the_page_asks_the_queues_say_so() {
 
 #[test]
 fn nothing_is_known_before_connecting() {
-    assert_eq!(
-        report(&cluster(), false, now()).state,
-        ClusterState::Unknown
-    );
+    assert_eq!(assess(&cluster(), false, now()), ClusterState::Unknown);
     assert_eq!(
         assess(&Snapshot::default(), true, now()),
         ClusterState::Unknown

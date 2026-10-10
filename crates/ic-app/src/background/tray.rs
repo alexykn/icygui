@@ -78,14 +78,7 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
         let connected = connection.is_connected();
         let no_data = connection.no_data_for(now);
         blind |= no_data.is_some();
-        statuses.push((
-            environment.id.clone(),
-            match no_data {
-                Some(age) => menu_age(age),
-                None if connected => "live".to_owned(),
-                None => connection.short_state().to_owned(),
-            },
-        ));
+        statuses.push((environment.id.clone(), menu_status(connection, now)));
         let overall = &slot.snapshot().overall;
         if connected {
             let current = worst.flatten();
@@ -178,6 +171,32 @@ pub(crate) fn tray_view(state: &AppState, now: Timestamp) -> TrayView {
 /// How long an environment has had no live data, as its menu line says
 /// it: in whole minutes (`no data 3m`), so the menu (rebuilt when a line
 /// changes, which closes it on macOS) changes at most once a minute.
+/// An environment's word in the menu (16e), from the same timestamps the
+/// footer reads (no false green): `live`, `no events 1m` while its stream
+/// is silent (the footer yellow), `no data 3m` once it is blind, else what
+/// the connection does. Whole minutes, so the menu changes at most once a
+/// minute (rebuilding it every second closes it on macOS).
+fn menu_status(connection: &crate::app_state::ConnectionStatus, now: Timestamp) -> String {
+    use crate::app_state::connection::Health;
+    if let Some(age) = connection.no_data_for(now) {
+        return menu_age(age);
+    }
+    match connection.health(now) {
+        Health::Live => "live".to_owned(),
+        Health::Stale => {
+            let minutes = connection
+                .silent_for(now)
+                .map_or(0, |age| age.as_secs() / 60);
+            if minutes == 0 {
+                "no events".to_owned()
+            } else {
+                format!("no events {minutes}m")
+            }
+        }
+        _ => connection.short_state().to_owned(),
+    }
+}
+
 fn menu_age(age: Duration) -> String {
     let minutes = age.as_secs() / 60;
     if minutes == 0 {
@@ -502,6 +521,29 @@ mod tests {
         assert!(view.tooltip.contains("no live data"), "{}", view.tooltip);
         assert_eq!(menu_age(Duration::from_secs(40)), "no data");
         assert_eq!(menu_age(Duration::from_mins(61)), "no data 1h");
+    }
+
+    /// No false green: from 30 s without events (the footer yellow) until
+    /// the blind grace ends, the menu says so instead of `live`, in whole
+    /// minutes.
+    #[test]
+    fn a_silent_stream_is_not_live_in_the_menu() {
+        let since = Timestamp::from_unix_seconds(now().as_unix_seconds() - 600.0);
+        let mut connection = crate::app_state::ConnectionStatus::starting("master-01", None);
+        connection.on_state(ConnectionState::Connected {
+            node: crate::app_state::connection::full_node("master-01"),
+            version: "r2.15.6".to_owned(),
+            since,
+        });
+        connection.checks_active = Some(true);
+        let at =
+            |seconds_ago: f64| Timestamp::from_unix_seconds(now().as_unix_seconds() - seconds_ago);
+        connection.last_event_at = Some(at(2.0));
+        assert_eq!(menu_status(&connection, now()), "live");
+        connection.last_event_at = Some(at(45.0));
+        assert_eq!(menu_status(&connection, now()), "no events");
+        connection.last_event_at = Some(at(100.0));
+        assert_eq!(menu_status(&connection, now()), "no events 1m");
     }
 
     #[test]

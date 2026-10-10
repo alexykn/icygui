@@ -15,16 +15,18 @@ pub const HEARTBEAT_VARIABLE: &str = "icygui_heartbeat";
 
 impl Scenario {
     /// Adds heartbeats every `interval` seconds, as the user guide
-    /// configures them: for every zone of masters or satellites (not the
-    /// agents' zones, and not the global ones) a host `icygui-hb-<zone>`
-    /// in that zone with a service `beat` (the zone's beat), and, in a zone
-    /// with more than one endpoint, a service `beat-<endpoint>` pinned to
-    /// each endpoint with `command_endpoint`. Each has
-    /// `vars.icygui_heartbeat = true`, is OK, and runs in real time.
+    /// configures them (mock-up 16a's topology): for every zone of masters
+    /// or satellites (not the agents' zones, and not the global ones) a
+    /// host `icygui-hb-<zone>` in that zone; a satellite zone gets a service
+    /// `beat` (the zone's beat); a zone with more than one endpoint gets a
+    /// service `beat-<endpoint>` pinned to each endpoint with
+    /// `command_endpoint`. The masters' HA zone has only its pinned beats
+    /// (they prove the zone too). Each has `vars.icygui_heartbeat = true`,
+    /// is OK, and runs in real time.
     #[must_use]
     pub fn with_heartbeats(mut self, interval: f64) -> Self {
         let at = self.time_base;
-        let zones: Vec<(String, Vec<String>)> = self
+        let zones: Vec<(String, Vec<String>, bool)> = self
             .zones
             .iter()
             .filter(|zone| !zone.global)
@@ -35,9 +37,9 @@ impl Scenario {
                     .filter(|endpoint| endpoint.zone == zone.name)
                     .map(|endpoint| endpoint.name.clone())
                     .collect();
-                (zone.name.clone(), endpoints)
+                (zone.name.clone(), endpoints, zone.parent.is_none())
             })
-            .filter(|(zone, endpoints)| {
+            .filter(|(zone, endpoints, _)| {
                 // An agent's zone: a leaf named like its only endpoint.
                 match endpoints.as_slice() {
                     [] => false,
@@ -46,7 +48,7 @@ impl Scenario {
                 }
             })
             .collect();
-        for (zone, endpoints) in zones {
+        for (zone, endpoints, top) in zones {
             let host_name = format!("icygui-hb-{zone}");
             let mut host = Host::new(&host_name);
             host.state = HostState::Up;
@@ -61,8 +63,13 @@ impl Scenario {
             host.check.last_state_change =
                 Timestamp::from_unix_seconds(at.as_unix_seconds() - 86_400.0);
             self.hosts.push(host);
-            let mut beats = vec![(String::from("beat"), None)];
-            if endpoints.len() > 1 {
+            let ha = endpoints.len() > 1;
+            let mut beats = if top && ha {
+                Vec::new()
+            } else {
+                vec![(String::from("beat"), None)]
+            };
+            if ha {
                 beats.extend(
                     endpoints
                         .iter()
@@ -94,6 +101,18 @@ impl Scenario {
         self
     }
 
+    /// Adds a connected endpoint `name` to zone `zone` (the demo makes
+    /// `prod-cluster`'s zone `fra` an HA zone with it).
+    #[must_use]
+    pub fn with_endpoint(mut self, name: &str, zone: &str) -> Self {
+        self.endpoints.push(super::Endpoint {
+            name: name.to_owned(),
+            zone: zone.to_owned(),
+            connected: true,
+        });
+        self
+    }
+
     /// The heartbeat services ([`Scenario::with_heartbeats`]).
     #[must_use]
     pub fn heartbeats(&self) -> Vec<ObjectKey> {
@@ -117,10 +136,31 @@ mod tests {
             .iter()
             .map(ObjectKey::full_name)
             .collect();
+        // The masters' HA zone: pinned beats only; a satellite zone: its
+        // own beat, and pinned ones too once it is HA.
         assert!(
-            beats.contains(&"icygui-hb-master!beat".to_owned()),
+            !beats.contains(&"icygui-hb-master!beat".to_owned()),
             "{beats:?}"
         );
+        assert!(
+            beats.contains(&"icygui-hb-ams!beat".to_owned()),
+            "{beats:?}"
+        );
+        let ha = crate::scenarios::prod_cluster()
+            .with_endpoint("sat-fra-02", "fra")
+            .with_heartbeats(10.0)
+            .heartbeats()
+            .iter()
+            .map(ObjectKey::full_name)
+            .collect::<Vec<_>>();
+        for beat in [
+            "icygui-hb-fra!beat",
+            "icygui-hb-fra!beat-sat-fra-01",
+            "icygui-hb-fra!beat-sat-fra-02",
+        ] {
+            assert!(ha.contains(&beat.to_owned()), "{ha:?}");
+        }
+        assert_eq!(ha.len(), 6, "mock-up 16a's six beats");
         assert!(
             beats.contains(&"icygui-hb-master!beat-master-01".to_owned()),
             "{beats:?}"

@@ -120,6 +120,9 @@ pub(crate) enum PaletteCommand {
     OpenList(ListKind, Option<crate::lists::model::Chip>),
     /// Show the cluster health page (topic 06).
     ClusterHealth,
+    /// Open the health page in the dashboard editor (16j's *edit page*,
+    /// by keyboard).
+    EditHealthPage,
     /// Mark every notification read.
     MarkNotificationsRead,
     /// Open the settings (`secondary-,`), on this tab.
@@ -1034,6 +1037,13 @@ fn list_commands(state: &AppState, now: Timestamp) -> Vec<PaletteItem> {
             None,
             IconName::HeartPulse,
             PaletteCommand::ClusterHealth,
+        ),
+        command(
+            "Edit health page",
+            "the cluster health page's views".to_owned(),
+            None,
+            IconName::Pencil,
+            PaletteCommand::EditHealthPage,
         ),
     ]
 }

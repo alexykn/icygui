@@ -7,6 +7,11 @@
 //! hold back: only a pause does (it is recorded silent then, like any
 //! paused notification).
 //!
+//! A condition shows in the health page's alert block as soon as it is
+//! found (with its *since*); the grace holds back only its notification and
+//! its log line, so a page that turned red says why at once, and a blip
+//! that never lasts its grace leaves no line and no notification.
+//!
 //! *No live data* is the engine's own: it begins when a session fails
 //! (or, for a stalled stream, when the last line came) and ends when one
 //! goes live again; after [`crate::trouble::GRACE`] the environment is *blind*. A beat the
@@ -33,11 +38,15 @@ use crate::trouble::{self, Alert, Blind, Facts, Finding, Trouble};
 /// changes).
 pub(super) const ASSESS_INTERVAL: Duration = Duration::from_secs(5);
 
-/// A condition found, not raised yet.
-#[derive(Clone, Copy, Debug)]
+/// A condition found, not raised yet: the page's alert block lists it
+/// already (with its *since*); only its notification and its log line
+/// wait for the grace.
+#[derive(Clone, Debug)]
 struct Pending {
     first: Instant,
     first_wall: Timestamp,
+    /// What the alert block shows meanwhile.
+    alert: Alert,
 }
 
 /// A raised alert.
@@ -277,7 +286,8 @@ impl Engine {
             found.insert(finding.key.clone());
             self.consider(finding, now, wall);
         }
-        // What no longer holds.
+        // What no longer holds (a condition that never held for its grace
+        // just goes: nothing was notified or logged).
         self.trouble.pending.retain(|key, _| found.contains(key));
         let over: Vec<String> = self
             .trouble
@@ -415,6 +425,48 @@ impl Engine {
         late
     }
 
+    /// Lists a condition found in the alert block at once (kept up to
+    /// date while it waits for its grace). Returns when it was first found
+    /// and since when it holds.
+    fn show_pending(
+        &mut self,
+        finding: &Finding,
+        now: Instant,
+        wall: Timestamp,
+    ) -> (Instant, Timestamp) {
+        let (first, first_wall) = self
+            .trouble
+            .pending
+            .get(&finding.key)
+            .map_or((now, wall), |pending| (pending.first, pending.first_wall));
+        let since = finding.since.unwrap_or(first_wall);
+        let shown = Alert {
+            key: finding.key.clone(),
+            tone: finding.tone,
+            title: finding.title.clone(),
+            detail: finding.detail.clone(),
+            action: finding.action.clone(),
+            since,
+        };
+        let changed = self
+            .trouble
+            .pending
+            .get(&finding.key)
+            .is_none_or(|pending| pending.alert != shown);
+        self.trouble.pending.insert(
+            finding.key.clone(),
+            Pending {
+                first,
+                first_wall,
+                alert: shown,
+            },
+        );
+        if changed {
+            self.trouble.news = true;
+        }
+        (first, since)
+    }
+
     /// One condition that holds: kept up to date if raised, raised once it
     /// held for its grace.
     fn consider(&mut self, finding: Finding, now: Instant, wall: Timestamp) {
@@ -442,16 +494,8 @@ impl Engine {
         // (Icinga runs no checks), not one per zone.
         let settling =
             finding.key.starts_with("zone-silent:") || finding.key.starts_with("endpoint-silent:");
-        let pending = *self
-            .trouble
-            .pending
-            .entry(finding.key.clone())
-            .or_insert(Pending {
-                first: now,
-                first_wall: wall,
-            });
-        let since = finding.since.unwrap_or(pending.first_wall);
-        let waited = now.saturating_duration_since(pending.first);
+        let (first, since) = self.show_pending(&finding, now, wall);
+        let waited = now.saturating_duration_since(first);
         let held = if from_beats {
             // The beats' own times say when they stopped, not how long
             // the verdict has held.
@@ -579,6 +623,12 @@ impl Engine {
             .raised
             .values()
             .map(|raised| raised.alert.clone())
+            .chain(
+                self.trouble
+                    .pending
+                    .values()
+                    .map(|pending| pending.alert.clone()),
+            )
             .collect();
         alerts.sort_by(|a, b| {
             b.tone

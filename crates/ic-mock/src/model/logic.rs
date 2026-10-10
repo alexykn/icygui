@@ -1103,9 +1103,40 @@ impl World {
         }
     }
 
-    /// Runs the real-time checks that are due (heartbeats): OK, or UNKNOWN
-    /// with Icinga's output while the endpoint the check is pinned to
-    /// isn't connected. Nothing runs while checks are stopped.
+    /// The endpoint that runs `zone`'s checks, as far as the node can see
+    /// it: the node itself for its own zone (and for objects without a
+    /// zone), else the first connected endpoint of the zone whose checker
+    /// runs. `None` when the zone is cut off (every endpoint gone) or every
+    /// connected one hangs: its results can't arrive.
+    pub(crate) fn zone_checker(&self, zone: &str) -> Option<String> {
+        if zone.is_empty() || zone == self.app.zone_name {
+            return Some(self.app.node_name.clone());
+        }
+        let Some(data) = self.zones.get(zone) else {
+            return Some(self.app.node_name.clone());
+        };
+        if data.endpoints.is_empty() {
+            return Some(self.app.node_name.clone());
+        }
+        data.endpoints
+            .iter()
+            .find(|name| {
+                self.endpoints
+                    .get(name.as_str())
+                    .is_some_and(|endpoint| endpoint.connected)
+                    && !self.checkers_stopped.contains(name.as_str())
+            })
+            .cloned()
+    }
+
+    /// Runs the real-time checks that are due (heartbeats), as Icinga's
+    /// cluster would: the zone's checker runs each (the node for its own
+    /// zone, a satellite for its zone). A zone that is cut off, or whose
+    /// connected endpoints all hang, sends nothing: its beats go silent (the
+    /// master never schedules them). A check pinned to an endpoint that
+    /// isn't connected comes back UNKNOWN with Icinga's words; one pinned to
+    /// an endpoint that hangs never answers. Nothing runs while checks are
+    /// stopped.
     pub(crate) fn run_realtime_checks(&mut self, now: f64) {
         if self.checks_stopped {
             return;
@@ -1122,28 +1153,41 @@ impl World {
                 continue;
             };
             let interval = checkable.check_interval.max(1.0);
-            let node = self.app.node_name.clone();
             let pinned = checkable.command_endpoint.clone();
+            let zone = checkable.meta.zone.clone();
+            // Its next slot either way: a silent beat resumes at its pace.
+            self.realtime.insert(object.clone(), now + interval);
+            let Some(scheduler) = self.zone_checker(&zone) else {
+                continue;
+            };
             let disconnected = !pinned.is_empty()
-                && pinned != node
+                && pinned != scheduler
+                && pinned != self.app.node_name
                 && self
                     .endpoints
                     .get(&pinned)
                     .is_none_or(|endpoint| !endpoint.connected);
+            if !disconnected && self.checkers_stopped.contains(&pinned) {
+                // Pinned to an endpoint that hangs: no answer comes.
+                continue;
+            }
             // The pinned endpoint is the check's source even while it isn't
             // connected (as Icinga 2.15 reports it, checked in Docker).
             let source = if pinned.is_empty() {
-                node.clone()
+                scheduler.clone()
             } else {
                 pinned.clone()
             };
             let (state, output) = if disconnected {
                 (
                     3,
-                    format!("Remote Icinga instance '{pinned}' is not connected to '{node}'"),
+                    format!("Remote Icinga instance '{pinned}' is not connected to '{scheduler}'"),
                 )
             } else {
                 (0, format!("icygui heartbeat {now:.0}"))
+            };
+            let Some(checkable) = self.checkable(&object) else {
+                continue;
             };
             let base = self.recheck_input(checkable, Some((state, output, Some(Vec::new()))));
             let input = CheckInput {
@@ -1151,7 +1195,6 @@ impl World {
                 ..base
             };
             self.process_check_result(&object, input);
-            self.realtime.insert(object, now + interval);
         }
     }
 

@@ -14,14 +14,17 @@
 //! need them (a feature turned off, a growing relay queue): both come with
 //! a status poll every [`TROUBLE_INTERVAL`] (PLAN.md §4.2 E2). Each
 //! request takes a token from the request budget. A refused one
-//! (`Forbidden`) isn't asked for again in the session.
+//! (`Forbidden`) isn't asked for again in the session, nor is a feature
+//! type Icinga refuses or doesn't know (an Icinga before 2.13 has no
+//! `IcingaDB` type); a read that fails otherwise waits for the normal
+//! pace.
 //!
 //! [`Command::WatchHealth`]: crate::Command::WatchHealth
 
 use std::time::Duration;
 
-use ic_api::{ApiError, Client};
-use ic_model::{ListenerStatus, NodeFeatures};
+use ic_api::{ApiError, Client, FEATURE_TYPES, FeaturesRead};
+use ic_model::ListenerStatus;
 use tokio::time::Instant;
 
 use super::{Engine, Internal, Phase};
@@ -35,19 +38,21 @@ const FEATURES_INTERVAL: Duration = Duration::from_mins(5);
 const TROUBLE_INTERVAL: Duration = Duration::from_mins(5);
 
 /// What one round of the page's requests asks for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Ask {
     /// The `ApiListener` status.
     listener: bool,
-    /// The node's features.
+    /// The node's features, but those Icinga refused or doesn't know.
     features: bool,
+    /// The feature types not to ask for.
+    skip: Vec<&'static str>,
 }
 
 /// Their answers.
 #[derive(Debug)]
 pub(crate) struct Answers {
     listener: Option<Result<ListenerStatus, ApiError>>,
-    features: Option<Result<NodeFeatures, ApiError>>,
+    features: Option<Result<FeaturesRead, ApiError>>,
 }
 
 /// The page's requests in one session.
@@ -60,6 +65,9 @@ pub(super) struct Asked {
     /// Icinga refused them: not asked for again in the session.
     listener_refused: bool,
     features_refused: bool,
+    /// The feature types Icinga refused (403) or doesn't know (400, 404):
+    /// the others are still asked for.
+    refused_types: Vec<&'static str>,
     /// The round sent when the page opened is out.
     pub(super) in_flight: bool,
 }
@@ -73,7 +81,7 @@ pub(super) async fn fetch(client: &Client, ask: Ask) -> Answers {
         None
     };
     let features = if ask.features {
-        Some(client.node_features().await)
+        Some(client.node_features(&ask.skip).await)
     } else {
         None
     };
@@ -154,7 +162,12 @@ impl Engine {
         if features {
             conn.health.features_at = Some(now);
         }
-        Some(Ask { listener, features })
+        let skip = conn.health.refused_types.clone();
+        Some(Ask {
+            listener,
+            features,
+            skip,
+        })
     }
 
     /// The page's answers are in: the store keeps them. Returns the
@@ -180,22 +193,40 @@ impl Engine {
             None => {}
         }
         match answers.features {
-            Some(Ok(features)) => self
-                .store
-                .update_health(|health| health.features = Some(features)),
+            Some(Ok(read)) => {
+                if let Some(conn) = &mut self.conn {
+                    for plural in read.refused {
+                        if !conn.health.refused_types.contains(&plural) {
+                            tracing::info!(environment = %self.spec.environment.name, feature = plural, "the feature's objects can't be read; not asking again");
+                            conn.health.refused_types.push(plural);
+                        }
+                    }
+                    if FEATURE_TYPES
+                        .iter()
+                        .all(|plural| conn.health.refused_types.contains(plural))
+                    {
+                        conn.health.features_refused = true;
+                    }
+                }
+                // What was not read stays as it was (a refused type: none).
+                self.store.update_health(|health| {
+                    let mut features = health.features.unwrap_or_default();
+                    let read = read.features;
+                    features.checker = read.checker.or(features.checker);
+                    features.notification = read.notification.or(features.notification);
+                    features.icingadb = read.icingadb.or(features.icingadb);
+                    health.features = Some(features);
+                });
+            }
             Some(Err(ApiError::Forbidden(message))) => {
                 tracing::warn!(%message, "the API user may not read the features; not asking again");
                 if let Some(conn) = &mut self.conn {
                     conn.health.features_refused = true;
                 }
             }
-            Some(Err(error)) => {
-                tracing::debug!(%error, "the features couldn't be read");
-                // Asked for again with the next poll.
-                if let Some(conn) = &mut self.conn {
-                    conn.health.features_at = None;
-                }
-            }
+            // A broken read waits for the normal pace (no retry with every
+            // status poll).
+            Some(Err(error)) => tracing::debug!(%error, "the features couldn't be read"),
             None => {}
         }
         listener

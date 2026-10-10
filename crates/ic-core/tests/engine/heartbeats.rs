@@ -26,9 +26,9 @@ use ic_rules::Tone;
 
 use crate::support::{Engine, Launch, mock, wait_until};
 
-/// The beats every 0.3 s; prod-cluster has five (master, its two
-/// endpoints, ams, fra).
-const BEATS: usize = 5;
+/// The beats every 0.3 s; prod-cluster has four (its two masters, pinned,
+/// and the zones ams and fra).
+const BEATS: usize = 4;
 
 async fn server_with(users: Vec<MockUser>, heartbeats: bool) -> MockServer {
     let scenario = if heartbeats {
@@ -121,16 +121,15 @@ async fn heartbeats_are_found_watched_and_left_out_of_everything_else() {
     assert_eq!(
         objects,
         [
-            "icygui-hb-master!beat",
             "icygui-hb-master!beat-master-01",
             "icygui-hb-master!beat-master-02",
             "icygui-hb-ams!beat",
             "icygui-hb-fra!beat",
         ],
-        "the top-level zone first, its own beat before its endpoints'"
+        "the top-level zone first"
     );
-    assert_eq!(beats.beats[1].proves.label(), "master-01");
-    assert_eq!(beats.beats[3].proves.label(), "zone ams");
+    assert_eq!(beats.beats[0].proves.label(), "master-01");
+    assert_eq!(beats.beats[2].proves.label(), "zone ams");
     assert!(!beats.polled);
     // Left out of lists, counts and the watchdog; the store keeps them.
     for beat in &beats.beats {
@@ -217,8 +216,16 @@ async fn a_checker_that_stops_is_one_alert_and_one_recovery() {
     control.stop_checks();
     let tone = notified(&mut engine, "test: Icinga runs no checks").await;
     assert_eq!(tone, Tone::Critical);
+    // (While the beats' verdicts came in one by one, the block showed what
+    // each said; once all are in, one line says it.)
     let snapshot = engine
-        .snapshot(|snapshot| !snapshot.trouble.alerts.is_empty())
+        .snapshot(|snapshot| {
+            snapshot
+                .trouble
+                .alerts
+                .iter()
+                .any(|alert| alert.key == "no-checks")
+        })
         .await;
     assert_eq!(
         snapshot.trouble.alerts.len(),
@@ -301,8 +308,16 @@ async fn an_endpoint_that_goes_away_with_its_beat_is_one_line() {
         .control()
         .set_endpoint_connected("master-02", false)
         .unwrap();
+    // The alert block shows the finding at once (its grace holds back only
+    // the notification); once the pinned beat is in, one line says both.
     let snapshot = engine
-        .snapshot(|snapshot| !snapshot.trouble.alerts.is_empty())
+        .snapshot(|snapshot| {
+            snapshot
+                .trouble
+                .alerts
+                .iter()
+                .any(|alert| alert.title.starts_with("heartbeat master-02 dead"))
+        })
         .await;
     let alerts = &snapshot.trouble.alerts;
     assert_eq!(alerts.len(), 1, "{alerts:?}");
@@ -323,6 +338,17 @@ async fn an_endpoint_that_goes_away_with_its_beat_is_one_line() {
         .unwrap();
     assert_eq!(pinned.state, BeatState::Dead(Death::NotOk));
     notified(&mut engine, "test: master-02 disconnected").await;
+    // One cause, one alert, one notification: through several graces
+    // (and the status polls that read the relay queue), nothing else.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let snapshot = engine.snapshot(|_| true).await;
+    assert_eq!(
+        snapshot.trouble.alerts.len(),
+        1,
+        "{:?}",
+        snapshot.trouble.alerts
+    );
+    assert_eq!(titles(&engine), ["test: master-02 disconnected"]);
     // Back: one recovery.
     server
         .control()

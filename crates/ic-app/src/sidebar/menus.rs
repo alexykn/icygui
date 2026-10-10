@@ -1207,6 +1207,23 @@ mod tests {
         assert_eq!(super::super::short_node(".odd"), ".odd");
     }
 
+    /// The footer keeps the node while a few characters of it fit beside
+    /// the name and the age slot, and drops it rather than show a lone
+    /// ellipsis without live data.
+    #[test]
+    fn the_footer_keeps_the_node_while_it_has_room() {
+        use super::super::{AGE_SLOT_CHARS, NO_DATA_SLOT_CHARS, node_has_room};
+        // Every length scales with the interface size, so 100 % stands for
+        // all of them.
+        let theme = ic_ui_kit::Theme::dark();
+        // `prod-cluster master-01 59s` fits; `prod-cluster no data 4m`.
+        assert!(node_has_room(&theme, 12, AGE_SLOT_CHARS));
+        assert!(!node_has_room(&theme, 12, NO_DATA_SLOT_CHARS));
+        // `staging stg-m… no data 4m`, `lab master-01 no data 4m`.
+        assert!(node_has_room(&theme, 7, NO_DATA_SLOT_CHARS));
+        assert!(node_has_room(&theme, 3, NO_DATA_SLOT_CHARS));
+    }
+
     #[test]
     fn the_switcher_tooltip_names_the_environment_and_unread_elsewhere() {
         assert_eq!(

@@ -5,11 +5,12 @@
 //!
 //! The endpoints' numbers come with the cluster nodes' states the status
 //! poll already asks for (a few more attributes in the same request). The
-//! `ApiListener` status and the features need requests of their own: they
-//! are asked for only while the page is open ([`crate::Command::WatchHealth`])
-//! and the environment isn't quiet, with the status polls (the listener)
-//! or when the page opens and every five minutes (the features), each
-//! request taken from the request budget. A closed page costs nothing.
+//! `ApiListener` status and the features need requests of their own: while
+//! the page is open ([`crate::Command::WatchHealth`]) and the environment
+//! isn't quiet, with the status polls (the listener) or when the page opens
+//! and every five minutes (the features); otherwise both every five
+//! minutes, for the trouble alerts (PLAN.md §4.2 E2). Each request is taken
+//! from the request budget, and none goes out while the engine isn't live.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;

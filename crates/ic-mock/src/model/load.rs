@@ -161,6 +161,7 @@ impl World {
                 })
                 .collect(),
             checks_stopped: false,
+            checkers_stopped: BTreeSet::new(),
         };
 
         let mut line = 1;

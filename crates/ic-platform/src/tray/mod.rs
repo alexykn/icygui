@@ -251,12 +251,11 @@ impl Tray {
     }
 
     /// Lists the environments, as `(id, name)` pairs in display order, in
-    /// the menu's environment lines; `active` is marked `✓` (and can't be
-    /// chosen again). Choosing another one sends
+    /// the menu's environment lines, each with its status and no check
+    /// mark (16e; `active` is kept for the menu's state). Choosing one sends
     /// [`TrayCommand::SwitchEnvironment`] and changes nothing in the menu
-    /// by itself, so a switch that is refused or fails leaves the mark on
-    /// the environment that is still active. Call this again once the
-    /// active environment has changed, and whenever the list changes.
+    /// by itself. Call this again once the active environment has changed,
+    /// and whenever the list changes.
     pub fn set_environments(&self, environments: &[(String, String)], active: Option<&str>) {
         self.update_menu(|state| {
             state.environments = environments.to_vec();
@@ -547,17 +546,17 @@ mod tests {
         activate(&items, "Resume notifications");
         activate(&submenu("Pause notifications"), "For 30 minutes");
         activate(&submenu("Pause notifications"), "Until 08:00");
-        activate(&items, "\u{2003}staging");
+        activate(&items, "staging");
         activate(&items, "Paused until 18:30");
         activate(&items, "Quit icygui");
         on_icon_event(&click(MouseButton::Left, MouseButtonState::Up));
 
-        // A click changes nothing in the menu by itself: if the app refuses
-        // the switch, the mark stays on the active environment.
+        // A click changes nothing in the menu by itself; no line carries a
+        // check mark (16e).
         assert_eq!(environment_lines(&items), environments_before);
         assert_eq!(
             environments_before,
-            ["✓ prod (off)", "\u{2003}staging"],
+            ["prod", "staging"],
             "{environments_before:?}"
         );
 

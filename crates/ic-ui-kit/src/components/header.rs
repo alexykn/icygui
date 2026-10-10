@@ -8,7 +8,7 @@ use crate::px;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _,
+    Styled as _, Window, div, prelude::FluentBuilder as _, relative,
 };
 
 use crate::components::{GlyphButton, Tooltip};
@@ -150,9 +150,13 @@ impl RenderOnce for PaneHeader {
                         .child(label),
                 )
             })
+            // The title stays whole while the subtitle gives way (a
+            // dashboard's name before its filter), up to half the header.
             .when_some(self.title, |header, title| {
                 header.child(
                     div()
+                        .flex_none()
+                        .max_w(relative(0.5))
                         .min_w_0()
                         .truncate()
                         .text_size(text.heading)

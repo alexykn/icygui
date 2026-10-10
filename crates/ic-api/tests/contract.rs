@@ -352,9 +352,10 @@ async fn real_icinga_cluster_health() {
         (0, 0),
         "a single master talks to no other endpoint"
     );
-    let features = client.node_features().await.unwrap();
+    let read = client.node_features(&[]).await.unwrap();
+    assert!(read.refused.is_empty(), "{read:?}");
     assert_eq!(
-        features,
+        read.features,
         ic_model::NodeFeatures {
             checker: Some(ic_model::FeatureState::Running),
             notification: Some(ic_model::FeatureState::Running),

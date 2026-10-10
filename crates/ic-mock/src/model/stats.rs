@@ -266,7 +266,7 @@ impl World {
             connected.len() as f64,
             not_connected.len() as f64,
         );
-        let (relay_items, relay_rate, work_rate) = self.json_rpc_queues(&identity, &not_connected);
+        let (relay_items, relay_rate, work_rate) = self.json_rpc_queues(&identity);
         let mut json_rpc = Map::new();
         json_rpc.insert("anonymous_clients".into(), int(0));
         json_rpc.insert("relay_queue_item_rate".into(), num(relay_rate));
@@ -304,28 +304,21 @@ impl World {
     }
 
     /// The JSON-RPC queues: the messages the connected endpoints send are
-    /// the work; while an endpoint the node talks to is gone, messages for
-    /// its zone pile up in the relay queue (96 a second since the first
-    /// one left). Returns the relay queue's items and rate and the work
-    /// queue's rate.
-    fn json_rpc_queues(&self, identity: &str, not_connected: &[Json]) -> (f64, f64, f64) {
-        let now = self.now();
+    /// the work, and a quarter of it is relayed on. An endpoint that is gone
+    /// does not fill the relay queue: Icinga skips disconnected endpoints
+    /// when it relays and writes their messages to the replay log instead
+    /// (checked against Icinga 2.15.6 in Docker: 300 results for a host in
+    /// a zone whose only endpoint never connected, `relay_queue_items`
+    /// stayed 0 while the rate rose). Returns the relay queue's items and
+    /// rate and the work queue's rate.
+    fn json_rpc_queues(&self, identity: &str) -> (f64, f64, f64) {
         let work_rate: f64 = self
             .endpoints
             .values()
             .filter(|e| e.connected && e.name != identity)
             .map(|e| e.message_rate)
             .sum();
-        let gone_since = not_connected
-            .iter()
-            .filter_map(|name| self.endpoints.get(name.as_str()?))
-            .map(|e| e.last_message)
-            .filter(|at| *at > 0.0)
-            .reduce(f64::min);
-        match gone_since {
-            Some(since) => (((now - since).max(0.0) * 96.0).floor(), 96.0, work_rate),
-            None => (0.0, work_rate / 4.0, work_rate),
-        }
+        (0.0, work_rate / 4.0, work_rate)
     }
 
     fn service_check_times(&self) -> CheckTimes {

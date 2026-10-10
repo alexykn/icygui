@@ -1093,6 +1093,7 @@ impl Sidebar {
         let name = state
             .environment()
             .map(|environment| environment.name.clone());
+        let name_chars = name.as_ref().map_or(0, |name| name.chars().count());
         // A node that doesn't see the whole cluster says so (ENV-12).
         let marker = connection.view_marker();
         let partial = marker.as_ref().is_some_and(|marker| marker.partial);
@@ -1132,12 +1133,12 @@ impl Sidebar {
             .active(|style| style.bg(colors.element_active))
             .child(StateDot::with_color(health_color(health, theme)).size(metrics.status_dot))
             .when_some(name, |status, name| {
-                // The name gives way to the node (at most
-                // `STATUS_NODE_MAX`): both stay readable (ENV-06, ENV-12).
+                // The name (at most `STATUS_NAME_MAX`) stays readable:
+                // the node beside it is cut short first (ENV-06, ENV-12).
                 status.child(
                     div()
                         .min_w_0()
-                        .ml(px(5.))
+                        .ml(px(STATUS_NAME_GAP))
                         .max_w(px(STATUS_NAME_MAX))
                         .truncate()
                         .text_color(if open {
@@ -1149,12 +1150,20 @@ impl Sidebar {
                 )
             })
             .map(|status| {
-                Self::status_detail(status, connected, endpoint, suffix, partial, no_data, theme)
+                let detail = StatusDetail {
+                    connected,
+                    endpoint,
+                    suffix,
+                    partial,
+                    no_data,
+                    name_chars,
+                };
+                Self::status_detail(status, detail, theme)
             })
             .child(
-                div().flex_none().ml(px(2.)).child(
+                div().flex_none().ml(px(STATUS_CHEVRON_GAP)).child(
                     Icon::new(IconName::ChevronDown)
-                        .size(px(10.))
+                        .size(px(STATUS_CHEVRON))
                         .color(if elsewhere.is_empty() {
                             colors.text_muted
                         } else {
@@ -1181,60 +1190,61 @@ impl Sidebar {
     /// The footer switcher's middle: connected, the node (its first DNS
     /// label: `icinga-master-02` of `icinga-master-02.example.com`; the
     /// tooltip and the details have it in full), cut short beyond
-    /// [`STATUS_NODE_MAX`] (the name gives way first), then at the right the age of the
-    /// last event in a slot of its own (it never shortens the node as it
-    /// ticks, ENV-06). A node that sees only part of the cluster
-    /// (a satellite) is coloured, nothing more (ENV-12): the tooltip, the
-    /// details and the summary bar say what it means. Otherwise what the
-    /// connection does (`retry in 12s`).
-    fn status_detail(
-        status: Stateful<Div>,
-        connected: bool,
-        endpoint: String,
-        suffix: Option<String>,
-        partial: bool,
-        no_data: bool,
-        theme: &Theme,
-    ) -> Stateful<Div> {
-        let slot = if no_data {
+    /// [`STATUS_NODE_MAX`] and before the environment's name when room is
+    /// short, then the age of the last event (or `no data 3m`) in a slot of
+    /// its own right after it (it never shortens the node as it ticks,
+    /// ENV-06). Without room for a few characters of the node it gives way
+    /// whole ([`node_has_room`]) rather than leave a lone ellipsis. A node
+    /// that sees only part of the cluster (a satellite) is coloured,
+    /// nothing more (ENV-12): the tooltip, the details and the summary bar
+    /// say what it means. Otherwise what the connection does
+    /// (`retry in 12s`).
+    fn status_detail(status: Stateful<Div>, detail: StatusDetail, theme: &Theme) -> Stateful<Div> {
+        let slot = if detail.no_data {
             NO_DATA_SLOT_CHARS
         } else {
             AGE_SLOT_CHARS
         };
-        match (connected, suffix) {
-            // Without live data the node gives way to `no data 3m`, so the
-            // environment's name stays whole in the sidebar-wide footer
-            // (the banner names the node).
+        match (detail.connected, detail.suffix) {
+            // The node stays while it has room (the connected node is
+            // visible, PLAN §4.3); it is cut short before the environment's
+            // name. The age (or `no data 3m`) follows it, left-aligned in
+            // its fixed slot, so the free room sits before the chevron and
+            // nothing after the slot moves with what it says (16f).
             (true, Some(age)) => status
-                .when(!no_data, |status| {
+                .when(node_has_room(theme, detail.name_chars, slot), |status| {
                     status.child(
                         div()
-                            .flex_none()
+                            .flex_shrink(8.)
+                            .min_w_0()
                             .max_w(px(STATUS_NODE_MAX))
-                            .ml(px(5.))
+                            .ml(px(STATUS_NODE_GAP))
                             .truncate()
-                            .when(partial, |node| node.text_color(theme.states.text.warning))
-                            .child(short_node(&endpoint).to_owned()),
+                            .when(detail.partial, |node| {
+                                node.text_color(theme.states.text.warning)
+                            })
+                            .child(short_node(&detail.endpoint).to_owned()),
                     )
                 })
-                .child(div().flex_1())
                 .child(
                     div()
                         .flex()
                         .flex_none()
-                        .ml(px(2.))
-                        .justify_end()
+                        .ml(px(STATUS_AGE_GAP))
                         .w(theme.text.hint * (slot * ic_ui_kit::CHAR_WIDTH))
-                        .when(no_data, |age| age.text_color(theme.states.text.warning))
+                        .when(detail.no_data, |age| {
+                            age.text_color(theme.states.text.warning)
+                        })
                         .child(age),
-                ),
+                )
+                .child(div().flex_1()),
             (_, suffix) => status
                 .child(
                     div()
                         .min_w_0()
-                        .ml(px(5.))
+                        .ml(px(STATUS_NAME_GAP))
                         .truncate()
-                        .child(suffix.unwrap_or(endpoint)),
+                        .child(suffix.unwrap_or(detail.endpoint)),
                 )
                 .child(div().flex_1()),
         }
@@ -1334,10 +1344,10 @@ impl Sidebar {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(8.))
+            .gap(px(FOOTER_GAP))
             .h(Metrics::with_rule(metrics.footer_height))
-            .pl(px(9.))
-            .pr(px(5.))
+            .pl(px(FOOTER_LEFT))
+            .pr(px(FOOTER_RIGHT))
             .border_t_1()
             .border_color(colors.border_header)
             .child(
@@ -1402,6 +1412,64 @@ pub(super) fn short_node(name: &str) -> &str {
 const AGE_SLOT_CHARS: f32 = 3.;
 /// The slot of `no data 59m`, in characters.
 const NO_DATA_SLOT_CHARS: f32 = 11.;
+/// The footer's padding left and right of its buttons, and the gap
+/// between them (the icons sit where the design draws them).
+const FOOTER_LEFT: f32 = 9.;
+const FOOTER_RIGHT: f32 = 5.;
+const FOOTER_GAP: f32 = 8.;
+/// Room before the environment's name (after the dot), the node, the age
+/// and the chevron in the footer switcher, and the chevron's size: about
+/// 16f's spacing, so `prod-cluster master-01 59s` fits whole.
+const STATUS_NAME_GAP: f32 = 5.;
+const STATUS_NODE_GAP: f32 = 4.;
+const STATUS_AGE_GAP: f32 = 3.;
+const STATUS_CHEVRON_GAP: f32 = 1.;
+const STATUS_CHEVRON: f32 = 10.;
+/// The fewest characters of the node the footer shows (`stg-m…`); with
+/// less room it gives way whole.
+const NODE_MIN_CHARS: f32 = 6.;
+
+/// What the footer switcher's middle shows (see `Sidebar::status_detail`).
+struct StatusDetail {
+    connected: bool,
+    endpoint: String,
+    suffix: Option<String>,
+    partial: bool,
+    no_data: bool,
+    /// The environment name's length, in characters.
+    name_chars: usize,
+}
+
+/// Whether the footer switcher has room for at least [`NODE_MIN_CHARS`]
+/// of the node beside an environment name of `name_chars` characters and
+/// an age slot of `slot_chars`. The text is monospaced and every width in
+/// the footer is the theme's, so this is arithmetic: with less room the
+/// node gives way whole (`prod-cluster no data 4m`; the banner and the
+/// details name it) rather than leave a lone ellipsis.
+fn node_has_room(theme: &Theme, name_chars: usize, slot_chars: f32) -> bool {
+    let metrics = theme.metrics;
+    let char_width = theme.text.hint * ic_ui_kit::CHAR_WIDTH;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "an environment name is far shorter than 2^23 characters"
+    )]
+    let name = (char_width * name_chars as f32).min(px(STATUS_NAME_MAX));
+    // The footer (less the sidebar's border and a pixel of rounding), its
+    // padding, gaps and three icon buttons, then the switcher's own
+    // padding (it reaches a pixel to the left), dot, gaps and chevron.
+    let buttons = metrics.icon_button * 3.;
+    let footer = px(FOOTER_LEFT + FOOTER_RIGHT + 3. * FOOTER_GAP + 2.);
+    let switcher = px(STATUS_PADDING
+        + 2.
+        + STATUS_NAME_GAP
+        + STATUS_NODE_GAP
+        + STATUS_AGE_GAP
+        + STATUS_CHEVRON_GAP
+        + STATUS_CHEVRON)
+        + metrics.status_dot;
+    let room = metrics.sidebar_width - footer - buttons - switcher - name - char_width * slot_chars;
+    room >= char_width * NODE_MIN_CHARS
+}
 
 /// The footer dot's colour (ENV-06): green while live, yellow when stale,
 /// red when reconnecting or failed, grey otherwise.

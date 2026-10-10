@@ -119,6 +119,10 @@ pub(crate) struct World {
     pub(crate) realtime: BTreeMap<String, f64>,
     /// No check runs (`MockControl::stop_checks`): the checker hangs.
     pub(crate) checks_stopped: bool,
+    /// Endpoints whose checker hangs while they stay connected
+    /// (`MockControl::stop_checks_on`): they run no check of their zone's
+    /// and answer no check pinned to them.
+    pub(crate) checkers_stopped: BTreeSet<String>,
 }
 
 /// Wall-clock seconds since the epoch.

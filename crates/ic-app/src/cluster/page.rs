@@ -13,6 +13,21 @@
 //! The editor shows the page as its preview (the draft's views instead of
 //! the saved ones, without the header): a click on a view's header selects
 //! the view in the inspector.
+//!
+//! **Keyboard** (a dashboard's model, its `DashboardView` keys): one cursor
+//! over the heartbeat row's *settings*, the worst alert's link, the late
+//! checks and their `+ N more`, the views' headers, the zones and the
+//! endpoints (`↑`/`↓`, `j`/`k`; `tab` to the next view's header); `←`/`→`
+//! fold and unfold the view (or show fewer and more late checks); `Enter`
+//! follows a link, opens a late check as a tab, folds a view; `Home`/`End`
+//! go to the first and last stop, `PageUp`/`PageDown` scroll the body;
+//! `Esc` closes the late checks, then leaves the cursor. The cursor is the
+//! accent bar on its row (on a link, an accent outline), and the body
+//! scrolls to it. *show master-02* puts it on that endpoint's row.
+//!
+//! **No false green:** without live data the page draws no green dot
+//! ([`super::health::Liveness`]); the health line says *as of* when the
+//! states came.
 
 use std::time::Duration;
 
@@ -23,7 +38,6 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use ic_config::{HealthPage as HealthLayout, View, ViewDisplay};
-use ic_core::NodeState;
 use ic_core::trouble::AlertAction;
 use ic_model::{FeatureState, ObjectKey, Timestamp, format_compact};
 use ic_ui_kit::{
@@ -32,16 +46,51 @@ use ic_ui_kit::{
 };
 
 use super::beats::{AlertLine, BeatCell, BeatRow, BeatTone};
-use super::health::{EndpointRow, Report, Tile, Tone, ZoneGroup, count_text, report};
+use super::health::{EndpointRow, Liveness, Report, Tile, Tone, ZoneGroup, count_text, report};
 use super::spark;
+use crate::actions::{
+    Dismiss, NextView, OpenSelected, PreviousView, SelectFirst, SelectLast, SelectNext,
+    SelectPageDown, SelectPageUp, SelectPrevious,
+};
 use crate::app_state::AppState;
 use crate::chrome::{Controls, WindowDrag};
+use crate::lists::view::{Fold, Unfold};
 use crate::menu_state::{OpenMenu, down_position};
 use crate::workspace::sidebar_reopen;
 
 /// The late checks the banner's fold shows before `+ N more` (the hosts'
 /// paging rule).
 const LATE_PREVIEW: usize = 7;
+
+/// The page's key context: a dashboard's keys (`DashboardView`), and its
+/// own name.
+const HEALTH_CONTEXT: &str = "DashboardView HealthPage";
+
+/// A place the page's keyboard cursor stands on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// The heartbeat row's *settings*.
+    BeatSettings,
+    /// The worst alert's link.
+    AlertLink,
+    /// A late check under the alert block (by its place).
+    Late(usize),
+    /// The late checks' `+ N more` / `− show fewer`.
+    LateMore,
+    /// A view's header.
+    Header(ViewDisplay),
+    /// A zone's band.
+    Zone(String),
+    /// An endpoint's row.
+    Endpoint(String),
+}
+
+impl Stop {
+    /// Whether it sits in the scrolling body (the others are pinned).
+    fn in_body(&self) -> bool {
+        !matches!(self, Self::BeatSettings | Self::AlertLink)
+    }
+}
 
 /// What the page tells the workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +101,32 @@ pub(crate) enum HealthPageEvent {
     Settings,
     /// A view's header clicked in the editor's preview: select it there.
     Pick(String),
+}
+
+/// How much of the worst alert's late checks shows under the block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LateFold {
+    /// None (the link reads *show the late checks*).
+    #[default]
+    Closed,
+    /// The first seven, then `+ N more`.
+    Preview,
+    /// All of them, then `− show fewer`.
+    All,
+}
+
+impl LateFold {
+    fn is_open(self) -> bool {
+        self != Self::Closed
+    }
+
+    /// `+ N more` / `− show fewer`.
+    fn more_or_fewer(self) -> Self {
+        match self {
+            Self::All => Self::Preview,
+            Self::Preview | Self::Closed => Self::All,
+        }
+    }
 }
 
 /// The page's popup menus.
@@ -83,11 +158,23 @@ pub(crate) struct HealthPage {
     /// The folded views, by kind.
     folded: Vec<ViewDisplay>,
     /// The worst alert's late checks are shown, and all of them.
-    late_open: bool,
-    late_all: bool,
+    late: LateFold,
     menus: OpenMenu<PageMenu>,
     /// The editor's preview, when the page is one.
     preview: Option<Preview>,
+    /// The keyboard cursor.
+    cursor: Option<Stop>,
+    /// The cursor moved: the body scrolls to it when next drawn.
+    reveal: bool,
+    /// The body's scroll, and where the stops' rows sit in it (as last
+    /// drawn).
+    scroll: gpui::ScrollHandle,
+    rows: Vec<(Stop, usize)>,
+    /// The stops in their order, the worst alert's link and the late
+    /// checks, as last drawn.
+    stops: Vec<Stop>,
+    worst_action: Option<AlertAction>,
+    late_keys: Vec<ObjectKey>,
     _subscription: Subscription,
 }
 
@@ -102,10 +189,16 @@ impl HealthPage {
             drag: WindowDrag::default(),
             focus_handle: cx.focus_handle(),
             folded: Vec::new(),
-            late_open: false,
-            late_all: false,
+            late: LateFold::Closed,
             menus: OpenMenu::default(),
             preview: None,
+            cursor: None,
+            reveal: false,
+            scroll: gpui::ScrollHandle::new(),
+            rows: Vec::new(),
+            stops: Vec::new(),
+            worst_action: None,
+            late_keys: Vec::new(),
             _subscription: subscription,
         }
     }
@@ -174,11 +267,269 @@ impl HealthPage {
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn report(&self, cx: &gpui::App) -> Report {
         let state = self.state.read(cx);
+        let now = Timestamp::now();
         report(
             state.snapshot(),
-            state.connection().is_connected(),
-            Timestamp::now(),
+            super::liveness(state.snapshot(), state.connection(), now),
+            now,
         )
+    }
+
+    /// Where the keyboard cursor stands (tests).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn cursor(&self) -> Option<&Stop> {
+        self.cursor.as_ref()
+    }
+
+    /// The stops in their order, the worst alert's link and the late
+    /// checks, for `report` and the page's `views`.
+    fn layout(&self, report: &Report, views: &[View]) -> Vec<Stop> {
+        let mut stops = vec![Stop::BeatSettings];
+        if report
+            .alerts
+            .first()
+            .is_some_and(|alert| alert.link.is_some())
+        {
+            stops.push(Stop::AlertLink);
+        }
+        if self.late.is_open() && !report.late.is_empty() {
+            let shown = if self.late == LateFold::All {
+                report.late.len()
+            } else {
+                report.late.len().min(LATE_PREVIEW)
+            };
+            stops.extend((0..shown).map(Stop::Late));
+            if report.late.len() > LATE_PREVIEW {
+                stops.push(Stop::LateMore);
+            }
+        }
+        for view in views {
+            stops.push(Stop::Header(view.display));
+            if view.display == ViewDisplay::ZonesAndEndpoints && !self.is_folded(view.display) {
+                for zone in &report.zones {
+                    stops.push(Stop::Zone(zone.name.clone()));
+                    stops.extend(
+                        zone.endpoints
+                            .iter()
+                            .map(|endpoint| Stop::Endpoint(endpoint.name.clone())),
+                    );
+                }
+            }
+        }
+        stops
+    }
+
+    /// Puts the cursor on `stop` (the body scrolls to it).
+    fn set_cursor(&mut self, stop: Option<Stop>, cx: &mut Context<Self>) {
+        if self.cursor != stop {
+            self.cursor = stop;
+            self.reveal = true;
+            cx.notify();
+        }
+    }
+
+    /// Moves the cursor `by` stops (down when positive), from the first or
+    /// last stop when there is none.
+    fn move_cursor(&mut self, by: isize, cx: &mut Context<Self>) {
+        if self.stops.is_empty() {
+            return;
+        }
+        let last = self.stops.len() - 1;
+        let next = match self
+            .cursor
+            .as_ref()
+            .and_then(|cursor| self.stops.iter().position(|stop| stop == cursor))
+        {
+            Some(index) => index.saturating_add_signed(by).min(last),
+            None if by >= 0 => 0,
+            None => last,
+        };
+        let stop = self.stops[next].clone();
+        self.set_cursor(Some(stop), cx);
+    }
+
+    /// The view the cursor is in (its header, or a row of its body).
+    fn cursor_view(&self) -> Option<ViewDisplay> {
+        match self.cursor.as_ref()? {
+            Stop::Header(display) => Some(*display),
+            Stop::Zone(_) | Stop::Endpoint(_) => Some(ViewDisplay::ZonesAndEndpoints),
+            _ => None,
+        }
+    }
+
+    fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_cursor(1, cx);
+    }
+
+    fn select_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_cursor(-1, cx);
+    }
+
+    fn select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) {
+        let first = self.stops.first().cloned();
+        self.set_cursor(first, cx);
+        self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+        cx.notify();
+    }
+
+    fn select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) {
+        let last = self.stops.last().cloned();
+        self.set_cursor(last, cx);
+        self.scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// Scrolls the body by a screenful (`down`: towards the end).
+    fn page(&mut self, down: bool, cx: &mut Context<Self>) {
+        let height = self.scroll.bounds().size.height;
+        let offset = self.scroll.offset();
+        let max = self.scroll.max_offset().y;
+        let y = if down {
+            (offset.y - height).max(-max)
+        } else {
+            (offset.y + height).min(px(0.))
+        };
+        self.scroll.set_offset(gpui::point(offset.x, y));
+        cx.notify();
+    }
+
+    fn select_page_down(&mut self, _: &SelectPageDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.page(true, cx);
+    }
+
+    fn select_page_up(&mut self, _: &SelectPageUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.page(false, cx);
+    }
+
+    fn next_view(&mut self, _: &NextView, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_view(true, cx);
+    }
+
+    fn previous_view(&mut self, _: &PreviousView, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_view(false, cx);
+    }
+
+    /// The cursor to the next (or previous) view's header.
+    fn jump_view(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let at = self
+            .cursor
+            .as_ref()
+            .and_then(|cursor| self.stops.iter().position(|stop| stop == cursor));
+        let headers = self
+            .stops
+            .iter()
+            .enumerate()
+            .filter(|(_, stop)| matches!(stop, Stop::Header(_)));
+        let target = if forward {
+            headers
+                .filter(|(index, _)| at.is_none_or(|at| *index > at))
+                .map(|(_, stop)| stop.clone())
+                .next()
+        } else {
+            headers
+                .filter(|(index, _)| at.is_none_or(|at| *index < at))
+                .map(|(_, stop)| stop.clone())
+                .next_back()
+        };
+        if target.is_some() {
+            self.set_cursor(target, cx);
+        }
+    }
+
+    fn unfold(&mut self, _: &Unfold, _: &mut Window, cx: &mut Context<Self>) {
+        match self.cursor.clone() {
+            Some(Stop::LateMore) => {
+                self.late = LateFold::All;
+                cx.notify();
+            }
+            Some(Stop::AlertLink)
+                if matches!(self.worst_action, Some(AlertAction::LateChecks { .. })) =>
+            {
+                if !self.late.is_open() {
+                    self.late = LateFold::Preview;
+                }
+                cx.notify();
+            }
+            _ => {
+                if let Some(display) = self.cursor_view()
+                    && self.is_folded(display)
+                {
+                    self.toggle(display, cx);
+                }
+            }
+        }
+    }
+
+    fn fold(&mut self, _: &Fold, _: &mut Window, cx: &mut Context<Self>) {
+        match self.cursor.clone() {
+            Some(Stop::LateMore) if self.late == LateFold::All => {
+                self.late = LateFold::Preview;
+                cx.notify();
+            }
+            Some(Stop::Late(_) | Stop::LateMore) => {
+                self.late = LateFold::Closed;
+                self.set_cursor(Some(Stop::AlertLink), cx);
+            }
+            _ => {
+                if let Some(display) = self.cursor_view()
+                    && !self.is_folded(display)
+                {
+                    // The cursor goes up to the header it folds under.
+                    self.set_cursor(Some(Stop::Header(display)), cx);
+                    self.toggle(display, cx);
+                }
+            }
+        }
+    }
+
+    fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(stop) = self.cursor.clone() {
+            self.activate(&stop, window, cx);
+        }
+    }
+
+    fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
+        if self.late.is_open() {
+            self.late = LateFold::Closed;
+            if matches!(self.cursor, Some(Stop::Late(_) | Stop::LateMore)) {
+                self.set_cursor(Some(Stop::AlertLink), cx);
+            }
+            cx.notify();
+        } else {
+            self.set_cursor(None, cx);
+        }
+    }
+
+    /// What Enter (or a click) on `stop` does.
+    fn activate(&mut self, stop: &Stop, window: &mut Window, cx: &mut Context<Self>) {
+        match stop {
+            Stop::BeatSettings => {
+                if self.preview.is_none() {
+                    cx.emit(HealthPageEvent::Settings);
+                }
+            }
+            Stop::AlertLink => {
+                if let Some(action) = self.worst_action.clone() {
+                    self.alert_action(&action, window, cx);
+                }
+            }
+            Stop::Late(index) => {
+                if let Some(key) = self.late_keys.get(*index).cloned() {
+                    self.state.update(cx, |state, cx| {
+                        if state.open_tab(key) {
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+            Stop::LateMore => {
+                self.late = self.late.more_or_fewer();
+                cx.notify();
+            }
+            Stop::Header(display) => self.toggle(*display, cx),
+            // Clicking a node asks nothing more (06).
+            Stop::Zone(_) | Stop::Endpoint(_) => {}
+        }
     }
 
     /// The page's header: `cluster health`, the environment and the node
@@ -204,11 +555,16 @@ impl HealthPage {
                 Some(node) => format!("{environment} · seen from {node}"),
                 None => environment,
             })
+            // Its age turns the warning colour once it isn't current.
             .child(
                 div()
                     .flex_none()
                     .text_size(theme.text.small)
-                    .text_color(colors.text_faint)
+                    .text_color(if report.live.is_live() {
+                        colors.text_faint
+                    } else {
+                        theme.states.text.warning
+                    })
                     .child(updated_text(report, now)),
             )
             .child(self.options_trigger(cx));
@@ -223,9 +579,16 @@ impl HealthPage {
     /// The health line: endpoints connected and not in fixed slots (a
     /// count gaining a digit moves nothing), then room for more status
     /// slots of the same kind (dot, label, age) beside them, and Icinga's
-    /// version and uptime at the right.
-    fn render_health_line(report: &Report, theme: &Theme) -> AnyElement {
+    /// version and uptime at the right. Without live data the dots turn
+    /// grey and a third slot says when the states came (`as of 06:56`).
+    fn render_health_line(report: &Report, now: Timestamp, theme: &Theme) -> AnyElement {
         let colors = theme.colors;
+        let live = report.live.is_live();
+        let connected = if live && report.connected > 0 {
+            theme.states.fill.ok
+        } else {
+            theme.states.fill.pending
+        };
         let not_connected = if report.not_connected > 0 {
             theme.states.fill.critical
         } else {
@@ -233,7 +596,7 @@ impl HealthPage {
         };
         let slots = [
             status_slot(
-                theme.states.fill.ok,
+                connected,
                 format!("{} connected", report.connected),
                 "999 connected",
                 theme,
@@ -245,6 +608,13 @@ impl HealthPage {
                 theme,
             ),
         ];
+        let as_of = match report.live {
+            Liveness::Live => None,
+            Liveness::Stale { as_of } => Some(as_of.map_or_else(
+                || "not current".to_owned(),
+                |at| format!("as of {}", crate::format::list_clock(at, now)),
+            )),
+        };
         div()
             .id("health-line")
             .flex()
@@ -260,6 +630,13 @@ impl HealthPage {
             .whitespace_nowrap()
             .overflow_hidden()
             .children(slots)
+            .children(as_of.map(|as_of| {
+                div()
+                    .id("health-as-of")
+                    .flex_none()
+                    .text_color(theme.states.text.warning)
+                    .child(as_of)
+            }))
             .child(div().flex_1().min_w_0())
             .child(
                 div()
@@ -360,16 +737,23 @@ impl HealthPage {
                     .truncate()
                     .child(row.subject.clone()),
             )
+            // The status in a slot sized for its longest late wording
+            // (`99 intervals late`), so a late beat's age starts at a fixed
+            // place whatever the words (16a2); a longer status without an
+            // age just runs on.
             .child(
                 div()
                     .flex_none()
+                    .min_w(slot(STATUS_SLOT_CHARS))
                     .text_color(text(row.tone.text()))
                     .child(row.status.clone()),
             )
             .children(row.age.clone().map(|age| {
                 div()
                     .flex_none()
-                    .ml(px(24.))
+                    .w(slot(AGE_SLOT_CHARS))
+                    .flex()
+                    .justify_end()
                     .text_color(colors.text_secondary)
                     .child(age)
             }))
@@ -383,13 +767,17 @@ impl HealthPage {
                 )
             })
             .child(
-                Link::new("health-beats-settings", "settings").on_click(cx.listener(
-                    move |_, _: &ClickEvent, _, cx| {
-                        if !preview {
-                            cx.emit(HealthPageEvent::Settings);
-                        }
-                    },
-                )),
+                focus_outline(self.cursor == Some(Stop::BeatSettings), theme).child(
+                    Link::new("health-beats-settings", "settings").on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.cursor = Some(Stop::BeatSettings);
+                            if !preview {
+                                cx.emit(HealthPageEvent::Settings);
+                            }
+                            cx.notify();
+                        },
+                    )),
+                ),
             )
             .into_any_element()
     }
@@ -430,16 +818,18 @@ impl HealthPage {
         let link = worst.link.clone().map(|(words, action)| {
             Link::new(
                 "health-alert-link",
-                if matches!(action, AlertAction::LateChecks { .. }) && self.late_open {
+                if matches!(action, AlertAction::LateChecks { .. }) && self.late.is_open() {
                     "hide the late checks".to_owned()
                 } else {
                     words
                 },
             )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.alert_action(&action, cx);
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.cursor = Some(Stop::AlertLink);
+                this.alert_action(&action, window, cx);
             }))
         });
+        let link_cursor = self.cursor == Some(Stop::AlertLink);
         let first = div()
             .id("health-alert-0")
             .flex()
@@ -473,7 +863,11 @@ impl HealthPage {
                         )
                     }),
             )
-            .children(link.map(|link| div().flex_none().text_size(theme.text.small).child(link)))
+            .children(link.map(|link| {
+                focus_outline(link_cursor, theme)
+                    .text_size(theme.text.small)
+                    .child(link)
+            }))
             .child(since(worst));
         let others = alerts.iter().enumerate().skip(1).map(|(index, line)| {
             div()
@@ -523,19 +917,27 @@ impl HealthPage {
     }
 
     /// What the worst alert's link does.
-    fn alert_action(&mut self, action: &AlertAction, cx: &mut Context<Self>) {
+    fn alert_action(&mut self, action: &AlertAction, window: &mut Window, cx: &mut Context<Self>) {
         if self.preview.is_some() {
             return;
         }
         match action {
             AlertAction::LateChecks { .. } => {
-                self.late_open = !self.late_open;
+                self.late = if self.late.is_open() {
+                    LateFold::Closed
+                } else {
+                    LateFold::Preview
+                };
                 cx.notify();
             }
-            AlertAction::ShowNode(_) => {
-                // The node's row is in the zones view: unfold it.
+            AlertAction::ShowNode(node) => {
+                // The node's row is in the zones view: unfold it, put the
+                // cursor on the row (marked, and scrolled to) and give the
+                // page the keyboard.
                 self.folded
                     .retain(|display| *display != ViewDisplay::ZonesAndEndpoints);
+                self.set_cursor(Some(Stop::Endpoint(node.clone())), cx);
+                window.focus(&self.focus_handle, cx);
                 cx.notify();
             }
             AlertAction::Settings => cx.emit(HealthPageEvent::Settings),
@@ -544,73 +946,77 @@ impl HealthPage {
 
     /// The worst alert's late checks under the block, most overdue first:
     /// seven, then `+ N more` (all of them, `− show fewer`). A click opens
-    /// one as a tab.
+    /// one as a tab. Each a row of the body, with its stop.
     fn render_late(
         &self,
         report: &Report,
         now: Timestamp,
         cx: &Context<Self>,
-    ) -> Option<AnyElement> {
-        if !self.late_open || report.late.is_empty() {
-            return None;
+    ) -> Vec<(Option<Stop>, AnyElement)> {
+        if !self.late.is_open() || report.late.is_empty() {
+            return Vec::new();
         }
         let theme = cx.theme();
         let colors = theme.colors;
         let state = self.state.read(cx);
         let snapshot = state.snapshot();
-        let shown = if self.late_all {
+        let shown = if self.late == LateFold::All {
             report.late.len()
         } else {
             report.late.len().min(LATE_PREVIEW)
         };
-        let rows = report
+        let mut rows: Vec<(Option<Stop>, AnyElement)> = report
             .late
             .iter()
             .take(shown)
             .enumerate()
-            .map(|(index, key)| Self::late_row(index, key, snapshot, now, cx));
-        let more = (report.late.len() > LATE_PREVIEW).then(|| {
-            let text = if self.late_all {
+            .map(|(index, key)| {
+                (
+                    Some(Stop::Late(index)),
+                    self.late_row(index, key, snapshot, now, cx),
+                )
+            })
+            .collect();
+        if report.late.len() > LATE_PREVIEW {
+            let text = if self.late == LateFold::All {
                 "− show fewer".to_owned()
             } else {
                 format!("+ {} more", count_text((report.late.len() - shown) as u64))
             };
-            div()
-                .id("health-late-more")
-                .flex()
-                .flex_none()
-                .items_center()
-                .h(Metrics::with_rule(theme.metrics.item_row_height))
-                .pl(theme.metrics.list_padding + px(26.))
-                .border_b_1()
-                .border_color(colors.border_row)
-                .text_size(theme.text.small)
-                .text_color(colors.accent_text)
-                .cursor_pointer()
-                .child(text)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.late_all = !this.late_all;
-                    cx.notify();
-                }))
-                .into_any_element()
-        });
-        Some(
-            div()
-                .id("health-late-list")
-                .flex()
-                .flex_col()
-                .flex_none()
-                .border_b_1()
-                .border_color(colors.border_header)
-                .children(rows)
-                .children(more)
-                .into_any_element(),
-        )
+            let cursor = self.cursor == Some(Stop::LateMore);
+            rows.push((
+                Some(Stop::LateMore),
+                div()
+                    .id("health-late-more")
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .h(Metrics::with_rule(theme.metrics.item_row_height))
+                    .pl(theme.metrics.list_padding + px(26.))
+                    .border_b_1()
+                    .border_color(colors.border_header)
+                    .when(cursor, |row| row.bg(colors.row_selected))
+                    .children(cursor_bar(cursor, theme))
+                    .text_size(theme.text.small)
+                    .text_color(colors.accent_text)
+                    .cursor_pointer()
+                    .child(text)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.cursor = Some(Stop::LateMore);
+                        this.late = this.late.more_or_fewer();
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            ));
+        }
+        rows
     }
 
     /// One late check under the alert block: its mark, `service on host`, how
     /// late it is; a click opens it as a tab.
     fn late_row(
+        &self,
         index: usize,
         key: &ObjectKey,
         snapshot: &ic_core::snapshot::Snapshot,
@@ -637,9 +1043,11 @@ impl HealthPage {
             || "late".to_owned(),
             |due| format!("late {}", format_compact(due.elapsed_until(now))),
         );
+        let cursor = self.cursor == Some(Stop::Late(index));
         let key = key.clone();
         div()
             .id(("health-late-row", index))
+            .relative()
             .flex()
             .flex_none()
             .items_center()
@@ -649,7 +1057,9 @@ impl HealthPage {
             .border_b_1()
             .border_color(colors.border_row)
             .cursor_pointer()
-            .hover(|row| row.bg(colors.row_hover))
+            .when(cursor, |row| row.bg(colors.row_selected))
+            .when(!cursor, |row| row.hover(|row| row.bg(colors.row_hover)))
+            .children(cursor_bar(cursor, theme))
             .child(
                 div()
                     .flex()
@@ -673,6 +1083,7 @@ impl HealthPage {
                     .child(late),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.cursor = Some(Stop::Late(index));
                 let key = key.clone();
                 this.state.update(cx, |state, cx| {
                     if state.open_tab(key) {
@@ -711,6 +1122,9 @@ impl HealthPage {
         };
         let id = view.id.clone();
         let in_preview = self.preview.is_some();
+        // The keyboard cursor marks it like the editor's pick: the accent
+        // bar and the selected tint.
+        let picked = picked || (!in_preview && self.cursor == Some(Stop::Header(display)));
         div()
             .id(section_id(display))
             .relative()
@@ -787,26 +1201,30 @@ impl HealthPage {
                 if in_preview {
                     cx.emit(HealthPageEvent::Pick(id.clone()));
                 } else {
+                    this.cursor = Some(Stop::Header(display));
                     this.toggle(display, cx);
                 }
             }))
             .into_any_element()
     }
 
-    /// The page's views, each a header and (unless folded) its body.
+    /// The page's views, each a header and (unless folded) its body: the
+    /// body's rows, each with the stop it is (if any).
     fn render_sections(
         &self,
         report: &Report,
         views: &[View],
         cx: &Context<Self>,
-    ) -> Vec<AnyElement> {
+    ) -> Vec<(Option<Stop>, AnyElement)> {
         let theme = cx.theme();
         // The editor's preview is narrower: three tiles a row (16k).
         let columns = if self.preview.is_some() { 3 } else { 6 };
-        let mut body: Vec<AnyElement> = Vec::new();
+        let live = report.live;
+        let mut body: Vec<(Option<Stop>, AnyElement)> = Vec::new();
         for (index, view) in views.iter().enumerate() {
             let first = index == 0;
             let folded = self.is_folded(view.display);
+            let header = Some(Stop::Header(view.display));
             match view.display {
                 ViewDisplay::ZonesAndEndpoints => {
                     let about = format!(
@@ -819,63 +1237,77 @@ impl HealthPage {
                         ),
                         plural(report.global_zones.len(), "global zone", "global zones")
                     );
-                    body.push(self.render_section_header(
-                        view,
-                        first,
-                        about,
-                        Some(zone_counts(report, theme)),
-                        cx,
+                    body.push((
+                        header,
+                        self.render_section_header(
+                            view,
+                            first,
+                            about,
+                            Some(zone_counts(report, theme)),
+                            cx,
+                        ),
                     ));
                     if !folded {
-                        body.push(Self::render_zones(report, theme));
+                        body.extend(self.render_zones(report, theme));
                     }
                 }
                 ViewDisplay::Checks => {
-                    body.push(self.render_section_header(
-                        view,
-                        first,
-                        "last minute, from /v1/status".to_owned(),
-                        None,
-                        cx,
+                    body.push((
+                        header,
+                        self.render_section_header(
+                            view,
+                            first,
+                            "last minute, from /v1/status".to_owned(),
+                            None,
+                            cx,
+                        ),
                     ));
                     if !folded {
-                        body.push(Self::render_tiles(
-                            "health-check-tiles",
-                            &report.checks,
-                            view,
-                            columns,
-                            theme,
+                        body.push((
+                            None,
+                            Self::render_tiles(
+                                "health-check-tiles",
+                                &report.checks,
+                                view,
+                                columns,
+                                live,
+                                theme,
+                            ),
                         ));
                     }
                 }
                 ViewDisplay::QueuesAndConnections => {
-                    body.push(self.render_section_header(
-                        view,
-                        first,
-                        "ApiListener, JsonRpc".to_owned(),
-                        None,
-                        cx,
+                    body.push((
+                        header,
+                        self.render_section_header(
+                            view,
+                            first,
+                            "ApiListener, JsonRpc".to_owned(),
+                            None,
+                            cx,
+                        ),
                     ));
                     if !folded {
-                        body.push(Self::render_tiles(
-                            "health-queue-tiles",
-                            &report.queues,
-                            view,
-                            columns,
-                            theme,
+                        body.push((
+                            None,
+                            Self::render_tiles(
+                                "health-queue-tiles",
+                                &report.queues,
+                                view,
+                                columns,
+                                live,
+                                theme,
+                            ),
                         ));
                     }
                 }
                 ViewDisplay::GlobalSwitches => {
-                    body.push(self.render_section_header(
-                        view,
-                        first,
-                        "read-only".to_owned(),
-                        None,
-                        cx,
+                    body.push((
+                        header,
+                        self.render_section_header(view, first, "read-only".to_owned(), None, cx),
                     ));
                     if !folded {
-                        body.push(Self::render_switches(report, cx.theme()));
+                        body.push((None, Self::render_switches(report, cx.theme())));
                     }
                 }
                 _ => {}
@@ -884,39 +1316,49 @@ impl HealthPage {
         body
     }
 
-    /// The zones and their endpoints, as a table.
-    fn render_zones(report: &Report, theme: &Theme) -> AnyElement {
+    /// The zones and their endpoints, as a table: its rows, each with its
+    /// stop.
+    fn render_zones(&self, report: &Report, theme: &Theme) -> Vec<(Option<Stop>, AnyElement)> {
         let colors = theme.colors;
-        let mut rows: Vec<AnyElement> = vec![table_row(
-            [
-                "endpoint",
-                "zone",
-                "version",
-                "last message",
-                "messages in / out",
-                "status",
-            ]
-            .map(|text| cell(text, colors.text_faint)),
+        let live = report.live.is_live();
+        let mut rows: Vec<(Option<Stop>, AnyElement)> = vec![(
             None,
-            Some(
-                div()
-                    .text_color(colors.text_faint)
-                    .child("heartbeat")
-                    .into_any_element(),
+            table_row(
+                [
+                    "endpoint",
+                    "zone",
+                    "version",
+                    "last message",
+                    "messages in / out",
+                    "status",
+                ]
+                .map(|text| cell(text, colors.text_faint)),
+                None,
+                Some(
+                    div()
+                        .text_color(colors.text_faint)
+                        .child("heartbeat")
+                        .into_any_element(),
+                ),
+                RowLook::default(),
+                px(28.),
+                theme.text.label,
+                theme,
             ),
-            false,
-            px(28.),
-            theme.text.label,
-            theme,
         )];
         for zone in &report.zones {
-            rows.push(zone_row(zone, theme));
+            let stop = Stop::Zone(zone.name.clone());
+            let cursor = self.cursor.as_ref() == Some(&stop);
+            rows.push((Some(stop), zone_row(zone, cursor, theme)));
             for endpoint in &zone.endpoints {
-                rows.push(endpoint_row(endpoint, theme));
+                let stop = Stop::Endpoint(endpoint.name.clone());
+                let cursor = self.cursor.as_ref() == Some(&stop);
+                rows.push((Some(stop), endpoint_row(endpoint, cursor, live, theme)));
             }
         }
         if !report.global_zones.is_empty() {
-            rows.push(
+            rows.push((
+                None,
                 div()
                     .flex()
                     .flex_none()
@@ -937,14 +1379,9 @@ impl HealthPage {
                         report.global_zones.join(", ")
                     )))
                     .into_any_element(),
-            );
+            ));
         }
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .children(rows)
-            .into_any_element()
+        rows
     }
 
     /// A line of stat tiles: six columns, a wide tile spanning two; only
@@ -954,6 +1391,7 @@ impl HealthPage {
         tiles: &[Tile],
         view: &View,
         columns: u16,
+        live: Liveness,
         theme: &Theme,
     ) -> AnyElement {
         let sparklines = view.health.sparklines;
@@ -970,7 +1408,7 @@ impl HealthPage {
                 tiles
                     .iter()
                     .filter(|tile| tile.kind.is_none_or(|kind| view.health.shows(kind)))
-                    .map(|tile| render_tile(tile, sparklines, theme)),
+                    .map(|tile| render_tile(tile, sparklines, live, theme)),
             )
             .into_any_element()
     }
@@ -978,6 +1416,12 @@ impl HealthPage {
     /// Icinga's global switches, then the node's features.
     fn render_switches(report: &Report, theme: &Theme) -> AnyElement {
         let colors = theme.colors;
+        // Without live data nothing is green here either.
+        let ok = if report.live.is_live() {
+            theme.states.fill.ok
+        } else {
+            theme.states.fill.pending
+        };
         let item = |dot: Hsla, label: &'static str, word: &'static str, word_color: Hsla| {
             div()
                 .flex()
@@ -990,7 +1434,7 @@ impl HealthPage {
         };
         let switches = report.switches.iter().map(|switch| {
             if switch.on {
-                item(theme.states.fill.ok, switch.label, "on", colors.text_faint)
+                item(ok, switch.label, "on", colors.text_faint)
             } else {
                 item(
                     theme.states.fill.warning,
@@ -1002,7 +1446,7 @@ impl HealthPage {
         });
         let features = report.features.iter().map(|feature| {
             let dot = match feature.state {
-                FeatureState::Running => theme.states.fill.ok,
+                FeatureState::Running => ok,
                 FeatureState::Paused | FeatureState::Off => theme.states.fill.pending,
             };
             item(dot, feature.label, feature.word(), colors.text_faint)
@@ -1054,18 +1498,22 @@ impl gpui::Focusable for HealthPage {
 }
 
 impl Render for HealthPage {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the page's parts in order, with what the keyboard moves over"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let controls = Controls::of(window, cx);
         let now = Timestamp::now();
         let state = self.state.read(cx);
         let snapshot = state.snapshot().clone();
-        let report = report(&snapshot, state.connection().is_connected(), now);
+        let live = super::liveness(&snapshot, state.connection(), now);
+        let report = report(&snapshot, live, now);
         let policy = state
             .environment()
             .map_or("notify", |environment| environment.trouble.policy.label());
         if report.late.is_empty() {
-            self.late_open = false;
-            self.late_all = false;
+            self.late = LateFold::Closed;
         }
         let preview = self.preview.is_some();
         // The editor's preview has the editor's header; the page shows the
@@ -1076,12 +1524,12 @@ impl Render for HealthPage {
         } else {
             crate::banner::banners(&self.state, now, true, cx)
         };
-        let theme = cx.theme();
-        let colors = theme.colors;
         if report.zones.is_empty() {
+            let colors = cx.theme().colors;
             return div()
                 .id("health-page")
                 .track_focus(&self.focus_handle)
+                .key_context(HEALTH_CONTEXT)
                 .flex()
                 .flex_col()
                 .flex_1()
@@ -1102,15 +1550,55 @@ impl Render for HealthPage {
                         .max_width(px(560.)),
                 );
         }
-        let health_line = Self::render_health_line(&report, theme);
+        let views = self.views(cx);
+        // What the keyboard moves over, as drawn now.
+        self.stops = self.layout(&report, &views);
+        self.worst_action = report
+            .alerts
+            .first()
+            .and_then(|alert| alert.link.as_ref())
+            .map(|(_, action)| action.clone());
+        self.late_keys.clone_from(&report.late);
+        if self
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| !self.stops.contains(cursor))
+        {
+            self.cursor = None;
+        }
+        let theme = cx.theme();
+        let health_line = Self::render_health_line(&report, now, theme);
         let beats = self.render_beat_row(&report.beats, policy, cx);
         let alerts = self.render_alerts(&report.alerts, cx);
-        let late = self.render_late(&report, now, cx);
-        let views = self.views(cx);
-        let body = self.render_sections(&report, &views, cx);
+        let mut rows = self.render_late(&report, now, cx);
+        rows.extend(self.render_sections(&report, &views, cx));
+        self.rows = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (stop, _))| stop.clone().map(|stop| (stop, index)))
+            .collect();
+        if std::mem::take(&mut self.reveal)
+            && let Some(cursor) = self.cursor.as_ref().filter(|cursor| cursor.in_body())
+            && let Some((_, index)) = self.rows.iter().find(|(stop, _)| stop == cursor)
+        {
+            self.scroll.scroll_to_item(*index);
+        }
         div()
             .id("health-page")
             .track_focus(&self.focus_handle)
+            .key_context(HEALTH_CONTEXT)
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::select_first))
+            .on_action(cx.listener(Self::select_last))
+            .on_action(cx.listener(Self::select_page_down))
+            .on_action(cx.listener(Self::select_page_up))
+            .on_action(cx.listener(Self::next_view))
+            .on_action(cx.listener(Self::previous_view))
+            .on_action(cx.listener(Self::unfold))
+            .on_action(cx.listener(Self::fold))
+            .on_action(cx.listener(Self::open_selected))
+            .on_action(cx.listener(Self::dismiss))
             .flex()
             .flex_col()
             .flex_1()
@@ -1124,13 +1612,13 @@ impl Render for HealthPage {
             .child(
                 div()
                     .id("health-body")
+                    .track_scroll(&self.scroll)
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(late)
-                    .children(body),
+                    .children(rows.into_iter().map(|(_, row)| row)),
             )
     }
 }
@@ -1199,12 +1687,17 @@ fn zone_counts(report: &Report, theme: &Theme) -> AnyElement {
                     .child(count.to_string())
             })
     };
+    let connected = if report.live.is_live() {
+        theme.states.fill.ok
+    } else {
+        theme.states.fill.pending
+    };
     div()
         .flex()
         .flex_none()
         .items_center()
         .gap(px(10.))
-        .child(slot(theme.states.fill.ok, report.connected))
+        .child(slot(connected, report.connected))
         .child(slot(theme.states.fill.critical, report.not_connected))
         .into_any_element()
 }
@@ -1226,18 +1719,28 @@ fn cell(text: impl Into<SharedString>, color: Hsla) -> Cell {
 /// `1.2fr .8fr .8fr .9fr 1.1fr 1.6fr`).
 const COLUMNS: [f32; 6] = [1.2, 0.8, 0.8, 0.9, 1.1, 1.6];
 
+/// How a table line is marked.
+#[derive(Clone, Copy, Debug, Default)]
+struct RowLook {
+    /// The node icygui talks to (the selected-row background).
+    this_node: bool,
+    /// The keyboard cursor (the selected background and the accent bar).
+    cursor: bool,
+}
+
 /// One line of the endpoints table: the dot column, then the six columns.
 fn table_row(
     cells: [Cell; 6],
     dot: Option<Hsla>,
     beat: Option<AnyElement>,
-    selected: bool,
+    look: RowLook,
     height: gpui::Pixels,
     size: gpui::Pixels,
     theme: &Theme,
 ) -> AnyElement {
     let colors = theme.colors;
     div()
+        .relative()
         .flex()
         .flex_none()
         .items_center()
@@ -1246,7 +1749,10 @@ fn table_row(
         .px(theme.metrics.list_padding)
         .border_b_1()
         .border_color(colors.border_row)
-        .when(selected, |row| row.bg(colors.row_selected))
+        .when(look.this_node || look.cursor, |row| {
+            row.bg(colors.row_selected)
+        })
+        .children(cursor_bar(look.cursor, theme))
         .text_size(size)
         .whitespace_nowrap()
         .child(
@@ -1286,6 +1792,13 @@ fn beat_slot(beat: Option<AnyElement>) -> AnyElement {
 
 /// The *heartbeat* column's width.
 const BEAT_COLUMN: f32 = 104.;
+
+/// The heartbeat row's status slot, in characters: its longest late
+/// wording (`99 intervals late`, 16a2's 18ch).
+const STATUS_SLOT_CHARS: f32 = 18.;
+
+/// The heartbeat row's age slot, in characters (`59m 59s`, 16a2's 8ch).
+const AGE_SLOT_CHARS: f32 = 8.;
 
 /// A beat's dot and age (`● 8s`, `● disappeared`).
 fn beat_element(beat: &BeatCell, theme: &Theme) -> AnyElement {
@@ -1328,17 +1841,26 @@ fn section_icon(display: ViewDisplay) -> IconName {
     }
 }
 
-/// A zone's band: its worst endpoint's dot, the name, its line.
-fn zone_row(zone: &ZoneGroup, theme: &Theme) -> AnyElement {
+/// A zone's band: its dot (warning while an HA zone lost an endpoint,
+/// critical once it has none or its beat is dead), the name, its line. The
+/// dot sits at the band's edge and the name 10px after it (16a: a band
+/// reads as the header of the endpoint rows, whose names sit further in).
+fn zone_row(zone: &ZoneGroup, cursor: bool, theme: &Theme) -> AnyElement {
     let colors = theme.colors;
     div()
+        .relative()
         .flex()
         .flex_none()
         .items_center()
         .gap(px(10.))
         .h(Metrics::with_rule(px(30.)))
         .px(theme.metrics.list_padding)
-        .bg(colors.row_header)
+        .bg(if cursor {
+            colors.row_selected
+        } else {
+            colors.row_header
+        })
+        .children(cursor_bar(cursor, theme))
         .border_b_1()
         .border_color(colors.border_header)
         .text_size(theme.text.small)
@@ -1348,9 +1870,8 @@ fn zone_row(zone: &ZoneGroup, theme: &Theme) -> AnyElement {
             div()
                 .flex()
                 .flex_none()
-                .justify_center()
-                .w(px(14.))
-                .child(StateDot::with_color(node_color(zone.state, theme)).size(px(7.))),
+                .w(px(7.))
+                .child(StateDot::with_color(zone.dot.fill(theme)).size(px(7.))),
         )
         .child(
             div()
@@ -1374,12 +1895,14 @@ fn zone_row(zone: &ZoneGroup, theme: &Theme) -> AnyElement {
 }
 
 /// An endpoint's line; the node icygui talks to has the selected-row
-/// background.
-fn endpoint_row(row: &EndpointRow, theme: &Theme) -> AnyElement {
+/// background. Without live data its status is faint (the last known
+/// one) and its dot grey where it was green.
+fn endpoint_row(row: &EndpointRow, cursor: bool, live: bool, theme: &Theme) -> AnyElement {
     let colors = theme.colors;
     let status = match row.tone {
         Tone::Critical => theme.states.text.critical,
         Tone::Warning => theme.states.text.warning,
+        Tone::Normal if !live => colors.text_faint,
         Tone::Normal => colors.text_muted,
     };
     table_row(
@@ -1391,32 +1914,59 @@ fn endpoint_row(row: &EndpointRow, theme: &Theme) -> AnyElement {
             cell(row.traffic.clone(), colors.text_muted),
             cell(row.status.clone(), status),
         ],
-        Some(node_color(row.state, theme)),
+        Some(row.dot.fill(theme)),
         row.beat.as_ref().map(|beat| beat_element(beat, theme)),
-        row.this_node,
+        RowLook {
+            this_node: row.this_node,
+            cursor,
+        },
         px(34.),
         theme.text.body,
         theme,
     )
 }
 
-/// A node's dot: green connected, red down, grey unknown.
-fn node_color(state: NodeState, theme: &Theme) -> Hsla {
-    match state {
-        NodeState::Connected => theme.states.fill.ok,
-        NodeState::Disconnected => theme.states.fill.critical,
-        NodeState::Unknown => theme.states.fill.pending,
-    }
+/// The keyboard cursor's accent bar at a row's left edge (the row is
+/// `relative`).
+fn cursor_bar(on: bool, theme: &Theme) -> Option<AnyElement> {
+    on.then(|| {
+        div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(2.))
+            .bg(theme.colors.accent)
+            .into_any_element()
+    })
+}
+
+/// A link's frame for the keyboard cursor: an accent outline while the
+/// cursor is on it, a transparent one otherwise (so nothing moves).
+fn focus_outline(on: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .px(px(3.))
+        .mx(px(-4.))
+        .rounded(px(3.))
+        .border_1()
+        .border_color(if on {
+            theme.colors.accent
+        } else {
+            gpui::transparent_black()
+        })
 }
 
 /// One stat tile: label, value (in the warning or critical text colour
-/// when wrong), what it counts, and its trend (a blank of the same height
-/// without one, so every tile of a line is as tall).
-fn render_tile(tile: &Tile, sparklines: bool, theme: &Theme) -> AnyElement {
+/// when wrong; dimmed while not current), what it counts, and its trend (a
+/// blank of the same height without one, so every tile of a line is as
+/// tall).
+fn render_tile(tile: &Tile, sparklines: bool, live: Liveness, theme: &Theme) -> AnyElement {
     let colors = theme.colors;
     let (value, last) = match tile.tone {
         Tone::Critical => (theme.states.text.critical, theme.states.fill.critical),
         Tone::Warning => (theme.states.text.warning, theme.states.fill.warning),
+        Tone::Normal if !live.is_live() => (colors.text_muted, colors.text_faint),
         Tone::Normal => (colors.text_strong, colors.accent),
     };
     let trend: Option<AnyElement> = if !sparklines {

@@ -148,6 +148,20 @@ impl fmt::Debug for Client {
     }
 }
 
+/// The object types [`Client::node_features`] reads: the checker,
+/// notification and `IcingaDB` features.
+pub const FEATURE_TYPES: [&str; 3] = ["checkercomponents", "notificationcomponents", "icingadbs"];
+
+/// What one read of the node's features found ([`Client::node_features`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FeaturesRead {
+    /// The features, `None` where not read.
+    pub features: NodeFeatures,
+    /// The types (of [`FEATURE_TYPES`]) Icinga refused or doesn't know:
+    /// not worth asking for again on this connection.
+    pub refused: Vec<&'static str>,
+}
+
 impl Client {
     /// Builds a client. Nothing is sent until the first request.
     ///
@@ -340,20 +354,26 @@ impl Client {
     }
 
     /// Which of the node's checker, notification and `IcingaDB` features
-    /// run (their objects, attribute `paused` only): three small requests,
-    /// each taken from the request budget. A type the API user may not
-    /// read is `None`; any other error fails the whole call.
+    /// run (their objects, attribute `paused` only): one small request per
+    /// type not in `skip`, each taken from the request budget. A type the
+    /// API user may not read (403) or Icinga doesn't know (400 *Invalid
+    /// type specified*, 404: no `IcingaDB` type before Icinga 2.13) is
+    /// `None` and listed in [`FeaturesRead::refused`], so the caller asks
+    /// for it no more; any other error fails the whole call.
     ///
     /// # Errors
     ///
-    /// As [`Client::hosts`], except `Forbidden`.
-    pub async fn node_features(&self) -> Result<NodeFeatures, ApiError> {
-        let mut features = NodeFeatures::default();
+    /// As [`Client::hosts`], except `Forbidden`, `NotFound` and HTTP 400.
+    pub async fn node_features(&self, skip: &[&str]) -> Result<FeaturesRead, ApiError> {
+        let mut read = FeaturesRead::default();
         for (plural, slot) in [
-            ("checkercomponents", &mut features.checker),
-            ("notificationcomponents", &mut features.notification),
-            ("icingadbs", &mut features.icingadb),
+            (FEATURE_TYPES[0], &mut read.features.checker),
+            (FEATURE_TYPES[1], &mut read.features.notification),
+            (FEATURE_TYPES[2], &mut read.features.icingadb),
         ] {
+            if skip.contains(&plural) {
+                continue;
+            }
             self.spend().await;
             match self
                 .query::<FeatureAttrs>(plural, None, wire::FEATURE_ATTRS)
@@ -366,13 +386,21 @@ impl Client {
                         .collect();
                     *slot = Some(wire::feature_state(&objects));
                 }
-                Err(ApiError::Forbidden(message)) => {
-                    tracing::debug!(%message, plural, "may not read the feature's objects");
+                Err(
+                    ApiError::Forbidden(message)
+                    | ApiError::NotFound(message)
+                    | ApiError::Http {
+                        status: 400,
+                        message,
+                    },
+                ) => {
+                    tracing::debug!(%message, plural, "the feature's objects can't be read");
+                    read.refused.push(plural);
                 }
                 Err(error) => return Err(error),
             }
         }
-        Ok(features)
+        Ok(read)
     }
 
     /// Every zone with its member endpoints, its parent and whether it is

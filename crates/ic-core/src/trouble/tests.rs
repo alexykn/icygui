@@ -396,6 +396,13 @@ fn features_and_queues() {
             "the relay queue keeps growing (18,402 messages)",
         ]
     );
+    // Beyond 10,000 messages and growing: critical, as its tile is red.
+    let queues = findings
+        .iter()
+        .find(|finding| finding.key == "queues")
+        .unwrap();
+    assert_eq!(queues.tone, AlertTone::Critical);
+    assert_eq!(relay_tone(&health), Some(AlertTone::Critical));
     let findings = assess_with(
         &nodes(&["master-02"]),
         &health,
@@ -403,6 +410,103 @@ fn features_and_queues() {
         &BTreeMap::new(),
     );
     assert!(titles(&findings).contains(&"IcingaDB paused on master-01"));
+}
+
+/// One level per concept: the relay queue's tile and its alert read the
+/// same tone.
+#[test]
+fn the_relay_queue_has_one_tone() {
+    let with = |relay: &[f64]| {
+        let mut health = ClusterHealth {
+            listener: Some(ListenerStatus {
+                relay_queue: relay.last().copied().unwrap_or_default(),
+                ..ListenerStatus::default()
+            }),
+            ..ClusterHealth::default()
+        };
+        for (index, items) in relay.iter().enumerate() {
+            #[expect(clippy::cast_precision_loss, reason = "a short test series")]
+            let second = index as f64 * 30.0;
+            health.push(HealthSample {
+                at: at(second),
+                active_checks: 10.0,
+                relay_queue: Some(*items),
+                ..HealthSample::default()
+            });
+        }
+        health
+    };
+    assert_eq!(relay_tone(&with(&[0.0, 0.0, 0.0])), None);
+    assert_eq!(
+        relay_tone(&with(&[10.0, 50.0, 90.0])),
+        Some(AlertTone::Warning)
+    );
+    assert_eq!(
+        relay_tone(&with(&[12_000.0, 11_000.0, 10_500.0])),
+        Some(AlertTone::Warning),
+        "big but draining: a look, no alert"
+    );
+    let growing = with(&[10.0, 50.0, 90.0]);
+    let findings = assess_with(
+        &nodes(&[]),
+        &growing,
+        &Heartbeats::default(),
+        &BTreeMap::new(),
+    );
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].tone, AlertTone::Warning);
+    let draining = with(&[12_000.0, 11_000.0, 10_500.0]);
+    assert!(
+        assess_with(
+            &nodes(&[]),
+            &draining,
+            &Heartbeats::default(),
+            &BTreeMap::new()
+        )
+        .is_empty()
+    );
+}
+
+/// No false green, rule 4: the alert says what the data says. Every beat
+/// stopped, but the status poll still reads Icinga's one-minute rate
+/// above 0: no "fell to 0" yet.
+#[test]
+fn every_beat_stopped_says_only_what_the_polls_read() {
+    let mut health = ClusterHealth::default();
+    for (second, checks) in [(0.0, 796.0), (30.0, 790.0)] {
+        health.push(HealthSample {
+            at: at(second),
+            active_checks: checks,
+            ..HealthSample::default()
+        });
+    }
+    let findings = assess_with(
+        &nodes(&[]),
+        &health,
+        &six(BeatState::Dead(Death::Stopped), &[]),
+        &BTreeMap::new(),
+    );
+    assert_eq!(
+        titles(&findings),
+        ["Icinga runs no checks: none since t1000."]
+    );
+    assert_eq!(findings[0].detail, "every heartbeat stopped at t1000.");
+    // Once a poll reads 0, it says so.
+    health.push(HealthSample {
+        at: at(60.0),
+        active_checks: 0.0,
+        ..HealthSample::default()
+    });
+    let findings = assess_with(
+        &nodes(&[]),
+        &health,
+        &six(BeatState::Dead(Death::Stopped), &[]),
+        &BTreeMap::new(),
+    );
+    assert_eq!(
+        findings[0].detail,
+        "active checks fell from 790 a minute to 0; every heartbeat stopped at t1000."
+    );
 }
 
 #[test]

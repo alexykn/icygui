@@ -2,15 +2,17 @@
 //! 16r–16u), worked out from a snapshot: the heartbeat row under the
 //! health line, each zone's and endpoint's beat in the table's
 //! *heartbeat* column, and the alert block (the worst alert in full, the
-//! others one line each). Every age is worked out here, against the UI's
-//! clock, from the times the engine reports.
+//! others one line each). Every age and every verdict on time is worked
+//! out here, against the UI's clock, from the times the engine reports: a
+//! beat past its deadline is late (yellow) even when the engine, stuck or
+//! offline, last said it was on time (no false green).
 
 use ic_core::heartbeat::{BeatState, Heartbeat, HeartbeatSetup, Heartbeats};
 use ic_core::snapshot::Snapshot;
 use ic_core::trouble::{Alert, AlertAction, AlertTone};
 use ic_model::{Timestamp, format_compact, format_two_units};
 
-use super::health::Tone;
+use super::health::{Liveness, Tone};
 
 /// How a beat's dot looks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -86,8 +88,24 @@ pub(crate) struct AlertLine {
     pub(crate) since: String,
 }
 
-/// A beat's tone.
-pub(crate) fn tone_of(beat: &Heartbeat) -> BeatTone {
+/// Whether a beat the engine last called on time (or waiting) is past its
+/// deadline by the UI's clock: late, whatever the engine says.
+pub(crate) fn overdue(beat: &Heartbeat, now: Timestamp) -> bool {
+    matches!(beat.state, BeatState::OnTime | BeatState::Waiting)
+        && beat.deadline.is_some_and(|deadline| deadline < now)
+}
+
+/// Whether a beat is late at `now`: the engine says so, or its deadline
+/// passed.
+fn late(beat: &Heartbeat, now: Timestamp) -> bool {
+    matches!(beat.state, BeatState::Late | BeatState::Checking) || overdue(beat, now)
+}
+
+/// A beat's tone at `now`.
+pub(crate) fn tone_of(beat: &Heartbeat, now: Timestamp) -> BeatTone {
+    if overdue(beat, now) {
+        return BeatTone::Warning;
+    }
     match beat.state {
         BeatState::OnTime => BeatTone::Ok,
         BeatState::Late | BeatState::Checking | BeatState::Disappeared | BeatState::NotFound => {
@@ -95,6 +113,14 @@ pub(crate) fn tone_of(beat: &Heartbeat) -> BeatTone {
         }
         BeatState::Dead(_) => BeatTone::Critical,
         BeatState::Waiting => BeatTone::Off,
+    }
+}
+
+/// A tone without live data: on time turns grey (not proven now).
+fn stale(tone: BeatTone, live: Liveness) -> BeatTone {
+    match tone {
+        BeatTone::Ok if !live.is_live() => BeatTone::Off,
+        tone => tone,
     }
 }
 
@@ -107,26 +133,54 @@ fn age_of(beat: &Heartbeat, now: Timestamp) -> String {
 }
 
 /// A beat's cell in the table.
-pub(crate) fn cell(beat: &Heartbeat, now: Timestamp) -> BeatCell {
+pub(crate) fn cell(beat: &Heartbeat, live: Liveness, now: Timestamp) -> BeatCell {
     let text = match beat.state {
         BeatState::Disappeared => "disappeared".to_owned(),
         BeatState::NotFound => "not found".to_owned(),
         _ => age_of(beat, now),
     };
     BeatCell {
-        tone: tone_of(beat),
+        tone: stale(tone_of(beat, now), live),
         text,
     }
 }
 
 /// The beat that proves endpoint `name`, as its cell.
-pub(crate) fn endpoint_cell(beats: &Heartbeats, name: &str, now: Timestamp) -> Option<BeatCell> {
-    beats.of_endpoint(name).map(|beat| cell(beat, now))
+pub(crate) fn endpoint_cell(
+    beats: &Heartbeats,
+    name: &str,
+    live: Liveness,
+    now: Timestamp,
+) -> Option<BeatCell> {
+    beats.of_endpoint(name).map(|beat| cell(beat, live, now))
 }
 
 /// The beat that proves zone `name`, as its cell.
-pub(crate) fn zone_cell(beats: &Heartbeats, name: &str, now: Timestamp) -> Option<BeatCell> {
-    beats.of_zone(name).map(|beat| cell(beat, now))
+pub(crate) fn zone_cell(
+    beats: &Heartbeats,
+    name: &str,
+    live: Liveness,
+    now: Timestamp,
+) -> Option<BeatCell> {
+    beats.of_zone(name).map(|beat| cell(beat, live, now))
+}
+
+/// The heartbeat row while what the page shows may not be current: an
+/// on-time or waiting row says *no live data* in grey (nothing proves the
+/// beats now); a late, dead or gone one keeps its words.
+pub(crate) fn row_when(beats: &Heartbeats, live: Liveness, now: Timestamp) -> BeatRow {
+    let row = row(beats, now);
+    if live.is_live() || !row.watched || !matches!(row.tone, BeatTone::Ok | BeatTone::Off) {
+        return row;
+    }
+    BeatRow {
+        tone: BeatTone::Off,
+        label: "heartbeats",
+        subject: String::new(),
+        status: "no live data".to_owned(),
+        age: None,
+        watched: true,
+    }
 }
 
 /// The last beat of `beats` as a clock time (`last 02:11`).
@@ -175,7 +229,9 @@ pub(crate) fn row(beats: &Heartbeats, now: Timestamp) -> BeatRow {
     let total = watched.len() + gone.len() + missing.len();
     let beating = watched
         .iter()
-        .filter(|beat| matches!(beat.state, BeatState::OnTime | BeatState::Waiting))
+        .filter(|beat| {
+            matches!(beat.state, BeatState::OnTime | BeatState::Waiting) && !overdue(beat, now)
+        })
         .count();
     let count = format!("{beating} of {total}");
     let dead: Vec<&Heartbeat> = watched
@@ -186,7 +242,7 @@ pub(crate) fn row(beats: &Heartbeats, now: Timestamp) -> BeatRow {
     let late: Vec<&Heartbeat> = watched
         .iter()
         .copied()
-        .filter(|beat| matches!(beat.state, BeatState::Late | BeatState::Checking))
+        .filter(|beat| late(beat, now))
         .collect();
     let named = |beats: &[&Heartbeat]| beats.len() == 1 && total > 1;
     if !dead.is_empty() {
@@ -427,10 +483,52 @@ mod tests {
     #[test]
     fn cells_age_against_the_ui_clock() {
         let list = beats(vec![beat("ams", BeatState::OnTime, 21.0)]);
-        let cell = zone_cell(&list, "ams", now()).unwrap();
+        let cell = zone_cell(&list, "ams", Liveness::Live, now()).unwrap();
         assert_eq!((cell.tone, cell.text.as_str()), (BeatTone::Ok, "21s"));
         let dead = beat("ams", BeatState::Dead(Death::NotOk), 372.0);
-        assert_eq!(super::cell(&dead, now()).text, "6m 12s");
-        assert!(endpoint_cell(&list, "master-01", now()).is_none());
+        assert_eq!(super::cell(&dead, Liveness::Live, now()).text, "6m 12s");
+        assert!(endpoint_cell(&list, "master-01", Liveness::Live, now()).is_none());
+    }
+
+    /// No false green: an on-time beat whose deadline passed is late by the
+    /// UI's clock (a stuck engine says nothing new), and the row says so.
+    #[test]
+    fn a_beat_past_its_deadline_is_late_whatever_the_engine_last_said() {
+        let mut stuck = beat("ams", BeatState::OnTime, 270.0);
+        stuck.deadline = Some(Timestamp::from_unix_seconds(NOW - 235.0));
+        assert!(overdue(&stuck, now()));
+        let shown = cell(&stuck, Liveness::Live, now());
+        assert_eq!(
+            (shown.tone, shown.text.as_str()),
+            (BeatTone::Warning, "4m 30s")
+        );
+        let one = row(&beats(vec![stuck.clone()]), now());
+        assert_eq!(one.tone, BeatTone::Warning);
+        assert_eq!(one.status, "1 late");
+        let two = beats(vec![stuck, beat("fra", BeatState::OnTime, 3.0)]);
+        let named = row(&two, now());
+        assert_eq!((named.label, named.subject.as_str()), ("heartbeat", "ams"));
+        assert_eq!(named.status, "9 intervals late");
+        assert_eq!(named.age.as_deref(), Some("4m"));
+    }
+
+    /// Without live data nothing on time is green: the cells turn grey and
+    /// the row says so; what is dead stays red.
+    #[test]
+    fn without_live_data_no_beat_is_green() {
+        let stale = Liveness::Stale { as_of: None };
+        let list = beats(vec![
+            beat("ams", BeatState::OnTime, 3.0),
+            beat("fra", BeatState::OnTime, 8.0),
+        ]);
+        let row = row_when(&list, stale, now());
+        assert_eq!(row.tone, BeatTone::Off);
+        assert_eq!(row.status, "no live data");
+        assert_eq!(
+            zone_cell(&list, "ams", stale, now()).unwrap().tone,
+            BeatTone::Off
+        );
+        let dead = beats(vec![beat("ams", BeatState::Dead(Death::Stopped), 400.0)]);
+        assert_eq!(row_when(&dead, stale, now()).tone, BeatTone::Critical);
     }
 }

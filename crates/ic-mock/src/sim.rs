@@ -455,22 +455,6 @@ impl World {
         }
     }
 
-    /// Whether `zone` is another zone than the node's whose endpoints are
-    /// all disconnected (the results of its satellites can't arrive).
-    fn zone_cut_off(&self, zone: &str) -> bool {
-        if zone.is_empty() || zone == self.app.zone_name {
-            return false;
-        }
-        self.zones.get(zone).is_some_and(|data| {
-            !data.endpoints.is_empty()
-                && data.endpoints.iter().all(|name| {
-                    self.endpoints
-                        .get(name)
-                        .is_some_and(|endpoint| !endpoint.connected)
-                })
-        })
-    }
-
     /// Checks one object. Returns the number of ticks until its next check,
     /// or `None` if it isn't actively checked.
     #[expect(
@@ -490,9 +474,13 @@ impl World {
         let command = checkable.check_command.clone();
         let interval = checkable.check_interval;
         let retry = checkable.retry_interval;
-        // A zone whose endpoints are all gone sends no results: its
-        // checks run (or not) out of the node's sight and become late.
-        if !globally_enabled || self.zone_cut_off(&checkable.meta.zone) {
+        // A zone whose endpoints are all gone (or hang) sends no results:
+        // its checks run (or not) out of the node's sight and become late.
+        // A checker that hangs runs none at all.
+        if !globally_enabled
+            || self.checks_stopped
+            || self.zone_checker(&checkable.meta.zone).is_none()
+        {
             return Some(self.sim.ticks(interval));
         }
         let is_service = checkable.is_service();

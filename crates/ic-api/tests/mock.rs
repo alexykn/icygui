@@ -271,6 +271,31 @@ async fn node_states_and_counts_like_icinga() {
     let listener = client.listener_status().await.unwrap();
     assert_eq!((listener.connected_endpoints, listener.endpoints), (3, 3));
     assert!(listener.work_queue_rate > 0.0);
+    // The features: a type Icinga doesn't know (400, an Icinga before
+    // 2.13 without IcingaDB) is `None` and reported, so it isn't asked for
+    // again; a refused one likewise.
+    let control = master.control();
+    control.fail_path("/v1/objects/icingadbs", 1, 400);
+    control.fail_path("/v1/objects/notificationcomponents", 1, 403);
+    let read = client.node_features(&[]).await.unwrap();
+    assert_eq!(read.refused, ["notificationcomponents", "icingadbs"]);
+    assert!(read.features.checker.is_some());
+    assert_eq!(
+        (read.features.notification, read.features.icingadb),
+        (None, None)
+    );
+    control.clear_requests();
+    let read = client.node_features(&read.refused).await.unwrap();
+    assert!(read.refused.is_empty());
+    let asked: Vec<String> = control
+        .requests()
+        .iter()
+        .map(|request| request.path.clone())
+        .collect();
+    assert_eq!(asked, ["/v1/objects/checkercomponents"], "{asked:?}");
+    // Any other failure fails the read (asked again at the normal pace).
+    control.fail_path("/v1/objects/checkercomponents", 1, 503);
+    assert!(client.node_features(&[]).await.is_err());
 
     // `lab` has a service never checked: counted as unknown.
     let lab = start(MockConfig::with_scenario(scenarios::lab())).await;

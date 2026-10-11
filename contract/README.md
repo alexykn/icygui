@@ -100,10 +100,25 @@ Facts learned from the real instance that the client must respect:
   from a timer every 5 s: a state change in between already carries the
   count (`cluster_a_fixed_downtime_counts_from_its_start_like_icinga`, 3
   of 4 recoveries). A result that isn't OK triggers due downtimes first,
-  so its `DowntimeTriggered` comes before its check result. Each event
-  stream is written every 5 s, so an answer to a query sent right after a
-  downtime is set usually has it before the stream's line does
-  (`cluster_downtimes_and_acknowledgements_around_a_wake_match_icinga`).
+  so its `DowntimeTriggered` comes before its check result. An answer to a
+  query sent right after downtimes are set often has them before the
+  stream's lines do, but not always: a burst of downtime events (each
+  `DowntimeAdded` and `DowntimeTriggered` about a kilobyte) is often
+  written at once, and only its tail waits for the stream's next write.
+  `cluster_downtimes_and_acknowledgements_around_a_wake_match_icinga`
+  (four downtimes, set right after a write of the quiet stream was seen)
+  saw an answer come before its line in about half of its rounds (10 of 19,
+  each with 1 to 3 of the 4), so it tries up to 8 rounds; with two
+  downtimes it was 3 of 10. Its targets are soft problems: a hard one
+  notifies, the notification's prefetch loads it in full, and the refresh
+  after waking leaves out what it holds in full with a current result.
+- Check events (`CheckResult`, `StateChange`) carry `acknowledgement` as
+  it was when Icinga built them. A passive result for an acknowledged
+  problem sent 0.5 s after a quiet engine woke came only on the new live
+  stream (no state change), the acknowledgement's removal right after it
+  on both: at the handover the result was applied after the removal, and
+  before the small fix 3 fixer the store said acknowledged while Icinga
+  didn't (every round; the same test).
 - A filter that fails for any object fails the whole query with
   `404 No objects found.`; an empty filter matches nothing. A filter that
   doesn't compile fails only when it is evaluated (Icinga compiles it into
@@ -163,7 +178,8 @@ cluster tests in `crates/ic-core/tests/engine/cluster.rs` hold them):
   Icinga answers `403 Missing permission: objects/query/checkercomponent`.
 - A passive check is overdue (`next_update`, and icygui's *late*) twice its
   interval after its last result.
-- Icinga 2.15.6 writes each `/v1/events` stream in batches 5.0 s apart,
+- Icinga 2.15.6 writes each `/v1/events` stream at most every 5.0 s
+  (a burst large enough is written at once, see the downtimes above),
   idle or busy: a raw stream got bursts at 0, 5, 10 and 15 s, the oldest
   event of each 5 s old, the newest fresh. A new stream sends its first
   events at once. A client that closes a stream loses what it still held

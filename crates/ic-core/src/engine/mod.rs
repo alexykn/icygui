@@ -40,6 +40,7 @@ mod load;
 mod notify;
 mod publish;
 mod quiet;
+mod reask;
 mod recent;
 mod stream;
 mod sync;
@@ -386,6 +387,9 @@ pub(crate) struct Engine {
     load: Option<(u64, LoadKind)>,
     loads: u64,
     fetch: FetchQueue,
+    /// Problems whose downtime depth is provisional, asked for again
+    /// (spread, retried; `reask.rs`).
+    reasks: reask::Reasks,
     revision: u64,
     last_publish: Option<Instant>,
     /// The environment is on screen (`Command::SetActive`): snapshots go
@@ -614,6 +618,7 @@ impl Engine {
             load_backoff: Backoff::new(tuning.load_retry_initial, sync::LOAD_RETRY_MAX),
             jitter: crate::jitter::Jitter::new(tuning.seed),
             fetch: FetchQueue::new(tuning.missing_ttl),
+            reasks: reask::Reasks::new(tuning.reask_spread, tuning.reask_retry),
             spec,
             ports,
             tuning,
@@ -849,12 +854,22 @@ impl Engine {
         self.fetch.due(self.tuning.requery_delay)
     }
 
+    /// When re-asks for provisional downtime depths go into the re-query
+    /// queue: only while live.
+    fn reask_at(&self) -> Option<Instant> {
+        if self.phase != Phase::Live {
+            return None;
+        }
+        self.reasks.due()
+    }
+
     fn next_deadline(&self, now: Instant) -> Option<Instant> {
         [
             self.publish_at(now),
             self.retry_at(),
             self.status_at(),
             self.fetch_at(),
+            self.reask_at(),
             self.reload_due(),
             self.sweep_at(now),
             self.probe_due(),
@@ -904,6 +919,17 @@ impl Engine {
         }
         if self.sweep_at(now).is_some_and(|at| at <= now) {
             self.sweep(now);
+        }
+        if self.phase == Phase::Live {
+            // Problems whose downtime depth turned provisional since the
+            // last wake-up (a downtime event, a state change, a new
+            // session): Icinga's count again, by name.
+            let unsettled = self.store.take_unsettled();
+            let jitter = &mut self.jitter;
+            self.reasks.add(unsettled, now, || jitter.unit());
+        }
+        if self.reask_at().is_some_and(|at| at <= now) {
+            self.release_reasks(now);
         }
         if self.fetch_at().is_some_and(|at| at <= now) {
             self.start_fetch(now);
@@ -987,6 +1013,7 @@ impl Engine {
         self.conn = None;
         self.load = None;
         self.fetch.reset();
+        self.reasks.reset();
         self.watchdog.reset_awaiting();
         // A pending reload stays: the next session serves it.
         self.reconcile_at = None;
@@ -1115,7 +1142,7 @@ impl Engine {
         );
         // Lines between the last session's stream and this one's are lost:
         // depths counted from check events count as answers' again.
-        self.store.stream_gap();
+        self.store.new_session();
         // Every by-name request of the session takes from the budget.
         let client = client.with_budget(Arc::clone(&self.budget));
         let node = Arc::new(node);
@@ -1887,6 +1914,18 @@ impl Engine {
 
     // --- re-queries -------------------------------------------------------------------
 
+    /// Puts the re-asks that are due into the re-query queue: those still
+    /// provisional problems (the store says), by name. Their requests go
+    /// out after the downtime lines were read, so the answers have them.
+    fn release_reasks(&mut self, now: Instant) {
+        for key in self.reasks.take_due(now) {
+            if self.store.keep_asking(&key) {
+                tracing::debug!(object = %key, "downtime depth asked again");
+                self.fetch.mark(key, now);
+            }
+        }
+    }
+
     fn start_fetch(&mut self, now: Instant) {
         let Some(conn) = &self.conn else {
             return;
@@ -1933,6 +1972,7 @@ impl Engine {
         for answer in answers.objects {
             match answer.result {
                 Ok(fetched) => {
+                    self.reasks.answered();
                     // A whole-batch lookup's missing names weren't found,
                     // which doesn't make them gone (one name of the batch
                     // was unknown): they wait like missing ones, but leave
@@ -1974,6 +2014,11 @@ impl Engine {
                 Err(error) => {
                     tracing::warn!(%error, "re-query failed");
                     self.watchdog.failed(&answer.keys);
+                    // Provisional downtime depths it asked for: again,
+                    // with backoff.
+                    let failed = self.store.reask_failed(&answer.keys);
+                    self.reasks
+                        .failed(failed, Instant::now(), self.jitter.unit());
                 }
             }
         }
@@ -2152,13 +2197,8 @@ impl Engine {
                 }
             }
         }
-        // Downtime events changed depths that came from answers, which may
-        // already count them: Icinga's count again, by name (the requests
-        // go out after these lines were read, so their answers have them).
-        for key in self.store.take_unsettled() {
-            tracing::debug!(object = %key, "downtime depth asked again");
-            self.fetch.mark(key, now);
-        }
+        // Depths these lines made provisional are asked for again from
+        // `run_due` (`release_reasks`).
         self.record_log(log);
     }
 

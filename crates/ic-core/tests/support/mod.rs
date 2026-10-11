@@ -155,6 +155,8 @@ pub(crate) fn tuning() -> Tuning {
         backoff_max: Duration::from_millis(320),
         publish_interval: Duration::from_millis(20),
         requery_delay: Duration::from_millis(20),
+        reask_spread: Duration::from_millis(20),
+        reask_retry: Duration::from_millis(40),
         watchdog_interval: Duration::from_millis(20),
         reload_jitter: Duration::from_millis(30),
         reload_after_gap: Duration::ZERO,

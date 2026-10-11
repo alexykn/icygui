@@ -1261,28 +1261,191 @@ fn a_check_result_older_than_a_downtime_line_keeps_the_count() {
     assert_eq!(depth_of(&store, "a"), 1, "the result is older");
     store.apply(14, &counted(a.clone(), 1, 310.0));
     assert_eq!(depth_of(&store, "a"), 1);
+
+    // Review fixer (small fix 3): the same for a downtime line an answer
+    // already had. The removal (line 12, at 160) is read, an answer sent
+    // after it (13, none in effect) is applied first; the new stream's
+    // result from 150 (read later, 14) still counted the downtime. Before,
+    // only lines the store applied dated the count, so the result brought
+    // 1 back: the problem in downtime while Icinga had none.
+    let mut store = loaded();
+    let b = key("h", "b");
+    let downtime = fixed("h!b!d1", b.clone(), 100.0, 400.0, true);
+    store.apply_overview(
+        Overview {
+            downtimes: vec![downtime.clone()],
+            ..Overview::default()
+        },
+        10,
+    );
+    store.apply_fetched(Vec::new(), vec![answered_b(1)], Detail::Lean, &[], 11);
+    store.apply_fetched(Vec::new(), vec![answered_b(0)], Detail::Lean, &[], 13);
+    store.apply(
+        12,
+        &Event::DowntimeRemoved {
+            downtime,
+            at: t(160.0),
+        },
+    );
+    assert_eq!(depth_of(&store, "b"), 0, "the answer's");
+    store.apply(14, &counted(b.clone(), 1, 150.0));
+    assert_eq!(
+        depth_of(&store, "b"),
+        0,
+        "the result is older than the removal"
+    );
+}
+
+/// `event` (a check event) as Icinga sends it: with the acknowledgement as
+/// it was when Icinga built the event.
+fn with_ack(event: Event, kind: AckKind) -> Event {
+    match event {
+        Event::CheckResult {
+            object,
+            result,
+            downtime_depth,
+            after,
+            at,
+            ..
+        } => Event::CheckResult {
+            object,
+            result,
+            downtime_depth,
+            acknowledgement: Some(kind),
+            after,
+            at,
+        },
+        other => other,
+    }
+}
+
+fn acknowledged(store: &Store, name: &str) -> bool {
+    stored(store, "h", name)
+        .check
+        .acknowledgement
+        .is_acknowledged()
+}
+
+/// Review finding (small fix 3 fixer, false green): Icinga's check events
+/// carry the acknowledgement as it was when the event was built. In the
+/// overlap of a stream switch the new stream's check result can be older
+/// than an acknowledgement line the old stream already brought (a quiet
+/// stream has no check results, so a result from the overlap waits on the
+/// new one); applied after it, it took the acknowledgement back: removed
+/// in Icinga, still acknowledged here (handled, hollow, hidden by *hide
+/// handled*) until the next check result, and acknowledged in Icinga but
+/// not here in the mirror order. Such a result keeps the acknowledgement,
+/// like an older one keeps the downtime count.
+#[test]
+fn a_check_event_older_than_an_acknowledgement_line_keeps_the_acknowledgement() {
+    let b = key("h", "b");
+    let cleared = Event::AcknowledgementCleared {
+        object: b.clone(),
+        at: t(160.0),
+    };
+    let set = Event::AcknowledgementSet {
+        object: b.clone(),
+        author: "carol".to_owned(),
+        comment: "on it".to_owned(),
+        kind: AckKind::Normal,
+        expiry: None,
+        at: t(160.0),
+    };
+
+    // Acknowledged, then removed (the old stream's line 13); the new
+    // stream's result (line 12, from 150) still had it.
+    let mut store = loaded();
+    let mut answer = answered_b(0);
+    answer.check.acknowledgement = AckKind::Normal;
+    store.apply_fetched(Vec::new(), vec![answer], Detail::Lean, &[], 11);
+    store.apply(13, &cleared);
+    store.apply(12, &with_ack(counted(b.clone(), 0, 150.0), AckKind::Normal));
+    assert!(
+        !acknowledged(&store, "b"),
+        "removed at 160, after the result"
+    );
+    assert_eq!(stored(&store, "h", "b").check.last_check, Some(t(150.0)));
+    // A newer check event brings Icinga's value again.
+    store.apply(14, &with_ack(counted(b.clone(), 0, 170.0), AckKind::Normal));
+    assert!(acknowledged(&store, "b"), "acknowledged again at 170");
+
+    // The mirror: acknowledged at 160 (line 13); the result from 150 had
+    // none yet.
+    let mut store = loaded();
+    store.apply(13, &set);
+    store.apply(12, &with_ack(counted(b.clone(), 0, 150.0), AckKind::None));
+    assert!(acknowledged(&store, "b"), "acknowledged at 160");
+    // A state change from before the acknowledgement that carries none
+    // (an event without the field) doesn't end it either.
+    store.apply(
+        14,
+        &check_result(
+            b.clone(),
+            svc(ServiceState::Warning),
+            StateType::Hard,
+            1,
+            155.0,
+        ),
+    );
+    assert_eq!(stored(&store, "h", "b").state, ServiceState::Warning);
+    assert!(acknowledged(&store, "b"), "the change came before it");
+    // A newer state change does, as in Icinga.
+    store.apply(
+        15,
+        &check_result(
+            b.clone(),
+            svc(ServiceState::Critical),
+            StateType::Hard,
+            1,
+            170.0,
+        ),
+    );
+    assert!(
+        !acknowledged(&store, "b"),
+        "a normal one ends with a change"
+    );
+
+    // The removal's line (12) is read, and an answer sent after it (13,
+    // without the acknowledgement) is applied first: the line is stale,
+    // but its time still dates the value; the new stream's result from
+    // 150, read later (14), is older.
+    let mut store = loaded();
+    let mut answer = answered_b(0);
+    answer.check.acknowledgement = AckKind::Normal;
+    store.apply_fetched(Vec::new(), vec![answer], Detail::Lean, &[], 11);
+    store.apply_fetched(Vec::new(), vec![answered_b(0)], Detail::Lean, &[], 13);
+    assert_eq!(store.apply(12, &cleared), Applied::Stale);
+    store.apply(14, &with_ack(counted(b.clone(), 0, 150.0), AckKind::Normal));
+    assert!(!acknowledged(&store, "b"), "the answer's, newer than 150");
+}
+
+/// Whether `key`'s downtime depth is provisional (from an answer, a
+/// downtime event since).
+fn provisional(store: &Store, key: &ObjectKey) -> bool {
+    store.unsettled.contains(key)
 }
 
 /// Where the count comes from: an answer becomes its source (the next
-/// downtime event asks Icinga again) until a check event brings Icinga's
-/// count, whose downtime events are then exact; after a gap in the stream
-/// (a new session, a switch without a line on both streams) a count from a
-/// check event is no longer exact.
+/// downtime event makes it provisional) until a check event brings
+/// Icinga's count, whose downtime events are then exact; after a gap in
+/// the stream (a new session, a switch without a line on both streams) a
+/// count from a check event is no longer exact.
 #[test]
 fn the_count_keeps_its_exact_source_until_the_stream_has_a_gap() {
     let mut store = loaded();
     let a = key("h", "a");
+    // Added at 300 (Icinga sends the event as it creates the downtime).
     let added = |name: &str| Event::DowntimeAdded {
-        downtime: fixed(name, key("h", "a"), 100.0, 400.0, true),
+        downtime: Downtime {
+            entry_time: t(300.0),
+            ..fixed(name, key("h", "a"), 100.0, 400.0, true)
+        },
         at: t(300.0),
     };
     store.apply(11, &counted(a.clone(), 0, 150.0));
     store.apply(12, &added("h!a!d1"));
     assert_eq!(depth_of(&store, "a"), 1);
-    assert!(
-        store.take_unsettled().is_empty(),
-        "from a check event: exact"
-    );
+    assert!(!provisional(&store, &a), "from a check event: exact");
 
     let mut answer = service("h", "a", ServiceState::Ok);
     answer.check.last_check = Some(t(150.0));
@@ -1290,10 +1453,9 @@ fn the_count_keeps_its_exact_source_until_the_stream_has_a_gap() {
     store.apply_fetched(Vec::new(), vec![answer], Detail::Lean, &[], 13);
     store.apply(14, &added("h!a!d2"));
     assert_eq!(depth_of(&store, "a"), 2);
-    assert_eq!(
-        store.take_unsettled(),
-        std::slice::from_ref(&a),
-        "from an answer (even an agreeing one): asked"
+    assert!(
+        provisional(&store, &a),
+        "from an answer (even an agreeing one): provisional"
     );
     store.apply(15, &counted(a.clone(), 2, 310.0));
     store.apply(
@@ -1304,17 +1466,165 @@ fn the_count_keeps_its_exact_source_until_the_stream_has_a_gap() {
         },
     );
     assert_eq!(depth_of(&store, "a"), 1);
-    assert!(
-        store.take_unsettled().is_empty(),
-        "a check event again: exact"
-    );
+    assert!(!provisional(&store, &a), "a check event again: exact");
 
     let mut store = loaded();
     store.apply(11, &counted(a.clone(), 0, 150.0));
     store.stream_gap();
     store.apply(12, &added("h!a!d1"));
     assert_eq!(depth_of(&store, "a"), 1);
-    assert_eq!(store.take_unsettled(), [a], "after a gap: asked");
+    assert!(provisional(&store, &a), "after a gap: provisional");
+}
+
+/// Review finding (small fix 3 fixer, request economy): every answer is a
+/// count's source (a reconcile writes every object), so a schedule
+/// starting or ending downtimes on thousands of objects made every client
+/// ask for each by name at the same moment, OK objects too. Only problems
+/// are asked for: a provisional count of an OK object can't hide anything,
+/// and its next state change brings Icinga's count (or, when it can't,
+/// hands it out then). Each is handed out once, again after a downtime
+/// line newer than the request, after a failed request, and after a new
+/// session.
+#[test]
+fn only_problems_with_a_provisional_count_are_asked_for_once_each() {
+    let mut store = loaded();
+    let (a, b) = (key("h", "a"), key("h", "b"));
+    store.apply_fetched(
+        Vec::new(),
+        vec![service("h", "a", ServiceState::Ok), answered_b(0)],
+        Detail::Lean,
+        &[],
+        11,
+    );
+    let added = |name: &str, object: &ObjectKey, seq: u64| {
+        (
+            seq,
+            Event::DowntimeAdded {
+                downtime: fixed(name, object.clone(), 100.0, 400.0, true),
+                at: t(150.0 + f64::from(u32::try_from(seq).unwrap())),
+            },
+        )
+    };
+    for (seq, event) in [added("h!a!d1", &a, 12), added("h!b!d1", &b, 13)] {
+        store.apply(seq, &event);
+    }
+    assert!(provisional(&store, &a) && provisional(&store, &b));
+    assert_eq!(
+        store.take_unsettled(),
+        std::slice::from_ref(&b),
+        "the problem only"
+    );
+    assert!(store.take_unsettled().is_empty(), "once");
+
+    // A downtime line newer than the request in flight: asked again.
+    let (seq, event) = added("h!b!d2", &b, 14);
+    store.apply(seq, &event);
+    assert_eq!(
+        store.take_unsettled(),
+        std::slice::from_ref(&b),
+        "after a newer line"
+    );
+    // That request failed: still provisional, asked again when its retry
+    // is due.
+    assert_eq!(
+        store.reask_failed(&[a.clone(), b.clone()]),
+        std::slice::from_ref(&b)
+    );
+    assert!(store.take_unsettled().is_empty(), "not before the retry");
+    assert!(store.keep_asking(&b));
+
+    // `a` turns into a problem by a check event older than the downtime
+    // lines (the overlap of a switch): its count stays provisional, so it
+    // is asked for now.
+    store.apply(
+        15,
+        &check_result(
+            a.clone(),
+            svc(ServiceState::Critical),
+            StateType::Hard,
+            1,
+            140.0,
+        ),
+    );
+    assert_eq!(stored(&store, "h", "a").state, ServiceState::Critical);
+    assert_eq!(
+        depth_of(&store, "a"),
+        1,
+        "the older event's count isn't taken"
+    );
+    assert_eq!(store.take_unsettled(), std::slice::from_ref(&a));
+    // A new session: the queue is gone, both handed out again.
+    store.new_session();
+    assert_eq!(store.take_unsettled(), [a.clone(), b.clone()]);
+
+    // Icinga's answers settle both; nothing is asked any more.
+    let mut answer_a = service("h", "a", ServiceState::Critical);
+    answer_a.check.downtime_depth = 1;
+    store.apply_fetched(
+        Vec::new(),
+        vec![answer_a, answered_b(2)],
+        Detail::Lean,
+        &[],
+        16,
+    );
+    assert!(!provisional(&store, &a) && !provisional(&store, &b));
+    assert!(!store.keep_asking(&b), "settled: a retry asks nothing");
+    assert!(store.take_unsettled().is_empty());
+}
+
+/// Review finding (small fix 3 fixer, Icinga 2.15 `downtime.cpp`): Icinga
+/// registers a new downtime with its object before it sends
+/// `DowntimeAdded`, so a check event built in between counts it and can be
+/// written first. A count from a check event at or after the downtime's
+/// entry can't tell: the event makes it provisional (asked for, a problem)
+/// instead of adding to an exact count. Before, the store added 1 (2 for
+/// one downtime), and 1 stayed after the removal: hidden in quiet mode.
+#[test]
+fn a_check_event_from_the_moment_a_downtime_is_added_may_count_it() {
+    let mut store = loaded();
+    let b = key("h", "b");
+    let downtime = Downtime {
+        entry_time: t(150.0),
+        ..fixed("h!b!d1", b.clone(), 100.0, 400.0, true)
+    };
+    // Built at 150.0004 (its check ended at 150.0003), with the downtime.
+    store.apply(11, &counted(b.clone(), 1, 149.9004));
+    store.apply(
+        12,
+        &Event::DowntimeAdded {
+            downtime: downtime.clone(),
+            at: t(150.0005),
+        },
+    );
+    assert!(provisional(&store, &b), "can't be placed");
+    assert_eq!(store.take_unsettled(), std::slice::from_ref(&b));
+    store.apply_fetched(Vec::new(), vec![answered_b(1)], Detail::Lean, &[], 12);
+    store.apply(
+        13,
+        &Event::DowntimeRemoved {
+            downtime,
+            at: t(160.0),
+        },
+    );
+    store.take_unsettled();
+    store.apply_fetched(Vec::new(), vec![answered_b(0)], Detail::Lean, &[], 13);
+    assert_eq!(depth_of(&store, "b"), 0, "none left");
+
+    // A check event from before the entry didn't count it: exact.
+    let mut store = loaded();
+    store.apply(11, &counted(b.clone(), 0, 140.0));
+    store.apply(
+        12,
+        &Event::DowntimeAdded {
+            downtime: Downtime {
+                entry_time: t(150.0),
+                ..fixed("h!b!d1", b.clone(), 100.0, 400.0, true)
+            },
+            at: t(150.0005),
+        },
+    );
+    assert_eq!(depth_of(&store, "b"), 1);
+    assert!(!provisional(&store, &b));
 }
 
 /// Acknowledgements and comments are values, not counts: an answer that

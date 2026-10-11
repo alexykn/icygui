@@ -21,10 +21,11 @@
 //!   goes late, nothing else shows it, and icygui raises the zone's late
 //!   checks as one alert;
 //! - downtimes and acknowledgements added and removed around a quiet
-//!   engine's wake, and a fixed downtime that Icinga counts from its start
-//!   before it reports it: the store's downtime depth and acknowledgement
-//!   match Icinga's afterwards, in quiet mode where no check result would
-//!   correct them.
+//!   engine's wake (one removed while a check result that still carries it
+//!   waits on the new stream), and a fixed downtime that Icinga counts from
+//!   its start before it reports it: the store's downtime depth and
+//!   acknowledgement match Icinga's afterwards, in quiet mode where no
+//!   check result would correct them.
 //!
 //! They run when `demo/up.sh`'s variables are set (`ICYGUI_CLUSTER_SCENARIO`
 //! and the `ICYGUI_CONTRACT_*` ones), and otherwise pass without checking
@@ -1201,38 +1202,45 @@ async fn mode(engine: &mut Engine, quiet: bool) {
     .await;
 }
 
-/// One round of [`cluster_downtimes_and_acknowledgements_around_a_wake_match_icinga`]
-/// on six new targets; returns how many of the downtimes' answers came
-/// before their lines.
-#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
-async fn around_a_wake(
-    cluster: &Cluster,
-    admin: &Client,
-    engine: &mut Engine,
-    used: &mut BTreeSet<ServiceKey>,
-) -> usize {
-    mode(engine, true).await;
-    let targets = untouched(admin, engine, 6, used).await;
-    used.extend(targets.iter().cloned());
-    let keys: Vec<ObjectKey> = targets.iter().cloned().map(ObjectKey::from).collect();
-    let mut undo = cluster.undo(&keys);
-    // Problems (hard): the refresh after waking asks for them by name.
-    submit(admin, &keys, 2, 3).await;
-    wait_snapshot(engine, Duration::from_mins(1), "the problems", |snapshot| {
-        targets.iter().all(|key| {
-            let service = &snapshot.services[key];
-            service.state == ServiceState::Critical && service.check.state_type == StateType::Hard
-        })
-    })
-    .await;
-    let (with_downtime, acknowledged) = keys.split_at(4);
+/// Icinga 2.15 writes each event stream at most every 5 s
+/// (contract/README.md): after a write, what it sends waits for the next.
+const BATCH: f64 = 5.0;
 
-    // Around the wake: the changes, and at once the wake. The quiet
-    // stream brings their lines with its next batch (Icinga writes every
-    // 5 s); the refresh's answers usually come first.
-    let now = Timestamp::now().as_unix_seconds();
-    let downtimes = schedule(admin, with_downtime, now - 60.0, now + 3_600.0).await;
-    undo.downtimes.clone_from(&downtimes);
+/// Waits until the quiet stream has just written a batch (its lines
+/// applied less than 2.5 s ago), so what Icinga sends in the next couple
+/// of seconds reaches it only with its next batch, at least 2.5 s later.
+/// (A quiet engine publishes every 2 s, so a batch is seen up to 2 s late;
+/// one seen later than that is skipped for the next.) Returns when the
+/// next batch is due at the earliest (Unix seconds).
+async fn after_a_batch(engine: &mut Engine) -> f64 {
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(2);
+    loop {
+        let seen = engine
+            .latest()
+            .and_then(|snapshot| snapshot.last_event_at)
+            .map_or(0.0, Timestamp::as_unix_seconds);
+        let snapshot = wait_snapshot(
+            engine,
+            deadline - tokio::time::Instant::now(),
+            "a fresh batch of the quiet stream",
+            |snapshot| {
+                snapshot
+                    .last_event_at
+                    .is_some_and(|at| at.as_unix_seconds() > seen)
+            },
+        )
+        .await;
+        let batch = snapshot
+            .last_event_at
+            .map_or(seen, Timestamp::as_unix_seconds);
+        if Timestamp::now().as_unix_seconds() - batch < BATCH / 2.0 {
+            return batch + BATCH;
+        }
+    }
+}
+
+/// Acknowledges `keys` as the admin.
+async fn acknowledge(admin: &Client, keys: &[ObjectKey]) {
     admin
         .run_action(
             &Action::Acknowledge {
@@ -1241,46 +1249,172 @@ async fn around_a_wake(
                 persistent: false,
                 expiry: None,
             },
-            &ActionTarget::Objects(acknowledged.to_vec()),
+            &ActionTarget::Objects(keys.to_vec()),
             "icygui-test",
         )
         .await
         .unwrap();
+}
+
+/// Notes the downtimes of `keys` (named `names`) that the snapshot counts
+/// before it lists them while the old stream is still read: their answer
+/// came before their line.
+fn note_early(
+    snapshot: &Snapshot,
+    keys: &[ObjectKey],
+    names: &[String],
+    early: &mut BTreeSet<ObjectKey>,
+) {
+    for (key, name) in keys.iter().zip(names) {
+        let service = key.as_service().unwrap();
+        if snapshot.quiet
+            && !lists(snapshot, key, name)
+            && snapshot.services[service].check.downtime_depth > 0
+        {
+            early.insert(key.clone());
+        }
+    }
+}
+
+/// What one round of [`around_a_wake`] saw.
+#[derive(Default)]
+struct Round {
+    /// Downtimes whose refresh answer came before their line.
+    early: usize,
+    /// The passive result and the acknowledgement's removal both came
+    /// before the switch's handover (the result waits on the new stream,
+    /// the removal is applied from the old one first).
+    in_overlap: bool,
+}
+
+/// One round of [`cluster_downtimes_and_acknowledgements_around_a_wake_match_icinga`]
+/// on six new targets.
+#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
+#[expect(
+    clippy::print_stderr,
+    reason = "what the round saw, for the test's output (the rates in contract/README.md)"
+)]
+async fn around_a_wake(
+    cluster: &Cluster,
+    admin: &Client,
+    engine: &mut Engine,
+    used: &mut BTreeSet<ServiceKey>,
+) -> Round {
+    let mut round = Round::default();
+    mode(engine, true).await;
+    let targets = untouched(admin, engine, 6, used).await;
+    used.extend(targets.iter().cloned());
+    let keys: Vec<ObjectKey> = targets.iter().cloned().map(ObjectKey::from).collect();
+    let mut undo = cluster.undo(&keys);
+    // Problems, soft (one passive result of three attempts): the refresh
+    // after waking asks for them by name. (A hard one notifies, and the
+    // notification's prefetch loads it in full: its result is current
+    // then, so the refresh leaves it out; at most 10 a minute are
+    // prefetched, which made the refresh skip the targets in about every
+    // other round.)
+    submit(admin, &keys, 2, 1).await;
+    wait_snapshot(engine, Duration::from_mins(1), "the problems", |snapshot| {
+        targets.iter().all(|key| {
+            let service = &snapshot.services[key];
+            service.state == ServiceState::Critical && service.check.state_type == StateType::Soft
+        })
+    })
+    .await;
+    let (with_downtime, acknowledged) = keys.split_at(4);
+    let (overtaken_ack, handover_ack) = acknowledged.split_at(1);
+    let is_acknowledged = |snapshot: &Snapshot, key: &ObjectKey| {
+        snapshot.services[key.as_service().unwrap()]
+            .check
+            .acknowledgement
+            .is_acknowledged()
+    };
+    // Acknowledged before the wake, its line in.
+    acknowledge(admin, handover_ack).await;
+    wait_snapshot(engine, Duration::from_mins(1), "acknowledged", |snapshot| {
+        is_acknowledged(snapshot, &handover_ack[0])
+    })
+    .await;
+
+    // Right after a batch of the quiet stream: the changes and the wake.
+    // The quiet stream brings their lines with its next batch, 5 s later;
+    // the refresh's answers come first.
+    let next_batch = after_a_batch(engine).await;
+    let now = Timestamp::now().as_unix_seconds();
+    let downtimes = schedule(admin, with_downtime, now - 60.0, now + 3_600.0).await;
+    undo.downtimes.clone_from(&downtimes);
+    acknowledge(admin, overtaken_ack).await;
+    let woke = Timestamp::now().as_unix_seconds();
+    let seen = engine.seen.len();
     engine.send(ic_core::Command::SetQuiet(false));
+    // The live stream is subscribed within milliseconds (and the refresh
+    // asked for); half a second of margin.
+    run_for(engine, Duration::from_millis(500)).await;
     let mut early = BTreeSet::new();
-    wait_snapshot(
+    for event in &engine.seen[seen..] {
+        if let CoreEvent::Snapshot(snapshot) = event {
+            note_early(snapshot, with_downtime, &downtimes, &mut early);
+        }
+    }
+    // During the switch's overlap: a check result of the acknowledged
+    // problem (its second soft attempt, no state change: only the live
+    // stream has it, and holds it until the handover), then its
+    // acknowledgement goes (both streams).
+    let submitted = Timestamp::now().as_unix_seconds();
+    submit(admin, handover_ack, 2, 1).await;
+    admin
+        .run_action(
+            &Action::RemoveAcknowledgement,
+            &ActionTarget::Objects(handover_ack.to_vec()),
+            "icygui-test",
+        )
+        .await
+        .unwrap();
+    let removed = Timestamp::now().as_unix_seconds();
+    let mut handover = None;
+    let snapshot = wait_snapshot(
         engine,
         Duration::from_mins(1),
         "the changes' lines",
         |snapshot| {
-            for (key, name) in with_downtime.iter().zip(&downtimes) {
-                let service = key.as_service().unwrap();
-                if !lists(snapshot, key, name)
-                    && snapshot.services[service].check.downtime_depth > 0
-                {
-                    early.insert(key.clone());
-                }
+            note_early(snapshot, with_downtime, &downtimes, &mut early);
+            if !snapshot.quiet && handover.is_none() {
+                handover = Some(Timestamp::now().as_unix_seconds());
             }
             !snapshot.quiet
                 && with_downtime
                     .iter()
                     .zip(&downtimes)
                     .all(|(key, name)| lists(snapshot, key, name))
-                && acknowledged.iter().all(|key| {
-                    snapshot.services[key.as_service().unwrap()]
-                        .check
-                        .acknowledgement
-                        .is_acknowledged()
-                })
+                && is_acknowledged(snapshot, &overtaken_ack[0])
         },
     )
     .await;
+    round.early = early.len();
+    // The result came on the live stream (the refresh went out before
+    // it), and the handover after the removal (a snapshot goes out every
+    // 250 ms: half a second of margin).
+    let carried = snapshot.services[handover_ack[0].as_service().unwrap()]
+        .check
+        .last_check
+        .is_some_and(|last| last.as_unix_seconds() >= submitted - 1.0);
+    round.in_overlap = carried && handover.is_some_and(|at| at > removed + 0.5);
+    eprintln!(
+        "round: woke {:.2} s before the quiet stream's next batch at the earliest; \
+         the result {} on the live stream, the acknowledgement removed {:.2} s and the \
+         handover seen {:.2} s after waking; {} of {} downtimes answered before their lines",
+        next_batch - woke,
+        if carried { "came" } else { "didn't come" },
+        removed - woke,
+        handover.map_or(f64::NAN, |at| at - woke),
+        round.early,
+        with_downtime.len()
+    );
     // The switch's window ends, Icinga is asked again where needed.
     run_for(engine, Duration::from_secs(10)).await;
     matches_icinga(admin, engine, &keys, "after the wake").await;
 
     // Back to quiet, where no check result brings Icinga's count: the
-    // downtimes and acknowledgements go.
+    // downtimes and the other acknowledgement go.
     mode(engine, true).await;
     admin
         .run_action(
@@ -1293,7 +1427,7 @@ async fn around_a_wake(
     admin
         .run_action(
             &Action::RemoveAcknowledgement,
-            &ActionTarget::Objects(acknowledged.to_vec()),
+            &ActionTarget::Objects(overtaken_ack.to_vec()),
             "icygui-test",
         )
         .await
@@ -1304,12 +1438,7 @@ async fn around_a_wake(
             .iter()
             .zip(&downtimes)
             .all(|(key, name)| !lists(snapshot, key, name))
-            && acknowledged.iter().all(|key| {
-                !snapshot.services[key.as_service().unwrap()]
-                    .check
-                    .acknowledgement
-                    .is_acknowledged()
-            })
+            && !is_acknowledged(snapshot, &overtaken_ack[0])
     })
     .await;
     run_for(engine, Duration::from_secs(8)).await;
@@ -1322,19 +1451,24 @@ async fn around_a_wake(
         "unhandled problems again, none hidden"
     );
     // The targets recover (`undo`).
-    early.len()
+    round
 }
 
-/// Ledger row (small fix 2 fixer, false green): around a quiet engine's
-/// wake, downtimes and acknowledgements are added on problems that the
-/// refresh after waking asks for by name, and removed in quiet mode
-/// afterwards. Icinga writes each stream every 5 s, so the refresh's
-/// answers come before the quiet stream's lines of the same changes
-/// (counted; another round with new targets if none did). The store's
-/// downtime depth and acknowledgement of every target match Icinga's after
-/// the wake and after the removals, where no check result would correct
-/// them: before the fix an overtaken downtime counted twice and its
-/// problem stayed in downtime, hidden, after the removal.
+/// Ledger rows (small fix 2 fixer and small fix 3 fixer, false green):
+/// around a quiet engine's wake, downtimes and an acknowledgement are
+/// added on problems that the refresh after waking asks for by name, and
+/// removed in quiet mode afterwards; another acknowledged problem gets a
+/// check result during the switch's overlap (only the live stream has it,
+/// and holds it until the handover) and loses its acknowledgement then.
+/// Icinga writes each stream every 5 s, so starting right after a batch of
+/// the quiet stream, the refresh's answers come before its lines of the
+/// same changes, and the result and the removal before its next batch
+/// (both counted; another round with new targets if either didn't
+/// happen). The store's downtime depth and acknowledgement of every
+/// target match Icinga's after the wake and after the removals, where no
+/// check result would correct them: before the fixes an overtaken downtime
+/// counted twice and its problem stayed in downtime, hidden, after the
+/// removal, and the held result took the removed acknowledgement back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cluster_downtimes_and_acknowledgements_around_a_wake_match_icinga() {
     let _turn = CLUSTER.lock().await;
@@ -1349,17 +1483,22 @@ async fn cluster_downtimes_and_acknowledgements_around_a_wake_match_icinga() {
     })
     .await;
     let mut used = BTreeSet::new();
-    let mut overtaken = 0;
-    let mut rounds = 0;
-    while overtaken == 0 && rounds < 3 {
+    let (mut overtaken, mut in_overlap, mut rounds) = (0, 0, 0);
+    while (overtaken == 0 || in_overlap == 0) && rounds < 8 {
         rounds += 1;
-        overtaken += around_a_wake(&cluster, &admin, &mut engine, &mut used).await;
+        let round = around_a_wake(&cluster, &admin, &mut engine, &mut used).await;
+        overtaken += round.early;
+        in_overlap += usize::from(round.in_overlap);
     }
-    eprintln!("{overtaken} downtimes answered before their lines, in {rounds} rounds");
+    eprintln!(
+        "{overtaken} downtimes answered before their lines, \
+         {in_overlap} acknowledgements removed during the overlap, in {rounds} rounds"
+    );
     assert!(
-        overtaken > 0,
-        "in {rounds} rounds no answer came before its downtime's line: \
-         the case this test is about never happened"
+        overtaken > 0 && in_overlap > 0,
+        "in {rounds} rounds no answer came before its downtime's line ({overtaken}) \
+         or no acknowledgement was removed during the overlap ({in_overlap}): \
+         the cases this test is about never happened"
     );
     engine.shutdown();
 }

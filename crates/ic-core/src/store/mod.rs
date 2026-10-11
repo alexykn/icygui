@@ -48,23 +48,40 @@
 //! - a query answer carries Icinga's count at a moment between the request
 //!   and the answer, so a downtime event read after the request may or may
 //!   not be in it already. Such an event changes the depth for the moment
-//!   and the object is asked for again by name (`Store::take_unsettled`;
-//!   the request goes out after the line was read, so its answer has it)
-//!   until an answer or a check event brings Icinga's count with no
-//!   downtime event after it.
+//!   (the depth is *provisional*) until an answer sent after the line or a
+//!   check event brings Icinga's count with no downtime event after it.
+//!   A provisional problem is asked for again by name
+//!   (`Store::take_unsettled`, the engine's `reask` part: spread by the
+//!   requests they take, retried with backoff when a request fails, handed
+//!   out again after a new session); an OK object isn't, since its count
+//!   can't hide a problem and the state change that makes it one brings
+//!   Icinga's count (or, where it can't, hands it out then).
+//!
+//! A check event built in the moment a downtime is added (Icinga registers
+//! the downtime with its object before it sends `DowntimeAdded`) may count
+//! it: a count from a check event at or after the downtime's entry is
+//! treated like an answer's for that event.
 //!
 //! An answer takes the depth unless a newer line wrote it, and is its
 //! source from then on (even one that agrees with a count from a check
 //! event: a line it already has may still wait in a stream switch's
-//! buffer). When the store may have missed lines (a new session, a stream
-//! switch without a line on both streams), depths counted from check
-//! events count as answers' again (`Store::stream_gap`). The asking costs
-//! a by-name request per downtime event that changes a count from an
-//! answer: rare (downtimes are set by people and schedules), batched with
-//! the other re-queries, and in live mode only until the object's next
-//! check result. Acknowledgements and comments need none of this: every
-//! event sets them to a value (set, cleared, added, removed by name), so
-//! they converge like the other fields.
+//! buffer). Every load and reconcile is such an answer, so after one every
+//! count is an answer's until the object's next check event. When the
+//! store may have missed lines (a new session, a stream switch without a
+//! line on both streams), depths counted from check events count as
+//! answers' again (`Store::stream_gap`).
+//!
+//! **Acknowledgements** are values every event sets (set, cleared), so an
+//! answer that overtook their lines converges once they are in. But check
+//! events carry the acknowledgement too, as it was when Icinga built them:
+//! in the overlap of a stream switch the new stream's check result can be
+//! older than an acknowledgement line the old stream already brought (a
+//! quiet stream has no check results), and a check event older than the
+//! latest acknowledgement line (by Icinga's time, `Seqs::ack_at`) keeps the
+//! stored acknowledgement, like an older one keeps the depth
+//! (`Seqs::downtime_at`). Both times are kept also for lines an answer
+//! already had, and forgotten at a new session (one stream from then on,
+//! perhaps another master's clock). Comments have only their own events.
 //!
 //! **Views of the cluster (ENV-12).** While the engine is connected to a
 //! node in a child zone (a partial view), objects its answers leave out
@@ -127,6 +144,10 @@ struct Seqs {
     /// count: a check event older than that (the overlap of a stream
     /// switch) doesn't bring its count back.
     downtime_at: Option<Timestamp>,
+    /// The Icinga time of the latest acknowledgement event applied: a
+    /// check event older than that (the overlap of a stream switch)
+    /// doesn't bring its acknowledgement back.
+    ack_at: Option<Timestamp>,
 }
 
 /// Which groups of the fields events maintain an event newer than an
@@ -262,9 +283,18 @@ pub(crate) struct Store {
     /// was last taken from Icinga, by full name, and whether the stored
     /// depth counts each (see the module notes on downtime depths).
     counted: HashMap<ObjectKey, HashMap<String, bool>>,
-    /// Hosts and services whose depth a downtime event changed while it
-    /// came from a query answer: asked for again by name.
+    /// Hosts and services whose depth is provisional: a downtime event
+    /// changed it while it came from a query answer (or while a check
+    /// event's count can't tell whether it has the downtime). Until an
+    /// answer sent after the line or a check event brings Icinga's count.
     unsettled: BTreeSet<ObjectKey>,
+    /// Those of them handed out to be asked for again by name (queued, in
+    /// flight, or waiting for a retry): not handed out twice.
+    asked: BTreeSet<ObjectKey>,
+    /// `unsettled` may hold a problem not yet handed out (a downtime event,
+    /// a state change of a provisional object, a new session): the next
+    /// [`Store::take_unsettled`] looks.
+    unsettled_dirty: bool,
 }
 
 impl Store {
@@ -509,11 +539,87 @@ impl Store {
         std::mem::take(&mut self.discovered)
     }
 
-    /// Takes the hosts and services to ask for again by name: a downtime
-    /// event changed their depth while it came from a query answer, which
-    /// may already count it (see the module notes on downtime depths).
+    /// Takes the hosts and services to ask for again by name: problems
+    /// whose depth is provisional (a downtime event changed it while it
+    /// came from a query answer, which may already count it; see the
+    /// module notes on downtime depths), not handed out yet. An object that
+    /// isn't a problem waits: its next state change brings Icinga's count
+    /// (or, where it can't, makes it handed out then).
     pub(crate) fn take_unsettled(&mut self) -> Vec<ObjectKey> {
-        std::mem::take(&mut self.unsettled).into_iter().collect()
+        if !std::mem::take(&mut self.unsettled_dirty) {
+            return Vec::new();
+        }
+        let due: Vec<ObjectKey> = self
+            .unsettled
+            .iter()
+            .filter(|key| !self.asked.contains(*key) && self.is_problem(key))
+            .cloned()
+            .collect();
+        self.asked.extend(due.iter().cloned());
+        due
+    }
+
+    /// Whether a host or service is a problem now.
+    fn is_problem(&self, key: &ObjectKey) -> bool {
+        match key {
+            ObjectKey::Host { name } => self.hosts.get(name).is_some_and(|host| host.is_problem()),
+            ObjectKey::Service { key } => self
+                .services
+                .get(key)
+                .is_some_and(|service| service.is_problem()),
+        }
+    }
+
+    /// The request that asked again for those of `keys` handed out by
+    /// [`Store::take_unsettled`] failed: returns those still provisional,
+    /// to be asked again later ([`Store::keep_asking`]).
+    pub(crate) fn reask_failed(&self, keys: &[ObjectKey]) -> Vec<ObjectKey> {
+        if self.asked.is_empty() {
+            return Vec::new();
+        }
+        keys.iter()
+            .filter(|key| self.asked.contains(*key) && self.unsettled.contains(*key))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether to ask (again) for `key`, handed out earlier: its depth is
+    /// still provisional and it is a problem. Otherwise it is no longer
+    /// handed out (a later state change hands it out again if needed).
+    pub(crate) fn keep_asking(&mut self, key: &ObjectKey) -> bool {
+        if self.unsettled.contains(key) && self.is_problem(key) {
+            return true;
+        }
+        self.asked.remove(key);
+        false
+    }
+
+    /// The depth of `key` is Icinga's again: nothing to ask.
+    fn settle(&mut self, key: &ObjectKey) {
+        if !self.unsettled.is_empty() {
+            self.unsettled.remove(key);
+        }
+        if !self.asked.is_empty() {
+            self.asked.remove(key);
+        }
+    }
+
+    /// `key`'s depth turned provisional (a downtime event Icinga's count
+    /// may already have): it is asked for again, also if a request for it
+    /// is under way (sent before the line, its answer can't settle it).
+    fn unsettle(&mut self, key: &ObjectKey) {
+        self.unsettled.insert(key.clone());
+        self.asked.remove(key);
+        self.unsettled_dirty = true;
+    }
+
+    /// The check state of `key` changed without its count settling (an
+    /// answer whose depth a newer line kept, a check event older than a
+    /// downtime line): if its depth is provisional, it may be a problem now.
+    fn recheck_unsettled(&mut self, key: &ObjectKey) {
+        if self.unsettled.contains(key) {
+            self.unsettled_dirty = true;
+        }
     }
 
     /// The event stream was replaced and the store may not have seen every
@@ -525,6 +631,24 @@ impl Store {
             seqs.depth_line = None;
         }
         self.counted.clear();
+    }
+
+    /// A new session's stream replaces the last one, whose unread lines
+    /// are gone ([`Store::stream_gap`]). Its lines come after every line
+    /// applied so far, so a check event on it is never older than an
+    /// acknowledgement or downtime line already applied: the times that
+    /// guard against the overlap of a switch are forgotten (they may come
+    /// from another master's clock).
+    pub(crate) fn new_session(&mut self) {
+        self.stream_gap();
+        for seqs in self.seqs.values_mut() {
+            seqs.ack_at = None;
+            seqs.downtime_at = None;
+        }
+        // The last session's re-query queue is gone: whatever was handed
+        // out and is still provisional is handed out again.
+        self.asked.clear();
+        self.unsettled_dirty = !self.unsettled.is_empty();
     }
 
     /// Forgets everything (the environment now points at another server).
@@ -1134,11 +1258,14 @@ impl Store {
     /// downtime depths), unless a newer line wrote it (`kept`).
     fn depth_answered(&mut self, key: &ObjectKey, kept: bool) {
         if kept {
+            // Its state may have changed: a provisional depth of a new
+            // problem is asked for.
+            self.recheck_unsettled(key);
             return;
         }
         self.seqs.entry(key.clone()).or_default().depth_line = None;
         self.counted.remove(key);
-        self.unsettled.remove(key);
+        self.settle(key);
     }
 
     /// Whether an answer sent at `started` is older than what the store
@@ -1360,7 +1487,7 @@ impl Store {
         }
         self.seqs.remove(key);
         self.counted.remove(key);
-        self.unsettled.remove(key);
+        self.settle(key);
         self.tombstone(key.clone(), started);
         self.changes.any = true;
         self.changes.objects.insert(key.clone());

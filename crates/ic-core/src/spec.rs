@@ -98,6 +98,16 @@ pub struct Tuning {
     /// request goes out (200 ms), so a burst of config changes costs few
     /// requests.
     pub requery_delay: Duration,
+    /// Problems whose downtime depth is provisional (a downtime event
+    /// Icinga's count may already have, see docs/architecture.md
+    /// *Downtime depth*) are asked for again by name after a random delay
+    /// of up to this per request they take (2 s per 200 names, at most
+    /// 30 s): every client reads the same downtime events at the same
+    /// moment, and so doesn't ask at the same moment.
+    pub reask_spread: Duration,
+    /// A failed request of those is tried again after this (5 s, doubling
+    /// up to 5 minutes, with jitter).
+    pub reask_retry: Duration,
     /// An object Icinga reported as unknown (deleted, or hidden by a
     /// filtered permission) isn't re-queried again for events about it
     /// within this time (10 minutes), unless it is created again; each
@@ -230,6 +240,8 @@ impl Default for Tuning {
             publish_interval: Duration::from_millis(250),
             background_publish_interval: Duration::from_secs(2),
             requery_delay: Duration::from_millis(200),
+            reask_spread: Duration::from_secs(2),
+            reask_retry: Duration::from_secs(5),
             missing_ttl: Duration::from_mins(10),
             max_batch: 5_000,
             shutdown_timeout: Duration::from_secs(5),

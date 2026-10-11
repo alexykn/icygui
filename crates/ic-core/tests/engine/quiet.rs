@@ -689,6 +689,379 @@ async fn a_downtime_an_answer_already_counts_is_counted_once() {
     engine.shutdown();
 }
 
+/// Review finding (small fix 3 fixer, request economy): every count comes
+/// from an answer after a load or reconcile, so downtimes starting on many
+/// objects made every client ask for each of them by name at the same
+/// moment. Only problems are asked for: an OK object's count can't hide
+/// anything, and its next state change brings Icinga's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downtimes_on_ok_objects_cost_no_request() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut engine = Launch::new(&server).start();
+    settled(&mut engine).await;
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    engine.snapshot(|snapshot| snapshot.quiet).await;
+
+    let snapshot = engine.latest().unwrap();
+    let healthy: Vec<ServiceKey> = snapshot
+        .services
+        .values()
+        .filter(|service| {
+            service.state == ServiceState::Ok
+                && service.check.downtime_depth == 0
+                && !service.check.flapping
+                && snapshot
+                    .host_of(&service.key)
+                    .is_some_and(|host| host.state == HostState::Up)
+        })
+        .take(5)
+        .map(|service| service.key.clone())
+        .collect();
+    drop(snapshot);
+    let (problem, ok) = healthy.split_first().unwrap();
+    set(
+        &control,
+        problem.host.as_str(),
+        &problem.name,
+        ServiceState::Critical,
+        "CRITICAL - down",
+    );
+    engine
+        .snapshot(|snapshot| snapshot.services[problem].state == ServiceState::Critical)
+        .await;
+    let before = by_name(&control, "services").len();
+
+    // Downtimes on four OK services and the problem (their counts came
+    // from the load's answers).
+    let now = control.now().as_unix_seconds();
+    for key in &healthy {
+        control
+            .schedule_downtime(
+                &ObjectKey::from(key.clone()),
+                "carol",
+                "patching",
+                Timestamp::from_unix_seconds(now - 60.0),
+                Timestamp::from_unix_seconds(now + 3_600.0),
+                None,
+            )
+            .unwrap();
+    }
+    engine
+        .snapshot(|snapshot| {
+            healthy
+                .iter()
+                .all(|key| snapshot.services[key].check.downtime_depth == 1)
+        })
+        .await;
+    let named = |control: &MockControl, key: &ServiceKey| {
+        by_name(control, "services")
+            .iter()
+            .skip(before)
+            .any(|(_, names)| names.contains(&ObjectKey::from(key.clone()).full_name()))
+    };
+    assert!(
+        wait_until(|| named(&control, problem)).await,
+        "the problem is asked for"
+    );
+    // Its answer is in (and anything else asked with it).
+    engine
+        .snapshot(|snapshot| snapshot.services[problem].check.downtime_depth == 1)
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let asked: Vec<&ServiceKey> = ok.iter().filter(|key| named(&control, key)).collect();
+    assert!(asked.is_empty(), "OK services asked for: {asked:?}");
+    engine.shutdown();
+}
+
+/// Review finding (small fix 3 fixer, false green): a problem whose
+/// downtime depth turned provisional is asked for again by name, and a
+/// request that fails is tried again with backoff. Before, a failed
+/// request was dropped: here the refresh after waking already counts a
+/// downtime whose line is held, every by-name request fails while the line
+/// (2 for one downtime) and then the removal (1, Icinga 0) come, and the
+/// problem stayed in downtime, handled and hidden, until a state change or
+/// a reconcile in quiet mode. Now the retry after the requests work again
+/// brings Icinga's count.
+#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_request_for_a_provisional_depth_is_tried_again() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        // The held lines come inside the switch's window (the fence's line
+        // on both streams ends it).
+        stream_handover: Tuning::default().stream_handover,
+        ..tuning()
+    };
+    let mut engine = launch.start();
+    settled(&mut engine).await;
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    engine.snapshot(|snapshot| snapshot.quiet).await;
+
+    let snapshot = engine.latest().unwrap();
+    let mut healthy = snapshot.services.values().filter(|service| {
+        service.state == ServiceState::Ok
+            && service.check.downtime_depth == 0
+            && !service.check.flapping
+            && snapshot
+                .host_of(&service.key)
+                .is_some_and(|host| host.state == HostState::Up)
+    });
+    let service = healthy.next().unwrap().key.clone();
+    let fence = healthy.next().unwrap().key.clone();
+    drop(snapshot);
+    let key = ObjectKey::from(service.clone());
+    let (host, name) = (service.host.to_string(), service.name.to_string());
+    set(
+        &control,
+        &host,
+        &name,
+        ServiceState::Critical,
+        "CRITICAL - down",
+    );
+    engine
+        .snapshot(|snapshot| snapshot.services[&service].state == ServiceState::Critical)
+        .await;
+
+    // The downtime's lines wait in the quiet stream; the refresh after
+    // waking counts it.
+    assert_eq!(control.hold_event_streams(), 1);
+    let now = control.now().as_unix_seconds();
+    let downtime = control
+        .schedule_downtime(
+            &key,
+            "carol",
+            "replacing the disk",
+            Timestamp::from_unix_seconds(now - 60.0),
+            Timestamp::from_unix_seconds(now + 3_600.0),
+            None,
+        )
+        .unwrap();
+    engine.send(Command::SetQuiet(false));
+    engine
+        .snapshot(|snapshot| snapshot.services[&service].check.downtime_depth == 1)
+        .await;
+
+    // From now on every by-name request for services fails.
+    let failed = |control: &MockControl| {
+        control
+            .requests()
+            .iter()
+            .filter(|request| request.path == "/v1/objects/services" && request.status == 503)
+            .count()
+    };
+    control.fail_path("/v1/objects/services", 100_000, 503);
+    assert!(control.release_event_streams() > 0);
+    // A soft fence: no notification, so no prefetch of it either (only
+    // the re-asks query services by name from here on).
+    control
+        .set_service_state(
+            fence.host.as_str(),
+            &fence.name,
+            ServiceState::Warning,
+            "WARNING - fence",
+            false,
+        )
+        .unwrap();
+    stream_mode(&control, false).await;
+    engine
+        .snapshot(|snapshot| downtime_names(snapshot, &key).contains(&downtime))
+        .await;
+    assert!(
+        wait_until(|| failed(&control) >= 2).await,
+        "asked again, and tried again after the failure"
+    );
+
+    // Removed in quiet mode while the requests still fail: the provisional
+    // count is one too many, the problem shows as in downtime.
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    control.remove_downtime(&downtime).unwrap();
+    let snapshot = engine
+        .snapshot(|snapshot| downtime_names(snapshot, &key).is_empty())
+        .await;
+    assert_eq!(
+        snapshot.services[&service].check.downtime_depth, 1,
+        "provisional (Icinga 0) while nothing can be asked"
+    );
+    assert_eq!(
+        control.service(&host, &name).unwrap().check.downtime_depth,
+        0
+    );
+    let before = failed(&control);
+    assert!(
+        wait_until(|| failed(&control) > before).await,
+        "asked after the removal, and that failed too"
+    );
+
+    // The requests work again: the next retry brings Icinga's count
+    // (before the fix: none came, and the problem stayed hidden).
+    control.fail_path("/v1/objects/services", 0, 0);
+    let snapshot = engine
+        .snapshot(|snapshot| snapshot.services[&service].check.downtime_depth == 0)
+        .await;
+    assert!(
+        !snapshot.services[&service].is_handled(false),
+        "an unhandled problem again"
+    );
+    engine.shutdown();
+}
+
+/// Review finding (small fix 3 fixer, false green): Icinga's check events
+/// carry the acknowledgement as it was when the event was built. On
+/// waking, a check result of an acknowledged problem comes only on the
+/// new live stream (a quiet stream has none) and waits there for the
+/// handover; the acknowledgement is then removed, which the quiet stream
+/// brings at once. Applied at the handover, after the removal, the waiting
+/// result took the acknowledgement back: acknowledged here (handled,
+/// hollow, hidden by *hide handled*) while Icinga said it wasn't, until
+/// the next state change or reconcile in quiet mode (3 of 3 runs before
+/// the fix). The mirror (acknowledged meanwhile, the waiting result
+/// without it) showed a handled problem as unhandled. The new stream holds
+/// its lines until both changes are made, so the order is the same every
+/// run.
+#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_acknowledgement_changed_during_the_handover_is_not_undone() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        // The held lines come inside the switch's window (the removal's
+        // line on both streams ends it).
+        stream_handover: Tuning::default().stream_handover,
+        ..tuning()
+    };
+    let mut engine = launch.start();
+    settled(&mut engine).await;
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    engine.snapshot(|snapshot| snapshot.quiet).await;
+
+    // Two OK services on healthy hosts, and a third as a fence.
+    let snapshot = engine.latest().unwrap();
+    let mut healthy = snapshot.services.values().filter(|service| {
+        service.state == ServiceState::Ok
+            && service.check.downtime_depth == 0
+            && !service.check.flapping
+            && snapshot
+                .host_of(&service.key)
+                .is_some_and(|host| host.state == HostState::Up)
+    });
+    let removed = healthy.next().unwrap().key.clone();
+    let added = healthy.next().unwrap().key.clone();
+    let fence = healthy.next().unwrap().key.clone();
+    drop(snapshot);
+    let acknowledged = |snapshot: &ic_core::snapshot::Snapshot, key: &ServiceKey| {
+        snapshot.services[key]
+            .check
+            .acknowledgement
+            .is_acknowledged()
+    };
+    let in_icinga = |key: &ServiceKey| {
+        control
+            .service(key.host.as_str(), &key.name)
+            .unwrap()
+            .check
+            .acknowledgement
+            .is_acknowledged()
+    };
+
+    // Two problems (state changes: the quiet stream brings them); the
+    // first one acknowledged.
+    for key in [&removed, &added] {
+        set(
+            &control,
+            key.host.as_str(),
+            &key.name,
+            ServiceState::Critical,
+            "CRITICAL - down",
+        );
+    }
+    control
+        .acknowledge(&ObjectKey::from(removed.clone()), "carol", "on it", false)
+        .unwrap();
+    engine
+        .snapshot(|snapshot| {
+            snapshot.services[&added].state == ServiceState::Critical
+                && acknowledged(snapshot, &removed)
+        })
+        .await;
+
+    // Waking up: the live stream holds its lines; the refresh asks for the
+    // problems by name and is answered.
+    control.hold_new_event_streams(true);
+    let before = by_name(&control, "services").len();
+    engine.send(Command::SetQuiet(false));
+    assert!(
+        wait_until(|| control.event_stream_stats().len() == 2
+            && by_name(&control, "services")
+                .iter()
+                .skip(before)
+                .any(|(_, names)| names.contains(&ObjectKey::from(removed.clone()).full_name())))
+        .await,
+        "the refresh after waking"
+    );
+    control.hold_new_event_streams(false);
+    // A check result of each (no state change: only the live stream has
+    // it, and holds it), then the acknowledgements change (both streams;
+    // the quiet one brings it at once).
+    for key in [&removed, &added] {
+        control
+            .process_check_result(&ObjectKey::from(key.clone()), 2, "CRITICAL - still", &[])
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    control
+        .remove_acknowledgement(&ObjectKey::from(removed.clone()))
+        .unwrap();
+    control
+        .acknowledge(&ObjectKey::from(added.clone()), "carol", "mine", false)
+        .unwrap();
+    engine
+        .snapshot(|snapshot| !acknowledged(snapshot, &removed) && acknowledged(snapshot, &added))
+        .await;
+
+    // The live stream sends what it held: the results, then the
+    // acknowledgement lines the quiet stream brought too (the switch
+    // ends). The fence's problem comes after them.
+    assert!(control.release_event_streams() > 0);
+    stream_mode(&control, false).await;
+    set(
+        &control,
+        fence.host.as_str(),
+        &fence.name,
+        ServiceState::Critical,
+        "CRITICAL - fence",
+    );
+    let snapshot = engine
+        .snapshot(|snapshot| snapshot.services[&fence].state == ServiceState::Critical)
+        .await;
+    assert!(!in_icinga(&removed) && in_icinga(&added), "Icinga's values");
+    assert!(
+        !acknowledged(&snapshot, &removed),
+        "removed (before the fix: acknowledged again by the older result)"
+    );
+    assert!(
+        !snapshot.services[&removed].is_handled(false),
+        "an unhandled problem"
+    );
+    assert!(
+        acknowledged(&snapshot, &added),
+        "added (before the fix: taken back by the older result)"
+    );
+    // Back in quiet mode nothing brings another value: it stays right.
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    let snapshot = engine.latest().unwrap();
+    assert!(!acknowledged(&snapshot, &removed) && acknowledged(&snapshot, &added));
+    engine.shutdown();
+}
+
 /// Icinga 2.15 writes a stream's events in batches 5 s apart (every
 /// stream, idle or busy: measured on the demo cluster); a new stream's
 /// first events go out at once. A switch keeps the old stream until its

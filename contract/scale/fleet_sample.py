@@ -7,6 +7,12 @@
   (`memory.usage_in_bytes`, and the `rss` and `cache` of `memory.stat`);
 - `clients.csv`, every second: the fleet's process (the PID in the file
   `fleet.pid` once it exists): CPU time in clock ticks, resident memory;
+- `cpus.csv`, every second: each CPU's busy and total clock ticks
+  (`/proc/stat`), so a saturated client core shows;
+- `procs.csv`, every second: the CPU ticks of docker's port proxies
+  (`docker-proxy`, which carry every request to the published ports, outside
+  the containers' cgroups) and of the processes named in `procs-*.pid`
+  files of OUT_DIR (the stream readers);
 - `status.ndjson`, every 5 s: master-01's and master-02's
   `/v1/status/ApiListener` and master-01's `/v1/status/CIB` perfdata (the
   JSON-RPC relay, sync and work queues, the HTTP clients, check latency).
@@ -82,6 +88,31 @@ def process_sample(pid):
     return ticks, rss, threads
 
 
+def cpu_ticks():
+    """{cpu: (busy, total)} from /proc/stat."""
+    out = {}
+    for line in (read("/proc/stat") or "").splitlines():
+        if line.startswith("cpu") and line[3:4].isdigit():
+            name, *values = line.split()
+            values = [int(v) for v in values]
+            idle = values[3] + values[4]
+            out[name] = (sum(values[:8]) - idle, sum(values[:8]))
+    return out
+
+
+def watched_processes(out_dir):
+    """{pid: name}: docker-proxy processes and those in procs-*.pid."""
+    out = {}
+    for pid in os.listdir("/proc"):
+        if pid.isdigit() and (read(f"/proc/{pid}/comm") or "").strip() == "docker-proxy":
+            out[pid] = "docker-proxy"
+    for name in os.listdir(out_dir):
+        if name.startswith("procs-") and name.endswith(".pid"):
+            for pid in (read(os.path.join(out_dir, name)) or "").split():
+                out[pid] = name[6:-4]
+    return out
+
+
 def status_loop(out_dir, urls, ca, stop):
     context = ssl.create_default_context(cafile=ca)
     context.check_hostname = False
@@ -144,7 +175,13 @@ def main():
     refreshed = time.time()
     pid_file = os.path.join(out_dir, "fleet.pid")
     with open(os.path.join(out_dir, "cgroups.csv"), "a") as cg, \
-            open(os.path.join(out_dir, "clients.csv"), "a") as cl:
+            open(os.path.join(out_dir, "clients.csv"), "a") as cl, \
+            open(os.path.join(out_dir, "cpus.csv"), "a") as cpus, \
+            open(os.path.join(out_dir, "procs.csv"), "a") as procs:
+        if cpus.tell() == 0:
+            cpus.write("t,cpu,busy_ticks,total_ticks\n")
+        if procs.tell() == 0:
+            procs.write("t,name,pid,ticks\n")
         if cg.tell() == 0:
             cg.write("t,container,cpu_ns,mem_bytes,rss_bytes,cache_bytes\n")
         if cl.tell() == 0:
@@ -166,8 +203,16 @@ def main():
                     sample = process_sample(pid)
                     if sample:
                         cl.write(f"{t:.3f},{pid},{sample[0]},{sample[1]},{sample[2]}\n")
+                for name, (busy, total) in cpu_ticks().items():
+                    cpus.write(f"{t:.3f},{name},{busy},{total}\n")
+                for proc, name in watched_processes(out_dir).items():
+                    sample = process_sample(proc)
+                    if sample:
+                        procs.write(f"{t:.3f},{name},{proc},{sample[0]}\n")
                 cg.flush()
                 cl.flush()
+                cpus.flush()
+                procs.flush()
                 next_at += 1.0
                 time.sleep(max(0.0, next_at - time.time()))
         except KeyboardInterrupt:

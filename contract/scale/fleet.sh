@@ -24,9 +24,12 @@
 #   restart  50 fresh clients (a tenth live; FLEET_CLIENTS), a restart of
 #            master-01, then a reload (restart-process) (about 30 minutes)
 #   fit      no engines: 0, 10, 25 and 50 bare event streams (curl, every
-#            type), at rest and under the same storm (FLEET_STORM a second,
-#            default 1 500, for FLEET_STORM_S, default 60), for the
-#            master's CPU per stream (about 25 minutes)
+#            type, read by fleet_streams.py, which times the marker's
+#            results: the master's own delivery delay), plus one quiet
+#            stream throughout, at rest and under the same storm
+#            (FLEET_STORM a second, default 1 500, for FLEET_STORM_S,
+#            default 60), each step until master-01 is back at rest, for
+#            the master's CPU per stream (25 to 40 minutes)
 #   morning  on a freshly restarted master: 50 windows opening within 3
 #            minutes (Start::User), then, restarted again, 50 starts at
 #            login at once (Start::Background) (about 30 minutes)
@@ -40,7 +43,14 @@
 #            overlap (about 45 minutes)
 #
 # Environment: FLEET_CLUSTER_CPUS (0,1) and FLEET_CLIENT_CPUS (2,3) split
-# the cores; FLEET_BIN skips the build (the engine test binary). Nothing
+# the cores; FLEET_M1_CPUS and FLEET_OTHERS_CPUS (both FLEET_CLUSTER_CPUS
+# by default) give master-01 cores of its own and the rest of the cluster
+# others (`fit` on a dedicated master-01: FLEET_M1_CPUS=0,1
+# FLEET_OTHERS_CPUS=2 FLEET_CLIENT_CPUS=3). docker's port proxies
+# (docker-proxy, outside the containers' cgroups) are pinned to the client
+# cores and sampled (procs.csv); FLEET_RAW_DIRECT=1 has `fit`'s bare
+# streams connect to master-01's address on the compose network instead,
+# past the proxy. FLEET_BIN skips the build (the engine test binary). Nothing
 # else should run meanwhile (a shared CPU skews everything), and the build
 # happens before anything is measured.
 #
@@ -61,6 +71,8 @@ URL2=https://127.0.0.1:${ICYGUI_DEMO_PORT_2:-5666}
 COMPOSE=(docker compose -f "$ROOT/demo/docker-compose.yml")
 CLUSTER_CPUS=${FLEET_CLUSTER_CPUS:-0,1}
 CLIENT_CPUS=${FLEET_CLIENT_CPUS:-2,3}
+M1_CPUS=${FLEET_M1_CPUS:-$CLUSTER_CPUS}
+OTHERS_CPUS=${FLEET_OTHERS_CPUS:-$CLUSTER_CPUS}
 MARKER=${FLEET_MARKER:-storage-1999.prod.example.com!smart}
 CLIENT_USER=icygui-demo
 CLIENT_PASSWORD=icygui-demo-password
@@ -69,6 +81,8 @@ ADMIN_PASSWORD=demo-admin-password
 MASTER=icygui-demo-master-01-1
 
 mkdir -p "$OUT"
+: >"$OUT/actions.csv"
+rm -f "$OUT"/procs-*.pid
 CA="$OUT/ca.crt"
 PIDS=()
 RAW_PIDS=()
@@ -94,11 +108,22 @@ guard() {
 }
 
 pin_cluster() {
-  local id
+  local id name cpus pid
   for id in $("${COMPOSE[@]}" ps -q); do
-    docker update --cpuset-cpus "$CLUSTER_CPUS" "$id" >/dev/null
+    name=$(docker inspect -f '{{.Name}}' "$id")
+    cpus=$OTHERS_CPUS
+    [ "$name" != "/$MASTER" ] || cpus=$M1_CPUS
+    docker update --cpuset-cpus "$cpus" "$id" >/dev/null
+    action "cpuset ${name#/} $(docker inspect -f '{{.HostConfig.CpusetCpus}}' "$id")"
   done
-  action "cluster on cpus $CLUSTER_CPUS, clients on cpus $CLIENT_CPUS"
+  # docker's userland proxies carry every request to the published ports;
+  # they inherit dockerd's affinity (every core). They belong to the
+  # client side.
+  for pid in $(pgrep -x docker-proxy || true); do
+    taskset -a -p -c "$CLIENT_CPUS" "$pid" >/dev/null
+    action "docker-proxy $pid on cpus $(taskset -p -c "$pid" | sed 's/.*: //'): $(tr '\0' ' ' <"/proc/$pid/cmdline" | grep -o -- '-host-port [0-9]*')"
+  done
+  action "cluster: master-01 on cpus $M1_CPUS, the rest on cpus $OTHERS_CPUS; clients on cpus $CLIENT_CPUS"
 }
 
 build() {
@@ -132,7 +157,6 @@ marker_downtime() {
 }
 
 start_side() {
-  : >"$OUT/actions.csv"
   rm -f "$OUT/fleet.pid" "$OUT/control"
   export FLEET_STATUS_USER=$CLIENT_USER FLEET_STATUS_PASSWORD=$CLIENT_PASSWORD
   taskset -c "$CLIENT_CPUS" python3 -I "$HERE/fleet_sample.py" "$OUT" "$URL1" "$URL2" "$CA" &
@@ -167,6 +191,7 @@ start_side() {
 stop_side() {
   set +e
   raw_stop
+  [ -z "${QUIET_PID:-}" ] || kill "$QUIET_PID" 2>/dev/null
   if [ -n "${FLEET:-}" ]; then
     echo quit >&3
     exec 3>&-
@@ -222,7 +247,7 @@ restart_master() {
   master_answers
   action "master-01 answers"
   # cpuset survives a restart; set again in case the container was recreated.
-  docker update --cpuset-cpus "$CLUSTER_CPUS" "$MASTER" >/dev/null
+  docker update --cpuset-cpus "$M1_CPUS" "$MASTER" >/dev/null
 }
 
 # A config reload as a deploy does it (Director, `icinga2 api` packages):
@@ -243,24 +268,59 @@ storm() { # storm <rate> <seconds>: through master-02, as checks there would bri
   action "storm over: $(tail -n 1 "$OUT/storm.log")"
 }
 
-raw_start() { # raw_start <n>: bare event streams of every type, read and dropped
-  local i
-  for i in $(seq 1 "$1"); do
-    taskset -c "$CLIENT_CPUS" curl -sS --noproxy "*" --cacert "$CA" --resolve "master-01:${ICYGUI_DEMO_PORT_1:-5665}:127.0.0.1" \
-      -u "$CLIENT_USER:$CLIENT_PASSWORD" -H 'Accept: application/json' -N -X POST \
-      "https://master-01:${ICYGUI_DEMO_PORT_1:-5665}/v1/events" \
-      -d "{\"queue\":\"fleet-raw-$i\",\"types\":[\"CheckResult\",\"StateChange\",\"AcknowledgementSet\",\"AcknowledgementCleared\",\"CommentAdded\",\"CommentRemoved\",\"DowntimeAdded\",\"DowntimeRemoved\",\"DowntimeStarted\",\"DowntimeTriggered\",\"Flapping\",\"ObjectCreated\",\"ObjectModified\",\"ObjectDeleted\",\"Notification\"]}" \
-      -o /dev/null &
-    RAW_PIDS+=($!)
-  done
-  action "raw streams: ${#RAW_PIDS[@]}"
+# Bare event streams (fleet_streams.py: each read by curl, the marker's
+# results timed as they arrive): raw_start <live> [quiet] [tag]. With
+# FLEET_RAW_DIRECT=1 they connect to master-01's address on the compose
+# network (from docker inspect of the project's own master-01, which the
+# guard checked), past docker's port proxy.
+raw_start() {
+  local host=127.0.0.1 tag=${3:-s$1}
+  if [ "${FLEET_RAW_DIRECT:-0}" = 1 ]; then
+    host=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$MASTER" | awk '{print $1}')
+  fi
+  FLEET_STREAM_USER=$CLIENT_USER FLEET_STREAM_PASSWORD=$CLIENT_PASSWORD \
+    taskset -c "$CLIENT_CPUS" python3 -I "$HERE/fleet_streams.py" "$OUT" "$tag" "$1" "${2:-0}" \
+    "$host" "${ICYGUI_DEMO_PORT_1:-5665}" "$CA" &
+  RAW_PIDS+=($!)
+  action "raw streams $tag: $1 live, ${2:-0} quiet, via $host"
 }
 
 raw_stop() {
   local pid
   for pid in "${RAW_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for pid in "${RAW_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
   RAW_PIDS=()
   action "raw streams: 0"
+}
+
+# Waits until master-01 is back at its rest after a storm: its CPU over the
+# last 20 s (cgroups.csv) within max(0.05, 25 %) of `rest` cores, at least
+# `min` and at most `max` seconds.
+settle() { # settle <rest cores> <min s> <max s>
+  local start=$SECONDS now
+  sleep "$2"
+  until python3 -I - "$OUT/cgroups.csv" "$1" <<'PY'
+import sys
+rows = [l.split(",") for l in open(sys.argv[1]) if ",master-01," in l][-21:]
+(t0, c0), (t1, c1) = (float(rows[0][0]), int(rows[0][2])), (float(rows[-1][0]), int(rows[-1][2]))
+cores, rest = (c1 - c0) / 1e9 / (t1 - t0), float(sys.argv[2])
+sys.exit(0 if cores <= rest + max(0.05, 0.25 * rest) else 1)
+PY
+  do
+    now=$((SECONDS - start))
+    [ "$now" -lt "$3" ] || { action "not settled after $now s"; return 0; }
+    sleep 5
+  done
+  action "settled after $((SECONDS - start)) s"
+}
+
+# master-01's mean cores over the last <s> seconds (cgroups.csv).
+m1_cores() {
+  python3 -I - "$OUT/cgroups.csv" "$1" <<'PY'
+import sys
+rows = [l.split(",") for l in open(sys.argv[1]) if ",master-01," in l][-(int(sys.argv[2]) + 1):]
+print(f"{(int(rows[-1][2]) - int(rows[0][2])) / 1e9 / (float(rows[-1][0]) - float(rows[0][0])):.3f}")
+PY
 }
 
 run_smoke() {
@@ -326,19 +386,32 @@ run_restart() {
 # master-01 here without master-01 falling behind; at 5 000 a second
 # (2026-10-11, `fit-5000`) master-02 managed 2 200 to 3 500 and master-01
 # was still writing the storm to 25 and 50 streams minutes later, so each
-# step's rest was its predecessor's tail. Each step now waits 3 minutes
-# after its storm, and the analysis counts the storm's CPU from its start
-# to the end of that wait.
+# step's rest was its predecessor's tail. Each step therefore waits after
+# its storm until master-01 is back at its rest (settle: at least 60 s, at
+# most FLEET_SETTLE_MAX, default 900), and the analysis counts the storm's
+# CPU from its start to the end of that wait. One quiet stream (the types
+# a window in the tray subscribes to) runs through every step, the live
+# streams are the step's: both time the marker's results as they arrive
+# (marker.csv), the master's own delivery delay with no client behind it.
 run_fit() {
-  local n rate=${FLEET_STORM:-1500} seconds=${FLEET_STORM_S:-60}
+  local n rate=${FLEET_STORM:-1500} seconds=${FLEET_STORM_S:-60} rest
+  raw_start 0 1 quiet
+  QUIET_PID=${RAW_PIDS[0]}
+  RAW_PIDS=()
   for n in 0 10 25 50; do
-    [ "$n" = 0 ] || raw_start "$n"
+    [ "$n" = 0 ] || raw_start "$n" 0 "s$n"
     pause 30
     mark "F$n-rest"; pause 60
-    mark "F$n-storm"; storm "$rate" "$seconds"; mark "F$n-after"; pause 180
+    rest=$(m1_cores 60)
+    action "F$n rest: master-01 $rest cores"
+    mark "F$n-storm"; storm "$rate" "$seconds"; mark "F$n-after"
+    settle "$rest" 60 "${FLEET_SETTLE_MAX:-900}"
+    mark "F$n-settled"
     [ "$n" = 0 ] || raw_stop
     pause 15
   done
+  kill "$QUIET_PID" 2>/dev/null || true
+  wait "$QUIET_PID" 2>/dev/null || true
   mark end
 }
 

@@ -2,7 +2,16 @@
 """What anyone else using the master sees while the icygui fleet runs
 (contract/scale/fleet.sh, docs/performance.md): one request a second on a
 fresh TLS connection, its HTTP status and how long it took, as CSV on
-stdout (`t,status,seconds,bytes,error`, Unix seconds).
+stdout (`t,status,seconds,bytes,error,open`, Unix seconds).
+
+Open-loop (since 2026-10-11's settling of the 50-client measurement): each
+request goes out on a fixed one-second schedule on its own thread, whether
+or not the previous one has been answered, so a stall shows up in every
+second it lasts, not as one slow sample. A request that gets no answer
+within FLEET_PROBE_TIMEOUT seconds (default 30) is a failure
+(`error=timeout`), counted as over every threshold. `open` is 1 on every
+line (the analysis re-scores the earlier closed-loop runs, whose lines
+lack it).
 
     fleet_probe.py byname URL CA   another client opening an object: one
                                    service by name, two attributes (the
@@ -23,6 +32,7 @@ import json
 import os
 import ssl
 import sys
+import threading
 import time
 import urllib.parse
 
@@ -51,26 +61,15 @@ def main():
         path = "/v1/actions/process-check-result"
     else:
         raise SystemExit(f"fleet_probe.py: unknown probe {kind}")
-    print("t,status,seconds,bytes,error", flush=True)
-    flip = 0
-    next_at = time.time()
-    while True:
-        next_at += 1.0
-        body = None
-        if kind == "web":
-            flip ^= 1
-            # As Icinga Web's API command transport sends it: by filter.
-            body = json.dumps({
-                "type": "Service",
-                "filter": f'host.name=="{host}" && service.name=="{service}"',
-                "exit_status": 2 if flip else 0,
-                "plugin_output": f"fleet marker {'CRITICAL' if flip else 'OK'} {time.time():.3f}",
-            })
+    timeout = float(os.environ.get("FLEET_PROBE_TIMEOUT", "30"))
+    lock = threading.Lock()
+
+    def one(body):
         started = time.time()
         status, size, error = 0, 0, ""
         try:
             connection = http.client.HTTPSConnection(
-                parsed.hostname, parsed.port or 5665, context=context, timeout=60)
+                parsed.hostname, parsed.port or 5665, context=context, timeout=timeout)
             connection.request(method, path, body=body, headers={
                 "Authorization": auth, "Accept": "application/json",
                 "Content-Type": "application/json"})
@@ -78,14 +77,33 @@ def main():
             size = len(response.read())
             status = response.status
             connection.close()
+        except TimeoutError:
+            error = "timeout"
         except (OSError, http.client.HTTPException) as failure:
-            error = type(failure).__name__
+            error = "timeout" if "timed out" in str(failure) else type(failure).__name__
         took = time.time() - started
-        print(f"{started:.3f},{status},{took:.4f},{size},{error}", flush=True)
+        with lock:
+            print(f"{started:.3f},{status},{took:.4f},{size},{error},1", flush=True)
+
+    print("t,status,seconds,bytes,error,open", flush=True)
+    flip = 0
+    next_at = time.time()
+    while True:
+        body = None
+        if kind == "web":
+            flip ^= 1
+            # As Icinga Web's API command transport sends it: by filter. The
+            # send time in the output lets a stream reader time the delivery
+            # (fleet_streams.py).
+            body = json.dumps({
+                "type": "Service",
+                "filter": f'host.name=="{host}" && service.name=="{service}"',
+                "exit_status": 2 if flip else 0,
+                "plugin_output": f"fleet marker {'CRITICAL' if flip else 'OK'} {time.time():.3f}",
+            })
+        threading.Thread(target=one, args=(body,), daemon=True).start()
+        next_at += 1.0
         time.sleep(max(0.0, next_at - time.time()))
-        if time.time() - next_at > 1.0:
-            # A slow answer: the next one goes out now, not in a burst.
-            next_at = time.time()
 
 
 if __name__ == "__main__":

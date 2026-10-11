@@ -1,5 +1,5 @@
 {
- "run": "contract/scale/fleet-data/reconcile",
+ "run": "fleet-data/reconcile",
  "phases": [
   {
    "label": "(add 15 live user; add 10 quiet user)",
@@ -14,7 +14,16 @@
     "failed": 0,
     "over_500ms": 9,
     "over_2s": 6,
-    "worst_minute_p95": 4.1403
+    "worst_minute_p95": 4.1403,
+    "slots": {
+     "n": 57,
+     "median": 0.44419999999999993,
+     "p95": 4.8237,
+     "max": 6.1312,
+     "over_500ms": 27,
+     "over_2s": 16,
+     "worst_minute_p95": 4.8237
+    }
    },
    "web": {
     "n": 31,
@@ -24,7 +33,16 @@
     "failed": 0,
     "over_500ms": 4,
     "over_2s": 4,
-    "worst_minute_p95": 3.4844
+    "worst_minute_p95": 3.4844,
+    "slots": {
+     "n": 54,
+     "median": 0.4626,
+     "p95": 8.7471,
+     "max": 11.7471,
+     "over_500ms": 25,
+     "over_2s": 19,
+     "worst_minute_p95": 8.7471
+    }
    },
    "m1_cores": 1.4918408205882352,
    "m2_cores": 0.09431802407843137,
@@ -161,7 +179,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0862
+    "worst_minute_p95": 0.0862,
+    "slots": {
+     "n": 2400,
+     "median": 0.0541,
+     "p95": 0.082,
+     "max": 0.166,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0862
+    }
    },
    "web": {
     "n": 2400,
@@ -171,7 +198,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.1064
+    "worst_minute_p95": 0.1064,
+    "slots": {
+     "n": 2400,
+     "median": 0.0545,
+     "p95": 0.0793,
+     "max": 0.1606,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.1064
+    }
    },
    "m1_cores": 0.39305037369112134,
    "m2_cores": 0.12420159952355148,
@@ -287,7 +323,14 @@
    },
    "reconnecting": 0,
    "connected_events": 0,
-   "completed": 0
+   "completed": 0,
+   "reconcile_cost": {
+    "reconciles": 91,
+    "mean_s": 4.127153844623775,
+    "split_cpu_s": 2.126351494627289,
+    "fit_cpu_s": 2.150056795807306
+   },
+   "new_connection_share": 0.39237973265028414
   },
   {
    "label": "end",
@@ -302,7 +345,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": null
+    "worst_minute_p95": null,
+    "slots": {
+     "n": 5,
+     "median": 0.0502,
+     "p95": 0.0542,
+     "max": 0.0542,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": null
+    }
    },
    "web": {
     "n": 5,
@@ -312,7 +364,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": null
+    "worst_minute_p95": null,
+    "slots": {
+     "n": 5,
+     "median": 0.0507,
+     "p95": 0.0545,
+     "max": 0.0545,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": null
+    }
    },
    "m1_cores": 0.1641289984,
    "m2_cores": 0.13710854420000002,

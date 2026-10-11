@@ -1,5 +1,5 @@
 {
- "run": "contract/scale/fleet-data/restart-50",
+ "run": "fleet-data/restart-50",
  "phases": [
   {
    "label": "(add 5 live user; add 45 quiet background)",
@@ -14,7 +14,16 @@
     "failed": 0,
     "over_500ms": 2,
     "over_2s": 1,
-    "worst_minute_p95": 0.3917
+    "worst_minute_p95": 0.3917,
+    "slots": {
+     "n": 107,
+     "median": 0.0753,
+     "p95": 0.5993,
+     "max": 5.5282,
+     "over_500ms": 7,
+     "over_2s": 4,
+     "worst_minute_p95": 2.5282
+    }
    },
    "web": {
     "n": 96,
@@ -24,7 +33,16 @@
     "failed": 0,
     "over_500ms": 7,
     "over_2s": 3,
-    "worst_minute_p95": 2.0289
+    "worst_minute_p95": 2.0289,
+    "slots": {
+     "n": 110,
+     "median": 0.0768,
+     "p95": 2.9867,
+     "max": 5.8259,
+     "over_500ms": 18,
+     "over_2s": 8,
+     "worst_minute_p95": 3.9867
+    }
    },
    "m1_cores": 1.4823410510380952,
    "m2_cores": 0.1087066562952381,
@@ -161,7 +179,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0595
+    "worst_minute_p95": 0.0595,
+    "slots": {
+     "n": 180,
+     "median": 0.0515,
+     "p95": 0.0594,
+     "max": 0.0874,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0595
+    }
    },
    "web": {
     "n": 180,
@@ -171,7 +198,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0667
+    "worst_minute_p95": 0.0667,
+    "slots": {
+     "n": 180,
+     "median": 0.0523,
+     "p95": 0.0624,
+     "max": 0.0786,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0667
+    }
    },
    "m1_cores": 0.2262946397653551,
    "m2_cores": 0.12471319061136724,
@@ -298,7 +334,16 @@
     "failed": 12,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": null
+    "worst_minute_p95": null,
+    "slots": {
+     "n": 12,
+     "median": Infinity,
+     "p95": Infinity,
+     "max": Infinity,
+     "over_500ms": 12,
+     "over_2s": 12,
+     "worst_minute_p95": Infinity
+    }
    },
    "web": {
     "n": 13,
@@ -308,7 +353,16 @@
     "failed": 11,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": null
+    "worst_minute_p95": null,
+    "slots": {
+     "n": 13,
+     "median": Infinity,
+     "p95": Infinity,
+     "max": Infinity,
+     "over_500ms": 11,
+     "over_2s": 11,
+     "worst_minute_p95": Infinity
+    }
    },
    "m1_cores": 1.1639390228181818,
    "m2_cores": 0.08677955527272728,
@@ -435,7 +489,16 @@
     "failed": 0,
     "over_500ms": 14,
     "over_2s": 6,
-    "worst_minute_p95": 5.7803
+    "worst_minute_p95": 5.7803,
+    "slots": {
+     "n": 399,
+     "median": 0.0546,
+     "p95": 10.636700000000001,
+     "max": 30.6367,
+     "over_500ms": 61,
+     "over_2s": 44,
+     "worst_minute_p95": 27.6367
+    }
    },
    "web": {
     "n": 345,
@@ -445,7 +508,16 @@
     "failed": 0,
     "over_500ms": 17,
     "over_2s": 9,
-    "worst_minute_p95": 4.3335
+    "worst_minute_p95": 4.3335,
+    "slots": {
+     "n": 400,
+     "median": 0.0565,
+     "p95": 5.3556,
+     "max": 22.7647,
+     "over_500ms": 66,
+     "over_2s": 43,
+     "worst_minute_p95": 19.7647
+    }
    },
    "m1_cores": 0.5178536604554708,
    "m2_cores": 0.1364952394885496,
@@ -567,7 +639,8 @@
    },
    "reconnecting": 0,
    "connected_events": 50,
-   "completed": 0
+   "completed": 0,
+   "new_connection_share": 0.22444633730834754
   }
  ],
  "starts": [
@@ -960,7 +1033,16 @@
      "failed": 0,
      "over_500ms": 14,
      "over_2s": 6,
-     "worst_minute_p95": 5.7803
+     "worst_minute_p95": 5.7803,
+     "slots": {
+      "n": 186,
+      "median": 0.0971,
+      "p95": 21.6367,
+      "max": 30.6367,
+      "over_500ms": 61,
+      "over_2s": 44,
+      "worst_minute_p95": 27.6367
+     }
     },
     "web": {
      "n": 131,
@@ -970,7 +1052,16 @@
      "failed": 0,
      "over_500ms": 17,
      "over_2s": 9,
-     "worst_minute_p95": 4.3335
+     "worst_minute_p95": 4.3335,
+     "slots": {
+      "n": 186,
+      "median": 0.096,
+      "p95": 13.764700000000001,
+      "max": 22.7647,
+      "over_500ms": 66,
+      "over_2s": 43,
+      "worst_minute_p95": 19.7647
+     }
     }
    },
    "m1_cores_3min": 0.9213872275698324,

@@ -53,6 +53,8 @@ def pct(values, share):
 
 
 def ms(value):
+    if value == float("inf"):
+        return "failed"
     return "–" if value is None else f"{value * 1000:.0f}"
 
 
@@ -83,8 +85,11 @@ def phases(run):
 def series(run):
     """Everything sampled, loaded once."""
     data = {}
-    data["byname"] = [(float(r["t"]), int(r["status"]), float(r["seconds"])) for r in rows(run, "probe-byname.csv")]
-    data["web"] = [(float(r["t"]), int(r["status"]), float(r["seconds"])) for r in rows(run, "probe-web.csv")]
+    # (t, status, seconds, open-loop?): the `open` column exists since the
+    # probes became open-loop (2026-10-11's settling).
+    for kind in ("byname", "web"):
+        data[kind] = sorted((float(r["t"]), int(r["status"]), float(r["seconds"]), r.get("open") == "1")
+                            for r in rows(run, f"probe-{kind}.csv"))
     cg = defaultdict(list)
     for r in rows(run, "cgroups.csv"):
         cg[r["container"]].append((float(r["t"]), int(r["cpu_ns"]), int(r["mem_bytes"]), int(r["rss_bytes"])))
@@ -103,6 +108,12 @@ def series(run):
     data["loads"] = rows(run, "loads.csv")
     data["plans"] = rows(run, "plans.csv")
     data["cpu"] = rows(run, "cpu.csv")
+    # fleet_streams.py (bare streams that time the marker), fleet_sample.py's
+    # per-CPU and per-process samples: in the runs since 2026-10-11's settling.
+    data["marker"] = rows(run, "marker.csv")
+    data["chunks"] = rows(run, "chunks.csv")
+    data["cpus"] = rows(run, "cpus.csv")
+    data["procs"] = rows(run, "procs.csv")
     actions = []
     handle = opener(run, "actions.csv")
     if handle:
@@ -157,20 +168,54 @@ def cpu_seconds(samples, start, end):
     return total / 1e9
 
 
+def open_loop(samples):
+    """Every probe slot of a fixed one-second schedule, as `(t, ok,
+    seconds)`. Open-loop probes (`fleet_probe.py`'s `open` field, since
+    2026-10-11's settling) are taken as they are. The runs before were
+    closed-loop: one request a second, but each waited for the previous
+    answer, so a slow answer stood for every second it blocked. Those are
+    re-scored: each second a slow answer covered gets the time that answer
+    was still outstanding then (`seconds - k` for the k-th second), the
+    estimate of what a request sent then would have waited at least. A
+    failed request counts as over every threshold (infinite)."""
+    out = []
+    for t, status, s, *rest in samples:
+        out.append((t, status == 200, s if status == 200 else float("inf")))
+        if rest and rest[0]:
+            continue  # open-loop: the next slot went out on time
+        k = 1
+        while s - k > 0:
+            out.append((t + k, True, s - k))
+            k += 1
+    out.sort()
+    return out
+
+
 def probe_stats(samples, start, end):
     inside = window(samples, start, end)
-    ok = [s for _, status, s in inside if status == 200]
-    failed = sum(1 for _, status, _ in inside if status != 200)
+    ok = [s for _, status, s, *_ in inside if status == 200]
+    failed = sum(1 for _, status, *_ in inside if status != 200)
     # The worst minute: the highest 95th percentile of any minute of the
     # phase (a short spike that a long phase's percentile would hide).
     minutes = defaultdict(list)
-    for t, status, s in inside:
+    for t, status, s, *_ in inside:
         if status == 200:
             minutes[int((t - start) // 60)].append(s)
     worst = max((pct(v, 0.95) for v in minutes.values() if len(v) >= 10), default=None)
+    # The same over every second's slot (`open_loop`), failures as infinite.
+    slots = [v for t, _, v in open_loop(window(samples, start - 120, end)) if start <= t < end]
+    slot_minutes = defaultdict(list)
+    for t, _, v in open_loop(window(samples, start - 120, end)):
+        if start <= t < end:
+            slot_minutes[int((t - start) // 60)].append(v)
     return {"n": len(inside), "median": pct(ok, 0.5), "p95": pct(ok, 0.95), "max": max(ok) if ok else None,
             "failed": failed, "over_500ms": sum(1 for s in ok if s > 0.5), "over_2s": sum(1 for s in ok if s > 2),
-            "worst_minute_p95": worst}
+            "worst_minute_p95": worst,
+            "slots": {"n": len(slots), "median": pct(slots, 0.5), "p95": pct(slots, 0.95),
+                      "max": max(slots) if slots else None,
+                      "over_500ms": sum(1 for v in slots if v > 0.5), "over_2s": sum(1 for v in slots if v > 2),
+                      "worst_minute_p95": max((pct(v, 0.95) for v in slot_minutes.values() if len(v) >= 10),
+                                              default=None)}}
 
 
 def modes(timeline):
@@ -199,7 +244,7 @@ def result_delays(data):
     """Per engine sighting of the marker: the delay of every result it
     brought, from the web probe's send times (a result's execution_end is
     when Icinga processed the probe's request)."""
-    probes = sorted((t + s, t) for t, status, s in data["web"] if status == 200)
+    probes = sorted((t + s, t) for t, status, s, _ in data["web"] if status == 200)
     ends = [end for end, _ in probes]
     by_client = defaultdict(list)
     for r in data["delays"]:
@@ -220,6 +265,113 @@ def result_delays(data):
             previous = end
     out.sort()
     return out
+
+
+def stream_delays(data, start, end):
+    """The master's own delivery delay to bare streams (fleet_streams.py):
+    from the probe's send time (`hi`: includes the probe's request itself)
+    and from its answer (`lo`: Icinga had processed the result by then), per
+    stream kind, over the results that arrived in [start, end)."""
+    sent = sorted((t, s) for t, status, s, _ in data["web"] if status == 200)
+    times = [t for t, _ in sent]
+    out = {}
+    for kind in ("live", "quiet"):
+        hi, lo = [], []
+        for r in data["marker"]:
+            t = float(r["t"])
+            if r["kind"] != kind or not start <= t < end:
+                continue
+            at = float(r["sent"])
+            hi.append(t - at)
+            i = bisect.bisect_left(times, at - 0.2)
+            if i < len(times) and abs(times[i] - at) < 0.2:
+                lo.append(max(0.0, t - times[i] - sent[i][1]))
+        if hi:
+            out[kind] = {"n": len(hi), "median": pct(hi, 0.5), "p95": pct(hi, 0.95), "max": max(hi),
+                         "lo_median": pct(lo, 0.5), "lo_p95": pct(lo, 0.95)}
+    return out
+
+
+def stream_flushes(data, start, end):
+    """How often Icinga writes to the first live and the first quiet stream:
+    gaps between reads (a gap under 50 ms is the same write)."""
+    out = {}
+    for kind in ("live", "quiet"):
+        reads = sorted(float(r["t"]) for r in data["chunks"] if r["kind"] == kind and start <= float(r["t"]) < end)
+        size = sum(int(r["bytes"]) for r in data["chunks"] if r["kind"] == kind and start <= float(r["t"]) < end)
+        writes = [t for i, t in enumerate(reads) if i == 0 or t - reads[i - 1] >= 0.05]
+        gaps = [b - a for a, b in zip(writes, writes[1:])]
+        if gaps:
+            out[kind] = {"writes": len(writes), "gap_median": pct(gaps, 0.5), "gap_p95": pct(gaps, 0.95),
+                         "gap_max": max(gaps), "kib_s": size / 1024 / (end - start)}
+    return out
+
+
+def cpu_busy(samples, start, end):
+    """Each CPU's busy share over [start, end) (/proc/stat)."""
+    by = defaultdict(list)
+    for r in samples:
+        t = float(r["t"])
+        if start <= t < end:
+            by[r["cpu"]].append((int(r["busy_ticks"]), int(r["total_ticks"])))
+    return {cpu: round((v[-1][0] - v[0][0]) / max(1, v[-1][1] - v[0][1]), 3) for cpu, v in sorted(by.items())
+            if len(v) >= 2}
+
+
+def procs_cores(samples, start, end):
+    """Cores used by docker-proxy and the stream readers over [start, end)."""
+    by = defaultdict(list)
+    for r in samples:
+        t = float(r["t"])
+        if start <= t < end:
+            by[(r["name"], r["pid"])].append((t, int(r["ticks"])))
+    out = defaultdict(float)
+    for (name, _), v in by.items():
+        if len(v) >= 2 and v[-1][0] > v[0][0]:
+            out[name] += (v[-1][1] - v[0][1]) / 100 / (end - start)
+    return {k: round(v, 3) for k, v in out.items()}
+
+
+def reconcile_cost(data, start, end):
+    """master-01's CPU per periodic reconcile (worked out from the raw data,
+    two ways): the seconds with a reconcile running against those with none
+    (`split`), and a fit of each second's cores on the number of reconciles
+    running then (`fit`: slope × the mean reconcile length)."""
+    m1 = [(t, c) for t, c, *_ in data["cgroups"].get("master-01", []) if start <= t < end]
+    spans = [(float(r["t"]) - int(r["took_ms"]) / 1000, float(r["t"])) for r in data["loads"]
+             if r["kind"] == "Reconcile" and start <= float(r["t"]) < end]
+    if len(m1) < 60 or not spans:
+        return None
+    seconds = []
+    for (ta, ca), (tb, cb) in zip(m1, m1[1:]):
+        if cb >= ca and tb > ta:
+            mid = (ta + tb) / 2
+            seconds.append((sum(1 for a, b in spans if a <= mid < b), (cb - ca) / 1e9 / (tb - ta)))
+    busy = [c for k, c in seconds if k]
+    idle = [c for k, c in seconds if not k]
+    length = statistics.mean(b - a for a, b in spans)
+    split = (statistics.mean(busy) - statistics.mean(idle)) * len(busy) / len(spans) if busy and idle else None
+    line = fit(seconds)
+    return {"reconciles": len(spans), "mean_s": length, "split_cpu_s": split,
+            "fit_cpu_s": line[1] * length if line else None}
+
+
+def new_connections(data, start, end, idle=5.0):
+    """The share of an engine's requests (the stream aside) that come more
+    than `idle` seconds after its previous one: the connection pool has
+    dropped its idle connection by then, so they open a new TLS connection
+    (an estimate from request times; the pool itself isn't logged)."""
+    by = defaultdict(list)
+    for r in data["requests"]:
+        t = float(r["t"])
+        if start <= t < end and r["path"] != "/v1/events":
+            by[r["client"]].append(t)
+    new = total = 0
+    for times in by.values():
+        times.sort()
+        total += len(times)
+        new += 1 + sum(1 for a, b in zip(times, times[1:]) if b - a > idle)
+    return new / total if total else None
 
 
 def summarise(run):
@@ -358,6 +510,14 @@ def summarise(run):
         phase["reconnecting"] = sum(1 for r in tl if r["event"] == "state" and r["detail"].startswith("reconnecting"))
         phase["connected_events"] = sum(1 for r in tl if r["event"] == "state" and r["detail"].startswith("connected"))
         phase["completed"] = sum(1 for r in tl if r["event"] == "complete")
+        if data["marker"]:
+            phase["stream_delay"] = stream_delays(data, start, end)
+        if data["chunks"]:
+            phase["stream_flushes"] = stream_flushes(data, start, end)
+        if data["cpus"]:
+            phase["cpu_busy"] = cpu_busy(data["cpus"], start, end)
+        if data["procs"]:
+            phase["procs_cores"] = procs_cores(data["procs"], start, end)
         result["phases"].append(phase)
     # A fit step's storm: master-01's CPU from the storm's start to the end
     # of the wait after it, beyond the step's own rest.
@@ -443,6 +603,12 @@ def summarise(run):
             "missed": [f for f in found if kind(f) == "missed"][:40],
             "by_mode": {q: dict(Counter(kind(f) for f in found if mode_of(f) == q)) for q in ("live", "quiet")},
         }
+    for p in result["phases"]:
+        cost = reconcile_cost(data, p["start"], p["end"])
+        if cost and cost["reconciles"] >= 10:
+            p["reconcile_cost"] = cost
+        if data["requests"] and p["minutes"] >= 5:
+            p["new_connection_share"] = new_connections(data, p["start"], p["end"])
     result["loads_total"] = dict(Counter(r["kind"] for r in data["loads"]))
     result["found_by_kind"] = {k: sum(int(r["found"]) for r in data["loads"] if r["kind"] == k)
                                for k in result["loads_total"]}
@@ -479,6 +645,16 @@ def report(result, data):
               f"{p['m1_cores'] or 0:.3f} | {p['m2_cores'] or 0:.3f} | "
               f"{mem.get('start', '–')} / {mem.get('peak', '–')} / {mem.get('end', '–')} | "
               f"{p.get('clients_cores') or 0:.2f} | {p.get('clients_rss_mib', {}).get('peak', '–')} |")
+    print("\nEvery second's slot (`open_loop`: closed-loop runs re-scored, failures as over every threshold):\n")
+    print("| phase | by-name ms med / p95 / max | web ms med / p95 / max | worst minute p95 ms by-name / web | "
+          "slots > 500 ms / > 2 s (by-name + web) |")
+    print("|---|---|---|---|---|")
+    for p in result["phases"]:
+        b, w = p["byname"]["slots"], p["web"]["slots"]
+        print(f"| {p['label']} | {ms(b['median'])} / {ms(b['p95'])} / {ms(b['max'])} | "
+              f"{ms(w['median'])} / {ms(w['p95'])} / {ms(w['max'])} | "
+              f"{ms(b['worst_minute_p95'])} / {ms(w['worst_minute_p95'])} | "
+              f"{b['over_500ms'] + w['over_500ms']} / {b['over_2s'] + w['over_2s']} |")
     print("\n| phase | delay live s med / p95 / max (n) | delay quiet s med / p95 / max (n) | "
           "req/min live (mean, max) | req/min quiet (mean, max) | all req/min | engine cores live / quiet | "
           "HTTP clients | relay queue max m1 / m2 | work queue rate | pending callbacks | loads | reconciles (found) |")
@@ -504,6 +680,11 @@ def report(result, data):
     for p in result["phases"]:
         if p["rpm_live"]["paths"] or p["rpm_quiet"]["paths"]:
             print(f"- {p['label']}: live {p['rpm_live']['paths']}; quiet {p['rpm_quiet']['paths']}")
+    for p in result["phases"]:
+        extra = {k: p[k] for k in ("stream_delay", "stream_flushes", "cpu_busy", "procs_cores", "reconcile_cost",
+                                   "new_connection_share") if p.get(k)}
+        if extra:
+            print(f"- {p['label']}: {json.dumps(extra, default=lambda v: round(v, 3) if isinstance(v, float) else str(v))}")
     plans = [p for p in result["phases"] if p.get("plans_first")]
     if plans:
         print("\nFirst reconciles planned after a load (minutes after the phase began):\n")
@@ -547,7 +728,7 @@ def events(result, data):
         firsts = sorted(start for start, _, _, kind in loads if kind == "First" and t <= start < until)
         reconciles = sorted(start for start, _, _, kind in loads if kind == "Reconcile" and t <= start < until)
         after = {"byname": probe_stats(data["byname"], up, up + 180), "web": probe_stats(data["web"], up, up + 180)}
-        down = sum(1 for tt, status, _ in data["byname"] if t <= tt < up and status != 200)
+        down = sum(1 for tt, status, *_ in data["byname"] if t <= tt < up and status != 200)
         plans = sorted(float(r["t"]) + int(r["in_s"]) for r in data["plans"]
                        if r["cadence"] == "First" and t <= float(r["t"]) < until)
         tl = [r for r in data["timeline"] if t <= float(r["t"]) < until]
@@ -602,10 +783,18 @@ def fits(results):
             intercept, slope = fit(a)
             lines.append(f"- at rest, engines (about a tenth live): master-01 = {intercept:.3f} cores + "
                          f"{slope * 1000:.2f} milli-cores per engine ({a})")
-        if "A50-live" in phases and "A50" in phases:
-            d = phases["A50-live"]["m1_cores"] - phases["A50"]["m1_cores"]
+        base = phases.get("A50") or phases.get("E50")
+        if "A50-live" in phases and base:
+            d = phases["A50-live"]["m1_cores"] - base["m1_cores"]
             lines.append(f"- 45 more engines live (the same 50 streams): +{d:.3f} cores, "
                          f"{d / 45 * 1000:.2f} milli-cores per live stream more than a quiet one")
+            # With `steady`'s 1.68 milli-cores per engine (a tenth live):
+            # quiet + 0.1 × (live − quiet) = 1.68.
+            per_engine = next((line for line in lines if "per engine" in line), None)
+            if per_engine:
+                mean = float(re.search(r"([\d.]+) milli-cores per engine", per_engine).group(1))
+                quiet = mean - 0.1 * d / 45 * 1000
+                lines.append(f"- so a quiet engine about {quiet:.1f} and a live one {quiet + d / 45 * 1000:.1f} milli-cores")
         f = [(int(label[1:-5]), p["m1_cores"]) for label, p in phases.items()
              if label.startswith("F") and label.endswith("-rest") and p["m1_cores"] is not None]
         if len(f) >= 2:
@@ -622,11 +811,33 @@ def fits(results):
                     continue
                 storms.append((n, p_storm["storm_extra_cpu_s"], p_storm["storm_results"], p_storm["m1_cores"]))
         if len(storms) >= 2:
-            intercept, slope = fit([(n, cpu) for n, cpu, _, _ in storms])
+            storms.sort()
             results_n = statistics.mean(r for _, _, r, _ in storms)
-            lines.append(f"- storm (about {results_n:.0f} state changes), master-01 CPU above rest: "
-                         f"{intercept:.1f} s + {slope:.2f} s per stream; per state change and stream "
-                         f"{slope / results_n * 1e6:.1f} µs ({[(n, round(c, 1), round(k, 2)) for n, c, _, k in storms]})")
+            subsets = [("every step", storms)]
+            if len(storms) >= 3:
+                # Without the last step: its window was cut off before the
+                # master was done in the first `fit` (2026-10-11).
+                subsets.append(("without the last step", storms[:-1]))
+            # A step's own rest can be off: in `fit-dedicated` (2026-10-11)
+            # master-01 was still busy from opening the step's streams when
+            # its rest was taken (0.58 cores with 10 streams, 0.81 with 50).
+            # So also against the rest without streams (F0) plus a clean
+            # at-rest cost per stream (`fit`: 5.06 milli-cores; override
+            # with FLEET_REST_PER_STREAM in cores).
+            per_stream = float(os.environ.get("FLEET_REST_PER_STREAM", "0.00506"))
+            base = phases.get("F0-rest", {}).get("m1_cores")
+            if base is not None and all(phases[f"F{n}-storm"].get("storm_window_s") for n, *_ in storms):
+                alt = []
+                for n, extra, results, cores in storms:
+                    p = phases[f"F{n}-storm"]
+                    own = phases[f"F{n}-rest"]["m1_cores"]
+                    alt.append((n, extra + (own - base - per_stream * n) * p["storm_window_s"], results, cores))
+                subsets.append((f"against F0's rest + {per_stream * 1000:.2f} milli-cores per stream", alt))
+            for name, points in subsets:
+                intercept, slope = fit([(n, cpu) for n, cpu, _, _ in points])
+                lines.append(f"- storm (about {results_n:.0f} state changes), master-01 CPU above rest, {name}: "
+                             f"{intercept:.1f} s + {slope:.2f} s per stream; per state change and stream "
+                             f"{slope / results_n * 1e6:.1f} µs ({[(n, round(c, 1), round(k, 2)) for n, c, _, k in points]})")
     return lines
 
 

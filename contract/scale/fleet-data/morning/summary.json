@@ -1,5 +1,5 @@
 {
- "run": "contract/scale/fleet-data/morning",
+ "run": "fleet-data/morning",
  "phases": [
   {
    "label": "C-user-rest",
@@ -14,7 +14,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0657
+    "worst_minute_p95": 0.0657,
+    "slots": {
+     "n": 60,
+     "median": 0.054,
+     "p95": 0.0657,
+     "max": 0.0757,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0657
+    }
    },
    "web": {
     "n": 60,
@@ -24,7 +33,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0626
+    "worst_minute_p95": 0.0626,
+    "slots": {
+     "n": 60,
+     "median": 0.0541,
+     "p95": 0.0626,
+     "max": 0.0709,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0626
+    }
    },
    "m1_cores": 0.17030427001694914,
    "m2_cores": 0.13328067179661016,
@@ -137,7 +155,16 @@
     "failed": 0,
     "over_500ms": 3,
     "over_2s": 2,
-    "worst_minute_p95": 0.1328
+    "worst_minute_p95": 0.1328,
+    "slots": {
+     "n": 283,
+     "median": 0.0616,
+     "p95": 0.1296,
+     "max": 2.4471,
+     "over_500ms": 5,
+     "over_2s": 2,
+     "worst_minute_p95": 0.4374
+    }
    },
    "web": {
     "n": 281,
@@ -147,7 +174,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.1099
+    "worst_minute_p95": 0.1099,
+    "slots": {
+     "n": 281,
+     "median": 0.0581,
+     "p95": 0.0979,
+     "max": 0.2781,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.1099
+    }
    },
    "m1_cores": 0.9209668129370123,
    "m2_cores": 0.1210803091461407,
@@ -277,7 +313,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0646
+    "worst_minute_p95": 0.0646,
+    "slots": {
+     "n": 120,
+     "median": 0.0529,
+     "p95": 0.061,
+     "max": 0.1008,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0646
+    }
    },
    "web": {
     "n": 120,
@@ -287,7 +332,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0698
+    "worst_minute_p95": 0.0698,
+    "slots": {
+     "n": 120,
+     "median": 0.0539,
+     "p95": 0.0659,
+     "max": 0.106,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0698
+    }
    },
    "m1_cores": 0.2700341040263147,
    "m2_cores": 0.12574903646723848,
@@ -419,7 +473,16 @@
     "failed": 10,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.057
+    "worst_minute_p95": 0.057,
+    "slots": {
+     "n": 266,
+     "median": 0.0528,
+     "p95": 0.0607,
+     "max": Infinity,
+     "over_500ms": 10,
+     "over_2s": 10,
+     "worst_minute_p95": Infinity
+    }
    },
    "web": {
     "n": 266,
@@ -429,7 +492,16 @@
     "failed": 10,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0587
+    "worst_minute_p95": 0.0587,
+    "slots": {
+     "n": 266,
+     "median": 0.0539,
+     "p95": 0.0621,
+     "max": Infinity,
+     "over_500ms": 10,
+     "over_2s": 10,
+     "worst_minute_p95": Infinity
+    }
    },
    "m1_cores": 0.19869785379179447,
    "m2_cores": 0.1331553097668286,
@@ -542,7 +614,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0585
+    "worst_minute_p95": 0.0585,
+    "slots": {
+     "n": 60,
+     "median": 0.0528,
+     "p95": 0.0585,
+     "max": 0.0608,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0585
+    }
    },
    "web": {
     "n": 60,
@@ -552,7 +633,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0581
+    "worst_minute_p95": 0.0581,
+    "slots": {
+     "n": 60,
+     "median": 0.0539,
+     "p95": 0.0581,
+     "max": 0.0619,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0581
+    }
    },
    "m1_cores": 0.15634758793220338,
    "m2_cores": 0.11814580374576271,
@@ -665,7 +755,16 @@
     "failed": 0,
     "over_500ms": 8,
     "over_2s": 3,
-    "worst_minute_p95": 0.661
+    "worst_minute_p95": 0.661,
+    "slots": {
+     "n": 172,
+     "median": 0.0608,
+     "p95": 0.661,
+     "max": 3.0427,
+     "over_500ms": 13,
+     "over_2s": 4,
+     "worst_minute_p95": 1.0427
+    }
    },
    "web": {
     "n": 170,
@@ -675,7 +774,16 @@
     "failed": 0,
     "over_500ms": 6,
     "over_2s": 0,
-    "worst_minute_p95": 0.4734
+    "worst_minute_p95": 0.4734,
+    "slots": {
+     "n": 174,
+     "median": 0.0618,
+     "p95": 0.4712,
+     "max": 1.5319,
+     "over_500ms": 7,
+     "over_2s": 0,
+     "worst_minute_p95": 0.5319
+    }
    },
    "m1_cores": 1.0108448197100592,
    "m2_cores": 0.1225386919704142,
@@ -805,7 +913,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0575
+    "worst_minute_p95": 0.0575,
+    "slots": {
+     "n": 120,
+     "median": 0.0534,
+     "p95": 0.0575,
+     "max": 0.0623,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0575
+    }
    },
    "web": {
     "n": 120,
@@ -815,7 +932,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0584
+    "worst_minute_p95": 0.0584,
+    "slots": {
+     "n": 120,
+     "median": 0.0538,
+     "p95": 0.058,
+     "max": 0.0962,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0584
+    }
    },
    "m1_cores": 0.17233433768907563,
    "m2_cores": 0.12655547998319328,
@@ -935,7 +1061,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.0535
+    "worst_minute_p95": 0.0535,
+    "slots": {
+     "n": 15,
+     "median": 0.0495,
+     "p95": 0.0535,
+     "max": 0.0694,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0535
+    }
    },
    "web": {
     "n": 15,
@@ -945,7 +1080,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": 0.054
+    "worst_minute_p95": 0.054,
+    "slots": {
+     "n": 15,
+     "median": 0.05,
+     "p95": 0.054,
+     "max": 0.0578,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.054
+    }
    },
    "m1_cores": 0.25007745800078596,
    "m2_cores": 0.14185605804325457,
@@ -1058,7 +1202,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": null
+    "worst_minute_p95": null,
+    "slots": {
+     "n": 7,
+     "median": 0.0534,
+     "p95": 0.0536,
+     "max": 0.0536,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": null
+    }
    },
    "web": {
     "n": 7,
@@ -1068,7 +1221,16 @@
     "failed": 0,
     "over_500ms": 0,
     "over_2s": 0,
-    "worst_minute_p95": null
+    "worst_minute_p95": null,
+    "slots": {
+     "n": 7,
+     "median": 0.0499,
+     "p95": 0.0616,
+     "max": 0.0616,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": null
+    }
    },
    "m1_cores": 0.2215837125,
    "m2_cores": 0.15482653633333335,
@@ -1903,7 +2065,16 @@
      "failed": 0,
      "over_500ms": 0,
      "over_2s": 0,
-     "worst_minute_p95": 0.07
+     "worst_minute_p95": 0.07,
+     "slots": {
+      "n": 180,
+      "median": 0.0538,
+      "p95": 0.0633,
+      "max": 0.2636,
+      "over_500ms": 0,
+      "over_2s": 0,
+      "worst_minute_p95": 0.07
+     }
     },
     "web": {
      "n": 180,
@@ -1913,7 +2084,16 @@
      "failed": 0,
      "over_500ms": 0,
      "over_2s": 0,
-     "worst_minute_p95": 0.0665
+     "worst_minute_p95": 0.0665,
+     "slots": {
+      "n": 180,
+      "median": 0.054,
+      "p95": 0.0626,
+      "max": 0.2076,
+      "over_500ms": 0,
+      "over_2s": 0,
+      "worst_minute_p95": 0.0665
+     }
     }
    },
    "m1_cores_3min": 0.17309364218435755,
@@ -1957,7 +2137,16 @@
      "failed": 0,
      "over_500ms": 0,
      "over_2s": 0,
-     "worst_minute_p95": 0.057
+     "worst_minute_p95": 0.057,
+     "slots": {
+      "n": 180,
+      "median": 0.0528,
+      "p95": 0.0569,
+      "max": 0.0845,
+      "over_500ms": 0,
+      "over_2s": 0,
+      "worst_minute_p95": 0.057
+     }
     },
     "web": {
      "n": 180,
@@ -1967,7 +2156,16 @@
      "failed": 0,
      "over_500ms": 0,
      "over_2s": 0,
-     "worst_minute_p95": 0.0588
+     "worst_minute_p95": 0.0588,
+     "slots": {
+      "n": 180,
+      "median": 0.0538,
+      "p95": 0.0582,
+      "max": 0.074,
+      "over_500ms": 0,
+      "over_2s": 0,
+      "worst_minute_p95": 0.0588
+     }
     }
    },
    "m1_cores_3min": 0.16053389173743016,

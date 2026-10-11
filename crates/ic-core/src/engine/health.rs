@@ -185,6 +185,8 @@ impl Engine {
         let mut listener = None;
         match answers.listener {
             Some(Ok(status)) => {
+                // The team's size, for adaptive pacing.
+                self.note_team(status.http_clients);
                 listener = Some(status.clone());
                 self.store.update_health(|health| {
                     health.listener = Some(status);

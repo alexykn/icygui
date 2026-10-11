@@ -36,6 +36,9 @@
 #   quiet_reconcile  12 quiet clients reconciling every 5 minutes (quiet
 #            mode's 30-minute floor lowered for the run) for 25 minutes:
 #            what quiet reconciles find (about 30 minutes)
+#   opens    12, then 25 windows opening at once on a master at rest,
+#            first with nothing kept, then with the keys the last run kept
+#            (adaptive pacing's warm start) (about 20 minutes)
 #   reconcile  15 live clients reconciling every 5 minutes (the shortest
 #            fixed interval the settings allow at this size; quiet mode
 #            keeps 10 quiet ones at 30) for 40 minutes: what the periodic
@@ -64,7 +67,7 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-SCENARIO=${1:?usage: fleet.sh smoke|steady|events|restart|fit|morning|reconcile|quiet_reconcile [out dir]}
+SCENARIO=${1:?usage: fleet.sh smoke|steady|events|restart|fit|morning|opens|reconcile|quiet_reconcile [out dir]}
 OUT=${2:-$HERE/fleet-data/$SCENARIO}
 URL1=https://127.0.0.1:${ICYGUI_DEMO_PORT_1:-5665}
 URL2=https://127.0.0.1:${ICYGUI_DEMO_PORT_2:-5666}
@@ -430,6 +433,30 @@ run_morning() {
   mark C-bg-done; pause 120
   fleet stop all; pause 15
   mark end
+}
+
+# Windows opening at the same moment (Start::User) on a master at rest: 12,
+# then 25 at once. `cold`: nothing kept (a first run: every service's name
+# is listed, then the batches); the 25 keep their keys (`fleet data`), so
+# `warm` is the usual case: the keys of the last run, by name at once, the
+# problems first. Adaptive pacing (docs/performance.md) never makes a
+# window wait at a gate: its batches pace themselves by their answers.
+run_opens() {
+  local total=0 n round data
+  # The engines' event logs (the keys they keep) stay out of the results.
+  data=$(mktemp -d)
+  for round in cold warm; do
+    for n in 12 25; do
+      if [ "$round$n" = cold12 ]; then fleet data none; else fleet data "$data"; fi
+      mark "O$n-$round-rest"; pause 60
+      mark "O$n-$round"; fleet add "$n" live user
+      total=$((total + n))
+      wait_loaded "$total" 900; pause 30
+      mark "O$n-$round-done"; fleet stop all; pause 45
+    done
+  done
+  mark end
+  rm -rf "$data"
 }
 
 run_reconcile() {

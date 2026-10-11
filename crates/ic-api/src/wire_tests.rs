@@ -1016,3 +1016,25 @@ fn zones_map_into_the_zone_tree() {
         }]
     );
 }
+
+/// Icinga 2.15 recomputes the raw `flapping` with every check result even
+/// where flap detection is off, and sends no `Flapping` event for it
+/// (ledger 138): only with the switch on does it mean what Icinga means
+/// (`Checkable::IsFlapping`). Without the attribute (an older Icinga), the
+/// raw value stands.
+#[test]
+fn flapping_needs_flap_detection_on() {
+    let with = |enable: Option<bool>| {
+        let mut attrs = json!({ "host_name": "h", "name": "s", "state": 0.0, "flapping": true });
+        if let Some(enable) = enable {
+            attrs["enable_flapping"] = json!(enable);
+        }
+        one_service(&attrs).check.flapping
+    };
+    assert!(!with(Some(false)), "raw flag, detection off");
+    assert!(with(Some(true)));
+    assert!(with(None), "attribute unknown: the raw value");
+    let host =
+        one_host(&json!({ "name": "h", "state": 0.0, "flapping": true, "enable_flapping": false }));
+    assert!(!host.check.flapping);
+}

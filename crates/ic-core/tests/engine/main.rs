@@ -20,6 +20,7 @@
 //! - `notifications`: rule inputs, the rule engine and the notifier;
 //! - `event_log`: the local `SQLite` event log;
 //! - `notified`: who Icinga notified, and when (its `Notification` objects);
+//! - `pacing`: adaptive pacing: batches, the gate, the count check;
 //! - `probe`: `test_connection` and `fetch_certificate`;
 //! - `quiet`: quiet mode, waking up, the object the user opens, the
 //!   request budget, prefetches and background starts (PERF-09);
@@ -45,6 +46,7 @@ mod gentle;
 mod heartbeats;
 mod notifications;
 mod notified;
+mod pacing;
 mod probe;
 mod quiet;
 mod scale;

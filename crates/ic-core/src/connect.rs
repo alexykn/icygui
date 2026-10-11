@@ -426,9 +426,24 @@ pub(crate) struct StreamWish {
     pub(crate) beats: std::sync::Mutex<Option<String>>,
     /// Icinga refused the filter.
     pub(crate) refused: AtomicBool,
+    /// The next stream opens this much later (microseconds; taken by the
+    /// open): after a lost live session, so clients that lost the master
+    /// together don't open their streams together (ledger 154).
+    pub(crate) open_delay: std::sync::atomic::AtomicU64,
 }
 
 impl StreamWish {
+    /// Delays the next stream's opening by `delay`.
+    pub(crate) fn set_open_delay(&self, delay: Duration) {
+        let micros = u64::try_from(delay.as_micros()).unwrap_or(u64::MAX);
+        self.open_delay.store(micros, Ordering::SeqCst);
+    }
+
+    /// The delay before the next stream opens (once).
+    fn take_open_delay(&self) -> Duration {
+        Duration::from_micros(self.open_delay.swap(0, Ordering::SeqCst))
+    }
+
     /// The event types and filter a stream for the API user `info` opens
     /// with now.
     pub(crate) fn spec(&self, info: &ApiInfo) -> (Vec<EventKind>, Option<String>) {
@@ -655,6 +670,14 @@ fn finish(
 /// user may read, without check results when `quiet` (none: no stream).
 async fn open_stream(reached: Reached, wish: &StreamWish) -> Result<Opened, (usize, Failure)> {
     let Reached { client, info, node } = reached;
+    let delay = wish.take_open_delay();
+    if !delay.is_zero() {
+        tracing::debug!(
+            ?delay,
+            "the event stream opens a little later (staggered after a lost session)"
+        );
+        tokio::time::sleep(delay).await;
+    }
     let quiet = wish.quiet.load(Ordering::SeqCst);
     let (kinds, filter) = wish.spec(&info);
     let opened = |lines: Option<(EventLines, Vec<EventKind>, Option<String>)>,

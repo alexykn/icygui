@@ -234,7 +234,7 @@ async fn wrong_credentials_stop_retrying() {
     // The user fixes the password: `UpdateEnvironment` (even unchanged)
     // retries.
     secrets.put(ENV_ID, PASSWORD);
-    engine.send(Command::UpdateEnvironment(environment(&server)));
+    engine.send(Command::UpdateEnvironment(Box::new(environment(&server))));
     engine.connected().await;
     engine.shutdown();
 }
@@ -267,7 +267,7 @@ async fn a_pin_mismatch_shows_both_fingerprints_and_the_certificate() {
     // Trust on first use: pin the presented certificate.
     let mut trusted = crate::support::environment(&server);
     trusted.urls[0].pinned_sha256 = Some(certificate.fingerprint());
-    engine.send(Command::UpdateEnvironment(trusted));
+    engine.send(Command::UpdateEnvironment(Box::new(trusted)));
     engine.connected().await;
     engine.shutdown();
 }
@@ -304,7 +304,7 @@ async fn unusable_settings_are_misconfigured() {
 
     let mut environment = crate::support::environment(&server);
     environment.urls[0].url = "http://plain.example".to_owned();
-    engine.send(Command::UpdateEnvironment(environment));
+    engine.send(Command::UpdateEnvironment(Box::new(environment)));
     engine
         .wait_state(|state| matches!(state, ConnectionState::Misconfigured { message } if message.contains("https")))
         .await;
@@ -671,7 +671,7 @@ async fn another_server_starts_from_scratch() {
 
     let mut moved = environment(&staging);
     moved.name = "renamed".to_owned();
-    engine.send(Command::UpdateEnvironment(moved));
+    engine.send(Command::UpdateEnvironment(Box::new(moved)));
     // The old server's objects are gone at once, then the new ones load.
     engine.snapshot(|snapshot| snapshot.hosts.is_empty()).await;
     engine
@@ -691,7 +691,7 @@ async fn another_server_starts_from_scratch() {
         .iter()
         .filter(|r| r.path == "/v1/events")
         .count();
-    engine.send(Command::UpdateEnvironment(renamed));
+    engine.send(Command::UpdateEnvironment(Box::new(renamed)));
     engine.send(Command::Refresh);
     engine
         .snapshot(|latest| latest.revision > snapshot.revision)

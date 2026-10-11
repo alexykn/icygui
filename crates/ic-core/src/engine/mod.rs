@@ -38,6 +38,8 @@ mod health;
 mod heartbeat;
 mod load;
 mod notify;
+mod pace;
+mod paced;
 mod publish;
 mod quiet;
 mod reask;
@@ -53,8 +55,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ic_api::{ApiError, ApiInfo, Client, Detail, EventLines, RequestBudget};
 use ic_model::{
-    Event, EventKind, Host, InstanceStatus, Notification, ObjectChange, ObjectKey, Service,
-    ServiceKey, Timestamp,
+    Event, EventKind, Host, InstanceStatus, Notification, ObjectChange, ObjectKey, ServiceKey,
+    Timestamp,
 };
 use ic_rules::{DashboardRef, NotificationIntent};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -107,8 +109,23 @@ pub(crate) enum Internal {
     Status {
         session: u64,
         result: Result<InstanceStatus, ApiError>,
+        /// How long the status itself took (a load signal, `pace.rs`).
+        took: std::time::Duration,
         nodes: Option<NodeStates>,
         health: Option<Box<health::Answers>>,
+    },
+    /// A probe of a paced load's gate is back (`endpoint`: it was the
+    /// connected node's endpoint that was refused).
+    LoadProbe {
+        session: u64,
+        answer: paced::ProbeAnswer,
+        endpoint: bool,
+    },
+    /// What adaptive pacing kept in the event log (`generation`: which
+    /// read).
+    RememberedPacing {
+        generation: u64,
+        pacing: Box<crate::event_log::RememberedPacing>,
     },
     /// The cluster health page's requests, asked for when it opened.
     Health {
@@ -169,8 +186,12 @@ pub(crate) enum Internal {
         result: Result<ic_api::Fetched, ApiError>,
     },
     /// A background start's size: Icinga's service count, if it could be
-    /// read.
-    StartSize { session: u64, services: Option<u32> },
+    /// read, and its count of open API connections (the team's size).
+    StartSize {
+        session: u64,
+        services: Option<u32>,
+        clients: Option<u32>,
+    },
     /// The heartbeats the event log remembers (`generation`: which log).
     RememberedBeats {
         generation: u64,
@@ -201,11 +222,17 @@ pub(crate) enum LoadStep {
         overview: Box<Overview>,
         hosts: Vec<Host>,
     },
-    /// Tier 2. The engine answers with the problems whose details tier 3
-    /// fetches.
-    Services {
+    /// A paced batch of tier 2 (applied as it comes), and how long it
+    /// took.
+    Batch {
         started: u64,
-        services: Vec<Service>,
+        took: std::time::Duration,
+        fetched: ic_api::Fetched,
+    },
+    /// Tier 2 is in. The engine answers with the problems whose details
+    /// tier 3 fetches.
+    Services {
+        services: load::ServicesAnswer,
         details: oneshot::Sender<Vec<ObjectKey>>,
     },
     /// A batch of tier 3.
@@ -579,6 +606,13 @@ pub(crate) struct Engine {
     /// The last tick by both clocks: a wall clock that moved much further
     /// than the monotonic one means the computer slept.
     last_tick: Option<(Instant, Timestamp)>,
+    /// Adaptive pacing (`paced.rs`).
+    pacing: paced::Pacing,
+    /// Problems whose reachability is asked for again while quiet, and
+    /// when (`quiet.rs`, ledger 139).
+    reach: BTreeMap<ObjectKey, Instant>,
+    /// What the load in flight (or the next one) reloads.
+    load_scope: paced::Scope,
 }
 
 /// Why the select loop woke up.
@@ -716,6 +750,9 @@ impl Engine {
             trouble: trouble::Tracker::default(),
             alive_at: now,
             last_tick: None,
+            pacing: paced::Pacing::default(),
+            reach: BTreeMap::new(),
+            load_scope: paced::Scope::All,
         }
     }
 
@@ -733,6 +770,8 @@ impl Engine {
         self.load_recent_events();
         // Heartbeats seen before, so one that is gone is a finding.
         self.read_remembered_beats();
+        // Adaptive pacing's keys, baselines and team size of the last run.
+        self.read_remembered_pacing();
         // Commands sent right after the start (quiet mode, say) apply
         // before the first connect opens the stream.
         while let Ok(command) = commands.try_recv() {
@@ -839,7 +878,7 @@ impl Engine {
 
     /// When a background start's first load may begin.
     fn first_load_at(&self) -> Option<Instant> {
-        (self.phase == Phase::Loading && self.load.is_none())
+        (self.phase == Phase::Loading && self.load.is_none() && self.pacing.gate.is_none())
             .then_some(self.start_at)
             .flatten()
     }
@@ -886,6 +925,8 @@ impl Engine {
             self.sweep_at(now),
             self.probe_due(),
             self.first_load_at(),
+            self.gate_due(),
+            self.reach_due(),
             self.switch_retry_due(),
             self.handover_at(),
             self.stall_suspect.map(|(at, _)| at),
@@ -908,8 +949,11 @@ impl Engine {
         }
         if self.first_load_at().is_some_and(|at| at <= now) {
             self.start_at = None;
-            self.start = Start::User;
-            self.start_load(LoadKind::First);
+            // Paced: it waits at its gate if the master is busy.
+            self.begin_load(LoadKind::First);
+        }
+        if self.gate_due().is_some_and(|at| at <= now) {
+            self.run_gate();
         }
         if self.handover_at().is_some_and(|at| at <= now) {
             // No line came on both streams: nothing proves the old one
@@ -927,7 +971,7 @@ impl Engine {
             self.poll_status();
         }
         if let Some(kind) = self.due_load(now) {
-            self.start_load(kind);
+            self.begin_load(kind);
         }
         if self.sweep_at(now).is_some_and(|at| at <= now) {
             self.sweep(now);
@@ -942,6 +986,9 @@ impl Engine {
         }
         if self.reask_at().is_some_and(|at| at <= now) {
             self.release_reasks(now);
+        }
+        if self.reach_due().is_some_and(|at| at <= now) {
+            self.run_reach(now);
         }
         if self.fetch_at().is_some_and(|at| at <= now) {
             self.start_fetch(now);
@@ -1042,6 +1089,11 @@ impl Engine {
         self.dedupe = None;
         self.focus = quiet::Focus::default();
         self.start_at = None;
+        // A paced load's gate belongs to the session (the pending reload
+        // stays and opens a new one).
+        self.pacing.gate = None;
+        self.pacing.refused = (false, false);
+        self.reach.clear();
         self.stall_suspect = None;
         self.verify = None;
         self.continuous_since = None;
@@ -1063,6 +1115,13 @@ impl Engine {
             .as_ref()
             .and_then(|conn| conn.live_since)
             .is_some_and(|(since, _)| since.elapsed() >= self.tuning.healthy_after);
+        // A live session lost (every client loses it at once when the
+        // master restarts): the next stream opens after a random delay
+        // that grows with the team (ledger 154).
+        if self.phase == Phase::Live && matches!(failure, Failure::Transient(_)) {
+            let delay = self.reopen_delay();
+            self.wish.set_open_delay(delay);
+        }
         // No live data from here (A): blind after a while.
         self.go_dark(&failure);
         self.teardown();
@@ -1280,6 +1339,11 @@ impl Engine {
             return;
         };
         let now = Instant::now();
+        // A load the user asked for is never paced.
+        let user = self.reload_by_user || std::mem::take(&mut self.pacing.unpaced_next);
+        let pace = self.pace_load(kind, user);
+        let hosts_only = self.load_scope == paced::Scope::Hosts;
+        self.pacing.gate = None;
         // The load serves a pending reload, if any.
         let served = self.reload_at.take().is_some();
         self.reconcile_at = None;
@@ -1314,6 +1378,8 @@ impl Engine {
             tx: self.internal_tx.clone(),
             session: self.session,
             load: self.loads,
+            pace,
+            hosts_only,
         };
         self.tasks.spawn(task.run());
     }
@@ -1366,19 +1432,12 @@ impl Engine {
                 self.record_discovered(true);
                 self.publish();
             }
-            LoadStep::Services {
+            LoadStep::Batch {
                 started,
-                services,
-                details,
-            } => {
-                self.store.replace_services(services, Detail::Lean, started);
-                // The heartbeats are left out of everything from here.
-                self.discover_beats();
-                self.record_discovered(true);
-                // The load task is gone if the session ended meanwhile.
-                let _ = details.send(self.problem_details(kind));
-                self.publish();
-            }
+                took,
+                fetched,
+            } => self.on_batch(started, took, fetched),
+            LoadStep::Services { services, details } => self.on_services(kind, services, details),
             LoadStep::Details { started, fetched } => {
                 self.store.apply_fetched(
                     fetched.hosts,
@@ -1393,6 +1452,7 @@ impl Engine {
             LoadStep::Done => self.load_done(kind),
             LoadStep::Failed(failure) => {
                 self.load = None;
+                self.load_scope = paced::Scope::All;
                 self.last_load_end = Some(Instant::now());
                 self.store.end_annotation_query();
                 self.finish_discovered();
@@ -1431,6 +1491,56 @@ impl Engine {
         }
     }
 
+    /// A paced batch of tier 2: applied as it comes.
+    fn on_batch(&mut self, started: u64, took: std::time::Duration, fetched: ic_api::Fetched) {
+        self.batch_answered(took);
+        self.store.apply_fetched(
+            Vec::new(),
+            fetched.services,
+            Detail::Lean,
+            &fetched.missing,
+            started,
+        );
+        self.record_discovered(true);
+        self.publish_changes();
+    }
+
+    /// Tier 2 is in: what the list said is gone goes, and tier 3 learns
+    /// which problems to detail.
+    fn on_services(
+        &mut self,
+        kind: LoadKind,
+        services: load::ServicesAnswer,
+        details: oneshot::Sender<Vec<ObjectKey>>,
+    ) {
+        match services {
+            load::ServicesAnswer::All(started, services) => {
+                self.store.replace_services(services, Detail::Lean, started);
+            }
+            load::ServicesAnswer::Batched { listed, stats } => {
+                if let Some((started, listed)) = listed {
+                    self.store.retain_services(&listed, started);
+                }
+                tracing::info!(
+                    environment = %self.spec.environment.name,
+                    kind = ?kind,
+                    batches = stats.batches,
+                    slow = stats.slow,
+                    widest = stats.widest,
+                    paused_ms = stats.paused.as_millis(),
+                    listed = stats.listed,
+                    "the services came in paced batches"
+                );
+            }
+        }
+        // The heartbeats are left out of everything from here.
+        self.discover_beats();
+        self.record_discovered(true);
+        // The load task is gone if the session ended meanwhile.
+        let _ = details.send(self.problem_details(kind));
+        self.publish();
+    }
+
     /// A load is complete: the objects are the node's, the rule engine
     /// judges what it found (and, after the first, learns what is wrong).
     fn load_done(&mut self, kind: LoadKind) {
@@ -1456,8 +1566,13 @@ impl Engine {
             found = self.load_found_count,
             reconciles = self.reconciles,
             reconciles_found = self.reconciles_found,
+            count_catches = self.pacing.count.catches,
+            paced_loads = self.pacing.gated,
+            gates_waited_ms = self.pacing.gate_waited.as_millis(),
+            scope = ?self.load_scope,
             "load done"
         );
+        let scope = std::mem::take(&mut self.load_scope);
         self.load = None;
         self.loaded = true;
         // The objects are this node's now.
@@ -1503,6 +1618,10 @@ impl Engine {
                 // The stream had ended meanwhile.
                 return;
             }
+        }
+        if scope == paced::Scope::All {
+            // The keys for the next run's first load, the baselines.
+            self.remember_pacing();
         }
         if !self.notifications_current {
             self.load_notifications();
@@ -1730,7 +1849,9 @@ impl Engine {
         let session = self.session;
         let health = self.health_ask(now);
         self.tasks.spawn(async move {
+            let sent = Instant::now();
             let result = client.status().await;
+            let took = sent.elapsed();
             let nodes = match nodes {
                 Some(names) => {
                     let states = client.endpoint_states(&names).await;
@@ -1745,6 +1866,7 @@ impl Engine {
             let _ = tx.send(Internal::Status {
                 session,
                 result,
+                took,
                 nodes,
                 health,
             });
@@ -1895,6 +2017,7 @@ impl Engine {
                     health.push(sample);
                     health.interval = interval;
                 });
+                self.check_object_counts(&status);
                 self.store.set_status(status);
                 if let Some(seen) = restarted {
                     // Its features may have changed with the restart.
@@ -2204,6 +2327,11 @@ impl Engine {
                 _ => None,
             };
             let applied = self.store.apply(seq, &event);
+            if let (Event::StateChange { object, .. }, Applied::Changed { .. }) = (&event, &applied)
+            {
+                // Quiet: what depends on it may change reachability unseen.
+                self.note_reachability(object);
+            }
             if let Some((key, result)) = beat {
                 self.beat_result(&key, &result, true);
             }
@@ -2457,7 +2585,7 @@ impl Engine {
         match command {
             Command::Action { id, target, action } => self.run_action(id, target, action),
             Command::Refresh => self.refresh(),
-            Command::UpdateEnvironment(environment) => self.update_environment(environment),
+            Command::UpdateEnvironment(environment) => self.update_environment(*environment),
             Command::UpdateGeneral(general) => self.update_general(general),
             Command::LoadHistory {
                 object,
@@ -2529,6 +2657,8 @@ impl Engine {
                 if !self.probe_in_flight && !self.probe_candidates().is_empty() {
                     self.probe_at = Some(Instant::now());
                 }
+                // The user's reload never waits at a paced load's gate.
+                self.pacing.gate = None;
                 self.request_reload(sync::ReloadCause::User);
             }
         }
@@ -2599,6 +2729,10 @@ impl Engine {
 
     // --- internal messages --------------------------------------------------------------
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per message, each handing it to its part"
+    )]
     fn on_internal(&mut self, message: Internal) {
         match message {
             Internal::ActionDone(finished) => self.on_action_done(*finished),
@@ -2619,9 +2753,13 @@ impl Engine {
             Internal::Status {
                 session,
                 result,
+                took,
                 nodes,
                 health,
             } if session == self.session => {
+                if result.is_ok() {
+                    self.status_answered(took);
+                }
                 if let Some((asked, nodes)) = nodes {
                     self.on_node_states(&asked, nodes);
                 }
@@ -2666,11 +2804,23 @@ impl Engine {
                 started,
                 result,
             } if session == self.session => self.on_focused(&key, started, result),
-            Internal::StartSize { session, services } if session == self.session => {
-                self.start_after(services);
+            Internal::StartSize {
+                session,
+                services,
+                clients,
+            } if session == self.session => {
+                self.start_after(services, clients);
             }
             Internal::RememberedBeats { generation, beats } => {
                 self.on_remembered_beats(generation, beats);
+            }
+            Internal::LoadProbe {
+                session,
+                answer,
+                endpoint,
+            } if session == self.session => self.on_load_probe(answer, endpoint),
+            Internal::RememberedPacing { generation, pacing } => {
+                self.on_remembered_pacing(generation, *pacing);
             }
             Internal::Beats {
                 session,
@@ -2690,6 +2840,7 @@ impl Engine {
             | Internal::StreamOpened { .. }
             | Internal::Focused { .. }
             | Internal::StartSize { .. }
+            | Internal::LoadProbe { .. }
             | Internal::Beats { .. } => {}
         }
     }

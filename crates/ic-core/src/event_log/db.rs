@@ -351,6 +351,105 @@ impl Database {
         Ok(())
     }
 
+    /// Adaptive pacing's state.
+    pub(super) fn pacing(&self) -> Result<super::RememberedPacing, DbError> {
+        let mut keys = Vec::new();
+        {
+            let mut statement = self
+                .conn
+                .prepare("SELECT object, problem FROM pacing_keys ORDER BY object")?;
+            let rows = statement.query_map([], |row| {
+                let object: String = row.get(0)?;
+                let problem: i64 = row.get(1)?;
+                Ok(ServiceKey::parse(&object).map(|key| (key, problem != 0)))
+            })?;
+            for row in rows {
+                if let Some(key) = row? {
+                    keys.push(key);
+                }
+            }
+        }
+        let mut baselines = Vec::new();
+        {
+            let mut statement = self
+                .conn
+                .prepare("SELECT url, signal, micros FROM pacing_baselines")?;
+            let rows = statement.query_map([], |row| {
+                let micros: i64 = row.get(2)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    Duration::from_micros(u64::try_from(micros).unwrap_or(0)),
+                ))
+            })?;
+            for row in rows {
+                baselines.push(row?);
+            }
+        }
+        let team: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT value FROM pacing_facts WHERE name = 'team'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(super::RememberedPacing {
+            keys,
+            baselines,
+            team: team.and_then(|team| u32::try_from(team).ok()),
+        })
+    }
+
+    /// Replaces the services' keys.
+    pub(super) fn remember_keys(&mut self, keys: &[(ServiceKey, bool)]) -> Result<(), DbError> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM pacing_keys", [])?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT OR REPLACE INTO pacing_keys (object, problem) VALUES (?1, ?2)",
+            )?;
+            for (key, problem) in keys {
+                insert.execute(params![
+                    format!("{}!{}", key.host, key.name),
+                    i64::from(*problem)
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Keeps baselines (URL, signal, fastest answer).
+    pub(super) fn remember_baselines(
+        &mut self,
+        baselines: &[(String, String, Duration)],
+    ) -> Result<(), DbError> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut upsert = tx.prepare_cached(
+                "INSERT INTO pacing_baselines (url, signal, micros) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (url, signal) DO UPDATE SET micros = ?3",
+            )?;
+            for (url, signal, took) in baselines {
+                let micros = i64::try_from(took.as_micros()).unwrap_or(i64::MAX);
+                upsert.execute(params![url, signal, micros])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Keeps the team's size.
+    pub(super) fn remember_team(&self, clients: u32) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT INTO pacing_facts (name, value) VALUES ('team', ?1)
+             ON CONFLICT (name) DO UPDATE SET value = ?1",
+            params![i64::from(clients)],
+        )?;
+        Ok(())
+    }
+
     /// The schema version recorded in the database.
     #[cfg(test)]
     pub(super) fn version(&self) -> Result<Option<i64>, DbError> {
@@ -390,6 +489,7 @@ fn migrate(conn: &Connection) -> Result<(), DbError> {
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch(SCHEMA)?;
             tx.execute_batch(HEARTBEATS)?;
+            tx.execute_batch(PACING)?;
             tx.execute(
                 "INSERT INTO schema_version (version) VALUES (?1)",
                 params![SCHEMA_VERSION],
@@ -411,8 +511,28 @@ fn migrate(conn: &Connection) -> Result<(), DbError> {
 /// that don't know it keep reading and writing the file.
 fn add_heartbeats_table(conn: &Connection) -> Result<(), DbError> {
     conn.execute_batch(HEARTBEATS)?;
+    conn.execute_batch(PACING)?;
     Ok(())
 }
+
+/// Adaptive pacing's state (`super::RememberedPacing`), kept like the
+/// heartbeats: added to any file, no schema version of its own.
+const PACING: &str = "
+CREATE TABLE IF NOT EXISTS pacing_keys (
+    object TEXT PRIMARY KEY,
+    problem INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pacing_baselines (
+    url TEXT NOT NULL,
+    signal TEXT NOT NULL,
+    micros INTEGER NOT NULL,
+    PRIMARY KEY (url, signal)
+);
+CREATE TABLE IF NOT EXISTS pacing_facts (
+    name TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
+";
 
 const HEARTBEATS: &str = "
 CREATE TABLE IF NOT EXISTS heartbeats (

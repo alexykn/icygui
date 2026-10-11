@@ -437,6 +437,18 @@ impl FetchQueue {
         }
     }
 
+    /// Nothing that could change which objects the store holds is queued
+    /// or in flight (created or unknown objects, re-queries, objects
+    /// deferred during a load): the store's object counts can be compared
+    /// with Icinga's.
+    pub(super) fn idle(&self) -> bool {
+        !self.in_flight
+            && self.pending.is_empty()
+            && self.full.is_empty()
+            && self.unknown.is_empty()
+            && self.deferred.is_empty()
+    }
+
     /// When the next round may start: `delay` after the oldest mark, never
     /// while a round runs.
     pub(super) fn due(&self, delay: Duration) -> Option<Instant> {

@@ -252,7 +252,11 @@ impl CheckableAttrs {
             acknowledgement_expiry: Timestamp::from_unix_seconds(self.acknowledgement_expiry.0)
                 .non_zero(),
             downtime_depth: clamp_u32(self.downtime_depth.0),
-            flapping: self.flapping.0,
+            // Icinga recomputes the raw `flapping` with every check result
+            // even where flap detection is off, without a `Flapping` event;
+            // what it means (`Checkable::IsFlapping`) needs the switch on.
+            // (The global switch is the store's to apply.)
+            flapping: self.flapping.0 && self.enable_flapping.0.unwrap_or(true),
             flapping_current: self.flapping_current.0,
             reachable: self.last_reachable.0.unwrap_or(true),
             check_command: std::mem::take(&mut self.check_command.0),

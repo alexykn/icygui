@@ -2148,3 +2148,46 @@ fn service_counts_follow_icinga_with_pending_services_as_unknown() {
     );
     assert_eq!(store.service_states(), [2, 0, 1, 0]);
 }
+
+/// With Icinga's global flap detection off, nothing is flapping as Icinga
+/// means it, whatever an answer's raw flag says (ledger 138); a reload that
+/// only differs in that raw flag finds nothing.
+#[test]
+fn flapping_follows_the_global_switch() {
+    let mut store = loaded();
+    let flapping = |store: &Store| {
+        store
+            .services()
+            .get(&ServiceKey::new("h", "a"))
+            .unwrap()
+            .check
+            .flapping
+    };
+    let mut raw = service("h", "a", ServiceState::Ok);
+    raw.check.flapping = true;
+    store.set_status(ic_model::InstanceStatus {
+        flap_detection_enabled: false,
+        ..ic_model::InstanceStatus::default()
+    });
+    store.apply_fetched(Vec::new(), vec![raw.clone()], Detail::Lean, &[], 20);
+    assert!(!flapping(&store));
+    assert!(store.take_discovered().is_empty(), "nothing found");
+    store.set_status(ic_model::InstanceStatus {
+        flap_detection_enabled: true,
+        ..ic_model::InstanceStatus::default()
+    });
+    store.apply_fetched(Vec::new(), vec![raw], Detail::Lean, &[], 30);
+    assert!(flapping(&store));
+}
+
+/// A paced load's list of every service's name: services it doesn't name
+/// are gone, unless an event newer than the list showed them.
+#[test]
+fn a_list_of_names_removes_the_services_it_lacks() {
+    let mut store = loaded();
+    let listed: std::collections::HashSet<ServiceKey> =
+        [ServiceKey::new("h", "a")].into_iter().collect();
+    store.retain_services(&listed, 20);
+    assert!(store.services().contains_key(&ServiceKey::new("h", "a")));
+    assert!(!store.services().contains_key(&ServiceKey::new("h", "b")));
+}

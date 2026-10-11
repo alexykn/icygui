@@ -2330,3 +2330,68 @@ async fn quiet_mode_evaluates_only_what_notifications_need() {
         .await;
     engine.shutdown();
 }
+
+/// Quiet mode drops check results, and a problem that becomes unreachable
+/// (its host went down) does so only with its next check result, without a
+/// state change (ledger 139): the host's state change, which a quiet
+/// stream carries, makes the engine ask for its problems by name once
+/// their next check is due, so the problem shows as unreachable (handled)
+/// while quiet too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reachability_change_without_a_state_change_is_found_while_quiet() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning.reach_recheck_margin = Duration::from_millis(50);
+    launch.tuning.reach_recheck_max = Duration::from_millis(300);
+    let mut engine = launch.start();
+    settled(&mut engine).await;
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    engine.snapshot(|snapshot| snapshot.quiet).await;
+    let snapshot = engine.latest().unwrap();
+    let service = snapshot
+        .services
+        .values()
+        .find(|service| {
+            service.is_problem()
+                && service.check.reachable
+                && snapshot
+                    .host_of(&service.key)
+                    .is_some_and(|host| host.state == HostState::Up)
+        })
+        .expect("a reachable problem on an UP host")
+        .clone();
+    let key = ObjectKey::from(service.key.clone());
+    let code = match service.state {
+        ServiceState::Warning => 1,
+        ServiceState::Critical => 2,
+        _ => 3,
+    };
+    // The host goes down (a state change: on the quiet stream) …
+    control
+        .set_host_state(service.key.host.as_str(), HostState::Down, "DOWN", true)
+        .unwrap();
+    // … and the service's next check finds it unreachable, in the same
+    // state (no state change: not on the quiet stream).
+    control
+        .process_check_result(&key, code, "still failing", &[])
+        .unwrap();
+    assert!(
+        !control
+            .service(service.key.host.as_str(), &service.key.name)
+            .unwrap()
+            .check
+            .reachable,
+        "the mock says unreachable"
+    );
+    engine
+        .snapshot(|snapshot| {
+            snapshot
+                .services
+                .get(&service.key)
+                .is_some_and(|found| !found.check.reachable)
+        })
+        .await;
+    engine.shutdown();
+}

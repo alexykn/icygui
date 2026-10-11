@@ -649,7 +649,7 @@ async fn beats_the_settings_no_longer_ask_for_are_forgotten_not_findings() {
     let mut environment = crate::support::environment(&server);
     environment.trouble.heartbeats.mode = ic_config::HeartbeatMode::List;
     environment.trouble.heartbeats.list = vec!["icygui-hb-master!beat-master-01".to_owned()];
-    engine.send(Command::UpdateEnvironment(environment));
+    engine.send(Command::UpdateEnvironment(Box::new(environment)));
     let snapshot = engine
         .snapshot(|snapshot| snapshot.heartbeats.beats.len() == 1)
         .await;

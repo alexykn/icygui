@@ -475,6 +475,31 @@ impl Store {
             .collect()
     }
 
+    /// The problems whose reachability a state change of `parent` may
+    /// change: its services (Icinga's implicit dependency on the host) and
+    /// the children of its `Dependency` objects, if they are problems.
+    pub(crate) fn dependent_problems(&self, parent: &ObjectKey) -> Vec<ObjectKey> {
+        let mut found: Vec<ObjectKey> = match parent {
+            ObjectKey::Host { name } => self
+                .problem_services_of(name)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect(),
+            ObjectKey::Service { .. } => Vec::new(),
+        };
+        for dependency in self.dependencies.iter() {
+            if &dependency.parent == parent
+                && self
+                    .checkable(&dependency.child)
+                    .is_some_and(|(state, _)| state.is_problem())
+                && !found.contains(&dependency.child)
+            {
+                found.push(dependency.child.clone());
+            }
+        }
+        found
+    }
+
     /// An object's comments.
     pub(crate) fn comments_of(&self, object: &ObjectKey) -> &[Comment] {
         self.comments.get(object).map_or(&[], Vec::as_slice)
@@ -953,6 +978,22 @@ impl Store {
         self.changes.any = true;
     }
 
+    /// Every service's name, listed at `started` (a paced load's list):
+    /// services it doesn't name are gone (unless an event newer than the
+    /// list showed them).
+    pub(crate) fn retain_services(&mut self, listed: &HashSet<ServiceKey>, started: u64) {
+        let gone: Vec<ObjectKey> = self
+            .services
+            .keys()
+            .filter(|key| !listed.contains(*key))
+            .map(|key| ObjectKey::Service { key: key.clone() })
+            .collect();
+        if !gone.is_empty() {
+            self.remove_objects(&gone, started);
+            self.changes.any = true;
+        }
+    }
+
     /// Applies hosts and services queried by name at `started`; `missing`
     /// are gone (unless an event newer than the query showed them).
     /// Returns the missing objects that were removed.
@@ -1307,7 +1348,23 @@ impl Store {
         seqs.fetched = seqs.fetched.max(started);
     }
 
+    /// An answer's `flapping` is Icinga's raw flag, which it recomputes
+    /// with every check result even with flap detection off (`ic-api` keeps
+    /// it only where the object's switch is on): with the global switch
+    /// off (`/v1/status`), nothing is flapping as Icinga means it
+    /// (`Checkable::IsFlapping`), and no `Flapping` event will say so.
+    fn flapping_as_icinga_means_it(&self, check: &mut CheckInfo) {
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|status| !status.flap_detection_enabled)
+        {
+            check.flapping = false;
+        }
+    }
+
     fn put_host(&mut self, mut host: Host, started: u64) {
+        self.flapping_as_icinga_means_it(&mut host.check);
         let key = host.key();
         if self.superseded(&key, started) {
             return;
@@ -1348,6 +1405,7 @@ impl Store {
     }
 
     fn put_service(&mut self, mut service: Service, detail: Detail, started: u64) {
+        self.flapping_as_icinga_means_it(&mut service.check);
         let key = service.object_key();
         if self.superseded(&key, started) {
             // Even a full answer: its result and links are older than the

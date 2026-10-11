@@ -129,7 +129,27 @@ enum Job {
     Heartbeats(Box<dyn FnOnce(Vec<RememberedBeat>) + Send>),
     RememberHeartbeats(Vec<RememberedBeat>),
     ForgetHeartbeat(ServiceKey),
+    Pacing(Box<dyn FnOnce(RememberedPacing) + Send>),
+    RememberKeys(Vec<(ServiceKey, bool)>),
+    RememberBaselines(Vec<(String, String, Duration)>),
+    RememberTeam(u32),
     Stop(mpsc::Sender<()>),
+}
+
+/// What adaptive pacing keeps across runs (docs/performance.md *Adaptive
+/// pacing*): the services' keys of the last complete load (with whether
+/// each was a problem), so the first load can ask for them by name in
+/// batches, the problems first; the fastest answers seen per URL and
+/// signal (the baselines); and the last count of open API connections
+/// Icinga reported (the team's size).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RememberedPacing {
+    /// Each service's key and whether it was a problem.
+    pub(crate) keys: Vec<(ServiceKey, bool)>,
+    /// URL, signal name, fastest answer.
+    pub(crate) baselines: Vec<(String, String, Duration)>,
+    /// Icinga's `api_num_http_clients`, last seen.
+    pub(crate) team: Option<u32>,
 }
 
 /// A heartbeat icygui has seen (PLAN.md §4.2 B3): remembered so that one
@@ -287,6 +307,31 @@ impl EventLog {
         let _ = self.send(Job::ForgetHeartbeat(key));
     }
 
+    /// Calls `reply` (on the log's thread) with what adaptive pacing kept
+    /// (nothing without a log).
+    pub(crate) fn pacing(&self, reply: Box<dyn FnOnce(RememberedPacing) + Send>) {
+        if let Err(Job::Pacing(reply)) = self.send(Job::Pacing(reply)) {
+            reply(RememberedPacing::default());
+        }
+    }
+
+    /// Keeps the services' keys of a complete load (replacing the last).
+    pub(crate) fn remember_keys(&self, keys: Vec<(ServiceKey, bool)>) {
+        let _ = self.send(Job::RememberKeys(keys));
+    }
+
+    /// Keeps the baselines (replacing those of the same URL and signal).
+    pub(crate) fn remember_baselines(&self, baselines: Vec<(String, String, Duration)>) {
+        if !baselines.is_empty() {
+            let _ = self.send(Job::RememberBaselines(baselines));
+        }
+    }
+
+    /// Keeps the team's size.
+    pub(crate) fn remember_team(&self, clients: u32) {
+        let _ = self.send(Job::RememberTeam(clients));
+    }
+
     /// Lets the thread finish what it was given, waiting at most `timeout`
     /// (it keeps going on its own after that).
     pub(crate) fn close(&mut self, timeout: Duration) {
@@ -388,6 +433,7 @@ fn read<T: Default>(
 }
 
 /// Runs one job against the database (`None`: no log).
+#[expect(clippy::too_many_lines, reason = "one arm per job")]
 fn handle(database: Option<&mut Database>, job: Job) {
     match job {
         Job::Record(entries) => {
@@ -473,6 +519,30 @@ fn handle(database: Option<&mut Database>, job: Job) {
                 && let Err(error) = database.forget_heartbeat(&key)
             {
                 tracing::warn!(%error, "couldn't forget a heartbeat");
+            }
+        }
+        Job::Pacing(reply) => {
+            reply(read(database, "the pacing state", Database::pacing));
+        }
+        Job::RememberKeys(keys) => {
+            if let Some(database) = database
+                && let Err(error) = database.remember_keys(&keys)
+            {
+                tracing::warn!(%error, "couldn't keep the services' keys");
+            }
+        }
+        Job::RememberBaselines(baselines) => {
+            if let Some(database) = database
+                && let Err(error) = database.remember_baselines(&baselines)
+            {
+                tracing::warn!(%error, "couldn't keep the answer time baselines");
+            }
+        }
+        Job::RememberTeam(clients) => {
+            if let Some(database) = database
+                && let Err(error) = database.remember_team(clients)
+            {
+                tracing::warn!(%error, "couldn't keep the team's size");
             }
         }
         Job::Prune(before) => {

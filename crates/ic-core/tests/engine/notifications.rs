@@ -367,7 +367,7 @@ async fn missed_changes_found_by_a_reconcile_notify() {
     // recovery, never delayed, is the fence). Commands are handled before
     // stream lines, so the rule applies to the change after it.
     environment.notifications.default_rule.min_duration_secs = 60;
-    engine.send(Command::UpdateEnvironment(environment));
+    engine.send(Command::UpdateEnvironment(Box::new(environment)));
     critical(&control, "stg-k8s-02", "kubelet");
     ok(&control, "stg-cache-01", "redis-memory");
     assert_eq!(
@@ -411,7 +411,7 @@ async fn rules_follow_the_environment() {
     // dashboard names it.
     environment.notifications.enabled = true;
     environment.groups[0].dashboards[0].notifications = ic_rules::ScopeSetting::Off;
-    engine.send(Command::UpdateEnvironment(environment));
+    engine.send(Command::UpdateEnvironment(Box::new(environment)));
     critical(&control, "stg-api-01", "http");
     let record = engine.notification().await;
     assert_eq!(record.intent.title, "CRITICAL · http on stg-api-01");

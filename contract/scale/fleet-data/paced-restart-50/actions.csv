@@ -1,0 +1,14 @@
+1791729078.275,cpuset icygui-demo-master-01-1 0,1
+1791729078.372,cpuset icygui-demo-master-02-1 0,1
+1791729078.495,cpuset icygui-demo-proxy-1 0,1
+1791729078.576,cpuset icygui-demo-sat-ams-01-1 0,1
+1791729078.650,cpuset icygui-demo-sat-fra-01-1 0,1
+1791729078.726,cpuset icygui-demo-sat-fra-02-1 0,1
+1791729078.748,docker-proxy 6780 on cpus 2,3: -host-port 5667
+1791729078.758,docker-proxy 7512 on cpus 2,3: -host-port 5665
+1791729078.769,docker-proxy 7563 on cpus 2,3: -host-port 5666
+1791729078.772,cluster: master-01 on cpus 0,1, the rest on cpus 0,1; clients on cpus 2,3
+1791729078.874,started: fleet pid 12857
+1791729370.682,50 loaded after 292 s
+1791729370.685,mark R50
+1791729389.316,raw streams: 0

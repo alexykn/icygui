@@ -17,6 +17,10 @@
 //! - `mode <n> <live|quiet>`: switches `n` engines of the other mode,
 //!   lowest first.
 //! - `stop <n|all>`: shuts the newest `n` engines down.
+//! - `data <dir|none>`: engines started from now on keep their event logs
+//!   in `<dir>/<index>` (an engine started again with the same index finds
+//!   what it kept: adaptive pacing's keys, baselines and team size), or in
+//!   a fresh directory each (`none`, the default).
 //! - `mark <label>`: a line in the timeline (phases for the analysis).
 //! - `quit` (or the end of the file): stops everything.
 //!
@@ -384,6 +388,11 @@ struct Fleet {
     clients: Mutex<Vec<Option<Client>>>,
     /// One engine starts at a time, so the threads that appear are its.
     starting: Mutex<()>,
+    /// Where engines keep their event logs (`data <dir|none>`): engine `i`
+    /// in `<dir>/<i>`, so one started again with the same index finds what
+    /// it kept (adaptive pacing's keys and baselines); `None`: a fresh
+    /// directory each.
+    data: Mutex<Option<PathBuf>>,
 }
 
 impl Fleet {
@@ -410,7 +419,12 @@ impl Fleet {
             tuning: self.tuning.clone(),
             general: self.general.clone(),
             now: Timestamp::now().as_unix_seconds(),
-            data_dir: None,
+            data_dir: self
+                .data
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|dir| dir.join(index.to_string())),
             start,
             real_clock: true,
         }
@@ -768,6 +782,7 @@ async fn fleet() {
             seen: AtomicU64::new(0),
         }),
         clients: Mutex::new(Vec::new()),
+        data: Mutex::new(None),
         starting: Mutex::new(()),
     });
 
@@ -889,6 +904,9 @@ async fn fleet() {
                 out.event(None, "stopped", &count.to_string());
             }
             ["mark", ..] => out.event(None, "mark", line.trim_start_matches("mark").trim()),
+            ["data", dir] => {
+                *fleet.data.lock().unwrap() = (*dir != "none").then(|| PathBuf::from(dir));
+            }
             ["quit"] => break,
             _ => eprintln!("fleet: unknown command {line:?}"),
         }

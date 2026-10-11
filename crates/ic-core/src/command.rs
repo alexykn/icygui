@@ -34,7 +34,7 @@ pub enum Command {
     /// (URLs, their order, pins and server names, authentication, TLS)
     /// reconnect; anything else (dashboards, rules, author) applies in
     /// place.
-    UpdateEnvironment(ic_config::Environment),
+    UpdateEnvironment(Box<ic_config::Environment>),
     /// The app-wide settings changed (reconcile interval, log retention).
     UpdateGeneral(ic_config::General),
     /// Pauses notifications until the time given (`None` resumes them).

@@ -210,6 +210,10 @@ pub(super) fn reconcile_wait(draw: Draw, interval: Duration, floor: Option<Durat
 impl Engine {
     /// The periodic reconcile's interval (see the module notes).
     pub(super) fn reconcile_interval(&self) -> Duration {
+        if self.safety_net() {
+            // The count check stands in for it: a rare safety pass.
+            return self.tuning.safety_interval;
+        }
         let interval = self.tuning.reconcile_interval.unwrap_or_else(|| {
             reconcile_interval(
                 self.spec.general.reconcile_interval_secs,
@@ -305,9 +309,10 @@ impl Engine {
         // (each quiet poll that finds nothing missed counts as hearing it).
         let long_gap = long_gap(&self.tuning, was_quiet);
         if std::mem::take(&mut self.reload_now) {
-            // The user asked for it.
+            // The user asked for it: never paced.
             self.reload_full = true;
             self.notifications_current = false;
+            self.pacing.unpaced_next = true;
             self.reload_at = Some(now);
         } else if gap >= long_gap {
             tracing::debug!(?gap, "reconnected after a long gap; reloading");
@@ -318,6 +323,25 @@ impl Engine {
                 "reconnected after a short gap; the next reconcile catches up"
             );
             self.replan_reconcile();
+            if self.safety_net() {
+                // The safety pass is hours away: a short gap still gets a
+                // reconcile at the adaptive interval, as before.
+                let adaptive = reconcile_interval(
+                    self.spec.general.reconcile_interval_secs,
+                    self.store.object_count(),
+                    0,
+                );
+                let wait = reconcile_wait(
+                    Draw {
+                        cadence: Cadence::First,
+                        unit: self.jitter.unit(),
+                    },
+                    adaptive,
+                    Some(MIN_INTERVAL),
+                );
+                let at = now + wait;
+                self.reconcile_at = Some(self.reconcile_at.map_or(at, |planned| planned.min(at)));
+            }
         } else {
             // A restart can't be told: reload, but not often.
             let jitter = self.jitter.up_to(self.tuning.reload_jitter);
@@ -379,7 +403,7 @@ impl Engine {
     /// When a reload or the periodic reconcile is due: only while live and
     /// no load runs.
     pub(super) fn reload_due(&self) -> Option<Instant> {
-        if self.phase != Phase::Live || self.load.is_some() {
+        if self.phase != Phase::Live || self.load.is_some() || self.pacing.gate.is_some() {
             return None;
         }
         self.reload_at.into_iter().chain(self.reconcile_at).min()
@@ -430,6 +454,13 @@ impl Engine {
             }
             ReloadCause::Restart | ReloadCause::Reconnect => {
                 self.reload_full = true;
+                // A reconcile waiting at its gate becomes this reload.
+                if let Some(run) = &mut self.pacing.gate
+                    && run.kind == LoadKind::Reconcile
+                {
+                    run.kind = LoadKind::Reload;
+                    run.scope = super::paced::Scope::All;
+                }
                 base
             }
         };

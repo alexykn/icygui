@@ -341,7 +341,7 @@ async fn previews_and_changed_dashboards() {
     environment.groups[0]
         .dashboards
         .retain(|dashboard| dashboard.id != "broken");
-    engine.send(Command::UpdateEnvironment(environment));
+    engine.send(Command::UpdateEnvironment(Box::new(environment)));
     let snapshot = engine
         .snapshot(|snapshot| snapshot.revision > revision && snapshot.dashboards.len() == 3)
         .await;

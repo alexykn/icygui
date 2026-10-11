@@ -107,6 +107,9 @@ use crate::command::{ConnectionState, LoadPhase};
 use crate::connect::{self, Failure};
 use crate::spec::Start;
 
+/// At most this many reachability rechecks wait at a time.
+pub(super) const REACH_MAX: usize = 2_000;
+
 /// After waking up, at most this many problems are fetched in full in the
 /// background (five requests); the others' results come with their next
 /// check.
@@ -991,6 +994,76 @@ impl Engine {
         }
     }
 
+    // --- reachability while quiet (ledger 139) --------------------------------------
+
+    /// A state change of `parent` came on a quiet stream: the problems
+    /// that depend on it may become unreachable (or reachable again) with
+    /// their next check, which a quiet stream doesn't carry; each is asked
+    /// for by name once that check is due (`Tuning::reach_recheck_margin`
+    /// after its `next_check`, at most `Tuning::reach_recheck_max` from
+    /// now). At most [`REACH_MAX`] wait at a time (beyond that, an outage:
+    /// waking up and the next reconcile bring the rest).
+    pub(super) fn note_reachability(&mut self, parent: &ObjectKey) {
+        let quiet = self.conn.as_ref().is_some_and(|conn| conn.quiet);
+        if !quiet {
+            return;
+        }
+        let children = self.store.dependent_problems(parent);
+        if children.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let icinga_now = self.icinga_seconds();
+        let margin = self.tuning.reach_recheck_margin;
+        let most = self.tuning.reach_recheck_max;
+        for child in children {
+            if self.reach.len() >= REACH_MAX {
+                tracing::debug!(
+                    "too many reachability rechecks waiting; leaving the rest to the reconcile"
+                );
+                break;
+            }
+            let due = self
+                .store
+                .check(&child)
+                .and_then(|check| check.next_check)
+                .map_or(Duration::ZERO, |next| {
+                    Duration::try_from_secs_f64(next.as_unix_seconds() - icinga_now)
+                        .unwrap_or_default()
+                });
+            let at = now + (due + margin).min(most);
+            let entry = self.reach.entry(child).or_insert(at);
+            *entry = (*entry).max(at);
+        }
+    }
+
+    /// When the next reachability recheck is due: only while live.
+    pub(super) fn reach_due(&self) -> Option<Instant> {
+        if self.phase != Phase::Live {
+            return None;
+        }
+        self.reach.values().min().copied()
+    }
+
+    /// The due rechecks go into the re-query queue (a full stream since
+    /// brings their check results itself).
+    pub(super) fn run_reach(&mut self, now: Instant) {
+        let quiet = self.conn.as_ref().is_some_and(|conn| conn.quiet);
+        let due: Vec<ObjectKey> = self
+            .reach
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in due {
+            self.reach.remove(&key);
+            if quiet && self.store.contains(&key) {
+                tracing::debug!(object = %key, "reachability asked for again");
+                self.fetch.mark(key, now);
+            }
+        }
+    }
+
     // --- background starts ---------------------------------------------------------
 
     /// The session's first load: at once, or after a background start's
@@ -1015,29 +1088,62 @@ impl Engine {
         let tx = self.internal_tx.clone();
         let session = self.session;
         self.tasks.spawn(async move {
-            let services = installation_size(&client, sized).await;
-            let _ = tx.send(Internal::StartSize { session, services });
+            let (services, clients) = futures::join!(installation_size(&client, sized), async {
+                // The team's size, for the window (`status/query` too).
+                if sized {
+                    client
+                        .listener_status()
+                        .await
+                        .ok()
+                        .map(|listener| listener.http_clients)
+                } else {
+                    None
+                }
+            });
+            let _ = tx.send(Internal::StartSize {
+                session,
+                services,
+                clients,
+            });
         });
     }
 
     /// A background start's first load waits for a delay that fits
     /// `services` (unknown: the longest).
-    pub(super) fn start_after(&mut self, services: Option<u32>) {
+    pub(super) fn start_after(&mut self, services: Option<u32>, clients: Option<u32>) {
         if self.phase != Phase::Loading || self.load.is_some() {
             return;
+        }
+        // The size decides whether the first load is paced.
+        self.pacing.size_hint = services;
+        if let Some(clients) = clients {
+            // The larger of this count and the last run's: at login, the
+            // team may not have connected yet.
+            let team = self.pacing.team.map_or(clients, |team| team.max(clients));
+            self.note_team(team);
         }
         if self.start == Start::User {
             self.start_load(super::LoadKind::First);
             return;
         }
+        // The window grows with the team (Icinga's count of API
+        // connections over `Tuning::start_team_base`), up to
+        // `Tuning::start_delay_team_max`.
+        let factor = self.team_factor();
+        let most = self.tuning.start_delay_max.mul_f64(factor).min(
+            self.tuning
+                .start_delay_team_max
+                .max(self.tuning.start_delay_max),
+        );
         let delay = start_delay(
             services,
-            self.tuning.start_delay_per_thousand,
-            self.tuning.start_delay_max,
+            self.tuning.start_delay_per_thousand.mul_f64(factor),
+            most,
             &mut self.jitter,
         );
         tracing::info!(
             ?services,
+            team = ?self.pacing.team,
             ?delay,
             "started in the background; the first load waits"
         );
@@ -1049,6 +1155,16 @@ impl Engine {
         self.start = Start::User;
         if self.start_at.is_some() {
             self.start_at = Some(Instant::now());
+        }
+        // Waiting at its gate (a busy master): the user doesn't wait.
+        if self
+            .pacing
+            .gate
+            .as_ref()
+            .is_some_and(|run| run.kind == super::LoadKind::First)
+        {
+            self.pacing.gate = None;
+            self.start_load(super::LoadKind::First);
         }
     }
 

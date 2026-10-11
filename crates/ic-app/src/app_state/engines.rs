@@ -153,7 +153,7 @@ impl EngineSlot {
             self.update_pending = true;
         } else {
             self.update_pending = false;
-            self.send(Command::UpdateEnvironment(environment.clone()));
+            self.send(Command::UpdateEnvironment(Box::new(environment.clone())));
         }
     }
 }

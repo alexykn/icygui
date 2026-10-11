@@ -204,6 +204,62 @@ pub struct Tuning {
     pub start_delay_per_thousand: Duration,
     /// … but at most this (90 s).
     pub start_delay_max: Duration,
+    /// A background start's window grows with the team: Icinga's count of
+    /// open API connections (`api_num_http_clients`, every client's event
+    /// stream, the last seen kept across runs) over this (20 clients)
+    /// multiplies it …
+    pub start_team_base: u32,
+    /// … up to this (5 minutes).
+    pub start_delay_team_max: Duration,
+    /// Adaptive pacing (docs/performance.md *Adaptive pacing*) applies to
+    /// installations of this many services or more (5 000; zero: always):
+    /// below it a lean load is a couple of megabytes, and fifty of them at
+    /// once were measured harmless.
+    pub pace_from: u32,
+    /// An answer is slow above this share of its baseline, in percent
+    /// (300: three times the fastest seen) …
+    pub pace_factor_percent: u32,
+    /// … and above this (150 ms).
+    pub pace_floor: Duration,
+    /// With no baseline yet, an answer is slow above this (1 s).
+    pub pace_unknown: Duration,
+    /// The first probe before a paced reload or safety pass goes out after
+    /// a random delay of up to this (3 s), so clients that noticed a
+    /// restart together don't probe together.
+    pub pace_probe_jitter: Duration,
+    /// A slow probe waits from half to all of this (5 s), doubling with
+    /// each further slow probe …
+    pub pace_wait_initial: Duration,
+    /// … but at most this in all (3 minutes): every paced load runs.
+    pub pace_wait_max: Duration,
+    /// A paced load's batches start with this many in flight when the user
+    /// waits (the window's first load: 4) …
+    pub batch_window_user: usize,
+    /// … one otherwise, and never more than this (8).
+    pub batch_window_max: usize,
+    /// With the count check working (the status poll's object counts per
+    /// type compared with the store's), the periodic reconcile is a safety
+    /// pass this often (3 hours, a random phase and ±20 % like every
+    /// interval), paced; without it (no `status/query`, counts that never
+    /// match), the adaptive interval of `General::reconcile_interval_secs`.
+    pub safety_interval: Duration,
+    /// After a live session is lost (every client loses it at once when
+    /// the master restarts), the next event stream opens after a random
+    /// delay of up to this per open API connection Icinga last reported …
+    pub reopen_per_client: Duration,
+    /// … at least up to this (2 s) …
+    pub reopen_spread_min: Duration,
+    /// … and at most up to this (20 s); only for installations paced
+    /// (`pace_from`).
+    pub reopen_spread_max: Duration,
+    /// Quiet mode (no check results) misses a reachability change that
+    /// comes without a state change: after a state change of a host (or of
+    /// a dependency's parent) on a quiet stream, the problems that depend
+    /// on it are asked for by name once their next check is due, plus this
+    /// (5 s) …
+    pub reach_recheck_margin: Duration,
+    /// … but no later than this after the state change (10 minutes).
+    pub reach_recheck_max: Duration,
     /// The heartbeats' time budget ([`crate::heartbeat::Timing`]).
     pub heartbeat: crate::heartbeat::Timing,
     /// How long a trouble condition (no live data, an Icinga health
@@ -264,6 +320,23 @@ impl Default for Tuning {
             request_burst: 10,
             start_delay_per_thousand: Duration::from_secs(3),
             start_delay_max: Duration::from_secs(90),
+            start_team_base: 20,
+            start_delay_team_max: Duration::from_mins(5),
+            pace_from: 5_000,
+            pace_factor_percent: 300,
+            pace_floor: Duration::from_millis(150),
+            pace_unknown: Duration::from_secs(1),
+            pace_probe_jitter: Duration::from_secs(3),
+            pace_wait_initial: Duration::from_secs(5),
+            pace_wait_max: Duration::from_mins(3),
+            batch_window_user: 4,
+            batch_window_max: 8,
+            safety_interval: Duration::from_hours(3),
+            reopen_per_client: Duration::from_millis(300),
+            reopen_spread_min: Duration::from_secs(2),
+            reopen_spread_max: Duration::from_secs(20),
+            reach_recheck_margin: Duration::from_secs(5),
+            reach_recheck_max: Duration::from_mins(10),
             heartbeat: crate::heartbeat::Timing::default(),
             trouble_grace: crate::trouble::GRACE,
             seed: None,

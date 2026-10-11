@@ -255,6 +255,56 @@ impl Client {
         }
     }
 
+    /// This client without a request budget: the by-name batches of a
+    /// paced bulk load, which pace themselves by their own answer times
+    /// instead (`ic-core`'s adaptive pacing), so they neither wait behind
+    /// the budget nor use up the tokens the user's requests need. The
+    /// connection pool is shared with `self`.
+    #[must_use]
+    pub fn without_budget(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            budget: None,
+        }
+    }
+
+    /// The smallest by-name query there is, as a load signal: one object
+    /// of `plural` (`"endpoints"`, `"hosts"`) named `name`, one attribute
+    /// (its name). Its answer time is the master's own time to answer
+    /// anyone; `ic-core` times it before a paced bulk load. Outside the
+    /// request budget.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::hosts`] (`NotFound` when the object is gone,
+    /// `Forbidden` without `objects/query/<type>`).
+    pub async fn probe(&self, plural: &'static str, name: &str) -> Result<(), ApiError> {
+        let names = [name.to_owned()];
+        let key = plural;
+        self.query_once::<serde::de::IgnoredAny>(plural, Some((key, &names)), &["name"])
+            .await
+            .map(|_| ())
+    }
+
+    /// Every service's name and nothing else (about 100 bytes a service,
+    /// a sixth of [`Detail::Lean`]): the key list a paced bulk load asks
+    /// for by name in batches when it has none, or when Icinga's count
+    /// says the one it has is out of date.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::hosts`].
+    pub async fn service_names(&self) -> Result<Vec<ic_model::ServiceKey>, ApiError> {
+        let results = self
+            .query::<serde::de::IgnoredAny>("services", None, &["name"])
+            .await?;
+        Ok(results
+            .iter()
+            .filter(|entry| entry.attrs.is_some())
+            .filter_map(|entry| ic_model::ServiceKey::parse(&entry.name.0))
+            .collect())
+    }
+
     /// Takes a token for one by-name request, waiting for it unless this
     /// is the priority client.
     async fn spend(&self) {

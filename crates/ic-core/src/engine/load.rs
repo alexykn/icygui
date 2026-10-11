@@ -6,15 +6,34 @@
 //! time. Which problems' details the engine decides once it applied the
 //! services (a periodic reconcile and `Refresh` skip those it holds
 //! current).
+//!
+//! A paced load ([`PaceLoad`], installations of `Tuning::pace_from`
+//! services or more) asks for the services by name in batches of
+//! [`NAMES_PER_REQUEST`] instead of one answer of every service (about
+//! 20 MB at 33 000), paced by their own answer times ([`super::pace::Aimd`]):
+//! the keys the engine knows (the store's, or the previous run's from the
+//! event log), the problems first. When it knows none, or Icinga's count
+//! of services (tier 1's status) differs from them, it first asks for every
+//! service's name (a sixth of the bytes) and batches those; a batch that
+//! finds fewer than Icinga counts asks for the names afterwards. Answers
+//! are applied batch by batch; once the names were listed, services the
+//! list doesn't have are gone.
 
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use ic_api::{ApiError, Client, Detail, NAMES_PER_REQUEST};
+use ic_model::{ObjectKey, ServiceKey};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
+use super::pace::{self, Aimd};
 use super::{Internal, LoadStep};
 use crate::command::LoadPhase;
 use crate::connect::Failure;
@@ -31,7 +50,64 @@ pub(super) struct LoadTask {
     pub(super) tx: UnboundedSender<Internal>,
     pub(super) session: u64,
     pub(super) load: u64,
+    /// Load the services in paced batches when there are enough of them.
+    pub(super) pace: Option<PaceLoad>,
+    /// Tier 1 only (a reload of the hosts a count mismatch asked for).
+    pub(super) hosts_only: bool,
 }
+
+/// How a paced load asks for the services (see the module notes).
+pub(super) struct PaceLoad {
+    /// The client for the batches: outside the request budget (they pace
+    /// themselves), sharing the connection pool.
+    pub(super) client: Client,
+    /// The services' keys the engine knows, the problems first.
+    pub(super) keys: Vec<ServiceKey>,
+    /// How many of `keys` (from the front) were problems.
+    pub(super) problems: usize,
+    /// Batches only from this many services on (Icinga's count, or the
+    /// keys'); one list below.
+    pub(super) from: u32,
+    /// Batches in flight at first, and at most.
+    pub(super) window: usize,
+    pub(super) max_window: usize,
+    /// When a batch's answer is slow, and the fastest batch seen at this
+    /// URL so far.
+    pub(super) rules: pace::Rules,
+    pub(super) baseline: Option<Duration>,
+}
+
+/// How a paced load went (logged when it is done).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PaceStats {
+    /// Batches answered, and how many of them were slow (or failed).
+    pub(crate) batches: u32,
+    pub(crate) slow: u32,
+    /// The widest window it reached.
+    pub(crate) widest: usize,
+    /// Paused between batches in all.
+    pub(crate) paused: Duration,
+    /// Whether it asked for every service's name.
+    pub(crate) listed: bool,
+}
+
+/// How tier 2 brought the services.
+#[derive(Debug)]
+pub(crate) enum ServicesAnswer {
+    /// Every service in one answer, sent when the reader had read the
+    /// count given.
+    All(u64, Vec<ic_model::Service>),
+    /// In batches, applied already; `listed`: the names of every service,
+    /// when they were asked for (and when): services not among them are
+    /// gone.
+    Batched {
+        listed: Option<(u64, HashSet<ServiceKey>)>,
+        stats: PaceStats,
+    },
+}
+
+/// A failed batch is asked again this many times before the load fails.
+const BATCH_TRIES: u32 = 3;
 
 impl LoadTask {
     fn send(&self, step: LoadStep) -> bool {
@@ -76,6 +152,10 @@ impl LoadTask {
         );
         let hosts = hosts?;
         let overview = overview?;
+        let icinga_services = overview
+            .status
+            .as_ref()
+            .map(|status| status.counts.services());
         if !self.send(LoadStep::Overview {
             started,
             overview: Box::new(overview),
@@ -84,16 +164,24 @@ impl LoadTask {
             return Ok(());
         }
 
-        // Tier 2: every service, lean.
-        let started = self.started();
-        self.progress(LoadPhase::Services, 0, None);
-        let services = permitted("services", self.client.services(Detail::Lean)).await?;
+        if self.hosts_only {
+            return Ok(());
+        }
+
+        // Tier 2: every service, lean: in one answer, or paced in batches.
+        let services = match &self.pace {
+            Some(pace) if paced(pace, icinga_services) => {
+                Box::pin(self.batched(pace, icinga_services)).await?
+            }
+            _ => {
+                let started = self.started();
+                self.progress(LoadPhase::Services, 0, None);
+                let services = permitted("services", self.client.services(Detail::Lean)).await?;
+                ServicesAnswer::All(started, services)
+            }
+        };
         let (details, problems) = oneshot::channel();
-        if !self.send(LoadStep::Services {
-            started,
-            services,
-            details,
-        }) {
+        if !self.send(LoadStep::Services { services, details }) {
             return Ok(());
         }
         // The engine applied them and names the problems to detail (none
@@ -129,6 +217,149 @@ impl LoadTask {
             }
         }
         Ok(())
+    }
+
+    /// Tier 2 in paced batches (see the module notes).
+    async fn batched(
+        &self,
+        pace: &PaceLoad,
+        icinga: Option<u32>,
+    ) -> Result<ServicesAnswer, Failure> {
+        let mut stats = PaceStats::default();
+        let mut aimd = Aimd::new(pace.window, pace.max_window);
+        let mut baseline = pace.baseline;
+        let mut listed: Option<(u64, HashSet<ServiceKey>)> = None;
+        let count_matches = icinga.is_some_and(|count| count as usize == pace.keys.len());
+        let mut keys = if pace.keys.is_empty() || !count_matches {
+            let (started, names) = self.list_names(pace, &mut stats).await?;
+            let ordered = problems_first(pace, &names);
+            listed = Some((started, names));
+            ordered
+        } else {
+            pace.keys.clone()
+        };
+        let mut found = 0_usize;
+        let mut asked: HashSet<ServiceKey> = keys.iter().cloned().collect();
+        loop {
+            let total = asked.len();
+            found += self
+                .run_batches(pace, &keys, total, &mut aimd, &mut baseline, &mut stats)
+                .await?;
+            // Fewer than Icinga counts (services created since the keys
+            // were taken): their names, once.
+            let short = icinga.is_some_and(|count| found < count as usize);
+            if listed.is_some() || !short {
+                break;
+            }
+            let (started, names) = self.list_names(pace, &mut stats).await?;
+            keys = names
+                .iter()
+                .filter(|key| !asked.contains(*key))
+                .cloned()
+                .collect();
+            asked.extend(keys.iter().cloned());
+            listed = Some((started, names));
+            if keys.is_empty() {
+                break;
+            }
+        }
+        Ok(ServicesAnswer::Batched { listed, stats })
+    }
+
+    /// Every service's name, and the reader's count when they were asked
+    /// for.
+    async fn list_names(
+        &self,
+        pace: &PaceLoad,
+        stats: &mut PaceStats,
+    ) -> Result<(u64, HashSet<ServiceKey>), Failure> {
+        stats.listed = true;
+        let started = self.started();
+        self.progress(LoadPhase::Services, 0, None);
+        let names = permitted("services", pace.client.service_names()).await?;
+        Ok((started, names.into_iter().collect()))
+    }
+
+    /// Asks for `keys` in batches, paced by `aimd`, applying each answer;
+    /// returns how many services they found.
+    async fn run_batches(
+        &self,
+        pace: &PaceLoad,
+        keys: &[ServiceKey],
+        total: usize,
+        aimd: &mut Aimd,
+        baseline: &mut Option<Duration>,
+        stats: &mut PaceStats,
+    ) -> Result<usize, Failure> {
+        let mut queue: VecDeque<(Vec<ObjectKey>, u32)> = keys
+            .chunks(NAMES_PER_REQUEST)
+            .map(|chunk| (chunk.iter().cloned().map(ObjectKey::from).collect(), 0))
+            .collect();
+        let mut flying = FuturesUnordered::new();
+        let mut found = 0;
+        let mut done = total.saturating_sub(keys.len());
+        let mut next_send = Instant::now();
+        self.progress(LoadPhase::Services, done, Some(total));
+        loop {
+            while flying.len() < aimd.allowed() && Instant::now() >= next_send {
+                let Some((batch, tries)) = queue.pop_front() else {
+                    break;
+                };
+                stats.widest = stats.widest.max(aimd.allowed());
+                let client = pace.client.clone();
+                let started = self.started();
+                flying.push(async move {
+                    let sent = Instant::now();
+                    let result = client.objects(&batch, Detail::Lean).await;
+                    (batch, tries, started, sent.elapsed(), result)
+                });
+                let gap = aimd.gap();
+                if !gap.is_zero() {
+                    stats.paused += gap;
+                    next_send = Instant::now() + gap;
+                }
+            }
+            if flying.is_empty() && queue.is_empty() {
+                return Ok(found);
+            }
+            let next = tokio::select! {
+                biased;
+                answer = flying.next(), if !flying.is_empty() => answer,
+                () = tokio::time::sleep_until(next_send), if !queue.is_empty() && flying.len() < aimd.allowed() => None,
+            };
+            let Some((batch, tries, started, took, result)) = next else {
+                continue;
+            };
+            match result {
+                Ok(fetched) => {
+                    let slow = pace::slow(pace.rules, *baseline, took);
+                    *baseline = Some(baseline.map_or(took, |fastest| fastest.min(took)));
+                    aimd.answered(slow, took);
+                    stats.batches += 1;
+                    stats.slow += u32::from(slow);
+                    found += fetched.services.len();
+                    done += batch.len();
+                    if !self.send(LoadStep::Batch {
+                        started,
+                        took,
+                        fetched,
+                    }) {
+                        return Ok(found);
+                    }
+                    self.progress(LoadPhase::Services, done, Some(total));
+                }
+                Err(ApiError::Unauthorized) => {
+                    return Err(Failure::Auth(ApiError::Unauthorized.to_string()));
+                }
+                Err(error) if error.is_transient() && tries + 1 < BATCH_TRIES => {
+                    tracing::debug!(%error, "a batch of the load failed; asking again");
+                    aimd.answered(true, took);
+                    stats.slow += 1;
+                    queue.push_front((batch, tries + 1));
+                }
+                Err(error) => return Err(failure(error)),
+            }
+        }
     }
 
     /// Tier 1 apart from the hosts, one query after the other.
@@ -170,6 +401,33 @@ impl LoadTask {
         self.progress(LoadPhase::Hosts, count, Some(OVERVIEW_QUERIES));
         answer
     }
+}
+
+/// Whether a paced load batches its services: Icinga counts at least
+/// `from` (or, without its count, the engine knows that many).
+fn paced(pace: &PaceLoad, icinga: Option<u32>) -> bool {
+    let size = icinga.unwrap_or_else(|| u32::try_from(pace.keys.len()).unwrap_or(u32::MAX));
+    size >= pace.from && size > 0
+}
+
+/// `names` in the order to ask for them: those that were problems first
+/// (the window needs them first), then the rest.
+fn problems_first(pace: &PaceLoad, names: &HashSet<ServiceKey>) -> Vec<ServiceKey> {
+    let problems = &pace.keys[..pace.problems.min(pace.keys.len())];
+    let first: HashSet<&ServiceKey> = problems.iter().filter(|key| names.contains(*key)).collect();
+    let mut ordered: Vec<ServiceKey> = problems
+        .iter()
+        .filter(|key| names.contains(*key))
+        .cloned()
+        .collect();
+    let mut rest: Vec<ServiceKey> = names
+        .iter()
+        .filter(|key| !first.contains(key))
+        .cloned()
+        .collect();
+    rest.sort();
+    ordered.extend(rest);
+    ordered
 }
 
 /// A list query the API user may not be allowed: `Forbidden` (and the

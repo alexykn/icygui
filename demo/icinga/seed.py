@@ -12,6 +12,7 @@ text. So a restart keeps what is there, and expired downtimes come back
 relative to the new start.
 
 Usage: seed.py [--marker FILE] [--feed SECONDS]
+       seed.py --never-checked [--reschedule]
   --marker  written once the seed is done (the health check waits for
             it); FILE.failed instead if it failed (the health check says
             so, and demo/up.sh stops waiting)
@@ -19,6 +20,12 @@ Usage: seed.py [--marker FILE] [--feed SECONDS]
             checks: their results again every SECONDS, so they stay fresh
             (Icinga, and icygui with it, calls a passive check late after
             twice its interval without a result)
+  --never-checked
+            only prints how many objects with active checks were never
+            checked, and the first of their names, on one line (`0` when
+            every check ran); with --reschedule it also reschedules them
+            at once (demo/up.sh, which never says healthy while one never
+            ran)
 """
 import base64
 import http.client
@@ -104,8 +111,10 @@ def call_once(method, path, body=None):
 # All the seed's waits together (the API, the cluster, the first checks,
 # the problems to acknowledge) end within this, so the seed is done well
 # before demo/up.sh gives up (20 minutes by default): a slow 2-core runner
-# takes about two minutes for all of them; one that never finishes (a
-# check that never runs) is logged and the seed goes on with what it has.
+# takes about two minutes for all of them; one that never finishes is
+# logged and the seed goes on with what it has (first checks that never
+# ran are rescheduled first, and demo/up.sh doesn't say healthy while one
+# never ran).
 BUDGET = 600
 # And the whole seed, its calls and their retries too, ends within this
 # (the waits' budget and two minutes for the seeding itself; a call in
@@ -145,17 +154,69 @@ def connected():
     return status == 200 and not answer["results"][0]["status"]["api"]["not_conn_endpoints"]
 
 
-def unchecked():
-    """Objects with active checks that haven't been checked yet."""
-    count = 0
-    for kind in ("hosts", "services"):
-        status, answer = call("QUERY", f"/v1/objects/{kind}", {
+def never_checked():
+    """The objects with active checks that haven't been checked yet, as
+    (`Host` or `Service`, full name)."""
+    found = []
+    for kind, plural in (("Host", "hosts"), ("Service", "services")):
+        status, answer = call("QUERY", f"/v1/objects/{plural}", {
             "attrs": ["last_check", "enable_active_checks"]})
         if status != 200:
-            raise KeyError(f"{kind}: {status}")
-        count += sum(1 for r in answer["results"]
-                     if r["attrs"]["enable_active_checks"] and r["attrs"]["last_check"] <= 0)
-    return count
+            raise KeyError(f"{plural}: {status}")
+        found += [(kind, r["name"]) for r in answer["results"]
+                  if r["attrs"]["enable_active_checks"] and r["attrs"]["last_check"] <= 0]
+    return found
+
+
+def unchecked():
+    """How many objects with active checks haven't been checked yet."""
+    return len(never_checked())
+
+
+def named(objects, most=8):
+    """`objects`' names for a log line: the first `most`, then how many
+    more."""
+    names = [name for _, name in objects]
+    more = f" and {len(names) - most} more" if len(names) > most else ""
+    return ", ".join(names[:most]) + more
+
+
+def reschedule(objects):
+    """Runs the checks of `objects` now (`reschedule-check`, forced), by
+    name, in batches. Icinga 2.15 sometimes leaves first checks unrun in
+    the HA zone fra on a loaded machine: their `next_check` passes and
+    nothing runs them (ledger, 2026-10-11); a forced reschedule runs them
+    at once."""
+    done = 0
+    for kind in ("Host", "Service"):
+        names = [name for k, name in objects if k == kind]
+        attribute = "host.name" if kind == "Host" else "service.__name"
+        for start in range(0, len(names), 200):
+            batch = names[start:start + 200]
+            done += len(batch) if action("reschedule-check", {
+                "type": kind, "filter": f"{attribute} in names",
+                "filter_vars": {"names": batch}, "force": True}) else 0
+    return done
+
+
+def first_checks():
+    """Waits for every object's first check; what is still unchecked after
+    that is rescheduled (and named in the log) and waited for once more.
+    Returns whether every check ran: demo/up.sh doesn't say healthy
+    otherwise (it reschedules them again and waits, or fails naming
+    them)."""
+    if wait("every object's first check", lambda: unchecked() == 0, 240):
+        return True
+    late = never_checked()
+    log(f"{len(late)} objects with active checks never checked: {named(late)}; "
+        "rescheduling them (reschedule-check, forced)")
+    log(f"rescheduled {reschedule(late)} of {len(late)}")
+    if wait("the rescheduled checks", lambda: unchecked() == 0, 180):
+        return True
+    late = never_checked()
+    log(f"still never checked after rescheduling: {len(late)}: {named(late)} "
+        "(demo/up.sh tries again and doesn't say healthy until they ran)")
+    return False
 
 
 def target(host, service):
@@ -199,7 +260,7 @@ def main():
     if not wait("the API", lambda: call_once("GET", "/v1")[0] == 200, 300):
         return 1
     wait("the cluster to connect", connected, 300)
-    wait("every object's first check", lambda: unchecked() == 0, 420)
+    first_checks()
     seed = generate.SEED
 
     for host, service, state, output, perfdata in seed["results"]:
@@ -286,8 +347,27 @@ def seed_until_done(attempts=3):
     return 1
 
 
+def report_never_checked(again):
+    """`--never-checked`: one line, the count first (`0`: every check
+    ran); `again` reschedules them too."""
+    late = never_checked()
+    if not late:
+        print("0")
+        return
+    rescheduled = f"; rescheduled {reschedule(late)}" if again else ""
+    print(f"{len(late)} objects with active checks never checked: {named(late)}{rescheduled}")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if "--never-checked" in args:
+        SEEDING = False
+        try:
+            report_never_checked("--reschedule" in args)
+        except (OSError, http.client.HTTPException, KeyError) as error:
+            print(f"? the API didn't answer: {error!r}")
+            sys.exit(2)
+        sys.exit(0)
     marker = args[args.index("--marker") + 1] if "--marker" in args else None
     every = float(args[args.index("--feed") + 1]) if "--feed" in args else None
     status = seed_until_done()

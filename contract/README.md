@@ -90,7 +90,20 @@ Facts learned from the real instance that the client must respect:
   endpoint); quiet mode's event stream (every type but `CheckResult`)
   opens with the `icygui` user's `events/*`.
 - A fresh start schedules every object's first check within
-  `min(check_interval, 60 s)` (`Checkable::Start`).
+  `min(check_interval, 60 s)` (`Checkable::Start`). In the demo cluster's
+  HA zone fra on a loaded machine a few never ran (their `next_check`
+  passed, 14 minutes later still unchecked) until a forced
+  `reschedule-check` ran them at once; `demo/up.sh` reschedules such
+  checks and doesn't say healthy before they ran.
+- A fixed downtime counts in `downtime_depth` from its `start_time`
+  (`Downtime::IsInEffect` asks the clock), but `DowntimeStarted` comes
+  from a timer every 5 s: a state change in between already carries the
+  count (`cluster_a_fixed_downtime_counts_from_its_start_like_icinga`, 3
+  of 4 recoveries). A result that isn't OK triggers due downtimes first,
+  so its `DowntimeTriggered` comes before its check result. Each event
+  stream is written every 5 s, so an answer to a query sent right after a
+  downtime is set usually has it before the stream's line does
+  (`cluster_downtimes_and_acknowledgements_around_a_wake_match_icinga`).
 - A filter that fails for any object fails the whole query with
   `404 No objects found.`; an empty filter matches nothing. A filter that
   doesn't compile fails only when it is evaluated (Icinga compiles it into

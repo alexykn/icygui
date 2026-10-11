@@ -161,7 +161,12 @@ async fn wait_for_first_checks(raw: &Raw) {
         }
         assert!(
             Instant::now() < deadline,
-            "never checked within {FIRST_CHECKS:?}: {}",
+            "never checked within {FIRST_CHECKS:?}: {}. On the demo cluster demo/up.sh \
+             doesn't say healthy while a check never ran (it reschedules them; Icinga 2.15 \
+             sometimes leaves first checks unrun in the HA zone fra on a loaded machine): \
+             run demo/up.sh again, which reschedules them and waits, or see \
+             /var/log/icinga2/seed.log on master-01. With contract/run-icinga.sh, wait a \
+             minute after it returns.",
             unchecked.join(", ")
         );
         tokio::time::sleep(Duration::from_secs(1)).await;

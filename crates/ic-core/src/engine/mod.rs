@@ -1113,6 +1113,9 @@ impl Engine {
             quiet,
             "connected to Icinga"
         );
+        // Lines between the last session's stream and this one's are lost:
+        // depths counted from check events count as answers' again.
+        self.store.stream_gap();
         // Every by-name request of the session takes from the budget.
         let client = client.with_budget(Arc::clone(&self.budget));
         let node = Arc::new(node);
@@ -2148,6 +2151,13 @@ impl Engine {
                     }
                 }
             }
+        }
+        // Downtime events changed depths that came from answers, which may
+        // already count them: Icinga's count again, by name (the requests
+        // go out after these lines were read, so their answers have them).
+        for key in self.store.take_unsettled() {
+            tracing::debug!(object = %key, "downtime depth asked again");
+            self.fetch.mark(key, now);
         }
         self.record_log(log);
     }

@@ -678,6 +678,11 @@ impl Engine {
             }
         }
         self.apply_lines(rest);
+        if !proven {
+            // The old stream may have held lines it never sent: depths
+            // counted from check events count as answers' again.
+            self.store.stream_gap();
+        }
         // The new stream takes over.
         while let Ok(message) = new_lines.try_recv() {
             buffered.push(message);

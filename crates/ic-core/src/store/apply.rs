@@ -79,6 +79,15 @@ enum Writes {
     Handling,
 }
 
+/// Which downtime event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DowntimeChange {
+    Added,
+    Started,
+    Triggered,
+    Removed,
+}
+
 /// A host or service to change in place.
 enum Target<'a> {
     Host(&'a mut Host),
@@ -129,16 +138,12 @@ impl Store {
                 after,
                 at,
             } if !self.overtaken(object, seq, result_time(result, *at)) => {
-                self.on_object(object, seq, Writes::Check, |target| {
-                    check_result(
-                        target,
-                        result,
-                        *after,
-                        *downtime_depth,
-                        *acknowledgement,
-                        *at,
-                    );
-                })
+                let depth = self.line_depth(object, *downtime_depth, *at);
+                let applied = self.on_object(object, seq, Writes::Check, |target| {
+                    check_result(target, result, *after, depth, *acknowledgement, *at);
+                });
+                self.depth_from_line(object, seq, depth, *at, &applied);
+                applied
             }
             Event::StateChange {
                 object,
@@ -149,17 +154,20 @@ impl Store {
                 acknowledgement,
                 at,
             } if !self.overtaken(object, seq, result_time(result, *at)) => {
-                self.on_object(object, seq, Writes::Check, |target| {
+                let depth = self.line_depth(object, *downtime_depth, *at);
+                let applied = self.on_object(object, seq, Writes::Check, |target| {
                     state_change(
                         target,
                         *state,
                         *state_type,
                         result,
-                        *downtime_depth,
+                        depth,
                         *acknowledgement,
                         *at,
                     );
-                })
+                });
+                self.depth_from_line(object, seq, depth, *at, &applied);
+                applied
             }
             Event::AcknowledgementSet {
                 object,
@@ -196,10 +204,18 @@ impl Store {
             }
             Event::CommentAdded { comment, .. } => self.on_comment(seq, comment, true),
             Event::CommentRemoved { comment, .. } => self.on_comment(seq, comment, false),
-            Event::DowntimeAdded { downtime, .. }
-            | Event::DowntimeStarted { downtime, .. }
-            | Event::DowntimeTriggered { downtime, .. } => self.on_downtime(seq, downtime, true),
-            Event::DowntimeRemoved { downtime, .. } => self.on_downtime(seq, downtime, false),
+            Event::DowntimeAdded { downtime, at } => {
+                self.on_downtime(seq, DowntimeChange::Added, downtime, *at)
+            }
+            Event::DowntimeStarted { downtime, at } => {
+                self.on_downtime(seq, DowntimeChange::Started, downtime, *at)
+            }
+            Event::DowntimeTriggered { downtime, at } => {
+                self.on_downtime(seq, DowntimeChange::Triggered, downtime, *at)
+            }
+            Event::DowntimeRemoved { downtime, at } => {
+                self.on_downtime(seq, DowntimeChange::Removed, downtime, *at)
+            }
             Event::ObjectLifecycle { .. } | Event::Notification { .. } => Applied::Ignored,
             // Overtaken by a query answer.
             Event::CheckResult { .. } | Event::StateChange { .. } | Event::Flapping { .. } => {
@@ -273,8 +289,9 @@ impl Store {
             return Applied::Stale;
         }
         seqs.evented = seqs.evented.max(seq);
-        if writes == Writes::Check {
-            seqs.checked = seqs.checked.max(seq);
+        match writes {
+            Writes::Check => seqs.checked = seqs.checked.max(seq),
+            Writes::Handling => seqs.handled = seqs.handled.max(seq),
         }
         let Some(mut target) = self.target(key) else {
             return Applied::Unknown(key.clone());
@@ -349,68 +366,192 @@ impl Store {
         }
     }
 
+    /// The downtime depth a check event about `key` at Icinga time `at`
+    /// carries, if the store takes it: not when a downtime event that
+    /// changed the count is newer (by Icinga's time: in the overlap of a
+    /// stream switch the new stream's check results can be older than the
+    /// old stream's lines already applied; in one stream they never are).
+    fn line_depth(&self, key: &ObjectKey, depth: Option<u32>, at: Timestamp) -> Option<u32> {
+        depth.filter(|_| {
+            self.seqs
+                .get(key)
+                .and_then(|seqs| seqs.downtime_at)
+                .is_none_or(|changed| at.as_unix_seconds() >= changed.as_unix_seconds())
+        })
+    }
+
+    /// A check event (line `seq`, Icinga time `at`) that brought Icinga's
+    /// count (`depth`) was applied: the depth is counted from it now, and
+    /// the downtime events after it change it by what they change in
+    /// Icinga's count (see the module notes on downtime depths).
+    fn depth_from_line(
+        &mut self,
+        key: &ObjectKey,
+        seq: u64,
+        depth: Option<u32>,
+        at: Timestamp,
+        applied: &Applied,
+    ) {
+        if depth.is_none() || !matches!(applied, Applied::Changed { .. }) {
+            return;
+        }
+        // Applied: `on_object` made the entry.
+        if let Some(seqs) = self.seqs.get_mut(key) {
+            seqs.depth = seqs.depth.max(seq);
+            seqs.depth_line = Some(at);
+        }
+        // (Most check events find both empty.)
+        if !self.counted.is_empty() {
+            self.counted.remove(key);
+        }
+        if !self.unsettled.is_empty() {
+            self.unsettled.remove(key);
+        }
+    }
+
     /// Adds, updates or removes a downtime, and keeps the object's
-    /// `downtime_depth` (the number of downtimes in effect) in step: +1
-    /// when one takes effect, −1 when one in effect is removed. Check
-    /// results bring Icinga's own count again.
-    fn on_downtime(&mut self, seq: u64, downtime: &Downtime, present: bool) -> Applied {
-        if seq <= self.annotations_fetched {
+    /// `downtime_depth` in step with Icinga's count (unless the object's
+    /// last answer was sent after the line was read, and so has it).
+    fn on_downtime(
+        &mut self,
+        seq: u64,
+        change: DowntimeChange,
+        downtime: &Downtime,
+        at: Timestamp,
+    ) -> Applied {
+        let object = &downtime.object;
+        // The list's query and the object's may have been sent at
+        // different times: each part is skipped only if its own answer
+        // has the line.
+        let listed = seq > self.annotations_fetched;
+        let counts = self.contains(object) && !self.reflects(object, seq);
+        if !listed && !counts {
             return Applied::Stale;
         }
-        self.log_annotation(
-            seq,
-            &downtime.name,
-            Annotation::Downtime(downtime.clone(), present),
-        );
-        let was_in_effect = self
-            .downtimes
-            .get(&downtime.object)
-            .and_then(|list| list.iter().find(|stored| stored.name == downtime.name))
-            .map(|stored| stored.in_effect);
-        let map = Arc::make_mut(&mut self.downtimes);
-        if present {
-            upsert_downtime(map, downtime.clone());
-            if let Some(list) = map.get_mut(&downtime.object) {
-                sort_downtimes(list);
+        let stored = self.downtime_of(object, &downtime.name).cloned();
+        if listed {
+            let present = change != DowntimeChange::Removed;
+            self.log_annotation(
+                seq,
+                &downtime.name,
+                Annotation::Downtime(downtime.clone(), present),
+            );
+            let map = Arc::make_mut(&mut self.downtimes);
+            if present {
+                upsert_downtime(map, downtime.clone());
+                if let Some(list) = map.get_mut(object) {
+                    sort_downtimes(list);
+                }
+            } else {
+                remove_named(map, object, &downtime.name, |d| &d.name);
             }
-        } else {
-            remove_named(map, &downtime.object, &downtime.name, |d| &d.name);
+            self.changes.any = true;
+            self.changes.objects.insert(object.clone());
         }
-        self.changes.any = true;
-        self.changes.objects.insert(downtime.object.clone());
-
-        let delta: i8 = if present {
-            match (was_in_effect.unwrap_or(false), downtime.in_effect) {
-                (false, true) => 1,
-                (true, false) => -1,
-                _ => 0,
-            }
-        } else if was_in_effect.unwrap_or(false) || downtime.in_effect {
-            -1
-        } else {
-            0
-        };
-        let before = self.view_of(&downtime.object);
-        let fetched_after = self
-            .seqs
-            .get(&downtime.object)
-            .is_none_or(|seqs| seq > seqs.fetched);
-        if delta != 0 && before.is_some() && fetched_after {
-            let seqs = self.seqs.entry(downtime.object.clone()).or_default();
-            seqs.evented = seqs.evented.max(seq);
-            if let Some(mut target) = self.target(&downtime.object) {
-                let check = target.check();
-                check.downtime_depth = if delta > 0 {
-                    check.downtime_depth.saturating_add(1)
-                } else {
-                    check.downtime_depth.saturating_sub(1)
-                };
-            }
+        let before = self.view_of(object);
+        if counts {
+            self.count_downtime(seq, change, downtime, stored.as_ref(), at);
         }
         Applied::Changed {
             before,
-            after: self.view_of(&downtime.object),
+            after: self.view_of(object),
         }
+    }
+
+    /// Changes the depth of `downtime`'s object by what the event (line
+    /// `seq`, Icinga time `at`) changes in Icinga's count. `stored`: the
+    /// downtime as the store had it before the event.
+    ///
+    /// Per downtime, by name: whether the stored depth counts it now, and
+    /// whether Icinga counts it after the event (in effect, and not
+    /// removed). The first event about a downtime since the depth was taken
+    /// from a check event judges what that count included by Icinga's rule
+    /// at the check event's time ([`counted_at`]): a fixed downtime whose
+    /// start passed before it was counted then, even though Icinga's start
+    /// timer reports it up to 5 s later. Since an answer, that can't be
+    /// known (it may already count a downtime whose event was read after
+    /// the request): the depth changes by what the store had, and the
+    /// object is asked for again by name.
+    fn count_downtime(
+        &mut self,
+        seq: u64,
+        change: DowntimeChange,
+        downtime: &Downtime,
+        stored: Option<&Downtime>,
+        at: Timestamp,
+    ) {
+        let object = &downtime.object;
+        let line = self.seqs.get(object).and_then(|seqs| seqs.depth_line);
+        let now = change != DowntimeChange::Removed && downtime.in_effect;
+        let counted = self.counted.entry(object.clone()).or_default();
+        let was = counted
+            .get(&downtime.name)
+            .copied()
+            .unwrap_or_else(|| match line {
+                Some(base) => counted_at(change, downtime, stored, base),
+                None => stored.map_or(
+                    change == DowntimeChange::Removed && downtime.in_effect,
+                    |stored| stored.in_effect,
+                ),
+            });
+        counted.insert(downtime.name.clone(), now);
+        if !(was || now || downtime.in_effect) {
+            // Never in effect: neither count changes.
+            return;
+        }
+        let seqs = self.seqs.entry(object.clone()).or_default();
+        seqs.evented = seqs.evented.max(seq);
+        seqs.depth = seqs.depth.max(seq);
+        if seqs
+            .downtime_at
+            .is_none_or(|latest| at.as_unix_seconds() > latest.as_unix_seconds())
+        {
+            seqs.downtime_at = Some(at);
+        }
+        if line.is_none() {
+            self.unsettled.insert(object.clone());
+        }
+        if was == now {
+            return;
+        }
+        if let Some(mut target) = self.target(object) {
+            let check = target.check();
+            check.downtime_depth = if now {
+                check.downtime_depth.saturating_add(1)
+            } else {
+                check.downtime_depth.saturating_sub(1)
+            };
+        }
+        self.changes.any = true;
+        self.changes.objects.insert(object.clone());
+    }
+}
+
+/// Whether Icinga's count at Icinga time `at` (when a check event carried
+/// it) included the downtime of a `change` event, the first about that
+/// downtime since then (`stored`: as the store had it before the event).
+/// Icinga's `Downtime::IsInEffect`: a fixed downtime during its window, a
+/// flexible one for `duration` after its trigger. A downtime the event
+/// adds didn't exist then, and a trigger the event reports came after
+/// (Icinga sends a check result's downtime triggers before the result).
+fn counted_at(
+    change: DowntimeChange,
+    downtime: &Downtime,
+    stored: Option<&Downtime>,
+    at: Timestamp,
+) -> bool {
+    if change == DowntimeChange::Added {
+        return false;
+    }
+    let downtime = stored.unwrap_or(downtime);
+    let at = at.as_unix_seconds();
+    if downtime.fixed {
+        downtime.start_time.as_unix_seconds() <= at && at < downtime.end_time.as_unix_seconds()
+    } else {
+        change != DowntimeChange::Triggered
+            && downtime
+                .trigger_time
+                .is_some_and(|trigger| at < trigger.as_unix_seconds() + downtime.duration)
     }
 }
 

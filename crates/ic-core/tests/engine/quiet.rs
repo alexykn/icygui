@@ -539,6 +539,156 @@ fn service_key(key: &ObjectKey) -> ServiceKey {
     key.as_service().unwrap().clone()
 }
 
+/// The names of the downtimes the snapshot has of `key`.
+fn downtime_names(snapshot: &ic_core::snapshot::Snapshot, key: &ObjectKey) -> Vec<String> {
+    snapshot
+        .downtimes
+        .get(key)
+        .map(|list| list.iter().map(|downtime| downtime.name.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Ledger row (small fix 2 fixer, false green): a downtime takes effect
+/// while the quiet stream holds its lines (Icinga writes each stream every
+/// 5 s), and the refresh after waking asks Icinga by name and is answered
+/// first: its count already has the downtime. Before the fix the held
+/// `DowntimeAdded` added 1 to that count for good (2 for one downtime), and
+/// once the downtime was removed in quiet mode, where no check result
+/// brings Icinga's count, the problem stayed in downtime (hollow, handled,
+/// hidden from problem lists) while Icinga said it wasn't. Now the line
+/// can't be placed against the answer, so the problem is asked for again
+/// by name: the store has Icinga's count, 1, and 0 after the removal. The
+/// quiet stream holds its lines until the answer is in, so the order is
+/// the same every run.
+#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_downtime_an_answer_already_counts_is_counted_once() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        // The held lines come inside the switch's window (the fence's line
+        // on both streams ends it).
+        stream_handover: Tuning::default().stream_handover,
+        ..tuning()
+    };
+    let mut engine = launch.start();
+    settled(&mut engine).await;
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    engine.snapshot(|snapshot| snapshot.quiet).await;
+
+    // An OK service on a healthy host, and a second one as a fence.
+    let snapshot = engine.latest().unwrap();
+    let mut healthy = snapshot.services.values().filter(|service| {
+        service.state == ServiceState::Ok
+            && service.check.downtime_depth == 0
+            && !service.check.flapping
+            && snapshot
+                .host_of(&service.key)
+                .is_some_and(|host| host.state == HostState::Up)
+    });
+    let service = healthy.next().unwrap().key.clone();
+    let fence = healthy.next().unwrap().key.clone();
+    drop(snapshot);
+    let key = ObjectKey::from(service.clone());
+    let (host, name) = (service.host.to_string(), service.name.to_string());
+
+    // A problem now (a state change: the quiet stream brings it).
+    control
+        .set_service_state(
+            &host,
+            &name,
+            ServiceState::Critical,
+            "CRITICAL - down",
+            true,
+        )
+        .unwrap();
+    engine
+        .snapshot(|snapshot| snapshot.services[&service].state == ServiceState::Critical)
+        .await;
+
+    // Between two of the quiet stream's batches: the downtime's lines wait.
+    assert_eq!(control.hold_event_streams(), 1);
+    let now = control.now().as_unix_seconds();
+    let downtime = control
+        .schedule_downtime(
+            &key,
+            "carol",
+            "replacing the disk",
+            Timestamp::from_unix_seconds(now - 60.0),
+            Timestamp::from_unix_seconds(now + 3_600.0),
+            None,
+        )
+        .unwrap();
+    let asked = |control: &MockControl| {
+        by_name(control, "services")
+            .iter()
+            .filter(|(_, names)| names.contains(&key.full_name()))
+            .count()
+    };
+    // Waking up: the refresh asks for the problem by name; Icinga's answer
+    // counts the downtime.
+    engine.send(Command::SetQuiet(false));
+    engine
+        .snapshot(|snapshot| snapshot.services[&service].check.downtime_depth == 1)
+        .await;
+    assert!(
+        !downtime_names(&engine.latest().unwrap(), &key).contains(&downtime),
+        "its line is still held"
+    );
+    let refreshed = asked(&control);
+
+    // Now the quiet stream's batch: the downtime's lines, after the
+    // answer. The fence's problem comes after them, on both streams (the
+    // switch ends).
+    assert!(control.release_event_streams() > 0);
+    control
+        .set_service_state(
+            fence.host.as_str(),
+            &fence.name,
+            ServiceState::Critical,
+            "CRITICAL - fence",
+            true,
+        )
+        .unwrap();
+    stream_mode(&control, false).await;
+    // Counted once: the lines are in and the store has Icinga's count
+    // (before the fix: 2, for good).
+    engine
+        .snapshot(|snapshot| {
+            downtime_names(snapshot, &key).contains(&downtime)
+                && snapshot.services[&service].check.downtime_depth == 1
+        })
+        .await;
+    assert!(
+        wait_until(|| asked(&control) > refreshed).await,
+        "the problem is asked for again by name"
+    );
+
+    // Back to quiet, where no check result brings Icinga's count; the
+    // downtime is removed.
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    control.remove_downtime(&downtime).unwrap();
+    let snapshot = engine
+        .snapshot(|snapshot| {
+            downtime_names(snapshot, &key).is_empty()
+                && snapshot.services[&service].check.downtime_depth == 0
+        })
+        .await;
+    assert_eq!(
+        control.service(&host, &name).unwrap().check.downtime_depth,
+        0,
+        "Icinga's count"
+    );
+    assert!(
+        !snapshot.services[&service].is_handled(false),
+        "an unhandled problem again (before the fix: in downtime, hidden)"
+    );
+    engine.shutdown();
+}
+
 /// Icinga 2.15 writes a stream's events in batches 5 s apart (every
 /// stream, idle or busy: measured on the demo cluster); a new stream's
 /// first events go out at once. A switch keeps the old stream until its

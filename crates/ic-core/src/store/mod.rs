@@ -32,6 +32,40 @@
 //! So the store converges to Icinga's state whatever order answers and
 //! events arrive in, without pausing the stream during queries.
 //!
+//! **Downtime depths.** `downtime_depth` is a count (Icinga's
+//! `GetDowntimeDepth`: the downtimes in effect), not a value an event sets,
+//! so applying a downtime event twice, or missing one, would leave it
+//! wrong for good where no check result brings Icinga's count again (quiet
+//! mode: a problem hidden as in downtime while Icinga says it isn't). Its
+//! sources:
+//! - a check event (`CheckResult`, `StateChange`) carries Icinga's count at
+//!   the event's time, in the stream's order: the downtime events after it
+//!   change it by exactly what they change in Icinga's count, judged per
+//!   downtime by name (`Store::count_downtime`) and by Icinga's own rule
+//!   (`Downtime::IsInEffect`: a fixed downtime counts from its start,
+//!   before Icinga's start timer reports it up to 5 s later, and stops at
+//!   its end, before the removal);
+//! - a query answer carries Icinga's count at a moment between the request
+//!   and the answer, so a downtime event read after the request may or may
+//!   not be in it already. Such an event changes the depth for the moment
+//!   and the object is asked for again by name (`Store::take_unsettled`;
+//!   the request goes out after the line was read, so its answer has it)
+//!   until an answer or a check event brings Icinga's count with no
+//!   downtime event after it.
+//!
+//! An answer takes the depth unless a newer line wrote it, and is its
+//! source from then on (even one that agrees with a count from a check
+//! event: a line it already has may still wait in a stream switch's
+//! buffer). When the store may have missed lines (a new session, a stream
+//! switch without a line on both streams), depths counted from check
+//! events count as answers' again (`Store::stream_gap`). The asking costs
+//! a by-name request per downtime event that changes a count from an
+//! answer: rare (downtimes are set by people and schedules), batched with
+//! the other re-queries, and in live mode only until the object's next
+//! check result. Acknowledgements and comments need none of this: every
+//! event sets them to a value (set, cleared, added, removed by name), so
+//! they converge like the other fields.
+//!
 //! **Views of the cluster (ENV-12).** While the engine is connected to a
 //! node in a child zone (a partial view), objects its answers leave out
 //! may only be outside its zone: they leave the store, but their last view
@@ -66,8 +100,8 @@ const MAX_TOMBSTONES: usize = 100_000;
 
 pub(crate) use apply::{Applied, ObjectView};
 
-/// Sequence numbers of the last query answer and the last event that
-/// wrote an object.
+/// Sequence numbers of the last query answer and the last events that
+/// wrote an object, and where its downtime depth comes from.
 #[derive(Clone, Copy, Debug, Default)]
 struct Seqs {
     /// `started` of the last query whose answer was applied.
@@ -79,6 +113,35 @@ struct Seqs {
     /// downtime): above `fetched`, events wrote the check state last and
     /// no answer can have overtaken them (`Store::overtaken`).
     checked: u64,
+    /// `seq` of the last acknowledgement event applied.
+    handled: u64,
+    /// `seq` of the last line that wrote the downtime depth: a check event
+    /// that brought Icinga's count, or a downtime event that changed it (or
+    /// could have: one in effect).
+    depth: u64,
+    /// The Icinga time of the check event the depth was last taken from;
+    /// `None` while it comes from a query answer (see the module notes on
+    /// downtime depths).
+    depth_line: Option<Timestamp>,
+    /// The Icinga time of the latest downtime event that changed the
+    /// count: a check event older than that (the overlap of a stream
+    /// switch) doesn't bring its count back.
+    downtime_at: Option<Timestamp>,
+}
+
+/// Which groups of the fields events maintain an event newer than an
+/// answer wrote: those keep the store's value, the rest come from the
+/// answer (which is newer than whatever wrote them).
+#[derive(Clone, Copy, Debug, Default)]
+struct Newer {
+    /// The check state (state, type, times, result, attempt, flapping,
+    /// reachability): a check event.
+    check: bool,
+    /// The acknowledgement: an acknowledgement event or a check event.
+    acknowledgement: bool,
+    /// The downtime depth: a check event that brought it, or a downtime
+    /// event that changed it.
+    depth: bool,
 }
 
 /// What changed since the last snapshot, for publishing, the incremental
@@ -195,6 +258,13 @@ pub(crate) struct Store {
     /// The heartbeat objects (`Snapshot::excluded`): left out of lists,
     /// counts, rules and notifications.
     excluded: Arc<BTreeSet<ServiceKey>>,
+    /// Per host or service: the downtimes events changed since its depth
+    /// was last taken from Icinga, by full name, and whether the stored
+    /// depth counts each (see the module notes on downtime depths).
+    counted: HashMap<ObjectKey, HashMap<String, bool>>,
+    /// Hosts and services whose depth a downtime event changed while it
+    /// came from a query answer: asked for again by name.
+    unsettled: BTreeSet<ObjectKey>,
 }
 
 impl Store {
@@ -437,6 +507,24 @@ impl Store {
     /// Takes the changes only query answers revealed since the last call.
     pub(crate) fn take_discovered(&mut self) -> Vec<Discovered> {
         std::mem::take(&mut self.discovered)
+    }
+
+    /// Takes the hosts and services to ask for again by name: a downtime
+    /// event changed their depth while it came from a query answer, which
+    /// may already count it (see the module notes on downtime depths).
+    pub(crate) fn take_unsettled(&mut self) -> Vec<ObjectKey> {
+        std::mem::take(&mut self.unsettled).into_iter().collect()
+    }
+
+    /// The event stream was replaced and the store may not have seen every
+    /// line in between (a new session; a switch that ended without a line
+    /// on both streams): depths counted from check events count as
+    /// answers' again, so the next downtime event asks Icinga.
+    pub(crate) fn stream_gap(&mut self) {
+        for seqs in self.seqs.values_mut() {
+            seqs.depth_line = None;
+        }
+        self.counted.clear();
     }
 
     /// Forgets everything (the environment now points at another server).
@@ -1030,6 +1118,29 @@ impl Store {
             .is_some_and(|seqs| seqs.evented > started)
     }
 
+    /// Which groups of `key`'s event fields lines newer than an answer
+    /// sent at `started` wrote.
+    fn newer(&self, key: &ObjectKey, started: u64) -> Newer {
+        let seqs = self.seqs.get(key).copied().unwrap_or_default();
+        Newer {
+            check: seqs.checked > started,
+            acknowledgement: seqs.checked.max(seqs.handled) > started,
+            depth: seqs.depth > started,
+        }
+    }
+
+    /// An answer sent at `started` was applied to `key`: its depth is the
+    /// store's now, and the answer its source (see the module notes on
+    /// downtime depths), unless a newer line wrote it (`kept`).
+    fn depth_answered(&mut self, key: &ObjectKey, kept: bool) {
+        if kept {
+            return;
+        }
+        self.seqs.entry(key.clone()).or_default().depth_line = None;
+        self.counted.remove(key);
+        self.unsettled.remove(key);
+    }
+
     /// Whether an answer sent at `started` is older than what the store
     /// knows of `key`: a newer answer wrote it, or a newer answer (or
     /// deletion) found it gone. Such an answer changes nothing about it.
@@ -1075,9 +1186,10 @@ impl Store {
             return;
         }
         self.removed.remove(&key);
-        if let Some(stored) = self.hosts.get(&host.name) {
-            if self.evented_after(&key, started) {
-                keep_event_fields(&mut host.check, &stored.check);
+        let newer = self.newer(&key, started);
+        if let Some(stored) = self.hosts.get(&host.name).cloned() {
+            keep_newer_fields(&mut host.check, &stored.check, newer);
+            if newer.check {
                 host.state = stored.state;
             } else {
                 let before = ObjectView::of(CheckableState::Host(stored.state), &stored.check);
@@ -1090,11 +1202,13 @@ impl Store {
                     });
                 }
             }
-            if **stored == host {
+            self.depth_answered(&key, newer.depth);
+            if *stored == host {
                 self.mark_fetched(key, started);
                 return;
             }
         } else {
+            self.depth_answered(&key, newer.depth);
             self.arrived(
                 &key,
                 ObjectView::of(CheckableState::Host(host.state), &host.check),
@@ -1115,9 +1229,10 @@ impl Store {
             return;
         }
         self.removed.remove(&key);
-        if let Some(stored) = self.services.get(&service.key) {
-            if self.evented_after(&key, started) {
-                keep_event_fields(&mut service.check, &stored.check);
+        let newer = self.newer(&key, started);
+        if let Some(stored) = self.services.get(&service.key).cloned() {
+            keep_newer_fields(&mut service.check, &stored.check, newer);
+            if newer.check {
                 service.state = stored.state;
             } else {
                 let before = ObjectView::of(CheckableState::Service(stored.state), &stored.check);
@@ -1130,6 +1245,7 @@ impl Store {
                     });
                 }
             }
+            self.depth_answered(&key, newer.depth);
             if detail == Detail::Lean {
                 // A lean answer has no check result and no links: keep what
                 // a full fetch or an event brought.
@@ -1140,7 +1256,7 @@ impl Store {
                     service.links.clone_from(&stored.links);
                 }
             }
-            if **stored == service {
+            if *stored == service {
                 if detail == Detail::Full {
                     self.full.insert(service.key.clone());
                 }
@@ -1148,6 +1264,7 @@ impl Store {
                 return;
             }
         } else {
+            self.depth_answered(&key, newer.depth);
             self.arrived(
                 &key,
                 ObjectView::of(CheckableState::Service(service.state), &service.check),
@@ -1242,28 +1359,37 @@ impl Store {
             Arc::make_mut(&mut self.icinga_notifications).remove(key);
         }
         self.seqs.remove(key);
+        self.counted.remove(key);
+        self.unsettled.remove(key);
         self.tombstone(key.clone(), started);
         self.changes.any = true;
         self.changes.objects.insert(key.clone());
     }
 }
 
-/// Keeps the fields events maintain from `stored` (newer than the answer
-/// they are merged into).
-fn keep_event_fields(check: &mut CheckInfo, stored: &CheckInfo) {
-    check.state_type = stored.state_type;
-    check.last_state_change = stored.last_state_change;
-    check.last_hard_state_change = stored.last_hard_state_change;
-    check.last_check = stored.last_check;
-    check.next_check = stored.next_check;
-    check.attempt = stored.attempt;
-    check.result.clone_from(&stored.result);
-    check.acknowledgement = stored.acknowledgement;
-    check.acknowledgement_expiry = stored.acknowledgement_expiry;
-    check.downtime_depth = stored.downtime_depth;
-    check.flapping = stored.flapping;
-    check.flapping_current = stored.flapping_current;
-    check.reachable = stored.reachable;
+/// Keeps the groups of the fields events maintain that events newer than
+/// the answer wrote (`newer`) from `stored`; the others come from the
+/// answer.
+fn keep_newer_fields(check: &mut CheckInfo, stored: &CheckInfo, newer: Newer) {
+    if newer.check {
+        check.state_type = stored.state_type;
+        check.last_state_change = stored.last_state_change;
+        check.last_hard_state_change = stored.last_hard_state_change;
+        check.last_check = stored.last_check;
+        check.next_check = stored.next_check;
+        check.attempt = stored.attempt;
+        check.result.clone_from(&stored.result);
+        check.flapping = stored.flapping;
+        check.flapping_current = stored.flapping_current;
+        check.reachable = stored.reachable;
+    }
+    if newer.acknowledgement {
+        check.acknowledgement = stored.acknowledgement;
+        check.acknowledgement_expiry = stored.acknowledgement_expiry;
+    }
+    if newer.depth {
+        check.downtime_depth = stored.downtime_depth;
+    }
 }
 
 /// Replaces `list` if `new` differs; returns whether it did.

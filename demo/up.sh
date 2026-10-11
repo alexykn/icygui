@@ -16,6 +16,15 @@
 #                        runner takes about 2 minutes, the seed gives up
 #                        its own waits after 10)
 #
+# Healthy means every node is connected and seeded, and every object with
+# active checks has been checked at least once: Icinga 2.15 sometimes
+# leaves first checks unrun in the HA zone fra on a loaded machine (their
+# `next_check` passes, nothing runs them). The seed reschedules those
+# after its wait; if some are still unchecked here, up.sh names them,
+# reschedules them again (every minute) and waits, and fails naming them
+# when the timeout ends: it never says healthy while one never ran (the
+# contract tests would fail with `never checked`).
+#
 # While it waits it says every minute what each node still lacks (its
 # health check's output: the endpoints not connected, or the seed's
 # latest line). It stops at once when a node exits or the seed failed,
@@ -114,7 +123,32 @@ while :; do
   fi
   sleep 3
 done
-echo "up.sh: healthy after $(( $(date +%s) - started ))s" >&2
+
+# never_checked [--reschedule]: one line from the seed's helper on
+# master-01, the count first (`0`: every check ran).
+never_checked() {
+  "${COMPOSE[@]}" exec -T master-01 python3 -I /demo/icinga/seed.py --never-checked "$@" </dev/null 2>&1 |
+    tail -n 1 || true
+}
+
+# Connected and seeded is not checked: wait until every object with active
+# checks ran once, rescheduling what didn't (see the top).
+rescheduled=0
+while :; do
+  line=$(never_checked)
+  [ "$line" = 0 ] && break
+  now=$(date +%s)
+  if [ "$now" -ge "$deadline" ]; then
+    explain "not healthy after ${TIMEOUT}s: ${line:-the never-checked query gave no answer}"
+    exit 1
+  fi
+  if [ $(( now - rescheduled )) -ge 60 ] && [ "${line#\?}" = "$line" ]; then
+    rescheduled=$now
+    echo "up.sh: $(( now - started ))s, $(never_checked --reschedule) (forced, they run now)" >&2
+  fi
+  sleep 5
+done
+echo "up.sh: healthy after $(( $(date +%s) - started ))s (connected, seeded, every check ran)" >&2
 
 CA=${ICYGUI_DEMO_CA:-$HERE/../target/demo-ca.crt}
 mkdir -p "$(dirname "$CA")"

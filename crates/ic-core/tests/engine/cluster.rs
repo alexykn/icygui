@@ -19,7 +19,12 @@
 //!   the checker feature's object paused on one of them;
 //! - a checker off on the other master: its share of the zone's checks
 //!   goes late, nothing else shows it, and icygui raises the zone's late
-//!   checks as one alert.
+//!   checks as one alert;
+//! - downtimes and acknowledgements added and removed around a quiet
+//!   engine's wake, and a fixed downtime that Icinga counts from its start
+//!   before it reports it: the store's downtime depth and acknowledgement
+//!   match Icinga's afterwards, in quiet mode where no check result would
+//!   correct them.
 //!
 //! They run when `demo/up.sh`'s variables are set (`ICYGUI_CLUSTER_SCENARIO`
 //! and the `ICYGUI_CONTRACT_*` ones), and otherwise pass without checking
@@ -37,6 +42,7 @@
     reason = "test helpers fail the test loudly"
 )]
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 use std::sync::Arc;
@@ -48,7 +54,10 @@ use ic_config::{ApiUrl, AuthConfig, Environment};
 use ic_core::heartbeat::{BeatState, Death};
 use ic_core::snapshot::Snapshot;
 use ic_core::{CoreEvent, Tuning};
-use ic_model::{FeatureState, ObjectKey, ServiceKey, ServiceState};
+use ic_model::{
+    Action, ActionTarget, ChildOptions, DowntimeMode, Event, EventKind, FeatureState, ObjectKey,
+    ServiceKey, ServiceState, StateType, Timestamp,
+};
 use secrecy::SecretString;
 
 use crate::support::{ENV_ID, Engine, FakeSecrets, Launch};
@@ -122,6 +131,40 @@ impl Cluster {
 
     fn client(&self, index: usize) -> Client {
         self.client_as(index, &self.user, &self.password)
+    }
+
+    /// The demo's admin user on master-01 (`ICYGUI_CONTRACT_ADMIN_*`, a
+    /// documented demo value): passive results, which icygui's own user
+    /// may not submit.
+    fn admin(&self) -> Client {
+        let var = |name: &str| std::env::var(name).expect(name);
+        self.client_as(
+            0,
+            &var("ICYGUI_CONTRACT_ADMIN_USER"),
+            &var("ICYGUI_CONTRACT_ADMIN_PASSWORD"),
+        )
+    }
+
+    /// Undoes what a test adds to `keys` when it ends, passed or not.
+    fn undo(&self, keys: &[ObjectKey]) -> Undo {
+        let var = |name: &str| std::env::var(name).expect(name);
+        let (url, server_name) = &self.urls[0];
+        Undo {
+            settings: Some(ConnectionSettings::new(
+                Url::parse(url).unwrap(),
+                Credentials::Basic {
+                    username: var("ICYGUI_CONTRACT_ADMIN_USER"),
+                    password: SecretString::from(var("ICYGUI_CONTRACT_ADMIN_PASSWORD")),
+                },
+                TlsSettings {
+                    ca_pem: Some(std::fs::read(&self.ca_file).expect("CA file")),
+                    server_name: Some(server_name.clone()),
+                    ..TlsSettings::default()
+                },
+            )),
+            keys: keys.to_vec(),
+            downtimes: Vec::new(),
+        }
     }
 
     /// Refuses anything but the disposable demo cluster, before any load.
@@ -206,7 +249,7 @@ impl Cluster {
                 ..Tuning::default()
             },
             general: ic_config::General::default(),
-            now: ic_model::Timestamp::now().as_unix_seconds(),
+            now: Timestamp::now().as_unix_seconds(),
             data_dir: None,
             start: ic_core::Start::User,
             real_clock: true,
@@ -217,12 +260,60 @@ impl Cluster {
     /// How long master-01's Icinga has run.
     async fn uptime(&self) -> f64 {
         let status = self.client(0).status().await.unwrap();
-        ic_model::Timestamp::now().as_unix_seconds() - status.program_start.as_unix_seconds()
+        Timestamp::now().as_unix_seconds() - status.program_start.as_unix_seconds()
     }
 }
 
 /// Recovers the cluster when the test ends, passed or not.
 struct Recover<'a>(&'a Path);
+
+/// What a test added to services, undone when it ends, passed or not (on a
+/// thread and client of its own: a failed test's runtime may be gone): its
+/// `downtimes` removed, and `keys` unacknowledged and OK again.
+struct Undo {
+    settings: Option<ConnectionSettings>,
+    keys: Vec<ObjectKey>,
+    downtimes: Vec<String>,
+}
+
+impl Drop for Undo {
+    fn drop(&mut self) {
+        let Some(settings) = self.settings.take() else {
+            return;
+        };
+        let keys = std::mem::take(&mut self.keys);
+        let downtimes = std::mem::take(&mut self.downtimes);
+        let undone = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let admin = Client::new(settings).unwrap();
+                if !downtimes.is_empty() {
+                    let _ = admin
+                        .run_action(
+                            &Action::RemoveAllDowntimes,
+                            &ActionTarget::Downtimes(downtimes),
+                            "icygui-test",
+                        )
+                        .await;
+                }
+                if !keys.is_empty() {
+                    let _ = admin
+                        .run_action(
+                            &Action::RemoveAcknowledgement,
+                            &ActionTarget::Objects(keys.clone()),
+                            "icygui-test",
+                        )
+                        .await;
+                    submit(&admin, &keys, 0, 1).await;
+                }
+            });
+        });
+        let _ = undone.join();
+    }
+}
 
 impl Drop for Recover<'_> {
     fn drop(&mut self) {
@@ -648,8 +739,8 @@ async fn cluster_ha_masters_share_the_checks() {
     // ...yet both run their share of the master zone's checks.
     let client = cluster.client(0);
     let services = client.services(Detail::Full).await.unwrap();
-    let now = ic_model::Timestamp::now().as_unix_seconds();
-    let mut sources = std::collections::BTreeSet::new();
+    let now = Timestamp::now().as_unix_seconds();
+    let mut sources = BTreeSet::new();
     for service in &services {
         let recent = service
             .check
@@ -952,4 +1043,468 @@ fn check_storm_log(history: &[ic_core::LogEntry]) -> usize {
         .collect();
     assert!(unseen.is_empty(), "soft attempts never seen: {unseen:?}");
     states.len()
+}
+
+/// Services nothing else touches during a test: OK on a host that is up,
+/// no downtime (none scheduled either), no acknowledgement, not a
+/// heartbeat, not in `used`, active checks every 30 minutes or more with
+/// the next one at least [`UNTOUCHED_FOR`] away (a passive result doesn't
+/// move it), those whose next check is furthest away first. Asked of
+/// Icinga, not the store (a quiet store's `next_check` doesn't move with
+/// a check that changes nothing). The demo's checks all started together,
+/// so the long ones fall due together every half hour: then this waits
+/// (the engine running) until they ran and are half an hour away again.
+async fn untouched(
+    admin: &Client,
+    engine: &mut Engine,
+    count: usize,
+    used: &BTreeSet<ServiceKey>,
+) -> Vec<ServiceKey> {
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(10);
+    loop {
+        let services = admin.services(Detail::Lean).await.unwrap();
+        let snapshot = engine.latest().unwrap();
+        let later = Timestamp::now().as_unix_seconds() + UNTOUCHED_FOR.as_secs_f64();
+        let mut fit: Vec<(f64, ServiceKey)> = services
+            .iter()
+            .filter(|service| {
+                let check = &service.check;
+                service.state == ServiceState::Ok
+                    && check.features.active_checks
+                    && check.check_interval >= 1_800.0
+                    && check.downtime_depth == 0
+                    && !check.acknowledgement.is_acknowledged()
+                    && snapshot.services.contains_key(&service.key)
+                    && !snapshot.excluded.contains(&service.key)
+                    && !used.contains(&service.key)
+                    && snapshot
+                        .downtimes
+                        .get(&ObjectKey::from(service.key.clone()))
+                        .is_none_or(Vec::is_empty)
+                    && snapshot
+                        .host_of(&service.key)
+                        .is_some_and(|host| host.state == ic_model::HostState::Up)
+            })
+            .filter_map(|service| {
+                let next = service.check.next_check?.as_unix_seconds();
+                (next > later).then(|| (next, service.key.clone()))
+            })
+            .collect();
+        if fit.len() >= count {
+            fit.sort_by(|a, b| b.0.total_cmp(&a.0));
+            return fit.into_iter().take(count).map(|(_, key)| key).collect();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "not {count} untouched services within 10 minutes, {} now",
+            fit.len()
+        );
+        run_for(engine, Duration::from_secs(20)).await;
+    }
+}
+
+/// How long a test's targets must stay clear of their active checks (a
+/// round takes about a minute).
+const UNTOUCHED_FOR: Duration = Duration::from_mins(4);
+
+/// Submits `exit_status` for `keys` as the admin, `times` times (3: past
+/// `max_check_attempts`, a hard state).
+async fn submit(admin: &Client, keys: &[ObjectKey], exit_status: u8, times: usize) {
+    for _ in 0..times {
+        admin
+            .run_action(
+                &Action::ProcessCheckResult {
+                    exit_status,
+                    output: format!("icygui cluster test (downtime depth): {exit_status}"),
+                    perfdata: Vec::new(),
+                    ttl: None,
+                },
+                &ActionTarget::Objects(keys.to_vec()),
+                "icygui-test",
+            )
+            .await
+            .unwrap();
+    }
+}
+
+/// Schedules a fixed downtime from `start` to `end` on each of `keys`;
+/// returns their names, in order.
+async fn schedule(admin: &Client, keys: &[ObjectKey], start: f64, end: f64) -> Vec<String> {
+    let results = admin
+        .run_action(
+            &Action::ScheduleDowntime {
+                comment: "icygui cluster test (downtime depth)".to_owned(),
+                start: Timestamp::from_unix_seconds(start),
+                end: Timestamp::from_unix_seconds(end),
+                mode: DowntimeMode::Fixed,
+                all_services: false,
+                child_options: ChildOptions::None,
+                trigger_name: None,
+            },
+            &ActionTarget::Objects(keys.to_vec()),
+            "icygui-test",
+        )
+        .await
+        .unwrap();
+    let names: Vec<String> = results
+        .into_iter()
+        .filter_map(|result| result.name)
+        .collect();
+    assert_eq!(names.len(), keys.len(), "a downtime each");
+    names
+}
+
+/// Whether the snapshot lists the downtime `name` of `key`.
+fn lists(snapshot: &Snapshot, key: &ObjectKey, name: &str) -> bool {
+    snapshot
+        .downtimes
+        .get(key)
+        .is_some_and(|list| list.iter().any(|downtime| downtime.name == name))
+}
+
+/// The store's downtime depth and acknowledgement of every one of `keys`
+/// against Icinga's, asked now.
+async fn matches_icinga(admin: &Client, engine: &Engine, keys: &[ObjectKey], when: &str) {
+    let icinga = admin.objects(keys, Detail::Lean).await.unwrap();
+    assert_eq!(icinga.services.len(), keys.len(), "{when}: Icinga answers");
+    let snapshot = engine.latest().unwrap();
+    let differ: Vec<String> = icinga
+        .services
+        .iter()
+        .filter_map(|service| {
+            let stored = &snapshot.services[&service.key];
+            let theirs = (
+                service.check.downtime_depth,
+                service.check.acknowledgement.is_acknowledged(),
+            );
+            let ours = (
+                stored.check.downtime_depth,
+                stored.check.acknowledgement.is_acknowledged(),
+            );
+            (theirs != ours).then(|| {
+                format!(
+                    "{}: Icinga depth {} acknowledged {}, store {} {}",
+                    service.key, theirs.0, theirs.1, ours.0, ours.1
+                )
+            })
+        })
+        .collect();
+    assert!(differ.is_empty(), "{when}: {differ:#?}");
+}
+
+/// Waits until the engine is in `quiet` mode.
+async fn mode(engine: &mut Engine, quiet: bool) {
+    engine.send(ic_core::Command::SetQuiet(quiet));
+    wait_snapshot(engine, Duration::from_secs(30), "the mode", |snapshot| {
+        snapshot.quiet == quiet
+    })
+    .await;
+}
+
+/// One round of [`cluster_downtimes_and_acknowledgements_around_a_wake_match_icinga`]
+/// on six new targets; returns how many of the downtimes' answers came
+/// before their lines.
+#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
+async fn around_a_wake(
+    cluster: &Cluster,
+    admin: &Client,
+    engine: &mut Engine,
+    used: &mut BTreeSet<ServiceKey>,
+) -> usize {
+    mode(engine, true).await;
+    let targets = untouched(admin, engine, 6, used).await;
+    used.extend(targets.iter().cloned());
+    let keys: Vec<ObjectKey> = targets.iter().cloned().map(ObjectKey::from).collect();
+    let mut undo = cluster.undo(&keys);
+    // Problems (hard): the refresh after waking asks for them by name.
+    submit(admin, &keys, 2, 3).await;
+    wait_snapshot(engine, Duration::from_mins(1), "the problems", |snapshot| {
+        targets.iter().all(|key| {
+            let service = &snapshot.services[key];
+            service.state == ServiceState::Critical && service.check.state_type == StateType::Hard
+        })
+    })
+    .await;
+    let (with_downtime, acknowledged) = keys.split_at(4);
+
+    // Around the wake: the changes, and at once the wake. The quiet
+    // stream brings their lines with its next batch (Icinga writes every
+    // 5 s); the refresh's answers usually come first.
+    let now = Timestamp::now().as_unix_seconds();
+    let downtimes = schedule(admin, with_downtime, now - 60.0, now + 3_600.0).await;
+    undo.downtimes.clone_from(&downtimes);
+    admin
+        .run_action(
+            &Action::Acknowledge {
+                comment: "icygui cluster test (acknowledgement)".to_owned(),
+                sticky: false,
+                persistent: false,
+                expiry: None,
+            },
+            &ActionTarget::Objects(acknowledged.to_vec()),
+            "icygui-test",
+        )
+        .await
+        .unwrap();
+    engine.send(ic_core::Command::SetQuiet(false));
+    let mut early = BTreeSet::new();
+    wait_snapshot(
+        engine,
+        Duration::from_mins(1),
+        "the changes' lines",
+        |snapshot| {
+            for (key, name) in with_downtime.iter().zip(&downtimes) {
+                let service = key.as_service().unwrap();
+                if !lists(snapshot, key, name)
+                    && snapshot.services[service].check.downtime_depth > 0
+                {
+                    early.insert(key.clone());
+                }
+            }
+            !snapshot.quiet
+                && with_downtime
+                    .iter()
+                    .zip(&downtimes)
+                    .all(|(key, name)| lists(snapshot, key, name))
+                && acknowledged.iter().all(|key| {
+                    snapshot.services[key.as_service().unwrap()]
+                        .check
+                        .acknowledgement
+                        .is_acknowledged()
+                })
+        },
+    )
+    .await;
+    // The switch's window ends, Icinga is asked again where needed.
+    run_for(engine, Duration::from_secs(10)).await;
+    matches_icinga(admin, engine, &keys, "after the wake").await;
+
+    // Back to quiet, where no check result brings Icinga's count: the
+    // downtimes and acknowledgements go.
+    mode(engine, true).await;
+    admin
+        .run_action(
+            &Action::RemoveAllDowntimes,
+            &ActionTarget::Downtimes(downtimes.clone()),
+            "icygui-test",
+        )
+        .await
+        .unwrap();
+    admin
+        .run_action(
+            &Action::RemoveAcknowledgement,
+            &ActionTarget::Objects(acknowledged.to_vec()),
+            "icygui-test",
+        )
+        .await
+        .unwrap();
+    undo.downtimes.clear();
+    wait_snapshot(engine, Duration::from_mins(1), "the removals", |snapshot| {
+        with_downtime
+            .iter()
+            .zip(&downtimes)
+            .all(|(key, name)| !lists(snapshot, key, name))
+            && acknowledged.iter().all(|key| {
+                !snapshot.services[key.as_service().unwrap()]
+                    .check
+                    .acknowledgement
+                    .is_acknowledged()
+            })
+    })
+    .await;
+    run_for(engine, Duration::from_secs(8)).await;
+    matches_icinga(admin, engine, &keys, "after the removals in quiet mode").await;
+    let snapshot = engine.latest().unwrap();
+    assert!(
+        targets
+            .iter()
+            .all(|key| !snapshot.services[key].is_handled(false)),
+        "unhandled problems again, none hidden"
+    );
+    // The targets recover (`undo`).
+    early.len()
+}
+
+/// Ledger row (small fix 2 fixer, false green): around a quiet engine's
+/// wake, downtimes and acknowledgements are added on problems that the
+/// refresh after waking asks for by name, and removed in quiet mode
+/// afterwards. Icinga writes each stream every 5 s, so the refresh's
+/// answers come before the quiet stream's lines of the same changes
+/// (counted; another round with new targets if none did). The store's
+/// downtime depth and acknowledgement of every target match Icinga's after
+/// the wake and after the removals, where no check result would correct
+/// them: before the fix an overtaken downtime counted twice and its
+/// problem stayed in downtime, hidden, after the removal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cluster_downtimes_and_acknowledgements_around_a_wake_match_icinga() {
+    let _turn = CLUSTER.lock().await;
+    let Some(cluster) = setup().await else {
+        return;
+    };
+    let admin = cluster.admin();
+    let mut engine = cluster.engine();
+    engine.connected().await;
+    wait_snapshot(&mut engine, Duration::from_mins(2), "loaded", |snapshot| {
+        !snapshot.icinga_notifications.is_empty()
+    })
+    .await;
+    let mut used = BTreeSet::new();
+    let mut overtaken = 0;
+    let mut rounds = 0;
+    while overtaken == 0 && rounds < 3 {
+        rounds += 1;
+        overtaken += around_a_wake(&cluster, &admin, &mut engine, &mut used).await;
+    }
+    eprintln!("{overtaken} downtimes answered before their lines, in {rounds} rounds");
+    assert!(
+        overtaken > 0,
+        "in {rounds} rounds no answer came before its downtime's line: \
+         the case this test is about never happened"
+    );
+    engine.shutdown();
+}
+
+/// Icinga counts a fixed downtime from its start (`Downtime::IsInEffect`
+/// asks the clock) but reports it (`DowntimeStarted`) from a timer every
+/// 5 s, so a state change in between already carries the count: checked
+/// here on Icinga's own event stream, for downtimes starting one after
+/// another, each followed 0.3 s after its start by a recovery (an OK
+/// result triggers no downtime). The store's depth matches Icinga's once
+/// they started and after their removal, in quiet mode; before the fix the
+/// started line added 1 again (2), and 1 stayed after the removal.
+#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cluster_a_fixed_downtime_counts_from_its_start_like_icinga() {
+    let _turn = CLUSTER.lock().await;
+    let Some(cluster) = setup().await else {
+        return;
+    };
+    let admin = cluster.admin();
+    let mut engine = cluster.engine();
+    engine.connected().await;
+    wait_snapshot(&mut engine, Duration::from_mins(2), "loaded", |snapshot| {
+        !snapshot.icinga_notifications.is_empty()
+    })
+    .await;
+    mode(&mut engine, true).await;
+    let targets = untouched(&admin, &mut engine, 4, &BTreeSet::new()).await;
+    let keys: Vec<ObjectKey> = targets.iter().cloned().map(ObjectKey::from).collect();
+    let mut undo = cluster.undo(&keys);
+    submit(&admin, &keys, 2, 3).await;
+    wait_snapshot(
+        &mut engine,
+        Duration::from_mins(1),
+        "the problems",
+        |snapshot| {
+            targets
+                .iter()
+                .all(|key| snapshot.services[key].state == ServiceState::Critical)
+        },
+    )
+    .await;
+
+    // Icinga's own stream, for the order of its events.
+    let mut events = admin
+        .events(
+            "icygui-cluster-downtime-start",
+            &[EventKind::StateChange, EventKind::DowntimeStarted],
+        )
+        .await
+        .unwrap();
+    let first = Timestamp::now().as_unix_seconds() + 4.0;
+    let starts: Vec<f64> = (0..keys.len())
+        .map(|index| first + 1.3 * f64::from(u32::try_from(index).unwrap()))
+        .collect();
+    let mut downtimes = Vec::new();
+    for (key, start) in keys.iter().zip(&starts) {
+        downtimes
+            .extend(schedule(&admin, std::slice::from_ref(key), *start, start + 3_600.0).await);
+    }
+    undo.downtimes.clone_from(&downtimes);
+    for (key, start) in keys.iter().zip(&starts) {
+        let wait = start + 0.3 - Timestamp::now().as_unix_seconds();
+        if wait > 0.0 {
+            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+        }
+        submit(&admin, std::slice::from_ref(key), 0, 1).await;
+    }
+    // Every start reported (the timer runs every 5 s); the order per target.
+    let mut recovered = BTreeSet::new();
+    let mut started = BTreeSet::new();
+    let mut counted_first = BTreeSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while started.len() < keys.len() {
+        let event = tokio::time::timeout_at(deadline, events.next())
+            .await
+            .expect("every downtime start reported within 30 s")
+            .expect("the stream")
+            .unwrap();
+        match event {
+            Event::StateChange {
+                object,
+                downtime_depth,
+                ..
+            } if keys.contains(&object) => {
+                if !started.contains(&object) && downtime_depth.unwrap_or(0) > 0 {
+                    counted_first.insert(object.clone());
+                }
+                recovered.insert(object);
+            }
+            Event::DowntimeStarted { downtime, .. } if keys.contains(&downtime.object) => {
+                started.insert(downtime.object);
+            }
+            _ => {}
+        }
+    }
+    drop(events);
+    eprintln!(
+        "{} of {} recoveries carried the downtime before Icinga reported it started",
+        counted_first.len(),
+        keys.len()
+    );
+    assert!(
+        !counted_first.is_empty(),
+        "Icinga's start timer reported every downtime within 0.3 s of its start: \
+         the case this test is about never happened"
+    );
+    run_for(&mut engine, Duration::from_secs(8)).await;
+    matches_icinga(&admin, &engine, &keys, "after the starts").await;
+    let snapshot = engine.latest().unwrap();
+    assert!(
+        targets
+            .iter()
+            .all(|key| snapshot.services[key].check.downtime_depth == 1),
+        "one downtime each"
+    );
+
+    admin
+        .run_action(
+            &Action::RemoveAllDowntimes,
+            &ActionTarget::Downtimes(downtimes.clone()),
+            "icygui-test",
+        )
+        .await
+        .unwrap();
+    undo.downtimes.clear();
+    wait_snapshot(
+        &mut engine,
+        Duration::from_mins(1),
+        "the removals",
+        |snapshot| {
+            keys.iter()
+                .zip(&downtimes)
+                .all(|(key, name)| !lists(snapshot, key, name))
+        },
+    )
+    .await;
+    run_for(&mut engine, Duration::from_secs(8)).await;
+    matches_icinga(&admin, &engine, &keys, "after the removals in quiet mode").await;
+    let snapshot = engine.latest().unwrap();
+    assert!(
+        targets
+            .iter()
+            .all(|key| snapshot.services[key].check.downtime_depth == 0),
+        "none left"
+    );
+    engine.shutdown();
 }

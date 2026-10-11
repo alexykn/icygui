@@ -12,10 +12,17 @@ use ic_rules::{NotificationSettings, ScopeSetting};
 use serde::de::{self, MapAccess, Visitor, value::MapAccessDeserializer};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::health_page::HealthPage;
+use crate::trouble::Trouble;
+use crate::view::{HideHandled, View};
+
 /// Current config file format version. Version 2 replaced an environment's
 /// single `url` (with the pin and server name in `tls`) by its list of
-/// `urls`, each with its own pin and server name (ENV-12).
-pub const CONFIG_VERSION: u32 = 2;
+/// `urls`, each with its own pin and server name (ENV-12). Version 3 moved
+/// `general.theme` into the new `[appearance]` table. Version 4 turned a
+/// dashboard's `view` into a list of `views` (v1, topic 04) and its
+/// `hide_handled` switch into the `handled` setting.
+pub const CONFIG_VERSION: u32 = 4;
 
 /// The most URLs an environment may list ([`Environment::urls`]). The
 /// engine tries them in order on every connect, so a long list would only
@@ -30,6 +37,9 @@ pub struct Config {
     pub version: u32,
     /// App-wide preferences.
     pub general: General,
+    /// How the app looks (theme, interface size, row density, times in
+    /// lists).
+    pub appearance: Appearance,
     /// The environment shown at startup.
     pub active_environment: Option<String>,
     /// Configured Icinga environments.
@@ -41,6 +51,7 @@ impl Default for Config {
         Self {
             version: CONFIG_VERSION,
             general: General::default(),
+            appearance: Appearance::default(),
             active_environment: None,
             environments: Vec::new(),
         }
@@ -50,9 +61,11 @@ impl Default for Config {
 /// App-wide preferences.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent switches of the settings file, one key each"
+)]
 pub struct General {
-    /// Colour theme.
-    pub theme: ThemeChoice,
     /// Keep running in the tray / menu bar when the window closes.
     pub close_to_tray: bool,
     /// Start at login.
@@ -73,32 +86,145 @@ pub struct General {
     /// less often; notifications are never delayed. Off: every environment
     /// stays fully live.
     pub quiet_when_hidden: bool,
+    /// Desktop notifications show the first line of the plugin output (on
+    /// by default). Off for shared screens and the lock screen: the title
+    /// still names the object and its state.
+    pub show_plugin_output: bool,
+    /// What icygui writes to its log. `RUST_LOG`, when set, overrides it
+    /// at start.
+    pub log_level: LogLevel,
 }
 
 impl Default for General {
     fn default() -> Self {
         Self {
-            theme: ThemeChoice::Dark,
             close_to_tray: true,
             launch_at_login: false,
             event_log_retention_hours: 48,
             reconcile_interval_secs: 0,
             quiet_when_hidden: true,
+            show_plugin_output: true,
+            log_level: LogLevel::Info,
         }
     }
+}
+
+/// How much icygui logs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    /// Only errors.
+    Error,
+    /// Errors and warnings.
+    Warn,
+    /// What happens: connections, reloads, settings changes.
+    #[default]
+    Info,
+    /// Also each request's path and timing.
+    Debug,
+    /// Everything.
+    Trace,
+}
+
+impl LogLevel {
+    /// Every level, quietest first.
+    pub const ALL: [Self; 5] = [
+        Self::Error,
+        Self::Warn,
+        Self::Info,
+        Self::Debug,
+        Self::Trace,
+    ];
+
+    /// The level's name, as the settings file and `RUST_LOG` write it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
+
+/// How the app looks. Stored on this computer only, like everything in
+/// the settings file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    /// Colour theme.
+    pub theme: ThemeChoice,
+    /// Scales text and spacing.
+    pub interface_size: InterfaceSize,
+    /// How tall list rows are.
+    pub row_density: RowDensity,
+    /// What the time under a list row's state circle says.
+    pub list_times: ListTimes,
+    /// The handled problems list views hide unless a view sets its own
+    /// (v1; all hidden by default).
+    pub hide_handled: HideHandled,
 }
 
 /// Colour theme.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeChoice {
-    /// The design's dark theme.
+    /// Follow the desktop's light or dark mode.
     #[default]
+    System,
+    /// The design's dark theme.
     Dark,
     /// Light theme.
     Light,
-    /// Follow the OS appearance.
-    System,
+}
+
+/// The interface's scale: text and spacing in every window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterfaceSize {
+    /// 90 %.
+    Small,
+    /// 100 %: the design's sizes.
+    #[default]
+    Default,
+    /// 115 %.
+    Large,
+}
+
+impl InterfaceSize {
+    /// The factor text and spacing are scaled by.
+    #[must_use]
+    pub fn scale(self) -> f32 {
+        match self {
+            Self::Small => 0.9,
+            Self::Default => 1.0,
+            Self::Large => 1.15,
+        }
+    }
+}
+
+/// How tall list rows are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowDensity {
+    /// Two lines per object: the name, then the output (the design's rows).
+    #[default]
+    Comfortable,
+    /// One line per object, without the output: about twice the rows.
+    Compact,
+}
+
+/// What the time under a list row's state circle says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListTimes {
+    /// How long the object has been in its state (`14m`).
+    #[default]
+    Relative,
+    /// Since when, as a clock time (`13:58`).
+    Clock,
 }
 
 /// One Icinga cluster (a single master, an HA pair, a master with
@@ -130,6 +256,15 @@ pub struct Environment {
     pub groups: Vec<DashboardGroup>,
     /// Notification rules.
     pub notifications: NotificationSettings,
+    /// Trouble alerts: how they notify and which heartbeats prove that
+    /// Icinga runs its checks (topic 16). Left out of the file while
+    /// default.
+    #[serde(skip_serializing_if = "Trouble::is_default")]
+    pub trouble: Trouble,
+    /// The cluster health page, a built-in dashboard (topic 16): topic 06's
+    /// layout until it is edited, and left out of the file until then.
+    #[serde(skip_serializing_if = "HealthPage::is_default")]
+    pub health_page: HealthPage,
 }
 
 /// How to authenticate against the API.
@@ -260,7 +395,9 @@ impl Default for DashboardGroup {
     }
 }
 
-/// A dashboard ("thread"): one filtered, sorted list of hosts or services.
+/// A dashboard ("thread"): one or more views stacked on one page (v1,
+/// topic 04), each a filtered list, grid, set of tiles or event stream.
+/// A dashboard from rc1 has one view and looks as it did.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Dashboard {
@@ -268,10 +405,17 @@ pub struct Dashboard {
     pub id: String,
     /// Display name.
     pub name: String,
-    /// What it shows.
-    pub view: View,
-    /// Notification setting relative to its group.
+    /// What it shows, top to bottom: at least one view, at most
+    /// [`crate::MAX_VIEWS`].
+    pub views: Vec<View>,
+    /// Notification setting relative to its group. An object notifies
+    /// through the dashboard when a view that counts problems
+    /// ([`View::counts_problems`]) matches it.
     pub notifications: ScopeSetting,
+    /// What the sidebar shows in the dashboard's mark slot (topic 14,
+    /// round 5): the worst problem's dot or a chosen icon.
+    #[serde(skip_serializing_if = "SidebarMark::is_auto")]
+    pub mark: SidebarMark,
 }
 
 impl Default for Dashboard {
@@ -279,99 +423,69 @@ impl Default for Dashboard {
         Self {
             id: String::new(),
             name: String::new(),
-            view: View::default(),
+            views: vec![View::default()],
             notifications: ScopeSetting::Inherit,
+            mark: SidebarMark::Auto,
         }
     }
 }
 
-/// What a dashboard lists and how.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct View {
-    /// Hosts or services.
-    pub object_kind: ObjectKind,
-    /// Icinga filter expression; empty = everything.
-    pub filter: String,
-    /// Only objects in a problem state.
-    pub problems_only: bool,
-    /// Hide handled problems (the design's `handled hidden`).
-    pub hide_handled: bool,
-    /// Sort order.
-    pub sort: Sort,
-    /// Optional grouping.
-    pub group_by: GroupBy,
-}
+impl Dashboard {
+    /// Whether some view counts problems ([`View::counts_problems`]): the
+    /// dashboard has a sidebar count and dot of its own.
+    #[must_use]
+    pub fn has_problem_view(&self) -> bool {
+        self.views.iter().any(View::counts_problems)
+    }
 
-impl Default for View {
-    fn default() -> Self {
-        Self {
-            object_kind: ObjectKind::Services,
-            filter: String::new(),
-            problems_only: true,
-            hide_handled: true,
-            sort: Sort::default(),
-            group_by: GroupBy::None,
+    /// The mark in effect: [`SidebarMark::Auto`] (a file from before the
+    /// setting, or written by hand) is the state dot with a problem view
+    /// and the first view's kind icon without; a state mark without a
+    /// problem view (no dot to show) is that icon too.
+    #[must_use]
+    pub fn effective_mark(&self) -> EffectiveMark<'_> {
+        match &self.mark {
+            SidebarMark::Icon(icon) if !icon.trim().is_empty() => EffectiveMark::Icon(icon),
+            SidebarMark::State | SidebarMark::Auto if self.has_problem_view() => {
+                EffectiveMark::State
+            }
+            _ => EffectiveMark::KindIcon,
         }
     }
 }
 
-/// Hosts or services.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// A dashboard's sidebar mark (the editor's *sidebar mark*).
+///
+/// In the settings file: `mark = "state"`, or `mark = { icon = "server" }`
+/// (the icon's Lucide name). Unset, it follows the defaults
+/// ([`Dashboard::effective_mark`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ObjectKind {
-    /// Services.
+pub enum SidebarMark {
+    /// Not set: the defaults.
     #[default]
-    Services,
-    /// Hosts.
-    Hosts,
+    Auto,
+    /// The worst unhandled problem's dot.
+    State,
+    /// An icon, by its Lucide name (`server`, `phone`).
+    Icon(String),
 }
 
-/// Sort order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Sort {
-    /// Sort key.
-    pub key: SortKey,
-    /// Largest / newest first.
-    pub descending: bool,
-}
-
-impl Default for Sort {
-    fn default() -> Self {
-        Self {
-            key: SortKey::Severity,
-            descending: true,
-        }
+impl SidebarMark {
+    /// Whether the mark is unset.
+    #[must_use]
+    pub fn is_auto(&self) -> bool {
+        *self == Self::Auto
     }
 }
 
-/// Sort keys. Ties fall back to severity, then name.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SortKey {
-    /// Icinga severity (the design's default, `severity ↓`).
-    #[default]
-    Severity,
-    /// Time of the last state change.
-    LastStateChange,
-    /// Host name.
-    Host,
-    /// Service name (host name for host views).
-    Service,
-}
-
-/// Grouping of list rows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GroupBy {
-    /// Flat list.
-    #[default]
-    None,
-    /// By host.
-    Host,
-    /// By host group (an object in several groups appears in each).
-    HostGroup,
-    /// By service group.
-    ServiceGroup,
+/// What a dashboard's mark slot shows ([`Dashboard::effective_mark`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectiveMark<'a> {
+    /// The worst unhandled problem's dot.
+    State,
+    /// The icon with this Lucide name.
+    Icon(&'a str),
+    /// The first view's kind icon.
+    KindIcon,
 }

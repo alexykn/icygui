@@ -32,6 +32,26 @@ impl CheckableState {
         }
     }
 
+    /// How alarming the state is, the one order everything that picks "the
+    /// worst state" shares (the tray icon, the summary bars, the host bands'
+    /// dots): critical, then down, unreachable, unknown, warning, pending
+    /// and last OK or up. Icinga's [`severity`](crate::severity) comes
+    /// first where it is known and this only breaks its ties (a down host
+    /// and a warning service weigh the same); where it is not known, as for
+    /// a list's marks, this order decides alone.
+    #[must_use]
+    pub fn severity_rank(self) -> u8 {
+        match self {
+            Self::Service(ServiceState::Critical) => 6,
+            Self::Host(HostState::Down) => 5,
+            Self::Host(HostState::Unreachable) => 4,
+            Self::Service(ServiceState::Unknown) => 3,
+            Self::Service(ServiceState::Warning) => 2,
+            Self::Host(HostState::Pending) | Self::Service(ServiceState::Pending) => 1,
+            Self::Host(HostState::Up) | Self::Service(ServiceState::Ok) => 0,
+        }
+    }
+
     /// The short label (`CRIT`, `DOWN`, …).
     #[must_use]
     pub fn short_label(self) -> &'static str {
@@ -366,6 +386,38 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one worst-state order (core's summary, the app's band dots and
+    /// the demo fixture all use it): a change here changes all three.
+    #[test]
+    fn severity_rank_orders_the_states_from_critical_down_to_ok() {
+        use CheckableState::{Host, Service};
+        let order = [
+            Service(ServiceState::Critical),
+            Host(HostState::Down),
+            Host(HostState::Unreachable),
+            Service(ServiceState::Unknown),
+            Service(ServiceState::Warning),
+            Host(HostState::Pending),
+            Host(HostState::Up),
+        ];
+        for pair in order.windows(2) {
+            assert!(
+                pair[0].severity_rank() > pair[1].severity_rank(),
+                "{:?} is redder than {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert_eq!(
+            Service(ServiceState::Pending).severity_rank(),
+            Host(HostState::Pending).severity_rank()
+        );
+        assert_eq!(
+            Service(ServiceState::Ok).severity_rank(),
+            Host(HostState::Up).severity_rank()
+        );
+    }
 
     #[test]
     fn api_names_round_trip() {

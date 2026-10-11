@@ -4,10 +4,11 @@
 
 use std::fmt;
 
+use crate::px;
 use gpui::{
     AnyElement, App, BoxShadow, ClickEvent, ElementId, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, ParentElement, RenderOnce, Role, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, point, prelude::FluentBuilder as _, px, relative,
+    Styled as _, Window, div, point, prelude::FluentBuilder as _, relative,
 };
 
 use crate::components::IconButton;
@@ -41,9 +42,9 @@ impl ToastTone {
     pub fn color(self, theme: &Theme) -> Hsla {
         match self {
             Self::Pending | Self::Info => theme.colors.accent,
-            Self::Success => theme.states.ok,
-            Self::Warning => theme.states.warning,
-            Self::Critical => theme.states.critical,
+            Self::Success => theme.states.fill.ok,
+            Self::Warning => theme.states.fill.warning,
+            Self::Critical => theme.states.fill.critical,
         }
     }
 
@@ -262,8 +263,11 @@ mod tests {
     #[test]
     fn tones_have_colours_and_icons() {
         let theme = Theme::dark();
-        assert_eq!(ToastTone::Success.color(&theme), theme.states.ok);
-        assert_eq!(ToastTone::Critical.color(&theme), theme.states.critical);
+        assert_eq!(ToastTone::Success.color(&theme), theme.states.fill.ok);
+        assert_eq!(
+            ToastTone::Critical.color(&theme),
+            theme.states.fill.critical
+        );
         assert_eq!(ToastTone::Pending.icon(), IconName::Loader);
         assert_eq!(ToastTone::Warning.icon(), IconName::TriangleAlert);
     }

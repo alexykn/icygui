@@ -30,7 +30,7 @@ impl LinkStyle {
     #[must_use]
     pub fn colors(self, theme: &Theme) -> (Hsla, Hsla) {
         match self {
-            Self::Accent => (theme.colors.accent, theme.colors.accent_hover),
+            Self::Accent => (theme.colors.accent_text, theme.colors.accent_hover),
             Self::Quiet => (theme.colors.text_faint, theme.colors.text),
         }
     }
@@ -148,7 +148,7 @@ mod tests {
     fn styles_brighten_on_hover() {
         let theme = Theme::dark();
         let (rest, hover) = LinkStyle::Accent.colors(&theme);
-        assert_eq!(rest, theme.colors.accent);
+        assert_eq!(rest, theme.colors.accent_text);
         assert_eq!(hover, theme.colors.accent_hover);
         let (rest, hover) = LinkStyle::Quiet.colors(&theme);
         assert_eq!(rest, theme.colors.text_faint);

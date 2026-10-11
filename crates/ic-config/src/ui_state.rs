@@ -48,7 +48,14 @@ pub struct UiState {
     pub window: Option<WindowState>,
     /// Per environment, by environment id.
     pub environments: BTreeMap<String, EnvironmentUiState>,
+    /// The icons chosen last as sidebar marks, newest first (the icon
+    /// picker's *recent* row; at most [`MAX_RECENT_ICONS`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_icons: Vec<String>,
 }
+
+/// The icon picker's *recent* row holds this many icons.
+pub const MAX_RECENT_ICONS: usize = 8;
 
 impl Default for UiState {
     fn default() -> Self {
@@ -56,6 +63,7 @@ impl Default for UiState {
             version: UI_STATE_VERSION,
             window: None,
             environments: BTreeMap::new(),
+            recent_icons: Vec::new(),
         }
     }
 }
@@ -100,7 +108,28 @@ impl UiState {
                 .tabs
                 .retain(|tab| !tab.trim().is_empty() && seen.insert(tab.clone()));
             state.tabs.truncate(MAX_TABS);
+            let mut seen = std::collections::BTreeSet::new();
+            state
+                .lists
+                .retain(|list| !list.trim().is_empty() && seen.insert(list.clone()));
+            state.lists.truncate(MAX_TABS);
         }
+        let mut seen = std::collections::BTreeSet::new();
+        self.recent_icons
+            .retain(|icon| !icon.trim().is_empty() && seen.insert(icon.clone()));
+        self.recent_icons.truncate(MAX_RECENT_ICONS);
+    }
+
+    /// Puts `icon` first in the *recent* row (once, keeping at most
+    /// [`MAX_RECENT_ICONS`]). Returns whether the row changed.
+    pub fn remember_icon(&mut self, icon: &str) -> bool {
+        if self.recent_icons.first().is_some_and(|first| first == icon) {
+            return false;
+        }
+        self.recent_icons.retain(|recent| recent != icon);
+        self.recent_icons.insert(0, icon.to_owned());
+        self.recent_icons.truncate(MAX_RECENT_ICONS);
+        true
     }
 }
 
@@ -111,8 +140,40 @@ pub struct EnvironmentUiState {
     /// Objects open as tabs ("↗ open as tab"), in sidebar order, by full
     /// name (`db-prod-03`, `db-prod-03!postgres-replication`).
     pub tabs: Vec<String>,
+    /// The handling and downtimes views open as tabs (v1, topic 14), by
+    /// id (`handling`, `downtimes`; stage 2's `comments` and `acknowledged`
+    /// open handling); the app ignores ids it doesn't know.
+    pub lists: Vec<String>,
     /// The dashboard shown last.
     pub selected: Option<DashboardRef>,
+    /// Each view's choices (chip, sort, *only mine*, timeline or list), by
+    /// view id, kept when the view is closed or the app restarts.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub list_options: BTreeMap<String, ListOptionsState>,
+}
+
+/// A view's choices (v1, topic 14): the chip picked, its sort (by id,
+/// `latest-activity`; the app ignores ids it doesn't know), *only mine*,
+/// and the downtimes view's display (`timeline`, `list`). Stage 2's
+/// `system_comments` is read and dropped (Icinga's own comments never
+/// show).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ListOptionsState {
+    /// The sort, by id; none: the chip's (or the display's) own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    /// Only what the environment's author set.
+    pub only_mine: bool,
+    /// The chip picked, by id; none: *all*.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chip: Option<String>,
+    /// The downtimes view's display, by id; none: the timeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// The rows' density chosen on the view; none: as in the settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub density: Option<crate::RowDensity>,
 }
 
 /// The main window's size and position in logical pixels, as the window
@@ -256,6 +317,25 @@ mod tests {
     }
 
     #[test]
+    fn stage_two_list_choices_still_load() {
+        // Stage 2's lists kept `system_comments`; topic 14 dropped it.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        fs::write(
+            store.path(),
+            "version = 1\n[environments.e]\ntabs = []\nlists = [\"comments\"]\n\
+             [environments.e.list_options.comments]\nsort = \"newest\"\nonly_mine = true\n\
+             system_comments = true\n",
+        )
+        .unwrap();
+        let state = store.load().unwrap();
+        let saved = &state.environments["e"].list_options["comments"];
+        assert_eq!(saved.sort.as_deref(), Some("newest"));
+        assert!(saved.only_mine);
+        assert_eq!(saved.chip, None);
+    }
+
+    #[test]
     fn round_trips_window_tabs_and_selection() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -273,7 +353,18 @@ mod tests {
                     "db-prod-03!postgres-replication".to_owned(),
                     "db-prod-03".to_owned(),
                 ],
+                lists: vec!["downtimes".to_owned(), "acknowledged".to_owned()],
                 selected: Some(reference("g", "d")),
+                list_options: BTreeMap::from([(
+                    "downtimes".to_owned(),
+                    ListOptionsState {
+                        sort: Some("object".to_owned()),
+                        only_mine: true,
+                        chip: Some("upcoming".to_owned()),
+                        mode: Some("list".to_owned()),
+                        density: Some(crate::RowDensity::Compact),
+                    },
+                )]),
             },
         ));
         store.save(&state).unwrap();
@@ -309,12 +400,13 @@ mod tests {
             store.path(),
             "version = 1\n\
              [window]\nx = 0.0\ny = 0.0\nwidth = 0.0\nheight = 900.0\n\
-             [environments.e]\ntabs = [\"a\", \"b\", \" \", \"a\"]\n",
+             [environments.e]\ntabs = [\"a\", \"b\", \" \", \"a\"]\nlists = [\"comments\", \"comments\", \"\"]\n",
         )
         .unwrap();
         let state = store.load().unwrap();
         assert_eq!(state.window, None);
         assert_eq!(state.environment("e").tabs, ["a", "b"]);
+        assert_eq!(state.environment("e").lists, ["comments"]);
 
         let mut huge = UiState::default();
         huge.environments.insert(
@@ -322,6 +414,8 @@ mod tests {
             EnvironmentUiState {
                 tabs: (0..200).map(|index| format!("host-{index}")).collect(),
                 selected: None,
+                lists: Vec::new(),
+                list_options: BTreeMap::new(),
             },
         );
         store.save(&huge).unwrap();
@@ -380,6 +474,8 @@ mod tests {
         let tabs = EnvironmentUiState {
             tabs: vec!["h".to_owned()],
             selected: None,
+            lists: Vec::new(),
+            list_options: BTreeMap::new(),
         };
         assert!(state.set_environment("a", tabs.clone()));
         assert!(!state.set_environment("a", tabs.clone()), "unchanged");

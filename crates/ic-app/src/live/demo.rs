@@ -21,13 +21,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::channel::oneshot;
 use ic_config::{
-    AuthConfig, CONFIG_VERSION, Config, Dashboard, DashboardGroup, Environment, General, GroupBy,
-    ObjectKind, Sort, TlsConfig, View,
+    AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, GroupOrder, GroupSource,
+    HandledSetting, ObjectKind, Sort, StreamOptions, TlsConfig, View, ViewDisplay, ViewGroups,
 };
+use ic_core::LogEntry;
 use ic_core::ports::{SecretError, SecretStore};
 use ic_mock::{
     MockConfig, MockControl, MockServer, MockUser, SimulationConfig, StormConfig, scenarios,
 };
+use ic_model::{ObjectKey, ServiceState, Timestamp};
 use ic_rules::{NotificationSettings, ScopeSetting};
 use secrecy::SecretString;
 
@@ -51,6 +53,19 @@ const STORM_EVERY: u64 = 300;
 
 /// When the [`DemoFault::Outage`] begins.
 const OUTAGE_AFTER: Duration = Duration::from_secs(20);
+/// The API user's permissions with [`DemoFault::NoComments`]: everything
+/// but adding comments.
+const NO_COMMENTS: &[&str] = &[
+    "objects/query/*",
+    "events/*",
+    "status/*",
+    "actions/acknowledge-problem",
+    "actions/remove-acknowledgement",
+    "actions/schedule-downtime",
+    "actions/remove-downtime",
+    "actions/reschedule-check",
+    "actions/remove-comment",
+];
 /// The latency of every answer with [`DemoFault::Slow`].
 const SLOW_LATENCY: Duration = Duration::from_millis(900);
 
@@ -73,7 +88,8 @@ pub(crate) enum DemoFault {
     /// server presents (renewed, or intercepted: both fingerprints show).
     PinMismatch,
     /// `outage`: 20 seconds in, the server drops every stream and answers
-    /// 503 (the connection is lost and retried).
+    /// 503 (the connection is lost and retried); four minutes later it
+    /// answers again (16c's `live again after 4m`).
     Outage,
     /// `slow`: every answer takes 0.9 s (the load's progress shows).
     Slow,
@@ -85,6 +101,37 @@ pub(crate) enum DemoFault {
     /// `prod-cluster` environment's second URL): a partial view, labelled
     /// as such, while the engine keeps asking the master (ENV-12).
     Partial,
+    /// `satellite-down`: 20 seconds in, both of `prod-cluster`'s
+    /// satellites in zone `fra` (`sat-fra-01`, `sat-fra-02`) drop out of the
+    /// cluster, so the zone is cut off: its beats go silent, its checks go
+    /// late, and the cluster health page and its sidebar dot turn critical
+    /// (06c, 16t: `zone fra: sat-fra-01 and sat-fra-02 disconnected,
+    /// heartbeat lost`).
+    SatelliteDown,
+    /// `satellite-checks-stopped`: 20 seconds in, `sat-fra-02` drops out
+    /// and `sat-fra-01`'s checker hangs while it stays connected: zone
+    /// `fra` runs no checks though an endpoint answers (16s).
+    SatelliteChecksStopped,
+    /// `beat-late`: zone `ams`'s heartbeat comes 13 seconds late every
+    /// two minutes: the heartbeat row shows it *1 interval late* for a few
+    /// seconds, before it arrives (16a2), and no alert.
+    BeatLate,
+    /// `no-comments`: the API user may do everything but add comments, so
+    /// nothing offers to write one (topic 17, frame 17f).
+    NoComments,
+    /// `master-down`: 20 seconds in, the second master `master-02`
+    /// disconnects: its pinned heartbeat comes back UNKNOWN with Icinga's
+    /// words, and the endpoint and its beat make one alert (16r); four
+    /// minutes later it connects again (16c2's recovery).
+    MasterDown,
+    /// `checks-stopped`: 20 seconds in, the simulated Icinga stops running
+    /// checks, as a hung checker does: the heartbeats stop and the REST
+    /// query finds them old, the check rates fall to 0 and the checks go
+    /// late, *Icinga runs no checks* (16a3).
+    ChecksStopped,
+    /// `beat-gone`: 20 seconds in, zone `fra`'s heartbeat is deleted from
+    /// the configuration: a finding until its removal is confirmed (16u).
+    BeatGone,
 }
 
 impl DemoFault {
@@ -101,6 +148,13 @@ impl DemoFault {
             "slow" => Some(Self::Slow),
             "frozen" => Some(Self::Frozen),
             "partial" => Some(Self::Partial),
+            "satellite-down" => Some(Self::SatelliteDown),
+            "satellite-checks-stopped" => Some(Self::SatelliteChecksStopped),
+            "beat-late" => Some(Self::BeatLate),
+            "no-comments" => Some(Self::NoComments),
+            "master-down" => Some(Self::MasterDown),
+            "checks-stopped" => Some(Self::ChecksStopped),
+            "beat-gone" => Some(Self::BeatGone),
             _ => None,
         }
     }
@@ -218,7 +272,18 @@ impl DemoServer {
         };
         let others = matches!(
             self.fault,
-            None | Some(DemoFault::Partial | DemoFault::Slow | DemoFault::Frozen)
+            None | Some(
+                DemoFault::Partial
+                    | DemoFault::Slow
+                    | DemoFault::Frozen
+                    | DemoFault::SatelliteDown
+                    | DemoFault::NoComments
+                    | DemoFault::MasterDown
+                    | DemoFault::ChecksStopped
+                    | DemoFault::BeatGone
+                    | DemoFault::SatelliteChecksStopped
+                    | DemoFault::BeatLate
+            )
         );
         std::iter::once(master)
             .chain(
@@ -262,9 +327,25 @@ pub(crate) fn start(
         tracing::warn!(scenario = %options.scenario, known = ?scenarios::NAMES, "unknown demo scenario; using prod-cluster");
         scenarios::prod_cluster()
     });
+    // `prod-cluster` has heartbeats, as the user guide sets them up and
+    // mock-up 16a draws them: zone `fra` is an HA zone of two satellites,
+    // every HA zone's endpoints have a pinned beat each, every satellite
+    // zone its own (six in all, topic 16).
+    let scenario = if scenario.name == DEFAULT_SCENARIO {
+        scenario
+            .with_endpoint(SECOND_SATELLITE, "fra")
+            .with_heartbeats(HEARTBEAT_EVERY)
+    } else {
+        scenario
+    };
     let password = demo_password();
+    let permissions: &[&str] = if options.fault == Some(DemoFault::NoComments) {
+        NO_COMMENTS
+    } else {
+        &["*"]
+    };
     let config = MockConfig {
-        users: vec![MockUser::new(USER, &password, &["*"])],
+        users: vec![MockUser::new(USER, &password, permissions)],
         simulation: SimulationConfig {
             enabled: true,
             seed: options.seed,
@@ -308,8 +389,10 @@ pub(crate) fn start(
     ))
 }
 
-/// The endpoints of `scenario` in a child zone (a zone with a parent):
-/// the satellites.
+/// The first endpoint of `scenario` in a child zone (a zone with a
+/// parent): the satellite the environment lists as its second URL
+/// (`prod-cluster`'s `sat-ams-01`; its other satellite only shows on the
+/// cluster health page).
 fn child_zone_nodes(scenario: &ic_mock::Scenario) -> Vec<String> {
     scenario
         .endpoints
@@ -321,11 +404,28 @@ fn child_zone_nodes(scenario: &ic_mock::Scenario) -> Vec<String> {
                 .any(|zone| zone.name == endpoint.zone && zone.parent.is_some())
         })
         .map(|endpoint| endpoint.name.clone())
+        .take(1)
         .collect()
 }
 
+/// The satellite [`DemoFault::SatelliteDown`] drops (with
+/// [`SECOND_SATELLITE`]).
+const DROPPED_SATELLITE: &str = "sat-fra-01";
+/// The demo's second satellite in zone `fra` (an HA zone, as in 16a).
+const SECOND_SATELLITE: &str = "sat-fra-02";
+/// How long the outage and the master's absence last before they recover.
+const RECOVER_AFTER: Duration = Duration::from_mins(4);
+/// How late [`DemoFault::BeatLate`]'s beat comes, and how often.
+const BEAT_LATE_BY: Duration = Duration::from_secs(13);
+const BEAT_LATE_EVERY: Duration = Duration::from_mins(2);
+/// The master [`DemoFault::MasterDown`] drops.
+const DROPPED_MASTER: &str = "master-02";
+/// How often the demo's heartbeats run (seconds).
+const HEARTBEAT_EVERY: f64 = 30.0;
+
 /// Runs the mock server (and the satellites' servers) until `stopped`
 /// fires.
+#[expect(clippy::too_many_lines, reason = "each demo fault next to the others")]
 fn serve(
     config: MockConfig,
     satellites: Vec<MockConfig>,
@@ -388,6 +488,65 @@ fn serve(
                             tracing::info!("the demo's outage begins");
                             control.fail_next(u32::MAX, 503);
                             control.drop_connections();
+                            tokio::time::sleep(RECOVER_AFTER).await;
+                            tracing::info!("the demo's outage ends");
+                            control.fail_next(0, 503);
+                        });
+                    }
+                    Some(DemoFault::MasterDown) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(OUTAGE_AFTER).await;
+                            drop_node(&control, DROPPED_MASTER, false);
+                            tokio::time::sleep(RECOVER_AFTER).await;
+                            drop_node(&control, DROPPED_MASTER, true);
+                        });
+                    }
+                    Some(DemoFault::SatelliteDown) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(OUTAGE_AFTER).await;
+                            drop_node(&control, DROPPED_SATELLITE, false);
+                            drop_node(&control, SECOND_SATELLITE, false);
+                        });
+                    }
+                    Some(DemoFault::SatelliteChecksStopped) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(OUTAGE_AFTER).await;
+                            drop_node(&control, SECOND_SATELLITE, false);
+                            tracing::info!(
+                                node = DROPPED_SATELLITE,
+                                "a demo satellite's checker hangs"
+                            );
+                            control.stop_checks_on(DROPPED_SATELLITE);
+                        });
+                    }
+                    Some(DemoFault::BeatLate) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(BEAT_LATE_EVERY).await;
+                                control.delay_realtime("icygui-hb-ams", "beat", BEAT_LATE_BY);
+                            }
+                        });
+                    }
+                    Some(DemoFault::ChecksStopped) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(OUTAGE_AFTER).await;
+                            tracing::info!("the demo's Icinga stops running checks");
+                            control.stop_checks();
+                        });
+                    }
+                    Some(DemoFault::BeatGone) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(OUTAGE_AFTER).await;
+                            match control.remove_service("icygui-hb-fra", "beat") {
+                                Ok(()) => tracing::info!("the demo's fra heartbeat is deleted"),
+                                Err(error) => tracing::warn!(%error, "no fra heartbeat to delete"),
+                            }
                         });
                     }
                     _ => {}
@@ -405,6 +564,16 @@ fn serve(
             }
         }
     });
+}
+
+/// Disconnects (or, with `connected`, connects again) the demo's node
+/// `node`.
+fn drop_node(control: &MockControl, node: &str, connected: bool) {
+    match control.set_endpoint_connected(node, connected) {
+        Ok(()) if connected => tracing::info!(%node, "a demo node connects again"),
+        Ok(()) => tracing::info!(%node, "a demo node drops out"),
+        Err(error) => tracing::warn!(%error, "the demo has no such node"),
+    }
 }
 
 /// A password for this run only: the demo server listens on 127.0.0.1.
@@ -536,8 +705,6 @@ pub(crate) fn options_for(environment_id: &str, prod_cluster: &DemoOptions) -> O
 /// master and its satellite (ENV-12).
 pub(crate) fn config() -> Config {
     Config {
-        version: CONFIG_VERSION,
-        general: General::default(),
         active_environment: Some(ENVIRONMENT_ID.to_owned()),
         environments: vec![
             environment(ENVIRONMENT_ID, "prod-cluster", groups()),
@@ -552,6 +719,7 @@ pub(crate) fn config() -> Config {
                 stable_ids(LAB_ID, ic_config::default_groups()),
             ),
         ],
+        ..Config::default()
     }
 }
 
@@ -565,9 +733,12 @@ fn environment(id: &str, name: &str, groups: Vec<DashboardGroup>) -> Environment
             username: USER.to_owned(),
         },
         tls: TlsConfig::default(),
-        author: Some("demo".to_owned()),
+        // The person the demo plays, as the mock-ups draw them: their
+        // downtimes and comments are *mine* in the lists (topic 07).
+        author: Some("j.berg".to_owned()),
         groups,
         notifications: NotificationSettings::default(),
+        ..Environment::default()
     }
 }
 
@@ -578,12 +749,16 @@ fn stable_ids(environment_id: &str, mut groups: Vec<DashboardGroup>) -> Vec<Dash
         group.id = format!("{environment_id}-{}", slug(&group.name));
         for dashboard in &mut group.dashboards {
             dashboard.id = format!("{}-{}", group.id, slug(&dashboard.name));
+            for (index, view) in dashboard.views.iter_mut().enumerate() {
+                view.id = format!("{}-view-{index}", dashboard.id);
+            }
         }
     }
     groups
 }
 
-/// One dashboard of the demo.
+/// One dashboard of the demo (a single view; `databases` and `fleet` have
+/// several, see [`databases_views`] and [`fleet_views`]).
 struct Spec {
     name: &'static str,
     kind: ObjectKind,
@@ -591,6 +766,189 @@ struct Spec {
     problems_only: bool,
     hide_handled: bool,
     group_by: GroupBy,
+}
+
+impl Spec {
+    /// The dashboard's only view: handled hidden as the settings say, or
+    /// shown.
+    fn view(&self) -> View {
+        let mut view = View {
+            object_kind: self.kind,
+            filter: self.filter.to_owned(),
+            problems_only: self.problems_only,
+            handled: if self.hide_handled {
+                HandledSetting::SETTINGS
+            } else {
+                HandledSetting::SHOW
+            },
+            sort: Sort::default(),
+            ..View::default()
+        };
+        view.set_grouping(self.group_by);
+        view
+    }
+}
+
+/// The database hosts' roles, as an Icinga filter list.
+const DB_ROLES: &str = "[\"postgres\", \"mysql\"]";
+
+/// `overview / databases` as topic 04 draws it: summary tiles per
+/// database role, the failing database services, a view with nothing to
+/// show, and the database hosts' events (the stream's defaults: hard
+/// states, no recoveries; [`recent_events`] gives it a history).
+fn databases_views() -> Vec<View> {
+    vec![
+        View {
+            name: "clusters".to_owned(),
+            display: ViewDisplay::SummaryTiles,
+            // Four roles, a tile each (4a).
+            filter: "host.vars.role in [\"postgres\", \"mysql\", \"mongodb\", \"redis\"]"
+                .to_owned(),
+            problems_only: false,
+            groups: ViewGroups {
+                by: GroupSource::CustomVar,
+                custom_var: "role".to_owned(),
+                order: GroupOrder::Name,
+                ..ViewGroups::default()
+            },
+            ..View::default()
+        },
+        View {
+            name: "failing services".to_owned(),
+            filter: format!("host.vars.role in {DB_ROLES} && service.problem"),
+            ..View::default()
+        },
+        // Nothing to show (4a's empty view): the replication slots are
+        // healthy.
+        View {
+            name: "replication lag".to_owned(),
+            filter: "service.name == \"pg-replication-slots\" && service.problem".to_owned(),
+            ..View::default()
+        },
+        View {
+            name: "db events".to_owned(),
+            display: ViewDisplay::EventStream,
+            filter: format!("host.vars.role in {DB_ROLES}"),
+            stream: StreamOptions::default(),
+            ..View::default()
+        },
+    ]
+}
+
+/// The database hosts' last hour, as 4a's event stream shows it: written
+/// to `prod-cluster`'s event log before its engine starts, so the stream
+/// (and the panes' history) isn't empty until something happens. `now`:
+/// Unix seconds.
+pub(crate) fn recent_events(now: f64) -> Vec<LogEntry> {
+    use ic_core::LogKind;
+    use ic_model::{CheckableState, StateType};
+    let state =
+        |minutes: f64, host: &str, service: &str, state: ServiceState, text: &str| LogEntry {
+            at: Timestamp::from_unix_seconds(now - minutes * 60.),
+            object: ObjectKey::service(host, service),
+            kind: LogKind::State {
+                state: CheckableState::Service(state),
+                state_type: StateType::Hard,
+            },
+            text: text.to_owned(),
+            author: None,
+        };
+    let by = |minutes: f64, host: &str, service: &str, kind: LogKind, author: &str, text: &str| {
+        LogEntry {
+            at: Timestamp::from_unix_seconds(now - minutes * 60.),
+            object: ObjectKey::service(host, service),
+            kind,
+            text: text.to_owned(),
+            author: Some(author.to_owned()),
+        }
+    };
+    // Oldest first, as the engine records them.
+    vec![
+        state(
+            70.,
+            "db-mysql-03",
+            "mysql-replication",
+            ServiceState::Unknown,
+            "UNKNOWN - connection refused",
+        ),
+        state(
+            58.,
+            "db-prod-05",
+            "pg-bloat",
+            ServiceState::Warning,
+            "WARNING - check_postgres degraded",
+        ),
+        by(
+            46.,
+            "db-prod-03",
+            "postgres-replication",
+            LogKind::CommentAdded,
+            "j.berg",
+            "failover drill on db-prod-01 at 15:00",
+        ),
+        by(
+            33.,
+            "db-prod-05",
+            "pg-bloat",
+            LogKind::DowntimeStarted,
+            "dba-oncall",
+            "VACUUM FULL on orders_archive, flexible 2h",
+        ),
+        state(
+            30.,
+            "db-mysql-02",
+            "mysql-replication",
+            ServiceState::Ok,
+            "OK - replica in sync, lag 0s",
+        ),
+        by(
+            26.,
+            "db-prod-01",
+            "pg-autovacuum",
+            LogKind::AcknowledgementSet,
+            "dba-oncall",
+            "vacuum running on orders, about 30 minutes",
+        ),
+        state(
+            19.,
+            "db-prod-03",
+            "pg-connections",
+            ServiceState::Warning,
+            "WARNING - 182 of 200 per-db limit (orders)",
+        ),
+        state(
+            14.,
+            "db-prod-03",
+            "postgres-replication",
+            ServiceState::Critical,
+            "CRITICAL - standby lag 412s (> 300s)",
+        ),
+        state(
+            8.,
+            "db-prod-01",
+            "load",
+            ServiceState::Warning,
+            "WARNING - load average 14.2, 12.8, 11.1",
+        ),
+    ]
+}
+
+/// `platform / fleet` as topic 05 draws it: every host as a square by host
+/// group above the service problems.
+fn fleet_views() -> Vec<View> {
+    vec![
+        View {
+            name: "hosts by group".to_owned(),
+            display: ViewDisplay::HostGroupGrid,
+            object_kind: ObjectKind::Hosts,
+            ..View::default()
+        },
+        View {
+            name: "service problems".to_owned(),
+            filter: "service.problem && !service.handled".to_owned(),
+            ..View::default()
+        },
+    ]
 }
 
 const fn spec(
@@ -635,6 +993,18 @@ const GROUPS: &[(&str, &[Spec])] = &[
                 )
             },
             spec("host problems", ObjectKind::Hosts, "", true, false),
+            // Topic 10's three hosts saved as a dashboard (10i): a grouped
+            // list by host with every service, paged by count (10h).
+            Spec {
+                group_by: GroupBy::Host,
+                ..spec(
+                    "db primaries",
+                    ObjectKind::Services,
+                    "host.name in [\"db-prod-01\", \"db-prod-02\", \"db-prod-03\"]",
+                    false,
+                    true,
+                )
+            },
         ],
     ),
     (
@@ -662,6 +1032,7 @@ const GROUPS: &[(&str, &[Spec])] = &[
                 false,
             ),
             spec("all services", ObjectKind::Services, "", false, false),
+            spec("fleet", ObjectKind::Hosts, "", true, true),
         ],
     ),
     (
@@ -677,7 +1048,7 @@ const GROUPS: &[(&str, &[Spec])] = &[
 ];
 
 fn groups() -> Vec<DashboardGroup> {
-    GROUPS
+    let mut groups: Vec<DashboardGroup> = GROUPS
         .iter()
         .map(|(name, dashboards)| {
             let group_id = format!("demo-{}", slug(name));
@@ -688,23 +1059,117 @@ fn groups() -> Vec<DashboardGroup> {
                 notifications: ScopeSetting::Inherit,
                 dashboards: dashboards
                     .iter()
-                    .map(|spec| Dashboard {
-                        id: format!("{group_id}-{}", slug(spec.name)),
-                        name: spec.name.to_owned(),
-                        view: View {
-                            object_kind: spec.kind,
-                            filter: spec.filter.to_owned(),
-                            problems_only: spec.problems_only,
-                            hide_handled: spec.hide_handled,
-                            sort: Sort::default(),
-                            group_by: spec.group_by,
-                        },
-                        notifications: ScopeSetting::Inherit,
+                    .map(|spec| {
+                        let id = format!("{group_id}-{}", slug(spec.name));
+                        let views = match spec.name {
+                            "databases" => databases_views(),
+                            "fleet" => fleet_views(),
+                            _ => vec![spec.view()],
+                        };
+                        Dashboard {
+                            views: views
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, view)| View {
+                                    id: format!("{id}-view-{index}"),
+                                    ..view
+                                })
+                                .collect(),
+                            id,
+                            name: spec.name.to_owned(),
+                            notifications: ScopeSetting::Inherit,
+                            mark: match spec.name {
+                                // A chosen icon instead of the state's dot.
+                                "network" => ic_config::SidebarMark::Icon("network".to_owned()),
+                                _ => ic_config::SidebarMark::Auto,
+                            },
+                        }
                     })
                     .collect(),
             }
         })
-        .collect()
+        .collect();
+    groups.insert(1, dba_group());
+    groups
+}
+
+/// The database team's folder (topic 14, round 5): their problems,
+/// handling and downtimes stacked on one dashboard (rows compact on the
+/// problems, the downtimes as a timeline), and a full page of each. The
+/// handling page's mark is a chosen icon, the downtimes page's its kind's.
+fn dba_group() -> DashboardGroup {
+    use ic_config::{DowntimesMode, RowDensity, ThreadChip, ThreadOptions};
+    let group_id = "demo-dba".to_owned();
+    let team = format!("host.vars.role in {DB_ROLES}");
+    let view = |dashboard: &str, index: usize, view: View| View {
+        id: format!("{group_id}-{dashboard}-view-{index}"),
+        ..view
+    };
+    let dashboard = |name: &str, mark: ic_config::SidebarMark, views: Vec<View>| {
+        let id = format!("{group_id}-{}", slug(name));
+        Dashboard {
+            views: views
+                .into_iter()
+                .enumerate()
+                .map(|(index, one)| view(&slug(name), index, one))
+                .collect(),
+            id,
+            name: name.to_owned(),
+            notifications: ScopeSetting::Inherit,
+            mark,
+        }
+    };
+    let problems = View {
+        name: "problems".to_owned(),
+        filter: format!("{team} && service.problem"),
+        density: Some(RowDensity::Compact),
+        ..View::default()
+    };
+    let handling = View {
+        name: "handling".to_owned(),
+        display: ViewDisplay::Handling,
+        filter: team.clone(),
+        ..View::default()
+    };
+    let downtimes = View {
+        name: "downtimes".to_owned(),
+        display: ViewDisplay::Downtimes,
+        filter: team.clone(),
+        threads: ThreadOptions {
+            mode: DowntimesMode::Timeline,
+            ..ThreadOptions::default()
+        },
+        ..View::default()
+    };
+    DashboardGroup {
+        id: group_id.clone(),
+        name: "dba".to_owned(),
+        collapsed: false,
+        notifications: ScopeSetting::Inherit,
+        dashboards: vec![
+            dashboard(
+                "dba",
+                ic_config::SidebarMark::Auto,
+                vec![problems, handling.clone(), downtimes.clone()],
+            ),
+            dashboard(
+                "dba handling",
+                ic_config::SidebarMark::Icon("users".to_owned()),
+                vec![View {
+                    threads: ThreadOptions {
+                        chip: ThreadChip::All,
+                        ..ThreadOptions::default()
+                    },
+                    ..handling
+                }],
+            ),
+            dashboard(
+                "dba downtimes",
+                ic_config::SidebarMark::Auto,
+                vec![downtimes],
+            ),
+        ],
+    }
 }
 
 /// `host problems` → `host-problems`.
@@ -734,15 +1199,17 @@ mod tests {
             .iter()
             .map(|group| group.name.as_str())
             .collect();
-        assert_eq!(names, ["overview", "platform", "lab"]);
+        assert_eq!(names, ["overview", "dba", "platform", "lab"]);
         let mut ids = HashSet::new();
         for environment in &config.environments {
             for group in &environment.groups {
                 assert!(ids.insert(group.id.clone()));
                 for dashboard in &group.dashboards {
                     assert!(ids.insert(dashboard.id.clone()), "{}", dashboard.id);
-                    ic_filter::Filter::parse(&dashboard.view.filter)
-                        .unwrap_or_else(|error| panic!("{}: {error:?}", dashboard.name));
+                    for view in &dashboard.views {
+                        ic_filter::Filter::parse(&view.filter)
+                            .unwrap_or_else(|error| panic!("{}: {error:?}", dashboard.name));
+                    }
                 }
             }
         }
@@ -885,6 +1352,21 @@ mod tests {
         );
         assert_eq!(DemoFault::parse("outage"), Some(DemoFault::Outage));
         assert_eq!(DemoFault::parse("frozen"), Some(DemoFault::Frozen));
+        assert_eq!(DemoFault::parse("master-down"), Some(DemoFault::MasterDown));
+        assert_eq!(
+            DemoFault::parse("checks-stopped"),
+            Some(DemoFault::ChecksStopped)
+        );
+        assert_eq!(DemoFault::parse("beat-gone"), Some(DemoFault::BeatGone));
+        assert_eq!(
+            DemoFault::parse("satellite-checks-stopped"),
+            Some(DemoFault::SatelliteChecksStopped)
+        );
+        assert_eq!(DemoFault::parse("beat-late"), Some(DemoFault::BeatLate));
+        assert_eq!(
+            DemoFault::parse("satellite-down"),
+            Some(DemoFault::SatelliteDown)
+        );
         assert_eq!(
             DemoFault::parse("pin-mismatch"),
             Some(DemoFault::PinMismatch)

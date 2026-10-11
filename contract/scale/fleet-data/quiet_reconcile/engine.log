@@ -1,0 +1,73 @@
+t client level target message fields
+1791713211.903 -1 INFO ic_core::handle engine started environment=fleet-00
+1791713211.903 0 INFO ic_core::engine::quiet quiet mode environment=fleet-00 quiet=true
+1791713211.904 -1 INFO ic_core::handle engine started environment=fleet-01
+1791713211.904 1 INFO ic_core::engine::quiet quiet mode environment=fleet-01 quiet=true
+1791713211.905 -1 INFO ic_core::handle engine started environment=fleet-02
+1791713211.905 2 INFO ic_core::engine::quiet quiet mode environment=fleet-02 quiet=true
+1791713211.906 -1 INFO ic_core::handle engine started environment=fleet-03
+1791713211.906 3 INFO ic_core::engine::quiet quiet mode environment=fleet-03 quiet=true
+1791713211.907 -1 INFO ic_core::handle engine started environment=fleet-04
+1791713211.907 4 INFO ic_core::engine::quiet quiet mode environment=fleet-04 quiet=true
+1791713211.907 -1 INFO ic_core::handle engine started environment=fleet-05
+1791713211.908 5 INFO ic_core::engine::quiet quiet mode environment=fleet-05 quiet=true
+1791713211.909 -1 INFO ic_core::handle engine started environment=fleet-06
+1791713211.909 6 INFO ic_core::engine::quiet quiet mode environment=fleet-06 quiet=true
+1791713211.910 -1 INFO ic_core::handle engine started environment=fleet-07
+1791713211.910 7 INFO ic_core::engine::quiet quiet mode environment=fleet-07 quiet=true
+1791713211.911 -1 INFO ic_core::handle engine started environment=fleet-08
+1791713211.911 8 INFO ic_core::engine::quiet quiet mode environment=fleet-08 quiet=true
+1791713211.912 -1 INFO ic_core::handle engine started environment=fleet-09
+1791713211.912 9 INFO ic_core::engine::quiet quiet mode environment=fleet-09 quiet=true
+1791713211.913 -1 INFO ic_core::handle engine started environment=fleet-10
+1791713211.913 10 INFO ic_core::engine::quiet quiet mode environment=fleet-10 quiet=true
+1791713211.917 -1 INFO ic_core::handle engine started environment=fleet-11
+1791713211.917 11 INFO ic_core::engine::quiet quiet mode environment=fleet-11 quiet=true
+1791713211.972 0 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713211.972 0 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713211.978 3 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713211.978 3 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713211.986 4 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713211.986 4 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713212.017 3 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713212.017 2 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713212.018 1 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713212.018 1 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713212.041 7 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713212.041 7 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713212.041 6 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713212.041 6 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713212.044 5 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713212.044 5 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713212.045 9 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713212.045 9 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713212.068 10 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713212.068 10 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713212.096 8 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713212.096 8 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713213.871 11 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791713213.871 11 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791713232.498 4 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713232.628 10 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713232.645 0 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713232.700 4 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713232.760 10 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713232.761 5 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713232.896 0 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713232.943 5 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713233.009 3 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713233.191 1 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713233.203 3 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713233.244 1 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713234.382 11 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713234.525 11 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713234.720 2 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713234.758 6 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713234.829 2 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713234.842 9 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713234.846 6 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713234.931 9 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713235.224 8 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713235.232 7 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791713235.274 8 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791713235.282 7 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet

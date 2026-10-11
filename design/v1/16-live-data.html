@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 16 knowing when icygui is blind</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="views.js"></script><script src="settings.js"></script><script src="health.js"></script>
+<style>
+/* the desktops around the app (16c, 16e): GNOME-like Linux with dunst, macOS */
+.desk { position: absolute; top: 0; bottom: 0; overflow: hidden; font-family: 'Open Sans', 'Segoe UI', sans-serif; }
+.desk.lx { background: linear-gradient(160deg, #3a3f46, #23272c); }
+.desk.mac { background: linear-gradient(160deg, #5a6f8f, #2f3a52 60%, #262c3c); }
+.desk.lxl { background: linear-gradient(160deg, #d9dde2, #b9c0c8); }
+.desk .tag { position: absolute; left: 16px; bottom: 14px; font: 12px 'IBM Plex Mono', monospace; color: rgba(255,255,255,.7); }
+.desk.lxl .tag { color: rgba(0,0,0,.6); }
+.lxbar { position: absolute; left: 0; right: 0; top: 0; height: 28px; background: #121416; color: #e8eaec; display: flex; align-items: center; padding: 0 12px; gap: 14px; font-size: 13px; }
+.lxbar .clock { position: absolute; left: 50%; transform: translateX(-50%); font-weight: 600; }
+.lxbar .tray { margin-left: auto; display: flex; gap: 12px; align-items: center; }
+.lxbar .tray .ti { display: flex; padding: 3px 5px; border-radius: 4px; }
+.lxbar .tray .ti.on { background: rgba(255,255,255,.16); }
+.desk.lxl .lxbar { background: #f4f5f6; color: #1d2023; border-bottom: 1px solid #d0d4d8; }
+.desk.lxl .lxbar .tray .ti.on { background: rgba(0,0,0,.1); }
+.dunst { position: absolute; width: 380px; padding: 10px 14px; background: #1f2224; border: 2px solid #4a5056; color: #e6e8ea; font-size: 13px; line-height: 1.45; }
+.dunst.crit { border-color: #e06c6c; }
+.dunst .ap { font-size: 11.5px; color: #9aa1a8; }
+.dunst b { font-weight: 600; }
+.macn { position: absolute; width: 344px; display: grid; grid-template-columns: 38px minmax(0,1fr); gap: 10px; padding: 11px 13px; border-radius: 16px; background: rgba(40,42,48,.82); color: #f2f3f5; font-size: 13px; line-height: 1.35; box-shadow: 0 10px 30px rgba(0,0,0,.35); backdrop-filter: blur(20px); }
+.macn .tt { display: flex; } .macn .tt b { font-weight: 600; flex: 1; } .macn .tt span { color: #a9adb5; font-size: 12px; }
+.macn .bd { color: #d9dbe0; }
+.gmenu { position: absolute; width: 250px; padding: 6px 0; border-radius: 10px; background: #2b2e33; color: #eceef0; font-size: 13.5px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+.gmenu .it { height: 30px; display: flex; align-items: center; padding: 0 16px; gap: 10px; }
+.gmenu .it.hov { background: rgba(255,255,255,.08); }
+.gmenu .it .r { margin-left: auto; color: #9aa1a8; }
+.gmenu .it.dim { color: #9aa1a8; }
+.gmenu .sp { height: 1px; background: rgba(255,255,255,.1); margin: 6px 0; }
+.desk.lxl .gmenu { background: #fbfbfc; color: #1d2023; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+.desk.lxl .gmenu .it.hov { background: rgba(0,0,0,.06); } .desk.lxl .gmenu .sp { background: rgba(0,0,0,.1); }
+.desk.lxl .gmenu .it .r, .desk.lxl .gmenu .it.dim { color: #6b7178; }
+.trayrow { position: absolute; display: flex; gap: 40px; align-items: flex-end; font: 12px 'IBM Plex Mono', monospace; color: rgba(255,255,255,.75); }
+.trayrow .one { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.desk.lxl .trayrow { color: rgba(0,0,0,.65); }
+.logl { display: grid; grid-template-columns: 112px 48px 104px minmax(0,1fr); gap: 14px; align-items: baseline; padding: 5px 18px; font-size: 12.5px; line-height: 1.5; border-bottom: 1px solid var(--bd-row); }
+.logl .t { color: var(--t-faint); } .logl .e { color: var(--t-sec); } .logl .m { color: var(--t); }
+.logl .lv { color: var(--t-faint); } .logl .lv.lw { color: var(--warn-text); } .logl .lv.le { color: var(--crit-text); }
+.logday { padding: 10px 18px 4px; font-size: 11.5px; color: var(--t-faint); }
+.lgr { display: grid; grid-template-columns: 64px 52px minmax(0,1fr); gap: 14px; align-items: center; height: 22px; padding: 7px 18px; border-bottom: 1px solid var(--bd-row); font-size: 12.5px; white-space: nowrap; }
+.lgr.all { grid-template-columns: 64px 52px 104px minmax(0,1fr); }
+.lgr.sel { background: var(--row-sel); }
+.lgr.dbg .lv, .lgr.dbg .m, .lgr.dbg .e { color: var(--t-faint); font-weight: 400; }  /* debug lines: the events' faint words */
+.vh .vctl .chip.dbgc { min-width: calc(11ch + 16px); box-sizing: border-box; }  /* fixed slot: 'debug · off' or 'NN debug' */
+.vh .vctl .chip.dbgc.off { color: var(--t-faint); background: transparent; border-color: var(--bd-row); }
+.sw .swl { display: inline-block; min-width: 11ch; }  /* fixed slot: 'debug' or 'debug · 28m' */
+.lgr .t { font-size: 11.5px; color: var(--t-faint); }
+.lgr .lv { font-weight: 600; font-size: 11.5px; color: var(--t-sec); }
+.lgr .lv.c-crit { color: var(--crit-text); } .lgr .lv.c-warn { color: var(--warn-text); }
+.lgr .e { color: var(--t-sec); overflow: hidden; text-overflow: ellipsis; }
+.lgr .m { color: var(--t); overflow: hidden; text-overflow: ellipsis; }
+.vh .chip .cn { display: inline-block; min-width: 2ch; text-align: right; margin-right: 5px; }
+.narrowk .kpis { grid-template-columns: repeat(3, minmax(0,1fr)) !important; }  /* the editor's narrow preview: tiles in 3 columns */
+.lgday { display: flex; align-items: center; height: 28px; padding: 0 18px; font-size: 11.5px; color: var(--t-faint); border-bottom: 1px solid var(--bd-row); background: var(--row-header); }  /* a day separator, as in the event stream */
+.etab.engt .er { grid-template-columns: 14px minmax(0,1fr) minmax(0,.7fr) minmax(0,.8fr) minmax(0,.6fr) minmax(0,.6fr) minmax(0,2.2fr); }
+.etab .er .estat { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+.etab .er .estat > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.etab .er .estat .btn { flex: none; }
+.engk { border-bottom: 1px solid var(--bd-row); }  /* a selected engine's tiles, right under its row */
+</style></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">16</span><span class="topic-name">Knowing when icygui is blind</span><span class="topic-id" style="background:#f2d974">new</span></div>
+<p class="topic-intro">PLAN.md §4.2, <i>Knowing when icygui is blind</i>. <b>(A) No live data</b>, always on, no setup: an environment that notifies and has had no live data for more than 2 minutes (connection lost, credentials refused, stalled, stale, heartbeat dead) gets one desktop notification naming it, the reason and since when, and one when it recovers; the tray gets a <i>blind</i> look and each environment’s age; every page of that environment shows a banner until data is live again. <b>(B) The heartbeat</b>, optional per environment: an always-OK check icygui watches on the event stream; the cluster health page shows it next to the health line. In this page’s story the prod-cluster stream stalled at 02:14; it is now 02:17.</p>
+<div class="shots"></div>
+<script>
+const L = { theme: 'light' };
+// ---- a. heartbeats and the health alerts, ON topic 06's page (health.js) ----------------------
+// B3 (user, 2026-10-09): one heartbeat per zone that runs checks, and one per
+// endpoint in any HA zone (pinned with command_endpoint). prod-cluster: zone
+// master (HA: master-01, master-02, beats pinned per master), zone ams
+// (sat-ams-01, a zone beat), zone fra (HA: sat-fra-01, sat-fra-02, a zone beat
+// and one per satellite): six heartbeats. A beat slot: [state, age of the
+// last OK beat]; null = no heartbeat on that row.
+const EP = {
+  m1: (b = ['ok', '8s']) => ['ok', 'master-01', 'master', 'r2.14.3-1', '0s ago', '412/s · 388/s', 'connected · this node', b, { sel: true }],
+  m2: (b = ['ok', '14s']) => ['ok', 'master-02', 'master', 'r2.14.3-1', '0s ago', '398/s · 405/s', 'connected', b],
+  m2down: (b = ['crit', '6m 40s']) => ['crit', 'master-02', 'master', 'r2.14.3-1', '6m 40s ago', '0/s · 0/s', 'not connected · retrying', b],
+  ams: () => ['ok', 'sat-ams-01', 'ams', 'r2.14.3-1', '1s ago', '201/s · 12/s', 'connected', null],
+  f1: (b = ['ok', '11s']) => ['ok', 'sat-fra-01', 'fra', 'r2.14.2-1', '0s ago', '104/s · 5/s', 'connected · older version', b],
+  f1down: (b = ['crit', '4m 02s']) => ['crit', 'sat-fra-01', 'fra', 'r2.14.2-1', '4m 02s ago', '0/s · 0/s', 'not connected · retrying', b],
+  f2: (b = ['ok', '26s']) => ['ok', 'sat-fra-02', 'fra', 'r2.14.3-1', '0s ago', '93/s · 4/s', 'connected', b],
+  f2down: (b = ['crit', '6m 02s']) => ['crit', 'sat-fra-02', 'fra', 'r2.14.3-1', '6m 02s ago', '0/s · 0/s', 'not connected · retrying', b],
+};
+const ZN = {
+  master: (eps) => ['ok', 'master', 'top level · 2 endpoints · checks shared between them', null, eps],
+  ams: (b = ['ok', '21s']) => ['ok', 'ams', 'parent master · 1 endpoint · 188 hosts', b, [EP.ams()]],
+  fra: (eps, b = ['ok', '3s'], st = 'ok') => [st, 'fra', 'parent master · 2 endpoints · 214 hosts · checks shared between them', b, eps],
+};
+const S5 = [['ok', 5, 'connected'], ['pend', 0, 'not connected']];
+const S41 = [['ok', 4, 'connected'], ['crit', 1, 'not connected']];
+const BEATS = {
+  ok: { sum: S5, counts: [['ok', 5]], hb: ['ok', 'heartbeats', '6 of 6', 'on time'],
+    zones: [ZN.master([EP.m1(), EP.m2()]), ZN.ams(), ZN.fra([EP.f1(), EP.f2()])] },
+  // (a) master-02 down: its pinned beat came back UNKNOWN from Icinga: dead, with the reason
+  m2: { sum: S41, counts: [['ok', 4], ['crit', 1]], conn: ['3 of 4', 1], hb: ['crit', 'heartbeat', 'master-02', 'dead · last 02:14'],
+    zones: [ZN.master([EP.m1(), EP.m2down()]), ZN.ams(), ZN.fra([EP.f1(), EP.f2()])] },
+  // (b) sat-fra-02 went down; sat-fra-01 is connected but runs nothing: the zone beat and its own stopped
+  fraStuck: { sum: S41, counts: [['ok', 4], ['crit', 1]], conn: ['3 of 4', 1], lateZone: true, hb: ['crit', 'heartbeat', 'fra', 'dead · last 02:31'],
+    zones: [ZN.master([EP.m1(), EP.m2()]), ZN.ams(), ZN.fra([EP.f1(['crit', '4m 10s']), EP.f2down()], ['crit', '4m 10s'], 'crit')] },
+  // (c) sat-fra-01 disconnected and its beat lost: one alert; sat-fra-02 carries the zone
+  f1: { sum: S41, counts: [['ok', 4], ['crit', 1]], conn: ['3 of 4', 1], hb: ['crit', 'heartbeat', 'sat-fra-01', 'dead · last 02:31'],
+    zones: [ZN.master([EP.m1(), EP.m2()]), ZN.ams(), ZN.fra([EP.f1down(), EP.f2()], ['ok', '7s'])] },
+  // (d) the zone fra beat disappeared from discovery: a finding, counted, never '5 of 5'
+  gone: { sum: S5, counts: [['ok', 5]], hb: ['warn', 'heartbeats', '5 of 6', 'fra disappeared'],
+    zones: [ZN.master([EP.m1(), EP.m2()]), ZN.ams(), ZN.fra([EP.f1(), EP.f2()], ['warn', 'disappeared'])] },
+  // Icinga runs no checks: every beat stopped at 02:11
+  stopped: { sum: [['ok', 3, 'connected'], ['crit', 2, 'not connected']], counts: [['ok', 3], ['crit', 2]], conn: ['2 of 4', 1], hb: ['crit', 'heartbeats', '0 of 6', 'dead · last 02:11'],
+    zones: [ZN.master([EP.m1(['crit', '6m 12s']), EP.m2down(['crit', '6m 12s'])]), ZN.ams(['crit', '6m 12s']), ZN.fra([EP.f1down(['crit', '6m 12s']), EP.f2(['crit', '6m 12s'])], ['crit', '6m 12s'], 'crit')] },
+};
+const ALERTS = [
+  ['crit', 'Icinga runs no checks: none since 02:11.', 'active checks fell from 3,283 a minute to 0; all 3,516 checks are late, and every heartbeat stopped at 02:11.', 'show the late checks', 'since 02:11'],
+  ['crit', 'master-02 disconnected, heartbeat lost', '', '', 'since 02:14'],
+  ['crit', 'zone fra: sat-fra-01 disconnected, heartbeat lost', '', '', 'since 02:14'],
+];
+const A_M2 = [['crit', 'heartbeat master-02 dead: Remote Icinga instance ‘master-02’ is not connected', 'Icinga’s result for the check pinned to master-02 (UNKNOWN); master-01 runs every master check.', 'show master-02', 'since 02:14']];
+const A_FRA = [
+  ['crit', 'zone fra runs no checks (sat-fra-01 connected)', 'sat-fra-01 answers, but its beat and the zone beat stopped at 02:31; 1,204 checks in zone fra are late.', 'show the late checks', 'since 02:31'],
+  ['crit', 'zone fra: sat-fra-02 disconnected, heartbeat lost', '', '', 'since 02:29'],
+];
+const A_F1 = [['crit', 'zone fra: sat-fra-01 disconnected, heartbeat lost', 'sat-fra-02 runs zone fra’s checks alone; the zone fra beat is on time.', 'show sat-fra-01', 'since 02:31']];
+const A_GONE = [['warn', 'heartbeat fra disappeared since 14:02', 'discovery no longer finds icygui-hb-fra!beat; zone fra is unwatched until it is back or removed.', 'settings', 'since 14:02']];
+const healthWin = (o, health = 'ok') => clusterWindow(`<div class="col" style="min-height:0;overflow:hidden">${healthPage(o)}</div>`, { cluster: 'health', health, statusBar: {} });
+shot('16a', '16-live-a-health-heartbeat', '<b>Heartbeats per zone and per endpoint on the cluster health page.</b> Topic 06’s approved page; <i>zones and endpoints</i> gets a <b>heartbeat</b> slot at the right of every row (dot + the age of the last beat, fixed width, empty where there is no beat): a zone’s beat on its zone row (ams, fra), a pinned beat on its endpoint row (master-01, master-02; sat-fra-01, sat-fra-02 in the HA zone fra). The heartbeat row under the health line is now their summary: <b>heartbeats 6 of 6 · on time</b>. Zone fra is HA here (two satellites), so the page counts 5 endpoints.',
+  healthWin({ beats: BEATS.ok }), { crops: '16-live-a-zoom:300,40,1140,330' });
+shot('16a-l', '16-live-a-health-heartbeat-light', '<b>Heartbeats per zone and per endpoint</b>, light.', healthWin({ beats: BEATS.ok }), L);
+const SUMS = [['ok', 'heartbeats', '6 of 6', 'on time'], ['warn', 'heartbeat', 'ams', '1 interval late', '48s'], ['crit', 'heartbeat', 'fra', 'dead · last 02:11'], ['crit', 'heartbeat', 'master-02', 'dead · last 02:14'], ['warn', 'heartbeats', '5 of 6', 'fra disappeared'], ['pend', 'heartbeats', '', 'off'], ['pend', 'heartbeats', '', 'none found']];
+const variants = () => `<div class="col" style="background:var(--win-bg);height:100%">${summary(S5, 'Icinga r2.14.3-1 · up 41d 6h')}${SUMS.map(hbSummary).join('')}</div>`;
+shot('16a2', '16-live-a2-heartbeat-states', '<b>The summary row’s states, stacked to show the slots line up.</b> All on time (<i>heartbeats 6 of 6</i>); otherwise the worst beat by name: one interval late (ams, 48s), dead (fra, the last beat 02:11), dead with Icinga’s reason (master-02, 16r); a disappeared beat is counted, never dropped (<i>5 of 6 · fra disappeared</i>); off; and none found (the custom variable matches nothing). Grey means icygui is not watching a beat.',
+  variants(), { w: 1140, h: 300 });
+shot('16a2-l', '16-live-a2-heartbeat-states-light', '<b>The summary row’s states</b>, light.', variants(), { w: 1140, h: 300, theme: 'light' });
+shot('16a3', '16-live-a3-health-alerts', '<b>Icinga health alerts (E), in 06’s banner.</b> Icinga runs no checks, master-02 and sat-fra-01 are disconnected. One block in the worst alert’s tone, the worst in full (first line, detail, an action), the others one line each, worst first, <i>since</i> in a fixed slot. An endpoint that is down and whose beat is lost is <b>one</b> line (<i>zone fra: sat-fra-01 disconnected, heartbeat lost</i>), never two. Every beat is dead (<i>heartbeats 0 of 6 · dead · last 02:11</i>), each heartbeat slot red; the tiles show it (active checks 0, late 3,516, 2 of 4 connections).',
+  healthWin({ stopped: true, beats: BEATS.stopped, alerts: ALERTS }, 'crit'), { h: 1000, crops: '16-live-a3-zoom:300,40,1140,330' });
+shot('16a3-l', '16-live-a3-health-alerts-light', '<b>Icinga health alerts</b>, light.', healthWin({ stopped: true, beats: BEATS.stopped, alerts: ALERTS }, 'crit'), { theme: 'light', h: 1000 });
+shot('16r', '16-live-r-master-beat-dead', '<b>(a) master-02’s pinned beat is dead, with Icinga’s reason.</b> master-02 is disconnected; the check pinned to it with <i>command_endpoint</i> doesn’t go silent, Icinga answers it UNKNOWN, and any non-OK beat is dead with its output in the alert: <i>heartbeat master-02 dead: Remote Icinga instance ‘master-02’ is not connected</i>. One alert for the one cause. Its row: red, heartbeat 6m 40s; master-01 and the zone beats stay green (master-01 runs every master check). Summary: <i>heartbeat master-02 · dead · last 02:14</i>.',
+  healthWin({ beats: BEATS.m2, alerts: A_M2 }, 'crit'), { crops: '16-live-r-zoom:300,40,1140,400' });
+shot('16r-l', '16-live-r-master-beat-dead-light', '<b>(a) master-02’s pinned beat dead</b>, light.', healthWin({ beats: BEATS.m2, alerts: A_M2 }, 'crit'), L);
+shot('16s', '16-live-s-zone-runs-no-checks', '<b>(b) zone fra runs no checks, sat-fra-01 connected.</b> sat-fra-02 went down at 02:29 (one line: <i>zone fra: sat-fra-02 disconnected, heartbeat lost</i>); sat-fra-01 should carry the zone and is connected, but the zone fra beat and its own stopped at 02:31: <i>zone fra runs no checks (sat-fra-01 connected)</i>, the worst, in full. Zone fra’s row is red with its beat 4m 10s; the tiles show 1,204 late checks, all in zone fra. Summary: <i>heartbeat fra · dead · last 02:31</i>.',
+  healthWin({ beats: BEATS.fraStuck, alerts: A_FRA }, 'crit'), { crops: '16-live-s-zoom:300,40,1140,430' });
+shot('16t', '16-live-t-endpoint-down-beat-lost', '<b>(c) sat-fra-01 disconnected and its beat lost: one alert line</b>, <i>zone fra: sat-fra-01 disconnected, heartbeat lost</i>, never an endpoint alert and a heartbeat alert for one cause. sat-fra-02 runs the zone alone: the zone fra beat stays green (7s), sat-fra-01’s slot red (4m 02s).',
+  healthWin({ beats: BEATS.f1, alerts: A_F1 }, 'crit'), { crops: '16-live-t-zoom:300,40,1140,400' });
+shot('16u', '16-live-u-beat-disappeared', '<b>(d) A heartbeat that disappeared.</b> Discovery no longer finds the zone fra beat (deleted, renamed, a bad deploy, a lost permission): a finding, not a smaller count. The alert block says <i>heartbeat fra disappeared since 14:02</i> in the warning tone, with <i>settings</i> to confirm its removal; the summary counts it, <i>heartbeats 5 of 6 · fra disappeared</i>; zone fra’s slot reads <i>disappeared</i>, yellow. It notifies under the trouble policy until the removal is confirmed (16b3).',
+  healthWin({ beats: BEATS.gone, alerts: A_GONE }, 'warn'), { crops: '16-live-u-zoom:300,40,1140,400' });
+shot('16u-l', '16-live-u-beat-disappeared-light', '<b>(d) A heartbeat that disappeared</b>, light.', healthWin({ beats: BEATS.gone, alerts: A_GONE }, 'warn'), L);
+
+// ---- the health page as a built-in dashboard: edit page --------------------------------------
+const healthMore = menu([{ label: 'edit page', ic: 'pencil', hov: true }, { label: 'open as tab', ic: 'arrow-up-right' }], { anchor: '.hbar .glyph.sel', align: 'right' });
+shot('16j', '16-live-j-health-menu', '<b>The health page is a built-in dashboard.</b> Every environment gets exactly 06’s approved layout by default, without opening any editor: the pinned alert block and heartbeat row, then four views of the health kinds in 06’s order, <i>zones and endpoints</i>, <i>checks</i>, <i>queues and connections</i>, <i>global switches</i> (the IcingaDB tile only when that feature is on). Its <i>···</i> (pressed) has <b>edit page</b>, which opens the same dashboard editor as every dashboard (16k).',
+  clusterWindow(`<div class="col" style="min-height:0;overflow:hidden;position:relative">${healthPage({ beats: BEATS.ok, menuOn: true })}${healthMore}</div>`, { cluster: 'health', statusBar: {} }));
+// the editor on the health page
+const lockRow = (n, ic) => `<div class="vrow" style="color:var(--t-muted)"><span class="grip">${icon('lock', 13)}</span><span class="vi">${icon(ic, 13)}</span><span class="vn">${n}</span><span class="vm">pinned</span></div>`;
+const hvRow = (n, ic, m, { sel = false, on = true } = {}) => `<div class="vrow${sel ? ' sel' : ''}"${on ? '' : ' style="opacity:.5"'}><span class="grip">${icon('grip-vertical', 13)}</span><span class="vi">${icon(ic, 13)}</span><span class="vn">${n}</span><span class="vm">${m}</span>${sw(on)}</div>`;
+const TILE_NAMES = [['active checks / min', 1], ['passive checks / min', 1], ['average latency', 1], ['average execution', 1], ['pending', 1], ['late', 1], ['IcingaDB writes', 0]];
+const healthInspector = `<div class="pane" style="background:var(--win-bg)">
+  <div class="hbar pane-h" style="padding:0 18px"><span class="title" style="font-size:13.5px">dashboard</span><span class="grow"></span><span class="right faint">built in · 4 views</span></div>
+  <div class="col" style="gap:12px;padding:14px 18px;overflow:hidden">
+    <div class="field"><div class="lab">name<span class="st faint">built in</span></div><span class="input" style="color:var(--t-muted)">cluster health</span></div>
+    <div class="field"><div class="lab">views<span class="st faint">drag or alt-↑↓ to reorder</span></div><div class="col" style="gap:2px">
+      ${lockRow('alerts', 'triangle-alert')}${lockRow('heartbeats', 'heart-pulse')}
+      ${hvRow('zones and endpoints', 'network', '5 endpoints')}${hvRow('checks', 'gauge', '6 tiles', { sel: true })}${hvRow('queues and connections', 'plug', '5 tiles')}${hvRow('global switches', 'toggle-left', 'off', { on: false })}</div>
+      <div class="vadd">${icon('plus', 13)}add view</div></div>
+    <div style="height:1px;flex:none;background:var(--bd-header);margin:0 -18px"></div>
+    ${viewNameField('checks', 'view 2 of 4')}
+    <div class="field"><div class="lab">display</div>${select(`<span style="display:flex;align-items:center;gap:8px">${icon('gauge', 13)}checks</span>`)}</div>
+    <div class="field"><div class="lab">tiles</div><div style="display:flex;gap:6px;flex-wrap:wrap">${TILE_NAMES.map(([n, on]) => chip(n, { sel: !!on })).join('')}</div></div>
+    <div class="field"><div class="lab">show</div>${sw(true, 'sparklines')}</div>
+  </div></div>`;
+const healthEditorHeader = `<div class="hbar"><span class="title">cluster health</span><span class="acc" style="font-size:12px">editing · prod-cluster</span><span class="grow"></span><span class="glyph sel" style="margin-right:6px">···</span>${btn('discard', { key: 'esc' })}${btn('save', { key: 'ctrl-s', primary: true })}</div>`;
+const resetMenu = menu([{ label: 'reset to default', ic: 'refresh-cw', hov: true }], { anchor: '.hbar .glyph.sel', align: 'right' });
+const healthEditor = `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${healthEditorHeader}<div class="col narrowk" style="min-height:0;overflow:hidden">${healthPage({ beats: BEATS.ok, pick: 'checks', off: ['Icinga’s global switches'] }).replace(/^[\s\S]*?<\/div>/, '')}</div></div>${healthInspector}${resetMenu}</div>`;
+shot('16k', '16-live-k-health-editor', '<b>Editing the health page.</b> The same editor as every dashboard, in the approved inspector layout. The name is built in. In the views list the pinned parts come first as <b>locked rows</b> (a lock in the handle’s slot, <i>pinned</i>): the alert block and the heartbeat row can’t be moved or removed. The four health views follow, each with its handle and a <b>switch</b>: <i>global switches</i> is switched off here (dimmed, gone from the preview). <i>checks</i> is selected (its header marked in the preview): its settings pick <b>which tiles</b> it shows (IcingaDB writes is off: the feature is off). <i>add view</i> lists only the health kinds on this page. The editor’s <i>···</i> (pressed) has <b>reset to default</b>, which brings back 06’s layout.',
+  clusterWindow(healthEditor, { cluster: 'health', statusBar: {} }), { crops: '16-live-k-inspector-zoom:1068,0,372,900' });
+shot('16k-l', '16-live-k-health-editor-light', '<b>Editing the health page</b>, light.', clusterWindow(healthEditor, { cluster: 'health', statusBar: {} }), L);
+
+// the health page's editor: add view lists only the health kinds
+const healthEditorAdd = `<div class="split" style="grid-template-columns:minmax(0,1fr) 372px;position:relative"><div class="col" style="min-height:0;overflow:hidden">${healthEditorHeader.replace('<span class="glyph sel" style="margin-right:6px">', '<span class="glyph" style="margin-right:6px">')}<div class="col narrowk" style="min-height:0;overflow:hidden">${healthPage({ beats: BEATS.ok, pick: 'checks', off: ['Icinga’s global switches'] }).replace(/^[\s\S]*?<\/div>/, '')}</div></div>${healthInspector.replace('<div class="vadd">', '<div class="vadd open">')}${layoutMenu({ kinds: HEALTH_KINDS, focus: 'global switches' })}</div>`;
+shot('16l', '16-live-l-health-add-view', '<b><i>add view</i> on the health page.</b> The editor is the same abstraction for every dashboard, parameterised by the kinds a page allows: on the health page <i>add view</i> lists only the <b>health kinds</b> (zones and endpoints, checks, queues and connections, global switches); on the diagnostics page only <i>app</i>, <i>engines</i> and <i>log</i>. These kinds live on their built-in pages only: a normal dashboard’s <i>add view</i> never lists them (15g). Adding a kind that is switched off just switches it back on.',
+  clusterWindow(healthEditorAdd, { cluster: 'health', statusBar: {} }));
+
+// ---- b. settings: the environment's trouble alerts, heartbeats found by discovery (B3) --------
+// heartbeats: 'find by custom variable' (default icygui_heartbeat) lists every
+// match with what it proves, its object, interval and last beat; 'list' takes
+// host!service entries for setups that can't add a variable. A heartbeat
+// discovery no longer finds stays as a row until its removal is confirmed.
+const FOUND = [
+  ['ok', 'master-01', 'icygui-hb-master-01!beat', '30s', '8s'],
+  ['ok', 'master-02', 'icygui-hb-master-02!beat', '30s', '14s'],
+  ['ok', 'zone ams', 'icygui-hb-ams!beat', '30s', '21s'],
+  ['ok', 'zone fra', 'icygui-hb-fra!beat', '30s', '3s'],
+  ['ok', 'sat-fra-01', 'icygui-hb-sat-fra-01!beat', '30s', '11s'],
+  ['ok', 'sat-fra-02', 'icygui-hb-sat-fra-02!beat', '60s', '26s'],
+];
+const foundRow = ([st, what, obj, iv, age], gone) => gone
+  ? `<div class="hr">${dot('warn', 'd7')}<span class="strong">${what}</span><span class="faint">${obj}</span><span class="wide"><span class="c-warn">disappeared since 14:02</span>${btn('confirm removal', { sm: true })}</span></div>`
+  : `<div class="hr">${dot(st, 'd7')}<span class="strong">${what}</span><span class="faint">${obj}</span><span class="muted">${iv}</span><span class="r sec">${age}</span></div>`;
+const foundList = (gone) => `<div class="hblist"><div class="hr h"><span></span><span>proves</span><span>object</span><span>every</span><span class="r">last beat</span></div>${FOUND.map((f) => foundRow(f, gone && f[1] === 'zone fra')).join('')}</div>`;
+const listEntry = (obj, res, { bad = false, focus = false } = {}) => `<div class="le">${inp(obj, 300, { focus, bad })}<span class="${bad ? 'c-crit' : 'muted'}" style="width:24ch">${res}</span><span class="grow"></span><span class="faint" style="display:flex">${icon('x', 13)}</span></div>`;
+const listBody = `<div class="hblist" style="border-top:1px solid var(--bd-row);padding-top:4px">${listEntry('icygui-hb-master-01!beat', 'master-01 · every 30s')}${listEntry('icygui-hb-master-02!beat', 'master-02 · every 30s')}${listEntry('icygui-hb-ams!beet', 'not found', { bad: true, focus: true })}<div class="le"><span class="acc" style="display:flex;align-items:center;gap:6px">${icon('plus', 13)}add</span></div></div>`;
+const envBody = ({ mode = 'find', gone = false } = {}) => ssec('connection') +
+  srow('URLs', '', `<span class="muted" style="font-size:12px">master-01.prod.example.com:5665, master-02…</span>`) +
+  ssec('trouble alerts') +
+  srow('policy', '', select('notify', 160)) +
+  srow('no live data', '', `<span class="faint" style="font-size:12px">always on</span>`) +
+  srow('heartbeats', '', seg(['find by custom variable', 'list'], mode === 'find' ? 0 : 1)) +
+  (mode === 'find'
+    ? srow('variable', '', `${inp('icygui_heartbeat', 200)}<span class="${gone ? 'c-warn' : 'c-ok'}" style="font-size:12px;width:24ch;white-space:nowrap">${gone ? 'found 5 · 1 disappeared' : 'found 6'}</span>`, { sub: true }) + foundList(gone)
+    : listBody) +
+  `<div class="ds muted" style="font-size:12px;padding:10px 0 12px;line-height:1.5;border-top:1px solid var(--bd-row)">Trouble alerts always notify; only a pause holds them back.</div>`;
+const envSettings = (o) => settingsWindow({ page: 'icinga', section: 2, title: 'prod-cluster', subtitle: 'environment · on this computer', body: envBody(o) });
+shot('16b', '16-live-b-settings', '<b>Settings → icinga → an environment: trouble alerts, heartbeats by discovery.</b> <b>policy</b> <i>notify</i> | <i>persistent</i>; <i>no live data</i> always on. <b>heartbeats</b>: <i>find by custom variable</i> (the default) with the variable’s name, <i>icygui_heartbeat</i>, and the result in a fixed slot (<i>found 6</i>). Under it every match: what it proves (master-01, master-02, zone ams, zone fra, sat-fra-01, sat-fra-02), its <i>host!service</i> dimmed, its interval (read from the object; each beat keeps its own time budget) and its last beat. One help line.',
+  envSettings(), { w: 1080, h: 820 });
+shot('16b-l', '16-live-b-settings-light', '<b>Trouble alerts, heartbeats by discovery</b>, light.', envSettings(), { w: 1080, h: 820, theme: 'light' });
+shot('16b3', '16-live-b3-disappeared', '<b>A heartbeat disappeared.</b> The zone fra beat is no longer found: its row stays, yellow, <i>disappeared since 14:02</i>, with <b>confirm removal</b> at its right; the result slot reads <i>found 5 · 1 disappeared</i>. Until it is confirmed (or the beat is back) it counts on the health page (16u) and notifies under the trouble policy.',
+  envSettings({ gone: true }), { w: 1080, h: 820, crops: '16-live-b3-zoom:300,380,780,330' });
+shot('16b2', '16-live-b2-list', '<b>The list mode</b>, for setups that can’t add a variable: <i>host!service</i> entries, each with what it proves and its interval in a fixed slot, × to remove, <i>add</i> under them. A typo shows at once: <i>icygui-hb-ams!beet</i> is <i>not found</i>, in the critical text colour, and the field keeps the focus.',
+  envSettings({ mode: 'list' }), { w: 1080, h: 820, crops: '16-live-b2-zoom:300,380,780,240' });
+shot('16b2-l', '16-live-b2-list-light', '<b>The list mode</b>, light.', envSettings({ mode: 'list' }), { w: 1080, h: 820, theme: 'light' });
+
+// ---- c. the desktop notifications ------------------------------------------------------------
+const MARK = (s) => `<svg viewBox="100 100 824 824" width="${s}" height="${s}"><defs><linearGradient id="og${s}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffb35c"/><stop offset="1" stop-color="#f2862f"/></linearGradient></defs><rect x="100" y="100" width="824" height="824" rx="185" fill="#1c1f22"/><path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" fill="none" stroke="url(#og${s})" stroke-width="30" stroke-linecap="round"/><circle cx="512" cy="512" r="178" fill="url(#og${s})"/><circle cx="718.5" cy="305.5" r="44" fill="#74ade8"/></svg>`;
+const NOTES = [
+  ['no live data from prod-cluster', 'since 02:14 · event stream stalled', false],
+  ['heartbeat lost on prod-cluster', 'Icinga stopped running checks (last 02:11)', true],
+  ['prod-cluster live again', 'after 6m', false],
+];
+const dunst = (y, [t, b, crit]) => `<div class="dunst${crit ? ' crit' : ''}" style="right:14px;top:${y}px"><div class="ap">icygui</div><b>${t}</b><div>${b}</div></div>`;
+const macn = (y, [t, b]) => `<div class="macn" style="right:14px;top:${y}px">${MARK(38)}<div><div class="tt"><b>icygui</b><span>now</span></div><div style="font-weight:600">${t}</div><div class="bd">${b}</div></div></div>`;
+const notesFrame = `<div class="desk lx" style="left:0;width:720px"><div class="lxbar"><span>Activities</span><span class="clock">Thu 02:17</span><span class="tray"><span class="ti">${TRAYICON('blind', 18)}</span></span></div>
+    ${dunst(40, NOTES[0])}${dunst(140, NOTES[1])}${dunst(240, NOTES[2])}<span class="tag">Linux (dunst; the heartbeat note at critical urgency)</span></div>
+  <div class="desk mac" style="left:720px;width:720px">${macn(40, NOTES[0])}${macn(136, NOTES[1])}${macn(232, NOTES[2])}<span class="tag">macOS</span></div>`;
+shot('16c', '16-live-c-notifications', '<b>The desktop notifications</b>, kept short: the title names the environment and what happened, the body says since when and why. <i>no live data from prod-cluster · since 02:14 · event stream stalled</i> (any cause: connection lost, credentials refused, stalled, stale); <i>heartbeat lost on prod-cluster · Icinga stopped running checks (last 02:11)</i>, sent at critical urgency, and with the <i>persistent</i> policy it stays until the beat is back; and the recovery, <i>prod-cluster live again · after 6m</i>. One of each per outage: storm limits and quiet hours don’t hold them back; pausing that environment (or all) does. Left Linux (dunst; its critical frame), right macOS. Drawn here stacked; they arrive minutes apart.',
+  notesFrame, { h: 420 });
+
+const ALERT_NOTES = [
+  ['prod-cluster: master-02 disconnected', 'since 02:14', false],
+  ['prod-cluster: Icinga runs no checks', 'since 02:11', true],
+  ['prod-cluster: master-02 connected again', 'after 9m', false],
+];
+const alertNotes = `<div class="desk lx" style="left:0;width:720px"><div class="lxbar"><span>Activities</span><span class="clock">Thu 02:23</span><span class="tray"><span class="ti">${TRAYICON('crit', 18)}</span></span></div>
+    ${dunst(40, ALERT_NOTES[0])}${dunst(140, ALERT_NOTES[1])}${dunst(240, ALERT_NOTES[2])}<span class="tag">Linux (dunst)</span></div>
+  <div class="desk mac" style="left:720px;width:720px">${macn(40, ALERT_NOTES[0])}${macn(136, ALERT_NOTES[1])}${macn(232, ALERT_NOTES[2])}<span class="tag">macOS</span></div>`;
+shot('16c2', '16-live-c2-alert-notifications', '<b>Icinga health alerts as notifications.</b> The title names the environment and what is wrong, the body since when: <i>prod-cluster: master-02 disconnected · since 02:14</i>, <i>prod-cluster: Icinga runs no checks · since 02:11</i> (critical urgency: nothing is being checked), and one when it is fine again, <i>prod-cluster: master-02 connected again · after 9m</i>. They follow the environment’s one trouble policy.',
+  alertNotes, { h: 420 });
+
+// ---- d, f. the banner on a page of that environment, and the footer -----------------------------
+const blindBanner = `<div class="banner" style="--tone:var(--warn);--tint:var(--warn-tint)"><span class="c-warn">${icon('triangle-alert', 14)}</span><div class="col" style="gap:2px;min-width:0"><span style="font-size:12.5px;color:var(--t-strong)">no live data for 3m — states may be outdated</span><span class="trunc" style="font-size:12px;color:var(--t-muted)">the event stream from master-01 stalled at 02:14; reconnecting</span></div><span class="grow"></span><span class="acc" style="font-size:12px">retry now</span></div>`;
+const dashBlind = appWindow(listHeader({ title: 'overview', subtitle: 'service problems' }) + blindBanner + summary() + `<div class="list">${rows()}</div>`,
+  { activeItem: 'overview', foot: { health: 'warn', age: '<span class="c-warn">no data 3m</span>' }, statusBar: { diag: 'warn' } });
+shot('16d', '16-live-d-banner', '<b>A page of a blind environment.</b> Every page of prod-cluster shows the connection banner (the existing style, warning tone, under the header): <i>no live data for 3m — states may be outdated</i>, the reason on its second line, <i>retry now</i> at the right. The minutes count up in place (a fixed slot). The rows stay as they are: no tint, no dimming; checks that come due show <i>late</i> as today. <b>The status bar</b> (16f) keeps the node and puts the stale wording where the age was: <i>no data 3m</i>, in the warning text colour, the dot yellow; the diagnostics symbol at the right gets a yellow dot.',
+  dashBlind, { crops: '16-live-f-footer-zoom:0,860,560,40;16-live-d-zoom:300,0,1140,180' });
+shot('16d-l', '16-live-d-banner-light', '<b>A page of a blind environment</b>, light.', dashBlind, { theme: 'light', crops: '16-live-f-footer-zoom-light:0,860,560,40' });
+
+// ---- e. the tray --------------------------------------------------------------------------
+// the tray mark (ic-platform tray/icon.rs): orbit and core in the worst state's
+// colour; BLIND (NEW): the core hollow and the orbit dashed, in grey, with the
+// node in the warning colour: data is missing, not a state
+function TRAYICON(look, size, lightBg = false) {
+  const grey = lightBg ? '#6b7178' : '#9aa1a8';
+  const tint = { ok: lightBg ? '#34a058' : '#56b870', crit: lightBg ? '#e04848' : '#e06c6c', blind: grey }[look];
+  const blind = look === 'blind';
+  return `<svg viewBox="190 190 644 644" width="${size}" height="${size}" style="display:block;flex:none">
+    <path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" fill="none" stroke="${tint}" stroke-width="40" stroke-linecap="round"${blind ? ' stroke-dasharray="70 70"' : ''}/>
+    <circle cx="512" cy="512" r="${blind ? 150 : 178}" fill="${blind ? 'none' : tint}"${blind ? ` stroke="${tint}" stroke-width="56"` : ''}/><circle cx="718.5" cy="305.5" r="50" fill="${blind ? (lightBg ? '#e0a020' : '#e5b04a') : '#74ade8'}"/></svg>`;
+}
+const trayFrame = (light) => `<div class="desk ${light ? 'lxl' : 'lx'}" style="left:0;width:1440px">
+  <div class="lxbar"><span>Activities</span><span class="clock">Thu 02:17</span><span class="tray"><span class="ti on">${TRAYICON('blind', 18, light)}</span></span></div>
+  <div class="gmenu" style="right:6px;top:32px">
+    <div class="it">Open icygui</div><div class="sp"></div>
+    <div class="it hov">prod-cluster<span class="r">no data 3m</span></div>
+    <div class="it">staging<span class="r">live 2s</span></div>
+    <div class="it">lab<span class="r">live 19s</span></div><div class="sp"></div>
+    <div class="it">Pause notifications<span class="r">›</span></div>
+    <div class="it">Quit icygui</div></div>
+  <div class="trayrow" style="left:80px;top:120px">
+    <div class="one">${TRAYICON('ok', 48, light)}<span>all fine</span></div>
+    <div class="one">${TRAYICON('crit', 48, light)}<span>a problem</span></div>
+    <div class="one">${TRAYICON('blind', 48, light)}<span>blind (NEW)</span></div></div>
+  <span class="tag">the tray icon at 48px (it is 16–22px in the panel), and its menu</span></div>`;
+shot('16e', '16-live-e-tray', '<b>The tray.</b> Left, the tray mark’s looks at a large size: all fine (green), a problem (the worst state’s colour, here critical), and the new <b>blind</b> look: the core hollow and the orbit broken, in grey, with the small node in the warning colour. Grey alone already means “nothing connected”; blind is “connected once, no live data now”, and it wins over any state colour, since the states may be outdated. Right, the menu (the desktop draws it): each environment with its age, <i>prod-cluster · no data 3m</i>, <i>staging · live 2s</i>, <i>lab · live 19s</i>; a click opens that environment. The tooltip says the same, one line each.',
+  trayFrame(false), { h: 320 });
+shot('16e-l', '16-live-e-tray-light', '<b>The tray</b>, on a light panel.', trayFrame(true), { h: 320 });
+
+// ---- g. the log page (F): sparse, state transitions only --------------------------------------
+const LOG = [
+  ['day', 'Wed 7 Oct'],
+  ['08:02:11', 'info', 'all', 'icygui 1.0.0 started · 3 environments'],
+  ['08:02:12', 'info', 'prod-cluster', 'connected to master-01 · full view'],
+  ['08:02:12', 'info', 'staging', 'connected to stg-master-01 · full view'],
+  ['08:02:14', 'error', 'lab', 'login refused by lab-icinga (401): check the API user’s password'],
+  ['09:40:05', 'info', 'all', 'switched to quiet: the window is hidden'],
+  ['11:17:44', 'warn', 'prod-cluster', 'alert raised: zone fra has no connected endpoint'],
+  ['11:20:02', 'info', 'prod-cluster', 'alert cleared: zone fra connected again after 2m 18s'],
+  ['13:05:31', 'warn', 'prod-cluster', 'storm on prod-cluster: 37 notifications held in 60 s'],
+  ['16:48:10', 'warn', 'staging', 'heartbeat missed, last_check fresh: reconnecting the stream'],
+  ['16:48:12', 'info', 'staging', 'live again after 1m 02s'],
+  ['day', 'Thu 8 Oct'],
+  ['02:14:09', 'warn', 'prod-cluster', 'reconnecting to prod-cluster: event stream stalled (41 checks in the last minute, no event for 124 s)'],
+  ['02:16:14', 'warn', 'prod-cluster', 'no live data since 02:14 · notified'],
+  ['02:18:21', 'info', 'prod-cluster', 'reconnected to prod-cluster after 7 attempts, 4m 12s'],
+  ['02:18:21', 'info', 'prod-cluster', 'live again after 4m 12s'],
+];
+const logLines = (env = '') => LOG.filter((l) => l[0] === 'day' || !env || l[2] === env || l[2] === 'all').map((l) => (l[0] === 'day' ? `<div class="logday">${l[1]}</div>` : `<div class="logl"><span class="t">${l[0]}</span><span class="lv ${l[1] === 'warn' ? 'lw' : l[1] === 'error' ? 'le' : ''}">${l[1]}</span><span class="e trunc">${l[2]}</span><span class="m">${l[3]}</span></div>`)).join('');
+// (G) DIAGNOSTICS: a page in the main window built like a two-view dashboard,
+// reached from 'diagnostics' in the sidebar's cluster section (under health;
+// its dot = the engine's state). View 1 'engine': the health markers as 06's
+// tiles; view 2 'log': event-style rows, selectable like any list.
+const T = (label, value, sub, points, o = {}) => kpi(label, value, sub, points, o);
+const flat = (v, n = 12) => Array.from({ length: n }, () => v);  // steady: a flat line
+const TILES = {
+  'prod-cluster': [
+    T('connection', 'live', 'master-01 · full view', null),
+    T('last event', '2s', '412 events/s', [1, 2, 1, 3, 1, 2, 1, 2, 1, 1, 2, 2]),
+    T('engine tick', '1s', 'every 5 s', flat(1)),
+    T('last evaluation', '38 ms', 'of 3,516 objects', [36, 41, 37, 39, 38, 44, 37, 36, 40, 38, 37, 38]),
+    T('queues', '0', 'snapshot · notifier', flat(0)),
+    T('request budget', '4 / 16', 'requests in flight', null),
+    T('last status poll', '12s', 'every 30 s', null),
+    T('last reconcile', '3m', 'adaptive · every 15m', null),
+    T('event log lag', '0 ms', 'writes behind', null),
+    T('up', '18h 15m', 'since 08:02 yesterday', null),
+  ],
+  staging: [
+    T('connection', 'live', 'stg-master-01 · full view', null, { cls: 'v-warn' }),
+    T('last event', '41s', 'nothing read since 02:40', [1, 2, 1, 2, 1, 2, 1, 2, 9, 21, 33, 41], { cls: 'v-warn', last: 'var(--warn)' }),
+    T('engine tick', '34s', 'every 5 s · missed 6', [1, 1, 1, 1, 1, 1, 1, 1, 6, 16, 26, 34], { cls: 'v-bad', last: 'var(--crit)' }),
+    T('last evaluation', '44 ms', 'of 1,280 objects', [41, 43, 40, 44, 42, 44, 43, 41, 44, 44, 44, 44]),
+    T('queues', '1,204', 'snapshot · growing', [0, 0, 0, 0, 0, 0, 0, 0, 120, 480, 860, 1204], { cls: 'v-warn', last: 'var(--warn)' }),
+    T('request budget', '2 / 16', 'requests in flight', null),
+    T('last status poll', '28s', 'every 30 s', null),
+    T('last reconcile', '9m', 'adaptive · every 15m', null),
+    T('event log lag', '0 ms', 'writes behind', null),
+    T('up', '9s', 'restarted 02:41:12', null),
+  ],
+};
+// log lines: [time, level, env, message]; app-level lines name 'app'
+const LOGS = {
+  'prod-cluster': [
+    ['day', 'Wed 7 Oct'],
+    ['08:02:12', 'info', 'prod-cluster', 'connected to master-01 · full view'],
+    ['11:17:44', 'warn', 'prod-cluster', 'alert raised: zone fra has no connected endpoint'],
+    ['11:20:02', 'info', 'prod-cluster', 'alert cleared: zone fra connected again after 2m 18s'],
+    ['13:05:31', 'warn', 'prod-cluster', 'storm on prod-cluster: 37 notifications held in 60 s'],
+    ['17:30:00', 'info', 'prod-cluster', 'reconciled: 3,516 objects, 2 changed'],
+    ['day', 'Thu 8 Oct'],
+    ['02:14:09', 'warn', 'prod-cluster', 'reconnecting: event stream stalled (41 checks in the last minute, no event for 124 s)'],
+    ['02:16:14', 'warn', 'prod-cluster', 'no live data since 02:14 · notified'],
+    ['02:18:21', 'info', 'prod-cluster', 'reconnected to master-01 after 7 attempts, 4m 12s'],
+    ['02:18:21', 'info', 'prod-cluster', 'live again after 4m 12s'],
+  ],
+  staging: [
+    ['day', 'Wed 7 Oct'],
+    ['08:02:12', 'info', 'staging', 'connected to stg-master-01 · full view'],
+    ['16:48:10', 'warn', 'staging', 'heartbeat missed, last_check fresh: reconnecting the stream'],
+    ['16:48:12', 'info', 'staging', 'live again after 1m 02s'],
+    ['day', 'Thu 8 Oct'],
+    ['02:30:02', 'info', 'staging', 'reconciled: 1,280 objects, 0 changed'],
+    ['02:41:12', 'error', 'staging', 'engine stuck: no tick for 30 s · restarted (1 of 3)'],
+    ['02:41:13', 'info', 'staging', 'connected to stg-master-01 · full view'],
+  ],
+  all: [
+    ['day', 'Wed 7 Oct'],
+    ['08:02:11', 'info', 'app', 'icygui 1.0.0 started · 3 environments'],
+    ['08:02:12', 'info', 'prod-cluster', 'connected to master-01 · full view'],
+    ['08:02:12', 'info', 'staging', 'connected to stg-master-01 · full view'],
+    ['08:02:14', 'error', 'lab', 'login refused by lab-icinga (401): check the API user’s password'],
+    ['09:40:05', 'info', 'app', 'switched to quiet: the window is hidden'],
+    ['13:05:31', 'warn', 'prod-cluster', 'storm on prod-cluster: 37 notifications held in 60 s'],
+    ['16:48:10', 'warn', 'staging', 'heartbeat missed, last_check fresh: reconnecting the stream'],
+    ['day', 'Thu 8 Oct'],
+    ['02:14:09', 'warn', 'prod-cluster', 'reconnecting: event stream stalled (41 checks in the last minute, no event for 124 s)'],
+    ['02:18:21', 'info', 'prod-cluster', 'live again after 4m 12s'],
+    ['02:41:12', 'error', 'staging', 'engine stuck: no tick for 30 s · restarted (1 of 3)'],
+  ],
+};
+const LV_CLS = { error: 'c-crit', warn: 'c-warn', info: '', debug: 'faint' };
+const logRow = ([t, lv, env, msg], { sel = false, all = false } = {}) => t === 'day' ? `<div class="lgday">${lv}</div>` : `<div class="lgr${all ? ' all' : ''}${sel ? ' sel' : ''}${lv === 'debug' ? ' dbg' : ''}"><span class="t">${t}</span><span class="lv ${LV_CLS[lv]}">${lv.toUpperCase()}</span>${all ? `<span class="e">${env}</span>` : ''}<span class="m">${msg}</span></div>`;
+// the log view's header: the scope switch, level chips with counts in digit
+// slots (they filter), search, follow; ··· holds open log folder and save diagnostics
+const lvChips = (counts, on = ['error', 'warn', 'info'], debug = false) => `<span class="fchips">${['error', 'warn', 'info'].map((lv, i) => `<span class="chip${on.includes(lv) ? ' sel' : ''}"><span class="cn">${counts[i]}</span>${lv}</span>`).join('')}${debug ? `<span class="chip dbgc sel"><span class="cn">${counts[3]}</span>debug</span>` : '<span class="chip dbgc off">debug · off</span>'}</span>`;
+// the debug switch: off 'debug'; on, its time left (it turns itself off after 30 minutes)
+const dbgSwitch = (on) => `<span class="sw${on ? ' on' : ''}"><span class="trk"></span><span class="swl">${on ? 'debug · 28m' : 'debug'}</span></span>`;
+const logControls = (scope, counts) => `<span class="vctl"><span class="seg cmp" style="margin-right:2px">${['this environment', 'all'].map((m) => `<span class="${m === scope ? 'on' : ''}">${m}</span>`).join('')}</span>${lvChips(counts)}<span class="input" style="height:22px;width:120px;font-size:11.5px;box-sizing:border-box;padding:0 8px"><span class="ph">search</span></span>${sw(true, 'follow')}</span>`;
+const STUCK_BANNER = `<div class="banner" style="--tone:var(--crit);--tint:var(--crit-tint)"><span class="c-crit">${icon('triangle-alert', 14)}</span><div class="col" style="gap:2px;min-width:0">
+  <span style="font-size:12.5px;color:var(--t-strong)">engine stuck · restarted 1 of 3</span>
+  <span class="trunc" style="font-size:12px;color:var(--t-muted)">no tick since 02:40:38; the watchdog restarted it at 02:41:12; after 3 restarts in 10 minutes it stays stopped.</span></div><span class="grow"></span><span class="acc" style="font-size:12px;white-space:nowrap">show its log lines</span></div>`;
+const APP_TILES = [
+  T('UI thread', '8 ms', 'longest answer', [6, 7, 9, 6, 8, 7, 12, 7, 6, 8, 7, 8]),
+  T('engines', '2 live · 1 failed', 'lab: login refused', null, { cls: 'v-warn' }),
+  T('memory', '412 MB', 'resident', [398, 401, 404, 403, 406, 405, 408, 409, 410, 411, 412, 412]),
+  T('settings writes', 'ok', 'last 02:10 · settings.toml', null),
+  T('notifier', '0 queued', 'desktop notifications', flat(0)),
+];
+// TWO diagnostics pages (user, 2026-10-08), the approved g5 look:
+// 'diagnostics · app' (the monitor): views app + log (the app's own lines;
+// 'include engines' adds every engine's lines); 'diagnostics · engine' (the
+// gauge): views engines + log (engine lines only, never the app's)
+// the one log, in order: [time, level, source, message, stuck-only]
+const ALL_LOG = [
+  ['day', 'Wed 7 Oct'],
+  ['08:02:11', 'info', 'app', 'icygui 1.0.0 started · 3 environments'],
+  ['08:02:11', 'info', 'app', 'settings loaded from settings.toml'],
+  ['08:02:12', 'info', 'prod-cluster', 'connected to master-01 · full view'],
+  ['08:02:12', 'info', 'staging', 'connected to stg-master-01 · full view'],
+  ['08:02:14', 'error', 'lab', 'login refused by lab-icinga (401): check the API user’s password'],
+  ['09:40:05', 'info', 'app', 'switched to quiet: the window is hidden'],
+  ['11:17:44', 'warn', 'prod-cluster', 'alert raised: zone fra has no connected endpoint'],
+  ['11:20:02', 'info', 'prod-cluster', 'alert cleared: zone fra connected again after 2m 18s'],
+  ['12:31:50', 'info', 'app', 'window shown'],
+  ['13:05:31', 'warn', 'prod-cluster', 'storm: 37 notifications held in 60 s'],
+  ['16:48:10', 'warn', 'staging', 'heartbeat missed, last_check fresh: reconnecting the stream'],
+  ['16:48:12', 'info', 'staging', 'live again after 1m 02s'],
+  ['17:30:00', 'info', 'prod-cluster', 'reconciled: 3,516 objects, 2 changed'],
+  ['18:04:22', 'warn', 'app', 'notification server not answering · sent after a 2 s retry'],
+  ['day', 'Thu 8 Oct'],
+  ['02:10:03', 'info', 'app', 'settings saved to settings.toml'],
+  ['02:14:09', 'warn', 'prod-cluster', 'reconnecting: event stream stalled (41 checks in the last minute, no event for 124 s)'],
+  ['02:16:14', 'warn', 'prod-cluster', 'no live data since 02:14 · notified'],
+  ['02:16:14', 'info', 'app', 'notification sent: no live data from prod-cluster'],
+  ['02:18:21', 'info', 'prod-cluster', 'reconnected to master-01 after 7 attempts, 4m 12s'],
+  ['02:18:21', 'info', 'prod-cluster', 'live again after 4m 12s'],
+  ['02:30:02', 'info', 'staging', 'reconciled: 1,280 objects, 0 changed'],
+  ['02:41:02', 'debug', 'staging', 'watchdog: no tick for 24 s', true],
+  ['02:41:12', 'error', 'staging', 'engine stuck: no tick for 30 s · restarted (1 of 3)', true],
+  ['02:41:13', 'info', 'staging', 'connected to stg-master-01 · full view', true],
+  ['02:41:13', 'debug', 'staging', 'GET /v1/objects/services?… 200 · 1,280 objects · 182 ms', true],
+  ['02:41:14', 'debug', 'staging', 'event applied: CheckResult disk /var on k8s-node-07', true],
+  ['02:41:18', 'debug', 'staging', 'tick: 1,280 objects evaluated · 44 ms', true],
+  ['02:41:13', 'info', 'app', 'notification sent: staging engine stuck', true],
+];
+// the lines a log shows, without day separators left empty
+const pickLog = (keep, stuck, debug = false) => ALL_LOG.filter((l) => l[0] === 'day' || ((stuck || !l[4]) && (debug || l[1] !== 'debug') && keep(l[2]))).filter((l, i, arr) => !(l[0] === 'day' && (i === arr.length - 1 || arr[i + 1][0] === 'day')));
+const lvCounts = (lines) => { const n = (k) => lines.filter((l) => l[1] === k).length; return [n('error'), n('warn'), n('info'), n('debug')]; };
+const SEARCH = `<span class="input" style="height:22px;width:120px;font-size:11.5px;box-sizing:border-box;padding:0 8px"><span class="ph">search</span></span>`;
+const diagHead = (sub) => `<div class="hbar"><span class="title">diagnostics</span><span class="subtitle">${sub}</span><span class="grow"></span><span class="glyph">···</span></div>`;
+const logView = (lines, chips, { all = true, selRows = [] } = {}) => viewHeader({ name: 'log', display: 'stream', ic: 'scroll-text', filter: '', controls: `<span class="vctl">${chips}</span>`, sort: '', focus: true })
+  + `<div class="vbody">${lines.map((l, i) => logRow(l, { sel: selRows.includes(i), all })).join('')}</div>`;
+const ENGINES = (stuck) => [
+  ['prod-cluster', 'ok', 'live', 'master-01', ['2s'], ['1s'], 'running · up 18h 15m'],
+  stuck
+    ? ['staging', 'crit', 'live', 'stg-master-01', ['41s', 'warn'], ['34s', 'crit'], ['stuck · restarted 1 of 3', 'crit']]
+    : ['staging', 'ok', 'live', 'stg-master-01', ['1s'], ['1s'], 'running · up 18h 15m'],
+  ['lab', 'warn', 'not connected', 'lab-icinga', ['—'], ['1s'], ['running · login refused', 'warn']],
+];
+const cell = (v) => (Array.isArray(v) ? `<span class="${v[1] === 'crit' ? 'c-crit' : v[1] === 'warn' ? 'c-warn' : 'sec'}">${v[0]}</span>` : `<span class="sec">${v}</span>`);
+const engRow = ([env, st, mode, node, ev, tick, status], sel) => `<div class="er${sel ? ' sel' : ''}">${dot(st, 'd7')}<span class="strong">${env}</span><span class="muted">${mode}</span><span class="muted">${node}</span>${cell(ev)}${cell(tick)}<span class="estat">${Array.isArray(status) ? cell(status) : `<span class="muted">${status}</span>`}${sel ? btn('restart engine', { icon: 'refresh-cw', sm: true }) : ''}</span></div>`;
+const engTiles = (env) => `<div class="kpis engk" style="grid-template-columns:repeat(5,minmax(0,1fr))">${TILES[env].slice(1, 6).join('')}</div>`;
+// all engines: the compact rows; a chosen engine: its row, expanded
+const engTable = (stuck, selEnv) => `<div class="etab engt"><div class="er h"><span></span><span>engine</span><span>stream</span><span>node</span><span>last event</span><span>engine tick</span><span>status</span></div>
+  ${ENGINES(stuck).filter((e) => !selEnv || e[0] === selEnv).map((e) => engRow(e, e[0] === selEnv) + (e[0] === selEnv ? engTiles(e[0]) : '')).join('')}</div>`;
+// the engines view's select: all engines, then each engine with its state dot
+const engVal = (env, stuck) => { const e = ENGINES(stuck).find((x) => x[0] === env); return env ? `<span style="display:flex;align-items:center;gap:8px">${dot(e[1], 'd7')}${env}</span>` : 'all engines'; };
+const engItems = (stuck) => [{ label: 'all engines' }, '-', ...ENGINES(stuck).map((e) => ({ label: e[0], dotSt: e[1] }))];
+const engSelect = (env, stuck, open) => `<span class="vctl"><span class="faint">engine</span>${open ? selectOpen(engVal(env, stuck), engItems(stuck), { current: env || 'all engines', focus: 'staging', compact: true }) : select(engVal(env, stuck))}</span>`;
+const engineChip = (env) => `<span class="chip filled" style="gap:6px;height:22px;box-sizing:border-box">engine ${env}<span class="faint" style="display:flex">${icon('x', 11)}</span></span>`;
+// 1. the app's page (the monitor): app + log of the app's own lines
+function appDiagPage({ include = false, stuck = false, debug = false } = {}) {
+  const lines = pickLog((src) => include || src === 'app', stuck, debug);
+  const appHdr = viewHeader({ name: 'app', display: 'tiles', ic: 'monitor', filter: '', counts: [['warn', 1], ['ok', 4]], sort: '', more: false });
+  const chips = `${lvChips(lvCounts(lines), undefined, debug)}${SEARCH}${sw(include, 'include engines')}${dbgSwitch(debug)}${sw(true, 'follow')}`;
+  return `<div class="col" style="min-height:0;flex:1;overflow:hidden">${diagHead('app')}${appHdr}<div class="kpis" style="grid-template-columns:repeat(5,minmax(0,1fr))">${APP_TILES.join('')}</div>${logView(lines, chips, { all: include })}</div>`;
+}
+// 2. the engines' page (the gauge): engines + log of engine lines only
+function engDiagPage({ stuck = false, selEnv = '', selOpen = false, debug = false } = {}) {
+  const lines = pickLog((src) => src !== 'app' && (!selEnv || src === selEnv), stuck, debug);
+  const engHdr = viewHeader({ name: 'engines', display: 'list', ic: 'server', filter: '', counts: stuck ? [['crit', 1], ['warn', 1], ['ok', 1]] : [['warn', 1], ['ok', 2]], controls: engSelect(selEnv, stuck, selOpen), sort: '', more: false });
+  const chips = `${selEnv ? engineChip(selEnv) : ''}${lvChips(lvCounts(lines), undefined, debug)}${SEARCH}${dbgSwitch(debug)}${sw(true, 'follow')}`;
+  return `<div class="col" style="min-height:0;flex:1;overflow:hidden">${diagHead('engine')}${engHdr}${engTable(stuck, selEnv)}${logView(lines, chips)}</div>`;
+}
+// no false green: with the active environment's engine stuck, the footer's dot and age, the
+// sidebar's health dot and the gauge all follow the engine
+const STUCK_AGE = '<span class="c-crit">41s</span>';
+const diagFrame = (page, { env = 'prod-cluster', stuck = false, gauge = false } = {}) => clusterWindow(`<div class="col" style="min-height:0;height:100%;position:relative">${page}</div>`, { cluster: '', env, health: stuck ? 'crit' : 'ok', foot: { env, node: env === 'staging' ? 'stg-master-01' : 'master-01', ...(stuck ? { health: 'crit', age: STUCK_AGE } : {}) }, statusBar: { diag: stuck ? 'crit' : 'ok', diagOpen: gauge, logOpen: !gauge } });
+const appWin = (o = {}) => diagFrame(appDiagPage(o));
+const engWin = (o = {}) => diagFrame(engDiagPage(o), { env: o.active || o.selEnv || 'prod-cluster', stuck: o.stuck, gauge: true });
+shot('16g5', '16-live-g5-diagnostics-app', '<b>diagnostics · app</b>, opened from the status bar’s <b>monitor</b> (pressed). The approved look, two views: <b>app</b>, the app’s tiles, unchanged; <b>log</b>, only the app’s own lines (start, settings, the window, the notifier), with day separators. Its header: level chips with counts, search, the switch <b>include engines</b> (off) and <i>follow</i>. No engines view on this page: the engines have their own (16g6). The page belongs to no environment (nothing in the cluster section highlighted).',
+  appWin(), { crops: '16-live-g5-log-header-zoom:560,222,880,42' });
+shot('16g5-l', '16-live-g5-diagnostics-app-light', '<b>diagnostics · app</b>, light.', appWin(), { theme: 'light', crops: '16-live-g5-log-header-zoom-light:560,222,880,42' });
+shot('16g9', '16-live-g9-app-include-engines', '<b>include engines on:</b> the full log of everything, in order. The source column appears and names each line’s source, <i>app</i> or the engine’s environment; the level counts follow.',
+  appWin({ include: true }));
+shot('16g6', '16-live-g6-engine-staging-stuck', '<b>diagnostics · engine</b>, opened from the status bar’s <b>gauge</b> (pressed, red: staging, the active environment, is stuck). Two views, no app view. <b>engines</b>: the <b>engine</b> select defaults to the active environment’s engine, here staging: its row alone, selected, red (engine tick 34s, <i>stuck · restarted 1 of 3</i>; last event yellow), <b>restart engine</b> at its right, its tiles under it. <b>log</b>: only staging’s lines, behind the chip <b>engine staging ×</b> (× or Esc goes to <i>all engines</i>). Engine lines only, never the app’s.',
+  engWin({ stuck: true, selEnv: 'staging' }));
+shot('16g6-l', '16-live-g6-engine-staging-stuck-light', '<b>diagnostics · engine, staging stuck</b>, light.', engWin({ stuck: true, selEnv: 'staging' }), L);
+shot('16g11', '16-live-g11-engine-debug', '<b>debug on, staging chosen.</b> The <b>debug</b> switch next to <i>follow</i> records the chosen engine’s debug lines (with <i>all engines</i>, every engine’s). On, it shows its time left, <b>debug · 28m</b>: it turns itself off after 30 minutes. The <i>debug</i> level chip has its count (off it reads <i>debug · off</i>, greyed, in the same slot). Debug lines sit between the others in the faint colour: <i>watchdog: no tick for 24 s</i>, <i>GET /v1/objects/services?… 200 · 1,280 objects · 182 ms</i>, <i>event applied: CheckResult disk /var on k8s-node-07</i>, <i>tick: 1,280 objects evaluated · 44 ms</i>. Off, the app page’s header (16g5 zoom) reads <i>debug</i> and <i>debug · off</i> in the same slots.',
+  engWin({ stuck: true, selEnv: 'staging', debug: true }), { crops: '16-live-g11-log-header-zoom:560,284,880,42' });
+shot('16g11-l', '16-live-g11-engine-debug-light', '<b>debug on, staging chosen</b>, light.', engWin({ stuck: true, selEnv: 'staging', debug: true }), L);
+shot('16g10', '16-live-g10-engine-all', '<b>all engines.</b> The select set to <i>all engines</i>: the compact rows like 06’s <i>zones and endpoints</i>, one per engine (state dot, environment, stream, node, last event, engine tick, status; lab: <i>running · login refused</i>, yellow). A click on a row chooses that engine. The log holds every engine’s lines, each naming its environment; no app lines, no chip.',
+  engWin());
+shot('16g7', '16-live-g7-engine-select-open', '<b>The engine select, open</b> (the dropdown system: it opens from its field, exactly as wide, joined to it, the current value ticked at the right): <i>all engines</i>, then each engine with its state dot and name. prod-cluster, the active environment’s, is current; the keyboard focus is on staging.',
+  engWin({ selEnv: 'prod-cluster', selOpen: true }), { crops: '16-live-g7-zoom:1000,40,440,240' });
+shot('16g8', '16-live-g8-engine-prod', '<b>prod-cluster chosen</b> (the gauge’s default while prod-cluster is the active environment): its row alone, selected, <b>restart engine</b> at its right, its tiles under it; the log narrowed by <b>engine prod-cluster ×</b>.',
+  engWin({ selEnv: 'prod-cluster' }));
+
+// ---- the status bar (NEW): full width, slim, Zed-like ------------------------------------------------
+const sbFrame = (o = {}, tip = '') => appWindow(listHeader() + summary() + `<div class="list">${rows()}</div>`, { activeItem: 'overview', foot: o.foot || {}, statusBar: o.bar || {} }) + tip;
+shot('16n', '16-live-n-status-bar', '<b>The status bar.</b> The footer that lived under the sidebar becomes a slim bar across the whole window’s bottom, Zed-like: 26px (our 40px top bar stays). <b>Left</b>, as before: the sidebar toggle, history, the environment switcher (dot, environment, node, age), <i>+</i>. <b>Right</b>, two small symbols (14px in 22px buttons, a tooltip each): the <b>gauge</b>, the active environment’s engine (its dot: the engine’s state), and the <b>monitor</b>, the app’s diagnostics (the same icon as the page’s <i>app</i> view). Each opens its own page: the gauge <i>diagnostics · engine</i> with the active environment’s engine chosen (16g6, 16g8), the monitor <i>diagnostics · app</i> (16g5). Room for later symbols to their left.',
+  sbFrame(), { crops: '16-live-n-left-zoom:0,860,440,40;16-live-n-right-zoom:1240,860,200,40' });
+shot('16n-l', '16-live-n-status-bar-light', '<b>The status bar</b>, light.', sbFrame(), { theme: 'light', crops: '16-live-n-left-zoom-light:0,860,440,40;16-live-n-right-zoom-light:1240,860,200,40' });
+const diagTip = '<div class="tip" data-anchor=".statusbar [data-sym=\'diagnostics\']" data-side="top" style="left:0;top:0">prod-cluster engine · running</div>';
+shot('16o', '16-live-o-status-bar-hover', '<b>Hover on the diagnostics symbol</b>: the hover background and a tooltip above it, right edges aligned, naming the active environment’s engine and its state: <i>prod-cluster engine · running</i>. A click opens <i>diagnostics · engine</i> with that engine chosen.',
+  sbFrame({ bar: { hov: 'diagnostics' } }, diagTip), { crops: '16-live-o-zoom:1040,780,400,120' });
+const stuckTip = '<div class="tip" data-anchor=".statusbar [data-sym=\'diagnostics\']" data-side="top" style="left:0;top:0">staging engine · stuck, restarted 1 of 3</div>';
+shot('16p', '16-live-p-status-bar-stuck', '<b>An engine stuck.</b> With staging the active environment and its engine stuck, the gauge carries a <b>red dot</b> (6px, ringed in the bar’s colour, at its top right), and its tooltip says so: <i>staging engine · stuck, restarted 1 of 3</i>. The trouble alert went out as a notification too.',
+  sbFrame({ foot: { env: 'staging', node: 'stg-master-01', health: 'crit', age: '<span class="c-crit">41s</span>' }, bar: { diag: 'crit', hov: 'diagnostics' } }, stuckTip), { crops: '16-live-p-zoom:1040,780,400,120' });
+shot('16p-l', '16-live-p-status-bar-stuck-light', '<b>An engine stuck</b>, light.', sbFrame({ foot: { env: 'staging', node: 'stg-master-01', health: 'crit', age: '<span class="c-crit">41s</span>' }, bar: { diag: 'crit', hov: 'diagnostics' } }, stuckTip), L);
+
+// the app symbol: three candidates for the user, at the gauge's size and weight
+const MARK14 = '<svg viewBox="190 190 644 644" width="14" height="14" style="display:block"><path d="M796.5 446.3 A292 292 0 1 1 577.7 227.5" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round"/><circle cx="512" cy="512" r="150" fill="currentColor"/><circle cx="718.5" cy="305.5" r="74" fill="currentColor"/></svg>';
+const candBar = (label, ic) => `<div style="display:flex;flex-direction:column;gap:8px;width:220px"><div class="statusbar" style="position:relative;border:1px solid var(--bd-split);border-radius:4px"><span class="grow"></span><span class="ibtn stb">${icon('gauge', 14)}<span class="sdot ok"></span></span><span class="ibtn stb">${ic.startsWith('<svg') ? ic : icon(ic, 14)}</span></div><span class="muted" style="font-size:12px;text-align:right;padding-right:8px">${label}</span></div>`;
+const cands = `<div style="display:flex;gap:40px;padding:28px 36px;background:var(--win-bg);height:100%;box-sizing:border-box">${candBar('a · monitor (drawn)', 'monitor')}${candBar('b · the icygui mark', MARK14)}${candBar('c · box (the app)', 'box')}</div>`;
+shot('16q', '16-live-q-app-symbol-candidates', '<b>The app symbol: three candidates</b>, each beside the gauge at 14px with the same line weight and baseline: <b>a</b> the monitor (as the page’s <i>app</i> view header, used in every frame for now), <b>b</b> a small monochrome icygui mark, <b>c</b> a box (the app as one package). The user chose <b>a</b>, the monitor.',
+  cands, { w: 820, h: 120 });
+shot('16q-l', '16-live-q-app-symbol-candidates-light', '<b>The app symbol candidates</b>, light.', cands, { w: 820, h: 120, theme: 'light' });
+
+const crashNote = `<div class="desk lx" style="left:0;width:720px"><div class="lxbar"><span>Activities</span><span class="clock">Thu 02:15</span><span class="tray"><span class="ti">${TRAYICON('ok', 18)}</span></span></div>${dunst(40, ['icygui restarted', 'after it stopped unexpectedly at 02:14', false])}<span class="tag">Linux (dunst)</span></div>
+  <div class="desk mac" style="left:720px;width:720px">${macn(40, ['icygui restarted', 'after it stopped unexpectedly at 02:14'])}<span class="tag">macOS</span></div>`;
+shot('16i', '16-live-i-restarted-note', '<b>After a crash or a hang.</b> The OS restarted icygui (launchd <i>KeepAlive</i>, systemd <i>Restart=on-failure</i>); the run that didn’t end cleanly left a marker, so the new run says so once: <i>icygui restarted · after it stopped unexpectedly at 02:14</i>. It treats the gap like a reconnect gap, so problems that began meanwhile still notify.',
+  crashNote, { h: 220 });
+
+// ---- h. save diagnostics ------------------------------------------------------------------------
+const diagRow = (t, d) => `<div style="display:grid;grid-template-columns:16px 170px minmax(0,1fr);gap:10px;align-items:baseline;font-size:12.5px"><span class="c-ok">${icon('check', 12)}</span><span>${t}</span><span class="faint">${d}</span></div>`;
+const diagDlg = dialog({ title: 'Save diagnostics', what: 'one zip file',
+  body: `<div class="col" style="gap:8px">${diagRow('logs', 'icygui.log and its 4 rotated files')}${diagRow('versions', 'icygui 1.0.0 · Linux 6.18 · Icinga r2.14.3-1, r2.14.2-1')}${diagRow('settings', 'every password, token and key removed')}${diagRow('connection states', '3 environments, their streams and alerts')}</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--bd-row);padding-top:14px">${sw(false, 'replace host names')}<span class="faint" style="font-size:12px">for sharing in public</span></div>`,
+  actions: btn('cancel', { key: 'esc' }) + btn('save', { key: '↵', primary: true }) });
+shot('16h', '16-live-h-diagnostics', '<b>Save diagnostics.</b> One zip, and the dialog lists what goes in: the logs, the versions (icygui, OS, each Icinga), the settings with every password, token and key removed, and each environment’s connection, stream and alert state. It never holds a secret. <b>replace host names</b> (off) swaps every host and endpoint name for a placeholder before it is shared publicly. <i>save</i> asks where to put the zip. (The button reads <i>save diagnostics</i>, without “…”: the project’s label rule.)',
+  appWin() + modal(680, diagDlg));
+
+</script>
+</body></html>

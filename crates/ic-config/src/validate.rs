@@ -11,16 +11,18 @@ use std::fmt;
 use std::net::IpAddr;
 use std::path::Path;
 
-use ic_model::ObjectKey;
+use ic_model::{ObjectKey, ServiceKey};
 use ic_rules::{NotificationSettings, QuietHours};
 
 use crate::environment::{CREDENTIALS_REASON, has_credentials, parse_api_url};
 use crate::error::{ConfigError, MAX_VALUE_CHARS, excerpt};
 use crate::fingerprint::parse_fingerprint;
+use crate::health_page::HealthPage;
 use crate::model::{
-    ApiUrl, AuthConfig, Config, Dashboard, DashboardGroup, Environment, GroupBy, MAX_API_URLS,
-    ObjectKind, TlsConfig,
+    ApiUrl, AuthConfig, Config, Dashboard, DashboardGroup, Environment, MAX_API_URLS, TlsConfig,
 };
+use crate::trouble::{MIN_HEARTBEAT_INTERVAL_SECS, Trouble};
+use crate::view::{GroupBy, GroupSource, MAX_VIEWS, ObjectKind, STREAM_LINES, View, ViewDisplay};
 
 /// The shortest allowed event log retention, in hours.
 pub const MIN_EVENT_LOG_RETENTION_HOURS: u32 = 1;
@@ -214,6 +216,55 @@ fn check_environment(environment: &Environment, path: &str, issues: &mut Issues)
         &join(path, "notifications"),
         issues,
     );
+    check_trouble(&environment.trouble, &join(path, "trouble"), issues);
+    check_health_page(&environment.health_page, &join(path, "health_page"), issues);
+}
+
+/// The trouble alerts: listed heartbeats name a service (`host!service`),
+/// an interval override isn't too short, the custom variable is a name.
+fn check_trouble(trouble: &Trouble, path: &str, issues: &mut Issues) {
+    let heartbeats = &trouble.heartbeats;
+    for (index, entry) in heartbeats.list.iter().enumerate() {
+        if ServiceKey::parse(entry.trim()).is_none() {
+            issues.push(
+                join(path, &format!("heartbeats.list[{index}]")),
+                "must name a service as host!service",
+            );
+        }
+    }
+    if let Some(interval) = heartbeats.interval_secs
+        && interval < MIN_HEARTBEAT_INTERVAL_SECS
+    {
+        issues.push(
+            join(path, "heartbeats.interval_secs"),
+            format!("must be at least {MIN_HEARTBEAT_INTERVAL_SECS} seconds"),
+        );
+    }
+    let name = heartbeats.variable_name();
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        issues.push(
+            join(path, "heartbeats.variable"),
+            "must be a custom variable's name, such as icygui_heartbeat",
+        );
+    }
+}
+
+/// The cluster health page: only health kinds, each once.
+fn check_health_page(page: &HealthPage, path: &str, issues: &mut Issues) {
+    let mut seen = Vec::new();
+    for (index, view) in page.views.iter().enumerate() {
+        let view_path = join(path, &format!("views[{index}].display"));
+        if !view.display.is_health() {
+            issues.push(view_path, "must be a health view");
+        } else if seen.contains(&view.display) {
+            issues.push(view_path, "is already on the page");
+        } else {
+            seen.push(view.display);
+        }
+    }
 }
 
 fn check_name(name: &str, path: &str, issues: &mut Issues) {
@@ -382,11 +433,73 @@ fn check_groups(groups: &[DashboardGroup], path: &str, issues: &mut Issues) {
 
 fn check_dashboard(dashboard: &Dashboard, path: &str, issues: &mut Issues) {
     check_name(&dashboard.name, &join(path, "name"), issues);
-    let view = &dashboard.view;
-    if view.object_kind == ObjectKind::Hosts && view.group_by == GroupBy::ServiceGroup {
+    if let crate::SidebarMark::Icon(icon) = &dashboard.mark
+        && icon.trim().is_empty()
+    {
+        issues.push(join(path, "mark.icon"), "must name an icon");
+    }
+    if dashboard.views.is_empty() {
+        issues.push(join(path, "views"), "must list at least one view");
+    } else if dashboard.views.len() > MAX_VIEWS {
         issues.push(
-            join(path, "view.group_by"),
+            join(path, "views"),
+            format!("must list at most {MAX_VIEWS} views"),
+        );
+    }
+    let mut ids = UniqueIds::default();
+    for (index, view) in dashboard.views.iter().enumerate() {
+        let view_path = join(path, &format!("views[{index}]"));
+        ids.check(issues, &view_path, &view.id);
+        check_view(view, &view_path, issues);
+    }
+}
+
+fn check_view(view: &View, path: &str, issues: &mut Issues) {
+    if view.display.is_health() {
+        issues.push(
+            join(path, "display"),
+            "belongs to the cluster health page, not to a dashboard",
+        );
+    }
+    if view.object_kind == ObjectKind::Hosts && view.list_grouping() == GroupBy::ServiceGroup {
+        issues.push(
+            join(path, "group_by"),
             "hosts can't be grouped by service group",
+        );
+    }
+    let grouped = matches!(
+        view.display,
+        ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles
+    );
+    if grouped
+        && view.groups.by == GroupSource::CustomVar
+        && view.groups.custom_var_name().is_empty()
+    {
+        issues.push(
+            join(path, "groups.custom_var"),
+            "must name a host custom variable to group by",
+        );
+    }
+    if grouped
+        && let Some(index) = view
+            .groups
+            .host_groups
+            .iter()
+            .position(|group| group.trim().is_empty())
+    {
+        issues.push(
+            join(path, &format!("groups.host_groups[{index}]")),
+            "must not be empty",
+        );
+    }
+    if view.display == ViewDisplay::EventStream && !STREAM_LINES.contains(&view.stream.lines) {
+        issues.push(
+            join(path, "stream.lines"),
+            format!(
+                "must be between {} and {}",
+                STREAM_LINES.start(),
+                STREAM_LINES.end()
+            ),
         );
     }
 }

@@ -46,6 +46,8 @@ wait_for() { # wait_for <pattern> [seconds]
     sleep 0.1
   done
   echo "timed out waiting for: $1" >&2
+  echo "--- spike log ---" >&2; cat "$LOG" >&2 || true
+  echo "--- dunst log ---" >&2; cat "$WORK/dunst.log" >&2 || true
   return 1
 }
 
@@ -57,7 +59,15 @@ EOF
 chmod +x "$WORK/pick-ack.sh"
 printf '[global]\n    dmenu = %s\n' "$WORK/pick-ack.sh" >"$WORK/dunstrc"
 dunst -config "$WORK/dunstrc" &>"$WORK/dunst.log" &
-sleep 0.5
+# Wait until dunst owns the notification name on the bus instead of guessing
+# a delay: on a slow runner a fixed sleep lost the race and the spike's
+# notification went nowhere.
+for _ in $(seq 1 100); do
+  gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+    --method org.freedesktop.DBus.NameHasOwner org.freedesktop.Notifications 2>/dev/null |
+    grep -q true && break
+  sleep 0.1
+done
 
 echo "== run 1: QuitMode::Explicit =="
 NO_COLOR=1 "$BIN" --auto 12 >"$LOG" 2>&1 &

@@ -31,11 +31,20 @@
 //!    and what its reader had read is applied. The new stream's lines are
 //!    then applied in order, skipping those the old stream already
 //!    brought (by hash, once each); the new stream goes on from there.
+//!    Icinga 2.15 writes each stream in batches 5 s apart (a new stream's
+//!    first events go out at once): the window (7 s) outlasts the old
+//!    stream's next batch, which brings what it held from before the
+//!    switch and, with it, the line both streams carry. A window shorter
+//!    than the batches closed the old stream with those events unsent
+//!    (every switch during the demo cluster's problem storm, until the
+//!    status counts made a reload find them).
 //! 4. Waking up, the new stream's check results from the overlap can be
 //!    older than a state change the old stream already applied: while
 //!    duplicates are being skipped, a check result older than the stored
 //!    one is skipped too (Icinga itself drops results older than the
-//!    current one).
+//!    current one). The refresh after waking (below) can be answered
+//!    before the new stream brings the events its answer already shows;
+//!    the store skips those (`Store::overtaken`), as after any query.
 //!
 //! Lines are numbered by one counter over every stream (the reader numbers
 //! a line when it reads it), so the store's ordering against query answers
@@ -137,12 +146,17 @@ pub(super) struct Switch {
     quiet: bool,
     /// The new stream's event types.
     kinds: Vec<EventKind>,
+    /// Its filter (a quiet stream's naming the heartbeats).
+    filter: Option<String>,
     /// The line count when the new stream was asked for: old-stream lines
     /// read after it may come on the new stream too.
     since: u64,
     /// Hashes of those old-stream lines (how many of each).
     old: HashMap<u64, u32>,
     stage: Stage,
+    /// Waking up: the refresh after waking went out when the new (live)
+    /// stream opened ([`Engine::woke`]), not at the handover.
+    woke: bool,
 }
 
 #[derive(Debug)]
@@ -257,18 +271,19 @@ fn line_hash(line: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// How long a background start waits before its first load: random, up to
-/// `per_thousand` per 1 000 services (`max` when the size couldn't be
-/// read at all), at most `max`.
+/// How long a background start waits before its first load: random (from
+/// `jitter`), up to `per_thousand` per 1 000 services (`max` when the size
+/// couldn't be read at all), at most `max`.
 pub(super) fn start_delay(
     services: Option<u32>,
     per_thousand: Duration,
     max: Duration,
+    jitter: &mut crate::jitter::Jitter,
 ) -> Duration {
     let ceiling = services.map_or(max, |services| {
         per_thousand.mul_f64(f64::from(services) / 1_000.0).min(max)
     });
-    ceiling.mul_f64(fastrand::f64())
+    jitter.up_to(ceiling)
 }
 
 /// The installation's size for a background start's delay: Icinga's
@@ -325,7 +340,7 @@ fn result_due(state: CheckableState, check: &CheckInfo) -> Option<f64> {
 impl Engine {
     /// Whether quiet mode is wanted ([`crate::Command::SetQuiet`]).
     pub(super) fn quiet(&self) -> bool {
-        self.quiet_wanted.load(Ordering::SeqCst)
+        self.wish.quiet.load(Ordering::SeqCst)
     }
 
     /// Whether the session's stream carries no check results (quiet mode;
@@ -338,7 +353,7 @@ impl Engine {
 
     /// `Command::SetQuiet`.
     pub(super) fn set_quiet(&mut self, quiet: bool) {
-        if self.quiet_wanted.swap(quiet, Ordering::SeqCst) == quiet {
+        if self.wish.quiet.swap(quiet, Ordering::SeqCst) == quiet {
             return;
         }
         tracing::info!(environment = %self.spec.environment.name, quiet, "quiet mode");
@@ -347,7 +362,7 @@ impl Engine {
             // The reconcile moves out to the quiet interval; the status
             // poll after the next one follows the quiet pace by itself.
             if self.reconcile_at.is_some() {
-                self.schedule_reconcile();
+                self.replan_reconcile();
             }
         } else {
             let interval = self.tuning.status_interval;
@@ -391,7 +406,10 @@ impl Engine {
         let Some(conn) = &mut self.conn else {
             return;
         };
-        if conn.quiet == quiet {
+        let (kinds, filter) = self.wish.spec(&conn.info);
+        if conn.quiet == quiet
+            && (self.lines.is_none() || (kinds == conn.kinds && filter == conn.filter))
+        {
             return;
         }
         if self.lines.is_none() {
@@ -401,8 +419,7 @@ impl Engine {
             self.mode_changed = true;
             return;
         }
-        let kinds = connect::stream_kinds(&conn.info, quiet);
-        if kinds == conn.kinds {
+        if kinds == conn.kinds && filter == conn.filter {
             // The API user may not read check results anyway.
             conn.quiet = quiet;
             self.stream_quiet = quiet;
@@ -419,12 +436,15 @@ impl Engine {
             id,
             quiet,
             kinds: kinds.clone(),
+            filter: filter.clone(),
             since: self.seq.load(Ordering::SeqCst),
             old: HashMap::new(),
             stage: Stage::Opening,
+            woke: false,
         });
+        let wish = Arc::clone(&self.wish);
         self.tasks.spawn(async move {
-            let result = connect::open_events(&client, &kinds).await;
+            let result = connect::open_wished(&client, kinds, filter, &wish).await;
             let _ = tx.send(Internal::StreamOpened {
                 session,
                 switch: id,
@@ -434,17 +454,27 @@ impl Engine {
     }
 
     /// The new stream of switch `id` is open (or couldn't be opened).
-    pub(super) fn on_stream_opened(&mut self, id: u64, result: Result<EventLines, ApiError>) {
+    pub(super) fn on_stream_opened(
+        &mut self,
+        id: u64,
+        result: Result<(EventLines, Vec<EventKind>, Option<String>), ApiError>,
+    ) {
         if self.switch.as_ref().is_none_or(|switch| switch.id != id) {
             return;
         }
         match result {
-            Ok(lines) => {
+            Ok((lines, kinds, filter)) => {
+                // What it carries (Icinga may have refused the filter).
+                if let Some(switch) = &mut self.switch {
+                    switch.kinds = kinds;
+                    switch.filter = filter;
+                }
                 let (tx, rx) = mpsc::unbounded_channel();
                 let reader = self
                     .tasks
                     .spawn(stream::read(lines, Arc::clone(&self.seq), tx));
                 let until = Instant::now() + self.tuning.stream_handover;
+                let waking = self.stream_quiet();
                 if let Some(switch) = &mut self.switch {
                     switch.stage = Stage::Overlap {
                         lines: Some(rx),
@@ -453,6 +483,17 @@ impl Engine {
                         seen: HashSet::new(),
                         until,
                     };
+                    switch.woke = waking && !switch.quiet;
+                }
+                if waking && self.switch.as_ref().is_some_and(|switch| switch.woke) {
+                    // The live stream is subscribed: it carries every
+                    // check result from now on (its lines wait for the
+                    // handover, up to the whole window on a calm
+                    // installation), and the refresh's answers are ordered
+                    // against them like any query's. So the problems whose
+                    // results went stale are asked for now, not once the
+                    // old stream is closed.
+                    self.woke();
                 }
             }
             Err(ApiError::Unauthorized) => {
@@ -473,7 +514,7 @@ impl Engine {
         {
             reader.abort();
         }
-        let wait = self.switch_backoff.fail();
+        let wait = self.switch_backoff.fail(self.jitter.unit());
         tracing::warn!(%why, ?wait, "couldn't switch the event stream; trying again later");
         self.switch_retry_at = Some(Instant::now() + wait);
     }
@@ -597,9 +638,11 @@ impl Engine {
         let Switch {
             quiet,
             kinds,
+            filter,
             mut old,
             since,
             stage,
+            woke,
             ..
         } = switch;
         let Stage::Overlap {
@@ -635,6 +678,11 @@ impl Engine {
             }
         }
         self.apply_lines(rest);
+        if !proven {
+            // The old stream may have held lines it never sent: depths
+            // counted from check events count as answers' again.
+            self.store.stream_gap();
+        }
         // The new stream takes over.
         while let Ok(message) = new_lines.try_recv() {
             buffered.push(message);
@@ -647,14 +695,17 @@ impl Engine {
             .as_ref()
             .map_or_else(Instant::now, |conn| conn.last_line);
         if let Some(conn) = &mut self.conn {
-            conn.check_events = kinds.contains(&EventKind::CheckResult);
+            conn.check_events = kinds.contains(&EventKind::CheckResult) && filter.is_none();
             conn.kinds = kinds;
+            conn.filter = filter;
             conn.quiet = quiet;
             // The stall watch counts from the new stream.
             conn.last_line = Instant::now();
         }
         self.stream_quiet = quiet;
         self.mode_changed = true;
+        // The heartbeats come on the new stream, or are read by polls.
+        self.beats_stream_changed();
         self.switch_backoff.reset();
         self.dedupe = Some(Dedupe {
             hashes: old,
@@ -667,7 +718,7 @@ impl Engine {
             waiting = buffered.len(),
             "the new event stream took over"
         );
-        if was_quiet && !quiet {
+        if was_quiet && !quiet && !woke {
             self.woke();
         }
         self.on_lines(buffered);
@@ -719,21 +770,16 @@ impl Engine {
         else {
             return false;
         };
-        // Strictly older: a check's result and its state change carry the
-        // same end, and the attempts of one problem can come within a
-        // millisecond (passive results, a burst).
-        let end = result.execution_end.non_zero().unwrap_or(*at);
         self.store
-            .check(object)
-            .and_then(|check| check.last_check)
-            .is_some_and(|last| end.as_unix_seconds() < last.as_unix_seconds())
+            .older_result(object, result.execution_end.non_zero().unwrap_or(*at))
     }
 
     // --- waking up -----------------------------------------------------------------
 
-    /// The live stream is back after quiet mode: deadlines start over, and
-    /// the problems whose results may have been replaced meanwhile are
-    /// fetched in the background.
+    /// The live stream is back after quiet mode (subscribed: its lines may
+    /// still wait for the handover): deadlines start over, and the problems
+    /// whose results may have been replaced meanwhile are fetched in the
+    /// background.
     pub(super) fn woke(&mut self) {
         let now = self.icinga_seconds();
         self.woke_at = Some(now);
@@ -988,6 +1034,7 @@ impl Engine {
             services,
             self.tuning.start_delay_per_thousand,
             self.tuning.start_delay_max,
+            &mut self.jitter,
         );
         tracing::info!(
             ?services,
@@ -1283,17 +1330,18 @@ mod tests {
     fn start_delays_scale_with_the_installation() {
         let per = Duration::from_secs(3);
         let max = Duration::from_secs(90);
+        let jitter = &mut crate::jitter::Jitter::new(Some(5));
         for _ in 0..1_000 {
-            assert!(start_delay(Some(200), per, max) < Duration::from_millis(600));
-            assert!(start_delay(Some(3_000), per, max) < Duration::from_secs(9));
-            assert!(start_delay(Some(30_000), per, max) < Duration::from_secs(90));
-            assert!(start_delay(Some(300_000), per, max) < Duration::from_secs(90));
-            assert!(start_delay(None, per, max) < Duration::from_secs(90));
+            assert!(start_delay(Some(200), per, max, jitter) < Duration::from_millis(600));
+            assert!(start_delay(Some(3_000), per, max, jitter) < Duration::from_secs(9));
+            assert!(start_delay(Some(30_000), per, max, jitter) < Duration::from_secs(90));
+            assert!(start_delay(Some(300_000), per, max, jitter) < Duration::from_secs(90));
+            assert!(start_delay(None, per, max, jitter) < Duration::from_secs(90));
         }
-        assert_eq!(start_delay(Some(0), per, max), Duration::ZERO);
+        assert_eq!(start_delay(Some(0), per, max, jitter), Duration::ZERO);
         // Spread over the whole range.
         let samples: Vec<Duration> = (0..1_000)
-            .map(|_| start_delay(Some(30_000), per, max))
+            .map(|_| start_delay(Some(30_000), per, max, jitter))
             .collect();
         assert!(samples.iter().any(|delay| *delay > Duration::from_secs(80)));
         assert!(samples.iter().any(|delay| *delay < Duration::from_secs(10)));

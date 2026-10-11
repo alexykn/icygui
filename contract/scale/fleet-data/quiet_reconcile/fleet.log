@@ -1,0 +1,62 @@
+
+running 1 test
+test fleet::fleet ... fleet: mark Q-load
+fleet: add 12 quiet user
+fleet: mark Q
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 64 marker results seen, rss 1447 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 221 marker results seen, rss 1449 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 359 marker results seen, rss 1449 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 511 marker results seen, rss 1449 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 671 marker results seen, rss 1449 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 826 marker results seen, rss 1449 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 963 marker results seen, rss 1449 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 1101 marker results seen, rss 1449 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 1250 marker results seen, rss 1449 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 1410 marker results seen, rss 1449 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 1561 marker results seen, rss 1476 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 1709 marker results seen, rss 1577 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 1855 marker results seen, rss 1577 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 1991 marker results seen, rss 1582 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 2122 marker results seen, rss 1582 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 2251 marker results seen, rss 1582 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 2402 marker results seen, rss 1645 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 2542 marker results seen, rss 1668 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 2695 marker results seen, rss 1668 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 2826 marker results seen, rss 1714 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 2972 marker results seen, rss 1714 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 3125 marker results seen, rss 1714 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 3293 marker results seen, rss 1722 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 3434 marker results seen, rss 1726 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 3586 marker results seen, rss 1726 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 3715 marker results seen, rss 1726 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 3853 marker results seen, rss 1727 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 3989 marker results seen, rss 1729 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 4128 marker results seen, rss 1739 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 4298 marker results seen, rss 1742 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 4451 marker results seen, rss 1742 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 4590 marker results seen, rss 1742 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 4742 marker results seen, rss 1765 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 4889 marker results seen, rss 1765 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 5034 marker results seen, rss 1765 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 5178 marker results seen, rss 1766 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 5327 marker results seen, rss 1766 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 5478 marker results seen, rss 1766 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 5624 marker results seen, rss 1769 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 5770 marker results seen, rss 1769 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 5910 marker results seen, rss 1769 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 6051 marker results seen, rss 1769 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 6175 marker results seen, rss 1769 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 6318 marker results seen, rss 1769 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 6482 marker results seen, rss 1769 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 6630 marker results seen, rss 1769 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 6787 marker results seen, rss 1772 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 6925 marker results seen, rss 1772 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 7070 marker results seen, rss 1772 MiB
+fleet: 12 engines, 12 connected, 0 live, 12 loaded, 7212 marker results seen, rss 1772 MiB
+fleet: mark end
+fleet: quit
+fleet: 0 engines, 0 connected, 0 live, 12 loaded, 7334 marker results seen, rss 1599 MiB
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 1530.86s
+

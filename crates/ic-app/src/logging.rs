@@ -6,19 +6,22 @@
 //! and never pass through this crate's log calls, the core redacts
 //! credentials, and the mock's users print as `<redacted>`.
 //!
-//! `RUST_LOG` sets the filter (default `info`, with chatty GPU and D-Bus
-//! crates at `warn`). Panics are logged before the default hook prints
-//! them, so a crash leaves its message in the file.
+//! The level comes from the settings (`General.log_level`, default
+//! `info`, with chatty GPU and D-Bus crates at `warn`) and changes while
+//! the app runs ([`set_level`], the settings' *log level*); `RUST_LOG`,
+//! when set, overrides it at start. Panics are logged before the default
+//! hook prints them, so a crash leaves its message in the file.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
-use tracing_subscriber::EnvFilter;
+use ic_config::LogLevel;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
+use tracing_subscriber::{EnvFilter, Registry, reload};
 
 /// The log file's name in the log directory.
 pub(crate) const LOG_FILE: &str = "icygui.log";
@@ -26,14 +29,41 @@ pub(crate) const LOG_FILE: &str = "icygui.log";
 const MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// How many rotated files are kept besides the current one.
 const KEEP: usize = 4;
-/// The filter without `RUST_LOG`.
-const DEFAULT_FILTER: &str = "info,naga=warn,wgpu_core=warn,wgpu_hal=warn,zbus=warn,blade=warn";
+/// The most the log folder holds: the current file and the rotated ones
+/// (the settings' advanced page says so).
+pub(crate) const MAX_TOTAL_BYTES: u64 = MAX_BYTES * (KEEP as u64 + 1);
+/// Crates that say too much at `info` and below: they stay at `warn`.
+const CHATTY: [&str; 5] = ["naga", "wgpu_core", "wgpu_hal", "zbus", "blade"];
+
+/// Changes the installed filter while the app runs.
+static FILTER: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+
+/// `RUST_LOG` chose the filter at start.
+static FROM_ENVIRONMENT: OnceLock<bool> = OnceLock::new();
+
+/// The filter for `level`: the chatty crates at `warn` (or `error`).
+pub(crate) fn directives(level: LogLevel) -> String {
+    let chatty = if level == LogLevel::Error {
+        "error"
+    } else {
+        "warn"
+    };
+    std::iter::once(level.as_str().to_owned())
+        .chain(CHATTY.iter().map(|name| format!("{name}={chatty}")))
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 /// Sets up logging to stderr and, when `log_dir` is given and writable, to
-/// the rotating log file there. Returns the log file's path, if any.
+/// the rotating log file there, at `info` until the settings are read
+/// ([`apply_setting`]) unless `RUST_LOG` says otherwise. Returns the log
+/// file's path, if any.
 pub(crate) fn init(log_dir: Option<&Path>) -> Option<PathBuf> {
+    let from_environment = EnvFilter::try_from_default_env().ok();
+    let _ = FROM_ENVIRONMENT.set(from_environment.is_some());
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+        from_environment.unwrap_or_else(|| EnvFilter::new(directives(LogLevel::default())));
+    let (filter, handle) = reload::Layer::new(filter);
     let mut file_error = None;
     let file = log_dir.and_then(|dir| {
         let path = dir.join(LOG_FILE);
@@ -61,11 +91,43 @@ pub(crate) fn init(log_dir: Option<&Path>) -> Option<PathBuf> {
         // Only tests install a subscriber of their own first.
         return None;
     }
+    let _ = FILTER.set(handle);
     if let Some((path, error)) = file_error {
         tracing::warn!(path = %path.display(), %error, "logging to stderr only: the log file can't be opened");
     }
     install_panic_hook();
     path
+}
+
+/// Takes the settings' level once they are read at start, unless
+/// `RUST_LOG` chose the filter.
+pub(crate) fn apply_setting(level: LogLevel) {
+    if FROM_ENVIRONMENT.get().copied().unwrap_or(false) {
+        tracing::info!(setting = level.as_str(), "RUST_LOG sets the log level");
+        return;
+    }
+    if level != LogLevel::default() {
+        set_level(level);
+    }
+}
+
+/// Logs at `level` from now on (the settings' *log level*; it also
+/// replaces a filter `RUST_LOG` set). Returns whether a filter was
+/// installed to change.
+pub(crate) fn set_level(level: LogLevel) -> bool {
+    let Some(handle) = FILTER.get() else {
+        return false;
+    };
+    match handle.reload(EnvFilter::new(directives(level))) {
+        Ok(()) => {
+            tracing::info!(level = level.as_str(), "log level changed");
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the log level couldn't be changed");
+            false
+        }
+    }
 }
 
 /// Logs panics (message and location) before the default hook runs.
@@ -256,6 +318,22 @@ mod tests {
         let _file = RotatingFile::open(path.clone(), 1_000, 2).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn levels_keep_the_chatty_crates_quiet() {
+        assert_eq!(
+            directives(LogLevel::Info),
+            "info,naga=warn,wgpu_core=warn,wgpu_hal=warn,zbus=warn,blade=warn"
+        );
+        assert!(directives(LogLevel::Debug).starts_with("debug,naga=warn"));
+        assert!(directives(LogLevel::Error).ends_with("blade=error"));
+        for level in LogLevel::ALL {
+            // Every filter parses.
+            let _ = EnvFilter::try_new(directives(level)).unwrap();
+        }
+        // Without an installed subscriber there is nothing to change.
+        assert!(!set_level(LogLevel::Debug));
     }
 
     #[test]

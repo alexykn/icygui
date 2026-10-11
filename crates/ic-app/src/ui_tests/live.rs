@@ -60,8 +60,8 @@ pub(super) fn row_keys(state: &AppState) -> Vec<ObjectKey> {
     else {
         return Vec::new();
     };
-    result
-        .rows
+    result.views[0]
+        .rows()
         .iter()
         .filter_map(|row| match row {
             DashboardRow::Object(key) => Some(key.clone()),
@@ -136,7 +136,7 @@ fn view_changes_are_evaluated_by_the_core_and_rows_get_their_details() {
                     app.state.update(cx, |state, cx| {
                         let overview = dashboard(state, "overview");
                         state.select(overview.clone());
-                        assert!(state.update_view(&overview, |view| {
+                        assert!(state.update_primary_view(&overview, |view| {
                             view.sort = Sort {
                                 key: SortKey::Host,
                                 descending: false,
@@ -172,7 +172,7 @@ fn view_changes_are_evaluated_by_the_core_and_rows_get_their_details() {
                     let rows = state
                         .selected()
                         .and_then(|reference| state.result(reference))
-                        .map(|result| result.rows.clone())
+                        .map(|result| result.views[0].rows().to_vec())
                         .unwrap_or_default();
                     visible
                         .filter_map(|index| match rows.get(index) {
@@ -233,7 +233,9 @@ fn group_by_shows_the_cores_group_headers() {
                         app.state.update(cx, |state, cx| {
                             let all = dashboard(state, "all services");
                             state.select(all.clone());
-                            assert!(state.update_view(&all, |view| view.group_by = group_by));
+                            assert!(
+                                state.update_primary_view(&all, |view| view.set_grouping(group_by))
+                            );
                             cx.notify();
                         });
                     });
@@ -243,7 +245,7 @@ fn group_by_shows_the_cores_group_headers() {
                         state
                             .selected()
                             .and_then(|reference| state.result(reference))
-                            .and_then(|result| group_sections(&result.rows))
+                            .and_then(|result| group_sections(result.views[0].rows()))
                             .is_some_and(|labels| labels.len() > 1 && labels != before)
                     })
                     .await;
@@ -254,7 +256,7 @@ fn group_by_shows_the_cores_group_headers() {
                             .selected()
                             .and_then(|reference| state.result(reference))
                             .unwrap();
-                        let labels = group_sections(&result.rows).unwrap();
+                        let labels = group_sections(result.views[0].rows()).unwrap();
                         // A group shows once, under its display name.
                         let mut unique = labels.clone();
                         unique.sort();
@@ -635,6 +637,188 @@ fn an_unreadable_settings_file_can_be_started_fresh() {
         backup.environments[0].name, "good",
         "starting fresh leaves the last good backup to restore later"
     );
+}
+
+/// Changes the row density as the settings panel does (and so saves).
+fn change_density(app: &super::Harness, cx: &mut App, density: ic_config::RowDensity) {
+    app.state.update(cx, |state, cx| {
+        let mut appearance = *state.appearance();
+        appearance.row_density = density;
+        state.set_appearance(appearance);
+        cx.notify();
+    });
+}
+
+/// The settings file as it reads now.
+fn on_disk(paths: &Paths) -> Option<Config> {
+    paths.config_store().read().ok().flatten()
+}
+
+/// UI-06: a settings file edited by hand while icygui runs is never
+/// written over by a change made in the window before the window comes
+/// back to the front: the save finds the edit, the two are merged, and
+/// the file and the window both end up with both (and the login entry
+/// follows the file).
+#[test]
+fn a_save_merges_an_edit_made_by_hand_instead_of_writing_over_it() {
+    use ic_config::RowDensity;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path());
+    paths.config_store().save(&settings_with("prod")).unwrap();
+    let check = paths.clone();
+    crate::background::autostart::tests::REQUESTS
+        .lock()
+        .unwrap()
+        .clear();
+    run_app(
+        crate::WINDOW_SIZE,
+        live_app(paths, None),
+        Body::Async(Box::new(move |app, cx| {
+            async move {
+                // Whatever icygui writes at start is written first.
+                wait_for(&app, &cx, "the settings as started", LOAD, |app, cx| {
+                    let state = app.state.read(cx);
+                    state.settings_on_disk().as_ref() == Some(state.config())
+                        && on_disk(&check).as_ref() == Some(state.config())
+                })
+                .await;
+                // Edited by hand, the window not brought to the front.
+                let mut edited = on_disk(&check).unwrap();
+                edited.general.event_log_retention_hours = 100;
+                edited.general.launch_at_login = true;
+                check.config_store().save(&edited).unwrap();
+                // A change made in the window saves.
+                cx.update(|cx| change_density(&app, cx, RowDensity::Compact));
+                wait_for(&app, &cx, "the edit taken over", LOAD, |app, cx| {
+                    app.state
+                        .read(cx)
+                        .config()
+                        .general
+                        .event_log_retention_hours
+                        == 100
+                })
+                .await;
+                cx.update(|cx| {
+                    let state = app.state.read(cx);
+                    assert_eq!(
+                        state.appearance().row_density,
+                        RowDensity::Compact,
+                        "the window's change stays"
+                    );
+                    assert!(state.config().general.launch_at_login);
+                });
+                wait_for(&app, &cx, "both in the file", LOAD, |_, _| {
+                    on_disk(&check).is_some_and(|file| {
+                        file.general.event_log_retention_hours == 100
+                            && file.appearance.row_density == RowDensity::Compact
+                    })
+                })
+                .await;
+                wait_for(&app, &cx, "the login entry", LOAD, |_, _| {
+                    crate::background::autostart::tests::REQUESTS
+                        .lock()
+                        .unwrap()
+                        .contains(&true)
+                })
+                .await;
+            }
+            .boxed_local()
+        })),
+    );
+}
+
+/// An edit by hand that doesn't read is never written over: it is
+/// reported (a banner, and `file has errors` in the settings header), the
+/// window's changes are kept meanwhile, and once the file is fixed both
+/// end up in it.
+#[test]
+fn an_unreadable_edit_is_reported_and_left_alone_until_it_is_fixed() {
+    use ic_config::RowDensity;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path());
+    paths.config_store().save(&settings_with("prod")).unwrap();
+    let check = paths.clone();
+    run_app(
+        crate::WINDOW_SIZE,
+        live_app(paths, None),
+        Body::Async(Box::new(move |app, cx| {
+            async move {
+                wait_for(&app, &cx, "the settings as started", LOAD, |app, cx| {
+                    let state = app.state.read(cx);
+                    state.settings_on_disk().as_ref() == Some(state.config())
+                        && on_disk(&check).as_ref() == Some(state.config())
+                })
+                .await;
+                let good = on_disk(&check).unwrap();
+                let broken = "version = 3\n[appearance]\ninterface_size = \"huge\"\n";
+                std::fs::write(&check.config_file, broken).unwrap();
+                cx.update(|cx| change_density(&app, cx, RowDensity::Compact));
+                wait_for(&app, &cx, "the problem reported", LOAD, |app, cx| {
+                    let state = app.state.read(cx);
+                    state.file_error().is_some()
+                        && state
+                            .notice()
+                            .is_some_and(|notice| notice.title.contains("can't be read"))
+                })
+                .await;
+                assert_eq!(
+                    std::fs::read_to_string(&check.config_file).unwrap(),
+                    broken,
+                    "nothing written over it"
+                );
+                // Coming back to the window says it once, not again.
+                cx.update(|cx| {
+                    app.state.update(cx, |state, _| state.dismiss_notice());
+                    let session = live::session(cx).unwrap();
+                    session.update(cx, Session::reload_settings_file);
+                });
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                cx.update(|cx| {
+                    let state = app.state.read(cx);
+                    assert!(state.notice().is_none(), "reported once");
+                    assert!(state.file_error().is_some());
+                });
+                // Fixed by hand, with a change of its own.
+                let mut fixed = good.clone();
+                fixed.general.event_log_retention_hours = 100;
+                let scratch = ic_config::ConfigStore::new(dir_of(&check).join("fixed.toml"));
+                scratch.save(&fixed).unwrap();
+                std::fs::copy(scratch.path(), &check.config_file).unwrap();
+                cx.update(|cx| {
+                    let session = live::session(cx).unwrap();
+                    session.update(cx, Session::reload_settings_file);
+                });
+                wait_for(&app, &cx, "the fixed file taken over", LOAD, |app, cx| {
+                    let state = app.state.read(cx);
+                    state.file_error().is_none()
+                        && state.config().general.event_log_retention_hours == 100
+                })
+                .await;
+                cx.update(|cx| {
+                    assert_eq!(
+                        app.state.read(cx).appearance().row_density,
+                        RowDensity::Compact,
+                        "the change made meanwhile stays"
+                    );
+                });
+                wait_for(&app, &cx, "both in the file", LOAD, |_, _| {
+                    on_disk(&check).is_some_and(|file| {
+                        file.general.event_log_retention_hours == 100
+                            && file.appearance.row_density == RowDensity::Compact
+                    })
+                })
+                .await;
+            }
+            .boxed_local()
+        })),
+    );
+}
+
+/// The folder of the settings file.
+fn dir_of(paths: &Paths) -> std::path::PathBuf {
+    paths.config_dir()
 }
 
 /// The disposable Icinga 2.15.6 from `contract/run-icinga.sh`, read-only:

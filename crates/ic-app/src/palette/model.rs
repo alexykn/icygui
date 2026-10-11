@@ -19,16 +19,17 @@
 use std::cmp::Reverse;
 
 use ic_core::snapshot::Snapshot;
-use ic_model::{CheckableState, Host, ObjectKey, Service, Timestamp};
+use ic_model::{Host, ObjectKey, Service, Timestamp};
 use ic_rules::DashboardRef;
-use ic_ui_kit::IconName;
+use ic_ui_kit::{IconName, ObjectMark};
 
 use super::fuzzy::{Match, Query};
 use crate::actions::ObjectAction;
 use crate::app_state::AppState;
 use crate::app_state::environments::url_summary;
+use crate::lists::ListKind;
 use crate::notifications::{MuteChoice, OverrideChange, PauseChoice};
-use crate::settings::SettingsTab;
+use crate::settings::SettingsPage;
 use crate::sidebar::Dot;
 
 /// The palette's sections, in display order.
@@ -114,10 +115,18 @@ pub(crate) enum PaletteCommand {
     Override(OverrideChange, Vec<ObjectKey>),
     /// Open the notification centre (NOTE-05).
     OpenNotifications,
+    /// Open the handling or downtimes view as a tab (topic 14), on a chip
+    /// (*acknowledged* opens handling on its acknowledged chip).
+    OpenList(ListKind, Option<crate::lists::model::Chip>),
+    /// Show the cluster health page (topic 06).
+    ClusterHealth,
+    /// Open the health page in the dashboard editor (16j's *edit page*,
+    /// by keyboard).
+    EditHealthPage,
     /// Mark every notification read.
     MarkNotificationsRead,
     /// Open the settings (`secondary-,`), on this tab.
-    Settings(SettingsTab),
+    Settings(SettingsPage),
     /// Show what icygui is.
     About,
     /// Quit the app, even when it keeps running in the tray.
@@ -403,11 +412,12 @@ impl PaletteIndex {
         let hosts = all_matches(&self.hosts, rest, rank);
         let count = services.len() + hosts.len();
         if count > 1 {
-            // The mark takes the worst state among them.
+            // The mark takes the worst state among them (the redder
+            // unhandled state, as every dot; Icinga's severity among equals).
             let worst = services
                 .iter()
                 .chain(&hosts)
-                .max_by_key(|candidate| candidate.severity)
+                .max_by_key(|candidate| (candidate.item.dot.map(Dot::rank), candidate.severity))
                 .and_then(|candidate| candidate.item.dot);
             let objects = |candidates: Vec<&Candidate>| -> Vec<ObjectKey> {
                 candidates
@@ -641,8 +651,12 @@ fn action_label(action: &ObjectAction) -> &'static str {
         ObjectAction::CheckNow => "Check now",
         ObjectAction::AddComment => "Add comment",
         ObjectAction::RemoveAcknowledgement => "Remove acknowledgement",
-        ObjectAction::RemoveComment(_) => "Remove comment",
-        ObjectAction::RemoveDowntime(_) => "Remove downtime",
+        ObjectAction::RemoveComments(names) if names.len() > 1 => "Remove comments",
+        ObjectAction::RemoveComments(_) => "Remove comment",
+        ObjectAction::RemoveNamedDowntimes(names) if names.len() > 1 => "Remove downtimes",
+        ObjectAction::RemoveDowntime(_) | ObjectAction::RemoveNamedDowntimes(_) => {
+            "Remove downtime"
+        }
         ObjectAction::RemoveDowntimes => "Remove downtimes",
         ObjectAction::SubmitCheckResult => "Submit check result",
         ObjectAction::RunCommand => "Run command",
@@ -701,7 +715,8 @@ fn host_candidates(state: &AppState) -> Vec<Candidate> {
 /// A host's row: its display name, then its name and address (when they
 /// differ) and its state.
 fn host_item(host: &Host) -> PaletteItem {
-    let state = CheckableState::Host(host.state);
+    let mark = ObjectMark::host(host);
+    let state = mark.state;
     let address = if host.display_name == host.name.as_str() {
         host.address.clone()
     } else {
@@ -711,7 +726,7 @@ fn host_item(host: &Host) -> PaletteItem {
         section: Section::Hosts,
         label: host.display_name.clone(),
         detail: join_detail(&address, crate::format::state_word(state)),
-        dot: Some(Dot::for_object(Some(state))),
+        dot: Some(Dot::for_mark(mark)),
         several: false,
         icon: None,
         key_hint: None,
@@ -727,6 +742,9 @@ fn service_candidates(state: &AppState) -> Vec<Candidate> {
     snapshot
         .services
         .values()
+        // Heartbeats are icygui's own checks: the health page and the
+        // settings show them, not the searches.
+        .filter(|service| !snapshot.excluded.contains(&service.key))
         .map(|service| {
             object_candidate(
                 service_item(snapshot, service),
@@ -739,8 +757,10 @@ fn service_candidates(state: &AppState) -> Vec<Candidate> {
 
 /// A service's row: its display name, then `on <host> · <state>`.
 fn service_item(snapshot: &Snapshot, service: &Service) -> PaletteItem {
-    let state = CheckableState::Service(service.state);
-    let host = snapshot.host_of(&service.key).map_or_else(
+    let host_object = snapshot.host_of(&service.key).map(AsRef::as_ref);
+    let mark = ObjectMark::service(service, host_object);
+    let state = mark.state;
+    let host = host_object.map_or_else(
         || service.key.host.to_string(),
         |host| host.display_name.clone(),
     );
@@ -748,7 +768,7 @@ fn service_item(snapshot: &Snapshot, service: &Service) -> PaletteItem {
         section: Section::Services,
         label: service.display_name.clone(),
         detail: join_detail(&format!("on {host}"), crate::format::state_word(state)),
-        dot: Some(Dot::for_object(Some(state))),
+        dot: Some(Dot::for_mark(mark)),
         several: false,
         icon: None,
         key_hint: None,
@@ -816,7 +836,7 @@ fn focus_target(state: &AppState, focus: &Focus) -> Option<Target> {
             let worst = many
                 .iter()
                 .map(row)
-                .max_by_key(|(_, severity)| *severity)
+                .max_by_key(|(item, severity)| (item.dot.map(Dot::rank), *severity))
                 .and_then(|(item, _)| item.dot)
                 .unwrap_or(Dot::Empty);
             Some(Target {
@@ -931,6 +951,10 @@ fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem>
     items.extend(more_actions);
     items.extend(override_commands(state, focus, now));
     items.extend(pause_commands(state, now, has_environment));
+    // A name away (`downtimes`), after what the empty query offers.
+    if has_environment {
+        items.extend(list_commands(state, now));
+    }
     items.push(command(
         "Toggle sidebar",
         String::new(),
@@ -959,6 +983,69 @@ fn commands(state: &AppState, focus: &Focus, now: Timestamp) -> Vec<PaletteItem>
         ));
     }
     items
+}
+
+/// The handling and downtimes views (topic 14), each opening as a tab:
+/// `Handling  who is handling what · 20`; *acknowledged* and *comments*
+/// open handling on that chip (there are no separate lists for them).
+fn list_commands(state: &AppState, now: Timestamp) -> Vec<PaletteItem> {
+    use crate::lists::model::Chip;
+    let snapshot = state.snapshot();
+    let count = |kind| {
+        crate::lists::model::count(
+            kind,
+            snapshot,
+            None,
+            ic_config::DowntimeKinds::default(),
+            now,
+        )
+    };
+    let handled = count(ListKind::Handling);
+    let in_effect = count(ListKind::Downtimes);
+    vec![
+        command(
+            "Handling",
+            format!("who is handling what · {handled}"),
+            None,
+            ListKind::Handling.icon(),
+            PaletteCommand::OpenList(ListKind::Handling, Some(Chip::All)),
+        ),
+        command(
+            "Downtimes",
+            format!("in effect and upcoming · {in_effect} in effect"),
+            None,
+            ListKind::Downtimes.icon(),
+            PaletteCommand::OpenList(ListKind::Downtimes, None),
+        ),
+        command(
+            "Acknowledged",
+            "handling, acknowledged problems".to_owned(),
+            None,
+            IconName::Check,
+            PaletteCommand::OpenList(ListKind::Handling, Some(Chip::Acknowledged)),
+        ),
+        command(
+            "Comments",
+            "handling, comments".to_owned(),
+            None,
+            IconName::MessageSquare,
+            PaletteCommand::OpenList(ListKind::Handling, Some(Chip::Comments)),
+        ),
+        command(
+            "Cluster health",
+            "zones, queues, checks/min".to_owned(),
+            None,
+            IconName::HeartPulse,
+            PaletteCommand::ClusterHealth,
+        ),
+        command(
+            "Edit health page",
+            "the cluster health page's views".to_owned(),
+            None,
+            IconName::Pencil,
+            PaletteCommand::EditHealthPage,
+        ),
+    ]
 }
 
 /// The actions on the focused objects, with their keys, then copying
@@ -992,11 +1079,12 @@ fn action_commands(state: &AppState, focus: &Focus) -> (Vec<PaletteItem>, Vec<Pa
     if acknowledged {
         actions.push(ObjectAction::RemoveAcknowledgement);
     }
+    // Only downtimes Icinga would remove: not those from the config.
     if focus.targets.iter().any(|target| {
         snapshot
             .downtimes
             .get(target)
-            .is_some_and(|list| !list.is_empty())
+            .is_some_and(|list| list.iter().any(|downtime| !downtime.config_owned))
     }) {
         actions.push(ObjectAction::RemoveDowntimes);
     }
@@ -1137,7 +1225,7 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
             String::new(),
             None,
             IconName::Settings,
-            PaletteCommand::Settings(SettingsTab::Notifications),
+            PaletteCommand::Settings(SettingsPage::Notifications),
         ));
     }
     items.push(command(
@@ -1145,7 +1233,7 @@ fn pause_commands(state: &AppState, now: Timestamp, has_environment: bool) -> Ve
         String::new(),
         Some(crate::settings::settings_key()),
         IconName::Settings,
-        PaletteCommand::Settings(SettingsTab::General),
+        PaletteCommand::Settings(SettingsPage::General),
     ));
     items.push(command(
         "About icygui",

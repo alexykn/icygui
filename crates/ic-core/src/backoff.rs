@@ -28,16 +28,17 @@ impl Backoff {
 
     /// Records a failure and returns how long to wait before the next
     /// attempt: `initial × 2^(failures − 1)`, at most `max`, of which a
-    /// random half is jitter.
-    pub(crate) fn fail(&mut self) -> Duration {
+    /// random half is jitter (`random` in `[0, 1)`, from the engine's
+    /// [`crate::jitter::Jitter`]).
+    pub(crate) fn fail(&mut self, random: f64) -> Duration {
         self.failures = self.failures.saturating_add(1);
-        jitter(self.delay(), fastrand::f64())
+        jitter(self.delay(), random)
     }
 
     /// Like [`Backoff::fail`], with the delay before jitter at most `max`.
-    pub(crate) fn fail_up_to(&mut self, max: Duration) -> Duration {
+    pub(crate) fn fail_up_to(&mut self, max: Duration, random: f64) -> Duration {
         self.failures = self.failures.saturating_add(1);
-        jitter(self.delay().min(max), fastrand::f64())
+        jitter(self.delay().min(max), random)
     }
 
     /// Back to the first delay (after a healthy connection or a user's
@@ -72,14 +73,14 @@ mod tests {
         assert_eq!(backoff.attempt(), 1);
         let mut delays = Vec::new();
         for _ in 0..9 {
-            backoff.fail();
+            backoff.fail(0.5);
             delays.push(backoff.delay().as_secs());
         }
         assert_eq!(delays, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
         assert_eq!(backoff.attempt(), 10);
         backoff.reset();
         assert_eq!(backoff.attempt(), 1);
-        backoff.fail();
+        backoff.fail(0.5);
         assert_eq!(backoff.delay(), Duration::from_secs(1));
     }
 
@@ -90,8 +91,9 @@ mod tests {
         assert_eq!(jitter(delay, 0.5), Duration::from_secs(6));
         assert!(jitter(delay, 0.999_999) < delay);
         let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_mins(1));
+        let mut random = crate::jitter::Jitter::new(Some(3));
         for _ in 0..100 {
-            let wait = backoff.fail();
+            let wait = backoff.fail(random.unit());
             assert!(
                 wait >= backoff.delay() / 2 && wait < backoff.delay().max(Duration::from_nanos(1))
             );
@@ -102,8 +104,8 @@ mod tests {
     fn a_lower_cap_applies_per_failure() {
         let mut backoff = Backoff::new(Duration::from_secs(30), Duration::from_mins(15));
         let mut waits = Vec::new();
-        for _ in 0..7 {
-            waits.push(backoff.fail_up_to(Duration::from_mins(5)));
+        for random in [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 0.999] {
+            waits.push(backoff.fail_up_to(Duration::from_mins(5), random));
         }
         let bounds = [30, 60, 120, 240, 300, 300, 300];
         for (wait, bound) in waits.iter().zip(bounds) {
@@ -116,7 +118,7 @@ mod tests {
     fn many_failures_never_overflow() {
         let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_mins(1));
         for _ in 0..1_000 {
-            backoff.fail();
+            backoff.fail(0.5);
         }
         assert_eq!(backoff.delay(), Duration::from_mins(1));
     }

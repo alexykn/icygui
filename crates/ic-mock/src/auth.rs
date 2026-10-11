@@ -3,6 +3,8 @@
 
 use base64::Engine as _;
 
+use ic_model::glob_matches;
+
 use crate::config::MockUser;
 
 /// An authenticated API user.
@@ -11,7 +13,6 @@ pub(crate) struct Principal {
     pub(crate) name: String,
     /// Permissions as configured (for `GET /v1`).
     pub(crate) permissions: Vec<String>,
-    lowered: Vec<String>,
 }
 
 impl Principal {
@@ -19,7 +20,6 @@ impl Principal {
         Self {
             name: user.username.clone(),
             permissions: user.permissions.clone(),
-            lowered: user.permissions.iter().map(|p| p.to_lowercase()).collect(),
         }
     }
 
@@ -29,8 +29,7 @@ impl Principal {
         if required.is_empty() {
             return true;
         }
-        let required = required.to_lowercase();
-        self.lowered.iter().any(|p| glob_match(p, &required))
+        self.permissions.iter().any(|p| glob_matches(p, required))
     }
 }
 
@@ -73,31 +72,6 @@ impl Users {
             .find(|u| u.client_cn.as_deref() == Some(cn))
             .map(Principal::new)
     }
-}
-
-/// Glob matching as `Utility::Match` (permissions): `*` matches any
-/// sequence, `?` one character.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let text: Vec<char> = text.chars().collect();
-    let (mut p, mut t) = (0, 0);
-    let mut backtrack: Option<(usize, usize)> = None;
-    while t < text.len() {
-        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
-            p += 1;
-            t += 1;
-        } else if p < pattern.len() && pattern[p] == '*' {
-            backtrack = Some((p, t));
-            p += 1;
-        } else if let Some((star, matched)) = backtrack {
-            p = star + 1;
-            t = matched + 1;
-            backtrack = Some((star, matched + 1));
-        } else {
-            return false;
-        }
-    }
-    pattern[p..].iter().all(|c| *c == '*')
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -147,15 +121,12 @@ mod tests {
     }
 
     #[test]
-    fn globbing() {
-        assert!(glob_match("*", ""));
-        assert!(glob_match("objects/*", "objects/query/host"));
-        assert!(glob_match("w?b-0*", "web-01"));
-        assert!(!glob_match("web-?", "web-01"));
-        assert!(glob_match("*query*", "objects/query/service"));
-        assert!(glob_match("a*b*c", "a-b-b-c"));
-        assert!(!glob_match("events/*", "actions/x"));
-        assert!(!glob_match("", "x"));
+    fn permissions_follow_icingas_match() {
+        let user = Principal::new(&MockUser::new("u", "p", &[r"literal\*", "Events/??"]));
+        assert!(user.has_permission("literal*"), "escaped star");
+        assert!(!user.has_permission("literalx"));
+        assert!(user.has_permission("EVENTS/ab"));
+        assert!(!user.has_permission("events/abc"));
     }
 
     #[test]

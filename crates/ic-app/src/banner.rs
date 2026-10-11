@@ -1,5 +1,5 @@
 //! The banners over the main area (ENV-07): the connection's problems
-//! (reconnecting with a countdown and "Retry now", login refused,
+//! (reconnecting with a countdown and *retry now*, login refused,
 //! certificate not trusted, password missing, settings that can't work)
 //! and settings that couldn't be saved; and the same problems as the whole
 //! body while there is nothing else to show (UI-05).
@@ -8,21 +8,28 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Entity, IntoElement, ParentElement as _, SharedString,
-    Styled as _, Window, div, px,
+    Styled as _, Window, div,
 };
 use ic_model::Timestamp;
 use ic_ui_kit::{
-    ActiveTheme as _, Banner, BannerTone, Button, EmptyState, Icon, IconName, Link, ProgressBar,
+    ActiveTheme as _, Banner, BannerTone, Button, EmptyState, Icon, IconName, Link, ProgressBar, px,
 };
 
 use crate::actions::{EditEnvironment, RestartEngine, ReviewCertificate};
 use crate::app_state::{AppState, ConnectionNotice, NoticeAction, NoticeKind, Tone};
 
-/// The banners to show over a list or tab at `now`.
-pub(crate) fn banners(state: &Entity<AppState>, now: Timestamp, cx: &App) -> Vec<AnyElement> {
+/// The banners to show over a list or tab at `now`. `with_connection`
+/// false leaves out the connection's: the body already shows it (UI-05),
+/// but a notice or a settings problem still needs its banner.
+pub(crate) fn banners(
+    state: &Entity<AppState>,
+    now: Timestamp,
+    with_connection: bool,
+    cx: &App,
+) -> Vec<AnyElement> {
     let current = state.read(cx);
     let mut banners = Vec::new();
-    if let Some(notice) = current.connection_notice(now) {
+    if with_connection && let Some(notice) = current.connection_notice(now) {
         banners.push(connection_banner(state, &notice).into_any_element());
     }
     if let Some(error) = current.save_error() {
@@ -94,7 +101,9 @@ fn icon(kind: NoticeKind) -> IconName {
         NoticeKind::Reconnecting => IconName::Unplug,
         NoticeKind::AuthFailed | NoticeKind::MissingSecret => IconName::KeyRound,
         NoticeKind::TlsFailed => IconName::Lock,
-        NoticeKind::Misconfigured | NoticeKind::EngineFailed => IconName::TriangleAlert,
+        NoticeKind::Misconfigured | NoticeKind::EngineFailed | NoticeKind::Blind => {
+            IconName::TriangleAlert
+        }
     }
 }
 
@@ -159,8 +168,8 @@ pub(crate) fn connection_body(
 ) -> AnyElement {
     let theme = cx.theme();
     let color = match notice.tone {
-        Tone::Critical => theme.states.critical,
-        Tone::Warning => theme.states.warning,
+        Tone::Critical => theme.states.fill.critical,
+        Tone::Warning => theme.states.fill.warning,
     };
     let mut buttons = div().flex().flex_wrap().justify_center().gap(px(8.));
     for (index, action) in notice.actions.iter().enumerate() {

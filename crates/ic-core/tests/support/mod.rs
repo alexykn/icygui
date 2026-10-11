@@ -38,6 +38,9 @@ pub(crate) const ENV_ID: &str = "11111111-2222-3333-4444-555555555555";
 /// How long a test waits for an expected event.
 pub(crate) const WAIT: Duration = Duration::from_secs(20);
 
+/// How long [`Engine::wait_for`] waits at most, events or not.
+pub(crate) const WAIT_FOR: Duration = Duration::from_mins(1);
+
 /// Secrets in memory.
 #[derive(Debug, Default)]
 pub(crate) struct FakeSecrets {
@@ -138,33 +141,55 @@ impl Clock for FakeClock {
 /// The fake clock's time.
 pub(crate) const NOW: f64 = 1_800_000_000.0;
 
+/// The seed of the engines' timer jitter in tests: the random phases
+/// and spreads (and the backoff's jitter) repeat from run to run.
+pub(crate) const SEED: u64 = 42;
+
 /// Fast timing for tests. Every reconnect reloads (the gap counts as long
-/// from the start); `gentle.rs` tests the production rule.
+/// from the start); `gentle.rs` tests the production rule. The timers'
+/// jitter is seeded ([`SEED`]), so a run repeats.
 pub(crate) fn tuning() -> Tuning {
     Tuning {
+        seed: Some(SEED),
         backoff_initial: Duration::from_millis(40),
         backoff_max: Duration::from_millis(320),
         publish_interval: Duration::from_millis(20),
         requery_delay: Duration::from_millis(20),
+        reask_spread: Duration::from_millis(20),
+        reask_retry: Duration::from_millis(40),
         watchdog_interval: Duration::from_millis(20),
         reload_jitter: Duration::from_millis(30),
         reload_after_gap: Duration::ZERO,
         load_retry_initial: Duration::from_millis(40),
         rule_tick: Duration::from_millis(20),
+        // ic-mock writes every line at once; the default's 7 s outlast
+        // Icinga's 5 s batches (`a_switch_keeps_the_old_stream_until_its_next_batch`
+        // keeps it).
+        stream_handover: Duration::from_secs(2),
         ..Tuning::default()
     }
 }
 
-/// Polls `condition` every 10 ms for at most ten seconds; whether it
-/// held.
+/// Polls `condition` every 10 ms for at most [`WAIT_FOR`] by the clock;
+/// whether it held. For what only the mock sees (the requests it got);
+/// what the engine shows is waited for on its own events
+/// ([`Engine::snapshot`], [`Engine::wait_for`]), which nothing paced or
+/// timed can outrun.
 pub(crate) async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
-    for _ in 0..1_000 {
+    // Bounded by the clock, not by a number of polls: on a busy runner
+    // (the tests run side by side, CI has two cores) paced or timed work
+    // takes longer, and a thousand short sleeps took ten seconds only on
+    // an idle machine.
+    let deadline = std::time::Instant::now() + WAIT_FOR;
+    loop {
         if condition() {
             return true;
         }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    false
 }
 
 /// Starts a mock with `config`.
@@ -195,8 +220,10 @@ pub(crate) struct Engine {
     pub(crate) secrets: Arc<FakeSecrets>,
     pub(crate) clock: Arc<FakeClock>,
     pub(crate) notifier: Arc<FakeNotifier>,
-    /// Every event seen so far, in order.
+    /// Every event seen so far, in order (but the liveness ticks).
     pub(crate) seen: Vec<CoreEvent>,
+    /// How many liveness ticks ([`CoreEvent::Alive`]) came.
+    pub(crate) alive: usize,
     pub(crate) data_dir: PathBuf,
     _dir: Option<tempfile::TempDir>,
 }
@@ -214,6 +241,9 @@ pub(crate) struct Launch {
     /// How the engine starts (a background start waits before its first
     /// load).
     pub(crate) start: Start,
+    /// The engine's clock is the system's, not the fake one (against a real
+    /// Icinga, whose heartbeats and alerts follow the wall clock).
+    pub(crate) real_clock: bool,
 }
 
 impl Launch {
@@ -229,6 +259,7 @@ impl Launch {
             now: Timestamp::now().as_unix_seconds(),
             data_dir: None,
             start: Start::User,
+            real_clock: false,
         }
     }
 
@@ -247,6 +278,7 @@ pub(crate) fn start(environment: Environment, secrets: Arc<FakeSecrets>, tuning:
         now: NOW,
         data_dir: None,
         start: Start::User,
+        real_clock: false,
     })
 }
 
@@ -259,6 +291,7 @@ fn launch(launch: Launch) -> Engine {
         now,
         data_dir,
         start,
+        real_clock,
     } = launch;
     let (dir, data_dir) = if let Some(data_dir) = data_dir {
         (None, data_dir)
@@ -272,13 +305,18 @@ fn launch(launch: Launch) -> Engine {
     let spec = EnvironmentSpec {
         environment,
         general,
+        hide_handled: ic_config::HideHandled::ALL,
         data_dir: data_dir.clone(),
         start,
     };
     let ports = Ports {
         secrets: Arc::clone(&secrets) as Arc<dyn SecretStore>,
         notifier: Arc::clone(&notifier) as Arc<dyn Notifier>,
-        clock: Arc::clone(&clock) as Arc<dyn Clock>,
+        clock: if real_clock {
+            Arc::new(ic_core::SystemClock) as Arc<dyn Clock>
+        } else {
+            Arc::clone(&clock) as Arc<dyn Clock>
+        },
     };
     let mut handle = ic_core::start_with_tuning(spec, ports, tuning).unwrap();
     let events = handle.take_events().unwrap();
@@ -290,6 +328,7 @@ fn launch(launch: Launch) -> Engine {
         clock,
         notifier,
         seen: Vec::new(),
+        alive: 0,
         data_dir,
         _dir: dir,
     }
@@ -313,14 +352,23 @@ impl Engine {
         self.handle().send(command);
     }
 
-    /// The next event, or a panic after [`WAIT`].
+    /// The next event, or a panic after [`WAIT`]. The engine's liveness
+    /// ticks ([`CoreEvent::Alive`]) are counted, not returned.
     pub(crate) async fn next(&mut self) -> CoreEvent {
-        let event = tokio::time::timeout(WAIT, self.events.next())
-            .await
-            .unwrap_or_else(|_| panic!("no event within {WAIT:?}; seen: {:#?}", self.tail()))
-            .expect("the engine stopped");
-        self.seen.push(event.clone());
-        event
+        // The ticks come every few seconds: the wait is for another event.
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let event = tokio::time::timeout_at(deadline, self.events.next())
+                .await
+                .unwrap_or_else(|_| panic!("no event within {WAIT:?}; seen: {:#?}", self.tail()))
+                .expect("the engine stopped");
+            if let CoreEvent::Alive(_) = event {
+                self.alive += 1;
+                continue;
+            }
+            self.seen.push(event.clone());
+            return event;
+        }
     }
 
     fn tail(&self) -> Vec<String> {
@@ -340,13 +388,20 @@ impl Engine {
             .collect()
     }
 
-    /// Waits for an event `pick` accepts.
+    /// Waits for an event `pick` accepts (at most [`WAIT_FOR`], however
+    /// many other events come meanwhile).
     pub(crate) async fn wait_for<T>(&mut self, mut pick: impl FnMut(&CoreEvent) -> Option<T>) -> T {
+        let deadline = std::time::Instant::now() + WAIT_FOR;
         loop {
             let event = self.next().await;
             if let Some(value) = pick(&event) {
                 return value;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no such event within {WAIT_FOR:?}; seen: {:#?}",
+                self.tail()
+            );
         }
     }
 

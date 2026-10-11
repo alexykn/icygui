@@ -65,19 +65,19 @@ impl ActionSpec {
     }
 
     /// The actions that need no dialog: a forced check, removing
-    /// acknowledgements or downtimes, one comment or downtime by name.
-    /// `None` for the actions with a dialog. `object` is the comment's or
-    /// downtime's object for removals by name.
+    /// acknowledgements or downtimes, comments or downtimes by name.
+    /// `None` for the actions with a dialog. `objects` are the comments' or
+    /// downtimes' objects for removals by name.
     pub(crate) fn immediate(kind: &ObjectAction, objects: Vec<ObjectKey>) -> Option<Self> {
         let action = match kind {
             ObjectAction::CheckNow => Action::CheckNow { force: true },
             ObjectAction::RemoveAcknowledgement => Action::RemoveAcknowledgement,
             ObjectAction::RemoveDowntimes => Action::RemoveAllDowntimes,
-            ObjectAction::RemoveComment(name) => {
+            ObjectAction::RemoveComments(names) => {
                 return Some(Self {
                     kind: kind.clone(),
                     action: Action::RemoveAllDowntimes,
-                    target: ActionTarget::Comment(name.clone()),
+                    target: ActionTarget::Comments(names.clone()),
                     objects,
                 });
             }
@@ -85,7 +85,15 @@ impl ActionSpec {
                 return Some(Self {
                     kind: kind.clone(),
                     action: Action::RemoveAllDowntimes,
-                    target: ActionTarget::Downtime(name.clone()),
+                    target: ActionTarget::Downtimes(vec![name.clone()]),
+                    objects,
+                });
+            }
+            ObjectAction::RemoveNamedDowntimes(names) => {
+                return Some(Self {
+                    kind: kind.clone(),
+                    action: Action::RemoveAllDowntimes,
+                    target: ActionTarget::Downtimes(names.clone()),
                     objects,
                 });
             }
@@ -128,8 +136,9 @@ pub(crate) fn allowed_action_names() -> Vec<&'static str> {
         ObjectAction::RemoveDowntimes,
         ObjectAction::CheckNow,
         ObjectAction::AddComment,
-        ObjectAction::RemoveComment("h!c".to_owned()),
+        ObjectAction::RemoveComments(vec!["h!c".to_owned()]),
         ObjectAction::RemoveDowntime("h!d".to_owned()),
+        ObjectAction::RemoveNamedDowntimes(vec!["h!d".to_owned(), "h!e".to_owned()]),
         ObjectAction::SubmitCheckResult,
         ObjectAction::RunCommand,
     ];
@@ -186,14 +195,17 @@ pub(crate) fn allowed_action_names() -> Vec<&'static str> {
                 ObjectAction::RemoveAcknowledgement
                 | ObjectAction::RemoveDowntimes
                 | ObjectAction::CheckNow
-                | ObjectAction::RemoveComment(_)
-                | ObjectAction::RemoveDowntime(_) => ActionSpec::immediate(kind, object.clone()),
+                | ObjectAction::RemoveComments(_)
+                | ObjectAction::RemoveDowntime(_)
+                | ObjectAction::RemoveNamedDowntimes(_) => {
+                    ActionSpec::immediate(kind, object.clone())
+                }
             };
             let spec = spec.unwrap_or_else(|| panic!("{kind:?} builds an action"));
             // `ic-api` sends a removal by comment name to `remove-comment`.
             match spec.target {
-                ActionTarget::Comment(_) => "remove-comment",
-                ActionTarget::Objects(_) | ActionTarget::Downtime(_) => spec.action.api_name(),
+                ActionTarget::Comments(_) => "remove-comment",
+                ActionTarget::Objects(_) | ActionTarget::Downtimes(_) => spec.action.api_name(),
             }
         })
         .collect()
@@ -217,7 +229,7 @@ mod tests {
     #[test]
     fn every_action_goes_to_a_runtime_endpoint() {
         let names = allowed_action_names();
-        assert_eq!(names.len(), 10, "one per kind of action");
+        assert_eq!(names.len(), 11, "one per kind of action");
         for name in &names {
             assert!(ALLOWED_ENDPOINTS.contains(name), "{name}");
         }
@@ -234,11 +246,14 @@ mod tests {
         assert_eq!(check.action, Action::CheckNow { force: true });
         assert_eq!(check.target, ActionTarget::Objects(objects.clone()));
         let removal = ActionSpec::immediate(
-            &ObjectAction::RemoveComment("db-01!c".to_owned()),
+            &ObjectAction::RemoveComments(vec!["db-01!c".to_owned(), "db-01!d".to_owned()]),
             objects.clone(),
         )
         .unwrap();
-        assert_eq!(removal.target, ActionTarget::Comment("db-01!c".to_owned()));
+        assert_eq!(
+            removal.target,
+            ActionTarget::Comments(vec!["db-01!c".to_owned(), "db-01!d".to_owned()])
+        );
         assert_eq!(removal.objects, objects);
         let downtime = ActionSpec::immediate(
             &ObjectAction::RemoveDowntime("db-01!d".to_owned()),
@@ -247,9 +262,18 @@ mod tests {
         .unwrap();
         assert_eq!(
             downtime.target,
-            ActionTarget::Downtime("db-01!d".to_owned())
+            ActionTarget::Downtimes(vec!["db-01!d".to_owned()])
         );
         assert_eq!(downtime.action, Action::RemoveAllDowntimes);
+        let named = ActionSpec::immediate(
+            &ObjectAction::RemoveNamedDowntimes(vec!["db-01!d".to_owned(), "db-01!e".to_owned()]),
+            objects.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            named.target,
+            ActionTarget::Downtimes(vec!["db-01!d".to_owned(), "db-01!e".to_owned()])
+        );
         assert!(ActionSpec::immediate(&ObjectAction::Acknowledge, objects).is_none());
     }
 }

@@ -27,6 +27,7 @@ docker stop "$NAME" >/dev/null
 docker run --rm -v "$NAME-data:/data" -v "$HERE/icinga:/fixtures:ro" --entrypoint sh \
   "icinga/icinga2:$TAG" -c '
     cp /fixtures/icygui-test.conf /data/etc/icinga2/conf.d/icygui-test.conf
+    cp /fixtures/icygui-groups.conf /data/etc/icinga2/conf.d/icygui-groups.conf
     cp /fixtures/services.conf /data/etc/icinga2/conf.d/services.conf
     cp /fixtures/api.conf /data/etc/icinga2/features-enabled/api.conf
     icinga2 daemon -C >/dev/null'

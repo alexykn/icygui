@@ -506,6 +506,9 @@ async fn a_problem_notified_before_a_restart_still_notifies_its_recovery() {
     let launch = |server: &ic_mock::MockServer| {
         let mut launch = Launch::new(server);
         launch.data_dir = Some(dir.path().to_owned());
+        // A busy disk: the event log's answer about what an earlier run
+        // notified comes a second after the engine asked.
+        launch.tuning.event_log_delay = Duration::from_secs(1);
         launch.start()
     };
 
@@ -522,8 +525,10 @@ async fn a_problem_notified_before_a_restart_still_notifies_its_recovery() {
     // a new engine on the same event log.
     let mut engine = launch(&server);
     settled(&mut engine).await;
-    // The event log answers right after the rule engine was seeded.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // At once, long before the event log's answer about what an earlier
+    // run notified: the recovery waits for it (it used to be judged as a
+    // problem nobody was told about whenever the answer came later than
+    // the event, so a busy disk lost the recovery).
     ok(&control, "stg-api-01", "http");
     assert_eq!(
         titles_until(&mut engine, "RECOVERED · http on stg-api-01").await,

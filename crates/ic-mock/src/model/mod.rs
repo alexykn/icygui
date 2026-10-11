@@ -24,11 +24,12 @@ use crate::sim::SimState;
 
 pub(crate) use attrs::{ObjKind, ObjRef};
 pub(crate) use checker::CheckQueue;
+pub(crate) use load::version_number;
 pub(crate) use logic::{CheckInput, DepType, ProcessOutcome};
 pub(crate) use stats::CheckStats;
 pub(crate) use types::{
-    Checkable, CommandData, CommentData, DependencyData, DowntimeData, EndpointData, GroupData,
-    NotificationData, ObjMeta, UserData, ZoneData,
+    Checkable, CommandData, CommentData, DependencyData, DowntimeData, EndpointData, FeatureData,
+    GroupData, NotificationData, ObjMeta, UserData, ZoneData,
 };
 
 /// What `/v1/status/IcingaApplication` reports.
@@ -86,6 +87,9 @@ pub(crate) struct World {
     pub(crate) notifications: BTreeMap<String, NotificationData>,
     pub(crate) check_commands: BTreeMap<String, CommandData>,
     pub(crate) event_commands: BTreeMap<String, CommandData>,
+    /// The enabled features' objects (`checker`, `notification`,
+    /// `icingadb`), by kind.
+    pub(crate) features: BTreeMap<ObjKind, FeatureData>,
     /// Comment names by object full name.
     comments_by_object: BTreeMap<String, BTreeSet<String>>,
     /// Downtime names by object full name.
@@ -110,6 +114,15 @@ pub(crate) struct World {
     pub(crate) sim: SimState,
     /// Seconds between `reschedule-check` and the resulting check.
     pub(crate) reschedule_delay: f64,
+    /// Objects checked in real time (`Scenario::realtime`), and when each
+    /// is due next.
+    pub(crate) realtime: BTreeMap<String, f64>,
+    /// No check runs (`MockControl::stop_checks`): the checker hangs.
+    pub(crate) checks_stopped: bool,
+    /// Endpoints whose checker hangs while they stay connected
+    /// (`MockControl::stop_checks_on`): they run no check of their zone's
+    /// and answer no check pinned to them.
+    pub(crate) checkers_stopped: BTreeSet<String>,
 }
 
 /// Wall-clock seconds since the epoch.

@@ -26,12 +26,18 @@ pub(crate) const MAX_TEXT: usize = 16 * 1024 * 1024;
 /// Array items and dictionary entries one evaluation may create.
 pub(crate) const MAX_ITEMS: usize = 100_000;
 
+/// Extra byte comparisons one evaluation may spend matching globs (see
+/// `ic_model::Glob::extra_steps`: only `?` runs longer than 64 bytes cost
+/// any). A few tens of milliseconds; no pattern people write gets near it.
+pub(crate) const MAX_STEPS: usize = 20_000_000;
+
 /// What is left of one evaluation's limits. Operations charge what they
 /// are about to create; the first charge that doesn't fit fails.
 #[derive(Debug)]
 pub(crate) struct Budget {
     text: Cell<usize>,
     items: Cell<usize>,
+    steps: Cell<usize>,
 }
 
 impl Budget {
@@ -40,6 +46,7 @@ impl Budget {
         Budget {
             text: Cell::new(MAX_TEXT),
             items: Cell::new(MAX_ITEMS),
+            steps: Cell::new(MAX_STEPS),
         }
     }
 
@@ -60,6 +67,16 @@ impl Budget {
             return Err(too_many_items());
         }
         self.items.set(left - count);
+        Ok(())
+    }
+
+    /// Charges `count` extra comparisons for matching a pattern.
+    pub(crate) fn steps(&self, count: usize) -> Result<(), String> {
+        let left = self.steps.get();
+        if count > left {
+            return Err(too_many_steps());
+        }
+        self.steps.set(left - count);
         Ok(())
     }
 
@@ -109,6 +126,13 @@ fn too_many_items() -> String {
     )
 }
 
+#[cold]
+fn too_many_steps() -> String {
+    "evaluation limit reached: a match() pattern with a long run of '?' would take too long \
+     on this text"
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +151,8 @@ mod tests {
                 .contains("100000 array items and dictionary entries")
         );
         assert_eq!(budget.text_left(), 0);
+        budget.steps(MAX_STEPS).unwrap();
+        assert!(budget.steps(1).unwrap_err().contains("long run of '?'"));
     }
 
     #[test]

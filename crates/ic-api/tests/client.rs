@@ -750,8 +750,12 @@ async fn endpoint_states_are_asked_for_by_name() {
         pki.issue(SERVER_NAME, &[SERVER_NAME]),
         |request| match request.path.as_str() {
             "/v1/objects/endpoints" => ok_json(&json!({ "results": [
-                { "name": "master-02", "attrs": { "connected": true } },
-                { "name": "sat-ams-01", "attrs": { "connected": false } }
+                { "name": "master-02", "attrs": {
+                    "connected": true, "connecting": false, "icinga_version": 21506,
+                    "last_message_received": 1_791_480_574.5,
+                    "messages_received_per_second": 412.25, "messages_sent_per_second": 388
+                } },
+                { "name": "sat-ams-01", "attrs": { "connected": false, "connecting": true } }
             ]})),
             _ => error_json(404, "nope"),
         },
@@ -763,17 +767,39 @@ async fn endpoint_states_are_asked_for_by_name() {
         .await
         .unwrap();
     assert_eq!(
-        states,
-        [
-            ("master-02".to_owned(), true),
-            ("sat-ams-01".to_owned(), false)
-        ]
+        states
+            .iter()
+            .map(|state| (state.name.as_str(), state.connected))
+            .collect::<Vec<_>>(),
+        [("master-02", true), ("sat-ams-01", false)]
     );
+    let master = states[0].stats;
+    assert_eq!(master.version, 21_506);
+    assert_eq!(
+        master.last_message,
+        ic_model::Timestamp::from_unix_seconds(1_791_480_574.5)
+    );
+    assert!((master.messages_in - 412.25).abs() < f64::EPSILON);
+    assert!((master.messages_out - 388.0).abs() < f64::EPSILON);
+    assert!(!master.connecting);
+    let satellite = states[1].stats;
+    assert_eq!(satellite.version, 0, "missing numbers read as none");
+    assert!(satellite.connecting);
     let requests = server.requests();
     assert_eq!(requests.len(), 1, "one small request");
     let body = requests[0].json();
     assert_eq!(body["endpoints"], json!(names));
-    assert_eq!(body["attrs"], json!(["connected"]));
+    assert_eq!(
+        body["attrs"],
+        json!([
+            "connected",
+            "connecting",
+            "icinga_version",
+            "last_message_received",
+            "messages_received_per_second",
+            "messages_sent_per_second"
+        ])
+    );
 }
 
 /// Answers name-list queries like Icinga: 404 if any name is unknown.
@@ -1086,41 +1112,114 @@ async fn action_errors_map_to_api_errors() {
 }
 
 #[tokio::test]
-async fn removing_one_downtime_or_comment() {
+async fn removing_downtimes_or_comments_by_name_lists() {
     let pki = Pki::new();
     let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), |request| {
-        ok_json(&json!({ "results": [{ "code": 200, "status": format!("Successfully removed {}", request.path) }] }))
+        let body = request.json();
+        let names = body
+            .get("downtimes")
+            .or_else(|| body.get("comments"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        ok_json(&json!({ "results": names.iter().map(|name| json!({
+            "code": 200,
+            "status": format!("Successfully removed {name}"),
+        })).collect::<Vec<_>>() }))
     })
     .await;
     let client = client(&server, ca_trust(&pki));
-    let downtime = client
+    let downtimes = client
         .run_action(
             &Action::RemoveAllDowntimes,
-            &ActionTarget::Downtime("h!e96da238".to_owned()),
+            &ActionTarget::Downtimes(vec!["h!e96da238".to_owned(), "h!s!0c1f".to_owned()]),
             "me",
         )
         .await
         .unwrap();
-    assert_eq!(downtime[0].target.as_deref(), Some("h!e96da238"));
+    let targets: Vec<_> = downtimes
+        .iter()
+        .map(|result| result.target.as_deref())
+        .collect();
+    assert_eq!(targets, [Some("h!e96da238"), Some("h!s!0c1f")]);
     client
         .run_action(
             &Action::RemoveAllDowntimes,
-            &ActionTarget::Comment("h!s!dc3b4066".to_owned()),
+            &ActionTarget::Comments(vec!["h!s!dc3b4066".to_owned()]),
             "me",
         )
         .await
         .unwrap();
     let requests = server.requests();
+    assert_eq!(requests.len(), 2, "one request per list");
     assert_eq!(requests[0].path, "/v1/actions/remove-downtime");
     assert_eq!(
         requests[0].json(),
-        json!({ "type": "Downtime", "downtime": "h!e96da238", "author": "me" })
+        json!({ "type": "Downtime", "downtimes": ["h!e96da238", "h!s!0c1f"], "author": "me" })
     );
     assert_eq!(requests[1].path, "/v1/actions/remove-comment");
     assert_eq!(
         requests[1].json(),
-        json!({ "type": "Comment", "comment": "h!s!dc3b4066", "author": "me" })
+        json!({ "type": "Comment", "comments": ["h!s!dc3b4066"], "author": "me" })
     );
+}
+
+#[tokio::test]
+async fn long_removal_lists_go_in_batches_and_vanished_names_are_isolated() {
+    let pki = Pki::new();
+    let names: Vec<String> = (0..450).map(|i| format!("h!s{i}!c")).collect();
+    let known: std::collections::HashSet<String> = names
+        .iter()
+        .filter(|name| *name != "h!s7!c")
+        .cloned()
+        .collect();
+    let server = server_with(pki.issue(SERVER_NAME, &[SERVER_NAME]), move |request| {
+        let body = request.json();
+        let listed: Vec<String> = body["comments"]
+            .as_array()
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if listed.is_empty() {
+            return error_json(400, "test server: an empty name list removes every comment");
+        }
+        if listed.iter().any(|name| !known.contains(name)) {
+            return error_json(404, "No objects found.");
+        }
+        ok_json(&json!({ "results": listed.iter().map(|_| json!({
+            "code": 200, "status": "Successfully removed comment.",
+        })).collect::<Vec<_>>() }))
+    })
+    .await;
+    let results = client(&server, ca_trust(&pki))
+        .run_action(
+            &Action::RemoveAllDowntimes,
+            &ActionTarget::Comments(names.clone()),
+            "me",
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 450, "one result per name");
+    let failed: Vec<_> = results
+        .iter()
+        .filter(|result| !result.is_success())
+        .map(|result| (result.code, result.target.clone()))
+        .collect();
+    assert_eq!(failed, [(404, Some("h!s7!c".to_owned()))]);
+    // Batches of 200 names; the first, holding the vanished name, is
+    // split until it is alone. Never one request per comment.
+    let requests = server.requests();
+    assert!(requests.len() < 20, "{} requests", requests.len());
+    assert!(requests.iter().all(|request| {
+        request.json()["comments"]
+            .as_array()
+            .is_some_and(|n| !n.is_empty())
+    }));
 }
 
 // --- Event stream ----------------------------------------------------------
@@ -2375,8 +2474,8 @@ async fn removing_a_vanished_downtime_or_comment_is_a_404_result() {
     .await;
     let client = client(&server, ca_trust(&pki));
     for target in [
-        ActionTarget::Downtime("h!gone".to_owned()),
-        ActionTarget::Comment("h!s!gone".to_owned()),
+        ActionTarget::Downtimes(vec!["h!gone".to_owned()]),
+        ActionTarget::Comments(vec!["h!s!gone".to_owned()]),
     ] {
         let results = client
             .run_action(&Action::RemoveAllDowntimes, &target, "me")
@@ -2395,7 +2494,7 @@ async fn other_actions_on_a_comment_are_refused_before_sending() {
     let error = client(&server, ca_trust(&pki))
         .run_action(
             &acknowledge(),
-            &ActionTarget::Comment("h!c".to_owned()),
+            &ActionTarget::Comments(vec!["h!c".to_owned()]),
             "me",
         )
         .await

@@ -17,6 +17,7 @@
 //!
 //! Methods here never touch GPUI, so they're tested directly.
 
+mod comments;
 pub(crate) mod connection;
 pub(crate) mod editing;
 mod engines;
@@ -26,6 +27,8 @@ mod notifications;
 mod operations;
 pub(crate) mod permissions;
 mod presence;
+pub(crate) mod settings_file;
+mod trouble;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -34,10 +37,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ic_config::{
-    AuthConfig, Config, Dashboard, DashboardGroup, Environment, EnvironmentUiState, MAX_TABS,
-    ObjectKind, UiState, View, WindowState,
+    AuthConfig, Config, Dashboard, DashboardGroup, Environment, EnvironmentUiState, HideHandled,
+    ListOptionsState, MAX_TABS, ObjectKind, UiState, View, WindowState,
 };
-use ic_core::snapshot::{DashboardResult, Snapshot};
+use ic_core::snapshot::{DashboardResult, Snapshot, ViewResult};
 use ic_core::{ApiInfo, Command, ConnectionState, CoreEvent, CoreHandle};
 use ic_model::{ObjectKey, ServiceKey, Timestamp};
 use ic_rules::DashboardRef;
@@ -52,8 +55,10 @@ pub(crate) use self::notifications::NotificationPlan;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use self::operations::NOT_CONNECTED;
 use crate::actions::{ActionRequest, ObjectAction};
+use crate::cluster::ClusterEntry;
 #[cfg(test)]
 use crate::fixture::{self, FixtureOptions};
+use crate::lists::ListKind;
 use crate::operate::tracker::Tracker;
 use crate::persist::{Persistence, SaveReport};
 
@@ -175,6 +180,10 @@ pub(crate) enum Hydrated {
 
 /// Application data shared by the views, and the outbound half.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the window, the user and the pages on screen"
+)]
 pub(crate) struct AppState {
     config: Config,
     ui: UiState,
@@ -191,6 +200,12 @@ pub(crate) struct AppState {
     tabs: Vec<ObjectKey>,
     /// The tab shown instead of the selected dashboard.
     active_tab: Option<ObjectKey>,
+    /// The cluster section's entry shown instead of the selected
+    /// dashboard (never together with `active_tab`).
+    active_cluster: Option<ClusterEntry>,
+    /// Each list's choices in the active environment, by list id (kept
+    /// with the UI state).
+    list_options: BTreeMap<String, ListOptionsState>,
     /// When this client started recording events (the history tab's
     /// "recorded locally since …").
     started_at: Timestamp,
@@ -208,6 +223,9 @@ pub(crate) struct AppState {
     config_problem: Option<ConfigProblem>,
     save_error: Option<String>,
     dismissed_save_error: Option<String>,
+    /// Why the settings file, edited by hand, can't be read: icygui
+    /// writes nothing over it until it reads again.
+    file_error: Option<String>,
     notice: Option<UserNotice>,
     /// An action the user asked for, until the workspace picks it up (and
     /// opens its dialog, asks, or sends it), and the environment it is for
@@ -220,6 +238,9 @@ pub(crate) struct AppState {
     last_denial: Option<String>,
     /// The actions sent: markers, failures, toasts.
     tracker: Tracker,
+    /// The comments sent from handling views until the event stream shows
+    /// them, or refused (topic 17).
+    drafts: crate::comments::drafts::Drafts,
     /// The id of the last action sent (ids are never reused, not even
     /// across environments).
     last_action_id: u64,
@@ -233,6 +254,9 @@ pub(crate) struct AppState {
     /// Counts the times the environment on screen woke up from quiet mode
     /// (or another came on screen).
     wake: u64,
+    /// The cluster health page is on screen (topic 06): the engine on
+    /// screen asks for what only the page needs while the window shows.
+    health_page: bool,
     /// Evaluates dashboards for the fixture; the core does that itself.
     #[cfg(test)]
     evaluator: Option<fixture::Evaluator>,
@@ -252,6 +276,8 @@ impl AppState {
             selected: None,
             tabs: Vec::new(),
             active_tab: None,
+            active_cluster: None,
+            list_options: BTreeMap::new(),
             started_at: now,
             mode,
             persistence: None,
@@ -261,16 +287,19 @@ impl AppState {
             config_problem: None,
             save_error: None,
             dismissed_save_error: None,
+            file_error: None,
             notice: None,
             requested: None,
             last_request: None,
             last_denial: None,
             tracker: Tracker::default(),
+            drafts: crate::comments::drafts::Drafts::default(),
             last_action_id: 0,
             // A window opens at start unless `start_hidden` says otherwise.
             window_hidden: false,
             user_present: true,
             wake: 0,
+            health_page: false,
             #[cfg(test)]
             evaluator: None,
             #[cfg(test)]
@@ -348,9 +377,12 @@ impl AppState {
             self.selected = None;
             self.tabs.clear();
             self.active_tab = None;
+            self.active_cluster = None;
+            self.list_options.clear();
             return;
         };
         let saved = self.ui.environment(&id);
+        self.list_options = saved.list_options.clone();
         self.selected = saved
             .selected
             .filter(|reference| self.dashboard(reference).is_some())
@@ -362,6 +394,7 @@ impl AppState {
             .take(MAX_TABS)
             .collect();
         self.active_tab = None;
+        self.active_cluster = None;
     }
 
     /// The first dashboard in sidebar order.
@@ -443,6 +476,13 @@ impl AppState {
         &self.config
     }
 
+    /// How the app looks (theme, interface size, row density, times in
+    /// lists), as the settings say. The settings panel changes it
+    /// ([`AppState::set_appearance`]); the views read it here.
+    pub(crate) fn appearance(&self) -> &ic_config::Appearance {
+        &self.config.appearance
+    }
+
     /// The UI state (window, tabs and selections) to save.
     #[cfg(test)]
     pub(crate) fn ui_state(&self) -> &UiState {
@@ -522,6 +562,29 @@ impl AppState {
         permissions::query_denial(self.engine.permissions.as_ref(), kind)
     }
 
+    /// Why the user may not read what view `kind` shows, if it may not.
+    pub(crate) fn list_denial(&self, kind: ListKind) -> Option<String> {
+        permissions::list_denial(self.engine.permissions.as_ref(), kind)
+    }
+
+    /// Why *only mine* can't be used in view `kind`: no author is set.
+    pub(crate) fn only_mine_denial(&self, _kind: ListKind) -> Option<String> {
+        self.author()
+            .is_empty()
+            .then(|| "No author is set for this environment".to_owned())
+    }
+
+    /// What the handling view can't show for lack of a permission.
+    pub(crate) fn handling_gap(&self) -> Option<String> {
+        permissions::handling_gap(self.engine.permissions.as_ref())
+    }
+
+    /// The active environment's author (*only mine*): its `author`, else
+    /// the API user; empty without either.
+    pub(crate) fn author(&self) -> &str {
+        self.environment().map_or("", Environment::author_name)
+    }
+
     /// Whether the user may read who Icinga notified (`None`: unknown yet).
     pub(crate) fn can_read_notifications(&self) -> Option<bool> {
         permissions::can_read_notifications(self.engine.permissions.as_ref())
@@ -592,9 +655,26 @@ impl AppState {
             .nth(index)
     }
 
-    /// A dashboard's evaluated rows and counts.
+    /// A dashboard's evaluated views and its counts for the sidebar (as of
+    /// the latest snapshot: after an edit, the next result may still be on
+    /// its way, so match views by id).
     pub(crate) fn result(&self, reference: &DashboardRef) -> Option<&DashboardResult> {
         self.engine.snapshot.dashboards.get(reference)
+    }
+
+    /// One view's evaluated body and counts, by the view's id.
+    pub(crate) fn view_result(
+        &self,
+        reference: &DashboardRef,
+        view_id: &str,
+    ) -> Option<&ViewResult> {
+        self.result(reference)?.view(view_id)
+    }
+
+    /// The handled problems list views hide unless they set their own (the
+    /// settings' *handled problems*, `[appearance.hide_handled]`).
+    pub(crate) fn handled_defaults(&self) -> HideHandled {
+        self.config.appearance.hide_handled
     }
 
     /// The first dashboard (the selected one first) that lists `key`. Its
@@ -607,16 +687,22 @@ impl AppState {
         let settling = self.rows_settling();
         let snapshot = &self.engine.snapshot;
         let now = Timestamp::now();
+        let defaults = self.handled_defaults();
         let shows = |reference: &DashboardRef| {
             if settling {
-                return self
-                    .dashboard(reference)
-                    .is_some_and(|(_, dashboard)| would_list(snapshot, &dashboard.view, key, now));
+                return self.dashboard(reference).is_some_and(|(_, dashboard)| {
+                    dashboard
+                        .views
+                        .iter()
+                        .any(|view| would_list(snapshot, view, defaults, key, now))
+                });
             }
             self.result(reference).is_some_and(|result| {
-                result.rows.iter().any(
-                    |row| matches!(row, ic_core::snapshot::DashboardRow::Object(row) if row == key),
-                )
+                result.views.iter().any(|view| {
+                    view.rows().iter().any(
+                        |row| matches!(row, ic_core::snapshot::DashboardRow::Object(row) if row == key),
+                    )
+                })
             })
         };
         if let Some(selected) = self.selected.as_ref().filter(|selected| shows(selected)) {
@@ -648,34 +734,41 @@ impl AppState {
         if self.dashboard(&reference).is_none() {
             return false;
         }
-        let changed = self.selected.as_ref() != Some(&reference) || self.active_tab.is_some();
+        let changed = self.selected.as_ref() != Some(&reference)
+            || self.active_tab.is_some()
+            || self.active_cluster.is_some();
         self.selected = Some(reference);
         self.active_tab = None;
+        self.active_cluster = None;
         if changed {
             self.remember_environment_ui();
         }
         changed
     }
 
-    /// Changes a dashboard's view (sort, handled toggle, grouping): the
-    /// core re-evaluates it and the settings are saved (DASH-07). Returns
-    /// whether the view changed.
+    /// Changes one view of a dashboard (its sort, handled switches,
+    /// grouping, collapsed by default, a display's options), by the view's
+    /// id: the core re-evaluates it and the settings are saved (DASH-07).
+    /// Returns whether the view changed.
     pub(crate) fn update_view(
         &mut self,
         reference: &DashboardRef,
+        view_id: &str,
         update: impl FnOnce(&mut View),
     ) -> bool {
         let Some(id) = self.config.active_environment.clone() else {
             return false;
         };
-        let Some(dashboard) = self.config.environment_mut(&id).and_then(|environment| {
-            environment.dashboard_mut(&reference.group_id, &reference.dashboard_id)
+        let Some(view) = self.config.environment_mut(&id).and_then(|environment| {
+            environment
+                .dashboard_mut(&reference.group_id, &reference.dashboard_id)?
+                .view_mut(view_id)
         }) else {
             return false;
         };
-        let before = dashboard.view.clone();
-        update(&mut dashboard.view);
-        if dashboard.view == before {
+        let before = view.clone();
+        update(view);
+        if *view == before {
             return false;
         }
         #[cfg(test)]
@@ -684,17 +777,49 @@ impl AppState {
         true
     }
 
+    /// [`AppState::update_view`] for a dashboard's primary view
+    /// (`crate::dashboard::primary_view`): all of a single-view dashboard,
+    /// which the page shows as rc1 did.
+    #[cfg(test)]
+    pub(crate) fn update_primary_view(
+        &mut self,
+        reference: &DashboardRef,
+        update: impl FnOnce(&mut View),
+    ) -> bool {
+        let Some(view_id) = self
+            .dashboard(reference)
+            .map(|(_, dashboard)| crate::dashboard::primary_view(&dashboard.views).id.clone())
+        else {
+            return false;
+        };
+        self.update_view(reference, &view_id, update)
+    }
+
+    /// The view header's (or summary bar's) handled button: `N hidden ·
+    /// show` shows every handled problem, `N handled · hide` hides them
+    /// again ([`handled_after_click`]); saved with the view. Returns
+    /// whether the view changed.
+    pub(crate) fn toggle_handled(&mut self, reference: &DashboardRef, view_id: &str) -> bool {
+        let defaults = self.handled_defaults();
+        let hidden = self
+            .view_result(reference, view_id)
+            .map_or(0, |result| result.hidden);
+        self.update_view(reference, view_id, |view| {
+            view.handled = handled_after_click(view.handled, defaults, hidden);
+        })
+    }
+
     /// The fixture has no core: evaluate the changed dashboard here.
     #[cfg(test)]
     fn evaluate_fixture(&mut self, reference: &DashboardRef) {
-        let Some(view) = self
+        let Some(views) = self
             .dashboard(reference)
-            .map(|(_, dashboard)| dashboard.view.clone())
+            .map(|(_, dashboard)| dashboard.views.clone())
         else {
             return;
         };
-        if let Some(evaluator) = &self.evaluator {
-            let result = evaluator.evaluate(&self.engine.snapshot, reference, &view);
+        if let Some(evaluator) = self.evaluator {
+            let result = evaluator.evaluate(&self.engine.snapshot, &views, self.handled_defaults());
             let mut dashboards = (*self.engine.snapshot.dashboards).clone();
             dashboards.insert(reference.clone(), result);
             self.engine.snapshot = Arc::new(Snapshot {
@@ -723,6 +848,12 @@ impl AppState {
         }
     }
 
+    /// Saves the settings again (a save the writer refused because the
+    /// file was being edited, once that edit is taken over).
+    pub(crate) fn save_settings(&self) {
+        self.save_config();
+    }
+
     fn save_config(&self) {
         if self.mode == Mode::Live
             && let Some(persistence) = &self.persistence
@@ -748,7 +879,11 @@ impl AppState {
         };
         let state = EnvironmentUiState {
             tabs: self.tabs.iter().map(ObjectKey::full_name).collect(),
+            // The cluster section's entries are always there (stage 2's
+            // list tabs aren't kept any more).
+            lists: Vec::new(),
             selected: self.selected.clone(),
+            list_options: self.list_options.clone(),
         };
         if self.ui.set_environment(&id, state) {
             self.save_ui();
@@ -790,8 +925,9 @@ impl AppState {
         } else if !self.tabs.contains(&key) {
             return false;
         }
-        let shown = self.active_tab.as_ref() != Some(&key);
+        let shown = self.active_tab.as_ref() != Some(&key) || self.active_cluster.is_some();
         self.active_tab = Some(key);
+        self.active_cluster = None;
         added || shown
     }
 
@@ -801,13 +937,102 @@ impl AppState {
             return false;
         }
         self.active_tab = Some(key.clone());
+        self.active_cluster = None;
         true
     }
 
-    /// Shows the selected dashboard instead of the active tab, which stays
-    /// open. Returns whether a tab was shown.
+    /// The choices saved for the list `kind` in the active environment
+    /// (the defaults when none are).
+    pub(crate) fn list_options(&self, kind: ListKind) -> ListOptionsState {
+        self.list_options
+            .get(kind.id())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Keeps the list `kind`'s choices with the UI state (saved if they
+    /// changed).
+    pub(crate) fn set_list_options(&mut self, kind: ListKind, options: ListOptionsState) {
+        let changed = if options == ListOptionsState::default() {
+            self.list_options.remove(kind.id()).is_some()
+        } else {
+            self.list_options
+                .insert(kind.id().to_owned(), options.clone())
+                != Some(options)
+        };
+        if changed {
+            self.remember_environment_ui();
+        }
+    }
+
+    /// The rows' density chosen on the cluster section's events (`None`:
+    /// as in the settings).
+    pub(crate) fn events_density(&self) -> Option<ic_config::RowDensity> {
+        self.list_options
+            .get(crate::dashboard::EVENTS_VIEW)
+            .and_then(|options| options.density)
+    }
+
+    /// Chooses the rows' density of the cluster section's events (kept
+    /// with the UI state). Returns whether it changed.
+    pub(crate) fn set_events_density(&mut self, density: Option<ic_config::RowDensity>) -> bool {
+        if self.events_density() == density {
+            return false;
+        }
+        let key = crate::dashboard::EVENTS_VIEW.to_owned();
+        match density {
+            Some(density) => {
+                self.list_options.entry(key).or_default().density = Some(density);
+            }
+            None => {
+                self.list_options.remove(&key);
+            }
+        }
+        self.remember_environment_ui();
+        true
+    }
+
+    /// The cluster section's entry shown instead of the dashboard, if any.
+    pub(crate) fn active_cluster(&self) -> Option<ClusterEntry> {
+        self.active_cluster
+    }
+
+    /// Shows the cluster section's handling or downtimes on `chip` (the
+    /// palette's *acknowledged* opens handling on its acknowledged chip),
+    /// with the chip's own sort.
+    pub(crate) fn open_list_on(&mut self, kind: ListKind, chip: crate::lists::model::Chip) -> bool {
+        let mut options = crate::lists::model::Options::saved(kind, &self.list_options(kind));
+        let changed = options.chip != chip;
+        if changed {
+            options.pick_chip(chip);
+            let mut saved = options.to_saved(kind);
+            saved.density = self.list_options(kind).density;
+            self.set_list_options(kind, saved);
+        }
+        self.open_list(kind) || changed
+    }
+
+    /// Shows the cluster section's handling or downtimes. Returns whether
+    /// anything changed.
+    pub(crate) fn open_list(&mut self, kind: ListKind) -> bool {
+        self.show_cluster(ClusterEntry::of_list(kind))
+    }
+
+    /// Shows an entry of the cluster section. Returns whether anything
+    /// changed.
+    pub(crate) fn show_cluster(&mut self, entry: ClusterEntry) -> bool {
+        let shown = self.active_cluster != Some(entry) || self.active_tab.is_some();
+        self.active_cluster = Some(entry);
+        self.active_tab = None;
+        shown
+    }
+
+    /// Shows the selected dashboard instead of the active tab or list,
+    /// which stays open. Returns whether a tab or list was shown.
     pub(crate) fn show_dashboard(&mut self) -> bool {
-        self.active_tab.take().is_some()
+        let tab = self.active_tab.take().is_some();
+        let cluster = self.active_cluster.take().is_some();
+        tab || cluster
     }
 
     /// Shows the next open tab (`forward`) or the previous one, cycling
@@ -817,7 +1042,7 @@ impl AppState {
         if self.tabs.is_empty() {
             return false;
         }
-        // 0 is the dashboard, n the n-th tab.
+        // 0 is the dashboard (or the cluster entry shown), then the tabs.
         let stops = self.tabs.len() + 1;
         let current = self
             .active_tab
@@ -853,7 +1078,7 @@ impl AppState {
         closed
     }
 
-    /// Closes every tab.
+    /// Closes every tab and list.
     pub(crate) fn close_all_tabs(&mut self) -> bool {
         self.active_tab = None;
         let had_tabs = !self.tabs.is_empty();
@@ -902,6 +1127,9 @@ impl AppState {
             // engine saying its pause ended lets the app forget the ones
             // that are over.
             CoreEvent::NotificationsPaused(_) => self.expire_pauses(Timestamp::now()),
+            // The engine runs: the footer, the sidebar's dot and the tray
+            // stay green only while it says so.
+            CoreEvent::Alive(_) => self.engine.connection.on_alive(Timestamp::now()),
         }
     }
 
@@ -910,6 +1138,7 @@ impl AppState {
         self.engine.connection.on_snapshot(&snapshot);
         self.engine.snapshot = snapshot;
         self.tracker.settle(&self.engine.snapshot, Instant::now());
+        self.settle_drafts(Instant::now());
     }
 
     /// Reloads from Icinga (or connects now after a failure). Ignored while
@@ -947,31 +1176,50 @@ impl AppState {
         Hydrated::Sent(fresh)
     }
 
-    /// Asks the core to evaluate an unsaved view (the dashboard editor's
-    /// live validation, match count and rows). `None` without a core.
+    /// Asks the core to evaluate unsaved views as one dashboard (the
+    /// dashboard editor's live preview, validation and match counts; a
+    /// view whose filter doesn't work has its `error` set). `None` without
+    /// a core.
     pub(crate) fn preview(
         &self,
-        view: View,
-    ) -> Option<futures::channel::oneshot::Receiver<Result<DashboardResult, String>>> {
+        views: Vec<View>,
+    ) -> Option<futures::channel::oneshot::Receiver<DashboardResult>> {
         let (reply, receiver) = futures::channel::oneshot::channel();
         #[cfg(test)]
         if self.evaluator.is_some() {
-            let _ = reply.send(fixture::preview(&self.engine.snapshot, &view));
+            let result = fixture::preview(&self.engine.snapshot, &views, self.handled_defaults());
+            let _ = reply.send(result);
             return Some(receiver);
         }
         let core = self.engine.core.as_ref()?;
-        core.send(Command::PreviewDashboard { view, reply });
+        core.send(Command::PreviewDashboard { views, reply });
         Some(receiver)
     }
 
-    /// A save finished (from the writer thread).
+    /// A save finished (from the writer thread). An edited or unreadable
+    /// settings file is the session's to handle (`Session::on_saved`).
     pub(crate) fn on_saved(&mut self, report: SaveReport) {
         match report {
-            SaveReport::Config(Ok(())) => self.save_error = None,
+            SaveReport::Config(Ok(())) => {
+                self.save_error = None;
+                self.file_error = None;
+            }
             SaveReport::Config(Err(error)) => self.save_error = Some(error),
+            SaveReport::FileUnreadable(error) => self.file_error = Some(error),
             // The UI state is only the layout: logged by the writer.
-            SaveReport::Ui(_) => {}
+            SaveReport::FileEdited { .. } | SaveReport::Ui(_) => {}
         }
+    }
+
+    /// Why the settings file can't be read, while it can't: nothing is
+    /// written over it meanwhile.
+    pub(crate) fn file_error(&self) -> Option<&str> {
+        self.file_error.as_deref()
+    }
+
+    /// The settings file reads (`None`) or doesn't (why).
+    pub(crate) fn set_file_error(&mut self, error: Option<String>) {
+        self.file_error = error;
     }
 
     /// Why the settings couldn't be saved, unless dismissed.
@@ -1027,24 +1275,45 @@ fn user_of(environment: &Environment) -> Option<String> {
     }
 }
 
-/// Whether `view` lists `key` as `snapshot` has it at `now`: the filter
-/// matches (evaluated by `ic-filter`, as the core does), then
-/// `problems_only` and `hide_handled` (Icinga's handled, as the core's
-/// rows apply it). A filter that doesn't parse or evaluate lists nothing.
-fn would_list(snapshot: &Snapshot, view: &View, key: &ObjectKey, now: Timestamp) -> bool {
+/// Whether the list `view` lists `key` as `snapshot` has it at `now`: the
+/// filter matches (evaluated by `ic-filter`, as the core does), then
+/// `problems_only` and the handled switches (the view's own or the
+/// settings' `defaults`; what counts as handled, as the core's rows apply
+/// it: acknowledged, a downtime in effect, a service of a host with a
+/// problem). Views other than lists, and filters that don't parse or
+/// evaluate, list nothing.
+fn would_list(
+    snapshot: &Snapshot,
+    view: &View,
+    defaults: HideHandled,
+    key: &ObjectKey,
+    now: Timestamp,
+) -> bool {
+    if !view.is_list() {
+        return false;
+    }
     let Ok(filter) = ic_filter::Filter::parse(&view.filter) else {
         return false;
     };
     let test = |scope: &dyn ic_filter::Scope| filter.is_empty() || filter.matches_at(scope, now);
-    let (matches, problem, handled) = match (key, view.object_kind) {
+    let hide = view.hidden_handled(defaults);
+    // Why the object counts as handled: (acknowledged, in downtime, a
+    // service of a host with a problem), each hidden by its own switch.
+    let hidden = |check: &ic_model::CheckInfo, problem: bool, host_down: bool| {
+        (hide.acknowledged && problem && check.acknowledgement.is_acknowledged())
+            || (hide.in_downtime && check.in_downtime())
+            || (hide.host_down && host_down)
+    };
+    let (matches, problem, hidden) = match (key, view.object_kind) {
         (ObjectKey::Host { name }, ObjectKind::Hosts) => {
             let Some(host) = snapshot.hosts.get(name) else {
                 return false;
             };
+            let problem = host.is_problem();
             (
                 test(&ic_filter::HostScope { host }),
-                host.is_problem(),
-                host.is_handled(),
+                problem,
+                hidden(&host.check, problem, false),
             )
         }
         (ObjectKey::Service { key }, ObjectKind::Services) => {
@@ -1053,15 +1322,49 @@ fn would_list(snapshot: &Snapshot, view: &View, key: &ObjectKey, now: Timestamp)
             };
             let host = snapshot.host_of(key).map(Arc::as_ref);
             let host_problem = host.is_some_and(ic_model::Host::is_problem);
+            let problem = service.is_problem();
             (
                 test(&ic_filter::ServiceScope { service, host }),
-                service.is_problem(),
-                service.is_handled(host_problem),
+                problem,
+                hidden(&service.check, problem, problem && host_problem),
             )
         }
         _ => return false,
     };
-    matches && (!view.problems_only || problem) && (!view.hide_handled || !handled)
+    matches && (!view.problems_only || problem) && !hidden
+}
+
+/// A view's handled setting after a click on its handled button, which
+/// reads `N hidden · show` while the view hides `hidden` handled problems
+/// and `N handled · hide` while they show:
+///
+/// - *show*: every handled problem shows (the kinds the view chose are
+///   kept for later);
+/// - *hide*, after *show*: back to what hid them before
+///   ([`ic_config::HandledSetting::toggled`]), and every kind when that
+///   would hide nothing (the settings hide no kind);
+/// - *hide* while the settings hide only some kinds and nothing is hidden
+///   (say only `host down`, and acknowledged problems show): every kind is
+///   hidden, on this view.
+pub(crate) fn handled_after_click(
+    setting: ic_config::HandledSetting,
+    defaults: HideHandled,
+    hidden: u32,
+) -> ic_config::HandledSetting {
+    use ic_config::{HandledMode, HandledSetting};
+    if hidden > 0 {
+        HandledSetting {
+            mode: HandledMode::Show,
+            hide: setting.hide,
+        }
+    } else if setting.hidden(defaults).any() && setting.hidden(defaults) != HideHandled::ALL {
+        HandledSetting {
+            mode: HandledMode::Hide,
+            hide: HideHandled::ALL,
+        }
+    } else {
+        setting.toggled(defaults)
+    }
 }
 
 /// An object from its full name: `host` or `host!service`.

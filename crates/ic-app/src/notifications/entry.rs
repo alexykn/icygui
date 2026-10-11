@@ -11,10 +11,13 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use chrono::{DateTime, Local, NaiveDate, TimeZone};
+use chrono::{Local, NaiveDate, TimeZone};
+
 use ic_core::NotificationRecord;
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::{Silence, Tone};
+
+use crate::format::date_time;
 
 /// Which notifications the centre lists.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -469,19 +472,6 @@ where
     } else {
         time.format("%H:%M").to_string()
     }
-}
-
-fn date_time<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<DateTime<Tz>> {
-    let millis = (at.as_unix_seconds() * 1000.).round();
-    if !millis.is_finite() {
-        return None;
-    }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "finite and rounded; out-of-range times are rejected by chrono"
-    )]
-    let millis = millis as i64;
-    zone.timestamp_millis_opt(millis).single()
 }
 
 fn local_date<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<NaiveDate> {

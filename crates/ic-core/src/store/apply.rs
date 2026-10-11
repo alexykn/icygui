@@ -70,6 +70,37 @@ pub(crate) enum Applied {
     Ignored,
 }
 
+/// What an event about a host or service changes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Writes {
+    /// The check state: a check result, a state change, flapping.
+    Check,
+    /// Only how it is handled: an acknowledgement.
+    Handling,
+}
+
+/// What a check event does to the acknowledgement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AckFrom {
+    /// Icinga's value when it built the event (`IsAcknowledged`).
+    Carried(AckKind),
+    /// The event doesn't carry it: a state change ends a normal
+    /// acknowledgement, a recovery a sticky one (`ProcessCheckResult`).
+    Inferred,
+    /// An acknowledgement event newer than the check event (by Icinga's
+    /// time) was applied: the stored value stays.
+    Older,
+}
+
+/// Which downtime event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DowntimeChange {
+    Added,
+    Started,
+    Triggered,
+    Removed,
+}
+
 /// A host or service to change in place.
 enum Target<'a> {
     Host(&'a mut Host),
@@ -119,16 +150,15 @@ impl Store {
                 acknowledgement,
                 after,
                 at,
-            } => self.on_object(object, seq, |target| {
-                check_result(
-                    target,
-                    result,
-                    *after,
-                    *downtime_depth,
-                    *acknowledgement,
-                    *at,
-                );
-            }),
+            } if !self.overtaken(object, seq, result_time(result, *at)) => {
+                let depth = self.line_depth(object, *downtime_depth, *at);
+                let ack = self.line_ack(object, *acknowledgement, *at);
+                let applied = self.on_object(object, seq, Writes::Check, |target| {
+                    check_result(target, result, *after, depth, ack, *at);
+                });
+                self.depth_from_line(object, seq, depth, *at, &applied);
+                applied
+            }
             Event::StateChange {
                 object,
                 state,
@@ -137,62 +167,132 @@ impl Store {
                 downtime_depth,
                 acknowledgement,
                 at,
-            } => self.on_object(object, seq, |target| {
-                state_change(
-                    target,
-                    *state,
-                    *state_type,
-                    result,
-                    *downtime_depth,
-                    *acknowledgement,
-                    *at,
-                );
-            }),
+            } if !self.overtaken(object, seq, result_time(result, *at)) => {
+                let depth = self.line_depth(object, *downtime_depth, *at);
+                let ack = self.line_ack(object, *acknowledgement, *at);
+                let applied = self.on_object(object, seq, Writes::Check, |target| {
+                    state_change(target, *state, *state_type, result, depth, ack, *at);
+                });
+                self.depth_from_line(object, seq, depth, *at, &applied);
+                applied
+            }
             Event::AcknowledgementSet {
                 object,
                 kind,
                 expiry,
+                at,
                 ..
-            } => self.on_object(object, seq, |target| {
-                let check = target.check();
-                check.acknowledgement = if kind.is_acknowledged() {
-                    *kind
-                } else {
-                    AckKind::Normal
-                };
-                check.acknowledgement_expiry = *expiry;
-            }),
-            Event::AcknowledgementCleared { object, .. } => self.on_object(object, seq, |target| {
-                let check = target.check();
-                check.acknowledgement = AckKind::None;
-                check.acknowledgement_expiry = None;
-            }),
+            } => {
+                let applied = self.on_object(object, seq, Writes::Handling, |target| {
+                    let check = target.check();
+                    check.acknowledgement = if kind.is_acknowledged() {
+                        *kind
+                    } else {
+                        AckKind::Normal
+                    };
+                    check.acknowledgement_expiry = *expiry;
+                });
+                self.ack_line(object, *at, &applied);
+                applied
+            }
+            Event::AcknowledgementCleared { object, at } => {
+                let applied = self.on_object(object, seq, Writes::Handling, |target| {
+                    let check = target.check();
+                    check.acknowledgement = AckKind::None;
+                    check.acknowledgement_expiry = None;
+                });
+                self.ack_line(object, *at, &applied);
+                applied
+            }
             Event::Flapping {
                 object,
                 flapping,
                 current,
-                ..
-            } => self.on_object(object, seq, |target| {
-                let check = target.check();
-                check.flapping = *flapping;
-                check.flapping_current = *current;
-            }),
+                at,
+            } if !self.overtaken(object, seq, *at) => {
+                self.on_object(object, seq, Writes::Check, |target| {
+                    let check = target.check();
+                    check.flapping = *flapping;
+                    check.flapping_current = *current;
+                })
+            }
             Event::CommentAdded { comment, .. } => self.on_comment(seq, comment, true),
             Event::CommentRemoved { comment, .. } => self.on_comment(seq, comment, false),
-            Event::DowntimeAdded { downtime, .. }
-            | Event::DowntimeStarted { downtime, .. }
-            | Event::DowntimeTriggered { downtime, .. } => self.on_downtime(seq, downtime, true),
-            Event::DowntimeRemoved { downtime, .. } => self.on_downtime(seq, downtime, false),
+            Event::DowntimeAdded { downtime, at } => {
+                self.on_downtime(seq, DowntimeChange::Added, downtime, *at)
+            }
+            Event::DowntimeStarted { downtime, at } => {
+                self.on_downtime(seq, DowntimeChange::Started, downtime, *at)
+            }
+            Event::DowntimeTriggered { downtime, at } => {
+                self.on_downtime(seq, DowntimeChange::Triggered, downtime, *at)
+            }
+            Event::DowntimeRemoved { downtime, at } => {
+                self.on_downtime(seq, DowntimeChange::Removed, downtime, *at)
+            }
             Event::ObjectLifecycle { .. } | Event::Notification { .. } => Applied::Ignored,
+            // Overtaken by a query answer.
+            Event::CheckResult { .. } | Event::StateChange { .. } | Event::Flapping { .. } => {
+                Applied::Stale
+            }
         }
     }
 
+    /// Whether an event about `key` from a check that ended at `end` (or,
+    /// for flapping, was processed then), read as line `seq`, is older
+    /// than the query answer the store's check state of `key` came from.
+    ///
+    /// A query sent before the line was read can be answered before it is
+    /// read: the stream is slow, or holds its lines for Icinga's next
+    /// batch, while the answer comes on a connection of its own. Icinga
+    /// composed the answer after it processed the event then, so the
+    /// answer shows a later check (`last_check` after `end`; Icinga
+    /// processes the results of a check in the order they started and
+    /// drops older ones, and checks of one object don't overlap). Applied
+    /// on top, the event would take the object back to an older state (a
+    /// hard problem soft again) and the next events forward again: two
+    /// state changes in the log, and rule inputs, for one. Such an event
+    /// is [`Applied::Stale`], judged by its own check's time, until a
+    /// check event that is not older is applied: from then on events
+    /// wrote the check state last and are applied in order again.
+    ///
+    /// Only an event that writes the check state ends this (`checked`):
+    /// an acknowledgement or a downtime that came in between says nothing
+    /// about the order of check results. Icinga sends the
+    /// `AcknowledgementCleared` of a state change just before the change's
+    /// check result, so it would otherwise let the older attempts of that
+    /// very change through.
+    fn overtaken(&self, key: &ObjectKey, seq: u64, end: Timestamp) -> bool {
+        let Some(seqs) = self.seqs.get(key) else {
+            return false;
+        };
+        // A check event wrote the check state last (events come in
+        // Icinga's order), or the line is stale anyway.
+        if seqs.checked > seqs.fetched || seq <= seqs.fetched {
+            return false;
+        }
+        self.older_result(key, end)
+    }
+
+    /// Whether a check result of `key` that ended at `end` is older than
+    /// the one the store holds (`last_check` is the end of the latest).
+    /// Strictly older: a check's `CheckResult` and `StateChange` carry the
+    /// same end, and the attempts of one problem can come within a
+    /// millisecond (passive results, a burst).
+    pub(crate) fn older_result(&self, key: &ObjectKey, end: Timestamp) -> bool {
+        self.check(key)
+            .and_then(|check| check.last_check)
+            .is_some_and(|last| end.as_unix_seconds() < last.as_unix_seconds())
+    }
+
     /// Changes a known host or service with `change`, unless the event is
-    /// already reflected in the object's last query answer.
+    /// already reflected in the object's last query answer. `writes`: what
+    /// the event changes.
     fn on_object(
         &mut self,
         key: &ObjectKey,
         seq: u64,
+        writes: Writes,
         change: impl FnOnce(&mut Target<'_>),
     ) -> Applied {
         if !self.contains(key) {
@@ -203,6 +303,10 @@ impl Store {
             return Applied::Stale;
         }
         seqs.evented = seqs.evented.max(seq);
+        match writes {
+            Writes::Check => seqs.checked = seqs.checked.max(seq),
+            Writes::Handling => seqs.handled = seqs.handled.max(seq),
+        }
         let Some(mut target) = self.target(key) else {
             return Applied::Unknown(key.clone());
         };
@@ -276,68 +380,265 @@ impl Store {
         }
     }
 
+    /// The downtime depth a check event about `key` at Icinga time `at`
+    /// carries, if the store takes it: not when a downtime event that
+    /// changed the count is newer (by Icinga's time: in the overlap of a
+    /// stream switch the new stream's check results can be older than the
+    /// old stream's lines already applied; in one stream they never are).
+    fn line_depth(&self, key: &ObjectKey, depth: Option<u32>, at: Timestamp) -> Option<u32> {
+        depth.filter(|_| {
+            self.seqs
+                .get(key)
+                .and_then(|seqs| seqs.downtime_at)
+                .is_none_or(|changed| at.as_unix_seconds() >= changed.as_unix_seconds())
+        })
+    }
+
+    /// What a check event about `key` at Icinga time `at` does to the
+    /// acknowledgement (`carried`: the event's value). Like the depth: not
+    /// when an acknowledgement event applied before is newer by Icinga's
+    /// time. In the overlap of a stream switch the new stream's check
+    /// result can be older than the old stream's acknowledgement line
+    /// already applied (a quiet stream has no check results), and in one
+    /// stream a check event built just before an acknowledgement changed
+    /// can be written just after its event; either way the event's value
+    /// is older than the stored one.
+    fn line_ack(&self, key: &ObjectKey, carried: Option<AckKind>, at: Timestamp) -> AckFrom {
+        let older = self
+            .seqs
+            .get(key)
+            .and_then(|seqs| seqs.ack_at)
+            .is_some_and(|changed| at.as_unix_seconds() < changed.as_unix_seconds());
+        match carried {
+            _ if older => AckFrom::Older,
+            Some(kind) => AckFrom::Carried(kind),
+            None => AckFrom::Inferred,
+        }
+    }
+
+    /// An acknowledgement event about `key` at Icinga time `at` was read:
+    /// check events older than it no longer write the acknowledgement
+    /// ([`Store::line_ack`]). Also when the object's last answer already
+    /// had the line (stale): the store's value is then the answer's, newer
+    /// than the line, and a check event older than the line older still.
+    fn ack_line(&mut self, key: &ObjectKey, at: Timestamp, applied: &Applied) {
+        if matches!(applied, Applied::Unknown(_)) {
+            return;
+        }
+        if let Some(seqs) = self.seqs.get_mut(key)
+            && seqs
+                .ack_at
+                .is_none_or(|latest| at.as_unix_seconds() > latest.as_unix_seconds())
+        {
+            seqs.ack_at = Some(at);
+        }
+    }
+
+    /// A downtime event at Icinga time `at` changed (or, for a line the
+    /// answer already has, may have changed) `key`'s count: check events
+    /// older than it no longer bring theirs ([`Store::line_depth`]).
+    fn downtime_line(&mut self, key: &ObjectKey, at: Timestamp) {
+        let seqs = self.seqs.entry(key.clone()).or_default();
+        if seqs
+            .downtime_at
+            .is_none_or(|latest| at.as_unix_seconds() > latest.as_unix_seconds())
+        {
+            seqs.downtime_at = Some(at);
+        }
+    }
+
+    /// A check event (line `seq`, Icinga time `at`) that brought Icinga's
+    /// count (`depth`) was applied: the depth is counted from it now, and
+    /// the downtime events after it change it by what they change in
+    /// Icinga's count (see the module notes on downtime depths).
+    fn depth_from_line(
+        &mut self,
+        key: &ObjectKey,
+        seq: u64,
+        depth: Option<u32>,
+        at: Timestamp,
+        applied: &Applied,
+    ) {
+        if !matches!(applied, Applied::Changed { .. }) {
+            return;
+        }
+        if depth.is_none() {
+            // A state change that doesn't bring the count: a provisional
+            // depth of a new problem is asked for.
+            self.recheck_unsettled(key);
+            return;
+        }
+        // Applied: `on_object` made the entry.
+        if let Some(seqs) = self.seqs.get_mut(key) {
+            seqs.depth = seqs.depth.max(seq);
+            seqs.depth_line = Some(at);
+        }
+        // (Most check events find both empty.)
+        if !self.counted.is_empty() {
+            self.counted.remove(key);
+        }
+        self.settle(key);
+    }
+
     /// Adds, updates or removes a downtime, and keeps the object's
-    /// `downtime_depth` (the number of downtimes in effect) in step: +1
-    /// when one takes effect, −1 when one in effect is removed. Check
-    /// results bring Icinga's own count again.
-    fn on_downtime(&mut self, seq: u64, downtime: &Downtime, present: bool) -> Applied {
-        if seq <= self.annotations_fetched {
+    /// `downtime_depth` in step with Icinga's count (unless the object's
+    /// last answer was sent after the line was read, and so has it).
+    fn on_downtime(
+        &mut self,
+        seq: u64,
+        change: DowntimeChange,
+        downtime: &Downtime,
+        at: Timestamp,
+    ) -> Applied {
+        let object = &downtime.object;
+        // The list's query and the object's may have been sent at
+        // different times: each part is skipped only if its own answer
+        // has the line.
+        let listed = seq > self.annotations_fetched;
+        let known = self.contains(object);
+        let reflected = known && self.reflects(object, seq);
+        let counts = known && !reflected;
+        let stored = self.downtime_of(object, &downtime.name).cloned();
+        if reflected && (downtime.in_effect || stored.as_ref().is_some_and(|d| d.in_effect)) {
+            // The answer has the line, but its time still dates the count.
+            self.downtime_line(object, at);
+        }
+        if !listed && !counts {
             return Applied::Stale;
         }
-        self.log_annotation(
-            seq,
-            &downtime.name,
-            Annotation::Downtime(downtime.clone(), present),
-        );
-        let was_in_effect = self
-            .downtimes
-            .get(&downtime.object)
-            .and_then(|list| list.iter().find(|stored| stored.name == downtime.name))
-            .map(|stored| stored.in_effect);
-        let map = Arc::make_mut(&mut self.downtimes);
-        if present {
-            upsert_downtime(map, downtime.clone());
-            if let Some(list) = map.get_mut(&downtime.object) {
-                sort_downtimes(list);
+        if listed {
+            let present = change != DowntimeChange::Removed;
+            self.log_annotation(
+                seq,
+                &downtime.name,
+                Annotation::Downtime(downtime.clone(), present),
+            );
+            let map = Arc::make_mut(&mut self.downtimes);
+            if present {
+                upsert_downtime(map, downtime.clone());
+                if let Some(list) = map.get_mut(object) {
+                    sort_downtimes(list);
+                }
+            } else {
+                remove_named(map, object, &downtime.name, |d| &d.name);
             }
-        } else {
-            remove_named(map, &downtime.object, &downtime.name, |d| &d.name);
+            self.changes.any = true;
+            self.changes.objects.insert(object.clone());
         }
-        self.changes.any = true;
-        self.changes.objects.insert(downtime.object.clone());
-
-        let delta: i8 = if present {
-            match (was_in_effect.unwrap_or(false), downtime.in_effect) {
-                (false, true) => 1,
-                (true, false) => -1,
-                _ => 0,
-            }
-        } else if was_in_effect.unwrap_or(false) || downtime.in_effect {
-            -1
-        } else {
-            0
-        };
-        let before = self.view_of(&downtime.object);
-        let fetched_after = self
-            .seqs
-            .get(&downtime.object)
-            .is_none_or(|seqs| seq > seqs.fetched);
-        if delta != 0 && before.is_some() && fetched_after {
-            let seqs = self.seqs.entry(downtime.object.clone()).or_default();
-            seqs.evented = seqs.evented.max(seq);
-            if let Some(mut target) = self.target(&downtime.object) {
-                let check = target.check();
-                check.downtime_depth = if delta > 0 {
-                    check.downtime_depth.saturating_add(1)
-                } else {
-                    check.downtime_depth.saturating_sub(1)
-                };
-            }
+        let before = self.view_of(object);
+        if counts {
+            self.count_downtime(seq, change, downtime, stored.as_ref(), at);
         }
         Applied::Changed {
             before,
-            after: self.view_of(&downtime.object),
+            after: self.view_of(object),
         }
+    }
+
+    /// Changes the depth of `downtime`'s object by what the event (line
+    /// `seq`, Icinga time `at`) changes in Icinga's count. `stored`: the
+    /// downtime as the store had it before the event.
+    ///
+    /// Per downtime, by name: whether the stored depth counts it now, and
+    /// whether Icinga counts it after the event (in effect, and not
+    /// removed). The first event about a downtime since the depth was taken
+    /// from a check event judges what that count included by Icinga's rule
+    /// at the check event's time ([`counted_at`]): a fixed downtime whose
+    /// start passed before it was counted then, even though Icinga's start
+    /// timer reports it up to 5 s later. Since an answer, that can't be
+    /// known (it may already count a downtime whose event was read after
+    /// the request): the depth changes by what the store had, and the
+    /// object is asked for again by name.
+    fn count_downtime(
+        &mut self,
+        seq: u64,
+        change: DowntimeChange,
+        downtime: &Downtime,
+        stored: Option<&Downtime>,
+        at: Timestamp,
+    ) {
+        let object = &downtime.object;
+        let mut line = self.seqs.get(object).and_then(|seqs| seqs.depth_line);
+        if change == DowntimeChange::Added
+            && line
+                .is_some_and(|base| base.as_unix_seconds() >= downtime.entry_time.as_unix_seconds())
+        {
+            // Icinga registers a new downtime with its object before it
+            // sends `DowntimeAdded` (`Downtime::Start`): a check event built
+            // in between, on another thread, counts it and can be written
+            // first. A check event from after the downtime's entry may have
+            // it, so the count can't be placed (rarely: the two fall in the
+            // same moment): as from an answer.
+            if let Some(seqs) = self.seqs.get_mut(object) {
+                seqs.depth_line = None;
+            }
+            line = None;
+        }
+        let now = change != DowntimeChange::Removed && downtime.in_effect;
+        let counted = self.counted.entry(object.clone()).or_default();
+        let was = counted
+            .get(&downtime.name)
+            .copied()
+            .unwrap_or_else(|| match line {
+                Some(base) => counted_at(change, downtime, stored, base),
+                None => stored.map_or(
+                    change == DowntimeChange::Removed && downtime.in_effect,
+                    |stored| stored.in_effect,
+                ),
+            });
+        counted.insert(downtime.name.clone(), now);
+        if !(was || now || downtime.in_effect) {
+            // Never in effect: neither count changes.
+            return;
+        }
+        let seqs = self.seqs.entry(object.clone()).or_default();
+        seqs.evented = seqs.evented.max(seq);
+        seqs.depth = seqs.depth.max(seq);
+        self.downtime_line(object, at);
+        if line.is_none() {
+            self.unsettle(object);
+        }
+        if was == now {
+            return;
+        }
+        if let Some(mut target) = self.target(object) {
+            let check = target.check();
+            check.downtime_depth = if now {
+                check.downtime_depth.saturating_add(1)
+            } else {
+                check.downtime_depth.saturating_sub(1)
+            };
+        }
+        self.changes.any = true;
+        self.changes.objects.insert(object.clone());
+    }
+}
+
+/// Whether Icinga's count at Icinga time `at` (when a check event carried
+/// it) included the downtime of a `change` event, the first about that
+/// downtime since then (`stored`: as the store had it before the event).
+/// Icinga's `Downtime::IsInEffect`: a fixed downtime during its window, a
+/// flexible one for `duration` after its trigger. A downtime the event
+/// adds didn't exist then, and a trigger the event reports came after
+/// (Icinga sends a check result's downtime triggers before the result).
+fn counted_at(
+    change: DowntimeChange,
+    downtime: &Downtime,
+    stored: Option<&Downtime>,
+    at: Timestamp,
+) -> bool {
+    if change == DowntimeChange::Added {
+        return false;
+    }
+    let downtime = stored.unwrap_or(downtime);
+    let at = at.as_unix_seconds();
+    if downtime.fixed {
+        downtime.start_time.as_unix_seconds() <= at && at < downtime.end_time.as_unix_seconds()
+    } else {
+        change != DowntimeChange::Triggered
+            && downtime
+                .trigger_time
+                .is_some_and(|trigger| at < trigger.as_unix_seconds() + downtime.duration)
     }
 }
 
@@ -390,13 +691,13 @@ fn result_time(result: &CheckResult, at: Timestamp) -> Timestamp {
 /// `last_state_change` on a state change, `last_hard_state_change` on a
 /// hard change, a normal acknowledgement ends with any state change and a
 /// sticky one with the recovery. `acknowledgement` and `downtime_depth`
-/// from the event win when present.
+/// from the event win when present (and the store takes them).
 fn transition(
     target: &mut Target<'_>,
     new_state: CheckableState,
     new_type: StateType,
     end: Timestamp,
-    acknowledgement: Option<AckKind>,
+    acknowledgement: AckFrom,
     downtime_depth: Option<u32>,
 ) {
     let old_state = target.state();
@@ -413,17 +714,18 @@ fn transition(
     }
     check.state_type = new_type;
     match acknowledgement {
-        Some(AckKind::None) => {
+        AckFrom::Older => {}
+        AckFrom::Carried(AckKind::None) => {
             check.acknowledgement = AckKind::None;
             check.acknowledgement_expiry = None;
         }
         // Events only say "acknowledged": keep sticky.
-        Some(_) => {
+        AckFrom::Carried(_) => {
             if !check.acknowledgement.is_acknowledged() {
                 check.acknowledgement = AckKind::Normal;
             }
         }
-        None => {
+        AckFrom::Inferred => {
             let ends = match check.acknowledgement {
                 AckKind::Normal => changed,
                 AckKind::Sticky => changed && !new_state.is_problem(),
@@ -464,7 +766,7 @@ fn check_result(
     result: &CheckResult,
     after: Option<StateAfter>,
     downtime_depth: Option<u32>,
-    acknowledgement: Option<AckKind>,
+    acknowledgement: AckFrom,
     at: Timestamp,
 ) {
     let old_state = target.state();
@@ -509,7 +811,7 @@ fn state_change(
     state_type: StateType,
     result: &CheckResult,
     downtime_depth: Option<u32>,
-    acknowledgement: Option<AckKind>,
+    acknowledgement: AckFrom,
     at: Timestamp,
 ) {
     if !is_same_kind(state, target.state()) {

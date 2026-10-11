@@ -304,16 +304,9 @@ fn morning() -> NaiveTime {
     NaiveTime::from_hms_opt(MORNING_HOUR, 0, 0).unwrap_or(NaiveTime::MIN)
 }
 
-/// `at` in `zone`.
+/// `at` in `zone` (whole seconds, through the app's one conversion).
 fn local<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Result<DateTime<Tz>, String> {
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "times typed into a dialog are far inside i64's range"
-    )]
-    let seconds = at.as_unix_seconds().floor() as i64;
-    zone.timestamp_opt(seconds, 0)
-        .single()
-        .ok_or_else(|| "That time is out of range.".to_owned())
+    crate::format::date_time(at, zone).ok_or_else(|| "That time is out of range.".to_owned())
 }
 
 /// The moment a local date and time names in `zone`. A time a clock
@@ -493,6 +486,24 @@ mod tests {
         assert!(error.contains("isn't a time"), "{error}");
         assert!(utc("").unwrap_err().contains("Enter a time"));
         assert!(utc("2026-13-01 10:00").is_err());
+    }
+
+    /// The dialog converts times like every other label
+    /// (`format::date_time`, whole seconds), and a time far outside any
+    /// calendar is the dialog's error, not a saturated `i64`.
+    #[test]
+    fn dialog_times_use_the_shared_conversion() {
+        let at = Timestamp::from_unix_seconds(86_399.999_6);
+        assert_eq!(
+            local(at, &Utc).ok(),
+            crate::format::date_time(at, &Utc),
+            "the same second"
+        );
+        assert_eq!(local(at, &Utc).map(|time| time.second()), Ok(59));
+        assert_eq!(
+            local(Timestamp::from_unix_seconds(1e300), &Utc).unwrap_err(),
+            "That time is out of range."
+        );
     }
 
     #[test]

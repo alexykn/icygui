@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 06 cluster health</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script><script src="views.js"></script><script src="health.js"></script></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">06</span><span class="topic-name">Cluster health: is the monitoring itself healthy?</span></div>
+<p class="topic-intro">A page per environment, like Icinga Web's monitoring health. It has the zones with their endpoints (connected, last message, version, traffic), the node icygui is connected to (marked with the selected-row background), Icinga's numbers from <b>/v1/status</b> (checks per minute, latency, execution time, pending checks, work queues, connections, uptime), and Icinga's global switches, read-only.
+It opens from <i>health</i> in the sidebar's fixed <i>cluster</i> section (topic 14), from a <i>cluster health</i> item under the nodes in the footer switcher, and from the palette, so it stays one click away. Its data comes from the 30-second status poll icygui already makes, plus the endpoints and zones it already loads, so it adds no requests while the page is closed. The small trend lines are the last 30 minutes of those polls, kept in memory.</p>
+<div class="shots"></div>
+<script>
+
+// 6a: where it lives: the footer switcher
+const switcher = menu([], { x: 54, y: 352, w: 320, style: 'padding:4px' }).replace('<div class="menu"', '<div class="menu" id="sw"');
+const swInner = `<div class="menu" style="left:54px;top:300px;width:340px;bottom:auto">
+  <div style="padding:4px 10px"><div class="strong med">prod-cluster</div><div class="muted trunc" style="font-size:12px">https://master-01.prod.example.com:5665</div></div>
+  <div class="msep"></div>
+  <div class="col" style="gap:4px;padding:4px 10px;font-size:12.5px">
+    ${[['status', 'connected for 6d 2h'], ['node', 'master-01 · zone master'], ['view', 'full view: the whole cluster'], ['version', 'r2.14.3-1'], ['last event', '0s ago'], ['API user', 'icygui']].map(([k, v]) => `<div style="display:grid;grid-template-columns:94px 1fr;gap:10px"><span class="faint">${k}</span><span>${v}</span></div>`).join('')}</div>
+  <div class="msep"></div><div class="mlabel">nodes</div>
+  <div class="mi sel">${dot('ok', 'd6')}<span>master-01</span><span class="det grow">master</span></div>
+  <div class="mi">${dot('ok', 'd6')}<span>master-02</span><span class="det grow">master</span></div>
+  <div class="mi">${dot('ok', 'd6')}<span>sat-ams-01</span><span class="det grow">ams</span></div>
+  <div class="mi">${dot('ok', 'd6')}<span>sat-fra-01</span><span class="det grow">fra</span></div>
+  <div class="mi hov"><span class="muted" style="width:6px;display:flex;justify-content:center">${icon('heart-pulse', 11)}</span><span class="grow">cluster health</span><span class="kh">zones, queues, checks/min</span></div>
+  <div class="msep"></div>
+  <div class="mi">Reload from Icinga</div>
+  <div class="msep"></div><div class="mlabel">environments</div>
+  <div class="mi sel">${dot('ok', 'd6')}<span>prod-cluster</span><span class="det grow">master-01 · 0s</span><span class="faint">${icon('settings', 12)}</span></div>
+  <div class="mi">${dot('ok', 'd6')}<span>staging</span><span class="det grow">stg-master-01 · 2s</span><span class="faint">${icon('settings', 12)}</span></div>
+  <div class="mi">${dot('ok', 'd6')}<span>lab</span><span class="det grow">lab-icinga · 19s</span><span class="faint">${icon('settings', 12)}</span></div>
+  <div class="msep"></div><div class="mi">add environment</div></div>`;
+shot('6a', '06-cluster-health-a-entry', 'Where it lives: <i>health</i>, the third entry of the sidebar’s fixed <b>cluster</b> section at the top (topic 14: handling, downtimes, health), with the cluster’s state dot in the mark slot and no count. The footer switcher’s nodes section also has a <i>cluster health</i> row under the nodes (open here: its icon in the mark slot, a faint hint says what is inside), and the palette has <i>cluster health</i>. All three open the same page; it is not a tab in the <i>open</i> section.',
+  clusterWindow(listHeader() + summary() + `<div class="list">${rows()}</div>`, { activeGroup: 'overview', activeItem: 'overview', foot: { open: true } }) + swInner,
+  { crops: '06-cluster-health-a-entry-zoom:0,280,560,620;06-cluster-health-a-sidebar-zoom:0,40,300,140' });
+
+shot('6b', '06-cluster-health-b-healthy', 'The page in the healthy case, opened from <i>health</i> in the sidebar’s <b>cluster</b> section (selected), whose dot is the cluster’s health: green. The zones are group-header bands, with each zone’s endpoints under it; the node icygui is connected to has the selected-row background. Then the checks and the queues as stat tiles (value, what it counts, 30 minutes of trend in the faint colour with the latest point in the accent), and Icinga’s global switches, read-only.',
+  clusterWindow(`<div class="col" style="min-height:0;overflow:hidden">${healthPage()}</div>`, { cluster: 'health' }));
+
+shot('6c', '06-cluster-health-c-degraded', 'A satellite has dropped out. sat-fra-01 turns critical in its zone (and in the footer switcher’s nodes), and a critical banner says what it means: zone fra’s results are stale, and 1,204 checks are late. The affected numbers turn warning or critical in their own colour, with their trend showing when it started. Performance data has been switched off globally, so its switch shows <i>off</i> in the warning colour. The <i>health</i> entry’s dot in the cluster section turns critical (an endpoint is down, by this page’s rules).',
+  clusterWindow(`<div class="col" style="min-height:0;overflow:hidden">${healthPage({ broken: true })}</div>`, { cluster: 'health', health: 'crit' }));
+</script>
+</body></html>

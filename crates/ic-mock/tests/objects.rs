@@ -485,7 +485,7 @@ async fn every_supported_type_answers() {
 #[tokio::test]
 async fn state_matches_the_design_scenario() {
     let (server, client) = prod().await;
-    // Acknowledged TLS problem.
+    // Acknowledged TLS problem (sticky, as in topic 07).
     let (_, body) = get(
         &client,
         &server,
@@ -493,7 +493,7 @@ async fn state_matches_the_design_scenario() {
     )
     .await;
     let attrs = &results(&body)[0]["attrs"];
-    assert_eq!(attrs["acknowledgement"], json!(1));
+    assert_eq!(attrs["acknowledgement"], json!(2));
     assert_eq!(attrs["handled"], json!(true));
     // Problem in downtime.
     let (_, body) = get(

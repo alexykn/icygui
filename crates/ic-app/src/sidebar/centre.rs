@@ -34,14 +34,13 @@ use std::collections::HashSet;
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
-    px,
 };
-use gpui::{BoxShadow, point};
+use gpui::{App, BoxShadow, point};
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::Tone;
 use ic_ui_kit::{
     ActiveTheme as _, CHIP_HEIGHT, Chip, Dismissable, Dismissal, Icon, IconButton, IconName, Link,
-    Menu, MenuItem, Popover, StateDot, Theme, Tooltip, chip_width,
+    Menu, MenuItem, Popover, StateDot, Theme, Tooltip, chip_width, px,
 };
 
 use super::{Sidebar, SidebarEvent, SidebarMenu};
@@ -50,7 +49,7 @@ use crate::notifications::entry::{
     self, CentreEntry, CentreItem, CentreView, Place, Scope, Source, StormGroup,
 };
 use crate::notifications::{PauseChoice, pause_label, paused_text, when};
-use crate::settings::SettingsTab;
+use crate::settings::SettingsPage;
 
 /// The centre's width.
 const CENTRE_WIDTH: f32 = 420.;
@@ -107,10 +106,10 @@ pub(super) struct CentreState {
 /// The colour of a notification's tone.
 pub(crate) fn tone_color(tone: Tone, theme: &Theme) -> gpui::Hsla {
     match tone {
-        Tone::Critical => theme.states.critical,
-        Tone::Warning => theme.states.warning,
-        Tone::Unknown => theme.states.unknown,
-        Tone::Recovery => theme.states.ok,
+        Tone::Critical => theme.states.fill.critical,
+        Tone::Warning => theme.states.fill.warning,
+        Tone::Unknown => theme.states.fill.unknown,
+        Tone::Recovery => theme.states.fill.ok,
         Tone::Info => theme.colors.accent,
     }
 }
@@ -245,13 +244,13 @@ impl Sidebar {
 
     /// The centre's scope.
     #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn centre_scope(&self, cx: &gpui::App) -> Option<Scope> {
+    pub(crate) fn centre_scope(&self, cx: &App) -> Option<Scope> {
         self.scope(self.state.read(cx))
     }
 
     /// The centre's list as shown now.
     #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn centre_view(&self, cx: &gpui::App) -> CentreView {
+    pub(crate) fn centre_view(&self, cx: &App) -> CentreView {
         self.view(self.state.read(cx), Timestamp::now())
     }
 
@@ -375,7 +374,9 @@ impl Sidebar {
         let has_environment = state.environment().is_some();
         let header = Self::centre_header(&view, theme, cx);
         let pause_row = has_environment.then(|| self.centre_pause(now, theme, cx));
-        let height = list_height(f32::from(self.viewport));
+        // The window's height in the design's pixels: the card's parts
+        // scale with the interface size, the window doesn't.
+        let height = list_height(f32::from(self.viewport) / ic_ui_kit::scale());
         let list = self.centre_list(&view, height, theme, cx);
         let bar = self.centre_bar(state, has_environment, theme, cx);
         let card = div()
@@ -516,7 +517,7 @@ impl Sidebar {
                 .tooltip(Tooltip::new("Notification settings"))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.menus.close();
-                    cx.emit(SidebarEvent::OpenSettings(SettingsTab::Notifications));
+                    cx.emit(SidebarEvent::OpenSettings(SettingsPage::Notifications));
                     cx.notify();
                 }))
         });
@@ -571,12 +572,14 @@ impl Sidebar {
             .iter()
             .map(|tab| f32::from(chip_width(&tab.label, size)))
             .collect();
-        let gear = f32::from(theme.metrics.icon_button) + 8.;
+        // In window pixels: the chips' widths follow the interface size.
+        let scale = ic_ui_kit::scale();
+        let gear = f32::from(theme.metrics.icon_button) + 8. * scale;
         let (shown, hidden) = fit_tabs(
             &widths,
             selected,
-            CENTRE_WIDTH - 2. * CENTRE_PADDING - 2. - gear,
-            CHIP_GAP,
+            (CENTRE_WIDTH - 2. * CENTRE_PADDING) * scale - 2. - gear,
+            CHIP_GAP * scale,
             f32::from(chip_width(MORE, size)),
         );
         let mut chips: Vec<AnyElement> = shown
@@ -643,18 +646,14 @@ impl Sidebar {
                     })),
             )
             .when(open, |trigger| {
-                trigger.child(
-                    Popover::new(Self::scope_overflow(items, cx))
-                        .above()
-                        .gap(px(6.)),
-                )
+                trigger.child(Popover::new(Self::scope_overflow(items, cx)).above())
             })
             .into_any_element()
     }
 
     /// The scopes that didn't fit, as a menu.
     fn scope_overflow(items: Vec<(Scope, String, bool)>, cx: &Context<Self>) -> Menu {
-        let mut menu = Menu::new("centre-scope-overflow").min_width(px(160.));
+        let mut menu = Menu::new("centre-scope-overflow");
         for (index, (scope, name, unread)) in items.into_iter().enumerate() {
             menu = menu.item(
                 MenuItem::new(("centre-scope-hidden", index), name)
@@ -709,9 +708,9 @@ impl Sidebar {
                     div()
                         .flex_1()
                         .line_height(px(CHIP_HEIGHT))
-                        .text_color(theme.states.warning)
+                        .text_color(theme.states.text.warning)
                         .child(format!(
-                            "{}: shown silently",
+                            "{}, trouble alerts too: shown silently",
                             paused_text(environments, until, now)
                         )),
                 )
@@ -728,7 +727,10 @@ impl Sidebar {
                 .into_any_element();
         }
         if let Some((id, name, until)) = muted {
-            let text = format!("{name} muted until {}: shown silently", when(until, now));
+            let text = format!(
+                "{name} muted until {}, trouble alerts too: shown silently",
+                when(until, now)
+            );
             return row
                 .child(
                     div()
@@ -737,7 +739,7 @@ impl Sidebar {
                         .line_height(px(CHIP_HEIGHT))
                         .min_w_0()
                         .truncate()
-                        .text_color(theme.states.warning)
+                        .text_color(theme.states.text.warning)
                         .tooltip(Tooltip::text(text.clone()))
                         .child(text),
                 )
@@ -869,9 +871,24 @@ impl Sidebar {
             .into_any_element()
     }
 
+    /// Whether the entry's object counts as handled now (acknowledged, or
+    /// a downtime in effect), in the entry's environment: its dot is hollow.
+    fn counts_as_handled(&self, entry: &CentreEntry, cx: &App) -> bool {
+        entry.object.as_ref().is_some_and(|object| {
+            let state = self.state.read(cx);
+            let snapshot = state
+                .snapshot_of(&entry.environment)
+                .unwrap_or_else(|| state.snapshot());
+            crate::operate::dialog::object_mark(snapshot, object).is_some_and(|mark| mark.hollow)
+        })
+    }
+
     /// One entry: time, tone dot, title, first line, where and whether
-    /// silent. A storm's summary (`storm`) shows how many it held back and
-    /// expands; a storm's notification (`member`) is indented under it.
+    /// silent. The dot is hollow when its object counts as handled now
+    /// (acknowledged, or a downtime in effect: hollow = handled, as in
+    /// every list). A storm's summary (`storm`) shows how many it held
+    /// back and expands; a storm's notification (`member`) is indented
+    /// under it.
     fn centre_row(
         &self,
         index: usize,
@@ -882,11 +899,13 @@ impl Sidebar {
         cx: &Context<Self>,
     ) -> AnyElement {
         let colors = theme.colors;
+        // Compact rows drop the output line, as in the dashboard list.
+        let compact = theme.density == ic_ui_kit::Density::Compact;
         let tone = tone_color(entry.tone, theme);
         let unread = storm.map_or(entry.unread, StormGroup::unread);
-        let silent = entry.is_silent();
+        let handled = storm.is_none() && self.counts_as_handled(entry, cx);
         // Unread is a brighter title; silent ones are a step dimmer.
-        let title_color = match (unread, silent) {
+        let title_color = match (unread, entry.is_silent()) {
             (true, false) => colors.text_strong,
             (true, true) => colors.text_secondary,
             (false, false) => colors.text_muted,
@@ -903,11 +922,11 @@ impl Sidebar {
             .flex()
             .items_start()
             .gap(px(10.))
-            .pl(px(if member {
-                CENTRE_PADDING + f32::from(theme.metrics.row_indent)
+            .pl(if member {
+                px(CENTRE_PADDING) + theme.metrics.row_indent
             } else {
-                CENTRE_PADDING
-            }))
+                px(CENTRE_PADDING)
+            })
             .pr(px(CENTRE_PADDING))
             .py(px(7.))
             .cursor_pointer()
@@ -935,7 +954,7 @@ impl Sidebar {
                 div()
                     .pt(px(5.))
                     .flex_none()
-                    .child(StateDot::with_color(tone).size(px(7.)).hollow(silent)),
+                    .child(StateDot::with_color(tone).size(px(7.)).hollow(handled)),
             )
             .child(
                 div()
@@ -951,7 +970,7 @@ impl Sidebar {
                             .text_color(title_color)
                             .child(entry.title.clone()),
                     )
-                    .when(!entry.body.is_empty(), |column| {
+                    .when(!compact && !entry.body.is_empty(), |column| {
                         column.child(
                             div()
                                 .truncate()
@@ -1075,6 +1094,10 @@ impl Sidebar {
                 environment: environment.to_owned(),
                 object: object.clone(),
             });
+        } else if ic_core::trouble::is_trouble_id(id) {
+            // A trouble alert is about the cluster: its health page.
+            self.menus.close();
+            cx.emit(SidebarEvent::OpenHealthIn(environment.to_owned()));
         }
         cx.notify();
     }

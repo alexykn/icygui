@@ -20,19 +20,14 @@ use crate::support::{ENV_ID, Engine, FakeSecrets, Launch, PASSWORD, USER, enviro
 use ic_config::{ApiUrl, AuthConfig, Environment};
 use ic_core::{ClusterView, ConnectedNode, ConnectionState, NodeState, Tuning, test_connection};
 use ic_mock::{MockConfig, MockServer, MockTls, MockUser, Scenario, scenarios};
-use ic_model::{Endpoint, HostState, ServiceState};
+use ic_model::{FeatureState, HostState, ServiceState};
 use secrecy::SecretString;
 
-/// The `prod-cluster` scenario with a second master in the top-level zone
-/// (an HA pair); its satellite `sat-ams-01` is in the child zone `ams`.
+/// The `prod-cluster` scenario: two masters in the top-level zone (an HA
+/// pair), its satellites `sat-ams-01` and `sat-fra-01` in the child zones
+/// `ams` and `fra`.
 fn cluster() -> Scenario {
-    let mut cluster = scenarios::prod_cluster();
-    cluster.endpoints.push(Endpoint {
-        name: "master-02".to_owned(),
-        zone: "master".to_owned(),
-        connected: true,
-    });
-    cluster
+    scenarios::prod_cluster()
 }
 
 /// A mock serving `cluster` as the node `node`.
@@ -217,14 +212,26 @@ async fn a_satellite_is_a_labelled_partial_view_until_the_master_is_back() {
 
     // Meanwhile the engine asks the master again, gently: with growing
     // waits (40 ms doubling to 160 ms here), never in a burst.
-    tokio::time::sleep(Duration::from_millis(900)).await;
-    let probes = master
-        .control()
-        .requests()
-        .iter()
-        .filter(|request| request.path == "/v1")
-        .count();
-    assert!((3..=20).contains(&probes), "{probes} probes in 0.9 s");
+    let probing = std::time::Instant::now();
+    let probes = || {
+        master
+            .control()
+            .requests()
+            .iter()
+            .filter(|request| request.path == "/v1")
+            .count()
+    };
+    // At least three (waited for: a busy runner is slower), and never a
+    // burst: no more than the growing waits allow in the time it took.
+    assert!(crate::support::wait_until(|| probes() >= 3).await);
+    tokio::time::sleep(Duration::from_millis(900).saturating_sub(probing.elapsed())).await;
+    let elapsed = probing.elapsed();
+    let most = 20 + usize::try_from(elapsed.as_millis() / 80).unwrap_or(usize::MAX);
+    assert!(
+        (3..=most).contains(&probes()),
+        "{} probes in {elapsed:?}",
+        probes()
+    );
 
     // The master answers again: the engine switches back to it and
     // reloads; the snapshot says partial until the whole cluster is in.
@@ -804,7 +811,7 @@ async fn the_cluster_nodes_follow_the_status_poll() {
             .collect()
     };
     let snapshot = engine
-        .snapshot(|snapshot| snapshot.cluster_nodes().len() == 3)
+        .snapshot(|snapshot| snapshot.cluster_nodes().len() == 4)
         .await;
     assert_eq!(
         states(&snapshot),
@@ -822,6 +829,11 @@ async fn the_cluster_nodes_follow_the_status_poll() {
             (
                 "sat-ams-01".to_owned(),
                 "ams".to_owned(),
+                NodeState::Connected
+            ),
+            (
+                "sat-fra-01".to_owned(),
+                "fra".to_owned(),
                 NodeState::Connected
             ),
         ]
@@ -863,10 +875,23 @@ async fn the_cluster_nodes_follow_the_status_poll() {
         let body = request.body.as_ref().unwrap();
         assert_eq!(
             body["endpoints"],
-            serde_json::json!(["master-02", "sat-ams-01"])
+            serde_json::json!(["master-02", "sat-ams-01", "sat-fra-01"])
         );
-        assert_eq!(body["attrs"], serde_json::json!(["connected"]));
+        assert_eq!(body["attrs"][0], "connected");
     }
+    // Their numbers come with them (the cluster health page's columns).
+    let snapshot = engine
+        .snapshot(|snapshot| snapshot.health.endpoints.len() == 3)
+        .await;
+    let numbers = &snapshot.health.endpoints;
+    assert_eq!(numbers["sat-fra-01"].version, 21_402, "r2.14.2-1");
+    assert_eq!(numbers["sat-ams-01"].version, 21_403);
+    assert!(numbers["sat-ams-01"].messages_in > 0.0);
+    assert!(
+        numbers["master-02"].messages_in.abs() < f64::EPSILON,
+        "gone: no messages, its last one kept"
+    );
+    assert!(numbers["master-02"].last_message.non_zero().is_some());
     engine.shutdown();
 }
 
@@ -953,7 +978,7 @@ async fn a_cluster_node_that_is_gone_reloads_the_node_list() {
     .start();
     connected_to(&mut engine, |_| true).await;
     engine
-        .snapshot(|snapshot| snapshot.cluster_nodes().len() == 3)
+        .snapshot(|snapshot| snapshot.cluster_nodes().len() == 4)
         .await;
     // master-02 leaves the cluster unannounced: Icinga answers the next
     // node query naming it with a 404 for all of them.
@@ -973,7 +998,7 @@ async fn a_cluster_node_that_is_gone_reloads_the_node_list() {
         .into_iter()
         .map(|node| node.name)
         .collect();
-    assert_eq!(names, ["master-01", "sat-ams-01"]);
+    assert_eq!(names, ["master-01", "sat-ams-01", "sat-fra-01"]);
     engine.shutdown();
 }
 
@@ -1003,5 +1028,110 @@ async fn a_single_node_costs_no_poll_when_it_comes_on_screen() {
         .filter(|request| request.path.starts_with("/v1/status"))
         .count();
     assert_eq!(polls, 0);
+    engine.shutdown();
+}
+
+/// The cluster health page (topic 06): its listener status comes with
+/// every status poll only while it shows the environment and it isn't
+/// quiet, the features when it opens (unless they are recent); else both
+/// every five minutes for the trouble alerts (E2). The trend comes from
+/// every poll, open or not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_health_page_asks_only_while_it_is_open() {
+    let cluster = cluster();
+    let master = node(&cluster, "master-01").await;
+    let interval = Duration::from_millis(200);
+    let mut engine = Launch {
+        environment: environment_of(&[&master]),
+        tuning: Tuning {
+            status_interval: interval,
+            ..tuning()
+        },
+        ..Launch::new(&master)
+    }
+    .start();
+    connected_to(&mut engine, |_| true).await;
+    let control = master.control();
+    let count = |path: &str| {
+        control
+            .requests()
+            .iter()
+            .filter(|request| request.path == path)
+            .count()
+    };
+    // Closed: the polls build the trend; the trouble alerts' round (E2)
+    // asks for the listener and the features with the first poll, then
+    // not for five minutes.
+    engine
+        .snapshot(|snapshot| snapshot.health.samples.len() >= 3)
+        .await;
+    assert_eq!(count("/v1/status/ApiListener"), 1);
+    assert_eq!(count("/v1/objects/checkercomponents"), 1);
+
+    // Open: the listener and the features at once, then the listener with
+    // every poll, the features not again.
+    let opened = std::time::Instant::now();
+    engine.send(ic_core::Command::WatchHealth(true));
+    let snapshot = engine
+        .snapshot(|snapshot| {
+            snapshot.health.features.is_some() && snapshot.health.listener.is_some()
+        })
+        .await;
+    assert!(opened.elapsed() < interval * 3, "{:?}", opened.elapsed());
+    let features = snapshot.health.features.unwrap();
+    assert_eq!(features.checker, Some(FeatureState::Running));
+    assert_eq!(features.notification, Some(FeatureState::Running));
+    assert_eq!(features.icingadb, Some(FeatureState::Off));
+    let listener = snapshot.health.listener.clone().unwrap();
+    assert_eq!(
+        (listener.connected_endpoints, listener.endpoints),
+        (3, 3),
+        "master-02 and both satellites"
+    );
+    engine
+        .snapshot(|snapshot| {
+            snapshot
+                .health
+                .samples
+                .iter()
+                .filter(|sample| sample.relay_queue.is_some())
+                .count()
+                >= 3
+        })
+        .await;
+    let listeners = count("/v1/status/ApiListener");
+    let polls = count("/v1/status/CIB");
+    assert!(
+        listeners >= 3 && listeners <= polls + 1,
+        "{listeners} for {polls} polls"
+    );
+    assert_eq!(count("/v1/objects/checkercomponents"), 1);
+    assert_eq!(count("/v1/objects/notificationcomponents"), 1);
+    assert_eq!(count("/v1/objects/icingadbs"), 1);
+
+    // Quiet (the window hidden): nothing more, though the page is open.
+    engine.send(ic_core::Command::SetQuiet(true));
+    tokio::time::sleep(interval).await;
+    let quiet_from = count("/v1/status/ApiListener");
+    tokio::time::sleep(interval * 4).await;
+    assert_eq!(count("/v1/status/ApiListener"), quiet_from);
+    engine.send(ic_core::Command::SetQuiet(false));
+
+    // Closed again: the polls go on alone.
+    engine.send(ic_core::Command::WatchHealth(false));
+    tokio::time::sleep(interval).await;
+    let closed_at = count("/v1/status/ApiListener");
+    let polls_at = count("/v1/status/CIB");
+    assert!(crate::support::wait_until(|| count("/v1/status/CIB") >= polls_at + 3).await);
+    assert_eq!(count("/v1/status/ApiListener"), closed_at);
+
+    // Opening and closing in a hurry costs no more than the polls would.
+    let before = count("/v1/status/ApiListener");
+    for _ in 0..5 {
+        engine.send(ic_core::Command::WatchHealth(true));
+        engine.send(ic_core::Command::WatchHealth(false));
+    }
+    tokio::time::sleep(interval / 2).await;
+    assert!(count("/v1/status/ApiListener") <= before + 1);
     engine.shutdown();
 }

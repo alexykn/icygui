@@ -168,6 +168,12 @@ impl World {
             parent: (!downtime.parent.is_empty()).then(|| downtime.parent.clone()),
             in_effect: downtime.is_in_effect(self.now()),
             config_owned: !downtime.config_owner.is_empty() || !downtime.scheduled_by.is_empty(),
+            schedule: [&downtime.scheduled_by, &downtime.config_owner]
+                .into_iter()
+                .find(|name| !name.is_empty())
+                .and_then(|name| name.rsplit('!').next())
+                .filter(|short| !short.is_empty())
+                .map(str::to_owned),
         }
     }
 
@@ -255,10 +261,14 @@ impl World {
         let mut latency = 0.0;
         let mut execution = 0.0;
         let mut count = 0.0;
+        let (mut max_latency, mut max_execution) = (0.0_f64, 0.0_f64);
         for cr in self.all_checkables().filter_map(|c| c.cr.as_ref()) {
             let exec = cr.execution_end - cr.execution_start;
+            let late = ((cr.schedule_end - cr.schedule_start) - exec).max(0.0);
             execution += exec;
-            latency += ((cr.schedule_end - cr.schedule_start) - exec).max(0.0);
+            latency += late;
+            max_execution = max_execution.max(exec);
+            max_latency = max_latency.max(late);
             count += 1.0;
         }
         let average = |sum: f64| if count > 0.0 { sum / count } else { 0.0 };
@@ -273,8 +283,11 @@ impl World {
             flap_detection_enabled: self.app.enable_flapping,
             perfdata_enabled: self.app.enable_perfdata,
             checks_per_minute: f64::from(self.stats.checks_last_minute(now)),
+            passive_checks_per_minute: f64::from(self.stats.passive_last_minute(now)),
             avg_latency: average(latency),
+            max_latency,
             avg_execution_time: average(execution),
+            max_execution_time: max_execution,
             counts: self.object_counts(),
         }
     }

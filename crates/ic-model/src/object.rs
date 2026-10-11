@@ -199,7 +199,15 @@ impl CheckInfo {
     /// Whether the object is acknowledged or in downtime.
     #[must_use]
     pub fn is_acknowledged_or_in_downtime(&self) -> bool {
-        self.acknowledgement.is_acknowledged() || self.downtime_depth > 0
+        self.acknowledgement.is_acknowledged() || self.in_downtime()
+    }
+
+    /// Whether a downtime is in effect for the object (`downtime_depth`).
+    /// A downtime that hasn't started (scheduled for later, or flexible
+    /// and not triggered) doesn't count.
+    #[must_use]
+    pub fn in_downtime(&self) -> bool {
+        self.downtime_depth > 0
     }
 
     /// First line of the plugin output, or empty while pending.
@@ -282,6 +290,16 @@ impl Host {
         self.is_problem() && self.check.is_acknowledged_or_in_downtime()
     }
 
+    /// Whether icygui counts the host as handled: drawn as a hollow mark,
+    /// left out by *hide handled*. Icinga's `handled`, and a host whose
+    /// downtime is in effect whatever its state (an UP host in downtime
+    /// is a hollow green ring). Filters keep Icinga's `handled`
+    /// ([`Host::is_handled`]).
+    #[must_use]
+    pub fn counts_as_handled(&self) -> bool {
+        self.is_handled() || self.check.in_downtime()
+    }
+
     /// Icinga 2's severity (see [`crate::severity`]).
     #[must_use]
     pub fn severity(&self) -> u32 {
@@ -342,6 +360,18 @@ impl Service {
     #[must_use]
     pub fn is_handled(&self, host_problem: bool) -> bool {
         self.is_problem() && (self.check.is_acknowledged_or_in_downtime() || host_problem)
+    }
+
+    /// Whether icygui counts the service as handled: drawn as a hollow
+    /// mark, left out by *hide handled*. Icinga's `handled`, and a service
+    /// whose downtime is in effect whatever its state (an OK service in
+    /// downtime is a hollow green ring). A downtime of its host that
+    /// doesn't cover the service (scheduled without `all_services`) leaves
+    /// it alone, as in Icinga Web. Filters keep Icinga's `handled`
+    /// ([`Service::is_handled`]).
+    #[must_use]
+    pub fn counts_as_handled(&self, host_problem: bool) -> bool {
+        self.is_handled(host_problem) || self.check.in_downtime()
     }
 
     /// Icinga 2's severity (see [`crate::severity`]).
@@ -428,9 +458,96 @@ pub struct Downtime {
     pub parent: Option<String>,
     /// Whether it's in effect right now.
     pub in_effect: bool,
-    /// Whether it was created by a `ScheduledDowntime` config object (those
-    /// come back after removal; the UI warns about it).
+    /// Whether it was created by a `ScheduledDowntime` config object
+    /// (Icinga refuses to remove those; they come back with the config).
     pub config_owned: bool,
+    /// The short name of the `ScheduledDowntime` that created it
+    /// (`weekly-patching`), when Icinga says.
+    #[serde(default)]
+    pub schedule: Option<String>,
+}
+
+/// Where a downtime stands right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DowntimePhase {
+    /// In effect: the object is handled.
+    InEffect,
+    /// Flexible, its window open, waiting for a problem to start it.
+    Waiting,
+    /// Its window hasn't begun (or it is about to take effect).
+    Upcoming,
+    /// Over: its window passed without it taking effect, or it ran out.
+    Over,
+}
+
+impl Downtime {
+    /// Where the downtime stands at `now`. Icinga's `in_effect` decides
+    /// while it's in effect (Icinga reports when it starts and ends);
+    /// otherwise its window does.
+    #[must_use]
+    pub fn phase(&self, now: Timestamp) -> DowntimePhase {
+        if self.in_effect {
+            DowntimePhase::InEffect
+        } else if now < self.start_time {
+            DowntimePhase::Upcoming
+        } else if now >= self.end_time {
+            DowntimePhase::Over
+        } else if self.fixed {
+            // Its window began; Icinga's report that it started is on
+            // its way.
+            DowntimePhase::Upcoming
+        } else if self.trigger_time.is_none() {
+            DowntimePhase::Waiting
+        } else {
+            DowntimePhase::Over
+        }
+    }
+
+    /// When it takes effect: the window's start for a fixed downtime, the
+    /// trigger for a flexible one (`None` while it waits).
+    #[must_use]
+    pub fn effective_start(&self) -> Option<Timestamp> {
+        if self.fixed {
+            Some(self.start_time)
+        } else {
+            self.trigger_time
+        }
+    }
+
+    /// When it stops being in effect: the window's end for a fixed
+    /// downtime, `duration` after the trigger for a flexible one (Icinga's
+    /// `Downtime::IsInEffect`); `None` while a flexible one waits.
+    #[must_use]
+    pub fn effective_end(&self) -> Option<Timestamp> {
+        if self.fixed {
+            Some(self.end_time)
+        } else {
+            self.trigger_time.map(|trigger| {
+                Timestamp::from_unix_seconds(trigger.as_unix_seconds() + self.duration.max(0.0))
+            })
+        }
+    }
+
+    /// How much of it has passed at `now`, 0 to 1: of the window for a
+    /// fixed downtime, of `duration` since the trigger for a flexible one;
+    /// 0 until it takes effect.
+    #[must_use]
+    pub fn progress(&self, now: Timestamp) -> f32 {
+        let (Some(start), Some(end)) = (self.effective_start(), self.effective_end()) else {
+            return 0.0;
+        };
+        let length = end.as_unix_seconds() - start.as_unix_seconds();
+        if length <= 0.0 {
+            return 1.0;
+        }
+        let done = ((now.as_unix_seconds() - start.as_unix_seconds()) / length).clamp(0.0, 1.0);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a fraction between 0 and 1 for a progress bar"
+        )]
+        let done = done as f32;
+        done
+    }
 }
 
 /// A host group.
@@ -526,6 +643,79 @@ mod tests {
         assert!(!host.is_handled());
         host.check.acknowledgement = AckKind::Sticky;
         assert!(host.is_handled());
+    }
+
+    #[test]
+    fn a_downtime_in_effect_counts_as_handled_whatever_the_state() {
+        let mut service = Service::new("h", "s");
+        service.state = ServiceState::Ok;
+        assert!(!service.counts_as_handled(false));
+        service.check.downtime_depth = 1;
+        assert!(
+            service.counts_as_handled(false),
+            "an OK service in downtime is a hollow green ring"
+        );
+        assert!(!service.is_handled(false), "filters keep Icinga's handled");
+        service.check.downtime_depth = 0;
+        service.state = ServiceState::Critical;
+        service.check.acknowledgement = AckKind::Normal;
+        assert!(service.counts_as_handled(false));
+        service.check.acknowledgement = AckKind::None;
+        assert!(service.counts_as_handled(true), "behind a host problem");
+        assert!(!service.counts_as_handled(false));
+
+        let mut host = Host::new("h");
+        host.state = HostState::Up;
+        assert!(!host.counts_as_handled());
+        host.check.downtime_depth = 2;
+        assert!(host.counts_as_handled());
+        assert!(!host.is_handled());
+    }
+
+    fn downtime(fixed: bool) -> Downtime {
+        Downtime {
+            name: "h!d".to_owned(),
+            object: ObjectKey::Host {
+                name: HostName::new("h"),
+            },
+            author: "a".to_owned(),
+            comment: "c".to_owned(),
+            start_time: Timestamp::from_unix_seconds(1_000.0),
+            end_time: Timestamp::from_unix_seconds(5_000.0),
+            fixed,
+            duration: 1_000.0,
+            entry_time: Timestamp::from_unix_seconds(900.0),
+            trigger_time: None,
+            triggered_by: None,
+            parent: None,
+            in_effect: false,
+            config_owned: false,
+            schedule: None,
+        }
+    }
+
+    #[test]
+    fn downtime_phases_follow_the_window() {
+        let at = Timestamp::from_unix_seconds;
+        let mut fixed = downtime(true);
+        assert_eq!(fixed.phase(at(500.0)), DowntimePhase::Upcoming);
+        assert_eq!(fixed.phase(at(6_000.0)), DowntimePhase::Over);
+        fixed.in_effect = true;
+        assert_eq!(fixed.phase(at(2_000.0)), DowntimePhase::InEffect);
+        assert!((fixed.progress(at(2_000.0)) - 0.25).abs() < 0.001);
+        assert_eq!(fixed.effective_end(), Some(at(5_000.0)));
+
+        let mut flexible = downtime(false);
+        assert_eq!(flexible.phase(at(2_000.0)), DowntimePhase::Waiting);
+        assert_eq!(flexible.effective_end(), None);
+        assert!(flexible.progress(at(2_000.0)).abs() < f32::EPSILON);
+        flexible.trigger_time = Some(at(2_000.0));
+        flexible.in_effect = true;
+        assert_eq!(flexible.phase(at(2_500.0)), DowntimePhase::InEffect);
+        assert_eq!(flexible.effective_end(), Some(at(3_000.0)));
+        assert!((flexible.progress(at(2_500.0)) - 0.5).abs() < 0.001);
+        flexible.in_effect = false;
+        assert_eq!(flexible.phase(at(3_500.0)), DowntimePhase::Over);
     }
 
     #[test]

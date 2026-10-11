@@ -32,6 +32,57 @@
 //! So the store converges to Icinga's state whatever order answers and
 //! events arrive in, without pausing the stream during queries.
 //!
+//! **Downtime depths.** `downtime_depth` is a count (Icinga's
+//! `GetDowntimeDepth`: the downtimes in effect), not a value an event sets,
+//! so applying a downtime event twice, or missing one, would leave it
+//! wrong for good where no check result brings Icinga's count again (quiet
+//! mode: a problem hidden as in downtime while Icinga says it isn't). Its
+//! sources:
+//! - a check event (`CheckResult`, `StateChange`) carries Icinga's count at
+//!   the event's time, in the stream's order: the downtime events after it
+//!   change it by exactly what they change in Icinga's count, judged per
+//!   downtime by name (`Store::count_downtime`) and by Icinga's own rule
+//!   (`Downtime::IsInEffect`: a fixed downtime counts from its start,
+//!   before Icinga's start timer reports it up to 5 s later, and stops at
+//!   its end, before the removal);
+//! - a query answer carries Icinga's count at a moment between the request
+//!   and the answer, so a downtime event read after the request may or may
+//!   not be in it already. Such an event changes the depth for the moment
+//!   (the depth is *provisional*) until an answer sent after the line or a
+//!   check event brings Icinga's count with no downtime event after it.
+//!   A provisional problem is asked for again by name
+//!   (`Store::take_unsettled`, the engine's `reask` part: spread by the
+//!   requests they take, retried with backoff when a request fails, handed
+//!   out again after a new session); an OK object isn't, since its count
+//!   can't hide a problem and the state change that makes it one brings
+//!   Icinga's count (or, where it can't, hands it out then).
+//!
+//! A check event built in the moment a downtime is added (Icinga registers
+//! the downtime with its object before it sends `DowntimeAdded`) may count
+//! it: a count from a check event at or after the downtime's entry is
+//! treated like an answer's for that event.
+//!
+//! An answer takes the depth unless a newer line wrote it, and is its
+//! source from then on (even one that agrees with a count from a check
+//! event: a line it already has may still wait in a stream switch's
+//! buffer). Every load and reconcile is such an answer, so after one every
+//! count is an answer's until the object's next check event. When the
+//! store may have missed lines (a new session, a stream switch without a
+//! line on both streams), depths counted from check events count as
+//! answers' again (`Store::stream_gap`).
+//!
+//! **Acknowledgements** are values every event sets (set, cleared), so an
+//! answer that overtook their lines converges once they are in. But check
+//! events carry the acknowledgement too, as it was when Icinga built them:
+//! in the overlap of a stream switch the new stream's check result can be
+//! older than an acknowledgement line the old stream already brought (a
+//! quiet stream has no check results), and a check event older than the
+//! latest acknowledgement line (by Icinga's time, `Seqs::ack_at`) keeps the
+//! stored acknowledgement, like an older one keeps the depth
+//! (`Seqs::downtime_at`). Both times are kept also for lines an answer
+//! already had, and forgotten at a new session (one stream from then on,
+//! perhaps another master's clock). Comments have only their own events.
+//!
 //! **Views of the cluster (ENV-12).** While the engine is connected to a
 //! node in a child zone (a partial view), objects its answers leave out
 //! may only be outside its zone: they leave the store, but their last view
@@ -48,7 +99,7 @@ mod apply;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use ic_api::Detail;
+use ic_api::{Detail, EndpointState};
 use ic_model::{
     CheckInfo, CheckableState, Comment, Dependency, Downtime, Endpoint, Host, HostGroup, HostName,
     InstanceStatus, Notification, ObjectCounts, ObjectKey, Service, ServiceGroup, ServiceKey,
@@ -56,6 +107,7 @@ use ic_model::{
 };
 use ic_rules::DashboardRef;
 
+use crate::health::ClusterHealth;
 use crate::snapshot::{DashboardResult, Snapshot};
 use crate::summary::Tally;
 
@@ -65,14 +117,52 @@ const MAX_TOMBSTONES: usize = 100_000;
 
 pub(crate) use apply::{Applied, ObjectView};
 
-/// Sequence numbers of the last query answer and the last event that
-/// wrote an object.
+/// Sequence numbers of the last query answer and the last events that
+/// wrote an object, and where its downtime depth comes from.
 #[derive(Clone, Copy, Debug, Default)]
 struct Seqs {
     /// `started` of the last query whose answer was applied.
     fetched: u64,
     /// `seq` of the last event applied.
     evented: u64,
+    /// `seq` of the last event applied that wrote the check state (a check
+    /// result, a state change, flapping; not an acknowledgement or a
+    /// downtime): above `fetched`, events wrote the check state last and
+    /// no answer can have overtaken them (`Store::overtaken`).
+    checked: u64,
+    /// `seq` of the last acknowledgement event applied.
+    handled: u64,
+    /// `seq` of the last line that wrote the downtime depth: a check event
+    /// that brought Icinga's count, or a downtime event that changed it (or
+    /// could have: one in effect).
+    depth: u64,
+    /// The Icinga time of the check event the depth was last taken from;
+    /// `None` while it comes from a query answer (see the module notes on
+    /// downtime depths).
+    depth_line: Option<Timestamp>,
+    /// The Icinga time of the latest downtime event that changed the
+    /// count: a check event older than that (the overlap of a stream
+    /// switch) doesn't bring its count back.
+    downtime_at: Option<Timestamp>,
+    /// The Icinga time of the latest acknowledgement event applied: a
+    /// check event older than that (the overlap of a stream switch)
+    /// doesn't bring its acknowledgement back.
+    ack_at: Option<Timestamp>,
+}
+
+/// Which groups of the fields events maintain an event newer than an
+/// answer wrote: those keep the store's value, the rest come from the
+/// answer (which is newer than whatever wrote them).
+#[derive(Clone, Copy, Debug, Default)]
+struct Newer {
+    /// The check state (state, type, times, result, attempt, flapping,
+    /// reachability): a check event.
+    check: bool,
+    /// The acknowledgement: an acknowledgement event or a check event.
+    acknowledgement: bool,
+    /// The downtime depth: a check event that brought it, or a downtime
+    /// event that changed it.
+    depth: bool,
 }
 
 /// What changed since the last snapshot, for publishing, the incremental
@@ -147,6 +237,8 @@ pub(crate) struct Store {
     endpoints: Arc<Vec<Endpoint>>,
     zones: Arc<Vec<Zone>>,
     status: Option<Arc<InstanceStatus>>,
+    /// The cluster health page's data (`Snapshot::health`).
+    health: Arc<ClusterHealth>,
     /// Icinga's own `Notification` objects, by host or service, each list
     /// by name.
     icinga_notifications: Arc<BTreeMap<ObjectKey, Arc<[Notification]>>>,
@@ -184,6 +276,25 @@ pub(crate) struct Store {
     /// While recording: objects answers brought that the store neither
     /// held nor hid (see [`Store::track_appeared`]).
     appeared: Option<Vec<ObjectKey>>,
+    /// The heartbeat objects (`Snapshot::excluded`): left out of lists,
+    /// counts, rules and notifications.
+    excluded: Arc<BTreeSet<ServiceKey>>,
+    /// Per host or service: the downtimes events changed since its depth
+    /// was last taken from Icinga, by full name, and whether the stored
+    /// depth counts each (see the module notes on downtime depths).
+    counted: HashMap<ObjectKey, HashMap<String, bool>>,
+    /// Hosts and services whose depth is provisional: a downtime event
+    /// changed it while it came from a query answer (or while a check
+    /// event's count can't tell whether it has the downtime). Until an
+    /// answer sent after the line or a check event brings Icinga's count.
+    unsettled: BTreeSet<ObjectKey>,
+    /// Those of them handed out to be asked for again by name (queued, in
+    /// flight, or waiting for a retry): not handed out twice.
+    asked: BTreeSet<ObjectKey>,
+    /// `unsettled` may hold a problem not yet handed out (a downtime event,
+    /// a state change of a provisional object, a new session): the next
+    /// [`Store::take_unsettled`] looks.
+    unsettled_dirty: bool,
 }
 
 impl Store {
@@ -428,6 +539,118 @@ impl Store {
         std::mem::take(&mut self.discovered)
     }
 
+    /// Takes the hosts and services to ask for again by name: problems
+    /// whose depth is provisional (a downtime event changed it while it
+    /// came from a query answer, which may already count it; see the
+    /// module notes on downtime depths), not handed out yet. An object that
+    /// isn't a problem waits: its next state change brings Icinga's count
+    /// (or, where it can't, makes it handed out then).
+    pub(crate) fn take_unsettled(&mut self) -> Vec<ObjectKey> {
+        if !std::mem::take(&mut self.unsettled_dirty) {
+            return Vec::new();
+        }
+        let due: Vec<ObjectKey> = self
+            .unsettled
+            .iter()
+            .filter(|key| !self.asked.contains(*key) && self.is_problem(key))
+            .cloned()
+            .collect();
+        self.asked.extend(due.iter().cloned());
+        due
+    }
+
+    /// Whether a host or service is a problem now.
+    fn is_problem(&self, key: &ObjectKey) -> bool {
+        match key {
+            ObjectKey::Host { name } => self.hosts.get(name).is_some_and(|host| host.is_problem()),
+            ObjectKey::Service { key } => self
+                .services
+                .get(key)
+                .is_some_and(|service| service.is_problem()),
+        }
+    }
+
+    /// The request that asked again for those of `keys` handed out by
+    /// [`Store::take_unsettled`] failed: returns those still provisional,
+    /// to be asked again later ([`Store::keep_asking`]).
+    pub(crate) fn reask_failed(&self, keys: &[ObjectKey]) -> Vec<ObjectKey> {
+        if self.asked.is_empty() {
+            return Vec::new();
+        }
+        keys.iter()
+            .filter(|key| self.asked.contains(*key) && self.unsettled.contains(*key))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether to ask (again) for `key`, handed out earlier: its depth is
+    /// still provisional and it is a problem. Otherwise it is no longer
+    /// handed out (a later state change hands it out again if needed).
+    pub(crate) fn keep_asking(&mut self, key: &ObjectKey) -> bool {
+        if self.unsettled.contains(key) && self.is_problem(key) {
+            return true;
+        }
+        self.asked.remove(key);
+        false
+    }
+
+    /// The depth of `key` is Icinga's again: nothing to ask.
+    fn settle(&mut self, key: &ObjectKey) {
+        if !self.unsettled.is_empty() {
+            self.unsettled.remove(key);
+        }
+        if !self.asked.is_empty() {
+            self.asked.remove(key);
+        }
+    }
+
+    /// `key`'s depth turned provisional (a downtime event Icinga's count
+    /// may already have): it is asked for again, also if a request for it
+    /// is under way (sent before the line, its answer can't settle it).
+    fn unsettle(&mut self, key: &ObjectKey) {
+        self.unsettled.insert(key.clone());
+        self.asked.remove(key);
+        self.unsettled_dirty = true;
+    }
+
+    /// The check state of `key` changed without its count settling (an
+    /// answer whose depth a newer line kept, a check event older than a
+    /// downtime line): if its depth is provisional, it may be a problem now.
+    fn recheck_unsettled(&mut self, key: &ObjectKey) {
+        if self.unsettled.contains(key) {
+            self.unsettled_dirty = true;
+        }
+    }
+
+    /// The event stream was replaced and the store may not have seen every
+    /// line in between (a new session; a switch that ended without a line
+    /// on both streams): depths counted from check events count as
+    /// answers' again, so the next downtime event asks Icinga.
+    pub(crate) fn stream_gap(&mut self) {
+        for seqs in self.seqs.values_mut() {
+            seqs.depth_line = None;
+        }
+        self.counted.clear();
+    }
+
+    /// A new session's stream replaces the last one, whose unread lines
+    /// are gone ([`Store::stream_gap`]). Its lines come after every line
+    /// applied so far, so a check event on it is never older than an
+    /// acknowledgement or downtime line already applied: the times that
+    /// guard against the overlap of a switch are forgotten (they may come
+    /// from another master's clock).
+    pub(crate) fn new_session(&mut self) {
+        self.stream_gap();
+        for seqs in self.seqs.values_mut() {
+            seqs.ack_at = None;
+            seqs.downtime_at = None;
+        }
+        // The last session's re-query queue is gone: whatever was handed
+        // out and is still provisional is handed out again.
+        self.asked.clear();
+        self.unsettled_dirty = !self.unsettled.is_empty();
+    }
+
     /// Forgets everything (the environment now points at another server).
     pub(crate) fn clear(&mut self) {
         *self = Self {
@@ -555,6 +778,7 @@ impl Store {
             endpoints: Arc::clone(&self.endpoints),
             zones: Arc::clone(&self.zones),
             status: self.status.clone(),
+            health: Arc::clone(&self.health),
             icinga_notifications: Arc::clone(&self.icinga_notifications),
             dashboards,
             last_event_at: self.last_event_at,
@@ -564,6 +788,10 @@ impl Store {
             // Set by the engine.
             quiet: false,
             updating: Arc::default(),
+            events: Arc::default(),
+            excluded: Arc::clone(&self.excluded),
+            heartbeats: Arc::default(),
+            trouble: Arc::default(),
         }
     }
 
@@ -576,6 +804,9 @@ impl Store {
         // Services are sorted by host: each host is looked up once.
         let mut current: Option<(&HostName, Option<&Host>)> = None;
         for service in self.services.values() {
+            if self.excluded.contains(&service.key) {
+                continue;
+            }
             let host = match current {
                 Some((name, host)) if *name == service.key.host => host,
                 _ => {
@@ -895,12 +1126,23 @@ impl Store {
 
     /// Sets the endpoints' `connected` as Icinga reported it (by name;
     /// `local`, the node the engine talks to, stays connected: Icinga
-    /// reports its own endpoint as not connected).
-    pub(crate) fn set_endpoint_states(&mut self, states: &[(String, bool)], local: &str) {
+    /// reports its own endpoint as not connected), and keeps their numbers
+    /// for the cluster health page.
+    pub(crate) fn set_endpoint_states(&mut self, states: &[EndpointState], local: &str) {
+        let stats_changed = states
+            .iter()
+            .any(|state| self.health.endpoints.get(&state.name) != Some(&state.stats));
+        if stats_changed {
+            let health = Arc::make_mut(&mut self.health);
+            for state in states {
+                health.endpoints.insert(state.name.clone(), state.stats);
+            }
+            self.changes.any = true;
+        }
         let changed = self.endpoints.iter().any(|endpoint| {
             endpoint.name != local
-                && states.iter().any(|(name, connected)| {
-                    *name == endpoint.name && *connected != endpoint.connected
+                && states.iter().any(|state| {
+                    state.name == endpoint.name && state.connected != endpoint.connected
                 })
         });
         if !changed {
@@ -910,11 +1152,51 @@ impl Store {
             if endpoint.name == local {
                 continue;
             }
-            if let Some((_, connected)) = states.iter().find(|(name, _)| *name == endpoint.name) {
-                endpoint.connected = *connected;
+            if let Some(state) = states.iter().find(|state| state.name == endpoint.name) {
+                endpoint.connected = state.connected;
             }
         }
         self.changes.any = true;
+    }
+
+    /// The heartbeat objects, left out of lists, counts, rules and
+    /// notifications.
+    pub(crate) fn excluded(&self) -> &Arc<BTreeSet<ServiceKey>> {
+        &self.excluded
+    }
+
+    /// Whether `key` is a heartbeat object.
+    pub(crate) fn is_excluded(&self, key: &ObjectKey) -> bool {
+        key.as_service()
+            .is_some_and(|service| self.excluded.contains(service))
+    }
+
+    /// Sets the heartbeat objects; those that join or leave the set are
+    /// marked changed, so the dashboards take them out (or back in).
+    pub(crate) fn set_excluded(&mut self, excluded: BTreeSet<ServiceKey>) {
+        if *self.excluded == excluded {
+            return;
+        }
+        for key in excluded.symmetric_difference(&self.excluded) {
+            self.changes.objects.insert(ObjectKey::from(key.clone()));
+        }
+        self.excluded = Arc::new(excluded);
+        self.changes.any = true;
+    }
+
+    /// The cluster health page's data.
+    pub(crate) fn health(&self) -> &ClusterHealth {
+        &self.health
+    }
+
+    /// Changes the cluster health page's data (marks the store changed).
+    pub(crate) fn update_health(&mut self, change: impl FnOnce(&mut ClusterHealth)) {
+        let mut health = (*self.health).clone();
+        change(&mut health);
+        if health != *self.health {
+            self.health = Arc::new(health);
+            self.changes.any = true;
+        }
     }
 
     /// The endpoints and zones (for the node list's states).
@@ -947,6 +1229,9 @@ impl Store {
     /// those before it ([`Store::shows_change`]): applying them would take
     /// the object back to an older state, so they become
     /// [`Applied::Stale`] like lines read before the request went out.
+    /// (Only for the lines that waited during the first load, all of one
+    /// stream; a line an answer overtook later is judged by its own
+    /// check's time instead, `Store::overtaken`.)
     pub(crate) fn note_reflected(&mut self, key: &ObjectKey, seq: u64) {
         self.mark_fetched(key.clone(), seq);
     }
@@ -955,6 +1240,32 @@ impl Store {
         self.seqs
             .get(key)
             .is_some_and(|seqs| seqs.evented > started)
+    }
+
+    /// Which groups of `key`'s event fields lines newer than an answer
+    /// sent at `started` wrote.
+    fn newer(&self, key: &ObjectKey, started: u64) -> Newer {
+        let seqs = self.seqs.get(key).copied().unwrap_or_default();
+        Newer {
+            check: seqs.checked > started,
+            acknowledgement: seqs.checked.max(seqs.handled) > started,
+            depth: seqs.depth > started,
+        }
+    }
+
+    /// An answer sent at `started` was applied to `key`: its depth is the
+    /// store's now, and the answer its source (see the module notes on
+    /// downtime depths), unless a newer line wrote it (`kept`).
+    fn depth_answered(&mut self, key: &ObjectKey, kept: bool) {
+        if kept {
+            // Its state may have changed: a provisional depth of a new
+            // problem is asked for.
+            self.recheck_unsettled(key);
+            return;
+        }
+        self.seqs.entry(key.clone()).or_default().depth_line = None;
+        self.counted.remove(key);
+        self.settle(key);
     }
 
     /// Whether an answer sent at `started` is older than what the store
@@ -1002,9 +1313,10 @@ impl Store {
             return;
         }
         self.removed.remove(&key);
-        if let Some(stored) = self.hosts.get(&host.name) {
-            if self.evented_after(&key, started) {
-                keep_event_fields(&mut host.check, &stored.check);
+        let newer = self.newer(&key, started);
+        if let Some(stored) = self.hosts.get(&host.name).cloned() {
+            keep_newer_fields(&mut host.check, &stored.check, newer);
+            if newer.check {
                 host.state = stored.state;
             } else {
                 let before = ObjectView::of(CheckableState::Host(stored.state), &stored.check);
@@ -1017,11 +1329,13 @@ impl Store {
                     });
                 }
             }
-            if **stored == host {
+            self.depth_answered(&key, newer.depth);
+            if *stored == host {
                 self.mark_fetched(key, started);
                 return;
             }
         } else {
+            self.depth_answered(&key, newer.depth);
             self.arrived(
                 &key,
                 ObjectView::of(CheckableState::Host(host.state), &host.check),
@@ -1042,9 +1356,10 @@ impl Store {
             return;
         }
         self.removed.remove(&key);
-        if let Some(stored) = self.services.get(&service.key) {
-            if self.evented_after(&key, started) {
-                keep_event_fields(&mut service.check, &stored.check);
+        let newer = self.newer(&key, started);
+        if let Some(stored) = self.services.get(&service.key).cloned() {
+            keep_newer_fields(&mut service.check, &stored.check, newer);
+            if newer.check {
                 service.state = stored.state;
             } else {
                 let before = ObjectView::of(CheckableState::Service(stored.state), &stored.check);
@@ -1057,6 +1372,7 @@ impl Store {
                     });
                 }
             }
+            self.depth_answered(&key, newer.depth);
             if detail == Detail::Lean {
                 // A lean answer has no check result and no links: keep what
                 // a full fetch or an event brought.
@@ -1067,7 +1383,7 @@ impl Store {
                     service.links.clone_from(&stored.links);
                 }
             }
-            if **stored == service {
+            if *stored == service {
                 if detail == Detail::Full {
                     self.full.insert(service.key.clone());
                 }
@@ -1075,6 +1391,7 @@ impl Store {
                 return;
             }
         } else {
+            self.depth_answered(&key, newer.depth);
             self.arrived(
                 &key,
                 ObjectView::of(CheckableState::Service(service.state), &service.check),
@@ -1169,28 +1486,37 @@ impl Store {
             Arc::make_mut(&mut self.icinga_notifications).remove(key);
         }
         self.seqs.remove(key);
+        self.counted.remove(key);
+        self.settle(key);
         self.tombstone(key.clone(), started);
         self.changes.any = true;
         self.changes.objects.insert(key.clone());
     }
 }
 
-/// Keeps the fields events maintain from `stored` (newer than the answer
-/// they are merged into).
-fn keep_event_fields(check: &mut CheckInfo, stored: &CheckInfo) {
-    check.state_type = stored.state_type;
-    check.last_state_change = stored.last_state_change;
-    check.last_hard_state_change = stored.last_hard_state_change;
-    check.last_check = stored.last_check;
-    check.next_check = stored.next_check;
-    check.attempt = stored.attempt;
-    check.result.clone_from(&stored.result);
-    check.acknowledgement = stored.acknowledgement;
-    check.acknowledgement_expiry = stored.acknowledgement_expiry;
-    check.downtime_depth = stored.downtime_depth;
-    check.flapping = stored.flapping;
-    check.flapping_current = stored.flapping_current;
-    check.reachable = stored.reachable;
+/// Keeps the groups of the fields events maintain that events newer than
+/// the answer wrote (`newer`) from `stored`; the others come from the
+/// answer.
+fn keep_newer_fields(check: &mut CheckInfo, stored: &CheckInfo, newer: Newer) {
+    if newer.check {
+        check.state_type = stored.state_type;
+        check.last_state_change = stored.last_state_change;
+        check.last_hard_state_change = stored.last_hard_state_change;
+        check.last_check = stored.last_check;
+        check.next_check = stored.next_check;
+        check.attempt = stored.attempt;
+        check.result.clone_from(&stored.result);
+        check.flapping = stored.flapping;
+        check.flapping_current = stored.flapping_current;
+        check.reachable = stored.reachable;
+    }
+    if newer.acknowledgement {
+        check.acknowledgement = stored.acknowledgement;
+        check.acknowledgement_expiry = stored.acknowledgement_expiry;
+    }
+    if newer.depth {
+        check.downtime_depth = stored.downtime_depth;
+    }
 }
 
 /// Replaces `list` if `new` differs; returns whether it did.

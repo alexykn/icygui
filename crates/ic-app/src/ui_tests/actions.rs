@@ -21,7 +21,7 @@ use crate::pane::{ObjectPane, PaneMenu};
 use crate::workspace::{Confirmed, ModalKind};
 
 /// Attaches a recording core (the fixture is connected but has none).
-fn record(app: &Harness, cx: &mut App) -> Recorder {
+pub(super) fn record(app: &Harness, cx: &mut App) -> Recorder {
     let recorder = Recorder::default();
     app.state
         .update(cx, |state, _| state.set_core(Box::new(recorder.clone())));
@@ -54,7 +54,7 @@ fn type_into(app: &Harness, cx: &mut App, field: FormField, text: &str) {
 }
 
 /// Asks for `action` on `targets`, as a key or a button does.
-fn request(app: &Harness, cx: &mut App, action: ObjectAction, targets: Vec<ObjectKey>) {
+pub(super) fn request(app: &Harness, cx: &mut App, action: ObjectAction, targets: Vec<ObjectKey>) {
     app.state.update(cx, |state, cx| {
         let _ = state.request(crate::actions::ActionRequest {
             action,
@@ -66,7 +66,7 @@ fn request(app: &Harness, cx: &mut App, action: ObjectAction, targets: Vec<Objec
     app.draw(cx);
 }
 
-fn toasts(app: &Harness, cx: &App) -> Vec<(ToastTone, String, Vec<String>)> {
+pub(super) fn toasts(app: &Harness, cx: &App) -> Vec<(ToastTone, String, Vec<String>)> {
     app.state
         .read(cx)
         .toasts()
@@ -222,6 +222,45 @@ fn downtimes_take_presets_and_check_their_window() {
             ObjectAction::ScheduleDowntime,
             vec![ObjectKey::host("db-prod-03")],
         );
+        // All services, on by default: the box lists the host and each of
+        // its services, and the button counts them (topic 01).
+        let services = app
+            .state
+            .read(cx)
+            .snapshot()
+            .services_of(&ic_model::HostName::from("db-prod-03"))
+            .count();
+        let listed = dialog(app, cx).read(cx).listed_objects();
+        assert_eq!(listed.len(), services + 1, "{listed:?}");
+        assert_eq!(listed[0], ObjectKey::host("db-prod-03"));
+        assert_eq!(
+            dialog(app, cx).read(cx).submit_text(),
+            format!("schedule {} downtimes", services + 1)
+        );
+        let flip = |app: &Harness, cx: &mut App, on: bool| {
+            dialog(app, cx).update(cx, |dialog, cx| {
+                dialog.edit_form(cx, |form| {
+                    if let Form::Downtime(form) = form {
+                        form.all_services = on;
+                    }
+                });
+            });
+            app.draw(cx);
+        };
+        let geometry = dialog(app, cx).read(cx).box_geometry();
+        assert_eq!(geometry.0, services + 1);
+        flip(app, cx, false);
+        assert_eq!(
+            dialog(app, cx).read(cx).listed_objects(),
+            vec![ObjectKey::host("db-prod-03")]
+        );
+        assert_eq!(dialog(app, cx).read(cx).submit_text(), "schedule downtime");
+        assert_eq!(
+            dialog(app, cx).read(cx).box_geometry(),
+            geometry,
+            "switching all services off moves nothing"
+        );
+        flip(app, cx, true);
         type_into(app, cx, FormField::Comment, "kernel update");
         type_into(app, cx, FormField::End, "yesterday");
         app.keys(cx, "enter");
@@ -430,7 +469,11 @@ fn checking_many_objects_asks_first() {
 }
 
 #[test]
-fn removals_go_at_once_for_one_and_ask_for_several() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one story: each removal asked for, listed and sent"
+)]
+fn acks_and_comments_go_at_once_downtimes_list_what_goes() {
     run(FixtureOptions::default(), |app, cx| {
         let recorder = record(app, cx);
         let acknowledged = find(app, cx, |service| {
@@ -471,40 +514,33 @@ fn removals_go_at_once_for_one_and_ask_for_several() {
         request(
             app,
             cx,
-            ObjectAction::RemoveComment(comment.clone()),
+            ObjectAction::RemoveComments(vec![comment.clone()]),
             vec![object],
         );
         assert_eq!(modal(app, cx), None);
-        assert_eq!(recorder.actions()[1].1, ActionTarget::Comment(comment));
+        assert_eq!(
+            recorder.actions()[1].1,
+            ActionTarget::Comments(vec![comment])
+        );
 
-        // Every downtime of an object: always asked.
-        let (with_downtime, count) = {
-            let snapshot = app.state.read(cx).snapshot().clone();
-            snapshot
-                .downtimes
-                .iter()
-                .find(|(_, list)| !list.is_empty())
-                .map(|(object, list)| (object.clone(), list.len()))
-                .unwrap()
-        };
+        // Downtimes always ask, listing every downtime that goes (topic
+        // 01): every downtime of an object...
+        let with_downtime = ObjectKey::service("cache-02", "redis-memory");
         request(
             app,
             cx,
             ObjectAction::RemoveDowntimes,
             vec![with_downtime.clone()],
         );
-        let Some(ModalKind::Confirm(confirmation)) = modal(app, cx) else {
-            panic!("a confirmation");
-        };
-        assert!(confirmation.danger);
-        assert!(confirmation.title.starts_with("Remove the downtimes of"));
-        if count == 1 {
-            assert!(
-                confirmation.detail.starts_with("Its downtime ends"),
-                "{}",
-                confirmation.detail
-            );
-        }
+        assert_eq!(
+            modal(app, cx),
+            Some(ModalKind::Action(DialogKind::RemoveDowntime))
+        );
+        assert_eq!(
+            dialog(app, cx).read(cx).listed_objects(),
+            vec![with_downtime.clone()]
+        );
+        assert_eq!(dialog(app, cx).read(cx).submit_text(), "remove downtime");
         app.keys(cx, "escape");
         assert_eq!(modal(app, cx), None);
         assert_eq!(recorder.actions().len(), 2, "not confirmed: not sent");
@@ -515,10 +551,356 @@ fn removals_go_at_once_for_one_and_ask_for_several() {
             vec![with_downtime.clone()],
         );
         app.keys(cx, "enter");
+        assert_eq!(modal(app, cx), None);
         let actions = recorder.actions();
         assert_eq!(actions.len(), 3);
-        assert_eq!(actions[2].1, ActionTarget::Objects(vec![with_downtime]));
+        // By the names listed, never by object: a downtime scheduled after
+        // the dialog opened was never shown, and stays.
+        let listed: Vec<String> = app.state.read(cx).snapshot().downtimes[&with_downtime]
+            .iter()
+            .map(|downtime| downtime.name.clone())
+            .collect();
+        assert_eq!(actions[2].1, ActionTarget::Downtimes(listed));
         assert_eq!(actions[2].2, Action::RemoveAllDowntimes);
+
+        // ... and one by name (the banner's *remove downtime*).
+        let name = app.state.read(cx).snapshot().downtimes[&with_downtime][0]
+            .name
+            .clone();
+        request(
+            app,
+            cx,
+            ObjectAction::RemoveDowntime(name.clone()),
+            vec![with_downtime.clone()],
+        );
+        assert_eq!(
+            modal(app, cx),
+            Some(ModalKind::Action(DialogKind::RemoveDowntime))
+        );
+        assert_eq!(recorder.actions().len(), 3, "asked first");
+        app.keys(cx, "enter");
+        let actions = recorder.actions();
+        assert_eq!(actions.len(), 4);
+        assert_eq!(actions[3].1, ActionTarget::Downtimes(vec![name]));
+        assert_eq!(actions[3].2, Action::RemoveAllDowntimes);
+    });
+}
+
+/// Gives edge-fra-04's services the children Icinga makes for a host
+/// downtime with `all services`; the host's downtime's name.
+pub(super) fn host_downtime_with_its_services(app: &Harness, cx: &mut App) -> String {
+    let host = ObjectKey::host("edge-fra-04");
+    let mut parent = String::new();
+    app.state.update(cx, |state, cx| {
+        let old = state.snapshot().clone();
+        let mut downtimes = (*old.downtimes).clone();
+        let host_downtime = downtimes[&host][0].clone();
+        parent.clone_from(&host_downtime.name);
+        let mut services = (*old.services).clone();
+        for service in services
+            .values_mut()
+            .filter(|service| service.key.host.as_str() == "edge-fra-04")
+        {
+            std::sync::Arc::make_mut(service).check.downtime_depth = 1;
+            let object = service.object_key();
+            downtimes
+                .entry(object.clone())
+                .or_default()
+                .push(ic_model::Downtime {
+                    name: format!("{}!child", object.full_name()),
+                    object,
+                    parent: Some(host_downtime.name.clone()),
+                    ..host_downtime.clone()
+                });
+        }
+        state.set_snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+            revision: old.revision + 1,
+            downtimes: std::sync::Arc::new(downtimes),
+            services: std::sync::Arc::new(services),
+            ..(*old).clone()
+        }));
+        cx.notify();
+    });
+    app.draw(cx);
+    parent
+}
+
+#[test]
+fn every_downtime_case_renders_in_the_panes_and_tabs() {
+    run(FixtureOptions::default(), |app, cx| {
+        host_downtime_with_its_services(app, cx);
+        let host = ObjectKey::host("edge-fra-04");
+        let later = |minutes: f64| {
+            ic_model::Timestamp::from_unix_seconds(
+                ic_model::Timestamp::now().as_unix_seconds() + minutes * 60.,
+            )
+        };
+        // Tonight's flexible one and a weekly one from the config on the
+        // host; a fixed one still to come on a problem.
+        let pg = replication();
+        app.state.update(cx, |state, cx| {
+            let old = state.snapshot().clone();
+            let mut downtimes = (*old.downtimes).clone();
+            let base = downtimes[&host][0].clone();
+            let list = downtimes.entry(host.clone()).or_default();
+            list.push(ic_model::Downtime {
+                name: "edge-fra-04!tonight".to_owned(),
+                fixed: false,
+                duration: 3_600.,
+                start_time: later(480.),
+                end_time: later(960.),
+                trigger_time: None,
+                in_effect: false,
+                ..base.clone()
+            });
+            list.push(ic_model::Downtime {
+                name: "edge-fra-04!weekly".to_owned(),
+                start_time: later(3_000.),
+                end_time: later(3_240.),
+                trigger_time: None,
+                in_effect: false,
+                config_owned: true,
+                schedule: Some("weekly-patching".to_owned()),
+                author: "icingaadmin".to_owned(),
+                ..base.clone()
+            });
+            downtimes.insert(
+                pg.clone(),
+                vec![ic_model::Downtime {
+                    name: format!("{}!tonight", pg.full_name()),
+                    object: pg.clone(),
+                    start_time: later(470.),
+                    end_time: later(530.),
+                    trigger_time: None,
+                    in_effect: false,
+                    ..base
+                }],
+            );
+            state.set_snapshot(std::sync::Arc::new(ic_core::snapshot::Snapshot {
+                revision: old.revision + 1,
+                downtimes: std::sync::Arc::new(downtimes),
+                ..(*old).clone()
+            }));
+            cx.notify();
+        });
+        app.draw(cx);
+        let snapshot = app.state.read(cx).snapshot().clone();
+        let now = ic_model::Timestamp::now();
+        let load = ObjectKey::service("edge-fra-04", "load");
+        for object in [&host, &load, &pg] {
+            let banner = crate::downtimes::banner(&snapshot, object, now)
+                .unwrap_or_else(|| panic!("a banner for {object}"));
+            assert_eq!(banner.in_effect, object != &pg, "{object}");
+        }
+        assert_eq!(
+            crate::lists::threads::thread_of(&snapshot, &host, now).len(),
+            3,
+            "the banner shows one of three; the thread lists them all"
+        );
+        let dashboard = app.dashboard(cx);
+        for object in [&host, &load, &pg] {
+            dashboard.update(cx, |view, cx| view.open_object(object, cx));
+            app.draw(cx);
+            assert_eq!(app.pane_object(cx).as_ref(), Some(object));
+            app.state.update(cx, |state, cx| {
+                state.open_tab(object.clone());
+                cx.notify();
+            });
+            app.draw(cx);
+        }
+        // Removing every downtime of the host: the config's is skipped,
+        // the rest go by name (Icinga would stop at the config's).
+        let recorder = record(app, cx);
+        request(app, cx, ObjectAction::RemoveDowntimes, vec![host.clone()]);
+        let listed = dialog(app, cx).read(cx).listed_objects();
+        assert!(
+            listed.contains(&host) && listed.contains(&load),
+            "{listed:?}"
+        );
+        app.keys(cx, "enter");
+        let actions = recorder.actions();
+        assert_eq!(actions.len(), 1, "one request for every name: {actions:?}");
+        assert!(
+            actions.iter().all(|(_, target, action)| {
+                *action == Action::RemoveAllDowntimes
+                    && matches!(target, ActionTarget::Downtimes(names)
+                        if !names.is_empty() && !names.iter().any(|name| name == "edge-fra-04!weekly"))
+            }),
+            "{actions:?}"
+        );
+    });
+}
+
+#[test]
+fn a_services_downtime_from_its_host_is_removed_whole_or_alone() {
+    run(FixtureOptions::default(), |app, cx| {
+        let recorder = record(app, cx);
+        let parent = host_downtime_with_its_services(app, cx);
+        let host = ObjectKey::host("edge-fra-04");
+        let services = app
+            .state
+            .read(cx)
+            .snapshot()
+            .services_of(&ic_model::HostName::from("edge-fra-04"))
+            .count();
+        assert!(services > 1, "the fixture's host has services");
+        let load = ObjectKey::service("edge-fra-04", "load");
+        let child = format!("{}!child", load.full_name());
+        request(
+            app,
+            cx,
+            ObjectAction::RemoveDowntime(child.clone()),
+            vec![load.clone()],
+        );
+        assert_eq!(
+            modal(app, cx),
+            Some(ModalKind::Action(DialogKind::RemoveDowntime))
+        );
+        // As drawn: the host's whole downtime, listing every downtime.
+        let listed = dialog(app, cx).read(cx).listed_objects();
+        assert_eq!(listed.len(), services + 1, "{listed:?}");
+        assert!(listed.contains(&host) && listed.contains(&load));
+        assert_eq!(
+            dialog(app, cx).read(cx).submit_text(),
+            format!("remove {} downtimes", services + 1)
+        );
+        // This service only.
+        dialog(app, cx).update(cx, |dialog, cx| {
+            dialog.edit_form(cx, |form| {
+                if let Form::Removal(removal) = form {
+                    removal.chosen = 0;
+                }
+            });
+        });
+        app.draw(cx);
+        assert_eq!(
+            dialog(app, cx).read(cx).listed_objects(),
+            vec![load.clone()]
+        );
+        assert_eq!(dialog(app, cx).read(cx).submit_text(), "remove downtime");
+        app.keys(cx, "enter");
+        let actions = recorder.actions();
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].1, ActionTarget::Downtimes(vec![child.clone()]));
+
+        // The whole: the host's by name, Icinga removes its children.
+        request(
+            app,
+            cx,
+            ObjectAction::RemoveDowntime(child),
+            vec![load.clone()],
+        );
+        app.keys(cx, "enter");
+        let actions = recorder.actions();
+        assert_eq!(actions.len(), 2, "{actions:?}");
+        assert_eq!(actions[1].1, ActionTarget::Downtimes(vec![parent]));
+        assert_eq!(actions[1].2, Action::RemoveAllDowntimes);
+    });
+}
+
+/// Whether the keyboard is still inside the open action dialog.
+fn dialog_has_focus(app: &Harness, cx: &mut App) -> bool {
+    let dialog = dialog(app, cx);
+    app.in_window(cx, |window, cx| {
+        gpui::Focusable::focus_handle(dialog.read(cx), cx).contains_focused(window, cx)
+    })
+}
+
+#[test]
+fn the_removal_scope_goes_by_keyboard_and_tab_stays_in_the_dialog() {
+    run(FixtureOptions::default(), |app, cx| {
+        let recorder = record(app, cx);
+        let parent = host_downtime_with_its_services(app, cx);
+        let load = ObjectKey::service("edge-fra-04", "load");
+        let child = format!("{}!child", load.full_name());
+        let before = app
+            .state
+            .read(cx)
+            .selected_dashboard()
+            .map(|(_, dashboard)| dashboard.name.clone());
+        request(
+            app,
+            cx,
+            ObjectAction::RemoveDowntime(child.clone()),
+            vec![load.clone()],
+        );
+        assert!(dialog_has_focus(app, cx));
+        // Tab and Shift-Tab keep the keyboard in the dialog: nothing behind
+        // it takes the keys that follow.
+        app.keys(cx, "tab");
+        assert!(dialog_has_focus(app, cx), "Tab stays in the dialog");
+        app.keys(cx, "shift-tab j j j");
+        assert!(dialog_has_focus(app, cx), "Shift-Tab stays in the dialog");
+        assert_eq!(
+            app.state
+                .read(cx)
+                .selected_dashboard()
+                .map(|(_, dashboard)| dashboard.name.clone()),
+            before
+        );
+        assert!(recorder.actions().is_empty());
+        // ← / → choose the scope: this service only, then the whole again.
+        let geometry = dialog(app, cx).read(cx).box_geometry();
+        let whole = dialog(app, cx).read(cx).listed_objects().len();
+        assert_eq!(geometry.0, whole, "sized for the widest scope");
+        assert!(geometry.1.is_some(), "the button fits its longest label");
+        app.keys(cx, "left");
+        assert_eq!(
+            dialog(app, cx).read(cx).listed_objects(),
+            vec![load.clone()]
+        );
+        assert_eq!(
+            dialog(app, cx).read(cx).box_geometry(),
+            geometry,
+            "the box and the button keep their size"
+        );
+        app.keys(cx, "right");
+        assert!(dialog(app, cx).read(cx).listed_objects().len() > 1);
+        app.keys(cx, "left enter");
+        let actions = recorder.actions();
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].1, ActionTarget::Downtimes(vec![child.clone()]));
+        // → past the last scope stays on it: the host and its services.
+        request(
+            app,
+            cx,
+            ObjectAction::RemoveDowntime(child.clone()),
+            vec![load.clone()],
+        );
+        app.keys(cx, "left right right enter");
+        let actions = recorder.actions();
+        assert_eq!(actions.len(), 2, "{actions:?}");
+        assert_eq!(actions[1].1, ActionTarget::Downtimes(vec![parent]));
+    });
+}
+
+#[test]
+fn tab_in_a_dialog_without_fields_stays_in_it() {
+    run(FixtureOptions::default(), |app, cx| {
+        let recorder = record(app, cx);
+        let host = ObjectKey::host("edge-fra-04");
+        let before = app
+            .state
+            .read(cx)
+            .selected_dashboard()
+            .map(|(_, dashboard)| dashboard.name.clone());
+        request(app, cx, ObjectAction::RemoveDowntimes, vec![host]);
+        assert_eq!(
+            modal(app, cx),
+            Some(ModalKind::Action(DialogKind::RemoveDowntime))
+        );
+        app.keys(cx, "tab");
+        assert!(dialog_has_focus(app, cx));
+        app.keys(cx, "tab enter");
+        assert_eq!(
+            app.state
+                .read(cx)
+                .selected_dashboard()
+                .map(|(_, dashboard)| dashboard.name.clone()),
+            before
+        );
+        assert_eq!(modal(app, cx), None, "Enter removed, as asked");
+        assert_eq!(recorder.actions().len(), 1);
     });
 }
 
@@ -788,7 +1170,7 @@ fn the_panes_menu_offers_the_other_actions_and_copying() {
                 "submit check result",
                 "run command",
                 // Watching and muting (NOTE-02).
-                "watch: always notify",
+                "watch",
                 "mute for 1 hour",
                 "mute for 4 hours",
                 morning.as_str(),

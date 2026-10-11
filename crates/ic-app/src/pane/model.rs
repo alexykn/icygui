@@ -5,17 +5,13 @@ use std::sync::Arc;
 
 use ic_core::snapshot::Snapshot;
 use ic_model::{
-    CheckInfo, CheckableState, Comment, CommentKind, Downtime, Features, Host, Notified, ObjectKey,
-    Service, ServiceState, Timestamp, Vars,
+    CheckInfo, CheckableState, Features, Host, Notified, ObjectKey, Service, ServiceState,
+    Timestamp, Vars, glob_matches,
 };
 use ic_ui_kit::TreeLine;
 use serde_json::Value;
 
 use crate::format;
-
-/// How many service rows the host pane shows before collapsing the OK ones
-/// into "+ N more ok" (screen 2c: two problems and five OK services).
-pub(crate) const HOST_SERVICES_PREVIEW: usize = 7;
 
 /// Limits for showing custom variables, so odd data can't flood the pane.
 const VARS_MAX_DEPTH: usize = 8;
@@ -44,31 +40,9 @@ const PROTECTED_VARS: &[&str] = &[
 
 /// Whether the custom variable (or dictionary key) `name` holds a secret.
 pub(crate) fn is_protected_var(name: &str) -> bool {
-    let name = name.to_lowercase();
     PROTECTED_VARS
         .iter()
-        .any(|pattern| glob_matches(pattern, &name))
-}
-
-/// Whether `text` matches `pattern`, where `*` stands for any characters.
-fn glob_matches(pattern: &str, text: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let first = parts.next().unwrap_or_default();
-    let Some(mut rest) = text.strip_prefix(first) else {
-        return false;
-    };
-    let parts: Vec<&str> = parts.collect();
-    let Some((last, middle)) = parts.split_last() else {
-        // No `*`: the whole text.
-        return rest.is_empty();
-    };
-    for part in middle {
-        match rest.find(part) {
-            Some(at) => rest = &rest[at + part.len()..],
-            None => return false,
-        }
-    }
-    rest.ends_with(last)
+        .any(|pattern| glob_matches(pattern, name))
 }
 
 /// The service pane's subtitle after `on <host>`: `14m · hard 3/3`.
@@ -249,17 +223,21 @@ pub(crate) fn feature_rows(features: Features) -> [(&'static str, bool); 6] {
     ]
 }
 
-/// The host pane's service rows: every service that isn't OK (worst first),
-/// then OK ones in name order up to [`HOST_SERVICES_PREVIEW`] rows unless
-/// `expanded`; `hidden` OK services are left for "+ N more ok".
+/// The host pane's service rows, paged by count as every host-with-services
+/// view pages ([`crate::paging`]): every service that isn't OK (worst
+/// first), then OK ones in name order up to seven rows unless `expanded`;
+/// `hidden` services are left for `+ N more`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct HostServices {
     /// The rows to show.
     pub(crate) shown: Vec<Arc<Service>>,
-    /// OK services not shown.
+    /// Services not shown.
     pub(crate) hidden: usize,
     /// All of the host's services.
     pub(crate) total: usize,
+    /// Some services wait behind `+ N more` unless expanded: the paging
+    /// row shows (`+ N more`, or `− show fewer` in the same slot).
+    pub(crate) pages: bool,
 }
 
 /// See [`HostServices`].
@@ -267,24 +245,22 @@ pub(crate) fn host_services(snapshot: &Snapshot, host: &Host, expanded: bool) ->
     let mut services: Vec<Arc<Service>> = snapshot.services_of(&host.name).cloned().collect();
     let total = services.len();
     services.sort_by(|a, b| {
-        b.severity()
-            .cmp(&a.severity())
-            .then_with(|| a.display_name.cmp(&b.display_name))
+        crate::paging::service_order(
+            (a.severity(), &a.display_name),
+            (b.severity(), &b.display_name),
+        )
     });
     let not_ok = services
         .iter()
         .filter(|service| service.state != ServiceState::Ok)
         .count();
-    let keep = if expanded {
-        total
-    } else {
-        HOST_SERVICES_PREVIEW.max(not_ok).min(total)
-    };
+    let keep = crate::paging::shown_count(total, not_ok, expanded);
     services.truncate(keep);
     HostServices {
         shown: services,
         hidden: total - keep,
         total,
+        pages: crate::paging::pages(total, not_ok),
     }
 }
 
@@ -367,81 +343,6 @@ pub(crate) fn group_names(
         .map(|group| display_name(group).unwrap_or_else(|| group.clone()))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// A comment or acknowledgement as the pane lists it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Note {
-    /// `#` for comments, `✓` for acknowledgements, `~` for flapping notes.
-    pub(crate) marker: &'static str,
-    /// Who wrote it.
-    pub(crate) author: String,
-    /// Faint details after the author: when, expiry.
-    pub(crate) meta: Vec<String>,
-    /// The text.
-    pub(crate) body: String,
-    /// The full name, to remove it.
-    pub(crate) name: String,
-}
-
-/// The pane's view of a comment.
-pub(crate) fn comment_note(comment: &Comment, now: Timestamp) -> Note {
-    let marker = match comment.kind {
-        CommentKind::User => "#",
-        CommentKind::Acknowledgement => "✓",
-        CommentKind::Downtime => "↓",
-        CommentKind::Flapping => "~",
-    };
-    let mut meta = vec![format::clock(comment.entry_time, now)];
-    if comment.kind == CommentKind::Acknowledgement {
-        meta.insert(0, "acknowledged".to_owned());
-    }
-    if let Some(expiry) = comment.expire_time.and_then(Timestamp::non_zero) {
-        meta.push(format!("expires {}", format::clock(expiry, now)));
-    }
-    Note {
-        marker,
-        author: comment.author.clone(),
-        meta,
-        body: comment.text.clone(),
-        name: comment.name.clone(),
-    }
-}
-
-/// The pane's view of a downtime: `a.ivanova downtime 14:21 → 16:00 · 50m
-/// left`.
-pub(crate) fn downtime_note(downtime: &Downtime, now: Timestamp) -> Note {
-    let window = format!(
-        "{} → {}",
-        format::clock(downtime.start_time, now),
-        format::clock(downtime.end_time, now)
-    );
-    let status = if downtime.in_effect {
-        format!(
-            "{} left",
-            ic_model::format_compact(downtime.end_time.remaining_from(now))
-        )
-    } else if downtime.start_time > now {
-        format!(
-            "starts in {}",
-            ic_model::format_compact(downtime.start_time.remaining_from(now))
-        )
-    } else if !downtime.fixed {
-        "flexible, not triggered".to_owned()
-    } else {
-        "ended".to_owned()
-    };
-    let mut meta = vec!["downtime".to_owned(), window, status];
-    if downtime.config_owned {
-        meta.push("from config".to_owned());
-    }
-    Note {
-        marker: "↓",
-        author: downtime.author.clone(),
-        meta,
-        body: downtime.comment.clone(),
-        name: downtime.name.clone(),
-    }
 }
 
 /// The host's parents and children from the dependencies.
@@ -634,10 +535,6 @@ mod tests {
 
     fn now() -> Timestamp {
         Timestamp::from_unix_seconds(NOW)
-    }
-
-    fn ago(seconds: f64) -> Timestamp {
-        Timestamp::from_unix_seconds(NOW - seconds)
     }
 
     #[test]
@@ -847,10 +744,7 @@ mod tests {
         for name in ["role", "address", "power_supply", "snmp_version", "keys"] {
             assert!(!is_protected_var(name), "{name}");
         }
-        assert!(glob_matches("a*b*c", "axxbyyc"));
-        assert!(!glob_matches("a*b*c", "axxcyyb"));
-        assert!(glob_matches("exact", "exact"));
-        assert!(!glob_matches("exact", "exactly"));
+        assert!(is_protected_var("DB_PASSWORD"), "ignoring case");
     }
 
     #[test]
@@ -865,52 +759,6 @@ mod tests {
         let last = lines.last().unwrap();
         assert!(last.value.ends_with("more lines"));
         assert!(last.summary);
-    }
-
-    #[test]
-    fn notes_for_comments_acks_and_downtimes() {
-        let comment = Comment {
-            name: "h!s!1".to_owned(),
-            object: ObjectKey::service("h", "s"),
-            author: "m.keller".to_owned(),
-            text: "renewal in progress".to_owned(),
-            kind: CommentKind::Acknowledgement,
-            entry_time: ago(60.),
-            expire_time: None,
-            persistent: false,
-        };
-        let note = comment_note(&comment, now());
-        assert_eq!(note.marker, "✓");
-        assert_eq!(note.meta[0], "acknowledged");
-        assert_eq!(note.body, "renewal in progress");
-
-        let demo = fixture::build(now());
-        let downtime = &demo.snapshot.downtimes[&ObjectKey::host("edge-fra-04")][0];
-        let note = downtime_note(downtime, now());
-        assert_eq!(note.marker, "↓");
-        assert_eq!(note.meta[0], "downtime");
-        assert_eq!(note.meta[2], "50m left");
-        assert_eq!(note.body, "rack maintenance");
-    }
-
-    #[test]
-    fn future_and_untriggered_downtimes() {
-        let demo = fixture::build(now());
-        let mut downtime = demo.snapshot.downtimes[&ObjectKey::host("edge-fra-04")][0].clone();
-        downtime.in_effect = false;
-        downtime.start_time = Timestamp::from_unix_seconds(NOW + 600.);
-        assert_eq!(downtime_note(&downtime, now()).meta[2], "starts in 10m");
-        downtime.start_time = ago(60.);
-        downtime.fixed = false;
-        assert_eq!(
-            downtime_note(&downtime, now()).meta[2],
-            "flexible, not triggered"
-        );
-        downtime.config_owned = true;
-        assert_eq!(
-            downtime_note(&downtime, now()).meta.last().unwrap(),
-            "from config"
-        );
     }
 
     #[test]

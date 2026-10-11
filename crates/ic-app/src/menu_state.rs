@@ -92,6 +92,10 @@ pub(crate) fn down_position(event: &ClickEvent) -> Option<Point<Pixels>> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "pointer positions are real pixels"
+)]
 mod tests {
     use gpui::{point, px};
 

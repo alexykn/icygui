@@ -5,8 +5,8 @@ use std::collections::VecDeque;
 
 use serde_json::{Map, Value as Json};
 
-use super::World;
 use super::logic::DepType;
+use super::{ObjKind, World};
 use crate::json::{int, num};
 
 /// The status functions of Icinga 2.15's packages, in its (sorted) order.
@@ -93,6 +93,11 @@ impl CheckStats {
     pub(crate) fn checks_last_minute(&self, now: f64) -> u32 {
         self.count(ACTIVE_HOST, now, 60.0) + self.count(ACTIVE_SERVICE, now, 60.0)
     }
+
+    /// Passive host and service check results in the last minute.
+    pub(crate) fn passive_last_minute(&self, now: f64) -> u32 {
+        self.count(PASSIVE_HOST, now, 60.0) + self.count(PASSIVE_SERVICE, now, 60.0)
+    }
 }
 
 fn perfdata_value(label: &str, value: f64) -> Json {
@@ -125,7 +130,7 @@ impl World {
         let (status, perfdata) = match name {
             "ApiListener" => self.api_listener_status(),
             "CIB" => (self.cib_status(), Vec::new()),
-            "CheckerComponent" => {
+            "CheckerComponent" if self.features.contains_key(&ObjKind::CheckerComponent) => {
                 let idle = self
                     .all_checkables()
                     .filter(|c| c.enable_active_checks)
@@ -148,7 +153,9 @@ impl World {
                 )
             }
             "IcingaApplication" => (self.icinga_application_status(), Vec::new()),
-            "NotificationComponent" => {
+            "NotificationComponent"
+                if self.features.contains_key(&ObjKind::NotificationComponent) =>
+            {
                 let mut nodes = Map::new();
                 nodes.insert("notification".into(), int(1));
                 let mut status = Map::new();
@@ -259,13 +266,14 @@ impl World {
             connected.len() as f64,
             not_connected.len() as f64,
         );
+        let (relay_items, relay_rate, work_rate) = self.json_rpc_queues(&identity);
         let mut json_rpc = Map::new();
         json_rpc.insert("anonymous_clients".into(), int(0));
-        json_rpc.insert("relay_queue_item_rate".into(), num(0.0));
-        json_rpc.insert("relay_queue_items".into(), int(0));
+        json_rpc.insert("relay_queue_item_rate".into(), num(relay_rate));
+        json_rpc.insert("relay_queue_items".into(), num(relay_items));
         json_rpc.insert("sync_queue_item_rate".into(), num(0.0));
         json_rpc.insert("sync_queue_items".into(), int(0));
-        json_rpc.insert("work_queue_item_rate".into(), num(0.0));
+        json_rpc.insert("work_queue_item_rate".into(), num(work_rate));
         let mut http = Map::new();
         http.insert("clients".into(), int(1));
         let mut api = Map::new();
@@ -285,14 +293,32 @@ impl World {
             perfdata_value("api_num_endpoints", total_f),
             perfdata_value("api_num_http_clients", 1.0),
             perfdata_value("api_num_json_rpc_anonymous_clients", 0.0),
-            perfdata_value("api_num_json_rpc_relay_queue_item_rate", 0.0),
-            perfdata_value("api_num_json_rpc_relay_queue_items", 0.0),
+            perfdata_value("api_num_json_rpc_relay_queue_item_rate", relay_rate),
+            perfdata_value("api_num_json_rpc_relay_queue_items", relay_items),
             perfdata_value("api_num_json_rpc_sync_queue_item_rate", 0.0),
             perfdata_value("api_num_json_rpc_sync_queue_items", 0.0),
-            perfdata_value("api_num_json_rpc_work_queue_item_rate", 0.0),
+            perfdata_value("api_num_json_rpc_work_queue_item_rate", work_rate),
             perfdata_value("api_num_not_conn_endpoints", not_connected_f),
         ];
         (status, perfdata)
+    }
+
+    /// The JSON-RPC queues: the messages the connected endpoints send are
+    /// the work, and a quarter of it is relayed on. An endpoint that is gone
+    /// does not fill the relay queue: Icinga skips disconnected endpoints
+    /// when it relays and writes their messages to the replay log instead
+    /// (checked against Icinga 2.15.6 in Docker: 300 results for a host in
+    /// a zone whose only endpoint never connected, `relay_queue_items`
+    /// stayed 0 while the rate rose). Returns the relay queue's items and
+    /// rate and the work queue's rate.
+    fn json_rpc_queues(&self, identity: &str) -> (f64, f64, f64) {
+        let work_rate: f64 = self
+            .endpoints
+            .values()
+            .filter(|e| e.connected && e.name != identity)
+            .map(|e| e.message_rate)
+            .sum();
+        (0.0, work_rate / 4.0, work_rate)
     }
 
     fn service_check_times(&self) -> CheckTimes {

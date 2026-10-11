@@ -1,8 +1,9 @@
 //! Text blocks: section labels and the plugin output's code block.
 
+use crate::px;
 use gpui::{
     App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px, relative,
+    prelude::FluentBuilder as _, relative,
 };
 
 use crate::theme::ActiveTheme as _;

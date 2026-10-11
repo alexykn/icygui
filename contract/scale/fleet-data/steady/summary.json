@@ -1,0 +1,2110 @@
+{
+ "run": "fleet-data/steady",
+ "phases": [
+  {
+   "label": "A0",
+   "start": 1791700642.259,
+   "end": 1791700941.981,
+   "minutes": 4.995366664727529,
+   "byname": {
+    "n": 299,
+    "median": 0.0522,
+    "p95": 0.0602,
+    "max": 0.0685,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0641,
+    "slots": {
+     "n": 299,
+     "median": 0.0522,
+     "p95": 0.0602,
+     "max": 0.0685,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0641
+    }
+   },
+   "web": {
+    "n": 299,
+    "median": 0.0545,
+    "p95": 0.0592,
+    "max": 0.0749,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0631,
+    "slots": {
+     "n": 299,
+     "median": 0.0545,
+     "p95": 0.0592,
+     "max": 0.0749,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0631
+    }
+   },
+   "m1_cores": 0.15798916930872484,
+   "m2_cores": 0.12578770759731542,
+   "cluster_cores": 0.3432822873154362,
+   "m1_mem_mib": {
+    "start": 475,
+    "peak": 561,
+    "end": 561,
+    "rss_end": 493
+   },
+   "clients_cores": 0.00016778523489932888,
+   "clients_rss_mib": {
+    "start": 11,
+    "peak": 11,
+    "end": 11
+   },
+   "engines": 0,
+   "live": 0,
+   "delay_live": {
+    "n": 0,
+    "median": null,
+    "p95": null,
+    "max": null
+   },
+   "delay_quiet": {
+    "n": 0,
+    "median": null,
+    "p95": null,
+    "max": null
+   },
+   "rpm_live": {
+    "clients": 0,
+    "mean": null,
+    "max": null,
+    "paths": {}
+   },
+   "rpm_quiet": {
+    "clients": 0,
+    "mean": null,
+    "max": null,
+    "paths": {}
+   },
+   "rpm_all": 0.0,
+   "streams_opened": 0,
+   "engine_cores_live": null,
+   "engine_cores_quiet": null,
+   "http_clients": 21,
+   "m1_relay_items": {
+    "max": 3,
+    "last": 0,
+    "mean": 0.11864406779661017
+   },
+   "m2_relay_items": {
+    "max": 519,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 772.05,
+    "last": 161.13333333333333,
+    "mean": 313.8906779661017
+   },
+   "m2_work_rate": {
+    "max": 726.0166666666667,
+    "last": 196.08333333333334
+   },
+   "m1_relay_rate": {
+    "max": 1436.8833333333334,
+    "last": 316.28333333333336,
+    "mean": 594.4313559322034
+   },
+   "m2_relay_rate": {
+    "max": 1437,
+    "last": 316.26666666666665
+   },
+   "pending_callbacks_max": 0,
+   "latency_avg": 0.3339739856712716,
+   "status_answer_max": 0.004303932189941406,
+   "icinga_connection_timeouts": 1,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": 0,
+   "loads": {},
+   "reconciles": 0,
+   "reconciles_found": 0,
+   "reconcile_found_objects": 0,
+   "load_took_s": {},
+   "reconnecting": 0,
+   "connected_events": 0,
+   "completed": 0
+  },
+  {
+   "label": "(add 1 live user)",
+   "start": 1791700941.981,
+   "end": 1791700948.005,
+   "minutes": 0.10040000279744467,
+   "byname": {
+    "n": 6,
+    "median": 0.0522,
+    "p95": 0.06,
+    "max": 0.06,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": null,
+    "slots": {
+     "n": 6,
+     "median": 0.0522,
+     "p95": 0.06,
+     "max": 0.06,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": null
+    }
+   },
+   "web": {
+    "n": 6,
+    "median": 0.0512,
+    "p95": 0.0598,
+    "max": 0.0598,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": null,
+    "slots": {
+     "n": 6,
+     "median": 0.0512,
+     "p95": 0.0598,
+     "max": 0.0598,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": null
+    }
+   },
+   "m1_cores": 0.5805686544,
+   "m2_cores": 0.057406394400000005,
+   "cluster_cores": 0.6896848156,
+   "m1_mem_mib": {
+    "start": 591,
+    "peak": 825,
+    "end": 805,
+    "rss_end": 737
+   },
+   "clients_cores": 0.202,
+   "clients_rss_mib": {
+    "start": 16,
+    "peak": 140,
+    "end": 140
+   },
+   "engines": 0,
+   "live": 0,
+   "delay_live": {
+    "n": 0,
+    "median": null,
+    "p95": null,
+    "max": null
+   },
+   "delay_quiet": {
+    "n": 0,
+    "median": null,
+    "p95": null,
+    "max": null
+   },
+   "rpm_live": {
+    "clients": 0,
+    "mean": null,
+    "max": null,
+    "paths": {
+     "/v1/objects/services": 89.64,
+     "/v1/status/IcingaApplication": 29.88,
+     "/v1/objects/zones": 19.92,
+     "/v1": 9.96,
+     "/v1/objects/endpoints": 9.96,
+     "/v1/status/CIB": 9.96
+    }
+   },
+   "rpm_quiet": {
+    "clients": 0,
+    "mean": null,
+    "max": null,
+    "paths": {}
+   },
+   "rpm_all": 239.04381804071858,
+   "streams_opened": 1,
+   "engine_cores_live": null,
+   "engine_cores_quiet": null,
+   "http_clients": 26,
+   "m1_relay_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_relay_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 138.4,
+    "last": 124.35,
+    "mean": 131.375
+   },
+   "m2_work_rate": {
+    "max": 161.8,
+    "last": 134.58333333333334
+   },
+   "m1_relay_rate": {
+    "max": 260.8666666666667,
+    "last": 220.4,
+    "mean": 240.63333333333333
+   },
+   "m2_relay_rate": {
+    "max": 260.9,
+    "last": 220.43333333333334
+   },
+   "pending_callbacks_max": 0,
+   "latency_avg": 0.32595073264945135,
+   "status_answer_max": 0.0012099742889404297,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": null,
+   "loads": {
+    "First": 1
+   },
+   "reconciles": 0,
+   "reconciles_found": 0,
+   "reconcile_found_objects": 0,
+   "load_took_s": {
+    "First": 3.249
+   },
+   "plans_first": {
+    "n": 1,
+    "first_in_min": 22.522699999809266,
+    "last_in_min": 22.522699999809266,
+    "largest_bunch_60s": 1
+   },
+   "reconnecting": 0,
+   "connected_events": 1,
+   "completed": 1
+  },
+  {
+   "label": "A1",
+   "start": 1791700948.005,
+   "end": 1791701548.011,
+   "minutes": 10.000099996725718,
+   "byname": {
+    "n": 601,
+    "median": 0.0522,
+    "p95": 0.0606,
+    "max": 0.0768,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0641,
+    "slots": {
+     "n": 601,
+     "median": 0.0522,
+     "p95": 0.0606,
+     "max": 0.0768,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0641
+    }
+   },
+   "web": {
+    "n": 601,
+    "median": 0.0513,
+    "p95": 0.0629,
+    "max": 0.0749,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0631,
+    "slots": {
+     "n": 601,
+     "median": 0.0513,
+     "p95": 0.0629,
+     "max": 0.0749,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0631
+    }
+   },
+   "m1_cores": 0.17171117088313856,
+   "m2_cores": 0.12383605202504173,
+   "cluster_cores": 0.35347510743071786,
+   "m1_mem_mib": {
+    "start": 805,
+    "peak": 856,
+    "end": 819,
+    "rss_end": 751
+   },
+   "clients_cores": 0.019398998330550917,
+   "clients_rss_mib": {
+    "start": 141,
+    "peak": 166,
+    "end": 166
+   },
+   "engines": 1,
+   "live": 1,
+   "delay_live": {
+    "n": 595,
+    "median": 2.7039999961853027,
+    "p95": 4.988799810409546,
+    "max": 5.2530999183654785
+   },
+   "delay_quiet": {
+    "n": 0,
+    "median": null,
+    "p95": null,
+    "max": null
+   },
+   "rpm_live": {
+    "clients": 1,
+    "mean": 13.899861005941148,
+    "max": 13.899861005941148,
+    "paths": {
+     "/v1/objects/notifications": 4.7,
+     "/v1/objects/services": 2.0,
+     "/v1/status/IcingaApplication": 2.0,
+     "/v1/status/CIB": 2.0,
+     "/v1/objects/endpoints": 2.0,
+     "/v1/status/ApiListener": 0.3
+    }
+   },
+   "rpm_quiet": {
+    "clients": 0,
+    "mean": null,
+    "max": null,
+    "paths": {}
+   },
+   "rpm_all": 13.899861005941148,
+   "streams_opened": 0,
+   "engine_cores_live": 0.016558480078087117,
+   "engine_cores_quiet": null,
+   "http_clients": 23,
+   "m1_relay_items": {
+    "max": 5,
+    "last": 0,
+    "mean": 0.06666666666666667
+   },
+   "m2_relay_items": {
+    "max": 4,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 734.1833333333333,
+    "last": 134.68333333333334,
+    "mean": 310.80916666666667
+   },
+   "m2_work_rate": {
+    "max": 728.7333333333333,
+    "last": 129.95
+   },
+   "m1_relay_rate": {
+    "max": 1387.4666666666667,
+    "last": 226.45,
+    "mean": 586.3080555555556
+   },
+   "m2_relay_rate": {
+    "max": 1387.45,
+    "last": 226.56666666666666
+   },
+   "pending_callbacks_max": 1,
+   "latency_avg": 0.32561293898621735,
+   "status_answer_max": 0.0047359466552734375,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": 7,
+   "loads": {},
+   "reconciles": 0,
+   "reconciles_found": 0,
+   "reconcile_found_objects": 0,
+   "load_took_s": {},
+   "reconnecting": 0,
+   "connected_events": 0,
+   "completed": 0,
+   "new_connection_share": 0.33093525179856115
+  },
+  {
+   "label": "(add 1 live user; add 8 quiet background)",
+   "start": 1791701548.011,
+   "end": 1791701628.265,
+   "minutes": 1.3375666697820028,
+   "byname": {
+    "n": 80,
+    "median": 0.0559,
+    "p95": 0.0642,
+    "max": 0.0763,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0642,
+    "slots": {
+     "n": 80,
+     "median": 0.0559,
+     "p95": 0.0642,
+     "max": 0.0763,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0642
+    }
+   },
+   "web": {
+    "n": 80,
+    "median": 0.0549,
+    "p95": 0.0668,
+    "max": 0.0752,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0668,
+    "slots": {
+     "n": 80,
+     "median": 0.0549,
+     "p95": 0.0668,
+     "max": 0.0752,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0668
+    }
+   },
+   "m1_cores": 0.4091286996125,
+   "m2_cores": 0.0599920110875,
+   "cluster_cores": 0.5243987562625,
+   "m1_mem_mib": {
+    "start": 820,
+    "peak": 1910,
+    "end": 1855,
+    "rss_end": 1785
+   },
+   "clients_cores": 0.1865,
+   "clients_rss_mib": {
+    "start": 169,
+    "peak": 1220,
+    "end": 1220
+   },
+   "engines": 1,
+   "live": 1,
+   "delay_live": {
+    "n": 148,
+    "median": 2.687999963760376,
+    "p95": 4.827999830245972,
+    "max": 5.1310999393463135
+   },
+   "delay_quiet": {
+    "n": 262,
+    "median": 1.2418999671936035,
+    "p95": 4.007200002670288,
+    "max": 5.026000022888184
+   },
+   "rpm_live": {
+    "clients": 1,
+    "mean": 8.223889132788264,
+    "max": 8.223889132788264,
+    "paths": {
+     "/v1/objects/services": 10.47,
+     "/v1/status/IcingaApplication": 5.23,
+     "/v1/objects/notifications": 5.23,
+     "/v1/objects/endpoints": 3.74,
+     "/v1/status/CIB": 3.74,
+     "/v1/objects/zones": 1.5
+    }
+   },
+   "rpm_quiet": {
+    "clients": 0,
+    "mean": null,
+    "max": null,
+    "paths": {
+     "/v1/objects/services": 77.75,
+     "/v1/status/IcingaApplication": 29.91,
+     "/v1/status/CIB": 17.94,
+     "/v1/objects/notifications": 14.2,
+     "/v1/objects/zones": 11.96,
+     "/v1/objects/endpoints": 11.96
+    }
+   },
+   "rpm_all": 273.6312202364095,
+   "streams_opened": 25,
+   "engine_cores_live": 0.010570069588978478,
+   "engine_cores_quiet": null,
+   "http_clients": 39,
+   "m1_relay_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_relay_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 143.9,
+    "last": 114.81666666666666,
+    "mean": 130.04375
+   },
+   "m2_work_rate": {
+    "max": 145.7,
+    "last": 115.05
+   },
+   "m1_relay_rate": {
+    "max": 253.26666666666668,
+    "last": 190.53333333333333,
+    "mean": 225.62291666666667
+   },
+   "m2_relay_rate": {
+    "max": 253.31666666666666,
+    "last": 190.56666666666666
+   },
+   "pending_callbacks_max": 0,
+   "latency_avg": 0.3256156474893052,
+   "status_answer_max": 0.005118370056152344,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": null,
+   "loads": {
+    "First": 9
+   },
+   "reconciles": 0,
+   "reconciles_found": 0,
+   "reconcile_found_objects": 0,
+   "load_took_s": {
+    "First": 3.49
+   },
+   "plans_first": {
+    "n": 9,
+    "first_in_min": 12.696616669495901,
+    "last_in_min": 57.32116666634877,
+    "largest_bunch_60s": 2
+   },
+   "reconnecting": 0,
+   "connected_events": 9,
+   "completed": 9
+  },
+  {
+   "label": "A10",
+   "start": 1791701628.265,
+   "end": 1791702228.27,
+   "minutes": 10.000083331267039,
+   "byname": {
+    "n": 600,
+    "median": 0.0522,
+    "p95": 0.0602,
+    "max": 0.0919,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0639,
+    "slots": {
+     "n": 600,
+     "median": 0.0522,
+     "p95": 0.0602,
+     "max": 0.0919,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0639
+    }
+   },
+   "web": {
+    "n": 600,
+    "median": 0.0516,
+    "p95": 0.0596,
+    "max": 0.0856,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0669,
+    "slots": {
+     "n": 600,
+     "median": 0.0516,
+     "p95": 0.0596,
+     "max": 0.0856,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0669
+    }
+   },
+   "m1_cores": 0.182635879769616,
+   "m2_cores": 0.12405679196327211,
+   "cluster_cores": 0.3644725553038397,
+   "m1_mem_mib": {
+    "start": 1855,
+    "peak": 1856,
+    "end": 1347,
+    "rss_end": 1277
+   },
+   "clients_cores": 0.1317696160267112,
+   "clients_rss_mib": {
+    "start": 1221,
+    "peak": 1273,
+    "end": 1273
+   },
+   "engines": 10,
+   "live": 2,
+   "delay_live": {
+    "n": 1199,
+    "median": 2.7500998973846436,
+    "p95": 5.007999897003174,
+    "max": 5.846899747848511
+   },
+   "delay_quiet": {
+    "n": 4797,
+    "median": 1.9739997386932373,
+    "p95": 4.069999933242798,
+    "max": 6.002899885177612
+   },
+   "rpm_live": {
+    "clients": 2,
+    "mean": 10.049916252774501,
+    "max": 10.39991333620446,
+    "paths": {
+     "/v1/objects/notifications": 2.05,
+     "/v1/status/CIB": 2.0,
+     "/v1/status/IcingaApplication": 2.0,
+     "/v1/objects/endpoints": 2.0,
+     "/v1/objects/services": 1.2,
+     "/v1/status/ApiListener": 0.2
+    }
+   },
+   "rpm_quiet": {
+    "clients": 8,
+    "mean": 10.33741385702054,
+    "max": 10.69991083628728,
+    "paths": {
+     "/v1/objects/services": 6.92,
+     "/v1/objects/notifications": 2.1,
+     "/v1/status/IcingaApplication": 0.19,
+     "/v1/status/CIB": 0.19,
+     "/v1/objects/endpoints": 0.19,
+     "/v1/status/ApiListener": 0.19
+    }
+   },
+   "rpm_all": 102.79914336171332,
+   "streams_opened": 0,
+   "engine_cores_live": 0.017487731481648887,
+   "engine_cores_quiet": 0.008932384164015667,
+   "http_clients": 38,
+   "m1_relay_items": {
+    "max": 2,
+    "last": 0,
+    "mean": 0.041666666666666664
+   },
+   "m2_relay_items": {
+    "max": 4,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 623.1833333333333,
+    "last": 173.18333333333334,
+    "mean": 310.9688888888889
+   },
+   "m2_work_rate": {
+    "max": 696.4166666666666,
+    "last": 155.68333333333334
+   },
+   "m1_relay_rate": {
+    "max": 1222.85,
+    "last": 289.05,
+    "mean": 585.93
+   },
+   "m2_relay_rate": {
+    "max": 1222.7833333333333,
+    "last": 289.05
+   },
+   "pending_callbacks_max": 0,
+   "latency_avg": 0.32564471779177223,
+   "status_answer_max": 0.011943578720092773,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": 1,
+   "loads": {},
+   "reconciles": 0,
+   "reconciles_found": 0,
+   "reconcile_found_objects": 0,
+   "load_took_s": {},
+   "reconnecting": 0,
+   "connected_events": 0,
+   "completed": 0,
+   "new_connection_share": 0.566147859922179
+  },
+  {
+   "label": "(add 1 live user; add 14 quiet background)",
+   "start": 1791702228.27,
+   "end": 1791702312.61,
+   "minutes": 1.4056666652361551,
+   "byname": {
+    "n": 84,
+    "median": 0.0561,
+    "p95": 0.0726,
+    "max": 0.088,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0799,
+    "slots": {
+     "n": 84,
+     "median": 0.0561,
+     "p95": 0.0726,
+     "max": 0.088,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0799
+    }
+   },
+   "web": {
+    "n": 84,
+    "median": 0.0552,
+    "p95": 0.0749,
+    "max": 0.0949,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.079,
+    "slots": {
+     "n": 84,
+     "median": 0.0552,
+     "p95": 0.0749,
+     "max": 0.0949,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.079
+    }
+   },
+   "m1_cores": 0.7976442673012049,
+   "m2_cores": 0.16308663638554216,
+   "cluster_cores": 1.0170409435662653,
+   "m1_mem_mib": {
+    "start": 1391,
+    "peak": 2138,
+    "end": 2138,
+    "rss_end": 2068
+   },
+   "clients_cores": 0.5179518072289157,
+   "clients_rss_mib": {
+    "start": 1278,
+    "peak": 3049,
+    "end": 3049
+   },
+   "engines": 10,
+   "live": 2,
+   "delay_live": {
+    "n": 242,
+    "median": 2.6152000427246094,
+    "p95": 5.0269999504089355,
+    "max": 5.246099948883057
+   },
+   "delay_quiet": {
+    "n": 1256,
+    "median": 1.066999912261963,
+    "p95": 4.1798999309539795,
+    "max": 5.42300009727478
+   },
+   "rpm_live": {
+    "clients": 2,
+    "mean": 16.71804602128197,
+    "max": 18.496561555460904,
+    "paths": {
+     "/v1/status/IcingaApplication": 5.69,
+     "/v1/objects/services": 4.98,
+     "/v1/objects/endpoints": 4.27,
+     "/v1/status/CIB": 4.27,
+     "/v1/objects/zones": 1.42,
+     "/v1/objects/hostgroups": 1.07
+    }
+   },
+   "rpm_quiet": {
+    "clients": 8,
+    "mean": 7.825468350387306,
+    "max": 12.093905632416746,
+    "paths": {
+     "/v1/objects/services": 23.39,
+     "/v1/status/IcingaApplication": 6.31,
+     "/v1/status/CIB": 3.82,
+     "/v1/objects/endpoints": 2.58,
+     "/v1/objects/zones": 2.49,
+     "/v1/status/ApiListener": 1.33
+    }
+   },
+   "rpm_all": 502.2527868521307,
+   "streams_opened": 43,
+   "engine_cores_live": 0.033554530776540505,
+   "engine_cores_quiet": 0.00934153138006109,
+   "http_clients": 64,
+   "m1_relay_items": {
+    "max": 2,
+    "last": 0,
+    "mean": 0.17647058823529413
+   },
+   "m2_relay_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 477.01666666666665,
+    "last": 477.01666666666665,
+    "mean": 343.53333333333336
+   },
+   "m2_work_rate": {
+    "max": 640.7,
+    "last": 640.7
+   },
+   "m1_relay_rate": {
+    "max": 1077.5833333333333,
+    "last": 1077.5833333333333,
+    "mean": 722.2294117647059
+   },
+   "m2_relay_rate": {
+    "max": 1077.6333333333334,
+    "last": 1077.6333333333334
+   },
+   "pending_callbacks_max": 0,
+   "latency_avg": 0.23864716824739726,
+   "status_answer_max": 0.004977703094482422,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": null,
+   "loads": {
+    "First": 15,
+    "Reconcile": 1
+   },
+   "reconciles": 1,
+   "reconciles_found": 1,
+   "reconcile_found_objects": 1,
+   "load_took_s": {
+    "First": 3.98,
+    "Reconcile": 5.062
+   },
+   "plans_first": {
+    "n": 15,
+    "first_in_min": 8.80154999891917,
+    "last_in_min": 57.57225000063578,
+    "largest_bunch_60s": 3
+   },
+   "reconnecting": 0,
+   "connected_events": 15,
+   "completed": 15
+  },
+  {
+   "label": "A25",
+   "start": 1791702312.61,
+   "end": 1791702912.613,
+   "minutes": 10.000050000349681,
+   "byname": {
+    "n": 600,
+    "median": 0.0524,
+    "p95": 0.064,
+    "max": 0.0839,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0681,
+    "slots": {
+     "n": 600,
+     "median": 0.0524,
+     "p95": 0.064,
+     "max": 0.0839,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0681
+    }
+   },
+   "web": {
+    "n": 600,
+    "median": 0.0539,
+    "p95": 0.0629,
+    "max": 0.0966,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.067,
+    "slots": {
+     "n": 600,
+     "median": 0.0539,
+     "p95": 0.0629,
+     "max": 0.0966,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.067
+    }
+   },
+   "m1_cores": 0.21288774804560617,
+   "m2_cores": 0.12926895433987481,
+   "cluster_cores": 0.40196724884159357,
+   "m1_mem_mib": {
+    "start": 2138,
+    "peak": 2138,
+    "end": 1592,
+    "rss_end": 1522
+   },
+   "clients_cores": 0.3529388195546558,
+   "clients_rss_mib": {
+    "start": 3066,
+    "peak": 3195,
+    "end": 3195
+   },
+   "engines": 25,
+   "live": 3,
+   "delay_live": {
+    "n": 1799,
+    "median": 2.7379000186920166,
+    "p95": 5.046900033950806,
+    "max": 5.6803998947143555
+   },
+   "delay_quiet": {
+    "n": 13205,
+    "median": 1.683500051498413,
+    "p95": 4.158999919891357,
+    "max": 5.295399904251099
+   },
+   "rpm_live": {
+    "clients": 3,
+    "mean": 11.999939999880386,
+    "max": 12.699936499873408,
+    "paths": {
+     "/v1/objects/notifications": 2.8,
+     "/v1/status/IcingaApplication": 2.07,
+     "/v1/status/CIB": 2.03,
+     "/v1/objects/endpoints": 2.03,
+     "/v1/objects/services": 1.9,
+     "/v1/status/ApiListener": 0.23
+    }
+   },
+   "rpm_quiet": {
+    "clients": 22,
+    "mean": 11.927213090790202,
+    "max": 12.299938499877396,
+    "paths": {
+     "/v1/objects/services": 7.74,
+     "/v1/objects/notifications": 2.95,
+     "/v1/status/IcingaApplication": 0.18,
+     "/v1/status/CIB": 0.18,
+     "/v1/objects/endpoints": 0.18,
+     "/v1/status/ApiListener": 0.18
+    }
+   },
+   "rpm_all": 298.3985079970256,
+   "streams_opened": 0,
+   "engine_cores_live": 0.02140081397414682,
+   "engine_cores_quiet": 0.009687948710346537,
+   "http_clients": 64,
+   "m1_relay_items": {
+    "max": 5,
+    "last": 0,
+    "mean": 0.175
+   },
+   "m2_relay_items": {
+    "max": 3,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 557.9666666666667,
+    "last": 455.31666666666666,
+    "mean": 316.46708333333333
+   },
+   "m2_work_rate": {
+    "max": 637.95,
+    "last": 583.8166666666667
+   },
+   "m1_relay_rate": {
+    "max": 1094.15,
+    "last": 996.9166666666666,
+    "mean": 600.5727777777778
+   },
+   "m2_relay_rate": {
+    "max": 1094.15,
+    "last": 996.9
+   },
+   "pending_callbacks_max": 2,
+   "latency_avg": 0.0015493427816274808,
+   "status_answer_max": 0.008297920227050781,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": 2,
+   "loads": {
+    "Reconcile": 2
+   },
+   "reconciles": 2,
+   "reconciles_found": 1,
+   "reconcile_found_objects": 1,
+   "load_took_s": {
+    "Reconcile": 3.167
+   },
+   "reconnecting": 0,
+   "connected_events": 0,
+   "completed": 0,
+   "new_connection_share": 0.49463806970509383
+  },
+  {
+   "label": "(add 2 live user; add 23 quiet background)",
+   "start": 1791702912.613,
+   "end": 1791703007.003,
+   "minutes": 1.5731666684150696,
+   "byname": {
+    "n": 94,
+    "median": 0.06,
+    "p95": 0.0839,
+    "max": 0.1193,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0839,
+    "slots": {
+     "n": 94,
+     "median": 0.06,
+     "p95": 0.0839,
+     "max": 0.1193,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0839
+    }
+   },
+   "web": {
+    "n": 94,
+    "median": 0.0589,
+    "p95": 0.0709,
+    "max": 0.0869,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0709,
+    "slots": {
+     "n": 94,
+     "median": 0.0589,
+     "p95": 0.0709,
+     "max": 0.0869,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0709
+    }
+   },
+   "m1_cores": 0.9244274608808403,
+   "m2_cores": 0.13444598736006055,
+   "cluster_cores": 1.1162891912103958,
+   "m1_mem_mib": {
+    "start": 1592,
+    "peak": 2310,
+    "end": 2308,
+    "rss_end": 2264
+   },
+   "clients_cores": 0.825609151598109,
+   "clients_rss_mib": {
+    "start": 3203,
+    "peak": 6238,
+    "end": 6232
+   },
+   "engines": 25,
+   "live": 3,
+   "delay_live": {
+    "n": 463,
+    "median": 2.929999828338623,
+    "p95": 5.224100112915039,
+    "max": 8.342000007629395
+   },
+   "delay_quiet": {
+    "n": 2752,
+    "median": 1.569200038909912,
+    "p95": 4.5197999477386475,
+    "max": 5.754199981689453
+   },
+   "rpm_live": {
+    "clients": 3,
+    "mean": 13.772645392045684,
+    "max": 14.620192800786956,
+    "paths": {
+     "/v1/objects/notifications": 10.59,
+     "/v1/objects/services": 6.14,
+     "/v1/status/IcingaApplication": 4.45,
+     "/v1/objects/endpoints": 3.6,
+     "/v1/status/CIB": 3.6,
+     "/v1/objects/zones": 0.85
+    }
+   },
+   "rpm_quiet": {
+    "clients": 22,
+    "mean": 14.995810402388202,
+    "max": 18.434156140122685,
+    "paths": {
+     "/v1/objects/services": 16.44,
+     "/v1/objects/notifications": 9.13,
+     "/v1/status/IcingaApplication": 3.5,
+     "/v1/status/CIB": 2.17,
+     "/v1/objects/endpoints": 1.5,
+     "/v1/objects/zones": 1.33
+    }
+   },
+   "rpm_all": 1044.3902944214333,
+   "streams_opened": 71,
+   "engine_cores_live": 0.020355217061956768,
+   "engine_cores_quiet": 0.009982467607078632,
+   "http_clients": 113,
+   "m1_relay_items": {
+    "max": 2,
+    "last": 0,
+    "mean": 0.1111111111111111
+   },
+   "m2_relay_items": {
+    "max": 23,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 519.9,
+    "last": 303.5833333333333,
+    "mean": 461.3305555555555
+   },
+   "m2_work_rate": {
+    "max": 576.4333333333333,
+    "last": 223.01666666666668
+   },
+   "m1_relay_rate": {
+    "max": 992.2833333333333,
+    "last": 485.1,
+    "mean": 815.3009259259259
+   },
+   "m2_relay_rate": {
+    "max": 992.3333333333334,
+    "last": 485.03333333333336
+   },
+   "pending_callbacks_max": 0,
+   "latency_avg": 0.0007985925569703808,
+   "status_answer_max": 0.08979225158691406,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": 0,
+   "loads": {
+    "First": 25
+   },
+   "reconciles": 0,
+   "reconciles_found": 0,
+   "reconcile_found_objects": 0,
+   "load_took_s": {
+    "First": 5.352
+   },
+   "plans_first": {
+    "n": 25,
+    "first_in_min": 15.582766668001812,
+    "last_in_min": 57.963433333237965,
+    "largest_bunch_60s": 4
+   },
+   "reconnecting": 0,
+   "connected_events": 25,
+   "completed": 25
+  },
+  {
+   "label": "A50",
+   "start": 1791703007.003,
+   "end": 1791704807.007,
+   "minutes": 30.000066665808358,
+   "byname": {
+    "n": 1801,
+    "median": 0.0521,
+    "p95": 0.064,
+    "max": 0.092,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0719,
+    "slots": {
+     "n": 1801,
+     "median": 0.0521,
+     "p95": 0.064,
+     "max": 0.092,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0719
+    }
+   },
+   "web": {
+    "n": 1801,
+    "median": 0.0512,
+    "p95": 0.063,
+    "max": 0.0916,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0693,
+    "slots": {
+     "n": 1801,
+     "median": 0.0512,
+     "p95": 0.063,
+     "max": 0.0916,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.0693
+    }
+   },
+   "m1_cores": 0.24680299848026682,
+   "m2_cores": 0.11885240211006114,
+   "cluster_cores": 0.4223472808960534,
+   "m1_mem_mib": {
+    "start": 2308,
+    "peak": 2308,
+    "end": 2041,
+    "rss_end": 1971
+   },
+   "clients_cores": 0.7620344635908839,
+   "clients_rss_mib": {
+    "start": 6232,
+    "peak": 6516,
+    "end": 6468
+   },
+   "engines": 50,
+   "live": 5,
+   "delay_live": {
+    "n": 8995,
+    "median": 2.78410005569458,
+    "p95": 5.118799924850464,
+    "max": 6.623600006103516
+   },
+   "delay_quiet": {
+    "n": 81172,
+    "median": 1.3961999416351318,
+    "p95": 4.416899919509888,
+    "max": 7.562099933624268
+   },
+   "rpm_live": {
+    "clients": 5,
+    "mean": 11.846640341138178,
+    "max": 12.433305704120823,
+    "paths": {
+     "/v1/objects/notifications": 3.14,
+     "/v1/status/IcingaApplication": 2.07,
+     "/v1/status/CIB": 2.04,
+     "/v1/objects/endpoints": 2.04,
+     "/v1/objects/services": 1.39,
+     "/v1/status/ApiListener": 0.23
+    }
+   },
+   "rpm_quiet": {
+    "clients": 45,
+    "mean": 12.258491277777509,
+    "max": 12.86663807450573,
+    "paths": {
+     "/v1/objects/services": 7.53,
+     "/v1/objects/notifications": 3.22,
+     "/v1/status/IcingaApplication": 0.21,
+     "/v1/status/CIB": 0.2,
+     "/v1/objects/endpoints": 0.2,
+     "/v1/status/ApiListener": 0.19
+    }
+   },
+   "rpm_all": 610.8653092056788,
+   "streams_opened": 0,
+   "engine_cores_live": 0.021913603500049967,
+   "engine_cores_quiet": 0.010891382270088842,
+   "http_clients": 109,
+   "m1_relay_items": {
+    "max": 8,
+    "last": 0,
+    "mean": 0.1388888888888889
+   },
+   "m2_relay_items": {
+    "max": 6,
+    "last": 1
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 502.46666666666664,
+    "last": 276.8666666666667,
+    "mean": 312.29175925925927
+   },
+   "m2_work_rate": {
+    "max": 550.65,
+    "last": 203.76666666666668
+   },
+   "m1_relay_rate": {
+    "max": 948.1833333333333,
+    "last": 439.9166666666667,
+    "mean": 588.6531481481481
+   },
+   "m2_relay_rate": {
+    "max": 948.3333333333334,
+    "last": 439.98333333333335
+   },
+   "pending_callbacks_max": 14,
+   "latency_avg": 0.0006699897038879824,
+   "status_answer_max": 0.030864238739013672,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": 11,
+   "loads": {
+    "Reconcile": 16
+   },
+   "reconciles": 16,
+   "reconciles_found": 11,
+   "reconcile_found_objects": 1320,
+   "load_took_s": {
+    "Reconcile": 3.72
+   },
+   "reconnecting": 0,
+   "connected_events": 0,
+   "completed": 0,
+   "reconcile_cost": {
+    "reconciles": 16,
+    "mean_s": 3.7636250108480453,
+    "split_cpu_s": 2.149550990196148,
+    "fit_cpu_s": 2.1416966861618283
+   },
+   "new_connection_share": 0.4834661137182146
+  },
+  {
+   "label": "D50",
+   "start": 1791704807.007,
+   "end": 1791704837.219,
+   "minutes": 0.5035333355267843,
+   "byname": {
+    "n": 30,
+    "median": 0.0838,
+    "p95": 0.152,
+    "max": 0.164,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.152,
+    "slots": {
+     "n": 30,
+     "median": 0.0838,
+     "p95": 0.152,
+     "max": 0.164,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.152
+    }
+   },
+   "web": {
+    "n": 30,
+    "median": 0.0837,
+    "p95": 0.1469,
+    "max": 0.1791,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.1469,
+    "slots": {
+     "n": 30,
+     "median": 0.0837,
+     "p95": 0.1469,
+     "max": 0.1791,
+     "over_500ms": 0,
+     "over_2s": 0,
+     "worst_minute_p95": 0.1469
+    }
+   },
+   "m1_cores": 0.855525422371732,
+   "m2_cores": 0.648963823434692,
+   "storm_extra_cpu_s": 37.55046962182783,
+   "storm_results": 45000,
+   "storm_request_s_max": 1.771,
+   "cluster_cores": 1.5609791652826774,
+   "m1_mem_mib": {
+    "start": 2041,
+    "peak": 2047,
+    "end": 2006,
+    "rss_end": 1972
+   },
+   "clients_cores": 1.5516379527227726,
+   "clients_rss_mib": {
+    "start": 6468,
+    "peak": 7884,
+    "end": 7884
+   },
+   "engines": 50,
+   "live": 5,
+   "delay_live": {
+    "n": 76,
+    "median": 6.6301000118255615,
+    "p95": 14.390599966049194,
+    "max": 15.571000099182129
+   },
+   "delay_quiet": {
+    "n": 599,
+    "median": 7.16700005531311,
+    "p95": 13.54800009727478,
+    "max": 17.17799997329712
+   },
+   "rpm_live": {
+    "clients": 5,
+    "mean": 13.107374496060409,
+    "max": 15.887726661891403,
+    "paths": {
+     "/v1/objects/services": 4.37,
+     "/v1/objects/notifications": 3.97,
+     "/v1/status/IcingaApplication": 1.59,
+     "/v1/status/CIB": 1.59,
+     "/v1/objects/endpoints": 1.59
+    }
+   },
+   "rpm_quiet": {
+    "clients": 45,
+    "mean": 13.85762825509417,
+    "max": 27.803521658309958,
+    "paths": {
+     "/v1/objects/services": 8.34,
+     "/v1/objects/notifications": 3.97,
+     "/v1/status/IcingaApplication": 0.22,
+     "/v1/status/CIB": 0.22,
+     "/v1/objects/endpoints": 0.22,
+     "/v1/status/ApiListener": 0.22
+    }
+   },
+   "rpm_all": 689.1301439595396,
+   "streams_opened": 0,
+   "engine_cores_live": 0.03320997270922278,
+   "engine_cores_quiet": 0.026500887313420197,
+   "http_clients": 111,
+   "m1_relay_items": {
+    "max": 26,
+    "last": 0,
+    "mean": 4.333333333333333
+   },
+   "m2_relay_items": {
+    "max": 1,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 928.6333333333333,
+    "last": 911.6333333333333,
+    "mean": 592.9777777777778
+   },
+   "m2_work_rate": {
+    "max": 198.4,
+    "last": 181.28333333333333
+   },
+   "m1_relay_rate": {
+    "max": 1075.9166666666667,
+    "last": 1055.8333333333333,
+    "mean": 743.6055555555556
+   },
+   "m2_relay_rate": {
+    "max": 1593.3666666666666,
+    "last": 1593.3666666666666
+   },
+   "pending_callbacks_max": 0,
+   "latency_avg": 0.0009001730735921981,
+   "status_answer_max": 0.02599954605102539,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": null,
+   "loads": {},
+   "reconciles": 0,
+   "reconciles_found": 0,
+   "reconcile_found_objects": 0,
+   "load_took_s": {},
+   "reconnecting": 0,
+   "connected_events": 0,
+   "completed": 0
+  },
+  {
+   "label": "D50-after",
+   "start": 1791704837.219,
+   "end": 1791704934.279,
+   "minutes": 1.6176666657129923,
+   "byname": {
+    "n": 82,
+    "median": 0.0639,
+    "p95": 0.1478,
+    "max": 15.2099,
+    "failed": 0,
+    "over_500ms": 1,
+    "over_2s": 1,
+    "worst_minute_p95": 0.1518,
+    "slots": {
+     "n": 97,
+     "median": 0.0719,
+     "p95": 10.2099,
+     "max": 15.2099,
+     "over_500ms": 15,
+     "over_2s": 14,
+     "worst_minute_p95": 12.2099
+    }
+   },
+   "web": {
+    "n": 82,
+    "median": 0.0628,
+    "p95": 0.1629,
+    "max": 15.2967,
+    "failed": 0,
+    "over_500ms": 1,
+    "over_2s": 1,
+    "worst_minute_p95": 0.1749,
+    "slots": {
+     "n": 97,
+     "median": 0.0709,
+     "p95": 10.2967,
+     "max": 15.2967,
+     "over_500ms": 15,
+     "over_2s": 14,
+     "worst_minute_p95": 12.2967
+    }
+   },
+   "m1_cores": 0.7100046024165351,
+   "m2_cores": 0.12124026935745523,
+   "storm_extra_cpu_s": -31.990913996881403,
+   "storm_results": 0,
+   "storm_request_s_max": null,
+   "cluster_cores": 0.9337406060131989,
+   "m1_mem_mib": {
+    "start": 2001,
+    "peak": 2001,
+    "end": 1729,
+    "rss_end": 1719
+   },
+   "clients_cores": 1.5407810449036023,
+   "clients_rss_mib": {
+    "start": 8005,
+    "peak": 12448,
+    "end": 0
+   },
+   "engines": 50,
+   "live": 5,
+   "delay_live": {
+    "n": 0,
+    "median": null,
+    "p95": null,
+    "max": null
+   },
+   "delay_quiet": {
+    "n": 77,
+    "median": 33.39120006561279,
+    "p95": 56.02500009536743,
+    "max": 65.88499999046326
+   },
+   "rpm_live": {
+    "clients": 5,
+    "mean": 19.781578416772213,
+    "max": 21.636101393344607,
+    "paths": {
+     "/v1/objects/services": 11.25,
+     "/v1/objects/hosts": 2.1,
+     "/v1/status/IcingaApplication": 1.36,
+     "/v1/status/CIB": 0.74,
+     "/v1/objects/endpoints": 0.74,
+     "/v1": 0.62
+    }
+   },
+   "rpm_quiet": {
+    "clients": 45,
+    "mean": 4.121162170160877,
+    "max": 8.03626623181371,
+    "paths": {
+     "/v1/objects/services": 3.45,
+     "/v1/status/IcingaApplication": 0.1,
+     "/v1/status/CIB": 0.1,
+     "/v1/objects/endpoints": 0.1,
+     "/v1/status/ApiListener": 0.1,
+     "/v1/objects/checkercomponents": 0.1
+    }
+   },
+   "rpm_all": 284.36018974110056,
+   "streams_opened": 5,
+   "engine_cores_live": 0.03751188644086404,
+   "engine_cores_quiet": 0.03127447874984236,
+   "http_clients": 97,
+   "m1_relay_items": {
+    "max": 4,
+    "last": 0,
+    "mean": 0.2777777777777778
+   },
+   "m2_relay_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 1074.05,
+    "last": 1023.5333333333333,
+    "mean": 855.6944444444445
+   },
+   "m2_work_rate": {
+    "max": 345.25,
+    "last": 345.25
+   },
+   "m1_relay_rate": {
+    "max": 1364.7333333333333,
+    "last": 1329.05,
+    "mean": 1076.8018518518518
+   },
+   "m2_relay_rate": {
+    "max": 1873.3166666666666,
+    "last": 586.5
+   },
+   "pending_callbacks_max": 1,
+   "latency_avg": 0.10862472319959482,
+   "status_answer_max": 0.6163296699523926,
+   "icinga_connection_timeouts": 2,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": 269,
+   "loads": {},
+   "reconciles": 0,
+   "reconciles_found": 0,
+   "reconcile_found_objects": 0,
+   "load_took_s": {},
+   "reconnecting": 0,
+   "connected_events": 0,
+   "completed": 0
+  }
+ ],
+ "starts": [
+  {
+   "client": 0,
+   "start": 1791700941.983,
+   "mode": "live user",
+   "connected": 1791700945.373,
+   "complete": 1791700945.428
+  },
+  {
+   "client": 2,
+   "start": 1791701548.013,
+   "mode": "quiet background",
+   "connected": 1791701624.677,
+   "complete": 1791701624.772
+  },
+  {
+   "client": 3,
+   "start": 1791701548.014,
+   "mode": "quiet background",
+   "connected": 1791701574.05,
+   "complete": 1791701574.099
+  },
+  {
+   "client": 4,
+   "start": 1791701548.02,
+   "mode": "quiet background",
+   "connected": 1791701566.161,
+   "complete": 1791701566.204
+  },
+  {
+   "client": 5,
+   "start": 1791701548.021,
+   "mode": "quiet background",
+   "connected": 1791701612.541,
+   "complete": 1791701612.645
+  },
+  {
+   "client": 6,
+   "start": 1791701548.023,
+   "mode": "quiet background",
+   "connected": 1791701597.042,
+   "complete": 1791701597.078
+  },
+  {
+   "client": 7,
+   "start": 1791701548.024,
+   "mode": "quiet background",
+   "connected": 1791701595.565,
+   "complete": 1791701595.631
+  },
+  {
+   "client": 8,
+   "start": 1791701548.026,
+   "mode": "quiet background",
+   "connected": 1791701622.429,
+   "complete": 1791701622.602
+  },
+  {
+   "client": 9,
+   "start": 1791701548.028,
+   "mode": "quiet background",
+   "connected": 1791701561.32,
+   "complete": 1791701561.358
+  },
+  {
+   "client": 1,
+   "start": 1791701548.03,
+   "mode": "live user",
+   "connected": 1791701551.837,
+   "complete": 1791701551.917
+  },
+  {
+   "client": 11,
+   "start": 1791702228.273,
+   "mode": "quiet background",
+   "connected": 1791702238.576,
+   "complete": 1791702238.626
+  },
+  {
+   "client": 12,
+   "start": 1791702228.275,
+   "mode": "quiet background",
+   "connected": 1791702251.474,
+   "complete": 1791702251.584
+  },
+  {
+   "client": 13,
+   "start": 1791702228.276,
+   "mode": "quiet background",
+   "connected": 1791702310.465,
+   "complete": 1791702310.55
+  },
+  {
+   "client": 14,
+   "start": 1791702228.277,
+   "mode": "quiet background",
+   "connected": 1791702251.577,
+   "complete": 1791702251.681
+  },
+  {
+   "client": 15,
+   "start": 1791702228.278,
+   "mode": "quiet background",
+   "connected": 1791702237.224,
+   "complete": 1791702237.33
+  },
+  {
+   "client": 16,
+   "start": 1791702228.28,
+   "mode": "quiet background",
+   "connected": 1791702308.609,
+   "complete": 1791702308.776
+  },
+  {
+   "client": 17,
+   "start": 1791702228.281,
+   "mode": "quiet background",
+   "connected": 1791702303.161,
+   "complete": 1791702303.246
+  },
+  {
+   "client": 18,
+   "start": 1791702228.282,
+   "mode": "quiet background",
+   "connected": 1791702282.749,
+   "complete": 1791702282.81
+  },
+  {
+   "client": 19,
+   "start": 1791702228.283,
+   "mode": "quiet background",
+   "connected": 1791702240.822,
+   "complete": 1791702240.864
+  },
+  {
+   "client": 20,
+   "start": 1791702228.285,
+   "mode": "quiet background",
+   "connected": 1791702293.029,
+   "complete": 1791702293.117
+  },
+  {
+   "client": 21,
+   "start": 1791702228.288,
+   "mode": "quiet background",
+   "connected": 1791702243.413,
+   "complete": 1791702243.497
+  },
+  {
+   "client": 22,
+   "start": 1791702228.289,
+   "mode": "quiet background",
+   "connected": 1791702253.68,
+   "complete": 1791702253.703
+  },
+  {
+   "client": 23,
+   "start": 1791702228.291,
+   "mode": "quiet background",
+   "connected": 1791702250.519,
+   "complete": 1791702250.615
+  },
+  {
+   "client": 24,
+   "start": 1791702228.293,
+   "mode": "quiet background",
+   "connected": 1791702299.4,
+   "complete": 1791702299.623
+  },
+  {
+   "client": 10,
+   "start": 1791702228.295,
+   "mode": "live user",
+   "connected": 1791702232.416,
+   "complete": 1791702232.503
+  },
+  {
+   "client": 27,
+   "start": 1791702912.616,
+   "mode": "quiet background",
+   "connected": 1791702993.603,
+   "complete": 1791702993.698
+  },
+  {
+   "client": 28,
+   "start": 1791702912.617,
+   "mode": "quiet background",
+   "connected": 1791702984.245,
+   "complete": 1791702984.245
+  },
+  {
+   "client": 29,
+   "start": 1791702912.619,
+   "mode": "quiet background",
+   "connected": 1791702944.981,
+   "complete": 1791702945.081
+  },
+  {
+   "client": 30,
+   "start": 1791702912.62,
+   "mode": "quiet background",
+   "connected": 1791702939.283,
+   "complete": 1791702939.43
+  },
+  {
+   "client": 31,
+   "start": 1791702912.621,
+   "mode": "quiet background",
+   "connected": 1791702977.728,
+   "complete": 1791702977.814
+  },
+  {
+   "client": 32,
+   "start": 1791702912.624,
+   "mode": "quiet background",
+   "connected": 1791703005.23,
+   "complete": 1791703005.23
+  },
+  {
+   "client": 33,
+   "start": 1791702912.626,
+   "mode": "quiet background",
+   "connected": 1791702990.621,
+   "complete": 1791702990.761
+  },
+  {
+   "client": 34,
+   "start": 1791702912.629,
+   "mode": "quiet background",
+   "connected": 1791703005.196,
+   "complete": 1791703005.196
+  },
+  {
+   "client": 35,
+   "start": 1791702912.632,
+   "mode": "quiet background",
+   "connected": 1791702937.951,
+   "complete": 1791702938.049
+  },
+  {
+   "client": 36,
+   "start": 1791702912.635,
+   "mode": "quiet background",
+   "connected": 1791702934.534,
+   "complete": 1791702934.769
+  },
+  {
+   "client": 37,
+   "start": 1791702912.641,
+   "mode": "quiet background",
+   "connected": 1791702982.033,
+   "complete": 1791702982.254
+  },
+  {
+   "client": 38,
+   "start": 1791702912.645,
+   "mode": "quiet background",
+   "connected": 1791702938.74,
+   "complete": 1791702938.833
+  },
+  {
+   "client": 39,
+   "start": 1791702912.646,
+   "mode": "quiet background",
+   "connected": 1791702971.349,
+   "complete": 1791702971.414
+  },
+  {
+   "client": 40,
+   "start": 1791702912.648,
+   "mode": "quiet background",
+   "connected": 1791702947.648,
+   "complete": 1791702947.707
+  },
+  {
+   "client": 41,
+   "start": 1791702912.652,
+   "mode": "quiet background",
+   "connected": 1791702979.821,
+   "complete": 1791702979.991
+  },
+  {
+   "client": 42,
+   "start": 1791702912.655,
+   "mode": "quiet background",
+   "connected": 1791703005.206,
+   "complete": 1791703005.206
+  },
+  {
+   "client": 43,
+   "start": 1791702912.658,
+   "mode": "quiet background",
+   "connected": 1791702980.521,
+   "complete": 1791702980.638
+  },
+  {
+   "client": 44,
+   "start": 1791702912.663,
+   "mode": "quiet background",
+   "connected": 1791702992.917,
+   "complete": 1791702992.941
+  },
+  {
+   "client": 45,
+   "start": 1791702912.665,
+   "mode": "quiet background",
+   "connected": 1791702942.307,
+   "complete": 1791702942.418
+  },
+  {
+   "client": 46,
+   "start": 1791702912.669,
+   "mode": "quiet background",
+   "connected": 1791702999.886,
+   "complete": 1791702999.997
+  },
+  {
+   "client": 47,
+   "start": 1791702912.672,
+   "mode": "quiet background",
+   "connected": 1791702945.054,
+   "complete": 1791702945.12
+  },
+  {
+   "client": 48,
+   "start": 1791702912.676,
+   "mode": "quiet background",
+   "connected": 1791703005.165,
+   "complete": 1791703005.165
+  },
+  {
+   "client": 49,
+   "start": 1791702912.68,
+   "mode": "quiet background",
+   "connected": 1791702955.769,
+   "complete": 1791702955.958
+  },
+  {
+   "client": 25,
+   "start": 1791702912.683,
+   "mode": "live user",
+   "connected": 1791702918.96,
+   "complete": 1791702919.011
+  },
+  {
+   "client": 26,
+   "start": 1791702912.687,
+   "mode": "live user",
+   "connected": 1791702918.636,
+   "complete": 1791702918.763
+  }
+ ],
+ "reconciles_total": 19,
+ "reconciles_found_total": 13,
+ "loads_total": {
+  "First": 50,
+  "Reconcile": 19
+ },
+ "found_by_kind": {
+  "First": 36,
+  "Reconcile": 1322
+ },
+ "events": []
+}

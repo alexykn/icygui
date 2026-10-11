@@ -5,7 +5,7 @@
 use std::fmt::Display;
 use std::time::Duration;
 
-use chrono::{DateTime, Local, TimeZone};
+use chrono::{DateTime, Datelike as _, Local, TimeZone};
 use ic_model::{
     CheckInfo, CheckableState, HostState, ServiceState, StateType, Timestamp, format_compact,
     format_two_units,
@@ -25,6 +25,41 @@ pub(crate) fn since(at: Timestamp, now: Timestamp) -> String {
 /// state since the first check).
 pub(crate) fn time_in_state(check: &CheckInfo, now: Timestamp) -> String {
     since(ic_core::snapshot::state_since(check), now)
+}
+
+/// Since when the object has had its state, as a list's clock time
+/// ([`list_clock`] of [`ic_core::snapshot::state_since`]). Empty when the
+/// state never changed (pending objects).
+pub(crate) fn state_clock(check: &CheckInfo, now: Timestamp) -> String {
+    ic_core::snapshot::state_since(check)
+        .non_zero()
+        .map(|at| list_clock(at, now))
+        .unwrap_or_default()
+}
+
+/// A clock time short enough for a list's time slot (six characters at
+/// most): `13:58` on the same day as `now`, `Oct 3` on another day of the
+/// same year, the year (`2025`) before that.
+pub(crate) fn list_clock(at: Timestamp, now: Timestamp) -> String {
+    list_clock_in(at, now, &Local)
+}
+
+/// [`list_clock`] in time zone `zone`.
+pub(crate) fn list_clock_in<Tz>(at: Timestamp, now: Timestamp, zone: &Tz) -> String
+where
+    Tz: TimeZone,
+    Tz::Offset: Display,
+{
+    let (Some(at), Some(now)) = (date_time(at, zone), date_time(now, zone)) else {
+        return "—".to_owned();
+    };
+    if at.date_naive() == now.date_naive() {
+        at.format("%H:%M").to_string()
+    } else if at.year() == now.year() {
+        at.format("%b %-d").to_string()
+    } else {
+        at.format("%Y").to_string()
+    }
 }
 
 /// How long ago `at` was: `12s ago`, or `never`.
@@ -149,7 +184,9 @@ pub(crate) fn expiry(not_after: Timestamp, now: Timestamp) -> (String, bool) {
     }
 }
 
-fn date_time<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<DateTime<Tz>> {
+/// `at` in time zone `zone`; `None` for timestamps far outside any
+/// real date.
+pub(crate) fn date_time<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<DateTime<Tz>> {
     let seconds = at.as_unix_seconds().floor();
     // Icinga's timestamps are well inside i64's range; anything else is
     // garbage and shows as unknown.
@@ -162,6 +199,26 @@ fn date_time<Tz: TimeZone>(at: Timestamp, zone: &Tz) -> Option<DateTime<Tz>> {
     )]
     let whole = seconds as i64;
     Some(DateTime::from_timestamp(whole, 0)?.with_timezone(zone))
+}
+
+#[cfg(test)]
+mod date_time_tests {
+    use chrono::{Timelike, Utc};
+
+    use super::*;
+
+    /// One conversion, rounding down to the second: a time just before a
+    /// minute or a day ends belongs to that minute or day, wherever it is
+    /// shown (the notification centre once rounded to milliseconds and
+    /// moved 23:59:59.9996 into the next day).
+    #[test]
+    fn times_round_down_to_the_second() {
+        let just_before_midnight = Timestamp::from_unix_seconds(86_399.999_6);
+        let time = date_time(just_before_midnight, &Utc).unwrap();
+        assert_eq!((time.hour(), time.minute(), time.second()), (23, 59, 59));
+        assert_eq!(time.date_naive().to_string(), "1970-01-01");
+        assert!(date_time(Timestamp::from_unix_seconds(1e18), &Utc).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -278,5 +335,26 @@ mod tests {
             "—",
             "garbage is unknown"
         );
+    }
+
+    #[test]
+    fn list_clocks_fit_the_time_slot() {
+        let zone = FixedOffset::east_opt(2 * 3600).unwrap();
+        let now = at(NOW);
+        assert_eq!(list_clock_in(at(NOW - 34. * 60.), now, &zone), "15:39");
+        assert_eq!(list_clock_in(at(NOW - 3. * 86_400.), now, &zone), "Sep 18");
+        assert_eq!(list_clock_in(at(NOW - 400. * 86_400.), now, &zone), "2025");
+        for days in [0., 1., 20., 200., 4000.] {
+            let text = list_clock_in(at(NOW - days * 86_400.), now, &zone);
+            assert!(text.chars().count() <= 6, "{text}");
+        }
+        assert_eq!(list_clock_in(at(f64::MAX), now, &zone), "—");
+    }
+
+    #[test]
+    fn state_clocks_are_empty_for_objects_that_never_changed() {
+        let check = CheckInfo::default();
+        assert_eq!(state_clock(&check, at(NOW)), "");
+        assert_eq!(time_in_state(&check, at(NOW)), "");
     }
 }

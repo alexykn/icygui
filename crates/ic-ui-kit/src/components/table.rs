@@ -2,9 +2,10 @@
 
 use std::fmt;
 
+use crate::px;
 use gpui::{
     AnyElement, App, IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 use ic_model::{Perfdata, PerfdataStatus, Threshold, format_number};
 

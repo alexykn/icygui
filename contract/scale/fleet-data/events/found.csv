@@ -1,0 +1,3 @@
+t,client,object,from,to,began_s_ago,acknowledged,downtime_depth
+1791705709.714,1,storage-1999.prod.example.com!smart,Service(Ok),Some(Service(Ok)),2.8129310607910156,(false; Some(false)),(1; Some(1))
+1791705808.638,0,storage-1999.prod.example.com!smart,Service(Ok),Some(Service(Ok)),7.73421835899353,(false; Some(false)),(1; Some(1))

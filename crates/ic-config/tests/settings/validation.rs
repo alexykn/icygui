@@ -473,13 +473,74 @@ until = nan
 #[test]
 fn host_views_cannot_group_by_service_group() {
     let mut config = full_config();
-    let view = &mut config.environments[0].groups[1].dashboards[1].view;
+    let view = &mut config.environments[0].groups[1].dashboards[1].views[0];
     assert_eq!(view.object_kind, ObjectKind::Hosts);
     view.group_by = GroupBy::ServiceGroup;
     assert_eq!(
         issues(&config),
         [
-            "environments[0].groups[1].dashboards[1].view.group_by: hosts can't be grouped by service group"
+            "environments[0].groups[1].dashboards[1].views[0].group_by: hosts can't be grouped by service group"
+        ]
+    );
+}
+
+#[test]
+fn dashboards_need_views_with_unique_ids() {
+    let mut config = full_config();
+    let databases = &mut config.environments[0].groups[1].dashboards;
+    databases[0].views.clear();
+    databases[3].views[1].id = databases[3].views[0].id.clone();
+    databases[3].views[2].id = " ".to_owned();
+    let path = "environments[0].groups[1].dashboards";
+    let first = databases[3].views[0].id.clone();
+    assert_eq!(
+        issues(&config),
+        [
+            format!("{path}[0].views: must list at least one view"),
+            format!("{path}[3].views[1].id: `{first}` is already used by {path}[3].views[0]"),
+            format!("{path}[3].views[2].id: must not be empty"),
+        ]
+    );
+    // Ids repeat freely across dashboards; at most MAX_VIEWS per dashboard.
+    let mut config = full_config();
+    let dashboards = &mut config.environments[0].groups[1].dashboards;
+    dashboards[1].views[0].id = dashboards[0].views[0].id.clone();
+    assert_eq!(issues(&config), Vec::<String>::new());
+    let dashboards = &mut config.environments[0].groups[1].dashboards;
+    let view = dashboards[3].views[1].clone();
+    dashboards[3].views = (0..=ic_config::MAX_VIEWS)
+        .map(|index| View {
+            id: format!("v{index}"),
+            ..view.clone()
+        })
+        .collect();
+    assert_eq!(
+        issues(&config),
+        [format!(
+            "environments[0].groups[1].dashboards[3].views: must list at most {} views",
+            ic_config::MAX_VIEWS
+        )]
+    );
+}
+
+#[test]
+fn grids_tiles_and_streams_need_usable_options() {
+    let mut config = full_config();
+    let views = &mut config.environments[0].groups[1].dashboards[3].views;
+    // The tiles: an empty host group pattern; the grid: no custom var.
+    views[0].groups.host_groups.push(" ".to_owned());
+    views[2].groups.custom_var = "host.vars.".to_owned();
+    views[3].stream.lines = 0;
+    // A list ignores its grid and tiles options.
+    views[1].groups.custom_var.clear();
+    views[1].groups.by = ic_config::GroupSource::CustomVar;
+    let path = "environments[0].groups[1].dashboards[3].views";
+    assert_eq!(
+        issues(&config),
+        [
+            format!("{path}[0].groups.host_groups[2]: must not be empty"),
+            format!("{path}[2].groups.custom_var: must name a host custom variable to group by"),
+            format!("{path}[3].stream.lines: must be between 1 and 200"),
         ]
     );
 }

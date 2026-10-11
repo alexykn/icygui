@@ -1,0 +1,357 @@
+t client level target message fields
+1791700941.983 -1 INFO ic_core::handle engine started environment=fleet-00
+1791700942.036 0 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791700942.036 0 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791701548.013 -1 INFO ic_core::handle engine started environment=fleet-02
+1791701548.013 2 INFO ic_core::engine::quiet quiet mode environment=fleet-02 quiet=true
+1791701548.013 -1 INFO ic_core::handle engine started environment=fleet-03
+1791701548.014 3 INFO ic_core::engine::quiet quiet mode environment=fleet-03 quiet=true
+1791701548.020 -1 INFO ic_core::handle engine started environment=fleet-04
+1791701548.020 -1 INFO ic_core::engine::quiet quiet mode environment=fleet-04 quiet=true
+1791701548.021 -1 INFO ic_core::handle engine started environment=fleet-05
+1791701548.021 5 INFO ic_core::engine::quiet quiet mode environment=fleet-05 quiet=true
+1791701548.022 -1 INFO ic_core::handle engine started environment=fleet-06
+1791701548.022 6 INFO ic_core::engine::quiet quiet mode environment=fleet-06 quiet=true
+1791701548.024 -1 INFO ic_core::handle engine started environment=fleet-07
+1791701548.025 7 INFO ic_core::engine::quiet quiet mode environment=fleet-07 quiet=true
+1791701548.026 -1 INFO ic_core::handle engine started environment=fleet-08
+1791701548.026 8 INFO ic_core::engine::quiet quiet mode environment=fleet-08 quiet=true
+1791701548.028 -1 INFO ic_core::handle engine started environment=fleet-09
+1791701548.029 9 INFO ic_core::engine::quiet quiet mode environment=fleet-09 quiet=true
+1791701548.029 -1 INFO ic_core::handle engine started environment=fleet-01
+1791701548.081 3 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791701548.081 3 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791701548.095 4 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791701548.095 4 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791701548.101 8 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791701548.101 8 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791701548.113 2 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791701548.113 2 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791701548.113 6 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791701548.113 6 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791701548.118 1 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791701548.118 1 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791701548.118 7 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791701548.118 7 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791701548.119 3 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=22.35383465s
+1791701548.119 9 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791701548.119 9 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791701548.160 4 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=14.411755016s
+1791701548.160 5 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791701548.160 5 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791701548.197 8 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=70.475803847s
+1791701548.243 2 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=72.503631474s
+1791701548.248 6 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=45.203640383s
+1791701548.250 9 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=9.758619932s
+1791701548.256 5 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=60.813920491s
+1791701548.279 7 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=43.749398906s
+1791701561.281 9 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=4
+1791701561.300 9 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791701566.129 4 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=4
+1791701566.146 4 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791701574.020 3 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=4
+1791701574.035 3 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791701595.533 7 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791701595.557 7 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791701597.000 6 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791701597.020 6 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791701612.501 5 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=6
+1791701612.517 5 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791701622.382 8 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=6
+1791701622.410 8 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791701624.637 2 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=6
+1791701624.652 2 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702228.273 -1 INFO ic_core::handle engine started environment=fleet-11
+1791702228.274 11 INFO ic_core::engine::quiet quiet mode environment=fleet-11 quiet=true
+1791702228.274 -1 INFO ic_core::handle engine started environment=fleet-12
+1791702228.274 12 INFO ic_core::engine::quiet quiet mode environment=fleet-12 quiet=true
+1791702228.276 -1 INFO ic_core::handle engine started environment=fleet-13
+1791702228.277 -1 INFO ic_core::handle engine started environment=fleet-14
+1791702228.277 13 INFO ic_core::engine::quiet quiet mode environment=fleet-13 quiet=true
+1791702228.277 14 INFO ic_core::engine::quiet quiet mode environment=fleet-14 quiet=true
+1791702228.278 -1 INFO ic_core::handle engine started environment=fleet-15
+1791702228.279 15 INFO ic_core::engine::quiet quiet mode environment=fleet-15 quiet=true
+1791702228.279 -1 INFO ic_core::handle engine started environment=fleet-16
+1791702228.280 16 INFO ic_core::engine::quiet quiet mode environment=fleet-16 quiet=true
+1791702228.281 -1 INFO ic_core::handle engine started environment=fleet-17
+1791702228.281 17 INFO ic_core::engine::quiet quiet mode environment=fleet-17 quiet=true
+1791702228.282 -1 INFO ic_core::handle engine started environment=fleet-18
+1791702228.282 18 INFO ic_core::engine::quiet quiet mode environment=fleet-18 quiet=true
+1791702228.283 -1 INFO ic_core::handle engine started environment=fleet-19
+1791702228.284 19 INFO ic_core::engine::quiet quiet mode environment=fleet-19 quiet=true
+1791702228.285 -1 INFO ic_core::handle engine started environment=fleet-20
+1791702228.285 20 INFO ic_core::engine::quiet quiet mode environment=fleet-20 quiet=true
+1791702228.287 -1 INFO ic_core::handle engine started environment=fleet-21
+1791702228.289 -1 INFO ic_core::handle engine started environment=fleet-22
+1791702228.290 22 INFO ic_core::engine::quiet quiet mode environment=fleet-22 quiet=true
+1791702228.288 21 INFO ic_core::engine::quiet quiet mode environment=fleet-21 quiet=true
+1791702228.290 -1 INFO ic_core::handle engine started environment=fleet-23
+1791702228.291 23 INFO ic_core::engine::quiet quiet mode environment=fleet-23 quiet=true
+1791702228.293 -1 INFO ic_core::handle engine started environment=fleet-24
+1791702228.293 24 INFO ic_core::engine::quiet quiet mode environment=fleet-24 quiet=true
+1791702228.295 -1 INFO ic_core::handle engine started environment=fleet-10
+1791702228.348 11 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.348 11 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.360 16 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.360 16 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.362 12 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.362 12 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.367 13 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.367 13 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.368 19 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.368 19 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.372 15 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.372 15 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.373 20 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.373 20 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.373 14 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.373 14 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.375 22 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.375 22 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.383 18 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.383 18 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.435 11 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=6.03760611s
+1791702228.485 16 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=74.151527972s
+1791702228.563 20 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=60.570050868s
+1791702228.564 14 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=16.751786633s
+1791702228.564 13 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=77.296518577s
+1791702228.564 21 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.564 21 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.565 17 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.565 17 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.570 23 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.570 23 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.572 10 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.572 10 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791702228.586 22 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=20.800300051s
+1791702228.691 15 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=4.697882409s
+1791702228.691 18 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=50.392273499s
+1791702228.693 24 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702228.693 24 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702228.733 17 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=70.646223203s
+1791702228.768 12 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=15.90243288s
+1791702228.798 19 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=7.95494086s
+1791702228.799 21 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=10.564051666s
+1791702228.841 23 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=16.10864786s
+1791702228.847 24 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=65.26811508s
+1791702237.189 15 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791702237.213 15 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702238.527 11 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791702238.546 11 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702240.767 19 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791702240.785 19 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702243.376 21 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791702243.393 21 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702250.445 23 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791702250.472 23 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702251.437 12 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791702251.456 12 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702251.521 14 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791702251.547 14 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702253.605 22 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791702253.633 22 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702282.706 18 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791702282.733 18 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702292.987 20 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791702293.007 20 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702299.341 24 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791702299.362 24 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702303.003 17 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791702303.034 17 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702308.545 16 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791702308.563 16 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702310.395 13 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791702310.424 13 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702912.616 -1 INFO ic_core::handle engine started environment=fleet-27
+1791702912.616 27 INFO ic_core::engine::quiet quiet mode environment=fleet-27 quiet=true
+1791702912.617 -1 INFO ic_core::handle engine started environment=fleet-28
+1791702912.617 28 INFO ic_core::engine::quiet quiet mode environment=fleet-28 quiet=true
+1791702912.618 -1 INFO ic_core::handle engine started environment=fleet-29
+1791702912.619 29 INFO ic_core::engine::quiet quiet mode environment=fleet-29 quiet=true
+1791702912.620 -1 INFO ic_core::handle engine started environment=fleet-30
+1791702912.620 30 INFO ic_core::engine::quiet quiet mode environment=fleet-30 quiet=true
+1791702912.621 -1 INFO ic_core::handle engine started environment=fleet-31
+1791702912.621 31 INFO ic_core::engine::quiet quiet mode environment=fleet-31 quiet=true
+1791702912.623 -1 INFO ic_core::handle engine started environment=fleet-32
+1791702912.625 32 INFO ic_core::engine::quiet quiet mode environment=fleet-32 quiet=true
+1791702912.626 -1 INFO ic_core::handle engine started environment=fleet-33
+1791702912.626 33 INFO ic_core::engine::quiet quiet mode environment=fleet-33 quiet=true
+1791702912.629 -1 INFO ic_core::handle engine started environment=fleet-34
+1791702912.629 34 INFO ic_core::engine::quiet quiet mode environment=fleet-34 quiet=true
+1791702912.631 -1 INFO ic_core::handle engine started environment=fleet-35
+1791702912.632 35 INFO ic_core::engine::quiet quiet mode environment=fleet-35 quiet=true
+1791702912.634 -1 INFO ic_core::handle engine started environment=fleet-36
+1791702912.636 36 INFO ic_core::engine::quiet quiet mode environment=fleet-36 quiet=true
+1791702912.639 -1 INFO ic_core::handle engine started environment=fleet-37
+1791702912.641 37 INFO ic_core::engine::quiet quiet mode environment=fleet-37 quiet=true
+1791702912.645 -1 INFO ic_core::handle engine started environment=fleet-38
+1791702912.646 38 INFO ic_core::engine::quiet quiet mode environment=fleet-38 quiet=true
+1791702912.646 -1 INFO ic_core::handle engine started environment=fleet-39
+1791702912.646 39 INFO ic_core::engine::quiet quiet mode environment=fleet-39 quiet=true
+1791702912.648 -1 INFO ic_core::handle engine started environment=fleet-40
+1791702912.650 40 INFO ic_core::engine::quiet quiet mode environment=fleet-40 quiet=true
+1791702912.651 -1 INFO ic_core::handle engine started environment=fleet-41
+1791702912.652 41 INFO ic_core::engine::quiet quiet mode environment=fleet-41 quiet=true
+1791702912.655 -1 INFO ic_core::handle engine started environment=fleet-42
+1791702912.655 42 INFO ic_core::engine::quiet quiet mode environment=fleet-42 quiet=true
+1791702912.658 -1 INFO ic_core::handle engine started environment=fleet-43
+1791702912.658 43 INFO ic_core::engine::quiet quiet mode environment=fleet-43 quiet=true
+1791702912.661 -1 INFO ic_core::handle engine started environment=fleet-44
+1791702912.664 44 INFO ic_core::engine::quiet quiet mode environment=fleet-44 quiet=true
+1791702912.665 -1 INFO ic_core::handle engine started environment=fleet-45
+1791702912.666 45 INFO ic_core::engine::quiet quiet mode environment=fleet-45 quiet=true
+1791702912.669 -1 INFO ic_core::handle engine started environment=fleet-46
+1791702912.671 46 INFO ic_core::engine::quiet quiet mode environment=fleet-46 quiet=true
+1791702912.671 -1 INFO ic_core::handle engine started environment=fleet-47
+1791702912.671 47 INFO ic_core::engine::quiet quiet mode environment=fleet-47 quiet=true
+1791702912.676 -1 INFO ic_core::handle engine started environment=fleet-48
+1791702912.678 48 INFO ic_core::engine::quiet quiet mode environment=fleet-48 quiet=true
+1791702912.679 -1 INFO ic_core::handle engine started environment=fleet-49
+1791702912.680 49 INFO ic_core::engine::quiet quiet mode environment=fleet-49 quiet=true
+1791702912.682 -1 INFO ic_core::handle engine started environment=fleet-25
+1791702912.685 -1 INFO ic_core::handle engine started environment=fleet-26
+1791702912.738 29 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.738 29 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.738 31 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.738 31 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.740 33 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.740 33 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.748 28 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.748 28 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.748 30 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.748 30 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.770 37 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.770 37 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.770 27 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.771 27 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.771 38 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.771 38 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.784 39 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.784 39 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.785 40 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.785 40 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.804 34 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.804 34 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.804 41 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.804 41 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.804 32 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.805 32 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.805 44 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.805 44 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.807 35 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.807 35 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.806 36 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702912.807 36 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702912.890 33 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=73.743605859s
+1791702912.906 29 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=26.466962264s
+1791702912.915 31 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=60.203111242s
+1791702912.937 28 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=67.421677266s
+1791702913.055 35 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=16.785118353s
+1791702913.071 34 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=83.259623715s
+1791702913.077 30 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=17.704984227s
+1791702913.107 44 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=74.718143811s
+1791702913.108 25 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702913.108 25 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791702913.128 37 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=64.582727316s
+1791702913.128 43 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702913.131 43 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702913.132 39 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=54.329049994s
+1791702913.134 36 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=15.461551279s
+1791702913.134 48 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702913.141 45 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702913.141 49 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702913.141 49 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702913.141 42 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702913.141 26 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702913.141 46 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702913.140 48 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702913.151 45 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702913.151 26 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791702913.152 46 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702913.152 42 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702913.153 47 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791702913.153 47 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791702913.203 32 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=83.477108207s
+1791702913.223 41 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=61.408274716s
+1791702913.223 40 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=30.211229711s
+1791702913.293 38 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=17.68103641s
+1791702913.322 27 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=75.847517029s
+1791702913.365 46 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=81.380329362s
+1791702913.369 48 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=82.112433006s
+1791702913.371 45 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=21.07121823s
+1791702913.422 43 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=61.652506464s
+1791702913.551 42 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=85.695345935s
+1791702913.552 49 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=38.812220648s
+1791702913.574 47 INFO ic_core::engine::quiet started in the background; the first load waits services=Some(32933) delay=25.636157891s
+1791702918.869 25 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791702934.104 36 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791702934.312 36 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702937.905 35 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=6
+1791702937.945 35 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702938.676 38 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=6
+1791702938.695 38 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702939.228 30 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=6
+1791702939.249 30 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702942.244 45 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=7
+1791702942.265 45 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702944.949 29 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=7
+1791702944.969 29 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702944.997 47 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=7
+1791702945.033 47 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702947.600 40 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=8
+1791702947.622 40 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702955.715 49 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=9
+1791702955.740 49 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702971.277 39 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=11
+1791702971.300 39 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702977.661 31 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=11
+1791702977.686 31 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702979.758 41 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=11
+1791702979.779 41 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702980.476 43 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=11
+1791702980.496 43 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702981.979 37 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=11
+1791702981.997 37 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702983.998 28 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=11
+1791702984.093 28 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702990.575 33 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=11
+1791702990.610 33 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702992.830 44 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=12
+1791702992.858 44 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702993.566 27 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=12
+1791702993.587 27 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791702999.825 46 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=12
+1791702999.848 46 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791703003.420 48 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=12
+1791703003.565 48 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791703004.716 42 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=12
+1791703004.739 42 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791703004.761 34 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=12
+1791703004.772 32 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=12
+1791703004.811 34 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791703004.841 32 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791704838.454 0 INFO ic_core::engine::heartbeat Icinga ran the heartbeat, but the event stream didn't bring it; reconnecting environment=fleet-00 object=icygui-hb-master!beat-master-02
+1791704838.474 0 INFO ic_core::engine connection lost; retrying error=the event stream lost a heartbeat's result; reconnecting delay=500.678157ms
+1791704839.286 0 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791704839.286 0 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791704840.670 1 INFO ic_core::engine::heartbeat Icinga ran the heartbeat, but the event stream didn't bring it; reconnecting environment=fleet-01 object=icygui-hb-master!beat-master-02
+1791704840.671 1 INFO ic_core::engine connection lost; retrying error=the event stream lost a heartbeat's result; reconnecting delay=807.191531ms
+1791704841.119 25 INFO ic_core::engine::heartbeat Icinga ran the heartbeat, but the event stream didn't bring it; reconnecting environment=fleet-25 object=icygui-hb-master!beat-master-02
+1791704841.415 25 INFO ic_core::engine connection lost; retrying error=the event stream lost a heartbeat's result; reconnecting delay=771.001939ms
+1791704841.658 1 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791704841.680 1 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791704842.667 25 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791704842.866 25 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791704843.434 10 INFO ic_core::engine::heartbeat Icinga ran the heartbeat, but the event stream didn't bring it; reconnecting environment=fleet-10 object=icygui-hb-master!beat-master-02
+1791704843.500 26 INFO ic_core::engine::heartbeat Icinga ran the heartbeat, but the event stream didn't bring it; reconnecting environment=fleet-26 object=icygui-hb-master!beat-master-02
+1791704843.532 10 INFO ic_core::engine connection lost; retrying error=the event stream lost a heartbeat's result; reconnecting delay=784.14228ms
+1791704843.744 26 INFO ic_core::engine connection lost; retrying error=the event stream lost a heartbeat's result; reconnecting delay=562.551715ms
+1791704844.470 26 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791704844.470 26 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791704844.492 10 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791704844.497 10 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791704875.169 0 WARN ic_core::engine::trouble no live data environment=fleet-00 since=07:46 reason=heartbeat master-02 not delivered
+1791704878.434 1 WARN ic_core::engine::trouble no live data environment=fleet-01 since=07:46 reason=heartbeat master-02 not delivered
+1791704878.820 25 WARN ic_core::engine::trouble no live data environment=fleet-25 since=07:46 reason=heartbeat master-02 not delivered
+1791704880.841 26 WARN ic_core::engine::trouble no live data environment=fleet-26 since=07:46 reason=heartbeat master-02 not delivered
+1791704882.606 10 WARN ic_core::engine::trouble no live data environment=fleet-10 since=07:46 reason=heartbeat master-02 not delivered

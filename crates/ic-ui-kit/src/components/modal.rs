@@ -3,11 +3,11 @@
 
 use std::fmt;
 
+use crate::px;
 use gpui::{
     AnyElement, App, BoxShadow, ElementId, InteractiveElement as _, IntoElement, MouseButton,
     MouseDownEvent, ParentElement as _, Pixels, RenderOnce, Role, ScrollHandle,
     StatefulInteractiveElement as _, Styled as _, Window, div, point, prelude::FluentBuilder as _,
-    px,
 };
 
 use crate::theme::ActiveTheme as _;

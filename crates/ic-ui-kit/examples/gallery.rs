@@ -7,14 +7,14 @@
 
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement as _,
-    Render, Styled as _, Window, WindowBounds, WindowOptions, div, px, size,
+    Render, Styled as _, Window, WindowBounds, WindowOptions, div, size,
 };
 use ic_model::{CheckableState, HostState, ServiceState, parse_perfdata};
 use ic_ui_kit::input::InputState;
 use ic_ui_kit::{
     ActiveTheme as _, Button, CircleSize, CodeBlock, Divider, DividerColor, Icon, IconButton,
     IconName, KvTable, PaneHeader, PerfdataTable, Root, SectionLabel, StateCircle, StateDot,
-    SubTabs, SummaryBar, SummaryItem, TextField, Tooltip,
+    SubTabs, SummaryBar, SummaryItem, TextField, Tooltip, px,
 };
 
 const CRITICAL: CheckableState = CheckableState::Service(ServiceState::Critical);
@@ -311,7 +311,7 @@ fn states(theme: &ic_ui_kit::Theme) -> impl IntoElement + use<> {
                 .child(StateDot::new(UNKNOWN))
                 .child(StateDot::new(WARNING))
                 .child(StateDot::new(OK))
-                .child(StateDot::with_color(theme.states.pending)),
+                .child(StateDot::with_color(theme.states.fill.pending)),
         )
 }
 
@@ -323,7 +323,12 @@ fn main() {
                 cx.quit();
                 return;
             }
-            let bounds = Bounds::centered(None, size(px(1400.), px(940.)), cx);
+            // `GALLERY_THEME=light` shows the light theme.
+            if std::env::var("GALLERY_THEME").is_ok_and(|theme| theme == "light") {
+                ic_ui_kit::set_theme(ic_ui_kit::Theme::light(), cx);
+            }
+            #[expect(clippy::disallowed_methods, reason = "window geometry is real pixels")]
+            let bounds = Bounds::centered(None, size(gpui::px(1400.), gpui::px(940.)), cx);
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),

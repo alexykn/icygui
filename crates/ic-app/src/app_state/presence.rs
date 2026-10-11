@@ -45,6 +45,15 @@ impl EngineSlot {
     pub(crate) fn is_quiet(&self) -> bool {
         self.quiet
     }
+
+    /// Tells the engine whether the cluster health page shows its
+    /// environment, unless it was told so last (topic 06).
+    fn set_health(&mut self, watch: bool) {
+        if self.health != watch {
+            self.health = watch;
+            self.send(Command::WatchHealth(watch));
+        }
+    }
 }
 
 impl AppState {
@@ -105,6 +114,34 @@ impl AppState {
         }
         for slot in self.parked.values_mut() {
             slot.set_quiet(enabled);
+        }
+        self.announce_health();
+    }
+
+    /// The cluster health page came on screen (`true`) or went away: the
+    /// engine on screen asks for what only the page needs while it shows
+    /// (topic 06).
+    pub(crate) fn set_health_page(&mut self, shown: bool) {
+        if self.health_page != shown {
+            self.health_page = shown;
+            self.announce_health();
+        }
+    }
+
+    /// Whether the cluster health page is on screen.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn health_page_shown(&self) -> bool {
+        self.health_page
+    }
+
+    /// Tells every engine whether the cluster health page shows its
+    /// environment: only the one on screen, while the page shows and the
+    /// window isn't hidden (a hidden window asks for nothing more).
+    pub(super) fn announce_health(&mut self) {
+        let watch = self.health_page && !self.window_hidden;
+        self.engine.set_health(watch);
+        for slot in self.parked.values_mut() {
+            slot.set_health(false);
         }
     }
 

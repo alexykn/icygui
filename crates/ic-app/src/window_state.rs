@@ -1,5 +1,9 @@
 //! The main window's size and position between runs (BG-06): saved from
 //! the window's bounds, restored on a display that still exists.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "window geometry is real pixels, whatever the interface size"
+)]
 
 use gpui::{Bounds, Pixels, Size, WindowBounds, point, px, size};
 use ic_config::WindowState;

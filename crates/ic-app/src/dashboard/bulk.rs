@@ -6,12 +6,12 @@
 
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Styled as _, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Pixels, Styled as _, div, prelude::FluentBuilder as _,
 };
 use ic_model::ObjectKey;
 use ic_rules::DashboardRef;
 use ic_ui_kit::{
-    ActiveTheme as _, Button, GlyphButton, KeyHint, Link, Menu, MenuItem, Popover, Tooltip,
+    ActiveTheme as _, Button, GlyphButton, KeyHint, Link, Menu, MenuItem, Popover, Tooltip, px,
 };
 
 use super::DashboardView;
@@ -21,7 +21,10 @@ use crate::menu_state::down_position;
 use crate::operate::expression;
 
 /// The selection bar's height.
-pub(crate) const SELECTION_BAR_HEIGHT: Pixels = px(40.);
+pub(crate) const SELECTION_BAR_HEIGHT: f32 = 40.;
+
+/// The selection count's slot, in characters (`999 selected`).
+const COUNT_SLOT_CHARS: f32 = 12.;
 
 /// Below this list width the bar drops its key hints and shortens labels.
 const COMPACT_BELOW: f32 = 760.;
@@ -66,7 +69,11 @@ impl DashboardView {
         list_width: Pixels,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
-        let marked = self.lists.get(reference)?.selection.marked_keys();
+        let ui = self.pages.get(reference)?;
+        if ui.selection.marked_count() == 0 {
+            return None;
+        }
+        let marked = ui.selection.marked_in(ui.objects());
         if marked.is_empty() {
             return None;
         }
@@ -92,18 +99,44 @@ impl DashboardView {
                 .flex_none()
                 .items_center()
                 .gap(px(8.))
-                .h(SELECTION_BAR_HEIGHT)
+                .h(px(SELECTION_BAR_HEIGHT))
                 .px(theme.metrics.list_padding)
                 .border_t_1()
                 .border_color(colors.border_header)
                 .bg(colors.pane_background)
                 .text_size(theme.text.small)
                 .child(
+                    // A slot as wide as `999 selected`, so the buttons never
+                    // move when the count gains a digit.
                     div()
+                        .id("selection-count")
+                        .relative()
                         .flex_none()
                         .mr(px(4.))
-                        .text_color(colors.accent)
-                        .child(format!("{} selected", marked.len())),
+                        // Rounded up: the font's advance is a hair over 0.6em.
+                        .min_w(
+                            (theme.text.small * (COUNT_SLOT_CHARS * ic_ui_kit::CHAR_WIDTH)).ceil()
+                                + px(1.),
+                        )
+                        .text_color(colors.accent_text)
+                        .child(format!("{} selected", marked.len()))
+                        .map(|count| {
+                            // Where the slot ends (the buttons follow), for
+                            // tests.
+                            #[cfg(test)]
+                            let count = count.child({
+                                let probe = self.selection_buttons_x.clone();
+                                gpui::canvas(
+                                    move |bounds, _, _| probe.set(Some(bounds.right())),
+                                    |_, (), _, _| {},
+                                )
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                            });
+                            count
+                        }),
                 )
                 .children(buttons)
                 .child(self.selection_more(&marked, cx))
@@ -231,8 +264,8 @@ impl DashboardView {
     /// Unmarks every row.
     fn clear_marks(&mut self, cx: &mut Context<Self>) {
         if let Some(reference) = self.sync(cx)
-            && let Some(list) = self.lists.get_mut(&reference)
-            && list.selection.clear_marks()
+            && let Some(ui) = self.pages.get_mut(&reference)
+            && ui.selection.clear_marks()
         {
             cx.notify();
         }

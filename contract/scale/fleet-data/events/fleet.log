@@ -1,0 +1,43 @@
+
+running 1 test
+test fleet::fleet ... fleet: add 5 live user
+fleet: add 45 quiet background
+fleet: 50 engines, 12 connected, 5 live, 12 loaded, 24 marker results seen, rss 1765 MiB
+fleet: 50 engines, 27 connected, 5 live, 27 loaded, 403 marker results seen, rss 3592 MiB
+fleet: 50 engines, 45 connected, 5 live, 45 loaded, 1229 marker results seen, rss 5901 MiB
+fleet: mark E50
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 2043 marker results seen, rss 6075 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 2697 marker results seen, rss 6075 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 3344 marker results seen, rss 6076 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 3992 marker results seen, rss 6112 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 4596 marker results seen, rss 6113 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 5328 marker results seen, rss 6113 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 6017 marker results seen, rss 6155 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 6623 marker results seen, rss 6168 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 7156 marker results seen, rss 6169 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 7713 marker results seen, rss 6184 MiB
+fleet: mark D50
+fleet: mark D50-after
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 8421 marker results seen, rss 10087 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 9521 marker results seen, rss 10088 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 10259 marker results seen, rss 10088 MiB
+fleet: mode 45 live
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 10764 marker results seen, rss 10097 MiB
+fleet: mark A50-live
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 11172 marker results seen, rss 10097 MiB
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 11687 marker results seen, rss 10097 MiB
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 12049 marker results seen, rss 10097 MiB
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 12414 marker results seen, rss 10118 MiB
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 12849 marker results seen, rss 10118 MiB
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 13152 marker results seen, rss 10118 MiB
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 13665 marker results seen, rss 10138 MiB
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 13999 marker results seen, rss 10138 MiB
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 14519 marker results seen, rss 10138 MiB
+fleet: 50 engines, 50 connected, 50 live, 50 loaded, 14902 marker results seen, rss 10138 MiB
+fleet: mode 45 quiet
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 15575 marker results seen, rss 10138 MiB
+fleet: quit
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 936.57s
+

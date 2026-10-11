@@ -1,6 +1,7 @@
 //! One-pixel rules.
 
-use gpui::{App, Axis, Hsla, IntoElement, Pixels, RenderOnce, Styled as _, Window, div, px};
+use crate::px;
+use gpui::{App, Axis, Hsla, IntoElement, Pixels, RenderOnce, Styled as _, Window, div};
 
 use crate::theme::{ActiveTheme as _, Colors};
 

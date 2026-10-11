@@ -1,24 +1,28 @@
 //! What a dashboard row shows, computed from the snapshot for the rows on
 //! screen only. Pure, so it's tested without a window.
 
-use ic_config::{GroupBy, ObjectKind, View};
+use ic_config::{ListTimes, ObjectKind, View};
 use ic_core::snapshot::Snapshot;
 use ic_model::{
     CheckInfo, CheckableState, Comment, CommentKind, Host, HostState, ObjectKey, ServiceState,
     Timestamp,
 };
+use ic_ui_kit::ObjectMark;
 
-use crate::format;
+use crate::{downtimes, format};
 
 /// A host or service row: `● postgres-replication on db-prod-03`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ObjectRow {
     /// The state circle's colour.
     pub(crate) state: CheckableState,
-    /// Acknowledged, in downtime or behind a host problem: a hollow ring.
+    /// Counts as handled (acknowledged, behind a host problem, or in a
+    /// downtime in effect whatever the state): a hollow ring.
     pub(crate) handled: bool,
     /// Time in state under the circle (`14m`).
     pub(crate) since: String,
+    /// Since when, as a clock time (`13:58`), for *times in lists: clock*.
+    pub(crate) clock: String,
     /// Service or host display name.
     pub(crate) name: String,
     /// The host's display name, for services.
@@ -32,16 +36,15 @@ pub(crate) struct ObjectRow {
     pub(crate) late: Option<String>,
 }
 
-/// A group header (`group_by`).
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct GroupRow {
-    /// Host name or group display name.
-    pub(crate) label: String,
-    /// `2 problems`, `5 services`.
-    pub(crate) count: String,
-    /// When grouping by host: the host itself, so the header shows its
-    /// state and output.
-    pub(crate) host: Option<ObjectRow>,
+impl ObjectRow {
+    /// The time the row shows, as the settings ask: how long in this state
+    /// (`14m`) or since when (`13:58`).
+    pub(crate) fn time(&self, times: ListTimes) -> &str {
+        match times {
+            ListTimes::Relative => &self.since,
+            ListTimes::Clock => &self.clock,
+        }
+    }
 }
 
 /// The row for `key`; `None` if the snapshot doesn't have the object (the
@@ -56,26 +59,29 @@ pub(crate) fn object_row(
     match key {
         ObjectKey::Host { name } => {
             let host = snapshot.hosts.get(name)?;
+            let mark = ObjectMark::host(host);
             Some(ObjectRow {
-                state: CheckableState::Host(host.state),
-                handled: host.is_handled(),
+                state: mark.state,
+                handled: mark.hollow,
                 since: format::time_in_state(&host.check, now),
+                clock: format::state_clock(&host.check, now),
                 name: host.display_name.clone(),
                 host: None,
                 output: output(&host.check, CheckableState::Host(host.state)),
-                tag: tag(&host.check, comments, None),
+                tag: tag(snapshot, key, &host.check, comments, None, now),
                 late,
             })
         }
         ObjectKey::Service { key: service_key } => {
             let service = snapshot.services.get(service_key)?;
             let host = snapshot.host_of(service_key);
-            let host_problem = host.is_some_and(|host| host.is_problem());
-            let state = CheckableState::Service(service.state);
+            let mark = ObjectMark::service(service, host.map(AsRef::as_ref));
+            let state = mark.state;
             Some(ObjectRow {
                 state,
-                handled: service.is_handled(host_problem),
+                handled: mark.hollow,
                 since: format::time_in_state(&service.check, now),
+                clock: format::state_clock(&service.check, now),
                 name: service.display_name.clone(),
                 host: Some(host.map_or_else(
                     || service_key.host.to_string(),
@@ -83,9 +89,12 @@ pub(crate) fn object_row(
                 )),
                 output: output(&service.check, state),
                 tag: tag(
+                    snapshot,
+                    key,
                     &service.check,
                     comments,
                     host.map(AsRef::as_ref).filter(|_| service.is_problem()),
+                    now,
                 ),
                 late,
             })
@@ -104,24 +113,6 @@ pub(crate) fn late_label(snapshot: &Snapshot, key: &ObjectKey, now: Timestamp) -
     } else {
         format!("late {}", ic_model::format_compact(overdue))
     })
-}
-
-/// The header row for a group of `count` rows labelled `label`.
-pub(crate) fn group_row(
-    snapshot: &Snapshot,
-    view: &View,
-    label: &str,
-    count: usize,
-    now: Timestamp,
-) -> GroupRow {
-    let host = (view.group_by == GroupBy::Host)
-        .then(|| object_row(snapshot, &ObjectKey::host(label), now))
-        .flatten();
-    GroupRow {
-        label: label.to_owned(),
-        count: count_label(count, view),
-        host,
-    }
 }
 
 /// `1 problem`, `3 services`, `2 hosts`.
@@ -146,13 +137,20 @@ fn output(check: &CheckInfo, state: CheckableState) -> String {
     }
 }
 
-/// Why a problem is handled, or that it's flapping: `ack m.keller`,
-/// `downtime`, `host down`, `flapping`. `problem_host` is the host of a
-/// service in a problem state.
+/// Why the object is handled, or what's coming: `ack m.keller`, a
+/// downtime in effect with how long is left (`downtime 1h 48m`, `host
+/// downtime 1h 18m`, `downtime, flexible 1h 12m`), `host down`,
+/// `flapping`, a downtime still to come (`downtime at 22:00`, `downtime,
+/// flexible, not started`). `problem_host` is the host of a service in a
+/// problem state. One tag, in the slot where `ack m.keller` was, so
+/// nothing moves.
 fn tag(
+    snapshot: &Snapshot,
+    key: &ObjectKey,
     check: &CheckInfo,
     comments: Option<&[Comment]>,
     problem_host: Option<&Host>,
+    now: Timestamp,
 ) -> Option<String> {
     if check.acknowledgement.is_acknowledged() {
         let author = comments
@@ -164,8 +162,8 @@ fn tag(
             .filter(|author| !author.is_empty());
         return Some(author.map_or_else(|| "ack".to_owned(), |author| format!("ack {author}")));
     }
-    if check.downtime_depth > 0 {
-        return Some("downtime".to_owned());
+    if check.in_downtime() {
+        return downtimes::tag(snapshot, key, check, now);
     }
     if let Some(host) = problem_host.filter(|host| host.is_problem()) {
         return Some(format!(
@@ -173,7 +171,10 @@ fn tag(
             format::state_word(CheckableState::Host(host.state))
         ));
     }
-    check.flapping.then(|| "flapping".to_owned())
+    if check.flapping {
+        return Some("flapping".to_owned());
+    }
+    downtimes::tag(snapshot, key, check, now)
 }
 
 #[cfg(test)]
@@ -281,6 +282,33 @@ mod tests {
         assert_eq!(row.state, CheckableState::Service(ServiceState::Critical));
         assert!(!row.handled);
         assert_eq!(row.tag, None);
+    }
+
+    #[test]
+    fn rows_show_their_time_as_the_settings_ask() {
+        let key = ObjectKey::service("db-prod-03", "postgres-replication");
+        let snapshot = snapshot(
+            vec![host("db-prod-03", HostState::Up)],
+            vec![service(
+                "db-prod-03",
+                "postgres-replication",
+                ServiceState::Critical,
+                "CRITICAL",
+            )],
+            vec![],
+        );
+        let row = object_row(&snapshot, &key, now()).unwrap();
+        assert_eq!(row.time(ListTimes::Relative), "14m");
+        assert_eq!(row.time(ListTimes::Relative), row.since);
+        // Since when: 14 minutes before now, on the same day or not (the
+        // test's clock and zone decide), always short enough for the slot.
+        assert_eq!(row.time(ListTimes::Clock), row.clock);
+        assert_eq!(
+            row.clock,
+            format::list_clock(ago(14. * 60.), now()),
+            "the state change's clock time"
+        );
+        assert!(row.clock.chars().count() <= 6);
     }
 
     #[test]
@@ -397,33 +425,6 @@ mod tests {
         let row = object_row(&snapshot, &key, now()).unwrap();
         assert_eq!(row.host.as_deref(), Some("vanished"));
         assert!(!row.handled);
-    }
-
-    #[test]
-    fn host_group_headers_carry_the_host() {
-        let snapshot = snapshot(
-            vec![host("db-prod-03", HostState::Up)],
-            Vec::new(),
-            Vec::new(),
-        );
-        let view = View {
-            group_by: GroupBy::Host,
-            ..View::default()
-        };
-        let header = group_row(&snapshot, &view, "db-prod-03", 2, now());
-        assert_eq!(header.count, "2 problems");
-        let host = header.host.unwrap();
-        assert_eq!(host.state, CheckableState::Host(HostState::Up));
-        assert_eq!(host.since, "41d");
-
-        let by_group = View {
-            group_by: GroupBy::HostGroup,
-            problems_only: false,
-            ..View::default()
-        };
-        let header = group_row(&snapshot, &by_group, "Production databases", 1, now());
-        assert_eq!(header.count, "1 service");
-        assert_eq!(header.host, None);
     }
 
     #[test]

@@ -84,7 +84,9 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends desktop-file-utils
           desktop-file-validate target/bundle/icygui/share/applications/*.desktop
-          shellcheck -s bash install.sh spikes/linux-headless.sh contract/run-icinga.sh
+          shellcheck -s bash install.sh spikes/linux-headless.sh contract/run-icinga.sh \
+            demo/up.sh demo/scenario.sh demo/screenshot.sh demo/icygui/write-config.sh
+          shellcheck -s sh demo/icinga/node.sh demo/icinga/pki.sh demo/icinga/healthcheck.sh
           version=$(cargo xtask version)
           release="$RUNNER_TEMP/release/v$version"
           mkdir -p "$release"

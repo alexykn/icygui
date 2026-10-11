@@ -20,9 +20,9 @@ use std::rc::Rc;
 use gpui::{
     App, Decorations, Div, Global, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, Pixels, RenderOnce, Role, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _,
 };
-use ic_ui_kit::{ActiveTheme as _, Icon, IconName, Metrics, Tooltip};
+use ic_ui_kit::{ActiveTheme as _, Icon, IconName, Metrics, Tooltip, px};
 
 /// The environment variable that overrides when the window controls show.
 pub(crate) const CONTROLS_ENV: &str = "ICYGUI_WINDOW_CONTROLS";

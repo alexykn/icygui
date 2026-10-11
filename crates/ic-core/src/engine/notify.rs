@@ -79,6 +79,13 @@ pub(super) struct Notify {
     seeded: HashMap<String, (ObjectKey, CheckableState, Timestamp)>,
     /// Ids of seeded problems the event log hasn't been asked about yet.
     lookups: Vec<String>,
+    /// The objects of `seeded`: their inputs wait for the event log's
+    /// answer (`held`), so a problem an earlier run notified that recovers
+    /// before the answer is in still notifies its recovery.
+    awaiting: HashSet<ObjectKey>,
+    /// Inputs (with their memberships) about objects in `awaiting`, in
+    /// order; judged once the event log answered.
+    held: Vec<RuleInput>,
     /// Objects whose `handled` turned false: their next check result
     /// repeats their state.
     confirm: HashSet<ObjectKey>,
@@ -172,6 +179,8 @@ impl Notify {
             seeds_evaluating: Vec::new(),
             seeded: HashMap::new(),
             lookups: Vec::new(),
+            awaiting: HashSet::new(),
+            held: Vec::new(),
             confirm: HashSet::new(),
             started: HashSet::new(),
             discovered: Deferred::default(),
@@ -205,6 +214,14 @@ impl Notify {
         self.rules.pause_until(until);
         self.announced_pause = self.rules.paused_until();
         self.announced_pause
+    }
+
+    /// Whether notifications are paused at `now` (only a pause holds the
+    /// trouble alerts back).
+    pub(super) fn paused(&self, now: Timestamp) -> bool {
+        self.rules
+            .paused_until()
+            .is_some_and(|until| until.as_unix_seconds() > now.as_unix_seconds())
     }
 
     /// Whether inputs (or seeds) wait for a snapshot.
@@ -261,6 +278,7 @@ impl Notify {
                 let since = since.non_zero().unwrap_or(input.at);
                 let id = state_intent_id(&input.object, *current, since);
                 self.lookups.push(id.clone());
+                self.awaiting.insert(input.object.clone());
                 self.seeded
                     .insert(id, (input.object.clone(), *current, since));
             }
@@ -269,6 +287,11 @@ impl Notify {
         let mut intents = Vec::new();
         for mut input in inputs {
             input.memberships = dashboards.memberships(&input.object);
+            if self.awaiting.contains(&input.object) {
+                // Whether an earlier run notified it isn't known yet.
+                self.held.push(input);
+                continue;
+            }
             intents.extend(self.rules.on_input(input, now, local));
         }
         intents
@@ -283,18 +306,38 @@ impl Notify {
     /// The event log answered about the seeded problems `asked`: it has
     /// `known`, which an earlier run notified, so their recoveries and
     /// acknowledgements follow (if the objects are still in those states).
-    pub(super) fn restore(&mut self, asked: &[String], known: &[String], now: Timestamp) {
+    /// The inputs held for these objects are judged now, in order;
+    /// returns the intents.
+    pub(super) fn restore(
+        &mut self,
+        asked: &[String],
+        known: &[String],
+        now: Timestamp,
+        local: LocalTime,
+    ) -> Vec<NotificationIntent> {
         for id in known {
             if let Some((object, state, since)) = self.seeded.remove(id) {
+                self.awaiting.remove(&object);
                 self.rules.restore_notified(&object, state, since, now);
             }
         }
         for id in asked {
-            self.seeded.remove(id);
+            if let Some((object, ..)) = self.seeded.remove(id) {
+                self.awaiting.remove(&object);
+            }
         }
         if self.seeded.is_empty() {
             self.seeded = HashMap::new();
+            self.awaiting = HashSet::new();
         }
+        let (ready, still): (Vec<RuleInput>, Vec<RuleInput>) = mem::take(&mut self.held)
+            .into_iter()
+            .partition(|input| !self.awaiting.contains(&input.object));
+        self.held = still;
+        ready
+            .into_iter()
+            .flat_map(|input| self.rules.on_input(input, now, local))
+            .collect()
     }
 
     /// The session's first load is complete: the rule engine learns what
@@ -387,7 +430,9 @@ impl Notify {
         at: Timestamp,
     ) {
         let found: Vec<(ObjectKey, ObjectView)> = views
-            .filter(|(_, view)| view.state.is_problem() || view.flapping)
+            .filter(|(object, view)| {
+                (view.state.is_problem() || view.flapping) && !store.is_excluded(object)
+            })
             .collect();
         tracing::debug!(count = found.len(), "seeding the rule engine");
         for (object, view) in found {
@@ -436,6 +481,10 @@ impl Notify {
         let Some(object) = entry.event.object() else {
             return;
         };
+        if store.is_excluded(object) {
+            // A heartbeat: no rule inputs, no history.
+            return;
+        }
         // What a load found about the object came before this event.
         self.flush_deferred(store, object, log);
         let (Some(before), Some(after)) = (entry.before, entry.after) else {
@@ -673,6 +722,9 @@ impl Notify {
             before,
             after,
         } = change;
+        if store.is_excluded(&object) {
+            return;
+        }
         let Some(after) = after else {
             // Gone: the rule engine forgets it (a change to pending never
             // notifies).
@@ -699,9 +751,13 @@ impl Notify {
         let host_problem = host_problem_of(store, &object);
         let handled_before = handled(&before, host_problem);
         let handled_after = handled(&after, host_problem);
-        let when = after.since.non_zero().unwrap_or(at);
-        let mut own_input = false;
         let began_again = began_again(&before, &after);
+        let when = if before.state == after.state && !began_again {
+            hard_since(store, &object, &after).unwrap_or(at)
+        } else {
+            after.since.non_zero().unwrap_or(at)
+        };
+        let mut own_input = false;
         let state_input = began_again || state_changed(&before, &after);
         if state_input {
             // The stored output, unless an event moved the object on since
@@ -919,6 +975,11 @@ impl Notify {
         handled: bool,
         at: Timestamp,
     ) {
+        // A heartbeat is no problem of anyone's: its trouble alerts say
+        // what it means.
+        if store.is_excluded(object) {
+            return;
+        }
         let (host_display, service_display) = store.display_names(object);
         self.pending.push(RuleInput {
             object: object.clone(),
@@ -938,6 +999,7 @@ impl Engine {
     /// pause.
     pub(super) fn tick(&mut self, now: tokio::time::Instant) {
         self.tick_at = now + self.tuning.rule_tick;
+        self.alive(now);
         let (intents, pause_ended) = self
             .notify
             .tick(self.ports.clock.now(), self.ports.clock.local());
@@ -961,6 +1023,7 @@ impl Engine {
             self.ports.clock.now().as_unix_seconds() - f64::from(hours) * 3_600.0,
         );
         self.event_log.prune(before);
+        self.prune_recent_events(before);
     }
 
     /// Judges the queued rule inputs with the dashboards' memberships:
@@ -979,10 +1042,19 @@ impl Engine {
         let asked = self.notify.take_lookups();
         if !asked.is_empty() {
             let tx = self.internal_tx.clone();
+            let delay = self.tuning.event_log_delay;
             self.event_log.known(
                 asked.clone(),
                 Box::new(move |known| {
-                    let _ = tx.send(Internal::NotifiedBefore { asked, known });
+                    if delay.is_zero() {
+                        let _ = tx.send(Internal::NotifiedBefore { asked, known });
+                    } else {
+                        // Tests: a busy disk (never block the log's thread).
+                        std::thread::spawn(move || {
+                            std::thread::sleep(delay);
+                            let _ = tx.send(Internal::NotifiedBefore { asked, known });
+                        });
+                    }
                 }),
             );
         }
@@ -997,12 +1069,18 @@ impl Engine {
                 "problems open at the start were notified before"
             );
         }
-        self.notify.restore(asked, known, self.ports.clock.now());
+        let intents = self.notify.restore(
+            asked,
+            known,
+            self.ports.clock.now(),
+            self.ports.clock.local(),
+        );
+        self.deliver(intents);
     }
 
     /// Logs intents; they are emitted once logged
     /// ([`Engine::on_logged`]).
-    fn deliver(&mut self, intents: Vec<NotificationIntent>) {
+    pub(super) fn deliver(&mut self, intents: Vec<NotificationIntent>) {
         if intents.is_empty() {
             return;
         }
@@ -1198,6 +1276,19 @@ fn began_again(before: &ObjectView, after: &ObjectView) -> bool {
         && before.state == after.state
         && before.since.non_zero().is_some()
         && after.since.as_unix_seconds() - before.since.as_unix_seconds() > 0.001
+}
+
+/// When a soft state a query found hard turned hard: Icinga's
+/// `last_hard_state_change`, if it is no older than the state itself. Not
+/// `since` (when the state began, with its first soft attempt): the soft
+/// entry the stream logged for a later attempt would then follow the hard
+/// one in the log.
+fn hard_since(store: &Store, object: &ObjectKey, after: &ObjectView) -> Option<Timestamp> {
+    if after.state_type != StateType::Hard {
+        return None;
+    }
+    let hard = store.check(object)?.last_hard_state_change.non_zero()?;
+    (hard.as_unix_seconds() >= after.since.as_unix_seconds()).then_some(hard)
 }
 
 /// The state a problem of `state`'s kind recovers to: OK or UP.

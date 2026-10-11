@@ -283,7 +283,10 @@ fn an_environment_off_screen_notifies_and_is_acknowledged_there() {
 /// check results) or quiet (without; PERF-09).
 pub(super) fn one_stream(control: &MockControl, live: bool) -> bool {
     let streams = control.event_stream_stats();
-    streams.len() == 1 && streams[0].types.contains(&"CheckResult") == live
+    // A quiet stream carries no check results but the heartbeats' (through
+    // its filter).
+    streams.len() == 1
+        && (streams[0].types.contains(&"CheckResult") && !streams[0].filtered) == live
 }
 
 /// ENV-01, D2: switching shows what the other environment's engine has at
@@ -304,11 +307,19 @@ fn switching_is_instant_and_keeps_every_stream() {
                         .map(|id| session.read(cx).demo_control_of(id).unwrap())
                         .collect()
                 });
+                // List queries: a load. (Waking up may ask for a few
+                // problems by name, `{"hosts": [...]}`: no reload.)
                 let loads = |control: &MockControl| {
                     control
                         .requests()
                         .iter()
                         .filter(|request| request.path == "/v1/objects/hosts")
+                        .filter(|request| {
+                            request
+                                .body
+                                .as_ref()
+                                .is_none_or(|body| body.get("hosts").is_none())
+                        })
                         .count()
                 };
                 let before: Vec<usize> = controls.iter().map(loads).collect();

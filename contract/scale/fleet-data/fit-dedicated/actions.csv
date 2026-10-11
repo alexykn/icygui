@@ -1,0 +1,53 @@
+1791718031.131,cpuset icygui-demo-master-01-1 0,1
+1791718031.234,cpuset icygui-demo-master-02-1 2
+1791718031.343,cpuset icygui-demo-proxy-1 2
+1791718031.430,cpuset icygui-demo-sat-ams-01-1 2
+1791718031.529,cpuset icygui-demo-sat-fra-01-1 2
+1791718031.616,cpuset icygui-demo-sat-fra-02-1 2
+1791718031.640,docker-proxy 22101 on cpus 3: -host-port 5667
+1791718031.652,docker-proxy 22746 on cpus 3: -host-port 5666
+1791718031.664,docker-proxy 22787 on cpus 3: -host-port 5665
+1791718031.667,cluster: master-01 on cpus 0,1, the rest on cpus 2; clients on cpus 3
+1791718031.854,marker downtime scheduled
+1791718031.865,started: fleet pid 17159
+1791718031.905,raw streams quiet: 0 live, 1 quiet, via 172.18.0.5
+1791718061.912,mark F0-rest
+1791718121.932,F0 rest: master-01 0.119 cores
+1791718121.934,mark F0-storm
+1791718121.937,storm 5000/s for 30 s
+1791718192.597,storm over: fleet_storm.py: 157500 check results in 70.6 s (2232/s), 30 rounds of 7 racks
+1791718192.600,mark F0-after
+1791718252.623,settled after 60 s
+1791718252.626,mark F0-settled
+1791718267.658,raw streams s10: 10 live, 0 quiet, via 172.18.0.5
+1791718297.663,mark F10-rest
+1791718357.685,F10 rest: master-01 0.576 cores
+1791718357.687,mark F10-storm
+1791718357.690,storm 5000/s for 30 s
+1791718427.611,storm over: fleet_storm.py: 157500 check results in 69.8 s (2256/s), 30 rounds of 7 racks
+1791718427.650,mark F10-after
+1791718497.706,settled after 70 s
+1791718497.708,mark F10-settled
+1791718497.755,raw streams: 0
+1791718512.791,raw streams s25: 25 live, 0 quiet, via 172.18.0.5
+1791718542.798,mark F25-rest
+1791718602.911,F25 rest: master-01 0.404 cores
+1791718602.920,mark F25-storm
+1791718602.922,storm 5000/s for 30 s
+1791718680.649,storm over: fleet_storm.py: 157500 check results in 77.4 s (2036/s), 30 rounds of 7 racks
+1791718680.672,mark F25-after
+1791718866.357,settled after 186 s
+1791718866.363,mark F25-settled
+1791718866.389,raw streams: 0
+1791718881.423,raw streams s50: 50 live, 0 quiet, via 172.18.0.5
+1791718911.428,mark F50-rest
+1791718971.452,F50 rest: master-01 0.804 cores
+1791718971.455,mark F50-storm
+1791718971.458,storm 5000/s for 30 s
+1791719041.934,storm over: fleet_storm.py: 157500 check results in 70.2 s (2244/s), 30 rounds of 7 racks
+1791719041.939,mark F50-after
+1791719445.164,settled after 404 s
+1791719445.167,mark F50-settled
+1791719445.827,raw streams: 0
+1791719460.993,mark end
+1791719460.997,raw streams: 0

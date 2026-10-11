@@ -1,0 +1,167 @@
+t client level target message fields
+1791710665.934 -1 INFO ic_core::handle engine started environment=fleet-15
+1791710665.934 15 INFO ic_core::engine::quiet quiet mode environment=fleet-15 quiet=true
+1791710665.935 -1 INFO ic_core::handle engine started environment=fleet-16
+1791710665.935 16 INFO ic_core::engine::quiet quiet mode environment=fleet-16 quiet=true
+1791710665.936 -1 INFO ic_core::handle engine started environment=fleet-17
+1791710665.936 17 INFO ic_core::engine::quiet quiet mode environment=fleet-17 quiet=true
+1791710665.937 -1 INFO ic_core::handle engine started environment=fleet-18
+1791710665.937 18 INFO ic_core::engine::quiet quiet mode environment=fleet-18 quiet=true
+1791710665.938 -1 INFO ic_core::handle engine started environment=fleet-19
+1791710665.938 19 INFO ic_core::engine::quiet quiet mode environment=fleet-19 quiet=true
+1791710665.939 -1 INFO ic_core::handle engine started environment=fleet-20
+1791710665.939 20 INFO ic_core::engine::quiet quiet mode environment=fleet-20 quiet=true
+1791710665.939 -1 INFO ic_core::handle engine started environment=fleet-21
+1791710665.940 21 INFO ic_core::engine::quiet quiet mode environment=fleet-21 quiet=true
+1791710665.941 -1 INFO ic_core::handle engine started environment=fleet-22
+1791710665.941 22 INFO ic_core::engine::quiet quiet mode environment=fleet-22 quiet=true
+1791710665.942 -1 INFO ic_core::handle engine started environment=fleet-23
+1791710665.942 23 INFO ic_core::engine::quiet quiet mode environment=fleet-23 quiet=true
+1791710665.944 -1 INFO ic_core::handle engine started environment=fleet-24
+1791710665.944 24 INFO ic_core::engine::quiet quiet mode environment=fleet-24 quiet=true
+1791710665.946 -1 INFO ic_core::handle engine started environment=fleet-00
+1791710665.947 -1 INFO ic_core::handle engine started environment=fleet-01
+1791710665.948 -1 INFO ic_core::handle engine started environment=fleet-02
+1791710665.950 -1 INFO ic_core::handle engine started environment=fleet-03
+1791710665.953 -1 INFO ic_core::handle engine started environment=fleet-04
+1791710665.956 -1 INFO ic_core::handle engine started environment=fleet-05
+1791710665.958 -1 INFO ic_core::handle engine started environment=fleet-06
+1791710665.960 -1 INFO ic_core::handle engine started environment=fleet-07
+1791710665.962 -1 INFO ic_core::handle engine started environment=fleet-08
+1791710665.965 -1 INFO ic_core::handle engine started environment=fleet-09
+1791710665.966 -1 INFO ic_core::handle engine started environment=fleet-10
+1791710665.967 -1 INFO ic_core::handle engine started environment=fleet-11
+1791710665.970 -1 INFO ic_core::handle engine started environment=fleet-12
+1791710665.972 -1 INFO ic_core::handle engine started environment=fleet-13
+1791710665.973 -1 INFO ic_core::handle engine started environment=fleet-14
+1791710666.017 15 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.017 15 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791710666.020 1 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.020 0 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710666.024 23 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.024 23 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791710666.027 20 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.027 20 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791710666.052 16 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.052 16 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791710666.055 18 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.055 18 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791710666.060 1 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.060 1 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710666.066 21 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.066 21 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791710666.066 17 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.066 17 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791710666.074 19 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.074 19 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791710666.074 2 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.074 3 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.074 3 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710666.074 2 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710666.082 5 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.082 5 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710666.083 22 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.083 22 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791710666.132 24 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.132 24 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=true
+1791710666.142 12 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.142 12 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710666.142 14 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.142 14 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710666.142 11 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.142 11 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710666.143 8 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710666.143 8 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710668.836 13 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710668.836 13 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710668.875 7 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710668.875 7 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710668.903 4 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710668.903 4 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710670.306 10 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710670.306 6 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710670.306 10 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710670.307 6 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710670.874 9 INFO ic_core::connect connected to Icinga node=master-01 url=https://127.0.0.1:5665 view=full view
+1791710670.875 9 INFO ic_core::engine connected to Icinga user=icygui-demo version=v2.15.6 node=master-01 view=full view quiet=false
+1791710697.677 20 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791710697.790 20 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791710697.816 15 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=1
+1791710697.939 15 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791710698.137 0 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791710699.955 18 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791710700.030 18 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791710701.061 23 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791710701.118 23 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791710701.174 16 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791710701.225 16 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791710706.300 12 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791710706.618 2 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791710706.843 10 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=2
+1791710707.905 22 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710708.147 9 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710708.180 22 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791710708.484 5 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710710.671 14 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710711.346 13 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710711.490 6 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710711.628 4 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710711.651 8 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710712.120 11 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710712.168 21 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710712.246 19 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710712.567 19 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791710712.827 21 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791710713.245 24 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791710713.332 1 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710713.540 7 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=3
+1791710713.641 17 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=5
+1791710713.938 24 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791710714.129 17 INFO ic_core::connect the API user may not filter the event stream (filter-expression): heartbeats are read once per interval while quiet
+1791710714.907 3 INFO ic_core::engine states that changed while the first load ran are judged, not seeded count=4
+1791712227.302 15 WARN ic_core::engine::trouble trouble alert environment=fleet-15 alert=master-02 runs no checks (connected) since=09:49
+1791712227.897 20 WARN ic_core::engine::trouble trouble alert environment=fleet-20 alert=master-02 runs no checks (connected) since=09:49
+1791712228.362 4 WARN ic_core::engine::trouble trouble alert environment=fleet-04 alert=master-02 runs no checks (connected) since=09:49
+1791712228.400 5 WARN ic_core::engine::trouble trouble alert environment=fleet-05 alert=master-02 runs no checks (connected) since=09:49
+1791712228.584 3 WARN ic_core::engine::trouble trouble alert environment=fleet-03 alert=master-02 runs no checks (connected) since=09:49
+1791712228.733 10 WARN ic_core::engine::trouble trouble alert environment=fleet-10 alert=master-02 runs no checks (connected) since=09:49
+1791712228.776 7 WARN ic_core::engine::trouble trouble alert environment=fleet-07 alert=master-02 runs no checks (connected) since=09:49
+1791712228.805 6 WARN ic_core::engine::trouble trouble alert environment=fleet-06 alert=master-02 runs no checks (connected) since=09:49
+1791712228.810 9 WARN ic_core::engine::trouble trouble alert environment=fleet-09 alert=master-02 runs no checks (connected) since=09:49
+1791712228.827 11 WARN ic_core::engine::trouble trouble alert environment=fleet-11 alert=master-02 runs no checks (connected) since=09:49
+1791712228.863 0 WARN ic_core::engine::trouble trouble alert environment=fleet-00 alert=master-02 runs no checks (connected) since=09:49
+1791712228.867 12 WARN ic_core::engine::trouble trouble alert environment=fleet-12 alert=master-02 runs no checks (connected) since=09:49
+1791712228.869 2 WARN ic_core::engine::trouble trouble alert environment=fleet-02 alert=master-02 runs no checks (connected) since=09:49
+1791712228.873 14 WARN ic_core::engine::trouble trouble alert environment=fleet-14 alert=master-02 runs no checks (connected) since=09:49
+1791712228.960 1 WARN ic_core::engine::trouble trouble alert environment=fleet-01 alert=master-02 runs no checks (connected) since=09:49
+1791712228.995 13 WARN ic_core::engine::trouble trouble alert environment=fleet-13 alert=master-02 runs no checks (connected) since=09:49
+1791712229.194 8 WARN ic_core::engine::trouble trouble alert environment=fleet-08 alert=master-02 runs no checks (connected) since=09:49
+1791712231.939 18 WARN ic_core::engine::trouble trouble alert environment=fleet-18 alert=master-02 runs no checks (connected) since=09:49
+1791712232.067 23 WARN ic_core::engine::trouble trouble alert environment=fleet-23 alert=master-02 runs no checks (connected) since=09:49
+1791712232.122 24 WARN ic_core::engine::trouble trouble alert environment=fleet-24 alert=master-02 runs no checks (connected) since=09:49
+1791712232.737 22 WARN ic_core::engine::trouble trouble alert environment=fleet-22 alert=master-02 runs no checks (connected) since=09:49
+1791712232.781 20 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-20 alert=master-02 runs no checks (connected) after=1m
+1791712232.900 6 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-06 alert=master-02 runs no checks (connected) after=1m
+1791712232.950 13 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-13 alert=master-02 runs no checks (connected) after=1m
+1791712233.013 4 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-04 alert=master-02 runs no checks (connected) after=1m
+1791712233.048 3 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-03 alert=master-02 runs no checks (connected) after=1m
+1791712233.107 0 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-00 alert=master-02 runs no checks (connected) after=1m
+1791712233.130 2 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-02 alert=master-02 runs no checks (connected) after=1m
+1791712233.131 1 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-01 alert=master-02 runs no checks (connected) after=1m
+1791712233.138 9 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-09 alert=master-02 runs no checks (connected) after=1m
+1791712233.145 5 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-05 alert=master-02 runs no checks (connected) after=1m
+1791712233.161 7 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-07 alert=master-02 runs no checks (connected) after=1m
+1791712233.179 10 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-10 alert=master-02 runs no checks (connected) after=1m
+1791712233.219 14 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-14 alert=master-02 runs no checks (connected) after=1m
+1791712233.225 8 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-08 alert=master-02 runs no checks (connected) after=1m
+1791712233.266 12 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-12 alert=master-02 runs no checks (connected) after=1m
+1791712233.272 11 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-11 alert=master-02 runs no checks (connected) after=1m
+1791712234.256 16 WARN ic_core::engine::trouble trouble alert environment=fleet-16 alert=master-02 runs no checks (connected) since=09:49
+1791712234.628 17 WARN ic_core::engine::trouble trouble alert environment=fleet-17 alert=master-02 runs no checks (connected) since=09:49
+1791712235.847 23 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-23 alert=master-02 runs no checks (connected) after=1m
+1791712236.091 24 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-24 alert=master-02 runs no checks (connected) after=1m
+1791712236.235 18 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-18 alert=master-02 runs no checks (connected) after=1m
+1791712236.849 22 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-22 alert=master-02 runs no checks (connected) after=1m
+1791712239.222 16 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-16 alert=master-02 runs no checks (connected) after=1m
+1791712239.231 17 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-17 alert=master-02 runs no checks (connected) after=1m
+1791712240.339 15 INFO ic_core::engine::trouble trouble alert cleared environment=fleet-15 alert=master-02 runs no checks (connected) after=1m

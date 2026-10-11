@@ -13,7 +13,9 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use crate::support::{ENV_ID, FakeSecrets, PASSWORD, environment, mock, start, start_for, tuning};
+use crate::support::{
+    ENV_ID, FakeSecrets, PASSWORD, environment, mock, start, start_for, tuning, wait_until,
+};
 use ic_core::{Command, ConnectionState, CoreEvent, Tuning};
 use ic_mock::{MockConfig, MockControl, scenarios};
 use ic_model::{ObjectKey, ServiceKey, ServiceState};
@@ -80,17 +82,6 @@ fn service_loads(control: &MockControl) -> Vec<bool> {
             )
         })
         .collect()
-}
-
-/// Polls `condition` for up to ten seconds.
-async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
-    for _ in 0..1_000 {
-        if condition() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    false
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

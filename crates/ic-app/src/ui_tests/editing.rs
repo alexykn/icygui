@@ -28,24 +28,27 @@ use crate::workspace::{Confirmed, ModalKind};
 /// The `overview` group's `···` (shown: it holds the selected dashboard).
 const OVERVIEW_MENU: Point<Pixels> = Point {
     x: px(274.),
-    y: px(59.),
+    y: px(59. + super::CLUSTER_SECTION),
 };
 /// The `overview` group's `+`.
 const OVERVIEW_ADD: Point<Pixels> = Point {
     x: px(250.),
-    y: px(59.),
+    y: px(59. + super::CLUSTER_SECTION),
 };
 
 /// An item of the group menu opened from [`OVERVIEW_MENU`], `offset`
 /// pixels below the group row.
 fn group_menu_item(offset: f32) -> Point<Pixels> {
-    point(px(180.), px(59. + offset))
+    point(px(180.), px(59. + super::CLUSTER_SECTION + offset))
 }
 
 /// The middle of the `network` row (under the `platform` group, after
 /// the three `overview` dashboards).
 fn network_row() -> Point<Pixels> {
-    point(px(150.), px(41. + 36. + 3. * 30. + 6. + 36. + 15.))
+    point(
+        px(150.),
+        px(41. + super::CLUSTER_SECTION + 36. + 3. * 30. + 6. + 36. + 15.),
+    )
 }
 
 /// An item of a dashboard's menu, `offset` pixels below its row's middle.
@@ -343,14 +346,26 @@ fn dashboards_are_duplicated_moved_muted_and_deleted_from_their_menu() {
         // delete (asks first).
         let lab_row = point(
             px(150.),
-            px(41. + 36. + 3. * 30. + 6. + 36. + 4. * 30. + 6. + 36. + 30. + 15.),
+            px(super::CLUSTER_SECTION
+                + 41.
+                + 36.
+                + 3. * 30.
+                + 6.
+                + 36.
+                + 4. * 30.
+                + 6.
+                + 36.
+                + 30.
+                + 15.),
         );
         right_click(app, cx, lab_row);
         assert_eq!(
             sidebar.read(cx).open_menu(),
             Some(&SidebarMenu::Dashboard(moved.clone()))
         );
-        app.click(cx, dashboard_menu_item(lab_row, 407.), Modifiers::default());
+        // Low in the sidebar the menu opens upward; the keyboard reaches its
+        // last item (End) and chooses it (Enter).
+        app.keys(cx, "end enter");
         assert!(matches!(
             app.workspace.read(cx).modal(cx),
             Some(ModalKind::Confirm(confirmation)) if confirmation.action == Confirmed::Dashboard(moved.clone())
@@ -396,7 +411,7 @@ fn a_new_dashboard_is_made_in_the_editor_with_a_live_preview() {
                         editor(app, cx)
                             .read(cx)
                             .preview_result()
-                            .is_some_and(Result::is_err)
+                            .is_some_and(|result| result.is_err())
                     },
                 )
                 .await;
@@ -433,7 +448,9 @@ fn a_new_dashboard_is_made_in_the_editor_with_a_live_preview() {
                             .read(cx)
                             .preview_result()
                             .is_some_and(|result| {
-                                result.as_ref().is_ok_and(|result| !result.rows.is_empty())
+                                result
+                                    .as_ref()
+                                    .is_ok_and(|result| !result.views[0].rows().is_empty())
                             })
                     },
                 )
@@ -448,10 +465,10 @@ fn a_new_dashboard_is_made_in_the_editor_with_a_live_preview() {
                     let (group, dashboard) = state.selected_dashboard().unwrap();
                     assert_eq!(group.name, "overview");
                     assert_eq!(dashboard.name, "web");
-                    assert_eq!(dashboard.view.filter, "match(\"db-*\", host.name)");
-                    assert_eq!(dashboard.view.object_kind, ObjectKind::Services);
+                    assert_eq!(dashboard.views[0].filter, "match(\"db-*\", host.name)");
+                    assert_eq!(dashboard.views[0].object_kind, ObjectKind::Services);
                     let result = state.result(state.selected().unwrap()).unwrap();
-                    assert!(result.error.is_none());
+                    assert!(result.views[0].error.is_none());
                     let kept = |toast: &Toast| toast.title.contains("are kept");
                     assert!(!state.toasts().any(kept), "nothing left to keep");
                 });
@@ -495,7 +512,7 @@ fn a_save_right_after_typing_checks_the_filter_first() {
                     let error = editor.read(cx).save_error().unwrap().to_owned();
                     assert!(error.contains("(line 1, column 18)"), "{error}");
                     let (_, saved) = app.state.read(cx).selected_dashboard().unwrap();
-                    assert_ne!(saved.view.filter, "service.state != ", "not saved");
+                    assert_ne!(saved.views[0].filter, "service.state != ", "not saved");
                 });
                 // A working one, saved at once: once checked.
                 cx.update(|cx| {
@@ -523,7 +540,7 @@ fn a_save_right_after_typing_checks_the_filter_first() {
                 .await;
                 cx.update(|cx| {
                     let (_, saved) = app.state.read(cx).selected_dashboard().unwrap();
-                    assert_eq!(saved.view.filter, "service.state != 0");
+                    assert_eq!(saved.views[0].filter, "service.state != 0");
                 });
             }
             .boxed_local()

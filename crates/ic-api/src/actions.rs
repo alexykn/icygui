@@ -39,9 +39,9 @@ pub(crate) enum TargetKind {
     Host,
     /// `"type": "Service", "services": ["host!service", ...]`.
     Service,
-    /// `"type": "Downtime", "downtime": name`.
+    /// `"type": "Downtime", "downtimes": [names]`.
     Downtime,
-    /// `"type": "Comment", "comment": name`.
+    /// `"type": "Comment", "comments": [names]`.
     Comment,
 }
 
@@ -79,14 +79,16 @@ impl Batch {
 }
 
 /// Splits an action on a target into requests: hosts and services go
-/// separately; a downtime target removes that downtime; a comment target
-/// removes that comment. Duplicate names are sent once; empty batches are
-/// dropped.
+/// separately; downtime targets remove those downtimes and comment targets
+/// those comments, by name (`"downtimes": [...]`, `"comments": [...]`,
+/// which Icinga resolves like `hosts`). Duplicate names are sent once;
+/// empty batches are dropped (an empty name list would make Icinga fall
+/// back to every object of the type).
 ///
-/// A [`ActionTarget::Downtime`] or [`ActionTarget::Comment`] can only be
-/// removed, so it is only valid with [`Action::RemoveAllDowntimes`]
+/// [`ActionTarget::Downtimes`] and [`ActionTarget::Comments`] can only be
+/// removed, so they are only valid with [`Action::RemoveAllDowntimes`]
 /// (`ic_model::Action` has no "remove comment" variant; that action stands
-/// for removing the targeted downtime or comment). Anything else is a
+/// for removing the targeted downtimes or comments). Anything else is a
 /// caller bug and fails with [`ApiError::InvalidSettings`] instead of
 /// silently deleting something.
 pub(crate) fn plan(action: &Action, target: &ActionTarget) -> Result<Vec<Batch>, ApiError> {
@@ -103,13 +105,13 @@ pub(crate) fn plan(action: &Action, target: &ActionTarget) -> Result<Vec<Batch>,
                 })
                 .collect())
         }
-        ActionTarget::Downtime(name) => {
+        ActionTarget::Downtimes(names) => {
             only_removal(action, "downtime")?;
-            Ok(single(TargetKind::Downtime, "remove-downtime", name))
+            Ok(named(TargetKind::Downtime, "remove-downtime", names))
         }
-        ActionTarget::Comment(name) => {
+        ActionTarget::Comments(names) => {
             only_removal(action, "comment")?;
-            Ok(single(TargetKind::Comment, "remove-comment", name))
+            Ok(named(TargetKind::Comment, "remove-comment", names))
         }
     }
 }
@@ -152,14 +154,21 @@ pub(crate) fn names_by_kind(keys: &[ObjectKey]) -> (Vec<String>, Vec<String>) {
     (hosts.names, services.names)
 }
 
-fn single(kind: TargetKind, endpoint: &'static str, name: &str) -> Vec<Batch> {
-    if name.is_empty() {
+/// One batch of `names` (each once, blank ones left out), or none.
+fn named(kind: TargetKind, endpoint: &'static str, names: &[String]) -> Vec<Batch> {
+    let mut seen = HashSet::new();
+    let names: Vec<String> = names
+        .iter()
+        .filter(|name| !name.is_empty() && seen.insert(name.as_str()))
+        .cloned()
+        .collect();
+    if names.is_empty() {
         return Vec::new();
     }
     vec![Batch {
         endpoint,
         kind,
-        names: vec![name.to_owned()],
+        names,
     }]
 }
 
@@ -175,10 +184,10 @@ pub(crate) fn body(action: &Action, kind: TargetKind, names: &[String], author: 
             body.insert("services".to_owned(), json!(names));
         }
         TargetKind::Downtime => {
-            body.insert("downtime".to_owned(), json!(names.first()));
+            body.insert("downtimes".to_owned(), json!(names));
         }
         TargetKind::Comment => {
-            body.insert("comment".to_owned(), json!(names.first()));
+            body.insert("comments".to_owned(), json!(names));
         }
     }
     match kind {
@@ -563,16 +572,23 @@ mod tests {
     }
 
     #[test]
-    fn downtime_and_comment_targets() {
+    fn downtime_and_comment_targets_go_by_name_lists() {
         let downtime = body(
             &Action::RemoveAllDowntimes,
             TargetKind::Downtime,
-            &["k8s-node-11!e96da238".to_owned()],
+            &[
+                "k8s-node-11!e96da238".to_owned(),
+                "k8s-node-11!disk /!0c1f".to_owned(),
+            ],
             "j.berg",
         );
         assert_eq!(
             downtime,
-            json!({ "type": "Downtime", "downtime": "k8s-node-11!e96da238", "author": "j.berg" })
+            json!({
+                "type": "Downtime",
+                "downtimes": ["k8s-node-11!e96da238", "k8s-node-11!disk /!0c1f"],
+                "author": "j.berg"
+            })
         );
         let comment = body(
             &Action::RemoveAllDowntimes,
@@ -582,7 +598,7 @@ mod tests {
         );
         assert_eq!(
             comment,
-            json!({ "type": "Comment", "comment": "db-prod-03!dc3b4066", "author": "j.berg" })
+            json!({ "type": "Comment", "comments": ["db-prod-03!dc3b4066"], "author": "j.berg" })
         );
     }
 
@@ -624,22 +640,30 @@ mod tests {
         let batches = plan(&Action::RemoveAcknowledgement, &only_hosts).unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].kind, TargetKind::Host);
-        assert!(
-            plan(
-                &Action::RemoveAllDowntimes,
-                &ActionTarget::Downtime(String::new())
-            )
-            .unwrap()
-            .is_empty()
-        );
+        for target in [
+            ActionTarget::Downtimes(Vec::new()),
+            ActionTarget::Downtimes(vec![String::new()]),
+            ActionTarget::Comments(Vec::new()),
+            ActionTarget::Comments(vec![String::new(), String::new()]),
+        ] {
+            assert!(
+                plan(&Action::RemoveAllDowntimes, &target)
+                    .unwrap()
+                    .is_empty(),
+                "{target:?}"
+            );
+        }
     }
 
     #[test]
     fn downtime_targets_only_remove() {
-        let target = ActionTarget::Downtime("h!x".to_owned());
+        let target =
+            ActionTarget::Downtimes(vec!["h!x".to_owned(), "h!y".to_owned(), "h!x".to_owned()]);
         let batches = plan(&Action::RemoveAllDowntimes, &target).unwrap();
+        assert_eq!(batches.len(), 1, "one request for every name");
         assert_eq!(batches[0].endpoint, "remove-downtime");
         assert_eq!(batches[0].kind, TargetKind::Downtime);
+        assert_eq!(batches[0].names, ["h!x", "h!y"], "each name once");
         assert!(matches!(
             plan(&Action::CheckNow { force: true }, &target),
             Err(ApiError::InvalidSettings(_))
@@ -648,7 +672,7 @@ mod tests {
 
     #[test]
     fn comment_targets_only_remove_the_comment() {
-        let target = ActionTarget::Comment("h!c".to_owned());
+        let target = ActionTarget::Comments(vec!["h!c".to_owned()]);
         let batches = plan(&Action::RemoveAllDowntimes, &target).unwrap();
         assert_eq!(
             batches,

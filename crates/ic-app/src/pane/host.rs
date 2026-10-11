@@ -2,23 +2,25 @@
 //! and the sub-tabs `services · history · vars · config`.
 //!
 //! The title, the actions and the sub-tab strip stay put; everything under
-//! them scrolls, including the host's comments and downtimes (at the top of
-//! the services tab), so a host with many notes can't push its services out
-//! of reach.
+//! them scrolls, including the host's thread (topic 14: its
+//! acknowledgement, downtimes and comments, with a field to add one; at
+//! the top of the services tab), so a host with a long thread can't push
+//! its services out of reach.
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _,
 };
+use ic_config::ListTimes;
 use ic_core::snapshot::Snapshot;
-use ic_model::{CheckableState, Host, ObjectKey, Timestamp};
+use ic_model::{Host, ObjectKey, Timestamp};
 use ic_ui_kit::{
-    ActiveTheme as _, CircleSize, CompactRow, KvTable, Link, StateCircle, SubTabs, Theme, Tooltip,
-    TreeTable,
+    ActiveTheme as _, CircleSize, CompactRow, KvTable, Link, ObjectMark, StateCircle, SubTabs,
+    Theme, Tooltip, TreeTable, px,
 };
 
-use super::service::{full_output, links_table, notes};
+use super::service::{full_output, links_table};
 use super::{
     HostTab, ObjectPane, PaneMode, TAB_CONTENT_WIDTH, TITLE_GROUP, action_buttons, copy_button,
     model, scroll_area,
@@ -69,19 +71,20 @@ pub(super) fn render(
         .child(tabs);
     let content = match pane.host_tab {
         HostTab::Services => {
-            let notes = notes(pane, snapshot, &key, now, cx).map(|notes| {
+            // The host's thread above its services (topic 14).
+            let thread = super::thread::section(pane, snapshot, &key, now, cx).map(|thread| {
                 div()
                     .px(theme.metrics.pane_inset)
                     .py(px(16.))
                     .border_b_1()
                     .border_color(theme.colors.border_row)
-                    .child(notes)
+                    .child(thread)
             });
             div()
                 .flex()
                 .flex_col()
-                .children(notes)
-                .child(services_tab(&services, host.is_problem(), now, cx))
+                .children(thread)
+                .child(services_tab(pane, &services, host, now, cx))
                 .into_any_element()
         }
         HostTab::History => super::history::host_tab(pane, &host.display_name, now, cx),
@@ -109,9 +112,8 @@ fn title(host: &Host, late: Option<String>, now: Timestamp, theme: &Theme) -> im
         .items_center()
         .gap(px(16.))
         .child(
-            StateCircle::new(CheckableState::Host(host.state))
+            StateCircle::mark(ObjectMark::host(host))
                 .size(CircleSize::Pane)
-                .handled(host.is_handled())
                 .state_label(),
         )
         .child(
@@ -159,7 +161,7 @@ fn title(host: &Host, late: Option<String>, now: Timestamp, theme: &Theme) -> im
                             line.child(
                                 div()
                                     .flex_none()
-                                    .text_color(theme.states.warning)
+                                    .text_color(theme.states.text.warning)
                                     .child(format!("\u{a0}· {late}")),
                             )
                         }),
@@ -168,12 +170,14 @@ fn title(host: &Host, late: Option<String>, now: Timestamp, theme: &Theme) -> im
 }
 
 fn services_tab(
+    pane: &ObjectPane,
     services: &model::HostServices,
-    host_problem: bool,
+    host: &Host,
     now: Timestamp,
     cx: &Context<ObjectPane>,
 ) -> AnyElement {
     let theme = cx.theme();
+    let times = pane.state.read(cx).appearance().list_times;
     let rows = services.shown.iter().map(|service| {
         let key = service.object_key();
         CompactRow::new(SharedString::from(format!(
@@ -181,28 +185,25 @@ fn services_tab(
             service.key.name
         )))
         .leading(
-            StateCircle::new(CheckableState::Service(service.state))
-                .size(CircleSize::Compact)
-                .handled(service.is_handled(host_problem)),
+            StateCircle::mark(ObjectMark::service(service, Some(host))).size(CircleSize::Compact),
         )
         .title(service.display_name.clone())
         .detail(service.check.output().to_owned())
-        .trailing(format::time_in_state(&service.check, now))
+        .trailing(match times {
+            ListTimes::Relative => format::time_in_state(&service.check, now),
+            ListTimes::Clock => format::state_clock(&service.check, now),
+        })
         .on_click(
             cx.listener(move |pane: &mut ObjectPane, _: &ClickEvent, _, cx| {
                 pane.navigate(key.clone(), cx);
             }),
         )
     });
-    let toggle = if services.hidden > 0 {
-        Some(format!("+ {} more ok", services.hidden))
-    } else if services.total > model::HOST_SERVICES_PREVIEW
-        && services.shown.len() == services.total
-    {
-        Some("− show fewer".to_owned())
-    } else {
-        None
-    };
+    // `+ N more`, and `− show fewer` in the same slot (the shared paging
+    // rule, as in every host-with-services view).
+    let toggle = services
+        .pages
+        .then(|| crate::paging::more_label(services.hidden));
     div()
         .flex()
         .flex_col()

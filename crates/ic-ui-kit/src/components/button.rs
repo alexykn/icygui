@@ -3,10 +3,11 @@
 
 use std::fmt;
 
+use crate::px;
 use gpui::{
     App, ClickEvent, ElementId, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, Pixels, RenderOnce, Role, SharedString, StatefulInteractiveElement,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 
 use crate::components::Tooltip;
@@ -99,9 +100,9 @@ impl ButtonVariant {
                 key: colors.text_faint,
             },
             Self::Danger => ButtonColors {
-                background: theme.states.critical,
-                hover: theme.states.critical.opacity(0.85),
-                active: theme.states.critical,
+                background: theme.states.fill.critical,
+                hover: theme.states.fill.critical.opacity(0.85),
+                active: theme.states.fill.critical,
                 foreground: colors.on_accent,
                 key: colors.on_accent_muted,
             },
@@ -435,7 +436,7 @@ impl RenderOnce for IconButton {
 
 /// A text glyph that acts as a button, the way the design draws `×`, `+`
 /// and `···`. The hover background and the hit area reach
-/// [`GlyphButton::REACH`] around the glyph; place the button with that in
+/// [`GlyphButton::reach`] around the glyph; place the button with that in
 /// mind, or let it [`bleed`](GlyphButton::bleed) into the space around it.
 #[derive(IntoElement)]
 #[must_use = "a button does nothing unless rendered"]
@@ -456,8 +457,11 @@ const GLYPH_REACH_Y: f32 = 2.;
 
 impl GlyphButton {
     /// How far the hit area and hover background reach left and right of
-    /// the glyph.
-    pub const REACH: Pixels = px(4.);
+    /// the glyph, at the interface size.
+    #[must_use]
+    pub fn reach() -> Pixels {
+        px(4.)
+    }
 
     /// A button showing `glyph`.
     pub fn new(id: impl Into<ElementId>, glyph: impl Into<SharedString>) -> Self {
@@ -550,9 +554,9 @@ impl RenderOnce for GlyphButton {
             .justify_center()
             // Padding widens the hit area; with `bleed`, equal negative
             // margins keep the layout at the glyph's size.
-            .px(Self::REACH)
+            .px(Self::reach())
             .py(px(GLYPH_REACH_Y))
-            .when(self.bleed, |button| button.mx(-Self::REACH))
+            .when(self.bleed, |button| button.mx(-Self::reach()))
             .rounded(theme.metrics.small_radius)
             .whitespace_nowrap()
             .when_some(self.text_size, gpui::Styled::text_size)

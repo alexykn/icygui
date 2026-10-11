@@ -9,6 +9,10 @@
 //! on the test thread only on Linux (macOS needs the process's main thread),
 //! so these tests are Linux-only. Each test runs one app; a lock keeps them
 //! from running in parallel.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "pointer positions and window sizes are real pixels"
+)]
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -25,7 +29,7 @@ use gpui::{
     MouseDownEvent, MouseUpEvent, Pixels, PlatformInput, Point, Size, Window, point, px, size,
 };
 use ic_config::{GroupBy, Sort, SortKey};
-use ic_core::snapshot::{DashboardResult, DashboardRow, Snapshot};
+use ic_core::snapshot::{DashboardRow, Snapshot, ViewBody};
 use ic_model::{Comment, CommentKind, ObjectKey, Timestamp};
 use ic_rules::DashboardRef;
 use ic_ui_kit::Metrics;
@@ -42,17 +46,27 @@ use crate::window_state::InitialBounds;
 use crate::workspace::{self, ToggleSidebar, Workspace};
 
 mod actions;
+mod appearance;
 mod background;
+mod comments;
+mod dropdowns;
 mod editing;
+mod editor_views;
 mod environments;
 mod every_environment;
+mod health;
+mod lists;
 mod live;
 mod live_actions;
 mod notifications;
 mod quiet;
 mod scopes;
+mod settings;
 mod states;
 mod topology;
+mod trouble;
+mod view_kinds;
+mod views;
 
 /// One headless app at a time.
 static HEADLESS: Mutex<()> = Mutex::new(());
@@ -149,10 +163,7 @@ impl Harness {
             let old = state.snapshot().clone();
             let mut dashboards = (*old.dashboards).clone();
             let result = dashboards.get_mut(&production()).unwrap();
-            *result = DashboardResult {
-                rows: Arc::new(rows),
-                ..result.clone()
-            };
+            result.views[0].body = ViewBody::List(Arc::new(rows));
             state.set_snapshot(Arc::new(Snapshot {
                 revision: old.revision + 1,
                 dashboards: Arc::new(dashboards),
@@ -184,8 +195,8 @@ impl Harness {
         let state = self.state.read(cx);
         state
             .result(state.selected().unwrap())
+            .and_then(|result| result.views[0].list_rows())
             .unwrap()
-            .rows
             .clone()
     }
 
@@ -705,12 +716,12 @@ fn sorting_and_grouping_keep_the_selection() {
         assert_eq!(app.cursor(cx).map(|(_, key)| key), Some(replication()));
         let changed = app.state.update(cx, |state, cx| {
             cx.notify();
-            state.update_view(&production(), |view| {
+            state.update_primary_view(&production(), |view| {
                 view.sort = Sort {
                     key: SortKey::Host,
                     descending: false,
                 };
-                view.group_by = GroupBy::Host;
+                view.set_grouping(GroupBy::Host);
             })
         });
         assert!(changed);
@@ -862,7 +873,11 @@ fn escape_closes_the_open_menu_before_anything_behind_it() {
         // A pane and a group's `···` menu: Escape closes the menu only.
         app.keys(cx, "j enter");
         assert!(app.pane_object(cx).is_some());
-        app.click(cx, point(px(274.), px(59.)), Modifiers::default());
+        app.click(
+            cx,
+            point(px(274.), px(59. + CLUSTER_SECTION)),
+            Modifiers::default(),
+        );
         assert_eq!(
             sidebar.read(cx).open_menu(),
             Some(&SidebarMenu::Group("demo-overview".to_owned()))
@@ -891,13 +906,22 @@ fn network() -> DashboardRef {
     }
 }
 
+/// The sidebar's cluster section above the groups (topic 14): its heading,
+/// four entries, and the space and rule under them.
+pub(crate) const CLUSTER_SECTION: f32 = 36. + 4. * 30. + 6. + 1. + 6.;
+
+/// The dashboard page as built for the last frame.
+fn views_page(app: &Harness, cx: &App) -> Rc<crate::dashboard::page::Page> {
+    app.dashboard(cx).read(cx).page(cx).expect("a page")
+}
+
 /// The middle of the sidebar's dashboard row `index` (0 = `overview` under
-/// the `overview` group): the header is 41px, group rows 36px, dashboard
-/// rows 30px.
+/// the `overview` group): the header is 41px, the cluster section
+/// [`CLUSTER_SECTION`], group rows 36px, dashboard rows 30px.
 fn sidebar_item(index: usize) -> Point<Pixels> {
     #[expect(clippy::cast_precision_loss, reason = "small row indices")]
     let row = 30. * index as f32;
-    point(px(150.), px(41. + 36. + 15.) + px(row))
+    point(px(150.), px(41. + CLUSTER_SECTION + 36. + 15.) + px(row))
 }
 
 #[test]
@@ -919,10 +943,18 @@ fn clicks_outside_the_list_keep_the_keys_working() {
         app.click(cx, point(px(150.), px(880.)), Modifiers::default());
         app.keys(cx, "k");
         assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(1));
-        app.click(cx, point(px(150.), px(59.)), Modifiers::default());
+        app.click(
+            cx,
+            point(px(150.), px(59. + CLUSTER_SECTION)),
+            Modifiers::default(),
+        );
         app.keys(cx, "k");
         assert_eq!(app.cursor(cx).map(|(index, _)| index), Some(0));
-        app.click(cx, point(px(150.), px(59.)), Modifiers::default());
+        app.click(
+            cx,
+            point(px(150.), px(59. + CLUSTER_SECTION)),
+            Modifiers::default(),
+        );
 
         // Enter in the search field shows the first match and hands the
         // keys back to the list.
@@ -1137,5 +1169,31 @@ fn a_cursor_whose_object_left_takes_no_action() {
         app.keys(cx, "a");
         let request = app.state.read(cx).last_request().cloned().unwrap();
         assert_eq!(request.targets, [app.row_key(cx, 1)]);
+    });
+}
+
+/// The selection bar's buttons stay where they are when the count gains a
+/// digit (`9 selected` → `10 selected`): the count has a fixed slot.
+#[test]
+fn the_selection_bar_buttons_stay_put_as_the_count_grows() {
+    let options = FixtureOptions { generated_rows: 30 };
+    run(options, |app, cx| {
+        assert!(app.rows(cx).len() >= 10);
+        app.keys(cx, "x");
+        for _ in 0..8 {
+            app.keys(cx, "shift-j");
+        }
+        assert_eq!(app.marked(cx).len(), 9);
+        let buttons_x = |app: &Harness, cx: &App| {
+            app.dashboard(cx)
+                .read(cx)
+                .selection_buttons_x
+                .get()
+                .unwrap()
+        };
+        let nine = buttons_x(app, cx);
+        app.keys(cx, "shift-j");
+        assert_eq!(app.marked(cx).len(), 10);
+        assert_eq!(buttons_x(app, cx), nine, "the buttons didn't move");
     });
 }

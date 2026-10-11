@@ -216,7 +216,7 @@ impl AppState {
     /// Forgets what the window asked for in the environment that was on
     /// screen: a waiting action request and the actions' markers and
     /// toasts.
-    fn forget_window_requests(&mut self) {
+    pub(super) fn forget_window_requests(&mut self) {
         self.requested = None;
         self.last_request = None;
         self.last_denial = None;
@@ -587,6 +587,23 @@ mod tests {
             assert_eq!(engine.sent().len(), 1);
             assert!(engine.sent()[0].starts_with("UpdateGeneral("));
         }
+    }
+
+    /// The settings panel edits any environment's notification rules: a
+    /// change to one off screen is saved and goes to its own engine only.
+    #[test]
+    fn notification_settings_of_an_environment_off_screen_go_to_its_engine() {
+        let (mut state, (prod_id, prod), (staging_id, staging)) = two_engines();
+        assert!(state.change_notifications(&staging_id, |plan| {
+            plan.settings.enabled = false;
+        }));
+        let enabled =
+            |state: &AppState, id: &str| state.environment_by_id(id).unwrap().notifications.enabled;
+        assert!(!enabled(&state, &staging_id));
+        assert!(enabled(&state, &prod_id), "prod is untouched");
+        assert_eq!(staging.sent(), ["UpdateEnvironment(staging)"]);
+        assert!(prod.sent().is_empty(), "{:?}", prod.sent());
+        assert_eq!(state.active_environment_id(), Some(prod_id.as_str()));
     }
 
     /// A1: an acknowledgement asked for from another environment's

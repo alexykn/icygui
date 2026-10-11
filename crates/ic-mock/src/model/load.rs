@@ -10,10 +10,10 @@ use serde_json::{Map, Value as Json};
 use super::logic::plugin_command;
 use super::types::{
     CheckResultData, Checkable, CommandData, CommentData, DependencyData, DowntimeData,
-    EndpointData, GroupData, NotificationData, ObjMeta, SourceLocation, UserData, VarsState,
-    ZoneData,
+    EndpointData, FeatureData, GroupData, NotificationData, ObjMeta, SourceLocation, UserData,
+    VarsState, ZoneData,
 };
-use super::{AppInfo, CheckStats, World};
+use super::{AppInfo, CheckStats, ObjKind, World};
 use crate::config::NumberFormat;
 use crate::error::MockError;
 use crate::events::EventBus;
@@ -53,8 +53,15 @@ impl Shift {
     }
 }
 
+/// The messages per second an endpoint sends while connected: 120 to
+/// 440, the same for a name every time.
+fn message_rate(name: &str) -> f64 {
+    let sum: u32 = name.bytes().map(u32::from).sum();
+    120.0 + f64::from(sum % 320) + 0.25
+}
+
 /// `r2.14.3-1` → 21403 (`icinga_version`).
-fn version_number(version: &str) -> u64 {
+pub(crate) fn version_number(version: &str) -> u64 {
     let digits: Vec<u64> = version
         .trim_start_matches(['r', 'v'])
         .split(['.', '-'])
@@ -125,6 +132,7 @@ impl World {
             notifications: BTreeMap::new(),
             check_commands: BTreeMap::new(),
             event_commands: BTreeMap::new(),
+            features: BTreeMap::new(),
             comments_by_object: BTreeMap::new(),
             downtimes_by_object: BTreeMap::new(),
             notifications_by_object: BTreeMap::new(),
@@ -141,6 +149,19 @@ impl World {
             pinned: scenario.pinned.iter().map(ObjectKey::full_name).collect(),
             sim: SimState::default(),
             reschedule_delay: options.reschedule_delay,
+            // The first beats a moment apart, at once.
+            realtime: scenario
+                .realtime
+                .iter()
+                .enumerate()
+                .map(|(index, object)| {
+                    #[expect(clippy::cast_precision_loss, reason = "a few hundred objects at most")]
+                    let offset = index as f64 * 0.05;
+                    (object.full_name(), now + offset)
+                })
+                .collect(),
+            checks_stopped: false,
+            checkers_stopped: BTreeSet::new(),
         };
 
         let mut line = 1;
@@ -260,11 +281,23 @@ impl World {
                     },
                     port: "5665".to_owned(),
                     connected: endpoint.connected,
-                    icinga_version: if endpoint.connected || local {
-                        icinga_version
+                    // Icinga reports no version for the node's own
+                    // endpoint (`contract/samples/endpoints.json`).
+                    icinga_version: if endpoint.connected && !local {
+                        scenario
+                            .endpoint_versions
+                            .iter()
+                            .find(|(name, _)| *name == endpoint.name)
+                            .map_or(icinga_version, |(_, version)| version_number(version))
                     } else {
                         0
                     },
+                    last_message: if endpoint.connected && !local {
+                        now
+                    } else {
+                        0.0
+                    },
+                    message_rate: message_rate(&endpoint.name),
                     meta: ObjMeta::config(
                         vec![endpoint.name.clone()],
                         "",
@@ -272,6 +305,38 @@ impl World {
                     ),
                 },
             );
+        }
+
+        for (enabled, kind, name) in [
+            (
+                scenario.features.checker,
+                ObjKind::CheckerComponent,
+                "checker",
+            ),
+            (
+                scenario.features.notification,
+                ObjKind::NotificationComponent,
+                "notification",
+            ),
+            (scenario.features.icingadb, ObjKind::IcingaDb, "icingadb"),
+        ] {
+            if enabled {
+                world.features.insert(
+                    kind,
+                    FeatureData {
+                        name: name.to_owned(),
+                        meta: ObjMeta::config(
+                            vec![name.to_owned()],
+                            "",
+                            SourceLocation::file(
+                                &format!("/etc/icinga2/features-enabled/{name}.conf"),
+                                1,
+                                5,
+                            ),
+                        ),
+                    },
+                );
+            }
         }
 
         for user in &scenario.users {
@@ -484,7 +549,10 @@ impl World {
             let entry_time = shift.at(downtime.entry_time);
             let legacy_id = world.next_downtime_legacy_id();
             let config_owner = if downtime.config_owned {
-                format!("{object}!maintenance-window")
+                format!(
+                    "{object}!{}",
+                    downtime.schedule.as_deref().unwrap_or("maintenance-window")
+                )
             } else {
                 String::new()
             };

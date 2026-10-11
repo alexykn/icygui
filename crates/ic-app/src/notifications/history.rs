@@ -21,7 +21,8 @@ pub(crate) enum HistoryTone {
     State(CheckableState),
     /// The accent: acknowledgements.
     Accent,
-    /// Downtimes (the unknown purple, as in the design's event stream).
+    /// A downtime taking effect: the downtime accent (the pane banner's
+    /// blue), as acknowledgements, never a state's colour (topic 01).
     Downtime,
     /// Flapping (warning yellow).
     Flapping,
@@ -96,6 +97,58 @@ pub(crate) fn line(entry: &LogEntry, viewer: &ObjectKey, now: Timestamp) -> Hist
     }
 }
 
+/// The lines for `entries` (newest first) in the history of `viewer`. In
+/// a host's history, a downtime's start (or end) on the host and its
+/// services, recorded together, is one line: `host and its 11 services`
+/// (Icinga records one event per object; the log keeps them all).
+pub(crate) fn lines(entries: &[LogEntry], viewer: &ObjectKey, now: Timestamp) -> Vec<HistoryLine> {
+    let host_view = matches!(viewer, ObjectKey::Host { .. });
+    let mut lines = Vec::with_capacity(entries.len());
+    let mut index = 0;
+    while index < entries.len() {
+        let first = &entries[index];
+        let mut end = index + 1;
+        if host_view
+            && matches!(
+                first.kind,
+                LogKind::DowntimeStarted | LogKind::DowntimeEnded
+            )
+        {
+            while end < entries.len() && same_downtime_event(first, &entries[end]) {
+                end += 1;
+            }
+        }
+        let group = &entries[index..end];
+        let mut line = line(first, viewer, now);
+        if group.len() > 1 {
+            let host = group
+                .iter()
+                .any(|entry| matches!(entry.object, ObjectKey::Host { .. }));
+            let services = group.len() - usize::from(host);
+            let noun = if services == 1 { "service" } else { "services" };
+            line.object = if host {
+                format!("host and its {services} {noun}")
+            } else {
+                format!("{services} {noun}")
+            };
+        }
+        lines.push(line);
+        index = end;
+    }
+    lines
+}
+
+/// Whether two log entries record the same downtime starting (or ending)
+/// on several objects at once: the same kind, author and comment, within
+/// a second.
+fn same_downtime_event(first: &LogEntry, other: &LogEntry) -> bool {
+    other.kind == first.kind
+        && other.author == first.author
+        && other.text == first.text
+        && (other.at.as_unix_seconds() - first.at.as_unix_seconds()).abs() <= 1.
+        && other.object != first.object
+}
+
 /// `CRITICAL`, `OK`, `DOWN`, …
 fn state_kind(state: CheckableState) -> &'static str {
     use ic_model::{HostState, ServiceState};
@@ -149,6 +202,38 @@ mod tests {
             text: text.to_owned(),
             author: author.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn a_host_downtime_with_its_services_is_one_line() {
+        let host = ObjectKey::host("k8s-node-02");
+        let started = |object: ObjectKey| {
+            entry(
+                object,
+                LogKind::DowntimeStarted,
+                "BMC firmware update",
+                Some("j.berg"),
+            )
+        };
+        let mut entries = vec![started(host.clone())];
+        for service in ["disk /", "kubelet", "load"] {
+            entries.push(started(ObjectKey::service("k8s-node-02", service)));
+        }
+        entries.push(entry(
+            ObjectKey::service("k8s-node-02", "load"),
+            LogKind::CommentAdded,
+            "noted",
+            Some("s.weber"),
+        ));
+        let shown = lines(&entries, &host, now());
+        assert_eq!(shown.len(), 2, "{shown:?}");
+        assert_eq!(shown[0].kind, "DOWNTIME");
+        assert_eq!(shown[0].object, "host and its 3 services");
+        assert_eq!(shown[0].note, "j.berg: BMC firmware update");
+        assert_eq!(shown[1].kind, "COMMENT");
+        // A service's own history has one line per event anyway.
+        let service = ObjectKey::service("k8s-node-02", "load");
+        assert_eq!(lines(&entries[3..4], &service, now()).len(), 1);
     }
 
     #[test]

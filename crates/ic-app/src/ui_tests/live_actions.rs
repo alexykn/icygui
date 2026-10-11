@@ -213,7 +213,7 @@ async fn comment(app: &Harness, cx: &AsyncApp, control: &MockControl) {
         request(
             app,
             cx,
-            ObjectAction::RemoveComment(comment.clone()),
+            ObjectAction::RemoveComments(vec![comment.clone()]),
             vec![object.clone()],
         );
     });
@@ -255,24 +255,22 @@ async fn downtimes(app: &Harness, cx: &AsyncApp, control: &MockControl) {
             .await;
             name.unwrap_or_default()
         };
-        if round == 0 {
-            cx.update(|cx| {
-                request(
-                    app,
-                    cx,
-                    ObjectAction::RemoveDowntime(downtime.clone()),
-                    vec![object.clone()],
-                );
-            });
-        } else {
-            cx.update(|cx| {
-                request(app, cx, ObjectAction::RemoveDowntimes, vec![object.clone()]);
-            });
-            cx.update(|cx| {
-                assert!(matches!(modal(app, cx), Some(ModalKind::Confirm(_))));
-            });
-            cx.update(|cx| app.keys(cx, "enter"));
-        }
+        // Both ask first, listing the downtimes that go (topic 01).
+        cx.update(|cx| {
+            let action = if round == 0 {
+                ObjectAction::RemoveDowntime(downtime.clone())
+            } else {
+                ObjectAction::RemoveDowntimes
+            };
+            request(app, cx, action, vec![object.clone()]);
+        });
+        cx.update(|cx| {
+            assert_eq!(
+                modal(app, cx),
+                Some(ModalKind::Action(DialogKind::RemoveDowntime))
+            );
+        });
+        cx.update(|cx| app.keys(cx, "enter"));
         wait_for(app, cx, "the downtime removed", LOAD, |app, cx| {
             control.downtimes().iter().all(|d| d.name != downtime)
                 && app

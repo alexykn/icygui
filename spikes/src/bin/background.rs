@@ -132,6 +132,10 @@ fn main() {
     tracing::info!("event loop ended");
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the spike has no interface size: real pixels"
+)]
 fn open_window(cx: &mut App, reason: &str) {
     if !cx.windows().is_empty() {
         tracing::info!(reason, "window already open");

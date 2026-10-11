@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>icygui v1 · 14 comments and acknowledgements</title>
+<link rel="stylesheet" href="v1.css"><script src="icons.js"></script><script src="v1.js"></script>
+<style>
+/* Topic 14: drafts for the comments and acknowledged views. */
+/* a thread: an object's band, then its entries in the text column */
+.th-e { display: grid; grid-template-columns: 44px minmax(0,1fr) auto; gap: 14px; padding: 10px 18px 11px; border-bottom: 1px solid var(--bd-row); flex: none; }
+.th-e.sel { background: var(--row-sel); }
+.th-e .mk { display: flex; justify-content: center; padding-top: 2px; color: var(--t-faint); }
+.th-e .mk.acc { color: var(--accent); }
+.th-e .hd { display: flex; align-items: baseline; gap: 10px; font-size: 12px; color: var(--t-faint); white-space: nowrap; }
+.th-e .hd .au { color: var(--t-strong); font-size: 12.5px; }
+.th-e .hd .k { color: var(--t-muted); }
+.th-e .hd .k.acc { color: var(--accent); }
+.th-e .tx { font-size: 12.5px; line-height: 1.5; color: var(--t); margin-top: 4px; white-space: normal; }
+.th-e .tx.re { border-left: 2px solid var(--bd-header); padding-left: 12px; }  /* later messages read as replies */
+.th-e .tg { display: flex; gap: 10px; align-items: flex-start; font-size: 11.5px; color: var(--t-faint); white-space: nowrap; padding-top: 1px; }
+.tgs { display: inline-block; width: 6ch; text-align: right; }            /* sticky slot */
+.tgx { display: inline-block; width: 22ch; text-align: right; }           /* expiry / window slot */
+.tgc { display: inline-block; width: 11ch; text-align: right; }           /* comment count slot */
+/* a flat mailing-list index */
+.mli { display: grid; grid-template-columns: 44px minmax(0,1fr) 110px 40px 100px; gap: 14px; align-items: center; height: 36px; padding: 0 18px; border-bottom: 1px solid var(--bd-row); font-size: 12.5px; white-space: nowrap; flex: none; }
+.mli.hdr { height: 30px; font-size: 11.5px; color: var(--t-faint); background: var(--row-header); border-bottom-color: var(--bd-header); }
+.mli.sel { background: var(--row-sel); }
+.mli .c { display: flex; justify-content: center; }
+.mli .s { overflow: hidden; text-overflow: ellipsis; }
+.mli .s .n { color: var(--t-strong); } .mli .s .o { color: var(--t-faint); }
+.mli .a { color: var(--t-sec); } .mli .r { color: var(--t-faint); text-align: right; } .mli .d { color: var(--t-faint); text-align: right; }
+.mlx { background: var(--pane-bg); border-bottom: 1px solid var(--bd-header); flex: none; }
+/* a compact single-line table */
+.cl { display: grid; grid-template-columns: 44px minmax(0,1fr) 100px 80px 52px 132px; gap: 14px; align-items: center; height: 32px; padding: 0 18px; border-bottom: 1px solid var(--bd-row); font-size: 12.5px; white-space: nowrap; flex: none; }
+.cl.hdr { height: 28px; font-size: 11.5px; color: var(--t-faint); background: var(--row-header); border-bottom-color: var(--bd-header); }
+.cl.sel { background: var(--row-sel); }
+.cl > span { overflow: hidden; text-overflow: ellipsis; }
+.cl .c { display: flex; justify-content: center; }
+.cl .s .n { color: var(--t-strong); } .cl .s .o { color: var(--t-faint); } .cl .s .cm { color: var(--t-muted); }
+.cl .a { color: var(--t-sec); } .cl .f { color: var(--t-faint); } .cl .r { text-align: right; color: var(--t-faint); }
+/* the pane's thread */
+.pth { display: flex; flex-direction: column; }
+.pth .e { display: grid; grid-template-columns: 16px minmax(0,1fr) auto; gap: 10px; padding: 10px 0; border-top: 1px solid var(--bd-row); }
+.pth .e .mk { color: var(--t-faint); padding-top: 2px; } .pth .e .mk.acc { color: var(--accent); }
+.pth .e .hd { font-size: 12px; color: var(--t-faint); white-space: nowrap; } .pth .e .hd .au { color: var(--t-strong); font-size: 12.5px; }
+.pth .e .tx { font-size: 12.5px; line-height: 1.5; color: var(--t); margin-top: 3px; }
+.pth .e .tx.re { border-left: 2px solid var(--bd-header); padding-left: 10px; }
+.pth .e .tg { font-size: 11.5px; color: var(--t-faint); white-space: nowrap; display: flex; gap: 8px; }
+.ghb .cs .hc { color: var(--t-faint); }
+.ghb .cs .tgc { justify-content: flex-end; }
+.quiet-acc { color: var(--accent); }
+.sb-item .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* downtimes: tight one-line rows, and the timeline */
+.dl { display: grid; grid-template-columns: 44px minmax(0,1fr) 150px 64px 92px; gap: 14px; align-items: center; height: 34px; padding: 0 18px; border-bottom: 1px solid var(--bd-row); font-size: 12.5px; white-space: nowrap; flex: none; }
+.dl.sel { background: var(--row-sel); }
+.dl > span { overflow: hidden; text-overflow: ellipsis; }
+.dl .c { display: flex; justify-content: center; }
+.dl .s .n { color: var(--t-strong); } .dl .s .o { color: var(--t-faint); } .dl .s .h { color: var(--t-sec); }
+.dl .w { color: var(--t-faint); font-size: 12px; } .dl .r { text-align: right; color: var(--t-faint); font-size: 11.5px; } .dl .r.acc { color: var(--accent); }
+.dsec { display: flex; align-items: center; gap: 10px; height: 28px; padding: 0 18px 0 62px; background: var(--row-header); border-bottom: 1px solid var(--bd-header); font-size: 11.5px; color: var(--t-muted); flex: none; white-space: nowrap; position: relative; }
+.dsec .dic { position: absolute; left: 33px; top: 0; bottom: 0; display: flex; align-items: center; color: var(--t-faint); }
+.dsec b { color: var(--t-sec); font-weight: 600; }
+.tml { display: grid; grid-template-columns: 44px minmax(0,1fr) 640px 92px; gap: 14px; align-items: center; height: 44px; padding: 0 18px; border-bottom: 1px solid var(--bd-row); font-size: 12.5px; white-space: nowrap; flex: none; }
+.tml.sel { background: var(--row-sel); }
+.tml > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tml .c { display: flex; justify-content: center; }
+.tml .s { display: flex; flex-direction: column; gap: 2px; }
+.tml .s .n { color: var(--t-strong); } .tml .s .o { color: var(--t-faint); } .tml .s .t2 { font-size: 11.5px; color: var(--t-faint); overflow: hidden; text-overflow: ellipsis; }
+.tml .ax { position: relative; height: 100%; }
+.tml .ax .bar { position: absolute; top: 50%; height: 3px; margin-top: -1px; border-radius: 2px; background: var(--track); overflow: hidden; }
+.tml .ax .bar > span { display: block; height: 100%; background: var(--accent); }
+.tml .ax .bar.up { background: var(--t-faint); opacity: .55; }
+.tml .ax .bar.flex { background: transparent; border-top: 1px dashed var(--t-faint); height: 0; margin-top: 0; opacity: .8; }
+.tml .ax .lab { position: absolute; top: 4px; font-size: 10.5px; color: var(--t-faint); }
+.tml .ax .off { position: absolute; right: 0; top: 50%; margin-top: -8px; font-size: 11px; color: var(--t-faint); }
+.tml .r { text-align: right; color: var(--t-faint); font-size: 11.5px; } .tml .r.acc { color: var(--accent); }
+.tlax { display: grid; grid-template-columns: 44px minmax(0,1fr) 640px 92px; gap: 14px; height: 28px; padding: 0 18px; align-items: center; background: var(--row-header); border-bottom: 1px solid var(--bd-header); font-size: 11px; color: var(--t-faint); flex: none; }
+.tlax .ax { position: relative; height: 100%; }
+.tlax .ax span { position: absolute; top: 8px; transform: translateX(-50%); }
+.nowl { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent); opacity: .6; z-index: 2; pointer-events: none; }
+</style></head>
+<body class="canvas">
+<div class="topic-head"><span class="topic-id">14</span><span class="topic-name">Comments and acknowledgements: drafts</span><span class="topic-id" style="background:#f2d974">drafts</span></div>
+<p class="topic-intro">Drafts to compare, replacing the dedicated comment and acknowledged lists of topic 07 (07d, 07f). The user’s notes: comments are rare; <b>a comment is just the text someone typed into the acknowledge or downtime dialog</b>, so it is shown as part of its acknowledgement or downtime and never as a separate thing; Icinga’s automatic acknowledgement and downtime comments are never listed. Only the rare <b>free-standing comments</b> (added with <i>comment</i>) are entries of their own. Drafts: <b>comments A–D</b>, <b>acknowledged A–D</b>, <b>downtimes A–D</b>, and <b>handling A</b>, which merges acknowledgements, downtimes and free-standing comments into one “who is handling what” view. <b>comments D</b>, <b>acknowledged D</b> and <b>handling A</b> treat acknowledgements and comments together. Each draft is drawn dark, then light. Same demo data throughout; wall clock Wed 7 Oct, 14:12.</p>
+<div class="shots"></div>
+<script>
+// ---- data -------------------------------------------------------------------
+// free-standing comments: [state, ring, name, host|null, [[author, time, text], …]]
+const COMMENTS = [
+  ['crit', false, 'postgres-replication', 'db-prod-03', [
+    ['j.berg', '13:41', 'Failover drill on db-prod-01 at 15:00. Expect lag on 03 until the replica is rebuilt.'],
+    ['dba-oncall', '13:58', 'Replica rebuild started on db-prod-03, about 45 minutes. Leaving the alert as it is.'],
+    ['j.berg', '14:05', 'Thanks. I’ll check again after the drill.']]],
+  ['crit', false, 'rabbitmq-queue', 'mq-prod-01', [
+    ['m.keller', '14:09', 'Consumer deploy rolled back; the queue should drain within 20 minutes.']]],
+  ['ok', false, 'backup-01', null, [
+    ['dba-oncall', 'Mon 09:14', 'The repository moves to backup-02 on Thursday night, see CHG-4480.'],
+    ['j.berg', 'Tue 10:02', 'Moved to Thursday 01:00; the downtime is scheduled.']]],
+];
+// acknowledgements, each with the text typed into the dialog:
+// [state, name, host, since, author, at, ago, text, sticky, expiry, expiresSoon]
+const ACKS = [
+  ['crit', 'pg-autovacuum', 'db-prod-01', '1h', 'dba-oncall', '13:12', '1h ago', 'Vacuum running on orders, about 30 minutes.', false, 'expires 15:00', true],
+  ['unk', 'borg-last-run', 'backup-01', '52m', 'dba-oncall', '13:30', '42m ago', 'Lock from the migration test; clears after Thursday.', true, 'expires Thu 08:00'],
+  ['unk', 'kafka-consumer-lag', 'kafka-01', '54m', 'm.keller', '13:25', '47m ago', 'Consumer group rebalancing after the deploy.', false, ''],
+  ['warn', 'ntp-offset', 'k8s-node-02', '2h', 'j.berg', '12:30', '1h 42m ago', 'chrony re-syncs with the node reboot tonight.', true, 'expires 23:00'],
+  ['crit', 'http-tls', 'web-edge-02', '2h', 'm.keller', '12:02', '2h 10m ago', 'Renewal ordered, new certificate expected tomorrow (CHG-4459).', true, 'expires Thu 12:00'],
+  ['crit', 'disk /srv', 'nfs-02', '3h', 'j.berg', '11:20', '2h 52m ago', 'Cleanup job running, 30 GiB to go.', false, ''],
+  ['warn', 'cert-expiry', 'vpn-gw-01', '1d', 'm.keller', 'Tue 16:40', '1d ago', 'New certificate arrives Friday; leave this until then.', true, 'expires Fri 12:00'],
+];
+const groupsNoActive = [{ name: 'overview', items: SIDEBAR_GROUPS[0].items }, SIDEBAR_GROUPS[1], SIDEBAR_GROUPS[2]];
+const openSec = (entries, active) => `<div class="sb-group"><div class="sb-gh active"><span class="name">open</span></div>${entries.map(([key, ic, label, n]) => `<div class="sb-item${key === active ? ' active' : ''}"><span class="faint" style="width:8px;display:flex;justify-content:center">${icon(ic, 11)}</span><span class="label">${label}<span class="faint" style="margin-left:6px">prod-cluster</span></span><span class="count">${n}</span></div>`).join('')}</div>`;
+const SEP = [['downtimes', 'calendar-clock', 'downtimes', 10], ['comments', 'message-square', 'comments', 3], ['acked', 'check', 'acknowledged', 7]];
+const NOCOMMENTS = [['downtimes', 'calendar-clock', 'downtimes', 10], ['acked', 'check', 'acknowledged', 7]];
+const MERGED = [['downtimes', 'calendar-clock', 'downtimes', 10], ['ackc', 'check', 'acknowledged and comments', 10]];
+const ALL = [['all', 'users', 'handling', 20]];
+const win = (main, sec, active, extra = {}) => appWindow(main, { groups: groupsNoActive, activeGroup: '', after: openSec(sec, active), ...extra });
+const onlyMine = (on) => `<span style="margin-right:6px">${sw(on, 'only mine')}</span>`;
+const secRow = (ic, title, detail) => `<div class="row ghdr"><div class="lead"><span class="muted">${icon(ic, 14)}</span></div><div class="text"><span class="t1"><span class="n" style="font-weight:600">${title}</span></span><span class="t2">${detail}</span></div><span class="tag"></span></div>`;
+const objLabel = (n, h) => h ? `<span class="n">${n}</span><span class="o"> on </span>${h}` : `<span class="n">${n}</span>`;
+const MSG = icon('message-square', 12), ACK = icon('check', 12), CAL = icon('calendar-clock', 12);
+// a band for an object (as the host bands of 10h): its state mark, `service on host`, faint output, right slots
+const band = (st, ring, n, h, out, right, { sel } = {}) => `<div class="ghb${sel ? ' sel' : ''}"><div class="lead"><span class="dot ${st}${ring ? ' ring' : ''} d9"></span></div>
+  <div class="t"><span class="n">${n}${h ? `<span style="font-weight:400;color:var(--t-faint)"> on </span><span style="font-weight:500;color:var(--t-sec)">${h}</span>` : ''}</span><span class="o">${out}</span></div><span class="cs">${right}</span></div>`;
+// a thread entry: mark in the fixed slot, `author · time` (+ kind), the text; later ones read as replies
+const entry = ({ mk = MSG, acc = false, au, at, kind = '', text, re = false, tags = '', sel = false }) => `<div class="th-e${sel ? ' sel' : ''}"><span class="mk${acc ? ' acc' : ''}">${mk}</span>
+  <div style="min-width:0"><div class="hd">${kind ? `<span class="k${acc ? ' acc' : ''}">${kind}</span>` : ''}<span class="au">${au}</span><span>${at}</span></div><div class="tx${re ? ' re' : ''}">${text}</div></div><span class="tg">${tags}</span></div>`;
+const T2 = (a, b = '') => `<span class="tgs">${a}</span><span class="tgx">${b}</span>`;
+const OUT = { 'postgres-replication': 'CRITICAL - standby lag 412s (> 300s)', 'rabbitmq-queue': 'CRITICAL - queue orders.retry depth 18,402', 'backup-01': 'UP - PING OK, rta 0.31 ms' };
+
+// ======================================================================
+// comments A: a thread per object
+// ======================================================================
+function commentsA() {
+  let h = listHeader({ title: 'comments', subtitle: 'prod-cluster · free-standing comments', sort: 'latest ↓', extra: onlyMine(false) });
+  h += `<div class="sum"><span class="it"><span class="faint">${icon('message-square', 11)}</span>6 comments on 3 objects</span><span class="end">acknowledgement and downtime texts are with them</span></div><div class="list">`;
+  COMMENTS.forEach(([st, ring, n, hst, msgs], oi) => {
+    h += band(st, ring, n, hst, OUT[n], `<span class="hc tgc">${msgs.length} ${msgs.length > 1 ? 'comments' : 'comment'}</span>`);
+    h += msgs.map(([au, at, tx], i) => entry({ au, at, text: tx, re: i > 0, sel: oi === 0 && i === 1 })).join('');
+  });
+  return h + '</div>';
+}
+const capCA = '<b>comments A: a thread per object.</b> Each object with free-standing comments is a slim band (as the host bands of 10h: its state dot, <i>service on host</i>, its output faint, the comment count in a fixed slot); its comments follow oldest first, like a mailing-list thread: <i>author · time</i>, then the text, later messages with a left rule as replies. Selection is the row background; x marks an entry, the bar removes. Acknowledgement and downtime texts are not here: they belong to their acknowledgement or downtime.';
+shot('14-cA', '14-comments-A', capCA, win(commentsA(), SEP, 'comments'));
+shot('14-cA-l', '14-comments-A-light', '<b>comments A</b>, light.', win(commentsA(), SEP, 'comments'), { theme: 'light' });
+
+// ======================================================================
+// comments B: a flat mailing-list index, the selected one expanded
+// ======================================================================
+function commentsB() {
+  let h = listHeader({ title: 'comments', subtitle: 'prod-cluster · free-standing comments', sort: 'latest ↓', extra: onlyMine(false) });
+  h += `<div class="list"><div class="mli hdr"><span></span><span>subject</span><span>from</span><span style="text-align:right">msgs</span><span style="text-align:right">last</span></div>`;
+  const idx = [
+    [COMMENTS[1], 'm.keller', '1', '14:09'],
+    [COMMENTS[0], 'j.berg, dba-oncall', '3', '14:05'],
+    [COMMENTS[2], 'dba-oncall, j.berg', '2', 'Tue 10:02'],
+  ];
+  idx.forEach(([[st, ring, n, hst, msgs], from, c, last], i) => {
+    const sel = i === 1;
+    h += `<div class="mli${sel ? ' sel' : ''}"><span class="c"><span class="dot ${st}${ring ? ' ring' : ''} d9"></span></span><span class="s">${objLabel(n, hst)}<span class="o">  ·  ${msgs[0][2]}</span></span><span class="a trunc">${from}</span><span class="r">${c}</span><span class="d">${last}</span></div>`;
+    if (sel) h += `<div class="mlx">${msgs.map(([au, at, tx], k) => entry({ au, at, text: tx, re: k > 0 })).join('')}</div>`;
+  });
+  return h + '</div>';
+}
+shot('14-cB', '14-comments-B', '<b>comments B: a flat mailing-list index.</b> One line per object: its state dot in the mark slot, the subject (<i>service on host</i> and the first comment’s start, faint), who wrote, how many, and the latest time, in fixed columns. ↵ or a click opens the selected line in place below it as its thread (the same entries as A); everything else stays one line, so three objects with six comments take four lines when closed. ←/→ fold and unfold.',
+  win(commentsB(), SEP, 'comments'));
+shot('14-cB-l', '14-comments-B-light', '<b>comments B</b>, light.', win(commentsB(), SEP, 'comments'), { theme: 'light' });
+
+// ======================================================================
+// comments C: no comments view; the thread lives in the object's pane
+// ======================================================================
+const pgPane = `<div class="pane">${paneHeader('service')}<div class="pbody">
+  ${paneTitle({ st: 'crit', label: 'CRIT', name: 'postgres-replication', sub: 'on <a>db-prod-03</a> · 14m · hard 3/3' })}
+  ${actionButtons()}
+  ${codeBlock('CRITICAL - standby lag 412s (&gt; 300s)')}
+  <div class="col" style="gap:8px"><div style="display:flex;align-items:baseline;gap:10px">${seclabel('comments')}<span class="faint" style="font-size:11.5px">3 · oldest first</span></div>
+    <div class="pth">${COMMENTS[0][4].map(([au, at, tx], i) => `<div class="e"><span class="mk">${MSG}</span><div style="min-width:0"><div class="hd"><span class="au">${au}</span>  ${at}</div><div class="tx${i ? ' re' : ''}">${tx}</div></div><span class="tg"></span></div>`).join('')}</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:4px"><span class="input" style="flex:1"><span class="ph">add a comment (c)</span></span>${btn('comment', { key: '↵' })}</div></div>
+</div></div>`;
+const dbRows = [
+  ['crit', 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', '14m'],
+  ['unk', 'mysql-replication', 'db-mysql-03', 'UNKNOWN - connection refused', '2h'],
+  ['warn', 'pg-connections', 'db-prod-03', 'WARNING - 182 of 200 per-db limit (orders)', '22m'],
+  ['warn', 'pg-bloat', 'db-prod-05', 'WARNING - check_postgres degraded', '50m'],
+  ['warn', 'load', 'db-prod-01', 'WARNING - load average 14.2, 12.8, 11.1', '1h'],
+];
+const cmTagSlot = (n) => `<span style="display:flex;align-items:center;gap:5px;width:5ch;justify-content:flex-end">${n ? `<span class="faint">${icon('message-square', 11)}</span>${n}` : ''}</span>`;
+const listC = listHeader({ title: 'databases', subtitle: 'service problems' }) + summary([['crit', 1, 'critical'], ['warn', 3, 'warning'], ['unk', 1, 'unknown']], handledEnd(2)) +
+  `<div class="list">${dbRows.map((r, i) => row(r, { sel: i === 0, tag: cmTagSlot(i === 0 ? 3 : 0) })).join('')}</div>`;
+shot('14-cC', '14-comments-C', '<b>comments C: no comments view at all.</b> Comments live where they are read: as a thread in the object’s pane (oldest first, <i>author time</i>, later ones as replies, a field to add one with c). A list row with comments shows a faint count in a fixed slot of its tag. Finding a comment across objects is the palette’s job (the light frame). The sidebar’s <i>open</i> section keeps downtimes and acknowledged only.',
+  win(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${listC}</div>${pgPane}</div>`, NOCOMMENTS, '', { activeGroup: 'overview', activeItem: 'databases' }));
+const palC = `<div class="pal-in"><span class="gt">›</span><span class="q">failover<span class="caret"></span></span><span class="n">2 results</span></div>
+  <div class="pal-list"><div class="pal-sec">comments</div>
+    <div class="prow sel"><span class="slot">${dot('crit', 'd7')}</span><span class="lbl">postgres-replication on db-prod-03</span><span class="det">j.berg 13:41 · <span class="hl">Failover</span> drill on db-prod-01 at 15:00…</span></div>
+    <div class="pal-sec">acknowledgements</div>
+    <div class="prow"><span class="slot"><span class="dot crit ring d7"></span></span><span class="lbl">pg-autovacuum on db-prod-01</span><span class="det">dba-oncall 13:12 · vacuum on orders, before the <span class="hl">failover</span>…</span></div></div>
+  <div class="pal-foot"><span>↵ open with its thread</span><span class="grow"></span><span>esc</span></div>`;
+shot('14-cC-l', '14-comments-C-light', '<b>comments C</b>, light: the palette finds comments and acknowledgement texts by their words (here “failover”); ↵ opens the object with its thread in the pane.',
+  win(`<div class="split" style="grid-template-columns:minmax(0,1fr) 620px"><div class="col">${listC}</div>${pgPane}</div>`, NOCOMMENTS, '', { activeGroup: 'overview', activeItem: 'databases' }) + modal(640, palC, { top: 70 }), { theme: 'light' });
+
+// ======================================================================
+// comments D (merged): "acknowledged and comments", a thread per object
+// ======================================================================
+const ackEntry = (a, opts = {}) => entry({ mk: ACK, acc: true, kind: 'acknowledged', au: a[4], at: a[5], text: a[7], tags: T2(a[8] ? 'sticky' : '', a[9]), ...opts });
+function commentsD() {
+  let h = listHeader({ title: 'acknowledged and comments', subtitle: 'prod-cluster', sort: 'latest ↓', extra: onlyMine(false) });
+  h += `<div class="sum"><span class="it"><span class="acc">${icon('check', 11)}</span>7 acknowledged</span><span class="it"><span class="faint">${icon('message-square', 11)}</span>6 comments</span><span class="end">10 objects</span></div><div class="list">`;
+  // pg-autovacuum: ack + a comment
+  const a0 = ACKS[0];
+  h += band(a0[0], true, a0[1], a0[2], 'CRITICAL - autovacuum has not run on orders for 26h', `<span class="hc tgc">1 comment</span>`);
+  h += ackEntry(a0, { sel: true }) + entry({ au: 'j.berg', at: '13:44', text: 'Still running at 13:44; I extended nothing, it expires at 15:00 on its own.', re: true });
+  // postgres-replication: comments only
+  const c0 = COMMENTS[0];
+  h += band('crit', false, c0[2], c0[3], OUT[c0[2]], `<span class="hc tgc">3 comments</span>`);
+  h += c0[4].map(([au, at, tx], i) => entry({ au, at, text: tx, re: i > 0 })).join('');
+  // http-tls: ack only
+  const a4 = ACKS[4];
+  h += band(a4[0], true, a4[1], a4[2], 'SSL CRITICAL - certificate expires in 2 days', `<span class="hc tgc"></span>`);
+  h += ackEntry(a4);
+  const a1 = ACKS[1];
+  h += band(a1[0], true, a1[1], a1[2], 'UNKNOWN - repository lock held by PID 4412', `<span class="hc tgc"></span>`);
+  h += ackEntry(a1);
+  return h + '</div>';
+}
+shot('14-cD', '14-comments-D', '<b>comments D (merged): one view, “acknowledged and comments”.</b> A thread per object: the acknowledgement first, as one entry (✓ in the accent, <i>acknowledged</i>, who and when, the text typed into the dialog, <i>sticky</i> and the expiry as small tags in fixed slots), then the object’s free-standing comments, oldest first. An acknowledgement’s text is never a second row. Objects with only comments (postgres-replication) have a filled dot; acknowledged ones are hollow. It replaces both 07d and 07f.',
+  win(commentsD(), MERGED, 'ackc'));
+shot('14-cD-l', '14-comments-D-light', '<b>comments D</b>, light.', win(commentsD(), MERGED, 'ackc'), { theme: 'light' });
+
+// ======================================================================
+// acknowledged A: grouped by expiry
+// ======================================================================
+const ackRow = (a, o = {}) => row([a[0], a[1], a[2], `${a[4]} ${a[5]}, ${a[6]} · ${a[7]}`, a[3]], { ...o, handled: true, tag: T2(a[8] ? 'sticky' : '', a[10] ? `<span style="color:var(--warn-text)">${a[9]}, in 48m</span>` : a[9]) });
+function acksA() {
+  let h = listHeader({ title: 'acknowledged', subtitle: 'prod-cluster · every problem', sort: 'expiry', extra: onlyMine(false) });
+  h += summary([['crit', 3, 'critical'], ['warn', 2, 'warning'], ['unk', 2, 'unknown']], '4 sticky · 5 expire') + '<div class="list">';
+  h += secRow('clock', 'expires within 2 hours · 1', 'it becomes a problem again, notifying, unless someone acts') + ackRow(ACKS[0], { sel: true });
+  h += secRow('calendar-clock', 'expires later · 4', 'soonest first') + [ACKS[3], ACKS[1], ACKS[4], ACKS[6]].map((a) => ackRow(a)).join('');
+  h += secRow('clock', 'no expiry · 2', 'until the problem recovers') + [ACKS[2], ACKS[5]].map((a) => ackRow(a)).join('');
+  return h + '</div>';
+}
+shot('14-aA', '14-acks-A', '<b>acknowledged A: grouped by expiry.</b> Section headers as in the downtime list: <i>expires within 2 hours</i> on top (the expiry in the warning text colour, with how long is left), <i>expires later</i> (soonest first), <i>no expiry</i>. Rows are today’s list rows, hollow (acknowledged = handled); the second line is who, when, how long ago, and the text typed into the dialog; <i>sticky</i> and the expiry in fixed tag slots.',
+  win(acksA(), SEP, 'acked'));
+shot('14-aA-l', '14-acks-A-light', '<b>acknowledged A</b>, light.', win(acksA(), SEP, 'acked'), { theme: 'light' });
+
+// ======================================================================
+// acknowledged B: grouped by author
+// ======================================================================
+function acksB() {
+  let h = listHeader({ title: 'acknowledged', subtitle: 'prod-cluster · every problem', sort: 'by author', extra: onlyMine(false) });
+  h += summary([['crit', 3, 'critical'], ['warn', 2, 'warning'], ['unk', 2, 'unknown']], '3 people') + '<div class="list">';
+  const by = { 'dba-oncall': [], 'j.berg': [], 'm.keller': [] };
+  ACKS.forEach((a) => by[a[4]].push(a));
+  Object.entries(by).forEach(([who, list], gi) => {
+    h += secRow('user', `${who} · ${list.length}`, who === 'j.berg' ? 'you · newest first' : 'newest first');
+    h += list.map((a, i) => row([a[0], a[1], a[2], `${a[5]}, ${a[6]} · ${a[7]}`, a[3]], { handled: true, sel: gi === 1 && i === 0, tag: T2(a[8] ? 'sticky' : '', a[9]) })).join('');
+  });
+  return h + '</div>';
+}
+shot('14-aB', '14-acks-B', '<b>acknowledged B: grouped by who acknowledged.</b> One section per person (you are named), newest first inside; the second line drops the author, since the section says it. Answers “what is m.keller holding?” at a glance, e.g. at a hand-over. <i>sticky</i> and the expiry stay in their fixed slots.',
+  win(acksB(), SEP, 'acked'));
+shot('14-aB-l', '14-acks-B-light', '<b>acknowledged B</b>, light.', win(acksB(), SEP, 'acked'), { theme: 'light' });
+
+// ======================================================================
+// acknowledged C: compact, one line each
+// ======================================================================
+function acksC() {
+  let h = listHeader({ title: 'acknowledged', subtitle: 'prod-cluster · every problem', sort: 'newest ↓', extra: onlyMine(false) });
+  h += summary([['crit', 3, 'critical'], ['warn', 2, 'warning'], ['unk', 2, 'unknown']], '4 sticky · 5 expire');
+  h += `<div class="list"><div class="cl hdr"><span></span><span>problem · text</span><span>by</span><span>since</span><span></span><span style="text-align:right">expires</span></div>`;
+  h += ACKS.map((a, i) => `<div class="cl${i === 2 ? ' sel' : ''}"><span class="c"><span class="dot ${a[0]} ring d9"></span></span><span class="s"><span class="n">${a[1]}</span><span class="o"> on </span><span class="cm">${a[2]}</span><span class="o">  ·  ${a[7]}</span></span><span class="a">${a[4]}</span><span class="f">${a[6]}</span><span class="f">${a[8] ? 'sticky' : ''}</span><span class="r"${a[10] ? ' style="color:var(--warn-text)"' : ''}>${a[9] ? a[9].replace('expires ', '') : '–'}</span></div>`).join('');
+  return h + '</div>';
+}
+shot('14-aC', '14-acks-C', '<b>acknowledged C: compact, one line each.</b> A table at 32px per line: the hollow state dot, <i>service on host</i> and the text (cut first), who, how long ago, <i>sticky</i>, when it expires (warning colour when within 2 hours, a dash for none), in fixed columns. Twice as many fit on screen; the full text is in the pane (↵) and the tooltip.',
+  win(acksC(), SEP, 'acked'));
+shot('14-aC-l', '14-acks-C-light', '<b>acknowledged C</b>, light.', win(acksC(), SEP, 'acked'), { theme: 'light' });
+
+// ======================================================================
+// acknowledged D (merged): one row per object, the thread in the pane
+// ======================================================================
+const objs = [
+  [ACKS[0], 1], [null, 3, COMMENTS[0]], [ACKS[1], 0], [ACKS[2], 0], [null, 1, COMMENTS[1]], [ACKS[3], 0], [ACKS[4], 0], [ACKS[5], 0], [ACKS[6], 0], [null, 2, COMMENTS[2]],
+];
+const dTag = (sticky, exp, n) => `<span class="tgs">${sticky ? 'sticky' : ''}</span><span style="display:inline-block;width:12ch;text-align:right">${exp.replace('expires ', '')}</span><span style="display:inline-flex;gap:5px;align-items:center;justify-content:flex-end;width:4ch">${n ? `${icon('message-square', 11)}${n}` : ''}</span>`;
+function acksDList() {
+  return objs.map(([a, n, c], i) => {
+    if (a) return row([a[0], a[1], a[2], `✓ ${a[4]} ${a[5]} · ${a[7]}`, a[3]], { handled: true, sel: i === 0, tag: dTag(a[8], a[9], n) });
+    const last = c[4][c[4].length - 1];
+    return row([c[0], c[2], c[3], `${last[0]} ${last[1]} · ${last[2]}`, c[3] ? '14m' : 'host'], { hostRow: !c[3], tag: dTag(false, '', n) });
+  }).join('');
+}
+const autoPane = `<div class="pane">${paneHeader('service')}<div class="pbody">
+  ${paneTitle({ st: 'crit', label: 'CRIT', ring: true, name: 'pg-autovacuum', sub: 'on <a>db-prod-01</a> · 1h · hard 3/3' })}
+  ${actionButtons({ first: 'remove ack', firstPrimary: false })}
+  <div class="col" style="gap:8px">${seclabel('acknowledged and comments')}
+    <div class="pth">
+      <div class="e"><span class="mk acc">${ACK}</span><div style="min-width:0"><div class="hd"><span class="quiet-acc">acknowledged</span>  <span class="au">dba-oncall</span>  13:12</div><div class="tx">Vacuum running on orders, about 30 minutes.</div></div><span class="tg"><span>expires 15:00, in 48m</span></span></div>
+      <div class="e"><span class="mk">${MSG}</span><div style="min-width:0"><div class="hd"><span class="au">j.berg</span>  13:44</div><div class="tx re">Still running at 13:44; I extended nothing, it expires at 15:00 on its own.</div></div><span class="tg"></span></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:4px"><span class="input" style="flex:1"><span class="ph">add a comment (c)</span></span>${btn('comment', { key: '↵' })}</div></div>
+  ${codeBlock('CRITICAL - autovacuum has not run on orders for 26h')}
+</div></div>`;
+const acksDMain = listHeader({ title: 'acknowledged and comments', subtitle: 'prod-cluster', sort: 'latest ↓' }) +
+  `<div class="sum"><span class="it"><span class="acc">${icon('check', 11)}</span>7 acknowledged</span><span class="it"><span class="faint">${icon('message-square', 11)}</span>3 with comments only</span><span class="end">10 objects</span></div><div class="list">${acksDList()}</div>`;
+shot('14-aD', '14-acks-D', '<b>acknowledged D (merged): one row per object.</b> Every acknowledged object, and every object with free-standing comments, once: hollow when acknowledged; the second line is the acknowledgement (✓, who, when, its text) or else the latest comment; the tag has <i>sticky</i>, when it expires and how many comments (the speech-bubble count), in fixed slots. The pane shows the object’s thread: the acknowledgement with its text and expiry, then the comments, and a field to add one. No text appears twice.',
+  win(`<div class="split" style="grid-template-columns:minmax(0,1fr) 500px"><div class="col">${acksDMain}</div>${autoPane}</div>`, MERGED, 'ackc'));
+shot('14-aD-l', '14-acks-D-light', '<b>acknowledged D</b>, light.', win(`<div class="split" style="grid-template-columns:minmax(0,1fr) 500px"><div class="col">${acksDMain}</div>${autoPane}</div>`, MERGED, 'ackc'), { theme: 'light' });
+
+// ======================================================================
+// handling A: acknowledgements, downtimes and comments: who is handling what
+// ======================================================================
+const dtEntry = ({ au, at, text, w, left, upcoming }) => entry({ mk: CAL, acc: !upcoming, kind: upcoming ? 'downtime, upcoming' : 'in downtime', au, at, text, tags: `<span class="tgs"></span><span class="tgx"${upcoming ? '' : ' style="color:var(--accent)"'}>${left}</span>` }).replace('<div class="tx">', `<div class="tx"><span class="faint">${w}  ·  </span>`);
+function handlingA() {
+  let h = listHeader({ title: 'handling', subtitle: 'prod-cluster · who is handling what', sort: 'latest ↓', extra: onlyMine(false) });
+  h += `<div class="sum"><span class="it"><span class="acc">${icon('check', 11)}</span>7 acknowledged</span><span class="it">${dot('accb', 'd9')}4 in downtime</span><span class="it">${dot('pend', 'd9')}6 upcoming</span><span class="it"><span class="faint">${icon('message-square', 11)}</span>6 comments</span><span class="end">20 objects</span></div><div class="list">`;
+  // postgres-replication: in downtime + comments
+  h += band('crit', true, 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', `<span class="hc tgc">3 comments</span>`);
+  h += dtEntry({ au: 'j.berg', at: '12:41', text: 'Failover drill on db-prod-01: the standby lags until the replica rebuild is done.', w: 'fixed 13:00 → 16:00', left: '1h 48m left' });
+  h += COMMENTS[0][4].map(([au, at, tx], i) => entry({ au, at, text: tx, re: true, sel: i === 1 })).join('');
+  // pg-autovacuum: ack
+  h += band('crit', true, 'pg-autovacuum', 'db-prod-01', 'CRITICAL - autovacuum has not run on orders for 26h', `<span class="hc tgc"></span>`);
+  h += ackEntry(ACKS[0], { tags: T2('', '<span style="color:var(--warn-text)">expires 15:00, in 48m</span>') });
+  // haproxy: upcoming downtime on an unhandled problem
+  h += band('warn', false, 'haproxy-backend', 'lb-prod-02', 'WARNING - backend api: 2/6 servers down', `<span class="hc tgc"></span>`);
+  h += dtEntry({ au: 'm.keller', at: '11:02', text: 'HAProxy 2.8 rollout on lb-prod-01/02 (CHG-4471).', w: 'fixed 22:00 → 23:00', left: 'at 22:00', upcoming: true });
+  // sw-core-ams-02: host downtime, all services
+  h += band('ok', true, 'sw-core-ams-02', null, 'UP - host and 18 services in downtime', `<span class="hc tgc"></span>`);
+  h += dtEntry({ au: 'm.keller', at: '13:52', text: 'Line card swap in slot 3 (CHG-4468).', w: 'fixed 14:00 → 15:00, host and 18 services', left: '48m left' });
+  return h + '</div>';
+}
+shot('14-hA', '14-handling-A', '<b>handling A (merges all three): who is handling what.</b> One thread per object, with every way someone is dealing with it, each entry with its kind in the mark slot and the header: <b>acknowledged</b> (✓, accent; sticky and expiry as tags), <b>in downtime</b> (calendar, accent, the window and the time left), <b>downtime, upcoming</b> (calendar, faint, “at 22:00”: the problem is still unhandled, so its dot stays filled), and free-standing <b>comments</b>. The text typed into each dialog is part of its entry. Hollow = handled, as everywhere. It could replace the downtime, comment and acknowledged lists, or sit beside the downtime list.',
+  win(handlingA(), ALL, 'all'));
+shot('14-hA-l', '14-handling-A-light', '<b>handling A</b>, light.', win(handlingA(), ALL, 'all'), { theme: 'light' });
+
+// ======================================================================
+// downtimes: [state, ringNow, name, host|null, extra, kind, window, author, text, phase, left, progress]
+// phase: 'on' in effect, 'up' upcoming, 'cfg' from config (not removable)
+// ======================================================================
+const DTS = [
+  ['ok', true, 'sw-core-ams-02', null, '+ 18 services', 'fixed', '14:00 → 15:00', 'm.keller', 'Line card swap in slot 3 (CHG-4468): Po12 to edge-ams is down during the swap.', 'on', '48m left', 20, [14, 15], 'CHG-4468'],
+  ['ok', true, 'k8s-node-07', null, '+ 23 services', 'fixed', '13:30 → 15:30', 'm.keller', 'Drained for the kernel 6.8 rollout (CHG-4470).', 'on', '1h 18m left', 35, [13.5, 15.5], 'CHG-4470'],
+  ['crit', true, 'postgres-replication', 'db-prod-03', '', 'fixed', '13:00 → 16:00', 'j.berg', 'Failover drill on db-prod-01 (CHG-4473); the standby lags until the rebuild.', 'on', '1h 48m left', 40, [13, 16], 'CHG-4473'],
+  ['warn', true, 'redis-memory', 'cache-02', '', 'fixed', '12:15 → 16:15', 'j.berg', 'maxmemory raised; restart at 16:00.', 'on', '2h 03m left', 49, [12.25, 16.25], ''],
+  ['ok', false, 'pg-locks', 'db-prod-05', '', 'flexible 2h', 'window 14:00 → 18:00', 'dba-oncall', 'VACUUM FULL on orders_archive; lock waits expected while it runs.', 'up', 'not started', 0, [14, 18], '', true],
+  ['warn', false, 'haproxy-backend', 'lb-prod-02', '', 'fixed', '22:00 → 23:00', 'm.keller', 'HAProxy 2.8 rollout on lb-prod-01/02 (CHG-4471).', 'up', 'in 7h 48m', 0, [22, 23], 'CHG-4471'],
+  ['ok', false, 'sw-core-ams-02', null, '', 'flexible 1h', 'window 22:00 → 06:00', 'm.keller', 'IOS XE 17.9.5 if the vendor build passes the lab (CHG-4468).', 'up', 'by 22:00', 0, [22, 30], 'CHG-4468', true],
+  ['unk', false, 'backup-01', null, '+ 6 services', 'fixed', 'Thu 01:00 → 03:00', 'j.berg', 'borg repository migration to backup-02 (CHG-4480).', 'up', 'in 10h 48m', 0, null, 'CHG-4480'],
+  ['ok', false, 'sw-core-ams-01', null, '', 'fixed', 'Sat 06:00 → 10:00', 'config', 'weekly-patching', 'cfg', 'from config', 0, null, ''],
+  ['ok', false, 'sw-core-ams-02', null, '', 'fixed', 'Sat 06:00 → 10:00', 'config', 'weekly-patching', 'cfg', 'from config', 0, null, ''],
+];
+const dtHead = (sort = 'ends soonest ↑') => listHeader({ title: 'downtimes', subtitle: 'prod-cluster · every object', sort, extra: onlyMine(false) });
+const dtSum = `<div class="sum"><span class="it">${dot('accb', 'd9')}4 in effect</span><span class="it">${dot('pend', 'd9')}6 upcoming</span><span class="it"><span class="faint">${icon('lock', 11)}</span>2 from config</span><span class="end">47 folded into hosts</span></div>`;
+const dtLabel = (d) => `${objLabel(d[2], d[3])}${d[4] ? `<span class="o">  ${d[4]}</span>` : ''}`;
+const dtText = (d) => d[9] === 'cfg' ? `from config: ${d[8]}` : `${d[7]}: ${d[8]}`;
+const leftSlot = (d) => d[9] === 'cfg' ? `<span style="display:inline-flex;gap:6px;align-items:center;justify-content:flex-end">${icon('lock', 11)}from config</span>` : d[10];
+
+// downtimes A: the two sections, tighter: one line per downtime
+function dtA() {
+  let h = dtHead() + dtSum + '<div class="list">';
+  const line = (d, i) => `<div class="dl${i === 2 ? ' sel' : ''}"><span class="c"><span class="dot ${d[0]}${d[1] ? ' ring' : ''} d9"></span></span><span class="s">${dtLabel(d)}<span class="o">  ·  ${dtText(d)}</span></span><span class="w">${d[5] === 'fixed' ? '' : d[5] + ' · '}${d[6]}</span><span>${d[9] === 'on' ? `<span class="mini"><span style="width:${d[11]}%"></span></span>` : d[9] === 'cfg' ? '' : '<span class="mini"></span>'}</span><span class="r${d[9] === 'on' ? ' acc' : ''}">${leftSlot(d)}</span></div>`;
+  h += `<div class="dsec"><span class="dic">${icon('calendar-clock', 12)}</span><b>in effect · 4</b><span class="faint">handled now · ending soonest first</span></div>`;
+  h += DTS.slice(0, 4).map(line).join('');
+  h += `<div class="dsec"><span class="dic">${icon('clock', 12)}</span><b>upcoming · 6</b><span class="faint">not in effect yet · starting soonest first</span></div>`;
+  h += DTS.slice(4).map((d, i) => line(d, i + 4)).join('');
+  return h + '</div>';
+}
+shot('14-dA', '14-downtimes-A', '<b>downtimes A: the two sections, tighter.</b> Stage 2’s list (07a) at one line per downtime (34px instead of 60): the state circle (hollow while in effect), <i>service on host</i> or the host with <i>+ N services</i>, then the author’s text faint (<i>m.keller: Line card swap…</i>, cut first); fixed columns for the window, the progress line and the time left (accent) or <i>not started</i>, <i>in 7h 48m</i>. The section headers become 28px bands. Config downtimes show the lock and <i>from config</i>, and can’t be removed. The full text is in the pane and the tooltip.',
+  win(dtA(), SEP, 'downtimes'));
+shot('14-dA-l', '14-downtimes-A-light', '<b>downtimes A</b>, light.', win(dtA(), SEP, 'downtimes'), { theme: 'light' });
+
+// downtimes B: a thread per object
+const dtEntryB = (d, opts = {}) => entry({ mk: d[9] === 'cfg' ? icon('lock', 12) : CAL, acc: d[9] === 'on', kind: d[9] === 'on' ? 'in effect' : d[9] === 'cfg' ? 'from config' : 'upcoming', au: d[9] === 'cfg' ? 'weekly-patching' : d[7], at: `${d[5]} · ${d[6]}`, text: d[9] === 'cfg' ? 'ScheduledDowntime from the config; it returns at the next reload, so it can’t be removed here.' : d[8], tags: `<span class="tgx"${d[9] === 'on' ? ' style="color:var(--accent)"' : ''}>${d[9] === 'on' ? `<span class="mini" style="width:40px;margin-right:8px;vertical-align:middle"><span style="width:${d[11]}%"></span></span>` : ''}${d[10]}</span>`, ...opts });
+function dtB() {
+  let h = dtHead('ends soonest ↑') + dtSum + '<div class="list">';
+  const sw = [DTS[0], DTS[6], DTS[9]];
+  h += band('ok', true, 'sw-core-ams-02', null, 'UP · host and 18 services in downtime', `<span class="hc tgc">3 downtimes</span>`);
+  h += sw.map((d, i) => dtEntryB(d, { re: i > 0, sel: i === 0 })).join('');
+  h += band('ok', true, 'k8s-node-07', null, 'UP · host and 23 services in downtime', `<span class="hc tgc">1 downtime</span>`) + dtEntryB(DTS[1]);
+  h += band('crit', true, 'postgres-replication', 'db-prod-03', 'CRITICAL - standby lag 412s (> 300s)', `<span class="hc tgc">1 downtime</span>`) + dtEntryB(DTS[2]);
+  h += band('warn', false, 'haproxy-backend', 'lb-prod-02', 'WARNING - backend api: 2/6 servers down', `<span class="hc tgc">1 downtime</span>`) + dtEntryB(DTS[5]);
+  return h + '</div>';
+}
+shot('14-dB', '14-downtimes-B', '<b>downtimes B: a thread per object</b>, consistent with comments A and D. Each object is a band (hollow while a downtime is in effect: sw-core-ams-02; filled while only upcoming: haproxy-backend); its downtimes follow, each one entry: the calendar in the mark slot (accent in effect, faint upcoming, a lock from config), the state, who set it, fixed or flexible and the window, and the text typed into the dialog; the progress line and time left, or when it starts, in a fixed tag slot. An object with three downtimes reads as one story.',
+  win(dtB(), SEP, 'downtimes'));
+shot('14-dB-l', '14-downtimes-B-light', '<b>downtimes B</b>, light.', win(dtB(), SEP, 'downtimes'), { theme: 'light' });
+
+// downtimes C: grouped by change ticket
+function dtC() {
+  let h = dtHead('by ticket') + dtSum + '<div class="list">';
+  const dtRowC = (d, o = {}) => row([d[0], d[3] ? d[2] : `${d[2]}${d[4] ? `<span class="faint" style="font-weight:400">  ${d[4]}</span>` : ''}`, d[3], `${d[5]} · ${d[6]} · ${dtText(d)}`, d[3] ? (d[9] === 'on' ? '14m' : '9m') : 'host'], { ...o, handled: d[1], hostRow: !d[3], tag: `<span class="mini"${d[9] === 'cfg' ? ' style="visibility:hidden"' : ''}><span style="width:${d[11]}%"></span></span><span class="${d[9] === 'on' ? 'left' : ''}" style="width:110px;text-align:right">${leftSlot(d)}</span>` });
+  const groups = [
+    ['CHG-4468', 'line card swap and IOS XE upgrade, sw-core-ams-02 · m.keller', [DTS[0], DTS[6]]],
+    ['CHG-4470', 'kernel 6.8 rollout · m.keller', [DTS[1]]],
+    ['CHG-4471', 'HAProxy 2.8 rollout · m.keller', [DTS[5]]],
+    ['CHG-4473', 'failover drill · j.berg', [DTS[2]]],
+    ['no ticket', 'downtimes whose text names no change', [DTS[3], DTS[4]]],
+    ['from config', 'ScheduledDowntime objects; not removable here', [DTS[8], DTS[9]]],
+  ];
+  groups.forEach(([t, det, list], gi) => {
+    h += secRow(gi === 5 ? 'lock' : gi === 4 ? 'calendar-clock' : 'file-code', `${t} · ${list.length}`, det);
+    h += list.map((d, i) => dtRowC(d, { sel: gi === 0 && i === 0 })).join('');
+  });
+  return h + '</div>';
+}
+shot('14-dC', '14-downtimes-C', '<b>downtimes C: grouped by change ticket.</b> The ticket is read from the downtime’s text (a <i>CHG-1234</i>-like pattern, configurable); a group lists every downtime of one change, in effect and upcoming together (CHG-4468: tonight’s upgrade follows today’s swap), with the people in the header. Downtimes without a ticket and config downtimes get their own groups at the end. Grouping by author works the same way (<i>sort: by author</i>). Rows are today’s list rows.',
+  win(dtC(), SEP, 'downtimes'));
+shot('14-dC-l', '14-downtimes-C-light', '<b>downtimes C</b>, light.', win(dtC(), SEP, 'downtimes'), { theme: 'light' });
+
+// downtimes D: a timeline on a shared axis, 12:00 → 24:00
+const AX0 = 12, AX1 = 24, AXW = 640;
+const xp = (t) => Math.round((Math.min(Math.max(t, AX0), AX1) - AX0) / (AX1 - AX0) * AXW);
+const NOWH = 14.2;
+function dtD() {
+  let h = dtHead('starts soonest ↑') + dtSum + '<div class="list" style="position:relative">';
+  h += `<div class="tlax"><span></span><span>12 hours from noon · now 14:12</span><span class="ax">${[12, 14, 16, 18, 20, 22, 24].map((t) => `<span style="left:${xp(t)}px">${String(t % 24).padStart(2, '0')}:00</span>`).join('')}</span><span style="text-align:right">left</span></div>`;
+  h += DTS.map((d, i) => {
+    let bar = '';
+    if (d[12]) {
+      const [a, b] = d[12];
+      const l = xp(a), w = Math.max(6, xp(b) - xp(a));
+      if (d[14]) bar = `<span class="bar flex" style="left:${l}px;width:${w}px"></span><span class="lab" style="left:${l}px">${d[5]}</span>`;
+      else if (d[9] === 'on') bar = `<span class="bar" style="left:${l}px;width:${w}px"><span style="width:${Math.round((NOWH - a) / (b - a) * 100)}%"></span></span>`;
+      else bar = `<span class="bar up" style="left:${l}px;width:${w}px"></span>`;
+      if (b > AX1 && !d[14]) bar += `<span class="off">→ ${d[6].split('→ ')[1]}</span>`;
+    } else bar = `<span class="off">${d[9] === 'cfg' ? `<span style="display:inline-flex;gap:5px;align-items:center">${icon('lock', 11)}</span> ` : ''}→ ${d[6].split(' →')[0]}</span>`;
+    return `<div class="tml${i === 2 ? ' sel' : ''}"><span class="c"><span class="dot ${d[0]}${d[1] ? ' ring' : ''} d9"></span></span><span class="s"><span>${dtLabel(d)}</span><span class="t2">${dtText(d)}</span></span><span class="ax">${bar}</span><span class="r${d[9] === 'on' ? ' acc' : ''}">${leftSlot(d)}</span></div>`;
+  }).join('');
+  const nowX = 18 + 300 + 0; // placeholder, positioned by script below
+  return h + `<span class="nowl" data-now></span></div>`;
+}
+const placeNow = () => document.querySelectorAll('.frame').forEach((fr) => {
+  const ln = fr.querySelector('[data-now]'); if (!ln) return;
+  const ax = fr.querySelector('.tlax .ax'); const list = ln.parentElement;
+  const x = ax.getBoundingClientRect().left - list.getBoundingClientRect().left + xp(NOWH);
+  ln.style.left = x + 'px';
+});
+shot('14-dD', '14-downtimes-D', '<b>downtimes D: a timeline.</b> One line per downtime on a shared axis for the next hours (noon to midnight here; the axis follows the window’s width and the earliest start), drawn with the list’s own progress line: <b>in effect</b> a track with the elapsed part in the accent, <b>upcoming</b> a faint track, a <b>flexible</b> one a dashed line over its window. A thin accent line marks now. Downtimes beyond the axis say when they start at the right edge (<i>→ Thu 01:00</i>), config ones with the lock. The text is the second line; the time left stays in its column. It shows overlaps at a glance (three changes on the core switches tonight).',
+  win(dtD(), SEP, 'downtimes'));
+shot('14-dD-l', '14-downtimes-D-light', '<b>downtimes D</b>, light.', win(dtD(), SEP, 'downtimes'), { theme: 'light' });
+placeNow();
+</script>
+</body></html>

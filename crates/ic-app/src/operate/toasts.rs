@@ -5,9 +5,9 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Styled as _, div, px,
+    ParentElement as _, SharedString, Styled as _, div,
 };
-use ic_ui_kit::{Link, Toast, ToastTone as KitTone};
+use ic_ui_kit::{Link, Toast, ToastTone as KitTone, px};
 
 use super::tracker::ToastTone;
 use crate::app_state::AppState;

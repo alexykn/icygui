@@ -4,9 +4,11 @@ use std::fs;
 use std::path::Path;
 
 use ic_config::{
-    ApiUrl, AuthConfig, CONFIG_VERSION, Config, ConfigStore, Dashboard, DashboardGroup,
-    Environment, General, GroupBy, ObjectKind, Sort, SortKey, ThemeChoice, TlsConfig, View,
-    format_fingerprint,
+    ApiUrl, Appearance, AuthConfig, CONFIG_VERSION, Config, ConfigStore, Dashboard, DashboardGroup,
+    Environment, General, GridCells, GridColour, GridOptions, GroupBy, GroupOrder, GroupSource,
+    HandledMode, HandledSetting, HideHandled, InterfaceSize, ListTimes, LogLevel, ObjectKind,
+    RowDensity, Sort, SortKey, StreamEvents, StreamOptions, ThemeChoice, TlsConfig, View,
+    ViewDisplay, ViewGroups, format_fingerprint,
 };
 use ic_model::{ObjectKey, Timestamp};
 use ic_rules::{
@@ -25,12 +27,23 @@ pub(crate) fn full_config() -> Config {
     Config {
         version: CONFIG_VERSION,
         general: General {
-            theme: ThemeChoice::System,
             close_to_tray: false,
             launch_at_login: true,
             event_log_retention_hours: 72,
             reconcile_interval_secs: 120,
             quiet_when_hidden: false,
+            show_plugin_output: false,
+            log_level: LogLevel::Debug,
+        },
+        appearance: Appearance {
+            theme: ThemeChoice::Dark,
+            interface_size: InterfaceSize::Large,
+            row_density: RowDensity::Compact,
+            list_times: ListTimes::Clock,
+            hide_handled: HideHandled {
+                in_downtime: false,
+                ..HideHandled::ALL
+            },
         },
         active_environment: Some(prod.id.clone()),
         environments: vec![prod, staging()],
@@ -130,12 +143,14 @@ fn databases() -> DashboardGroup {
                     object_kind: ObjectKind::Services,
                     filter: r#"host.vars.role == "postgres" && service.state != 0"#.to_owned(),
                     problems_only: true,
-                    hide_handled: false,
+                    handled: HandledSetting::SHOW,
                     sort: Sort {
                         key: SortKey::LastStateChange,
                         descending: false,
                     },
+                    display: ViewDisplay::GroupedList,
                     group_by: GroupBy::Host,
+                    ..View::default()
                 },
             )
         },
@@ -147,12 +162,14 @@ fn databases() -> DashboardGroup {
                     object_kind: ObjectKind::Hosts,
                     filter: r#"match("db-*", host.name)"#.to_owned(),
                     problems_only: false,
-                    hide_handled: true,
+                    handled: HandledSetting::SETTINGS,
                     sort: Sort {
                         key: SortKey::Host,
                         descending: true,
                     },
+                    display: ViewDisplay::GroupedList,
                     group_by: GroupBy::HostGroup,
+                    ..View::default()
                 },
             )
         },
@@ -163,16 +180,82 @@ fn databases() -> DashboardGroup {
                 filter: "service.vars.team == \"dba\"\n  || \"databases\" in service.groups"
                     .to_owned(),
                 problems_only: false,
-                hide_handled: false,
+                handled: HandledSetting {
+                    mode: HandledMode::Hide,
+                    hide: HideHandled {
+                        host_down: false,
+                        ..HideHandled::ALL
+                    },
+                },
                 sort: Sort {
                     key: SortKey::Service,
                     descending: false,
                 },
+                display: ViewDisplay::GroupedList,
                 group_by: GroupBy::ServiceGroup,
+                ..View::default()
             },
         ),
+        Dashboard::with_views("databases", multi_views()),
     ];
     databases
+}
+
+/// A dashboard's views of every display, with options away from their
+/// defaults (v1, topic 04).
+pub(crate) fn multi_views() -> Vec<View> {
+    vec![
+        View {
+            name: "clusters".to_owned(),
+            display: ViewDisplay::SummaryTiles,
+            object_kind: ObjectKind::Services,
+            groups: ViewGroups {
+                host_groups: vec!["pg-*".to_owned(), "mysql-*".to_owned()],
+                order: GroupOrder::Name,
+                ..ViewGroups::default()
+            },
+            ..View::default()
+        },
+        View {
+            name: "failing services".to_owned(),
+            filter: "service.problem".to_owned(),
+            collapsed: true,
+            ..View::default()
+        },
+        View {
+            name: "hosts by site".to_owned(),
+            display: ViewDisplay::HostGroupGrid,
+            object_kind: ObjectKind::Hosts,
+            groups: ViewGroups {
+                by: GroupSource::CustomVar,
+                custom_var: "site".to_owned(),
+                ..ViewGroups::default()
+            },
+            grid: GridOptions {
+                colour: GridColour::HostOnly,
+                cells: GridCells::LabelledCells,
+                hide_healthy_groups: true,
+                host_in_each_group: false,
+            },
+            ..View::default()
+        },
+        View {
+            name: "db events".to_owned(),
+            display: ViewDisplay::EventStream,
+            filter: r#"host.vars.role in ["postgres", "mysql"]"#.to_owned(),
+            stream: StreamOptions {
+                events: StreamEvents {
+                    flapping: true,
+                    comments: false,
+                    ..StreamEvents::default()
+                },
+                hard_states_only: false,
+                recoveries: true,
+                lines: 15,
+            },
+            ..View::default()
+        },
+    ]
 }
 
 /// Client-certificate auth with default TLS and notification settings.

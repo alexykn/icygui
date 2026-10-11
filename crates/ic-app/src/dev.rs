@@ -10,7 +10,8 @@
 //! - `ICYGUI_DEMO_FAULT` shows a connection failure on purpose: `offline`,
 //!   `auth`, `tls`, `pin-mismatch`, `missing-secret`, `misconfigured`, `outage` (lost
 //!   after 20 s), `slow` (every answer takes 0.9 s) or `frozen` (Icinga
-//!   stops checking: checks become late).
+//!   stops checking: checks become late) or `no-comments` (the API user
+//!   may do everything but add comments).
 //! - `ICYGUI_DEMO_STORM=20` starts a problem storm every 20 seconds
 //!   instead of every 5 minutes (24 services fail: a few notifications,
 //!   the rest silent, then a summary), for the notification centre.
@@ -22,10 +23,21 @@
 //!   postgres-replication, screen 2b), `host` (its host db-prod-03 beside
 //!   the list, screen 2c), `tab` (postgres-replication as a tab), or an
 //!   object name (`db-prod-03`, `db-prod-03!postgres-replication`, or
-//!   `tab:<name>` for a tab).
+//!   `tab:<name>` for a tab), or a view of topic 14 as a tab
+//!   (`list:handling`, `list:downtimes`, with a chip or display after a
+//!   colon: `list:handling:comments`, `list:downtimes:list`;
+//!   `list:acknowledged` and `list:comments` open handling on that chip).
+//! - `ICYGUI_DEMO_APPEARANCE=light,compact,clock` starts with these
+//!   appearance settings, comma separated: a theme (`system`, `dark`,
+//!   `light`), an interface size (`small`, `default`, `large`), a row
+//!   density (`comfortable`, `compact`) and times in lists (`relative`,
+//!   `clock`); the rest keep the demo's defaults.
 
+use ic_config::{Appearance, InterfaceSize, ListTimes, RowDensity, ThemeChoice};
 use ic_model::ObjectKey;
 
+use crate::lists::ListKind;
+use crate::lists::model::{Chip, Mode};
 use crate::live::demo::DemoFault;
 
 /// The demo's scenario.
@@ -42,6 +54,8 @@ pub(crate) const OPEN_ENV: &str = "ICYGUI_DEMO_OPEN";
 pub(crate) const STORM_ENV: &str = "ICYGUI_DEMO_STORM";
 /// How many demo environments.
 pub(crate) const ENVIRONMENTS_ENV: &str = "ICYGUI_DEMO_ENVIRONMENTS";
+/// Appearance settings at start.
+pub(crate) const APPEARANCE_ENV: &str = "ICYGUI_DEMO_APPEARANCE";
 
 /// What to open at start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +72,17 @@ pub(crate) enum OpenAtStart {
     },
     /// Open the object as a tab.
     Tab(ObjectKey),
+    /// Open the handling or downtimes view, on a chip or a display:
+    /// `list:handling`, `list:handling:comments`, `list:acknowledged`
+    /// (handling on that chip), `list:downtimes:list`.
+    List {
+        /// Which view.
+        kind: ListKind,
+        /// The chip it opens on.
+        chip: Option<Chip>,
+        /// The downtimes view's display.
+        mode: Option<Mode>,
+    },
 }
 
 /// The switches that are set.
@@ -77,6 +102,8 @@ pub(crate) struct DevOptions {
     pub(crate) storm_every: Option<u64>,
     /// `ICYGUI_DEMO_ENVIRONMENTS`.
     pub(crate) environments: Option<usize>,
+    /// `ICYGUI_DEMO_APPEARANCE`.
+    pub(crate) appearance: Option<Appearance>,
 }
 
 impl DevOptions {
@@ -131,6 +158,9 @@ impl DevOptions {
             }
             parsed
         });
+        let appearance = get(APPEARANCE_ENV)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_appearance(&value));
         Self {
             scenario,
             seed,
@@ -139,6 +169,7 @@ impl DevOptions {
             open,
             storm_every,
             environments,
+            appearance,
         }
     }
 
@@ -151,7 +182,37 @@ impl DevOptions {
             || self.open.is_some()
             || self.storm_every.is_some()
             || self.environments.is_some()
+            || self.appearance.is_some()
     }
+}
+
+/// The appearance `value` names (`light,compact,clock`), on the defaults;
+/// words it doesn't know are ignored with a warning.
+fn parse_appearance(value: &str) -> Appearance {
+    let mut appearance = Appearance::default();
+    for word in value
+        .split(',')
+        .map(str::trim)
+        .filter(|word| !word.is_empty())
+    {
+        match word {
+            "system" => appearance.theme = ThemeChoice::System,
+            "dark" => appearance.theme = ThemeChoice::Dark,
+            "light" => appearance.theme = ThemeChoice::Light,
+            "small" => appearance.interface_size = InterfaceSize::Small,
+            "default" => appearance.interface_size = InterfaceSize::Default,
+            "large" => appearance.interface_size = InterfaceSize::Large,
+            "comfortable" => appearance.row_density = RowDensity::Comfortable,
+            "compact" => appearance.row_density = RowDensity::Compact,
+            "relative" => appearance.list_times = ListTimes::Relative,
+            "clock" => appearance.list_times = ListTimes::Clock,
+            other => tracing::warn!(
+                word = other,
+                "{APPEARANCE_ENV} doesn't know it; ignoring it"
+            ),
+        }
+    }
+    appearance
 }
 
 fn replication() -> ObjectKey {
@@ -167,11 +228,36 @@ fn parse_open(value: &str) -> Option<OpenAtStart> {
             pane: ObjectKey::host("db-prod-03"),
         }),
         "tab" => Some(OpenAtStart::Tab(replication())),
-        other => match other.strip_prefix("tab:") {
-            Some(name) => object(name).map(OpenAtStart::Tab),
-            None => object(other).map(OpenAtStart::Object),
-        },
+        other => {
+            if let Some(spec) = other.strip_prefix("list:") {
+                return parse_list(spec);
+            }
+            match other.strip_prefix("tab:") {
+                Some(name) => object(name).map(OpenAtStart::Tab),
+                None => object(other).map(OpenAtStart::Object),
+            }
+        }
     }
+}
+
+/// `handling`, `handling:comments`, `acknowledged`, `downtimes:list`.
+fn parse_list(spec: &str) -> Option<OpenAtStart> {
+    let (id, rest) = spec.split_once(':').unwrap_or((spec, ""));
+    let kind = ListKind::from_id(id)?;
+    let mut chip = match id {
+        "acknowledged" => Some(Chip::Acknowledged),
+        "comments" => Some(Chip::Comments),
+        _ => None,
+    };
+    let mut mode = None;
+    if !rest.is_empty() {
+        match (Chip::from_id(kind, rest), Mode::from_id(rest)) {
+            (Some(found), _) => chip = Some(found),
+            (None, Some(found)) if kind == ListKind::Downtimes => mode = Some(found),
+            _ => return None,
+        }
+    }
+    Some(OpenAtStart::List { kind, chip, mode })
 }
 
 fn object(name: &str) -> Option<ObjectKey> {
@@ -232,6 +318,32 @@ mod tests {
             parse(&[(OPEN_ENV, "tab")]).open,
             Some(OpenAtStart::Tab(replication()))
         );
+        assert_eq!(
+            parse(&[(OPEN_ENV, "list:acknowledged")]).open,
+            Some(OpenAtStart::List {
+                kind: ListKind::Handling,
+                chip: Some(Chip::Acknowledged),
+                mode: None,
+            })
+        );
+        assert_eq!(
+            parse(&[(OPEN_ENV, "list:downtimes:list")]).open,
+            Some(OpenAtStart::List {
+                kind: ListKind::Downtimes,
+                chip: None,
+                mode: Some(Mode::List),
+            })
+        );
+        assert_eq!(
+            parse(&[(OPEN_ENV, "list:handling:comments")]).open,
+            Some(OpenAtStart::List {
+                kind: ListKind::Handling,
+                chip: Some(Chip::Comments),
+                mode: None,
+            })
+        );
+        assert_eq!(parse(&[(OPEN_ENV, "list:nonsense")]).open, None);
+        assert_eq!(parse(&[(OPEN_ENV, "list:handling:list")]).open, None);
     }
 
     #[test]
@@ -250,6 +362,24 @@ mod tests {
         assert_eq!(parse(&[(OPEN_ENV, "!broken")]).open, None);
         assert_eq!(parse(&[(OPEN_ENV, "tab:")]).open, None);
         assert_eq!(parse(&[(OPEN_ENV, "  ")]).open, None);
+    }
+
+    #[test]
+    fn appearance_words() {
+        let appearance = parse(&[(APPEARANCE_ENV, "light, compact,clock,large,sepia")])
+            .appearance
+            .unwrap();
+        assert_eq!(appearance.theme, ThemeChoice::Light);
+        assert_eq!(appearance.row_density, RowDensity::Compact);
+        assert_eq!(appearance.list_times, ListTimes::Clock);
+        assert_eq!(appearance.interface_size, InterfaceSize::Large);
+        let dark = parse(&[(APPEARANCE_ENV, "dark")]).appearance.unwrap();
+        assert_eq!(
+            dark.row_density,
+            RowDensity::Comfortable,
+            "the rest: defaults"
+        );
+        assert_eq!(parse(&[(APPEARANCE_ENV, " ")]).appearance, None);
     }
 
     #[test]

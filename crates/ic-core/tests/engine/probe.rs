@@ -184,8 +184,9 @@ fn plural(type_name: &str) -> String {
 
 /// An API user with exactly `REQUIRED_PERMISSIONS` connects and loads
 /// everything without a refusal, and each object query permission is used
-/// by a query: the list asks for nothing the client doesn't need (a
-/// production `ApiUser` gets exactly this list).
+/// by a query (the node's features with the health page open: otherwise
+/// every five minutes): the list asks for nothing the client doesn't need
+/// (a production `ApiUser` gets exactly this list).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_required_permissions_are_exactly_what_a_load_uses() {
     let server = mock(MockConfig {
@@ -199,6 +200,11 @@ async fn the_required_permissions_are_exactly_what_a_load_uses() {
     // Icinga's `Notification` objects come last, in the background.
     engine
         .snapshot(|snapshot| !snapshot.icinga_notifications.is_empty())
+        .await;
+    // The health page reads the node's features.
+    engine.send(ic_core::Command::WatchHealth(true));
+    engine
+        .snapshot(|snapshot| snapshot.health.features.is_some())
         .await;
     let requests = control.requests();
     let refused: Vec<String> = requests

@@ -21,6 +21,9 @@ const CONFIG_FILE: &str = "config.toml";
 /// The UI state file's name, in the data directory.
 const STATE_FILE: &str = "state.toml";
 
+/// The keymap file's name, next to the settings file.
+const KEYMAP_FILE: &str = "keymap.toml";
+
 /// The locations of icygui's files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Paths {
@@ -88,6 +91,19 @@ impl Paths {
     /// `state.toml` in [`Paths::data_dir`].
     pub fn state_file(&self) -> PathBuf {
         self.data_dir.join(STATE_FILE)
+    }
+
+    /// The keymap file (the user's own key bindings): `keymap.toml` next to
+    /// [`Paths::config_file`].
+    pub fn keymap_file(&self) -> PathBuf {
+        self.config_file.with_file_name(KEYMAP_FILE)
+    }
+
+    /// The directory of the settings and keymap files.
+    pub fn config_dir(&self) -> PathBuf {
+        self.config_file
+            .parent()
+            .map_or_else(PathBuf::new, Path::to_path_buf)
     }
 
     /// A [`StateStore`] for [`Paths::state_file`].
@@ -172,6 +188,8 @@ mod tests {
             root.join("config.toml.bak")
         );
         assert_eq!(paths.state_file(), root.join("data").join("state.toml"));
+        assert_eq!(paths.keymap_file(), root.join("keymap.toml"));
+        assert_eq!(paths.config_dir(), root);
         assert_eq!(paths.state_store().path(), paths.state_file());
     }
 

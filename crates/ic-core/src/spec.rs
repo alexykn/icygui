@@ -15,6 +15,10 @@ pub struct EnvironmentSpec {
     pub environment: ic_config::Environment,
     /// App-wide settings (reconcile interval, log retention).
     pub general: ic_config::General,
+    /// The settings' handled defaults (`[appearance.hide_handled]`), which
+    /// list views follow unless they set their own;
+    /// [`crate::Command::SetHandledDefaults`] changes them.
+    pub hide_handled: ic_config::HideHandled,
     /// Where the environment's event log lives.
     pub data_dir: PathBuf,
     /// Whether the user is waiting for this engine ([`Start::User`]) or
@@ -94,6 +98,16 @@ pub struct Tuning {
     /// request goes out (200 ms), so a burst of config changes costs few
     /// requests.
     pub requery_delay: Duration,
+    /// Problems whose downtime depth is provisional (a downtime event
+    /// Icinga's count may already have, see docs/architecture.md
+    /// *Downtime depth*) are asked for again by name after a random delay
+    /// of up to this per request they take (2 s per 200 names, at most
+    /// 30 s): every client reads the same downtime events at the same
+    /// moment, and so doesn't ask at the same moment.
+    pub reask_spread: Duration,
+    /// A failed request of those is tried again after this (5 s, doubling
+    /// up to 5 minutes, with jitter).
+    pub reask_retry: Duration,
     /// An object Icinga reported as unknown (deleted, or hidden by a
     /// filtered permission) isn't re-queried again for events about it
     /// within this time (10 minutes), unless it is created again; each
@@ -170,9 +184,13 @@ pub struct Tuning {
     /// least this.
     pub quiet_reconcile_interval: Duration,
     /// How long the old and the new event stream may overlap when quiet
-    /// mode switches the subscription (2 s): the old one is closed once a
+    /// mode switches the subscription (7 s): the old one is closed once a
     /// line came on both (it has delivered everything sent before the new
-    /// one subscribed), or after this.
+    /// one subscribed), or after this. Icinga 2.15 writes a stream's events
+    /// in batches 5 s apart (idle or busy, measured on the demo cluster),
+    /// so the old stream's next batch, with what it still holds from
+    /// before the switch, can take that long; a shorter window closed it
+    /// first and lost those events (`docs/performance.md`).
     pub stream_handover: Duration,
     /// The request budget for by-name queries ([`ic_api::RequestBudget`]):
     /// one request per `request_interval` (200 ms: 5 per second) after a
@@ -186,6 +204,22 @@ pub struct Tuning {
     pub start_delay_per_thousand: Duration,
     /// … but at most this (90 s).
     pub start_delay_max: Duration,
+    /// The heartbeats' time budget ([`crate::heartbeat::Timing`]).
+    pub heartbeat: crate::heartbeat::Timing,
+    /// How long a trouble condition (no live data, an Icinga health
+    /// alert) must hold before it is raised ([`crate::trouble::GRACE`],
+    /// 2 minutes).
+    pub trouble_grace: Duration,
+    /// The seed of the engine's timer jitter (no synchronised clients:
+    /// the reconcile's random phase and ±20 %, the quiet status polls, the
+    /// health reads for the trouble alerts, the reconnect backoff;
+    /// `crate::jitter`). `None` (the default): a random seed, so every
+    /// engine draws its own; tests pass one, so a run repeats exactly.
+    pub seed: Option<u64>,
+    /// How much later than it does the event log's answer about which
+    /// problems an earlier run notified reaches the engine (zero; tests
+    /// make it a busy disk).
+    pub event_log_delay: Duration,
     /// With several URLs, how long logging in at one and finding out its
     /// node (`GET /v1`, the node's name, the zones) may take while other
     /// URLs remain to try, and in a probe (8 s): a node that accepts
@@ -206,6 +240,8 @@ impl Default for Tuning {
             publish_interval: Duration::from_millis(250),
             background_publish_interval: Duration::from_secs(2),
             requery_delay: Duration::from_millis(200),
+            reask_spread: Duration::from_secs(2),
+            reask_retry: Duration::from_secs(5),
             missing_ttl: Duration::from_mins(10),
             max_batch: 5_000,
             shutdown_timeout: Duration::from_secs(5),
@@ -223,11 +259,15 @@ impl Default for Tuning {
             identify_timeout: Duration::from_secs(8),
             quiet_status_interval: Duration::from_mins(5),
             quiet_reconcile_interval: Duration::from_mins(30),
-            stream_handover: Duration::from_secs(2),
+            stream_handover: Duration::from_secs(7),
             request_interval: Duration::from_millis(200),
             request_burst: 10,
             start_delay_per_thousand: Duration::from_secs(3),
             start_delay_max: Duration::from_secs(90),
+            heartbeat: crate::heartbeat::Timing::default(),
+            trouble_grace: crate::trouble::GRACE,
+            seed: None,
+            event_log_delay: Duration::ZERO,
         }
     }
 }

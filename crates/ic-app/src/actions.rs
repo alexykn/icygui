@@ -13,6 +13,8 @@
 //! | | `escape` | [`Dismiss`]: close the pane, else clear the marks |
 //! | | `x`, `secondary-a` | [`ToggleMark`], [`MarkAll`] |
 //! | | `secondary-enter` | [`OpenAsTab`] |
+//! | | `right`, `left` | `Unfold`, `Fold`: on a view's header, a band or a host's `+ N more`, show or hide what's under it; on a grid, the next or previous host |
+//! | | `tab`, `shift-tab` | [`NextView`], [`PreviousView`]: the next or previous view of the page |
 //! | `DashboardView`, `ObjectPane` | `a`, `d`, `r`, `c` | [`Acknowledge`], [`ScheduleDowntime`], [`CheckNow`], [`AddComment`] |
 //! | `ObjectPane` (a tab) | `escape` | [`Dismiss`]: back to the dashboard; the tab stays open |
 //! | `ActionDialog` (and its fields) | `tab`, `shift-tab` | next / previous field |
@@ -25,7 +27,10 @@
 //! | | `secondary-b` | `ToggleSidebar` |
 //! | | — | [`FocusMain`]: hand the keyboard to the list or the tab shown (Enter and Escape in the sidebar search do this) |
 //! | | — | [`ReviewCertificate`], [`EditEnvironment`], [`RestartEngine`]: from the connection banner |
-//! | `SettingsDialog` | `secondary-s`, `enter` in a field | save the settings; `tab` / `shift-tab` move between fields |
+//! | `SettingsPanel` | `secondary-shift-e`, then `up` / `down`, `enter` | `FocusNavbar`: the categories, then back to the page |
+//! | | `secondary-f` | `FocusSettingsSearch` |
+//! | | `escape` | clear the search, else close the panel (a field being typed in applies first) |
+//! | | `enter`, `tab` / `shift-tab` in a field | apply it; move between the fields (applying the one left) |
 //! | (anywhere, also without a window) | `secondary-,` | [`OpenSettings`] |
 //! | | `secondary-q` | [`Quit`]: quit, even when the app keeps running in the tray |
 //! | | — | [`ShowAbout`], [`OpenNotifications`], [`ShowWindow`]: the app menu, the tray |
@@ -44,6 +49,13 @@ pub(crate) const WORKSPACE_CONTEXT: &str = "Workspace";
 pub(crate) const DASHBOARD_CONTEXT: &str = "DashboardView";
 /// Key context of an object opened as a tab.
 pub(crate) const PANE_CONTEXT: &str = "ObjectPane";
+
+/// Where the list's keys apply: a dashboard or a view, not a text field
+/// inside it.
+pub(crate) const DASHBOARD_KEYS: &str = "DashboardView && !Input";
+
+/// Where the pane's keys apply: the pane, not a text field inside it.
+pub(crate) const PANE_KEYS: &str = "ObjectPane && !Input";
 
 /// Moves the cursor to the next row.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
@@ -101,12 +113,23 @@ pub(crate) struct OpenAsTab;
 #[action(namespace = icygui)]
 pub(crate) struct Dismiss;
 
+/// Moves the cursor to the next view of the page: its first row, or its
+/// header when it shows none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct NextView;
+
+/// Moves the cursor to the previous view of the page.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
+#[action(namespace = icygui)]
+pub(crate) struct PreviousView;
+
 /// Marks or unmarks the cursor's row for a bulk action.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct ToggleMark;
 
-/// Marks every row of the dashboard.
+/// Marks every row of the view holding the cursor (its folded rows too).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
 pub(crate) struct MarkAll;
@@ -189,7 +212,7 @@ pub(crate) struct EditEnvironment;
 #[action(namespace = icygui)]
 pub(crate) struct RestartEngine;
 
-/// Opens the settings dialog (`secondary-,`; the macOS app menu's
+/// Opens the settings panel (`secondary-,`; the macOS app menu's
 /// *Settings*). Without a window, the window opens first.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Action)]
 #[action(namespace = icygui)]
@@ -220,8 +243,10 @@ pub(crate) struct Quit;
 /// panes.
 pub(crate) fn bind_keys(cx: &mut App) {
     let workspace = Some(WORKSPACE_CONTEXT);
-    let list = Some(DASHBOARD_CONTEXT);
-    let pane = Some(PANE_CONTEXT);
+    // Not while typing in a field inside them (the pane's comment field):
+    // its letters, arrows and Escape are the field's.
+    let list = Some(DASHBOARD_KEYS);
+    let pane = Some(PANE_KEYS);
     cx.bind_keys((1..=9).map(|number| {
         KeyBinding::new(
             &format!("secondary-{number}"),
@@ -254,6 +279,10 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("x", ToggleMark, list),
         KeyBinding::new("secondary-a", MarkAll, list),
         KeyBinding::new("secondary-enter", OpenAsTab, list),
+        KeyBinding::new("right", crate::lists::view::Unfold, list),
+        KeyBinding::new("left", crate::lists::view::Fold, list),
+        KeyBinding::new("tab", NextView, list),
+        KeyBinding::new("shift-tab", PreviousView, list),
         KeyBinding::new("a", Acknowledge, list),
         KeyBinding::new("d", ScheduleDowntime, list),
         KeyBinding::new("r", CheckNow, list),
@@ -283,10 +312,15 @@ pub(crate) enum ObjectAction {
     CheckNow,
     /// Open the comment dialog.
     AddComment,
-    /// Remove one comment, by its full name.
-    RemoveComment(String),
-    /// Remove one downtime, by its full name.
+    /// Remove these comments, by their full names (one request for all
+    /// of them).
+    RemoveComments(Vec<String>),
+    /// Remove one downtime, by its full name: asks first, listing every
+    /// downtime that goes with it (topic 01).
     RemoveDowntime(String),
+    /// Remove these downtimes, by their full names, as listed and
+    /// confirmed (their children go with them; one request for all).
+    RemoveNamedDowntimes(Vec<String>),
     /// Open the dialog for a passive check result.
     SubmitCheckResult,
     /// Open the dialog to run a check or event command.
@@ -303,8 +337,10 @@ impl ObjectAction {
             Self::RemoveDowntimes => "remove downtimes",
             Self::CheckNow => "check now",
             Self::AddComment => "add comment",
-            Self::RemoveComment(_) => "remove comment",
-            Self::RemoveDowntime(_) => "remove downtime",
+            Self::RemoveComments(names) if names.len() > 1 => "remove comments",
+            Self::RemoveComments(_) => "remove comment",
+            Self::RemoveNamedDowntimes(names) if names.len() > 1 => "remove downtimes",
+            Self::RemoveDowntime(_) | Self::RemoveNamedDowntimes(_) => "remove downtime",
             Self::SubmitCheckResult => "submit check result",
             Self::RunCommand => "run command",
         }

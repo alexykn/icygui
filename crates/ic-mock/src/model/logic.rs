@@ -11,6 +11,12 @@ use super::{PendingExecution, World};
 use crate::events::EventType;
 use crate::json::{int, num};
 
+/// How long Icinga must have run before it answers a check pinned to an
+/// endpoint that isn't connected with UNKNOWN (`Checkable::ExecuteCheck`:
+/// the application started more than 300 s ago); before, such a check
+/// stays silent.
+pub(crate) const COLD_START: f64 = 300.0;
+
 /// `DependencyType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DepType {
@@ -611,6 +617,9 @@ impl World {
     /// Runs a check now and processes its result: the current state again
     /// with fresh timestamps (what a scheduled check does in the mock).
     pub(crate) fn run_check(&mut self, object: &str) -> Option<ProcessOutcome> {
+        if self.checks_stopped {
+            return None;
+        }
         let checkable = self.checkable(object)?;
         let input = self.recheck_input(checkable, None);
         self.process_check_result(object, input)
@@ -1088,6 +1097,7 @@ impl World {
             self.scheduled_checks.remove(&object);
             self.checks.push(&object);
         }
+        self.run_realtime_checks(now);
         // Command executions.
         let (due, later): (Vec<PendingExecution>, Vec<PendingExecution>) =
             std::mem::take(&mut self.pending_executions)
@@ -1096,6 +1106,109 @@ impl World {
         self.pending_executions = later;
         for execution in due {
             self.finish_execution(&execution, now);
+        }
+    }
+
+    /// The endpoint that runs `zone`'s checks, as far as the node can see
+    /// it: the node itself for its own zone (and for objects without a
+    /// zone), else the first connected endpoint of the zone whose checker
+    /// runs. `None` when the zone is cut off (every endpoint gone) or every
+    /// connected one hangs: its results can't arrive.
+    pub(crate) fn zone_checker(&self, zone: &str) -> Option<String> {
+        if zone.is_empty() || zone == self.app.zone_name {
+            return Some(self.app.node_name.clone());
+        }
+        let Some(data) = self.zones.get(zone) else {
+            return Some(self.app.node_name.clone());
+        };
+        if data.endpoints.is_empty() {
+            return Some(self.app.node_name.clone());
+        }
+        data.endpoints
+            .iter()
+            .find(|name| {
+                self.endpoints
+                    .get(name.as_str())
+                    .is_some_and(|endpoint| endpoint.connected)
+                    && !self.checkers_stopped.contains(name.as_str())
+            })
+            .cloned()
+    }
+
+    /// Runs the real-time checks that are due (heartbeats), as Icinga's
+    /// cluster would: the zone's checker runs each (the node for its own
+    /// zone, a satellite for its zone). A zone that is cut off, or whose
+    /// connected endpoints all hang, sends nothing: its beats go silent (the
+    /// master never schedules them). A check pinned to an endpoint that
+    /// isn't connected comes back UNKNOWN with Icinga's words, but only
+    /// once Icinga has run for [`COLD_START`] (before that it stays silent,
+    /// as Icinga 2.15's `Checkable::ExecuteCheck` does: checked on the
+    /// demo cluster, `cluster_pinned_check_of_a_gone_endpoint_turns_unknown`);
+    /// one pinned to an endpoint that hangs never answers. Nothing runs
+    /// while checks are stopped.
+    pub(crate) fn run_realtime_checks(&mut self, now: f64) {
+        if self.checks_stopped {
+            return;
+        }
+        let due: Vec<String> = self
+            .realtime
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(object, _)| object.clone())
+            .collect();
+        for object in due {
+            let Some(checkable) = self.checkable(&object) else {
+                self.realtime.remove(&object);
+                continue;
+            };
+            let interval = checkable.check_interval.max(1.0);
+            let pinned = checkable.command_endpoint.clone();
+            let zone = checkable.meta.zone.clone();
+            // Its next slot either way: a silent beat resumes at its pace.
+            self.realtime.insert(object.clone(), now + interval);
+            let Some(scheduler) = self.zone_checker(&zone) else {
+                continue;
+            };
+            let disconnected = !pinned.is_empty()
+                && pinned != scheduler
+                && pinned != self.app.node_name
+                && self
+                    .endpoints
+                    .get(&pinned)
+                    .is_none_or(|endpoint| !endpoint.connected);
+            if !disconnected && self.checkers_stopped.contains(&pinned) {
+                // Pinned to an endpoint that hangs: no answer comes.
+                continue;
+            }
+            if disconnected && now - self.app.program_start < COLD_START {
+                // Icinga makes no result up for an endpoint that may still
+                // connect after its own start: the check stays silent.
+                continue;
+            }
+            // The pinned endpoint is the check's source even while it isn't
+            // connected (as Icinga 2.15 reports it, checked in Docker).
+            let source = if pinned.is_empty() {
+                scheduler.clone()
+            } else {
+                pinned.clone()
+            };
+            let (state, output) = if disconnected {
+                (
+                    3,
+                    format!("Remote Icinga instance '{pinned}' is not connected to '{scheduler}'"),
+                )
+            } else {
+                (0, format!("icygui heartbeat {now:.0}"))
+            };
+            let Some(checkable) = self.checkable(&object) else {
+                continue;
+            };
+            let base = self.recheck_input(checkable, Some((state, output, Some(Vec::new()))));
+            let input = CheckInput {
+                check_source: source,
+                ..base
+            };
+            self.process_check_result(&object, input);
         }
     }
 

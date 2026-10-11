@@ -28,6 +28,9 @@ pub const REQUIRED_PERMISSIONS: &[&str] = &[
     "objects/query/Dependency",
     "objects/query/Endpoint",
     "objects/query/Zone",
+    "objects/query/CheckerComponent",
+    "objects/query/NotificationComponent",
+    "objects/query/IcingaDB",
     "status/query",
     "events/CheckResult",
     "events/StateChange",
@@ -390,7 +393,7 @@ mod tests {
             .iter()
             .map(|action| action.api_name().to_owned())
             .collect();
-        // A comment target (`ActionTarget::Comment`) removes the comment.
+        // A comment target (`ActionTarget::Comments`) removes the comments.
         sent.insert("remove-comment".to_owned());
         assert_eq!(listed("actions/"), sent);
 

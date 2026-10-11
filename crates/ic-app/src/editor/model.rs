@@ -1,8 +1,15 @@
-//! The dashboard editor's pure parts: the draft it starts from, what the
-//! preview says about the filter, and where a filter error points.
+//! The dashboard editor's pure parts: the draft it starts from, the views
+//! it manages (add, duplicate, move, remove), what the inspector and the
+//! preview say about each view, what keeps a draft from being saved, and
+//! where a filter error points.
 
-use ic_config::{GroupBy, ObjectKind, View};
-use ic_core::snapshot::{DashboardResult, Summary};
+use chrono::Local;
+use ic_config::{
+    GroupBy, GroupSource, HealthPage as HealthLayout, MAX_VIEWS, ObjectKind, STREAM_LINES, View,
+    ViewDisplay,
+};
+use ic_core::snapshot::{DashboardResult, Summary, ViewBody, ViewResult};
+use ic_model::Timestamp;
 use ic_rules::{DashboardRef, ScopeSetting};
 
 use crate::app_state::AppState;
@@ -15,10 +22,15 @@ pub(crate) enum EditorTarget {
     New,
     /// An existing dashboard.
     Existing(DashboardRef),
+    /// The active environment's cluster health page (a built-in
+    /// dashboard: its views are the health kinds only, it has no name,
+    /// group, mark or notifications of its own; PLAN.md §4.2 H).
+    Health,
 }
 
 /// The draft for `target`: the dashboard as saved, or a new one in
-/// `group_id` listing unhandled service problems.
+/// `group_id` with one empty list view (topic 14, round 5: no starting
+/// points; an empty filter is every object, problems only), named `list`.
 pub(crate) fn initial_draft(
     state: &AppState,
     target: &EditorTarget,
@@ -27,34 +39,494 @@ pub(crate) fn initial_draft(
     match target {
         EditorTarget::New => Some(DashboardDraft {
             name: NEW_DASHBOARD_NAME.to_owned(),
-            view: View::default(),
+            views: vec![View {
+                id: ic_config::new_id(),
+                name: display_name(ViewDisplay::List).to_owned(),
+                ..View::default()
+            }],
             notifications: ScopeSetting::Inherit,
             group_id: group_id.to_owned(),
+            mark: ic_config::SidebarMark::Auto,
         }),
+        EditorTarget::Health => {
+            let mut page = state.environment()?.health_page.clone();
+            page.repair();
+            Some(DashboardDraft {
+                name: HealthLayout::TITLE.to_owned(),
+                views: page.views,
+                notifications: ScopeSetting::Inherit,
+                group_id: String::new(),
+                mark: ic_config::SidebarMark::Auto,
+            })
+        }
         EditorTarget::Existing(reference) => {
             let (group, dashboard) = state.dashboard(reference)?;
             Some(DashboardDraft {
                 name: dashboard.name.clone(),
-                view: dashboard.view.clone(),
+                views: dashboard.views.clone(),
                 notifications: dashboard.notifications.clone(),
                 group_id: group.id.clone(),
+                mark: dashboard.mark.clone(),
             })
         }
     }
 }
 
 /// `view` with a new object kind: hosts have no service groups, so a
-/// grouping by service group goes back to none.
+/// grouping by service group goes back to none (a plain list); a host is
+/// its own band's only row, so hosts grouped by host go by host group
+/// (the same object never gets two rows).
 pub(crate) fn with_kind(mut view: View, kind: ObjectKind) -> View {
     view.object_kind = kind;
-    if kind == ObjectKind::Hosts && view.group_by == GroupBy::ServiceGroup {
-        view.group_by = GroupBy::None;
+    if kind == ObjectKind::Hosts {
+        match view.group_by {
+            GroupBy::ServiceGroup => view.set_grouping(GroupBy::None),
+            GroupBy::Host => view.group_by = GroupBy::HostGroup,
+            GroupBy::None | GroupBy::HostGroup => {}
+        }
     }
     view
 }
 
+/// The groupings a list of `kind` offers: services by host, host group or
+/// service group; hosts by host group only (by host, each host would be
+/// its own band's only row).
+pub(crate) fn groupings(kind: ObjectKind) -> &'static [GroupBy] {
+    match kind {
+        ObjectKind::Services => &[GroupBy::Host, GroupBy::HostGroup, GroupBy::ServiceGroup],
+        ObjectKind::Hosts => &[GroupBy::HostGroup],
+    }
+}
+
+/// `view` shown as `display`: a list and a grouped list switch into each
+/// other keeping the rest (a grouped list groups by host, hosts by host
+/// group, unless it chose a grouping); the other options stay for when it
+/// switches back.
+pub(crate) fn with_display(mut view: View, display: ViewDisplay) -> View {
+    view.display = display;
+    if display == ViewDisplay::GroupedList && view.group_by == GroupBy::None {
+        view.group_by = groupings(view.object_kind)[0];
+    }
+    view
+}
+
+/// Whether `filter` reads a service's attributes (`service.…`, outside
+/// strings): on a host such an attribute is null, so a view that matches
+/// hosts only (a grid) matches nothing with it.
+pub(crate) fn reads_services(filter: &str) -> bool {
+    let mut quote: Option<char> = None;
+    let mut previous: Option<char> = None;
+    let mut chars = filter.char_indices();
+    while let Some((index, char)) = chars.next() {
+        match quote {
+            Some(open) => {
+                if char == '\\' {
+                    chars.next();
+                } else if char == open {
+                    quote = None;
+                }
+            }
+            None if char == '"' || char == '\'' => quote = Some(char),
+            None => {
+                // `service` itself, not a member (`vars.service`) or part of
+                // a longer name.
+                let starts_word = previous.is_none_or(|previous| {
+                    !(previous.is_alphanumeric() || previous == '_' || previous == '.')
+                });
+                if starts_word && filter[index..].starts_with("service.") {
+                    return true;
+                }
+            }
+        }
+        previous = Some(char);
+    }
+    false
+}
+
+/// A display's name, as the editor's menus and new views give it.
+pub(crate) fn display_name(display: ViewDisplay) -> &'static str {
+    match display {
+        ViewDisplay::List => "list",
+        ViewDisplay::GroupedList => "grouped list",
+        ViewDisplay::HostGroupGrid => "host-group grid",
+        ViewDisplay::SummaryTiles => "summary tiles",
+        ViewDisplay::EventStream => "event stream",
+        ViewDisplay::Handling => "handling",
+        ViewDisplay::Downtimes => "downtimes",
+        ViewDisplay::ZonesAndEndpoints => "zones and endpoints",
+        ViewDisplay::Checks => "checks",
+        ViewDisplay::QueuesAndConnections => "queues and connections",
+        ViewDisplay::GlobalSwitches => "global switches",
+    }
+}
+
+/// The displays as *add view* and the display dropdown list them, in
+/// sections (README, *one dropdown system*: no descriptions).
+pub(crate) const DISPLAY_SECTIONS: [(&str, &[ViewDisplay]); 3] = [
+    ("lists", &[ViewDisplay::List, ViewDisplay::GroupedList]),
+    (
+        "overviews",
+        &[ViewDisplay::HostGroupGrid, ViewDisplay::SummaryTiles],
+    ),
+    (
+        "activity",
+        &[
+            ViewDisplay::EventStream,
+            ViewDisplay::Handling,
+            ViewDisplay::Downtimes,
+        ],
+    ),
+];
+
+/// What a handling or downtimes view counts in the views list and the
+/// sidebar: `4 handled` (objects being handled), `1 in effect`
+/// (downtimes in effect now).
+pub(crate) fn threads_text(display: ViewDisplay, count: usize) -> String {
+    match display {
+        ViewDisplay::Downtimes => format!("{count} in effect"),
+        _ => format!("{count} handled"),
+    }
+}
+
+/// A new view of `display` (*add view*), named after its display and
+/// starting from `filter` (the selected view's). A grid matches hosts
+/// only: it starts from an empty filter when `filter` reads services'
+/// attributes, which would leave it silently empty.
+pub(crate) fn new_view(display: ViewDisplay, filter: &str) -> View {
+    let grid = display == ViewDisplay::HostGroupGrid;
+    let filter = if grid && reads_services(filter) {
+        ""
+    } else {
+        filter
+    };
+    with_display(
+        View {
+            id: ic_config::new_id(),
+            name: display_name(display).to_owned(),
+            filter: filter.to_owned(),
+            object_kind: if grid {
+                ObjectKind::Hosts
+            } else {
+                ObjectKind::default()
+            },
+            ..View::default()
+        },
+        display,
+    )
+}
+
+/// Adds `view` under the view at `after` (at the end without one).
+/// Returns its index; `None` when the dashboard has [`MAX_VIEWS`] already.
+pub(crate) fn insert_view(
+    views: &mut Vec<View>,
+    after: Option<usize>,
+    view: View,
+) -> Option<usize> {
+    if views.len() >= MAX_VIEWS {
+        return None;
+    }
+    let index = after.map_or(views.len(), |after| (after + 1).min(views.len()));
+    views.insert(index, view);
+    Some(index)
+}
+
+/// Copies the view at `index` (`<name> copy`, a fresh id) right under
+/// it. Returns the copy's index.
+pub(crate) fn duplicate_view(views: &mut Vec<View>, index: usize) -> Option<usize> {
+    let original = views.get(index)?;
+    let copy = View {
+        id: ic_config::new_id(),
+        name: format!("{} copy", view_name(original)),
+        ..original.clone()
+    };
+    insert_view(views, Some(index), copy)
+}
+
+/// Removes the view at `index`, unless it is the dashboard's only one.
+/// Returns the index of the view to select afterwards: the one that took
+/// its place, or the new last one.
+pub(crate) fn remove_view(views: &mut Vec<View>, index: usize) -> Option<usize> {
+    if views.len() < 2 || index >= views.len() {
+        return None;
+    }
+    views.remove(index);
+    Some(index.min(views.len() - 1))
+}
+
+/// Moves the view at `from` to `to` (clamped to the list). Returns where
+/// it is now; `None` when it didn't move.
+pub(crate) fn move_view(views: &mut Vec<View>, from: usize, to: usize) -> Option<usize> {
+    if from >= views.len() {
+        return None;
+    }
+    let to = to.min(views.len() - 1);
+    if from == to {
+        return None;
+    }
+    let view = views.remove(from);
+    views.insert(to, view);
+    Some(to)
+}
+
+/// *add view* on the cluster health page: a view of `display` under the
+/// one at `after`. The page has one view per kind, so a kind it has
+/// already is switched on (and selected) instead. Returns the view's
+/// index; `None` for a kind that isn't a health kind.
+pub(crate) fn add_health_view(
+    views: &mut Vec<View>,
+    after: Option<usize>,
+    display: ViewDisplay,
+) -> Option<usize> {
+    if !display.is_health() {
+        return None;
+    }
+    if let Some(index) = views.iter().position(|view| view.display == display) {
+        views[index].health.off = false;
+        return Some(index);
+    }
+    insert_view(views, after, HealthLayout::view_of(display))
+}
+
+/// The kinds the health page's view `id` may show, each with whether it
+/// is free: its own, and the ones no other view of the page shows (one
+/// view per kind).
+pub(crate) fn health_displays(views: &[View], id: &str) -> Vec<(ViewDisplay, bool)> {
+    ViewDisplay::HEALTH
+        .into_iter()
+        .map(|display| {
+            let taken = views
+                .iter()
+                .any(|view| view.id != id && view.display == display);
+            (display, !taken)
+        })
+        .collect()
+}
+
+/// What a health view's row in the views list says: `off`, or what it
+/// shows on this environment: its endpoints, its tiles (`tiles`: the ones
+/// the page has for its kind now), Icinga's switches.
+pub(crate) fn health_shows(
+    view: &View,
+    endpoints: usize,
+    tiles: &[ic_config::HealthTile],
+    switches: usize,
+) -> String {
+    if view.health.off {
+        return "off".to_owned();
+    }
+    let count = |count: usize, one: &str, many: &str| {
+        if count == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{count} {many}")
+        }
+    };
+    match view.display {
+        ViewDisplay::ZonesAndEndpoints => count(endpoints, "endpoint", "endpoints"),
+        ViewDisplay::Checks | ViewDisplay::QueuesAndConnections => {
+            let shown = tiles
+                .iter()
+                .filter(|tile| {
+                    view.display.health_tiles().contains(tile) && view.health.shows(**tile)
+                })
+                .count();
+            count(shown, "tile", "tiles")
+        }
+        ViewDisplay::GlobalSwitches => count(switches, "switch", "switches"),
+        _ => String::new(),
+    }
+}
+
+/// A view's name, or what it shows when it has none (a dashboard from
+/// rc1 has one unnamed list: `service problems`).
+pub(crate) fn view_name(view: &View) -> String {
+    let name = view.name.trim();
+    if !name.is_empty() {
+        return name.to_owned();
+    }
+    if view.is_list() {
+        crate::dashboard::header::view_label(view).to_owned()
+    } else {
+        display_name(view.display).to_owned()
+    }
+}
+
+/// Which part of *copy filter from…* an entry is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CopySection {
+    /// A dashboard with one view: its filter is the dashboard's.
+    Dashboards,
+    /// A view of a dashboard with several.
+    Views,
+}
+
+/// A filter *copy filter from…* offers (14-r4-e): another dashboard's, or
+/// a view's of another dashboard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CopySource {
+    pub(crate) section: CopySection,
+    /// `voip handling`, `databases › failing services`.
+    pub(crate) title: String,
+    /// Its group (and a dashboard's kind): `voip · handling`.
+    pub(crate) detail: String,
+    /// The view's display (its icon).
+    pub(crate) display: ViewDisplay,
+    /// Whether the view lists hosts or services (what its filter counts).
+    pub(crate) object_kind: ObjectKind,
+    /// Its group's name.
+    pub(crate) group: String,
+    /// A dashboard's (one view): which, so its row shows its sidebar mark.
+    pub(crate) dashboard: Option<DashboardRef>,
+    /// The filter copied.
+    pub(crate) filter: String,
+}
+
+/// The filters *copy filter from…* offers: every other dashboard's (one
+/// view) and every view's of the others (several), dashboards first, in
+/// sidebar order; empty filters are left out, `query` (any case) narrows
+/// them by name, group or filter. `editing` is the dashboard being edited
+/// (its own views are in the editor already).
+pub(crate) fn copy_sources(
+    groups: &[ic_config::DashboardGroup],
+    editing: Option<&DashboardRef>,
+    query: &str,
+) -> Vec<CopySource> {
+    let query = query.trim().to_lowercase();
+    let mut dashboards = Vec::new();
+    let mut views = Vec::new();
+    for group in groups {
+        for dashboard in &group.dashboards {
+            if editing.is_some_and(|editing| editing.dashboard_id == dashboard.id) {
+                continue;
+            }
+            let several = dashboard.views.len() > 1;
+            for view in &dashboard.views {
+                let filter = view.filter.trim();
+                if filter.is_empty() {
+                    continue;
+                }
+                let source = if several {
+                    CopySource {
+                        section: CopySection::Views,
+                        title: format!("{} › {}", dashboard.name, view_name(view)),
+                        detail: group.name.clone(),
+                        display: view.display,
+                        object_kind: view.object_kind,
+                        group: group.name.clone(),
+                        dashboard: None,
+                        filter: filter.to_owned(),
+                    }
+                } else {
+                    CopySource {
+                        section: CopySection::Dashboards,
+                        title: dashboard.name.clone(),
+                        detail: format!("{} · {}", group.name, display_name(view.display)),
+                        display: view.display,
+                        object_kind: view.object_kind,
+                        group: group.name.clone(),
+                        dashboard: Some(DashboardRef {
+                            group_id: group.id.clone(),
+                            dashboard_id: dashboard.id.clone(),
+                        }),
+                        filter: filter.to_owned(),
+                    }
+                };
+                let found = query.is_empty()
+                    || [&source.title, &source.detail, &source.filter]
+                        .iter()
+                        .any(|text| text.to_lowercase().contains(&query));
+                if !found {
+                    continue;
+                }
+                match source.section {
+                    CopySection::Dashboards => dashboards.push(source),
+                    CopySection::Views => views.push(source),
+                }
+            }
+        }
+    }
+    dashboards.extend(views);
+    dashboards
+}
+
+/// What *copy filter from…*'s preview card says the source is: `a
+/// handling dashboard in voip`, `a list view in databases`.
+pub(crate) fn copy_source_kind(source: &CopySource) -> String {
+    let what = match source.section {
+        CopySection::Dashboards => "dashboard",
+        CopySection::Views => "view",
+    };
+    let display = display_name(source.display);
+    let article = if display.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("{article} {display} {what} in {}", source.group)
+}
+
+/// How many objects `filter` matches on `snapshot` at `now`, counted as
+/// a view of `kind` shown as `display` counts them: a list or grouped list
+/// its hosts or its services, the other kinds both (an empty filter
+/// matches everything). `None` when the filter doesn't parse. Evaluated
+/// here, on the snapshot icygui holds: no request.
+pub(crate) fn count_matches(
+    snapshot: &ic_core::snapshot::Snapshot,
+    filter: &str,
+    display: ViewDisplay,
+    kind: ObjectKind,
+    now: Timestamp,
+) -> Option<usize> {
+    let parsed = ic_filter::Filter::parse(filter).ok()?;
+    let test = |scope: &dyn ic_filter::Scope| parsed.is_empty() || parsed.matches_at(scope, now);
+    let (hosts, services) = match display {
+        ViewDisplay::List | ViewDisplay::GroupedList => {
+            (kind == ObjectKind::Hosts, kind == ObjectKind::Services)
+        }
+        _ => (true, true),
+    };
+    let mut count = 0;
+    if hosts {
+        count += snapshot
+            .hosts
+            .values()
+            .filter(|host| test(&ic_filter::HostScope { host }))
+            .count();
+    }
+    if services {
+        count += snapshot
+            .services
+            .iter()
+            .filter(|(key, service)| {
+                let host = snapshot.host_of(key).map(std::sync::Arc::as_ref);
+                test(&ic_filter::ServiceScope { service, host })
+            })
+            .count();
+    }
+    Some(count)
+}
+
+/// The icons the sidebar mark's picker offers for `query` (any case, by
+/// Lucide name: `ser` finds `server`): content icons only.
+pub(crate) fn pickable_icons(query: &str) -> Vec<ic_ui_kit::IconName> {
+    let query = query.trim().to_lowercase();
+    ic_ui_kit::IconName::ALL
+        .iter()
+        .copied()
+        .filter(|icon| icon.is_pickable())
+        .filter(|icon| query.is_empty() || icon.lucide_name().contains(&query))
+        .collect()
+}
+
+/// Whether a dashboard of `views` has the notifications row: only
+/// problem views notify, so one of handling, downtimes or events views
+/// alone has none (README, topic 14 round 5).
+pub(crate) fn notifies(views: &[View]) -> bool {
+    views.iter().any(View::counts_problems)
+}
+
 /// How many objects a summary counts (every filter match, before
-/// `problems_only` and `hide_handled`).
+/// *problems only* and the handled switches).
 pub(crate) fn matches(summary: &Summary) -> u32 {
     summary.ok
         + summary.critical
@@ -65,21 +537,215 @@ pub(crate) fn matches(summary: &Summary) -> u32 {
         + summary.pending
 }
 
-/// The filter's status line for a preview: `valid · 12 matches · 3
-/// shown`.
-pub(crate) fn status_text(result: &DashboardResult) -> String {
-    let matched = matches(&result.summary);
-    let shown = result
-        .rows
-        .iter()
-        .filter(|row| matches!(row, ic_core::snapshot::DashboardRow::Object(_)))
-        .count();
-    let noun = if matched == 1 { "match" } else { "matches" };
-    if usize::try_from(matched).is_ok_and(|matched| matched == shown) {
-        format!("valid · {matched} {noun}")
-    } else {
-        format!("valid · {matched} {noun} · {shown} shown")
+/// `1 match`, `6 matches`.
+fn counted(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// What a view shows, at the right of its row in the views list (4c): a
+/// list's rows (`6 matches`), a grid's hosts (`124 hosts`), the tiles
+/// (`4 tiles`), a stream's events of today (`8 today`); `invalid` when
+/// its filter doesn't work (`true`); nothing before it was evaluated.
+pub(crate) fn shows_text(result: Option<&ViewResult>, now: Timestamp) -> (String, bool) {
+    let Some(result) = result else {
+        return (String::new(), false);
+    };
+    if result.error.is_some() {
+        return ("invalid".to_owned(), true);
     }
+    let text = match &result.body {
+        ViewBody::List(_) => counted(matches(&result.shown) as usize, "match", "matches"),
+        ViewBody::Grid(grid) => counted(grid.hosts as usize, "host", "hosts"),
+        ViewBody::Tiles(tiles) => counted(tiles.len(), "tile", "tiles"),
+        ViewBody::Stream(events) => {
+            let today = events
+                .iter()
+                .filter(|event| same_day(event.at, now))
+                .count();
+            format!("{today} today")
+        }
+        // What the editor counts of them ([`threads_text`]) replaces it.
+        ViewBody::Members(members) => counted(members.len(), "object", "objects"),
+    };
+    (text, false)
+}
+
+/// Whether `at` is on the same local day as `now`.
+fn same_day(at: Timestamp, now: Timestamp) -> bool {
+    match (
+        crate::format::date_time(at, &Local),
+        crate::format::date_time(now, &Local),
+    ) {
+        (Some(at), Some(now)) => at.date_naive() == now.date_naive(),
+        _ => false,
+    }
+}
+
+/// The filter field's status for an evaluated view (4c, 4e, 5e): `valid ·
+/// 8 matches, 2 handled` (a list: what the filter matches, and how many
+/// of them count as handled), `valid · 124 hosts` (a grid), `valid · 38
+/// services` (tiles), `valid · 9 hosts and their services` (a stream: the
+/// objects whose events it shows). A grid whose filter reads services'
+/// attributes says that it matches hosts only.
+pub(crate) fn status_text(view: &View, result: &ViewResult, threads: Option<usize>) -> String {
+    let matched = matches(&result.summary) as usize;
+    let empty = view.filter.trim().is_empty();
+    match &result.body {
+        ViewBody::Members(members) => {
+            let objects = if empty {
+                "every object".to_owned()
+            } else {
+                format!("matches {}", counted(members.len(), "object", "objects"))
+            };
+            let count = threads.unwrap_or_default();
+            match view.display {
+                ViewDisplay::Downtimes => {
+                    format!("{objects} · {}", counted(count, "downtime", "downtimes"))
+                }
+                _ => format!("{objects} · {count} being handled"),
+            }
+        }
+
+        ViewBody::Grid(grid) if reads_services(&view.filter) => format!(
+            "valid · {} · a grid's filter sees hosts, not service.*",
+            counted(grid.hosts as usize, "host", "hosts")
+        ),
+        ViewBody::List(_) if empty && view.problems_only => {
+            // An empty filter is every object (topic 14, round 5): of
+            // them, the problems the list shows, the number its row and
+            // the summary bar give (handled ones the view hides aside).
+            let shown = &result.shown;
+            let problems =
+                shown.critical + shown.warning + shown.unknown + shown.down + shown.unreachable;
+            let text = format!(
+                "empty: every object · {}",
+                counted(problems as usize, "problem", "problems")
+            );
+            if result.handled > 0 {
+                format!("{text}, {} handled", result.handled)
+            } else {
+                text
+            }
+        }
+        ViewBody::List(_) => {
+            let prefix = if empty {
+                "empty: every object"
+            } else {
+                "valid"
+            };
+            let text = format!("{prefix} · {}", counted(matched, "match", "matches"));
+            if result.handled > 0 {
+                format!("{text}, {} handled", result.handled)
+            } else {
+                text
+            }
+        }
+        ViewBody::Grid(grid) => {
+            format!("valid · {}", counted(grid.hosts as usize, "host", "hosts"))
+        }
+        ViewBody::Tiles(_) => match view.object_kind {
+            ObjectKind::Hosts => format!("valid · {}", counted(matched, "host", "hosts")),
+            ObjectKind::Services => format!("valid · {}", counted(matched, "service", "services")),
+        },
+        ViewBody::Stream(_) if view.filter.trim().is_empty() => {
+            "valid · every host and service".to_owned()
+        }
+        ViewBody::Stream(_) => {
+            let hosts = counted(result.hosts as usize, "host", "hosts");
+            let services = counted(result.services as usize, "service", "services");
+            if result.hosts == 0 {
+                format!("valid · {services}")
+            } else if reads_services(&view.filter) {
+                format!("valid · {hosts}, {services}")
+            } else {
+                // A filter on hosts matches their services too (theirs
+                // read `host.*`).
+                format!("valid · {hosts} and their services")
+            }
+        }
+    }
+}
+
+/// The error of view `view_id` in a preview, if its filter doesn't work.
+pub(crate) fn view_error<'a>(result: &'a DashboardResult, view_id: &str) -> Option<&'a str> {
+    result.view(view_id)?.error.as_deref()
+}
+
+/// What keeps a view from being saved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Problem {
+    /// Its filter doesn't work (why, with its line and column).
+    Filter(String),
+    /// A grid or tiles grouped by a custom variable without a name.
+    NoCustomVar,
+    /// Hosts grouped by service group.
+    HostsByServiceGroup,
+    /// A stream's lines out of range.
+    Lines,
+}
+
+impl Problem {
+    /// The problem as the editor says it; `view` names the view when the
+    /// dashboard has several.
+    pub(crate) fn message(&self, view: Option<&str>) -> String {
+        match (self, view) {
+            (Self::Filter(error), None) => format!("Fix the filter first: {error}"),
+            (Self::Filter(error), Some(view)) => {
+                format!("Fix the filter of {view} first: {error}")
+            }
+            (Self::NoCustomVar, None) => "Name the custom variable to group by.".to_owned(),
+            (Self::NoCustomVar, Some(view)) => {
+                format!("Name the custom variable {view} groups by.")
+            }
+            (Self::HostsByServiceGroup, view) => {
+                with_view("Hosts can't be grouped by service group", view)
+            }
+            (Self::Lines, view) => with_view(
+                &format!(
+                    "Show between {} and {} lines",
+                    STREAM_LINES.start(),
+                    STREAM_LINES.end()
+                ),
+                view,
+            ),
+        }
+    }
+}
+
+/// `text.`, or `text (view).`
+fn with_view(text: &str, view: Option<&str>) -> String {
+    match view {
+        Some(view) => format!("{text} ({view})."),
+        None => format!("{text}."),
+    }
+}
+
+/// Why `views` can't be saved: the first view with a problem (its index)
+/// and what it is. Filters that don't parse, a grid or tiles grouped by a
+/// custom variable without a name, hosts grouped by service group, a
+/// stream's lines out of range. The core's verdict on filters that parse
+/// but don't evaluate comes with the preview.
+pub(crate) fn check_views(views: &[View]) -> Result<(), (usize, Problem)> {
+    for (index, view) in views.iter().enumerate() {
+        check_filter(&view.filter).map_err(|error| (index, Problem::Filter(error)))?;
+        let grouped = matches!(
+            view.display,
+            ViewDisplay::HostGroupGrid | ViewDisplay::SummaryTiles
+        );
+        if grouped
+            && view.groups.by == GroupSource::CustomVar
+            && view.groups.custom_var_name().is_empty()
+        {
+            return Err((index, Problem::NoCustomVar));
+        }
+        if view.object_kind == ObjectKind::Hosts && view.list_grouping() == GroupBy::ServiceGroup {
+            return Err((index, Problem::HostsByServiceGroup));
+        }
+        if view.display == ViewDisplay::EventStream && !STREAM_LINES.contains(&view.stream.lines) {
+            return Err((index, Problem::Lines));
+        }
+    }
+    Ok(())
 }
 
 /// Checks that `filter` parses, as the core does before evaluating it:
@@ -161,7 +827,7 @@ pub(crate) fn error_marker(
 mod tests {
     use std::sync::Arc;
 
-    use ic_core::snapshot::DashboardRow;
+    use ic_core::snapshot::{DashboardRow, ViewBody, ViewResult};
     use ic_model::{ObjectKey, Timestamp};
 
     use super::*;
@@ -229,52 +895,462 @@ mod tests {
     }
 
     #[test]
-    fn the_status_counts_matches_and_rows_shown() {
+    fn only_problem_views_bring_the_notifications_row() {
+        let of = |display| View {
+            display,
+            ..View::default()
+        };
+        assert!(!notifies(&[
+            of(ViewDisplay::Handling),
+            of(ViewDisplay::Downtimes)
+        ]));
+        assert!(!notifies(&[of(ViewDisplay::EventStream)]));
+        assert!(notifies(&[
+            of(ViewDisplay::Handling),
+            of(ViewDisplay::List)
+        ]));
+    }
+
+    #[test]
+    fn the_status_says_what_the_filter_matches() {
         let summary = Summary {
             ok: 9,
             critical: 2,
-            handled: 1,
             ..Summary::default()
         };
         let rows = vec![
-            DashboardRow::Group {
-                label: "db".to_owned(),
-                count: 2,
-            },
             DashboardRow::Object(ObjectKey::host("a")),
             DashboardRow::Object(ObjectKey::host("b")),
         ];
-        let result = DashboardResult {
-            rows: Arc::new(rows),
+        let list = ViewResult {
+            id: "v".to_owned(),
+            body: ViewBody::List(Arc::new(rows)),
             summary,
-            ..DashboardResult::default()
+            shown: Summary {
+                critical: 2,
+                ..Summary::default()
+            },
+            handled: 2,
+            ..ViewResult::default()
         };
-        assert_eq!(status_text(&result), "valid · 11 matches · 2 shown");
-        let all = DashboardResult {
-            rows: Arc::new(vec![DashboardRow::Object(ObjectKey::host("a"))]),
+        let view = View {
+            filter: "host.vars.team == \"voip\"".to_owned(),
+            ..View::default()
+        };
+        assert_eq!(
+            status_text(&view, &list, None),
+            "valid · 11 matches, 2 handled"
+        );
+        assert_eq!(
+            status_text(&View::default(), &list, None),
+            "empty: every object · 2 problems, 2 handled",
+            "an empty filter is every object; of them, the problems"
+        );
+        // Handled problems the view hides aren't among the problems: the
+        // number is the row's `N matches` and the summary bar's.
+        let hiding = ViewResult {
+            summary: Summary {
+                critical: 5,
+                warning: 3,
+                ..Summary::default()
+            },
+            shown: Summary {
+                critical: 2,
+                warning: 1,
+                ..Summary::default()
+            },
+            handled: 5,
+            hidden: 5,
+            ..list.clone()
+        };
+        assert_eq!(
+            status_text(&View::default(), &hiding, None),
+            "empty: every object · 3 problems, 5 handled"
+        );
+        assert_eq!(
+            shows_text(Some(&hiding), Timestamp::from_unix_seconds(0.)).0,
+            "3 matches"
+        );
+        let everything = View {
+            problems_only: false,
+            ..View::default()
+        };
+        assert_eq!(
+            status_text(&everything, &list, None),
+            "empty: every object · 11 matches, 2 handled"
+        );
+        let now = Timestamp::from_unix_seconds(1_790_000_000.);
+        assert_eq!(
+            shows_text(Some(&list), now),
+            ("2 matches".to_owned(), false)
+        );
+        let one = ViewResult {
             summary: Summary {
                 ok: 1,
                 ..Summary::default()
             },
-            ..DashboardResult::default()
+            handled: 0,
+            ..list.clone()
         };
-        assert_eq!(status_text(&all), "valid · 1 match");
+        assert_eq!(status_text(&view, &one, None), "valid · 1 match");
+        assert_eq!(shows_text(None, now), (String::new(), false));
+        // A view whose filter fails.
+        let failed = ViewResult {
+            error: Some("bad".to_owned()),
+            ..list
+        };
+        assert_eq!(shows_text(Some(&failed), now), ("invalid".to_owned(), true));
+        let dashboard = DashboardResult {
+            summary: Summary::default(),
+            views: vec![failed],
+        };
+        assert_eq!(view_error(&dashboard, "v"), Some("bad"));
+        assert_eq!(view_error(&dashboard, "gone"), None);
+    }
+
+    #[test]
+    fn grids_tiles_and_streams_say_what_they_show() {
+        let now = Timestamp::from_unix_seconds(1_790_000_000.);
+        let grid = ViewResult {
+            body: ViewBody::Grid(Arc::new(ic_core::snapshot::Grid {
+                groups: Vec::new(),
+                hosts: 124,
+            })),
+            ..ViewResult::default()
+        };
+        let grid_view = new_view(ViewDisplay::HostGroupGrid, "");
+        assert_eq!(status_text(&grid_view, &grid, None), "valid · 124 hosts");
+        assert_eq!(shows_text(Some(&grid), now).0, "124 hosts");
+        let tiles = ViewResult {
+            body: ViewBody::Tiles(Arc::new(vec![ic_core::snapshot::Tile::default(); 4])),
+            summary: Summary {
+                ok: 38,
+                ..Summary::default()
+            },
+            ..ViewResult::default()
+        };
+        let tiles_view = new_view(ViewDisplay::SummaryTiles, "");
+        assert_eq!(
+            status_text(&tiles_view, &tiles, None),
+            "valid · 38 services"
+        );
+        assert_eq!(shows_text(Some(&tiles), now).0, "4 tiles");
+        let event = |seconds_ago: f64| ic_core::LogEntry {
+            at: Timestamp::from_unix_seconds(now.as_unix_seconds() - seconds_ago),
+            object: ObjectKey::host("a"),
+            kind: ic_core::LogKind::CommentAdded,
+            text: String::new(),
+            author: None,
+        };
+        let stream = ViewResult {
+            body: ViewBody::Stream(Arc::new(vec![event(1.), event(2.), event(3. * 86_400.)])),
+            hosts: 9,
+            services: 120,
+            ..ViewResult::default()
+        };
+        let mut stream_view = new_view(ViewDisplay::EventStream, "");
+        assert_eq!(shows_text(Some(&stream), now).0, "2 today");
+        assert_eq!(
+            status_text(&stream_view, &stream, None),
+            "valid · every host and service"
+        );
+        stream_view.filter = "host.vars.role == \"db\"".to_owned();
+        assert_eq!(
+            status_text(&stream_view, &stream, None),
+            "valid · 9 hosts and their services"
+        );
+        stream_view.filter = "service.name == \"ssh\" || host.name == \"a\"".to_owned();
+        assert_eq!(
+            status_text(&stream_view, &stream, None),
+            "valid · 9 hosts, 120 services"
+        );
+        let services_only = ViewResult { hosts: 0, ..stream };
+        assert_eq!(
+            status_text(&stream_view, &services_only, None),
+            "valid · 120 services"
+        );
+    }
+
+    #[test]
+    fn grids_start_without_a_filter_on_services() {
+        assert!(reads_services("service.state != 0"));
+        assert!(reads_services(
+            "host.vars.role == \"db\" && service.problem"
+        ));
+        assert!(!reads_services("host.vars.role == \"db\""));
+        assert!(!reads_services("host.vars.note == \"service.x\""));
+        assert!(!reads_services("myservice.x == 1"));
+        assert!(!reads_services("host.vars.service.tier == 1"));
+        let filter = "host.vars.role in [\"pg\"] && service.problem";
+        let grid = new_view(ViewDisplay::HostGroupGrid, filter);
+        assert_eq!(grid.filter, "");
+        assert_eq!(grid.object_kind, ObjectKind::Hosts);
+        assert_eq!(new_view(ViewDisplay::List, filter).filter, filter);
+        assert_eq!(
+            new_view(ViewDisplay::HostGroupGrid, "host.vars.role == \"db\"").filter,
+            "host.vars.role == \"db\""
+        );
+        let result = ViewResult {
+            body: ViewBody::Grid(Arc::new(ic_core::snapshot::Grid::default())),
+            ..ViewResult::default()
+        };
+        let mut grid = grid;
+        grid.filter = filter.to_owned();
+        assert_eq!(
+            status_text(&grid, &result, None),
+            "valid · 0 hosts · a grid's filter sees hosts, not service.*"
+        );
+    }
+
+    #[test]
+    fn views_are_added_duplicated_moved_and_removed() {
+        let mut views = vec![View {
+            id: "a".to_owned(),
+            ..View::default()
+        }];
+        // A new view goes under the selected one, named after its display,
+        // starting from the selected view's filter.
+        let added = new_view(ViewDisplay::EventStream, "host.vars.env == \"prod\"");
+        assert_eq!(added.name, "event stream");
+        assert_eq!(added.filter, "host.vars.env == \"prod\"");
+        assert!(!added.id.is_empty());
+        let index = insert_view(&mut views, Some(0), added).unwrap();
+        assert_eq!(index, 1);
+        let grouped = new_view(ViewDisplay::GroupedList, "");
+        assert_eq!(grouped.list_grouping(), GroupBy::Host);
+        assert_eq!(insert_view(&mut views, Some(0), grouped), Some(1));
+        assert_eq!(views[2].display, ViewDisplay::EventStream);
+        // A copy follows its original.
+        assert_eq!(duplicate_view(&mut views, 2), Some(3));
+        assert_eq!(views[3].name, "event stream copy");
+        assert_ne!(views[3].id, views[2].id);
+        // An unnamed rc1 list is copied under what it shows.
+        assert_eq!(duplicate_view(&mut views, 0), Some(1));
+        assert_eq!(views[1].name, "service problems copy");
+        // Moves are clamped and report where the view went.
+        assert_eq!(move_view(&mut views, 0, 9), Some(4));
+        assert_eq!(views[4].id, "a");
+        assert_eq!(move_view(&mut views, 4, 4), None);
+        assert_eq!(move_view(&mut views, 9, 0), None);
+        // Removing selects the view that took its place, or the new last.
+        assert_eq!(remove_view(&mut views, 4), Some(3));
+        assert_eq!(remove_view(&mut views, 0), Some(0));
+        while views.len() > 1 {
+            remove_view(&mut views, 0).unwrap();
+        }
+        assert_eq!(remove_view(&mut views, 0), None, "the last view stays");
+        // At most MAX_VIEWS.
+        while insert_view(&mut views, None, View::default()).is_some() {}
+        assert_eq!(views.len(), MAX_VIEWS);
+        assert_eq!(duplicate_view(&mut views, 0), None);
+    }
+
+    #[test]
+    fn displays_switch_keeping_the_rest() {
+        let list = View {
+            filter: "x".to_owned(),
+            ..View::default()
+        };
+        let grouped = with_display(list.clone(), ViewDisplay::GroupedList);
+        assert_eq!(grouped.list_grouping(), GroupBy::Host);
+        assert_eq!(grouped.filter, "x");
+        let back = with_display(grouped, ViewDisplay::List);
+        assert_eq!(back.list_grouping(), GroupBy::None);
+        let grid = with_display(back, ViewDisplay::HostGroupGrid);
+        assert!(!grid.is_list());
+        for display in ViewDisplay::ALL {
+            assert!(!display_name(display).is_empty());
+            assert_eq!(
+                DISPLAY_SECTIONS
+                    .iter()
+                    .filter(|(_, displays)| displays.contains(&display))
+                    .count(),
+                1,
+                "{display:?} is in one section of the menus"
+            );
+        }
+        assert_eq!(threads_text(ViewDisplay::Handling, 4), "4 handled");
+        assert_eq!(threads_text(ViewDisplay::Downtimes, 1), "1 in effect");
+        assert_eq!(
+            view_name(&new_view(ViewDisplay::SummaryTiles, "")),
+            "summary tiles"
+        );
+        assert_eq!(
+            view_name(&View {
+                display: ViewDisplay::HostGroupGrid,
+                ..View::default()
+            }),
+            "host-group grid"
+        );
+    }
+
+    #[test]
+    fn drafts_are_checked_before_saving() {
+        let mut views = vec![View::default(), new_view(ViewDisplay::SummaryTiles, "")];
+        assert_eq!(check_views(&views), Ok(()));
+        views[1].groups.by = GroupSource::CustomVar;
+        assert_eq!(check_views(&views), Err((1, Problem::NoCustomVar)));
+        assert_eq!(
+            Problem::NoCustomVar.message(Some("sites")),
+            "Name the custom variable sites groups by."
+        );
+        views[1].groups.custom_var = "host.vars.site".to_owned();
+        assert_eq!(check_views(&views), Ok(()));
+        views[0].filter = "service.state != ".to_owned();
+        let (index, problem) = check_views(&views).unwrap_err();
+        assert_eq!(index, 0);
+        let message = problem.message(None);
+        assert!(message.starts_with("Fix the filter first: "), "{message}");
+        assert!(message.contains("(line 1, column 18)"), "{message}");
+        assert!(
+            problem
+                .message(Some("failing"))
+                .starts_with("Fix the filter of failing first: ")
+        );
+        views[0].filter.clear();
+        views.push(new_view(ViewDisplay::EventStream, ""));
+        views[2].stream.lines = 0;
+        assert_eq!(check_views(&views), Err((2, Problem::Lines)));
+        assert_eq!(
+            Problem::Lines.message(None),
+            "Show between 1 and 200 lines."
+        );
+        views[2].stream.lines = 8;
+        views[0].object_kind = ObjectKind::Hosts;
+        views[0].set_grouping(GroupBy::ServiceGroup);
+        assert_eq!(check_views(&views), Err((0, Problem::HostsByServiceGroup)));
+        assert_eq!(
+            Problem::HostsByServiceGroup.message(Some("x")),
+            "Hosts can't be grouped by service group (x)."
+        );
     }
 
     #[test]
     fn hosts_have_no_service_groups() {
-        let view = View {
-            group_by: GroupBy::ServiceGroup,
-            ..View::default()
-        };
+        let mut view = View::default();
+        view.set_grouping(GroupBy::ServiceGroup);
         assert_eq!(
-            with_kind(view.clone(), ObjectKind::Hosts).group_by,
+            with_kind(view.clone(), ObjectKind::Hosts).list_grouping(),
             GroupBy::None
         );
+        // Nor are they grouped by host (each its own band's only row).
+        let by_host = with_display(View::default(), ViewDisplay::GroupedList);
+        assert_eq!(by_host.list_grouping(), GroupBy::Host);
         assert_eq!(
-            with_kind(view, ObjectKind::Services).group_by,
+            with_kind(by_host, ObjectKind::Hosts).list_grouping(),
+            GroupBy::HostGroup
+        );
+        let hosts = with_kind(View::default(), ObjectKind::Hosts);
+        assert_eq!(
+            with_display(hosts, ViewDisplay::GroupedList).list_grouping(),
+            GroupBy::HostGroup
+        );
+        assert!(!groupings(ObjectKind::Hosts).contains(&GroupBy::Host));
+        assert_eq!(
+            with_kind(view, ObjectKind::Services).list_grouping(),
             GroupBy::ServiceGroup
         );
+    }
+
+    #[test]
+    fn filters_are_copied_from_other_dashboards_and_views() {
+        let state = AppState::fixture(Timestamp::from_unix_seconds(1_790_000_000.));
+        let selected = state.selected().unwrap().clone();
+        let all = copy_sources(state.groups(), None, "");
+        assert!(!all.is_empty());
+        assert!(all.iter().all(|source| !source.filter.is_empty()));
+        let first_view = all
+            .iter()
+            .position(|source| source.section == CopySection::Views)
+            .unwrap_or(all.len());
+        assert!(
+            all[first_view..]
+                .iter()
+                .all(|source| source.section == CopySection::Views),
+            "dashboards first, then views"
+        );
+        let without = copy_sources(state.groups(), Some(&selected), "");
+        assert!(
+            without.len() <= all.len(),
+            "the edited dashboard is left out"
+        );
+        let (_, edited) = state.dashboard(&selected).unwrap();
+        let own = format!("{} › ", edited.name);
+        assert!(
+            without
+                .iter()
+                .all(|source| source.title != edited.name && !source.title.starts_with(&own)),
+            "{without:?}"
+        );
+        assert!(copy_sources(state.groups(), None, "no such thing at all").is_empty());
+        let icons = pickable_icons("ser");
+        assert!(icons.contains(&ic_ui_kit::IconName::Server));
+        assert!(icons.iter().all(|icon| icon.lucide_name().contains("ser")));
+        assert!(pickable_icons("").len() > icons.len());
+    }
+
+    #[test]
+    fn the_health_page_is_edited_as_a_dashboard_of_its_kinds() {
+        let state = AppState::fixture(Timestamp::from_unix_seconds(1_790_000_000.));
+        let draft = initial_draft(&state, &EditorTarget::Health, "").unwrap();
+        assert_eq!(draft.name, "cluster health");
+        assert_eq!(draft.views, HealthLayout::default().views, "06's layout");
+        // One view per kind: adding a kind it has switches it on.
+        let mut views = draft.views.clone();
+        views[3].health.off = true;
+        assert_eq!(
+            add_health_view(&mut views, Some(0), ViewDisplay::GlobalSwitches),
+            Some(3)
+        );
+        assert!(!views[3].health.off);
+        assert_eq!(views.len(), 4);
+        assert_eq!(add_health_view(&mut views, None, ViewDisplay::List), None);
+        // A kind the page lacks comes back under the selected view.
+        views.remove(1);
+        assert_eq!(
+            add_health_view(&mut views, Some(0), ViewDisplay::Checks),
+            Some(1)
+        );
+        assert_eq!(views[1].id, "checks");
+        // The display menu offers its own kind and the free ones.
+        views.remove(3);
+        let free: Vec<(ViewDisplay, bool)> = health_displays(&views, "checks");
+        assert_eq!(
+            free,
+            [
+                (ViewDisplay::ZonesAndEndpoints, false),
+                (ViewDisplay::Checks, true),
+                (ViewDisplay::QueuesAndConnections, false),
+                (ViewDisplay::GlobalSwitches, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn health_rows_say_what_the_view_shows() {
+        use ic_config::HealthTile;
+        let mut checks = HealthLayout::view_of(ViewDisplay::Checks);
+        // Every tile Icinga has numbers for; a view counts its own.
+        let tiles: Vec<HealthTile> = HealthTile::CHECKS
+            .into_iter()
+            .chain(HealthTile::QUEUES)
+            .collect();
+        assert_eq!(health_shows(&checks, 5, &tiles, 6), "6 tiles");
+        checks.health.hidden_tiles = vec![HealthTile::Pending];
+        assert_eq!(health_shows(&checks, 5, &tiles, 6), "5 tiles");
+        // A tile Icinga has no numbers for (IcingaDB off) doesn't count.
+        let queues = HealthLayout::view_of(ViewDisplay::QueuesAndConnections);
+        let without_db: Vec<HealthTile> = HealthTile::QUEUES
+            .into_iter()
+            .filter(|tile| *tile != HealthTile::IcingaDb)
+            .collect();
+        assert_eq!(health_shows(&queues, 5, &without_db, 6), "5 tiles");
+        let zones = HealthLayout::view_of(ViewDisplay::ZonesAndEndpoints);
+        assert_eq!(health_shows(&zones, 1, &[], 6), "1 endpoint");
+        let mut switches = HealthLayout::view_of(ViewDisplay::GlobalSwitches);
+        assert_eq!(health_shows(&switches, 5, &[], 6), "6 switches");
+        switches.health.off = true;
+        assert_eq!(health_shows(&switches, 5, &[], 6), "off");
     }
 
     #[test]
@@ -287,7 +1363,21 @@ mod tests {
         let new = initial_draft(&state, &EditorTarget::New, "lab").unwrap();
         assert_eq!(new.name, NEW_DASHBOARD_NAME);
         assert_eq!(new.group_id, "lab");
-        assert!(new.view.problems_only && new.view.hide_handled);
+        assert_eq!(
+            new.views.len(),
+            1,
+            "a new dashboard starts with one list view"
+        );
+        assert!(new.views[0].is_list());
+        assert_eq!(new.views[0].name, "list", "named after its display");
+        assert!(
+            new.views[0].filter.is_empty(),
+            "no starting points: every object"
+        );
+        assert!(new.mark.is_auto(), "the mark follows the defaults");
+        assert!(new.views[0].problems_only);
+        assert_eq!(new.views[0].handled, ic_config::HandledSetting::SETTINGS);
+        assert!(!new.views[0].id.is_empty());
         let gone = DashboardRef {
             group_id: "x".to_owned(),
             dashboard_id: "y".to_owned(),

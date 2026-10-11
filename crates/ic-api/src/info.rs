@@ -1,5 +1,7 @@
 //! `GET /v1`: who we are and what we may do.
 
+use ic_model::glob_matches;
+
 /// The authenticated API user, its permissions and the Icinga version.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApiInfo {
@@ -30,68 +32,14 @@ impl ApiInfo {
         if permission.is_empty() {
             return true;
         }
-        let required = permission.to_lowercase();
         self.permissions.iter().any(|granted| {
             let pattern = granted
                 .strip_suffix(FILTERED_SUFFIX)
                 .unwrap_or(granted)
-                .trim()
-                .to_lowercase();
-            glob_match(&pattern, &required)
+                .trim();
+            glob_matches(pattern, permission)
         })
     }
-}
-
-/// Glob matching as Icinga's `Utility::Match`: `*` matches any sequence
-/// (including empty and `/`), `?` matches exactly one character, `\`
-/// escapes the next character.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    #[derive(Clone, Copy)]
-    enum Token {
-        Any,
-        One,
-        Char(char),
-    }
-    let mut tokens = Vec::with_capacity(pattern.len());
-    let mut chars = pattern.chars();
-    while let Some(c) = chars.next() {
-        tokens.push(match c {
-            '*' => Token::Any,
-            '?' => Token::One,
-            '\\' => Token::Char(chars.next().unwrap_or('\\')),
-            other => Token::Char(other),
-        });
-    }
-    let text: Vec<char> = text.chars().collect();
-
-    // Iterative wildcard matching with single-star backtracking.
-    let (mut t, mut p) = (0, 0);
-    let mut backtrack: Option<(usize, usize)> = None;
-    while t < text.len() {
-        match tokens.get(p) {
-            Some(Token::Any) => {
-                backtrack = Some((p, t));
-                p += 1;
-            }
-            Some(Token::One) => {
-                p += 1;
-                t += 1;
-            }
-            Some(Token::Char(c)) if *c == text[t] => {
-                p += 1;
-                t += 1;
-            }
-            _ => match backtrack {
-                Some((star, matched)) => {
-                    p = star + 1;
-                    t = matched + 1;
-                    backtrack = Some((star, matched + 1));
-                }
-                None => return false,
-            },
-        }
-    }
-    tokens[p..].iter().all(|token| matches!(token, Token::Any))
 }
 
 #[cfg(test)]
@@ -156,16 +104,11 @@ mod tests {
     }
 
     #[test]
-    fn glob_details() {
-        assert!(glob_match("actions/*", "actions/"));
-        assert!(glob_match("*/query/*", "objects/query/host"));
-        assert!(glob_match("events/??", "events/ab"));
-        assert!(!glob_match("events/??", "events/abc"));
-        assert!(glob_match("a*b*c", "axxbyyc"));
-        assert!(!glob_match("a*b*c", "axxbyy"));
-        assert!(glob_match("**", ""));
-        assert!(glob_match(r"literal\*", "literal*"));
-        assert!(!glob_match(r"literal\*", "literalx"));
-        assert!(!glob_match("", "x"));
+    fn escapes_and_case_are_icingas() {
+        // The shared matcher's rules (ic_model::glob_matches).
+        let user = info(&[r"literal\*", "Actions/*"]);
+        assert!(user.allows("literal*"));
+        assert!(!user.allows("literalx"));
+        assert!(user.allows("ACTIONS/remove-comment"));
     }
 }

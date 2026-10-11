@@ -117,6 +117,24 @@ impl ConfigStore {
         Ok(config)
     }
 
+    /// Reads the settings as the file holds them now, without ever writing
+    /// (for noticing an edit by hand while the app runs): like
+    /// [`ConfigStore::load`], with older formats upgraded and missing ids
+    /// derived, but the repaired ids are not saved. `None` if there is no
+    /// file.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ConfigStore::load`].
+    pub fn read(&self) -> Result<Option<Config>, ConfigError> {
+        let Some(text) = read_text(&self.path)? else {
+            return Ok(None);
+        };
+        let mut config = parse_config(&text)?.config;
+        config.repair_ids();
+        Ok(Some(config))
+    }
+
     /// Reads the backup copy, the settings as they were before the last
     /// save, for restoring them after [`ConfigStore::load`] failed. To
     /// restore it, [`ConfigStore::save`] the result. `None` if there is no

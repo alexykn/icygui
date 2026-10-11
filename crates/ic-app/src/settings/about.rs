@@ -5,9 +5,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Image, ImageFormat, IntoElement, ParentElement as _, Styled as _, div, img, px,
+    AnyElement, App, Image, ImageFormat, IntoElement, ParentElement as _, Styled as _, div, img,
 };
-use ic_ui_kit::{ActiveTheme as _, DialogBody, KvTable};
+use ic_ui_kit::{ActiveTheme as _, DialogBody, KvTable, px};
 
 /// The app icon, 128 px.
 const ICON: &[u8] = include_bytes!("../../../../assets/icons/icygui-128.png");
@@ -71,7 +71,8 @@ pub(crate) fn render(facts: &AboutFacts, close: impl IntoElement, cx: &App) -> A
                 .child(
                     "Live state from Icinga's event stream; notification rules, mutes and \
                      pauses stay on this computer. MIT licensed; IBM Plex Mono under the SIL \
-                     Open Font License.",
+                     Open Font License, the Lucide icons under the ISC License, GPUI under \
+                     Apache 2.0.",
                 ),
         )
         .action(close)

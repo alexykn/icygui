@@ -5,10 +5,16 @@
 //! - `connect`: connecting, the tiered load, reconnects and failures;
 //! - `events`: the live event stream, re-queries and bursts;
 //! - `actions`: every action end to end;
+//! - `cluster`: the demo cluster of `demo/docker-compose.yml` with nodes
+//!   stopped (a real Icinga; run with `demo/up.sh`'s variables);
 //! - `background`: engines whose environment isn't on screen, several
 //!   side by side;
 //! - `dashboards`: dashboard evaluation and previews;
+//! - `fleet`: many clients on the demo cluster for a long while, driven
+//!   by `contract/scale/fleet.sh` (ignored);
 //! - `freshness`: the freshness watchdog, hydration and reconcile;
+//! - `heartbeats`: heartbeats and trouble alerts (no live data, Icinga
+//!   health alerts);
 //! - `gentle`: failing reloads, `Refresh` presses, hidden objects, refused
 //!   kinds and stalled streams cost Icinga little;
 //! - `notifications`: rule inputs, the rule engine and the notifier;
@@ -28,12 +34,15 @@ mod support;
 
 mod actions;
 mod background;
+mod cluster;
 mod connect;
 mod dashboards;
 mod event_log;
 mod events;
+mod fleet;
 mod freshness;
 mod gentle;
+mod heartbeats;
 mod notifications;
 mod notified;
 mod probe;

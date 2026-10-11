@@ -3,12 +3,13 @@
 
 use std::time::{Duration, Instant};
 
-use ic_config::{GroupBy, Paths, Sort, SortKey, StateStore};
+use ic_config::{Appearance, GroupBy, Paths, Sort, SortKey, StateStore};
 use ic_core::{LoadPhase, NotificationRecord};
 use ic_rules::{NotificationIntent, Tone as IntentTone};
 
 use super::testing::Recorder;
 use super::*;
+use crate::lists::ListKind;
 use crate::persist::Persistence;
 
 fn now() -> Timestamp {
@@ -157,6 +158,41 @@ fn tabs_cycle_through_the_dashboard() {
 }
 
 #[test]
+fn the_cluster_section_shows_instead_of_the_dashboard_or_a_tab() {
+    use crate::cluster::ClusterEntry;
+    let mut state = AppState::fixture(now());
+    let host = ObjectKey::host("db-prod-03");
+    state.open_tab(host.clone());
+    assert!(state.open_list(ListKind::Downtimes));
+    assert!(state.open_list(ListKind::Handling));
+    assert!(!state.open_list(ListKind::Handling), "shown already");
+    assert_eq!(state.active_cluster(), Some(ClusterEntry::Handling));
+    assert_eq!(state.active_tab(), None, "one thing is shown");
+    // ctrl-tab: the tabs, then back to the dashboard.
+    assert!(state.cycle_tab(true));
+    assert_eq!(state.active_tab(), Some(&host));
+    assert!(state.cycle_tab(true));
+    assert_eq!((state.active_tab(), state.active_cluster()), (None, None));
+    // The events and health entries are views of the section too.
+    assert!(state.show_cluster(ClusterEntry::Events));
+    assert_eq!(state.active_cluster(), Some(ClusterEntry::Events));
+    assert!(state.show_dashboard());
+    assert_eq!(state.active_cluster(), None);
+    // The palette's *acknowledged*: handling on its chip.
+    assert!(state.open_list_on(ListKind::Handling, crate::lists::model::Chip::Acknowledged));
+    assert_eq!(
+        state.list_options(ListKind::Handling).chip.as_deref(),
+        Some("acknowledged")
+    );
+    // Selecting a dashboard shows it instead.
+    let selected = state.selected().unwrap().clone();
+    assert!(state.select(selected));
+    assert_eq!(state.active_cluster(), None);
+    assert!(state.close_all_tabs());
+    assert!(state.tabs().is_empty());
+}
+
+#[test]
 fn an_empty_state_has_nothing_selected() {
     let state = AppState::empty();
     assert!(!state.is_demo());
@@ -236,17 +272,18 @@ fn view_changes_update_the_core_and_are_saved() {
     let recorder = Recorder::default();
     state.set_core(Box::new(recorder.clone()));
     let production = reference("overview", "production");
-    assert!(state.update_view(&production, |view| {
+    assert!(state.update_primary_view(&production, |view| {
         view.sort = Sort {
             key: SortKey::Host,
             descending: false,
         };
-        view.group_by = GroupBy::Host;
-        view.hide_handled = true;
+        view.set_grouping(GroupBy::Host);
+        view.handled = ic_config::HandledSetting::SETTINGS;
     }));
     assert_eq!(recorder.sent(), ["UpdateEnvironment(prod-cluster)"]);
     assert!(
-        !state.update_view(&production, |view| view.hide_handled = true),
+        !state.update_primary_view(&production, |view| view.handled =
+            ic_config::HandledSetting::SETTINGS),
         "unchanged: nothing sent"
     );
     assert_eq!(recorder.sent().len(), 1);
@@ -257,10 +294,10 @@ fn view_changes_update_the_core_and_are_saved() {
         .unwrap()
         .dashboard(&production.group_id, &production.dashboard_id)
         .unwrap()
-        .view;
+        .views[0];
     assert_eq!(view.sort.key, SortKey::Host);
-    assert_eq!(view.group_by, GroupBy::Host);
-    assert!(view.hide_handled);
+    assert_eq!(view.list_grouping(), GroupBy::Host);
+    assert_eq!(view.handled, ic_config::HandledSetting::SETTINGS);
     assert_eq!(
         saved.active_environment.as_deref(),
         Some(fixture::ENVIRONMENT_ID),
@@ -312,19 +349,28 @@ fn a_saved_selection_that_no_longer_exists_falls_back_to_the_first_dashboard() {
         fixture::ENVIRONMENT_ID,
         EnvironmentUiState {
             tabs: vec!["host!svc".to_owned(), "bad!".to_owned()],
+            lists: vec!["acknowledged".to_owned(), "nonsense".to_owned()],
             selected: Some(reference("gone", "gone")),
+            ..EnvironmentUiState::default()
         },
     );
     ui.set_environment(
         "deleted-environment",
         EnvironmentUiState {
             tabs: vec!["x".to_owned()],
+            lists: Vec::new(),
             selected: None,
+            ..EnvironmentUiState::default()
         },
     );
     let state = AppState::live(fixture::build(now()).config, ui, now());
     assert_eq!(state.selected(), Some(&reference("overview", "overview")));
     assert_eq!(state.tabs(), [ObjectKey::service("host", "svc")]);
+    assert_eq!(
+        state.active_cluster(),
+        None,
+        "it starts on the dashboard (stage 2's list tabs aren't kept)"
+    );
     assert!(
         !state
             .ui_state()
@@ -560,8 +606,8 @@ fn objects_that_changed_while_quiet_are_found_by_the_views() {
     let production = reference("overview", "production");
     let listed = |state: &AppState, reference: &DashboardRef| {
         state.result(reference).is_some_and(|result| {
-            result
-                .rows
+            result.views[0]
+                .rows()
                 .contains(&ic_core::snapshot::DashboardRow::Object(object.clone()))
         })
     };
@@ -628,8 +674,9 @@ fn view_changes_wait_while_the_engine_waits_to_reconnect() {
         retry_at: now(),
         untrusted: None,
     }));
-    assert!(state.update_view(&production, |view| view.hide_handled = true));
-    assert!(state.update_view(&production, |view| view.group_by = GroupBy::Host));
+    assert!(state.update_primary_view(&production, |view| view.handled =
+        ic_config::HandledSetting::SETTINGS));
+    assert!(state.update_primary_view(&production, |view| view.set_grouping(GroupBy::Host)));
     assert!(state.toggle_group("demo-lab"));
     assert!(
         recorder.sent().is_empty(),
@@ -651,6 +698,124 @@ fn view_changes_wait_while_the_engine_waits_to_reconnect() {
     state.apply(CoreEvent::Connection(ConnectionState::AuthFailed {
         message: "401".to_owned(),
     }));
-    assert!(state.update_view(&production, |view| view.hide_handled = false));
+    assert!(state.update_primary_view(&production, |view| view.handled =
+        ic_config::HandledSetting::SHOW));
     assert_eq!(recorder.sent().len(), 1);
+}
+
+#[test]
+fn views_change_by_id_and_the_handled_button_toggles() {
+    let (mut state, recorder) = connected_fixture();
+    let production = reference("overview", "production");
+    let view_id = state.dashboard(&production).unwrap().1.views[0].id.clone();
+    let rows = |state: &AppState| -> Vec<String> {
+        state
+            .view_result(&production, &view_id)
+            .unwrap()
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                ic_core::snapshot::DashboardRow::Object(key) => Some(key.full_name()),
+                ic_core::snapshot::DashboardRow::Group { .. } => None,
+            })
+            .collect()
+    };
+    // rc1's production showed its handled problems.
+    let acknowledged = "web-edge-02!http-tls".to_owned();
+    assert!(rows(&state).contains(&acknowledged));
+    let shown = state.view_result(&production, &view_id).unwrap().clone();
+    assert_eq!(shown.hidden, 0);
+    assert!(shown.handled > 0);
+
+    // `N handled · hide`: back to the settings, which hide them.
+    assert!(state.toggle_handled(&production, &view_id));
+    let view = &state.dashboard(&production).unwrap().1.views[0];
+    assert_eq!(view.handled, ic_config::HandledSetting::SETTINGS);
+    assert!(!rows(&state).contains(&acknowledged));
+    let hidden = state.view_result(&production, &view_id).unwrap().clone();
+    assert_eq!(hidden.hidden, shown.handled, "every handled one is hidden");
+    assert_eq!(hidden.counts, shown.counts, "the counts don't change");
+    assert_eq!(recorder.sent(), ["UpdateEnvironment(prod-cluster)"]);
+
+    // `N hidden · show`.
+    assert!(state.toggle_handled(&production, &view_id));
+    assert!(rows(&state).contains(&acknowledged));
+    // Unknown views and dashboards change nothing.
+    assert!(!state.update_view(&production, "no such view", |view| view.collapsed = true));
+    assert!(!state.toggle_handled(&reference("overview", "gone"), &view_id));
+    assert_eq!(recorder.sent().len(), 2);
+}
+
+#[test]
+fn handled_defaults_reach_every_engine_and_the_views_that_follow_them() {
+    let (mut state, recorder) = connected_fixture();
+    let overview = reference("overview", "overview");
+    let view_id = state.dashboard(&overview).unwrap().1.views[0].id.clone();
+    let hidden_before = state.view_result(&overview, &view_id).unwrap().hidden;
+    assert!(hidden_before > 0, "the overview hides handled problems");
+    let appearance = Appearance {
+        hide_handled: HideHandled::NONE,
+        ..*state.appearance()
+    };
+    assert!(state.set_appearance(appearance));
+    assert_eq!(state.handled_defaults(), HideHandled::NONE);
+    let sent = recorder.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("SetHandledDefaults("), "{sent:?}");
+    // The fixture evaluates again: the overview follows the settings.
+    assert_eq!(state.view_result(&overview, &view_id).unwrap().hidden, 0);
+    assert!(!state.set_appearance(appearance), "unchanged");
+    assert_eq!(recorder.sent().len(), 1);
+}
+
+#[test]
+fn would_list_follows_the_handled_kinds() {
+    let state = AppState::fixture(now());
+    let snapshot = state.snapshot().clone();
+    let key = ObjectKey::Service {
+        key: ServiceKey::new("web-edge-02", "http-tls"),
+    };
+    let service = &snapshot.services[key.as_service().unwrap()];
+    assert!(service.check.acknowledgement.is_acknowledged());
+    assert!(!service.check.in_downtime());
+    let view = View {
+        handled: ic_config::HandledSetting::SETTINGS,
+        ..View::default()
+    };
+    let all = HideHandled::ALL;
+    let at = Timestamp::now();
+    assert!(!would_list(&snapshot, &view, all, &key, at));
+    let downtimes_only = HideHandled {
+        acknowledged: false,
+        ..all
+    };
+    assert!(would_list(&snapshot, &view, downtimes_only, &key, at));
+    let shown = View {
+        handled: ic_config::HandledSetting::SHOW,
+        ..view.clone()
+    };
+    assert!(would_list(&snapshot, &shown, all, &key, at));
+    // Only lists list anything.
+    let grid = View {
+        display: ic_config::ViewDisplay::HostGroupGrid,
+        ..shown
+    };
+    assert!(!would_list(&snapshot, &grid, all, &key, at));
+}
+
+#[test]
+fn the_handled_button_hides_even_when_the_settings_hide_nothing() {
+    use ic_config::{HandledMode, HandledSetting};
+    let none = HideHandled::NONE;
+    // `2 handled · hide` on a view that follows settings hiding nothing.
+    let hidden = handled_after_click(HandledSetting::SETTINGS, none, 0);
+    assert_eq!(hidden.mode, HandledMode::Hide);
+    assert_eq!(hidden.hidden(none), HideHandled::ALL);
+    // `2 hidden · show` shows them again.
+    let shown = handled_after_click(hidden, none, 2);
+    assert_eq!(shown.hidden(none), none);
+    assert_eq!(
+        handled_after_click(shown, none, 0).hidden(none),
+        HideHandled::ALL
+    );
 }

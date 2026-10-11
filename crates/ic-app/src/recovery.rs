@@ -5,9 +5,9 @@
 
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
-use ic_ui_kit::{ActiveTheme as _, Button, CodeBlock, EmptyState, Icon, IconName, PaneHeader};
+use ic_ui_kit::{ActiveTheme as _, Button, CodeBlock, EmptyState, Icon, IconName, PaneHeader, px};
 
 use crate::app_state::ConfigProblem;
 use crate::chrome::{Controls, WindowControls, WindowDrag};
@@ -123,7 +123,7 @@ pub(crate) fn render<T: 'static>(
         .leading(
             Icon::new(IconName::TriangleAlert)
                 .size(px(22.))
-                .color(theme.states.critical),
+                .color(theme.states.fill.critical),
         )
         .detail(text.explanation)
         .max_width(px(640.))
@@ -153,7 +153,7 @@ pub(crate) fn render<T: 'static>(
                 div()
                     .max_w(px(600.))
                     .text_size(theme.text.small)
-                    .text_color(theme.states.critical)
+                    .text_color(theme.states.text.critical)
                     .child(failure),
             )
         });

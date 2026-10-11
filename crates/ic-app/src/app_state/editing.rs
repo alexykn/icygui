@@ -17,6 +17,16 @@ use super::AppState;
 
 /// The name a new group gets until it's renamed.
 pub(crate) const NEW_GROUP_NAME: &str = "new group";
+/// `views`, each with an id (a fresh one where it had none).
+fn with_ids(mut views: Vec<View>) -> Vec<View> {
+    for view in &mut views {
+        if view.id.trim().is_empty() {
+            view.id = ic_config::new_id();
+        }
+    }
+    views
+}
+
 /// The name a new dashboard gets until it's named.
 pub(crate) const NEW_DASHBOARD_NAME: &str = "new dashboard";
 
@@ -26,15 +36,32 @@ pub(crate) struct DashboardDraft {
     /// Display name (trimmed when saved; blank keeps the old name, or
     /// [`NEW_DASHBOARD_NAME`]).
     pub(crate) name: String,
-    /// What it lists and how.
-    pub(crate) view: View,
+    /// What it shows: its views, top to bottom (at least one).
+    pub(crate) views: Vec<View>,
     /// Notification setting relative to its group.
     pub(crate) notifications: ScopeSetting,
     /// The group it goes into.
     pub(crate) group_id: String,
+    /// What its sidebar row shows in the mark slot (topic 14, round 5).
+    pub(crate) mark: ic_config::SidebarMark,
 }
 
 impl AppState {
+    /// The icons picked most recently as sidebar marks (the icon
+    /// picker's *recent* row), newest first.
+    pub(crate) fn recent_icons(&self) -> &[String] {
+        &self.ui.recent_icons
+    }
+
+    /// A saved dashboard's icon mark goes first in the recent icons.
+    fn remember_mark(&mut self, mark: &ic_config::SidebarMark) {
+        if let ic_config::SidebarMark::Icon(icon) = mark
+            && self.ui.remember_icon(icon)
+        {
+            self.save_ui();
+        }
+    }
+
     /// The active environment's groups, in sidebar order.
     pub(crate) fn groups(&self) -> &[DashboardGroup] {
         self.environment()
@@ -57,9 +84,26 @@ impl AppState {
         Some(result)
     }
 
+    /// [`AppState::change_environment`] for environment `id`, on screen or
+    /// not: an environment off screen is saved and its own engine told.
+    pub(super) fn change_environment_of<R>(
+        &mut self,
+        id: &str,
+        change: impl FnOnce(&mut Environment) -> Option<R>,
+    ) -> Option<R> {
+        if self.config.active_environment.as_deref() == Some(id) {
+            return self.change_environment(change);
+        }
+        let environment = self.config.environment_mut(id)?;
+        let result = change(environment)?;
+        self.save_config();
+        self.send_environment_to(id);
+        Some(result)
+    }
+
     /// After a change: a selected dashboard that's gone selects the first
     /// one (and the UI state remembers it).
-    fn repair_selection(&mut self) {
+    pub(super) fn repair_selection(&mut self) {
         let valid = self
             .selected
             .as_ref()
@@ -150,8 +194,10 @@ impl AppState {
     /// it. Returns its reference.
     pub(crate) fn add_dashboard(&mut self, draft: DashboardDraft) -> Option<DashboardRef> {
         let name = non_blank(&draft.name).unwrap_or(NEW_DASHBOARD_NAME);
-        let mut dashboard = Dashboard::new(name, draft.view);
+        let mut dashboard = Dashboard::with_views(name, draft.views);
         dashboard.notifications = draft.notifications;
+        self.remember_mark(&draft.mark);
+        dashboard.mark = draft.mark;
         let reference = DashboardRef {
             group_id: draft.group_id.clone(),
             dashboard_id: dashboard.id.clone(),
@@ -165,6 +211,27 @@ impl AppState {
         })?;
         self.select(reference.clone());
         Some(reference)
+    }
+
+    /// Saves the cluster health page's `views` (the editor's draft) for the
+    /// active environment, repaired (one view per health kind, each with
+    /// its kind's id); the settings file leaves the page out while it is
+    /// the default layout. Returns whether the environment exists.
+    pub(crate) fn save_health_page(&mut self, views: Vec<View>) -> bool {
+        let mut page = ic_config::HealthPage { views };
+        page.repair();
+        let Some(environment) = self.environment() else {
+            return false;
+        };
+        if environment.health_page == page {
+            return true;
+        }
+        tracing::info!(environment = %environment.name, "cluster health page changed");
+        self.change_environment(|environment| {
+            environment.health_page = page;
+            Some(())
+        })
+        .is_some()
     }
 
     /// Saves the editor's `draft` over the dashboard `reference`: name,
@@ -191,8 +258,9 @@ impl AppState {
             if let Some(name) = non_blank(&draft.name) {
                 name.clone_into(&mut dashboard.name);
             }
-            dashboard.view = draft.view;
+            dashboard.views = with_ids(draft.views);
             dashboard.notifications = draft.notifications;
+            dashboard.mark = draft.mark.clone();
             let unchanged =
                 group.dashboards[index] == dashboard && reference.group_id == draft.group_id;
             if unchanged {
@@ -211,6 +279,10 @@ impl AppState {
         });
         if changed.is_none() {
             return self.dashboard(reference).map(|_| reference.clone());
+        }
+        if let Some((_, dashboard)) = self.dashboard(&moved) {
+            let mark = dashboard.mark.clone();
+            self.remember_mark(&mark);
         }
         if was_selected {
             self.select(moved.clone());
@@ -243,7 +315,7 @@ impl AppState {
                 .position(|dashboard| dashboard.id == reference.dashboard_id)?;
             let original = &group.dashboards[index];
             let mut copy =
-                Dashboard::new(&format!("{} copy", original.name), original.view.clone());
+                Dashboard::with_views(&format!("{} copy", original.name), original.views.clone());
             copy.notifications = original.notifications.clone();
             let copy_reference = DashboardRef {
                 group_id: group.id.clone(),
@@ -270,9 +342,10 @@ impl AppState {
             let (_, dashboard) = self.dashboard(reference)?;
             DashboardDraft {
                 name: dashboard.name.clone(),
-                view: dashboard.view.clone(),
+                views: dashboard.views.clone(),
                 notifications: dashboard.notifications.clone(),
                 group_id: group_id.to_owned(),
+                mark: dashboard.mark.clone(),
             }
         };
         self.update_dashboard(reference, draft)
@@ -405,6 +478,7 @@ fn shifted(index: usize, delta: isize, len: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use ic_config::{ObjectKind, Paths};
+    use ic_core::snapshot::DashboardResult;
     use ic_model::Timestamp;
 
     use super::*;
@@ -460,6 +534,27 @@ mod tests {
                 .id
                 .clone(),
         }
+    }
+
+    #[test]
+    fn the_health_page_saves_repaired_and_only_when_changed() {
+        let (mut state, recorder) = fixture();
+        let mut views = ic_config::HealthPage::default().views;
+        assert!(state.save_health_page(views.clone()), "unchanged");
+        assert!(recorder.sent().is_empty(), "nothing to tell the engine");
+        views.swap(0, 3);
+        views[1].health.sparklines = false;
+        views[2].id = "mine".to_owned();
+        views.push(View::default());
+        assert!(state.save_health_page(views));
+        let page = &state.environment().unwrap().health_page;
+        let ids: Vec<&str> = page.views.iter().map(|view| view.id.as_str()).collect();
+        assert_eq!(ids, ["switches", "checks", "queues", "zones"], "repaired");
+        assert!(!page.views[1].health.sparklines);
+        assert_eq!(recorder.sent(), ["UpdateEnvironment(prod-cluster)"]);
+        // Reset to default: the settings file leaves it out again.
+        assert!(state.save_health_page(ic_config::HealthPage::default().views));
+        assert!(state.environment().unwrap().health_page.is_default());
     }
 
     #[test]
@@ -526,9 +621,10 @@ mod tests {
         let added = state
             .add_dashboard(DashboardDraft {
                 name: " prod hosts ".to_owned(),
-                view: view.clone(),
+                views: vec![view.clone()],
                 notifications: ScopeSetting::Off,
                 group_id: lab.clone(),
+                mark: ic_config::SidebarMark::Auto,
             })
             .unwrap();
         assert_eq!(state.selected(), Some(&added), "a new dashboard is shown");
@@ -538,6 +634,7 @@ mod tests {
         assert!(
             state
                 .result(&added)
+                .and_then(DashboardResult::first)
                 .is_some_and(|result| result.error.is_none()),
             "evaluated"
         );
@@ -554,12 +651,13 @@ mod tests {
                 &added,
                 DashboardDraft {
                     name: "prod".to_owned(),
-                    view: View {
+                    views: vec![View {
                         problems_only: false,
                         ..view.clone()
-                    },
+                    }],
                     notifications: ScopeSetting::Inherit,
                     group_id: platform.clone(),
+                    mark: ic_config::SidebarMark::Auto,
                 },
             )
             .unwrap();
@@ -574,9 +672,10 @@ mod tests {
         let (_, current) = state.dashboard(&moved).unwrap();
         let same = DashboardDraft {
             name: current.name.clone(),
-            view: current.view.clone(),
+            views: current.views.clone(),
             notifications: current.notifications.clone(),
             group_id: platform.clone(),
+            mark: ic_config::SidebarMark::Auto,
         };
         assert_eq!(state.update_dashboard(&moved, same), Some(moved.clone()));
         assert!(recorder.sent().is_empty());
@@ -584,9 +683,10 @@ mod tests {
         // An unknown target group changes nothing.
         let nowhere = DashboardDraft {
             name: "x".to_owned(),
-            view,
+            views: vec![view],
             notifications: ScopeSetting::Inherit,
             group_id: "missing".to_owned(),
+            mark: ic_config::SidebarMark::Auto,
         };
         assert_eq!(state.update_dashboard(&moved, nowhere), Some(moved));
     }

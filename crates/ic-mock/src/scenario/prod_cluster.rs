@@ -7,7 +7,7 @@ use std::time::Duration;
 use ic_model::{ObjectKey, ServiceState};
 use serde_json::json;
 
-use super::build::{Builder, vars};
+use super::build::{Builder, ScenarioDowntime, vars};
 use super::{Scenario, User, Zone};
 
 fn mins(minutes: u64) -> Duration {
@@ -370,8 +370,8 @@ fn estate() -> Vec<HostDef> {
     for (name, address, zone) in [
         ("sw-core-ams-01", "10.8.0.2", Some("ams")),
         ("sw-core-ams-02", "10.8.0.3", Some("ams")),
-        ("sw-core-fra-01", "10.9.0.2", None),
-        ("sw-core-fra-02", "10.9.0.3", None),
+        ("sw-core-fra-01", "10.9.0.2", Some("fra")),
+        ("sw-core-fra-02", "10.9.0.3", Some("fra")),
     ] {
         let mut def = host(name, address, "switch", &["network"]);
         def.zone = zone;
@@ -393,17 +393,30 @@ fn estate() -> Vec<HostDef> {
 )]
 pub fn prod_cluster() -> Scenario {
     let mut b = Builder::new("prod-cluster", "master-01", "r2.14.3-1", 2_026);
+    // Two masters sharing the checks, a satellite per site (fra's runs an
+    // older version), and two global zones for configuration only.
     b.scenario.zones = vec![
         Zone::new("master", None),
         Zone::new("ams", Some("master")),
+        Zone::new("fra", Some("master")),
         Zone {
             name: "global-templates".to_owned(),
             parent: None,
             global: true,
         },
+        Zone {
+            name: "director-global".to_owned(),
+            parent: None,
+            global: true,
+        },
     ];
     b.endpoint("master-01", "master", false);
+    b.endpoint("master-02", "master", true);
     b.endpoint("sat-ams-01", "ams", true);
+    b.endpoint("sat-fra-01", "fra", true);
+    b.scenario
+        .endpoint_versions
+        .push(("sat-fra-01".to_owned(), "r2.14.2-1".to_owned()));
     b.scenario.users = vec![
         User::new("dba-oncall", "DBA on-call", "dba-oncall@example.com"),
         User::new(
@@ -423,7 +436,7 @@ pub fn prod_cluster() -> Scenario {
 
     for def in estate() {
         b.zone = def.zone.map(str::to_owned);
-        b.check_source = def.zone.map(|_| "sat-ams-01".to_owned());
+        b.check_source = def.zone.map(|zone| format!("sat-{zone}-01"));
         let mut host_vars = vec![
             ("role", json!(def.role)),
             ("env", json!("prod")),
@@ -551,6 +564,15 @@ pub fn prod_cluster() -> Scenario {
         None,
     );
     b.problem(
+        "k8s-node-07",
+        "kubelet",
+        ServiceState::Critical,
+        "CRITICAL - connection refused (10.0.4.27:10250)",
+        &[],
+        mins(41),
+        None,
+    );
+    b.problem(
         "web-edge-02",
         "http-tls",
         ServiceState::Critical,
@@ -559,12 +581,13 @@ pub fn prod_cluster() -> Scenario {
         hours(2) + mins(4),
         None,
     );
-    b.acknowledge(
+    b.acknowledge_until(
         &ObjectKey::service("web-edge-02", "http-tls"),
         "m.keller",
-        "renewal in progress",
-        mins(15),
-        false,
+        "renewal ordered, new cert expected tomorrow (CHG-4459)",
+        hours(2) + mins(10),
+        true,
+        Some(hours(21) + mins(48)),
     );
     b.problem(
         "lb-prod-02",
@@ -610,8 +633,8 @@ pub fn prod_cluster() -> Scenario {
     let end = b.later(hours(1));
     b.downtime(
         ObjectKey::service("cache-02", "redis-memory"),
-        "s.weber",
-        "Memory upgrade on cache-02",
+        "j.berg",
+        "maxmemory raised; restart once the memory upgrade on cache-02 is done",
         start,
         end,
         true,
@@ -887,6 +910,10 @@ pub fn prod_cluster() -> Scenario {
         false,
     );
 
+    downtimes_in_the_panes(&mut b);
+    the_lists(&mut b);
+    the_threads(&mut b);
+
     // Objects the demo should keep showing.
     let mut pinned: Vec<ObjectKey> = [
         "db-prod-03",
@@ -906,6 +933,18 @@ pub fn prod_cluster() -> Scenario {
     .iter()
     .map(|h| ObjectKey::host(h))
     .collect();
+    // The downtimes' objects that are OK (topic 01): kept OK, so they stay
+    // in the frames they were set up for.
+    pinned.push(ObjectKey::service("db-prod-05", "pg-locks"));
+    pinned.push(ObjectKey::service("db-prod-05", "pg-bloat"));
+    // The lists' acknowledged problems (topic 07) stay as they are.
+    for (host, service) in [
+        ("kafka-01", "kafka-consumer-lag"),
+        ("k8s-node-18", "ntp-offset"),
+        ("nfs-02", "disk /srv"),
+    ] {
+        pinned.push(ObjectKey::service(host, service));
+    }
     for (host, _) in &failed {
         pinned.push(ObjectKey::host(host));
     }
@@ -949,4 +988,315 @@ pub fn prod_cluster() -> Scenario {
         names.iter().map(|name| (*name).to_owned()).collect()
     });
     b.finish()
+}
+
+/// The downtimes of topic 01 (`design/v1/01-downtimes.html`), one of each
+/// case the pane draws:
+///
+/// - a service in a fixed downtime: redis-memory on cache-02, scheduled
+///   with the rest of the scenario above;
+/// - a host in downtime with all its services (k8s-node-07, whose disk
+///   /var and kubelet are critical);
+/// - a flexible downtime waiting for a problem (pg-locks on db-prod-05,
+///   OK) and one a problem started (pg-bloat on db-prod-05);
+/// - a downtime scheduled for tonight on an unhandled problem
+///   (haproxy-backend on lb-prod-02);
+/// - a host with three downtimes: in effect with its services, flexible
+///   tonight, and a weekly one from the config (sw-core-ams-02);
+/// - a downtime on the host only, not its services (k8s-node-02, whose
+///   ntp-offset still warns and notifies).
+fn downtimes_in_the_panes(b: &mut Builder) {
+    let reimage = ScenarioDowntime {
+        entry: Some(b.ago(mins(48))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("k8s-node-07"),
+            "m.keller",
+            "Node drained and cordoned for the kernel 6.8 rollout; reimage starts 14:30.",
+            b.ago(mins(42)),
+            b.later(mins(78)),
+        )
+    };
+    host_with_services(b, "k8s-node-07", &reimage);
+
+    b.downtime_with(ScenarioDowntime {
+        fixed: false,
+        duration: 7_200.0,
+        entry: Some(b.ago(mins(17))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::service("db-prod-05", "pg-locks"),
+            "dba-oncall",
+            "VACUUM FULL on orders_archive; lock waits are expected while it runs.",
+            b.ago(mins(12)),
+            b.later(mins(228)),
+        )
+    });
+    b.downtime_with(ScenarioDowntime {
+        fixed: false,
+        duration: 7_200.0,
+        trigger: Some(b.ago(mins(48))),
+        entry: Some(b.ago(mins(75))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::service("db-prod-05", "pg-bloat"),
+            "dba-oncall",
+            "pg_repack on orders; bloat warnings are expected until it finishes.",
+            b.ago(mins(60)),
+            b.later(mins(180)),
+        )
+    });
+
+    b.downtime_with(ScenarioDowntime {
+        entry: Some(b.ago(mins(190))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::service("lb-prod-02", "haproxy-backend"),
+            "m.keller",
+            "HAProxy 2.8 rollout on lb-prod-01/02 (CHG-4471); backends flap while the pool \
+             reloads.",
+            b.later(mins(468)),
+            b.later(mins(528)),
+        )
+    });
+
+    let swap = ScenarioDowntime {
+        entry: Some(b.ago(mins(20))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("sw-core-ams-02"),
+            "m.keller",
+            "Line card swap in slot 3 (CHG-4468): Po12 to edge-ams is down during the swap.",
+            b.ago(mins(12)),
+            b.later(mins(48)),
+        )
+    };
+    host_with_services(b, "sw-core-ams-02", &swap);
+    b.downtime_with(ScenarioDowntime {
+        fixed: false,
+        duration: 3_600.0,
+        entry: Some(b.ago(mins(15))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("sw-core-ams-02"),
+            "m.keller",
+            "IOS XE 17.9.5 upgrade if the vendor build passes the lab tonight.",
+            b.later(mins(468)),
+            b.later(mins(948)),
+        )
+    });
+    b.downtime_with(ScenarioDowntime {
+        schedule: Some("weekly-patching"),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("sw-core-ams-02"),
+            "icingaadmin",
+            "Weekly patch window for the core switches.",
+            b.later(hours(63) + mins(48)),
+            b.later(hours(67) + mins(48)),
+        )
+    });
+
+    let mut bmc = ScenarioDowntime::fixed(
+        ObjectKey::host("k8s-node-02"),
+        "m.keller",
+        "BMC firmware update (CHG-4470); the host check may flap, its services stay monitored.",
+        b.ago(mins(12)),
+        b.later(mins(48)),
+    );
+    bmc.entry = Some(b.ago(mins(17)));
+    b.downtime_with(bmc);
+}
+
+/// What the lists of topic 07 (`design/v1/07-comments-downtimes-lists.html`)
+/// show besides the downtimes above: comments by several people (one
+/// expiring), acknowledgements sticky or not, with an expiry or none, and
+/// two more downtimes to come (one with every service of its host, one from
+/// the config).
+fn the_lists(b: &mut Builder) {
+    the_lists_acknowledgements(b);
+    the_lists_comments_and_downtimes(b);
+}
+
+/// The acknowledged list's problems (topic 07, frame 7f).
+fn the_lists_acknowledgements(b: &mut Builder) {
+    b.problem(
+        "db-prod-01",
+        "pg-autovacuum",
+        ServiceState::Critical,
+        "POSTGRES_AUTOVACUUM CRITICAL - orders: autovacuum running for 58 min",
+        &["autovacuum_running=3480s;1800;3000"],
+        hours(1),
+        None,
+    );
+    b.acknowledge_until(
+        &ObjectKey::service("db-prod-01", "pg-autovacuum"),
+        "dba-oncall",
+        "vacuum running on orders, about 30 minutes",
+        hours(1),
+        false,
+        Some(mins(48)),
+    );
+    b.acknowledge_until(
+        &ObjectKey::service("backup-01", "borg-last-run"),
+        "dba-oncall",
+        "lock from the migration test, clears after Thursday",
+        mins(42),
+        true,
+        Some(hours(17) + mins(48)),
+    );
+    b.acknowledge(
+        &ObjectKey::service("kafka-01", "kafka-consumer-lag"),
+        "m.keller",
+        "consumer group rebalancing after the deploy",
+        mins(47),
+        false,
+    );
+    b.acknowledge_until(
+        &ObjectKey::service("k8s-node-18", "ntp-offset"),
+        "j.berg",
+        "chrony re-sync with the node reboot tonight",
+        hours(1) + mins(42),
+        true,
+        Some(hours(8) + mins(48)),
+    );
+    b.problem(
+        "nfs-02",
+        "disk /srv",
+        ServiceState::Critical,
+        "DISK CRITICAL - /srv 96% used (31 GiB free)",
+        &["'/srv'=769GiB;640;720;0;800"],
+        hours(3),
+        None,
+    );
+    b.acknowledge(
+        &ObjectKey::service("nfs-02", "disk /srv"),
+        "j.berg",
+        "cleanup job running, 30 GiB to go",
+        hours(2) + mins(52),
+        false,
+    );
+    b.acknowledge_until(
+        &ObjectKey::service("vpn-gw-01", "cert-expiry"),
+        "m.keller",
+        "new certificate arrives Friday; leave this until then",
+        hours(21) + mins(32),
+        true,
+        Some(hours(45) + mins(48)),
+    );
+}
+
+/// The comment list's comments and the downtimes still to come (topic 07,
+/// frames 7a and 7d).
+fn the_lists_comments_and_downtimes(b: &mut Builder) {
+    b.comment(
+        ObjectKey::service("vpn-gw-01", "cert-expiry"),
+        "m.keller",
+        "new certificate arrives Friday; leave this warning until then",
+        hours(21) + mins(32),
+        Some(hours(45) + mins(48)),
+    );
+    b.comment(
+        ObjectKey::service("mq-prod-01", "rabbitmq-queue"),
+        "m.keller",
+        "consumer deploy rolled back, queue should drain within 20 min",
+        mins(3),
+        None,
+    );
+    b.comment(
+        ObjectKey::service("k8s-node-04", "kubelet"),
+        "j.berg",
+        "node not drained yet, looking at containerd logs",
+        mins(2),
+        None,
+    );
+    b.comment(
+        ObjectKey::host("backup-01"),
+        "dba-oncall",
+        "repository moves to backup-02 on Thursday night, see CHG-4480",
+        hours(52) + mins(58),
+        None,
+    );
+    let migration = ScenarioDowntime {
+        entry: Some(b.ago(mins(35))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("backup-01"),
+            "j.berg",
+            "borg repository migration to backup-02",
+            b.later(hours(10) + mins(48)),
+            b.later(hours(12) + mins(48)),
+        )
+    };
+    host_with_services(b, "backup-01", &migration);
+    b.downtime_with(ScenarioDowntime {
+        schedule: Some("weekly-patching"),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::host("sw-core-ams-01"),
+            "icingaadmin",
+            "Weekly patch window for the core switches.",
+            b.later(hours(63) + mins(48)),
+            b.later(hours(67) + mins(48)),
+        )
+    });
+}
+
+/// The threads of topic 14 (`design/v1/14-r2-handling-downtimes.html`)
+/// besides what the lists above hold: a conversation under
+/// postgres-replication's comment, a comment after pg-autovacuum's
+/// acknowledgement, a second comment on backup-01, and kubelet on
+/// k8s-node-07 with a longer downtime of its own beside its host's (so it
+/// stays apart from the services folded into the host's).
+fn the_threads(b: &mut Builder) {
+    let replication = ObjectKey::service("db-prod-03", "postgres-replication");
+    b.comment(
+        replication.clone(),
+        "dba-oncall",
+        "Replica rebuild started on db-prod-03, about 45 minutes. Leaving the alert as it is.",
+        mins(14),
+        None,
+    );
+    b.comment(
+        replication,
+        "j.berg",
+        "Thanks. I'll check again after the drill.",
+        mins(7),
+        None,
+    );
+    b.comment(
+        ObjectKey::service("db-prod-01", "pg-autovacuum"),
+        "j.berg",
+        "Still running; nothing extended, the acknowledgement expires on its own.",
+        mins(28),
+        None,
+    );
+    b.comment(
+        ObjectKey::host("backup-01"),
+        "j.berg",
+        "Moved to Thursday 01:00; the downtime is scheduled.",
+        hours(28) + mins(10),
+        None,
+    );
+    b.downtime_with(ScenarioDowntime {
+        entry: Some(b.ago(mins(44))),
+        ..ScenarioDowntime::fixed(
+            ObjectKey::service("k8s-node-07", "kubelet"),
+            "j.berg",
+            "Its own downtime: reimage after the drain, kubelet stays down until it rejoins.",
+            b.ago(mins(42)),
+            b.later(hours(2) + mins(48)),
+        )
+    });
+}
+
+/// A downtime on `host` with `all_services`: the host's, and one per
+/// service with the host's as its parent, as Icinga schedules them.
+fn host_with_services(b: &mut Builder, host: &str, spec: &ScenarioDowntime) {
+    let parent = b.downtime_with(spec.clone());
+    let services: Vec<String> = b
+        .scenario
+        .services
+        .iter()
+        .filter(|service| service.key.host.as_str() == host)
+        .map(|service| service.key.name.to_string())
+        .collect();
+    for service in services {
+        b.downtime_with(ScenarioDowntime {
+            object: ObjectKey::service(host, &service),
+            parent: Some(parent.clone()),
+            ..spec.clone()
+        });
+    }
 }

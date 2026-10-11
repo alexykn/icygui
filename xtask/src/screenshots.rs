@@ -494,6 +494,9 @@ fn take(scene: &Scene, binary: &Path, display: &Display, work: &Path, out: &Path
         .env("GPUI_X11_SCALE_FACTOR", SCALE.to_string())
         .env("ICYGUI_WINDOW_CONTROLS", "always")
         .env("ICYGUI_DEMO_SEED", SEED)
+        // The README shows the dark theme: Xvfb has no desktop colour
+        // scheme, so *follow system* would be light. A scene may override it.
+        .env("ICYGUI_DEMO_APPEARANCE", "dark")
         .env("HOME", dir.join("home"))
         .env("XDG_CONFIG_HOME", dir.join("config"))
         .env("XDG_DATA_HOME", dir.join("data"))

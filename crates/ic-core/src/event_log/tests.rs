@@ -474,3 +474,21 @@ fn paths_are_safe_for_any_id_and_deleting_removes_every_file() {
     delete_event_log(dir.path(), "env").unwrap();
     assert!(other.exists());
 }
+
+#[test]
+fn a_log_can_be_seeded_before_its_engine_opens_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = ObjectKey::service("db-prod-03", "postgres-replication");
+    let critical = CheckableState::Service(ServiceState::Critical);
+    seed_event_log(
+        dir.path(),
+        "demo",
+        &[state(&service, 10.0, critical, "CRITICAL - lag 412s")],
+    )
+    .unwrap();
+    let database = Database::open(&event_log_path(dir.path(), "demo")).unwrap();
+    assert_eq!(
+        database.history(None, 10).unwrap(),
+        [state(&service, 10.0, critical, "CRITICAL - lag 412s")]
+    );
+}

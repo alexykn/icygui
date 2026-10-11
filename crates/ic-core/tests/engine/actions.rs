@@ -177,7 +177,7 @@ async fn every_action_end_to_end() {
     let outcome = run(
         &mut engine,
         5,
-        ActionTarget::Comment(comment.clone()),
+        ActionTarget::Comments(vec![comment.clone()]),
         Action::RemoveAllDowntimes,
     )
     .await;
@@ -272,7 +272,7 @@ async fn every_action_end_to_end() {
     let outcome = run(
         &mut engine,
         9,
-        ActionTarget::Downtime(downtime),
+        ActionTarget::Downtimes(vec![downtime]),
         Action::RemoveAllDowntimes,
     )
     .await;

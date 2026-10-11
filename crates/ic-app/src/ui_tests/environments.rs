@@ -104,8 +104,8 @@ fn has_rows(state: &AppState) -> bool {
         .selected()
         .and_then(|reference| state.result(reference))
         .is_some_and(|result| {
-            result
-                .rows
+            result.views[0]
+                .rows()
                 .iter()
                 .any(|row| matches!(row, DashboardRow::Object(_)))
         })
@@ -406,7 +406,8 @@ fn dialogs_for_one_environment_close_when_another_becomes_active() {
                         "the comment for prod-cluster can't be sent to staging"
                     );
                 });
-                // The settings, opened in staging, close on the way back.
+                // The settings panel, opened in staging, stays open on the
+                // way back: it belongs to no environment.
                 cx.update(|cx| {
                     app.in_window(cx, |window, cx| {
                         window.dispatch_action(Box::new(crate::actions::OpenSettings), cx);
@@ -414,7 +415,7 @@ fn dialogs_for_one_environment_close_when_another_becomes_active() {
                 });
                 cx.update(|cx| {
                     app.draw(cx);
-                    assert_eq!(app.workspace.read(cx).modal(cx), Some(ModalKind::Settings));
+                    assert!(app.workspace.read(cx).settings().is_some());
                     let session = live::session(cx).unwrap();
                     session.update(cx, |session, cx| {
                         session.switch_environment(demo::ENVIRONMENT_ID, cx);
@@ -423,6 +424,7 @@ fn dialogs_for_one_environment_close_when_another_becomes_active() {
                 cx.update(|cx| {
                     app.draw(cx);
                     assert_eq!(app.workspace.read(cx).modal(cx), None);
+                    assert!(app.workspace.read(cx).settings().is_some());
                 });
                 wait_for(&app, &cx, "prod-cluster again", CONNECT, |app, cx| {
                     let state = app.state.read(cx);

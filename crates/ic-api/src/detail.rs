@@ -95,6 +95,19 @@ pub struct Cluster {
     pub zones: Vec<ic_model::Zone>,
 }
 
+/// An endpoint's connection state and numbers, from
+/// [`crate::Client::endpoint_states`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct EndpointState {
+    /// The endpoint's name.
+    pub name: String,
+    /// Whether it is connected to the node that answered (Icinga says
+    /// `false` for that node's own endpoint).
+    pub connected: bool,
+    /// Its version, last message and message rates.
+    pub stats: ic_model::EndpointStats,
+}
+
 /// The result of [`crate::Client::notifications_named`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FetchedNotifications {

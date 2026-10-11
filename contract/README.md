@@ -133,7 +133,19 @@ cluster tests in `crates/ic-core/tests/engine/cluster.rs` hold them):
 - A checker feature that is off on one master of an HA zone isn't made up
   for: the other master keeps to its own share, and the off master's share
   goes unchecked (about 500 of the demo's 2 200 master-zone checks late 2.5
-  minutes after `icinga2 feature disable checker` on master-02).
+  minutes after `icinga2 feature disable checker` on master-02). Seen from
+  the other master nothing else shows it: its own `CheckerComponent` reads
+  as before (`paused: true`), both masters stay connected, and master-02's
+  pinned heartbeat keeps beating (master-01 schedules it, master-02 only
+  runs the command). icygui raises the zone's late checks as an alert of
+  their own (`cluster_a_checker_off_on_the_other_master_shows_as_the_zones_late_checks`,
+  `demo/scenario.sh checker-off`).
+- Not checked against a real Icinga DB (the demo cluster runs none): which
+  master writes while `IcingaDB` reports `paused` on the other. icygui says
+  only `paused here` (`· HA with master-02` with a partner connected), and
+  the IcingaDB tile `doesn't write from here`. The `IcingaDB` object
+  doesn't return the Redis password (`objects/query/IcingaDB` checked on a
+  single node).
 - Without `objects/query/CheckerComponent` (and the other feature types)
   Icinga answers `403 Missing permission: objects/query/checkercomponent`.
 - A passive check is overdue (`next_update`, and icygui's *late*) twice its

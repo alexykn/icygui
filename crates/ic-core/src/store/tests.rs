@@ -548,6 +548,159 @@ fn events_an_answer_overtook_change_nothing_until_the_stream_catches_up() {
     assert_eq!(stored(&store, "h", "a").state, ServiceState::Ok);
 }
 
+/// Icinga sends the `AcknowledgementCleared` of a state change just
+/// before the change's check result, and a downtime can take effect
+/// between two attempts. Neither writes the check state, so neither shows
+/// that events wrote the object last: the older attempts an answer
+/// overtook stay stale behind them (before, the cleared acknowledgement
+/// let them through: the hard problem went soft and hard again, two state
+/// changes logged twice).
+#[test]
+fn an_acknowledgement_or_downtime_between_overtaken_events_lets_none_through() {
+    for between in ["acknowledgement cleared", "downtime started"] {
+        let mut store = loaded();
+        // Sent at 11, answered with the hard problem of the check at 300.
+        let mut answer = service("h", "a", ServiceState::Critical);
+        answer.check.state_type = StateType::Hard;
+        answer.check.last_state_change = t(200.0);
+        answer.check.last_hard_state_change = t(300.0);
+        answer.check.last_check = Some(t(300.0));
+        store.apply_fetched(Vec::new(), vec![answer], Detail::Lean, &[], 11);
+        store.take_discovered();
+        let hard = stored(&store, "h", "a");
+        let event = if between == "downtime started" {
+            Event::DowntimeStarted {
+                downtime: downtime("h!a!d", key("h", "a"), true),
+                at: t(150.0),
+            }
+        } else {
+            Event::AcknowledgementCleared {
+                object: key("h", "a"),
+                at: t(199.9),
+            }
+        };
+        assert!(
+            matches!(store.apply(12, &event), Applied::Changed { .. }),
+            "{between}"
+        );
+        // The attempts at 200 (the state change) and 250: older.
+        for (seq, end) in [(13, 200.0), (14, 250.0)] {
+            for event in [
+                check_result(
+                    key("h", "a"),
+                    svc(ServiceState::Critical),
+                    StateType::Soft,
+                    1,
+                    end,
+                ),
+                Event::StateChange {
+                    object: key("h", "a"),
+                    state: svc(ServiceState::Critical),
+                    state_type: StateType::Soft,
+                    result: result(2, "soft", end),
+                    downtime_depth: Some(0),
+                    acknowledgement: None,
+                    at: t(end + 0.1),
+                },
+            ] {
+                assert_eq!(
+                    store.apply(seq, &event),
+                    Applied::Stale,
+                    "{between}: {event:?}"
+                );
+            }
+            let a = stored(&store, "h", "a");
+            assert_eq!(
+                (a.state, a.check.state_type, a.check.last_check),
+                (hard.state, hard.check.state_type, hard.check.last_check),
+                "{between}"
+            );
+        }
+        // The check the answer showed applies; from then on events apply
+        // in Icinga's order.
+        assert!(matches!(
+            store.apply(
+                15,
+                &check_result(
+                    key("h", "a"),
+                    svc(ServiceState::Critical),
+                    StateType::Hard,
+                    1,
+                    300.0,
+                ),
+            ),
+            Applied::Changed { .. }
+        ));
+        assert!(matches!(
+            store.apply(
+                16,
+                &check_result(
+                    key("h", "a"),
+                    svc(ServiceState::Ok),
+                    StateType::Hard,
+                    1,
+                    290.0
+                )
+            ),
+            Applied::Changed { .. }
+        ));
+        assert_eq!(
+            stored(&store, "h", "a").state,
+            ServiceState::Ok,
+            "{between}"
+        );
+    }
+}
+
+/// An attempt an answer overtook is skipped by its own time, not by its
+/// line number: a line with a lower number that comes later (the new
+/// stream's, applied after the old one's at a handover) and is newer than
+/// the answer still applies.
+#[test]
+fn skipping_an_overtaken_line_skips_no_newer_one_with_a_lower_number() {
+    let mut store = loaded();
+    let mut answer = service("h", "a", ServiceState::Critical);
+    answer.check.state_type = StateType::Hard;
+    answer.check.last_check = Some(t(300.0));
+    store.apply_fetched(Vec::new(), vec![answer], Detail::Lean, &[], 11);
+    store.take_discovered();
+    // The old stream's line 20: older than the answer.
+    assert_eq!(
+        store.apply(
+            20,
+            &check_result(
+                key("h", "a"),
+                svc(ServiceState::Critical),
+                StateType::Soft,
+                2,
+                250.0
+            )
+        ),
+        Applied::Stale
+    );
+    // The new stream's line 15 (read earlier, applied after): the
+    // recovery at 310, after the answer.
+    assert!(matches!(
+        store.apply(
+            15,
+            &check_result(
+                key("h", "a"),
+                svc(ServiceState::Ok),
+                StateType::Hard,
+                1,
+                310.0
+            )
+        ),
+        Applied::Changed { .. }
+    ));
+    assert_eq!(stored(&store, "h", "a").state, ServiceState::Ok);
+    // An answer sent at 16, after the first one, is not superseded.
+    let mut answer = service("h", "a", ServiceState::Warning);
+    answer.check.last_check = Some(t(320.0));
+    store.apply_fetched(Vec::new(), vec![answer], Detail::Lean, &[], 16);
+    assert_eq!(stored(&store, "h", "a").state, ServiceState::Warning);
+}
+
 #[test]
 fn answers_older_than_an_applied_event_keep_the_event_state() {
     let mut store = loaded();

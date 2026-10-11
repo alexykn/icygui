@@ -1819,13 +1819,13 @@ const STATUS_SLOT_CHARS: f32 = 18.;
 /// The heartbeat row's age slot, in characters (`59m 59s`, 16a2's 8ch).
 const AGE_SLOT_CHARS: f32 = 8.;
 
-/// A beat's dot and age (`● 8s`, `● disappeared`; without live data the
-/// last known age, faint).
+/// A beat's dot and age (`● 8s`, `● disappeared`; without live data when
+/// it was last seen, `● last 21:16`, faint).
 fn beat_element(beat: &BeatCell, theme: &Theme) -> AnyElement {
     let text = match beat.tone {
         BeatTone::Critical => theme.states.text.critical,
         BeatTone::Warning => theme.states.text.warning,
-        // A last known age, without live data: faint like the page's
+        // When it was last seen, without live data: faint like the page's
         // other last known values.
         BeatTone::Ok | BeatTone::Off if beat.last_known => theme.colors.text_faint,
         BeatTone::Ok | BeatTone::Off => theme.colors.text_secondary,

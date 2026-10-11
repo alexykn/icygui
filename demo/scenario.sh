@@ -26,6 +26,8 @@ usage: demo/scenario.sh <scenario> [argument] | recover | list
   frozen-master         freeze master-01 (docker pause): its connections stay
                         open and say nothing
   checks-stopped [zone] stop every active check (in one zone: master, ams, fra)
+  checker-off [node]    turn the checker feature off on one node (master-02 by
+                        default); it stays connected
   beat-late [seconds]   hold zone ams's heartbeat back once (12 s by default)
   problem-storm [count] a burst of hard CRITICAL results (40 services by default)
   blips [count]         a few database services fail and recover within seconds
@@ -178,6 +180,27 @@ case "$scenario" in
     say "Undo: demo/scenario.sh recover"
     ;;
 
+  checker-off)
+    require_up
+    node=${2:-master-02}
+    case "$node" in
+      master-01 | master-02) zone=master endpoints="master-01 and master-02" ;;
+      sat-ams-01) zone=ams endpoints=sat-ams-01 ;;
+      sat-fra-01 | sat-fra-02) zone=fra endpoints="sat-fra-01 and sat-fra-02" ;;
+      *) echo "scenario: unknown node $node" >&2; exit 2 ;;
+    esac
+    # The container's first process (dumb-init) passes SIGHUP on to
+    # icinga2 daemon (node.sh execs it), which reloads without the checker.
+    "${COMPOSE[@]}" exec -T "$node" sh -c 'icinga2 feature disable checker >/dev/null && kill -HUP 1'
+    say "The checker feature is off on $node; it stays connected. Icinga doesn't hand its" \
+      "share of zone $zone's checks to another endpoint. icygui shows, while connected to another node:" \
+      "- that node's own features read as before (on here · HA with ...), the heartbeats keep beating" \
+      "- $node's share of the zone's checks turns late as their intervals pass, then" \
+      "  zone $zone: N checks late ($endpoints connected), the zone's dot red" \
+      "and while connected to $node itself: the checker feature is off on $node" \
+      "Undo: demo/scenario.sh recover"
+    ;;
+
   beat-late)
     require_up
     seconds=${2:-12}
@@ -302,6 +325,14 @@ print(len(names))
       fi
     done
     "${COMPOSE[@]}" exec -T proxy rm -f /tmp/dead 2>/dev/null || true
+    # The checker checker-off turned off on a node that still runs (a node
+    # that starts again gets it back from node.sh).
+    for node in master-01 master-02 sat-ams-01 sat-fra-01 sat-fra-02; do
+      if [ "$(docker inspect -f '{{.State.Status}}' "$(cid "$node")" 2>/dev/null)" = running ] &&
+        ! "${COMPOSE[@]}" exec -T "$node" test -e /etc/icinga2/features-enabled/checker.conf; then
+        "${COMPOSE[@]}" exec -T "$node" sh -c 'icinga2 feature enable checker >/dev/null && kill -HUP 1'
+      fi
+    done
     "$HERE/up.sh" >/dev/null
     # Only the objects checks-stopped turned off: restoring an attribute
     # makes Icinga reschedule the object's check.

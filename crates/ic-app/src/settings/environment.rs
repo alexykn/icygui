@@ -741,7 +741,7 @@ fn beats_table(
                     .text_color(match tone {
                         BeatTone::Critical => theme.states.text.critical,
                         BeatTone::Warning => theme.states.text.warning,
-                        // The last known age, without live data.
+                        // When it was last seen, without live data.
                         BeatTone::Ok | BeatTone::Off if !live.live_data() => colors.text_faint,
                         BeatTone::Ok | BeatTone::Off => colors.text,
                     })

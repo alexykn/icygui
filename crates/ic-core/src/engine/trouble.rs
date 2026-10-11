@@ -416,6 +416,7 @@ impl Engine {
         let (endpoints, zones) = self.store.cluster();
         let nodes = crate::topology::cluster_nodes(zones, endpoints, Some(&conn.node));
         let late = self.late_by_zone();
+        let checked = self.checked_in(&late);
         let health = self.store.health();
         let clock = |at: Timestamp| clock_time(at);
         let facts = Facts {
@@ -425,6 +426,7 @@ impl Engine {
             health,
             heartbeats: self.beats.published(),
             late: &late,
+            checked: &checked,
             clock: &clock,
         };
         trouble::assess(&facts)
@@ -449,6 +451,38 @@ impl Engine {
             *late.entry(zone).or_default() += 1;
         }
         late
+    }
+
+    /// How many hosts and services are actively checked in each zone with
+    /// at least [`trouble::ZONE_LATE_MIN`] late checks: what a zone's late
+    /// checks are compared with. Nothing is counted while no zone has that
+    /// many (the usual case), so a healthy cluster costs no walk over the
+    /// store.
+    fn checked_in(&self, late: &BTreeMap<Option<String>, usize>) -> BTreeMap<String, usize> {
+        let zones: Vec<&str> = late
+            .iter()
+            .filter(|(_, late)| **late >= trouble::ZONE_LATE_MIN)
+            .filter_map(|(zone, _)| zone.as_deref())
+            .collect();
+        let mut checked: BTreeMap<String, usize> = BTreeMap::new();
+        if zones.is_empty() {
+            return checked;
+        }
+        let mut count = |check: &ic_model::CheckInfo| {
+            if let Some(zone) = check.zone.as_deref()
+                && check.features.active_checks
+                && zones.contains(&zone)
+            {
+                *checked.entry(zone.to_owned()).or_default() += 1;
+            }
+        };
+        for host in self.store.hosts().values() {
+            count(&host.check);
+        }
+        for service in self.store.services().values() {
+            count(&service.check);
+        }
+        checked
     }
 
     /// Lists a condition found in the alert block at once (kept up to

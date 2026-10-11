@@ -338,24 +338,42 @@ async fn switching_modes_loses_and_repeats_no_event() {
     engine.shutdown();
 }
 
-/// Waking up while state changes are still on their way to icygui (the
-/// new stream is slow): the refresh of the problems asks Icinga by name at
-/// once and can be answered before the stream brings the events its
-/// answer already shows. Those events are older than the stored state, so
-/// they change nothing: the state never goes back and comes again, the
-/// log has each change once, and the problem notifies once (one cause,
-/// one alert). The new stream holds its lines back until the answer is
-/// in, so the order is the same every run.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// What comes on the held stream ahead of the attempts an answer
+/// overtakes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Between {
+    /// Nothing: the attempts alone.
+    Nothing,
+    /// The first attempt was acknowledged; the state change clears it
+    /// (Icinga sends `AcknowledgementCleared` just before the change's
+    /// check result; checked on the demo cluster).
+    AckCleared,
+    /// A downtime takes effect before the attempts.
+    Downtime,
+}
+
+/// Waking up while state changes are still on their way to icygui: the
+/// quiet stream holds them, as Icinga does until the stream's next batch
+/// (every 5 s). The refresh of the problems asks Icinga by name as soon as
+/// the live stream is open and is answered before the quiet stream's
+/// batch brings the events its answer already shows. Those events are
+/// older than the stored state, so they change nothing, whatever came
+/// between them (an acknowledgement the change cleared, a downtime): the
+/// log has each change once (the check of the fix: before it, the older
+/// attempt took the state back to soft and forward again, two entries
+/// more), and the problem notifies once (one cause, one alert; the rule
+/// engine never notified twice, this guards the property). The quiet
+/// stream holds its lines until the answer is in, so the order is the
+/// same every run.
 #[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
-async fn an_answer_newer_than_the_events_on_their_way_is_not_undone() {
+async fn an_answer_overtakes(between: Between) {
     let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
     let control = server.control();
     let mut launch = Launch::new(&server);
     launch.tuning = Tuning {
-        // The held stream shares no line with the stalled one: the
-        // handover waits this long.
-        stream_handover: Duration::from_millis(300),
+        // The app's window: the quiet stream's batch comes inside it (the
+        // fence's line on both streams ends it).
+        stream_handover: Tuning::default().stream_handover,
         ..tuning()
     };
     let mut engine = launch.start();
@@ -385,52 +403,65 @@ async fn an_answer_newer_than_the_events_on_their_way_is_not_undone() {
     );
     drop(snapshot);
 
-    // Its first soft attempt comes on the quiet stream.
+    // Its first soft attempt, a warning, comes on the quiet stream (a
+    // state change carries its check result).
     control
-        .set_service_state(
-            &host,
-            &name,
-            ServiceState::Critical,
-            "CRITICAL - one",
-            false,
-        )
+        .set_service_state(&host, &name, ServiceState::Warning, "first attempt", false)
         .unwrap();
+    if between == Between::AckCleared {
+        control.acknowledge(&key, "carol", "on it", false).unwrap();
+    }
     engine
         .snapshot(|snapshot| {
             let service = &snapshot.services[&service_key(&key)];
-            service.state == ServiceState::Critical && service.check.state_type == StateType::Soft
+            service.state == ServiceState::Warning
+                && service.check.state_type == StateType::Soft
+                && service.check.acknowledgement.is_acknowledged()
+                    == (between == Between::AckCleared)
         })
         .await;
 
-    // The quiet stream relays nothing more; the live one holds its lines.
-    control.stall_event_streams();
-    control.hold_new_event_streams(true);
-    engine.send(Command::SetQuiet(false));
-    assert!(
+    // Between two of the quiet stream's batches: what follows waits in it.
+    assert_eq!(control.hold_event_streams(), 1);
+    if between == Between::Downtime {
+        let now = control.now().as_unix_seconds();
         control
-            .wait_for_event_streams(2, Duration::from_secs(10))
-            .await
-    );
-    // The second attempt and the hard state: only the held stream has
-    // them.
+            .schedule_downtime(
+                &key,
+                "carol",
+                "maintenance",
+                Timestamp::from_unix_seconds(now - 60.0),
+                Timestamp::from_unix_seconds(now + 3_600.0),
+                None,
+            )
+            .unwrap();
+    }
+    // The critical attempts (a state change, then the hard state), after
+    // the cleared acknowledgement or the downtime.
     control
         .set_service_state(&host, &name, ServiceState::Critical, "CRITICAL - one", true)
         .unwrap();
-    // The handover times out and the refresh after waking asks for the
-    // problem by name: Icinga's answer shows it hard.
+    // Waking up: the live stream opens (after the attempts: it doesn't
+    // have them) and the refresh asks for the problem by name: Icinga's
+    // answer shows it hard.
+    engine.send(Command::SetQuiet(false));
     engine
         .snapshot(|snapshot| {
             let service = &snapshot.services[&service_key(&key)];
-            !snapshot.quiet && service.check.state_type == StateType::Hard
+            service.state == ServiceState::Critical && service.check.state_type == StateType::Hard
         })
         .await;
-    let notified = engine.notification().await;
-    assert_eq!(notified.intent.title, title);
-    let before = engine.seen.len();
+    // In a downtime it notifies nobody.
+    let notifies = usize::from(between != Between::Downtime);
+    if notifies == 1 {
+        let record = engine.notification().await;
+        assert_eq!(record.intent.title, title);
+    }
 
-    // Now the stream brings the second attempt and the hard state change:
-    // older than the answer. The fence's problem comes after them, and
-    // its notification after anything theirs would raise.
+    // Now the quiet stream's batch brings what came between and the
+    // attempts: older than the answer. The fence's problem comes after
+    // them (on both streams: the switch ends), and its notification after
+    // anything theirs would raise.
     assert!(control.release_event_streams() > 0);
     let fence_title = {
         let snapshot = engine.latest().unwrap();
@@ -453,39 +484,55 @@ async fn an_answer_newer_than_the_events_on_their_way_is_not_undone() {
     while titles.last() != Some(&fence_title) {
         titles.push(engine.notification().await.intent.title);
     }
-    assert_eq!(titles, [fence_title], "one cause, one notification");
+    assert_eq!(
+        titles,
+        [fence_title],
+        "{between:?}: one cause, one notification"
+    );
     assert_eq!(
         engine
             .shown()
             .iter()
             .filter(|shown| **shown == title)
             .count(),
-        1
+        notifies,
+        "{between:?}"
     );
-    // Never back to soft on the way.
-    for event in &engine.seen[before..] {
-        if let CoreEvent::Snapshot(snapshot) = event {
-            assert_eq!(
-                snapshot.services[&service_key(&key)].check.state_type,
-                StateType::Hard,
-                "the older events took the state back"
-            );
-        }
-    }
+    // The guard: each change logged once, never back from hard to soft.
     let history = engine.history(Some(key.clone())).await;
     let states: Vec<_> = history
         .iter()
         .filter_map(|entry| match entry.kind {
-            LogKind::State { state_type, .. } => Some(state_type),
+            LogKind::State {
+                state, state_type, ..
+            } => Some((state, state_type)),
             _ => None,
         })
         .collect();
+    let critical = ic_model::CheckableState::Service(ServiceState::Critical);
+    let warning = ic_model::CheckableState::Service(ServiceState::Warning);
     assert_eq!(
         states,
-        [StateType::Hard, StateType::Soft],
-        "each change logged once (newest first): {history:#?}"
+        [(critical, StateType::Hard), (warning, StateType::Soft)],
+        "{between:?}: each change logged once (newest first): {history:#?}"
     );
+    stream_mode(&control, false).await;
     engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_answer_newer_than_the_events_on_their_way_is_not_undone() {
+    an_answer_overtakes(Between::Nothing).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_acknowledgement_the_change_cleared_lets_no_overtaken_attempt_through() {
+    an_answer_overtakes(Between::AckCleared).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_downtime_before_the_attempts_lets_no_overtaken_attempt_through() {
+    an_answer_overtakes(Between::Downtime).await;
 }
 
 fn service_key(key: &ObjectKey) -> ServiceKey {
@@ -1193,6 +1240,92 @@ async fn waking_up_refreshes_problems_whose_results_went_stale() {
             .iter()
             .any(|(_, names)| names.contains(&problem.full_name()))
     );
+    engine.shutdown();
+}
+
+/// Waking up on a calm installation: no line comes on both streams, so the
+/// old stream is kept for the whole handover window (7 s, beyond Icinga's
+/// 5 s batches) and the live stream's lines wait meanwhile. The refresh of
+/// the problems whose results went stale doesn't wait with them: it goes
+/// out as soon as the live stream is subscribed (its answers are ordered
+/// against that stream's lines like any query's), so the newer output
+/// shows while the old stream is still kept (the snapshot still quiet).
+/// Before, it waited for the window's end (the small fix 2 review).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_refresh_after_waking_does_not_wait_for_the_handover() {
+    let server = mock(MockConfig::with_scenario(scenarios::staging())).await;
+    let control = server.control();
+    let mut launch = Launch::new(&server);
+    launch.tuning = Tuning {
+        reconcile_interval: Some(Duration::from_millis(200)),
+        quiet_reconcile_interval: Duration::from_millis(300),
+        // The app's window.
+        stream_handover: Tuning::default().stream_handover,
+        ..tuning()
+    };
+    let mut engine = launch.start();
+    settled(&mut engine).await;
+    let snapshot = engine.latest().unwrap();
+    let (problem, code) = snapshot
+        .services
+        .values()
+        .find(|service| service.is_problem() && service.check.result.is_some())
+        .map(|service| {
+            let code = match service.state {
+                ServiceState::Warning => 1,
+                ServiceState::Critical => 2,
+                _ => 3,
+            };
+            (service.object_key(), code)
+        })
+        .expect("a problem");
+    let service = problem.as_service().unwrap().clone();
+    drop(snapshot);
+    engine.send(Command::SetQuiet(true));
+    stream_mode(&control, true).await;
+    engine.snapshot(|snapshot| snapshot.quiet).await;
+    // Checked again, same state, new output: nothing comes while quiet,
+    // and a quiet reconcile brings the newer last check, not the output.
+    control
+        .process_check_result(&problem, code, "CRITICAL - newer output", &[])
+        .unwrap();
+    let last_check = control
+        .service(service.host.as_str(), &service.name)
+        .unwrap()
+        .check
+        .last_check
+        .unwrap()
+        .as_unix_seconds();
+    engine
+        .snapshot(|snapshot| {
+            snapshot.services[&service]
+                .check
+                .last_check
+                .is_some_and(|at| (at.as_unix_seconds() - last_check).abs() < 0.01)
+        })
+        .await;
+    // Nothing more on the quiet stream: no line can prove the switch.
+    control.stall_event_streams();
+    let woke = Instant::now();
+    engine.send(Command::SetQuiet(false));
+    let snapshot = engine
+        .snapshot(|snapshot| {
+            snapshot.services[&service]
+                .check
+                .result
+                .as_ref()
+                .is_some_and(|result| result.output == "CRITICAL - newer output")
+        })
+        .await;
+    assert!(
+        snapshot.quiet,
+        "the refresh waited for the handover ({:?} after waking)",
+        woke.elapsed()
+    );
+    // The handover still ends with the window, and the live stream goes on.
+    stream_mode(&control, false).await;
+    engine.snapshot(|snapshot| !snapshot.quiet).await;
+    assert!(woke.elapsed() >= Tuning::default().stream_handover);
     engine.shutdown();
 }
 

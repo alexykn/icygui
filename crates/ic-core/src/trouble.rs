@@ -15,9 +15,11 @@
 //! - **Icinga health alerts** (E), from data the health page already has
 //!   (no new periodic requests): an endpoint disconnected, a zone without a
 //!   connected endpoint, no checks running, the checker or notification
-//!   feature off, `IcingaDB` paused with no other master to write, the
-//!   relay queue growing. Each must hold for [`GRACE`] (a reload or a short
-//!   blip stays quiet).
+//!   feature off, `IcingaDB` paused with no other master connected, the
+//!   relay queue growing, and a zone whose checks go late while every
+//!   endpoint of it is connected (what another master's checker being off
+//!   looks like: icygui reads the features of the node it talks to only).
+//!   Each must hold for [`GRACE`] (a reload or a short blip stays quiet).
 //! - **Heartbeats** (B3): a dead beat is an alert at once (its time budget
 //!   already waited), combined with what it says about the cluster, so one
 //!   cause is one line: every beat stopped is *Icinga runs no checks*; a
@@ -47,6 +49,18 @@ use crate::topology::{ClusterNode, NodeState};
 /// every Icinga health alert.
 pub const GRACE: Duration = Duration::from_mins(2);
 
+/// A zone whose endpoints are all connected is short of checks once at
+/// least this many of its checks are late...
+pub(crate) const ZONE_LATE_MIN: usize = 10;
+
+/// ...and they are at least this share of the zone's actively checked
+/// objects (1 in 20). A late check is overdue by a whole interval past
+/// Icinga's own `next_update`, confirmed by a re-query, so a healthy zone
+/// has next to none; one master's checker off in a two-master zone leaves
+/// up to half of them unchecked (about 500 of the demo's 2 200 master-zone
+/// checks 2.5 minutes after `icinga2 feature disable checker`).
+const ZONE_LATE_SHARE: usize = 20;
+
 /// The trouble alerts of one environment.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Trouble {
@@ -64,6 +78,24 @@ impl Trouble {
     pub fn worst(&self) -> Option<AlertTone> {
         self.alerts.iter().map(|alert| alert.tone).max()
     }
+
+    /// The tone of the alert that `zone`'s checks go late while every
+    /// endpoint of it is connected, while it is shown (the zone's dot
+    /// follows it: a zone short of checks is never green).
+    #[must_use]
+    pub fn zone_short_of_checks(&self, zone: &str) -> Option<AlertTone> {
+        let key = zone_late_key(zone);
+        self.alerts
+            .iter()
+            .find(|alert| alert.key == key)
+            .map(|alert| alert.tone)
+    }
+}
+
+/// The key of the alert that `zone`'s checks go late while every endpoint
+/// of it is connected.
+fn zone_late_key(zone: &str) -> String {
+    format!("zone-late:{zone}")
 }
 
 /// No live data.
@@ -161,6 +193,9 @@ pub(crate) struct Facts<'a> {
     pub(crate) heartbeats: &'a Heartbeats,
     /// How many checks are late, by zone (`None`: an object without one).
     pub(crate) late: &'a BTreeMap<Option<String>, usize>,
+    /// How many hosts and services are actively checked in each zone with
+    /// at least [`ZONE_LATE_MIN`] late checks (worked out only for those).
+    pub(crate) checked: &'a BTreeMap<String, usize>,
     /// Formats a local time as the alerts say it (`02:14`).
     pub(crate) clock: &'a dyn Fn(Timestamp) -> String,
 }
@@ -494,6 +529,7 @@ pub(crate) fn assess(facts: &Facts<'_>) -> Vec<Finding> {
     }
 
     // --- Zones whose beat stopped while an endpoint of theirs answers.
+    let mut silent: Vec<&str> = Vec::new();
     for beat in &watched {
         let Proves::Zone(zone) = &beat.proves else {
             continue;
@@ -519,6 +555,7 @@ pub(crate) fn assess(facts: &Facts<'_>) -> Vec<Finding> {
             .collect();
         covered.push(&beat.key);
         covered.extend(pinned_stopped.iter().map(|other| &other.key));
+        silent.push(zone.as_str());
         let at = beat.last_beat.map(|at| (facts.clock)(at));
         let late = facts.late_in(Some(zone));
         let who = names(&connected);
@@ -613,6 +650,9 @@ pub(crate) fn assess(facts: &Facts<'_>) -> Vec<Finding> {
                 let prefix = zone
                     .as_deref()
                     .map_or_else(String::new, |zone| zone_prefix(facts, zone));
+                if let Some(zone) = zone {
+                    silent.push(zone.as_str());
+                }
                 let at = beat.last_beat.map(|at| (facts.clock)(at));
                 findings.push(Finding {
                     key: format!("endpoint-silent:{endpoint}"),
@@ -658,6 +698,69 @@ pub(crate) fn assess(facts: &Facts<'_>) -> Vec<Finding> {
             note_detail: None,
             recovered: format!("heartbeat {subject} back"),
             urgent: false,
+        });
+    }
+
+    // --- A zone whose checks go late while every endpoint of it is
+    // connected: part of it runs no checks although nothing is down. In an
+    // HA zone that is what another endpoint's checker being off looks like
+    // (Icinga doesn't hand its share to the others, and icygui reads the
+    // features of the node it talks to only); else a checker that can't
+    // keep up. A zone already said to run no checks, cut off, or whose
+    // checker is off on the node icygui talks to (the feature's own line
+    // below) is not said twice.
+    let own_checker_off = facts
+        .health
+        .features
+        .is_some_and(|features| features.checker == Some(FeatureState::Off));
+    for zone in facts.zones {
+        let name = zone.name.as_str();
+        if no_checks || zones_done.iter().any(|done| done == name) || silent.contains(&name) {
+            continue;
+        }
+        let endpoints: Vec<&str> = facts
+            .nodes_in(name)
+            .map(|node| node.name.as_str())
+            .collect();
+        if endpoints.is_empty()
+            || facts
+                .nodes_in(name)
+                .any(|node| node.state != NodeState::Connected)
+            || (own_checker_off
+                && facts
+                    .connected
+                    .is_some_and(|node| endpoints.contains(&node)))
+        {
+            continue;
+        }
+        let late = facts.late_in(Some(name));
+        let checked = facts.checked.get(name).copied().unwrap_or_default();
+        if late < ZONE_LATE_MIN || late.saturating_mul(ZONE_LATE_SHARE) < checked {
+            continue;
+        }
+        let who = names(&endpoints);
+        // What matters first: the line is cut at the block's width.
+        let detail = if endpoints.len() > 1 {
+            format!(
+                "overdue although {who} are connected: one of their checkers may be off or can't keep up; Icinga doesn't hand its share to the other."
+            )
+        } else {
+            format!("overdue although {who} is connected: its checker may be off or can't keep up.")
+        };
+        findings.push(Finding {
+            key: zone_late_key(name),
+            tone: AlertTone::Critical,
+            title: format!("zone {name}: {} late ({who} connected)", checks(late)),
+            detail,
+            action: Some(AlertAction::LateChecks {
+                zone: Some(name.to_owned()),
+            }),
+            since: None,
+            grace: GRACE,
+            note: format!("zone {name} is short of checks"),
+            note_detail: Some(format!("{} late, {who} connected", checks(late))),
+            recovered: format!("zone {name}'s checks are on time again"),
+            urgent: true,
         });
     }
 

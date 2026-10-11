@@ -159,11 +159,7 @@ pub(crate) fn liveness(
     } else {
         health::Link::Silent(tone)
     };
-    health::Liveness::Stale {
-        as_of,
-        heard: connection.last_event_at,
-        link,
-    }
+    health::Liveness::Stale { as_of, link }
 }
 
 /// The sidebar's *health* dot (no false green, PLAN.md §4.2), a summary
@@ -339,9 +335,8 @@ mod tests {
         let heard = Timestamp::from_unix_seconds(1_999.0);
         connection.last_event_at = Some(heard);
         let polled = Timestamp::from_unix_seconds(1_990.0);
-        let stale = |as_of, heard, link| Liveness::Stale {
+        let stale = |as_of, link| Liveness::Stale {
             as_of: Some(as_of),
-            heard: Some(heard),
             link,
         };
         let fresh = Snapshot {
@@ -363,10 +358,7 @@ mod tests {
             }),
             ..Snapshot::default()
         };
-        assert_eq!(
-            liveness(&old, &connection, now),
-            stale(old_at, heard, Link::Up)
-        );
+        assert_eq!(liveness(&old, &connection, now), stale(old_at, Link::Up));
         // No endpoints' states yet (the first poll after a reconnect is
         // due), the latest status 4m old: the page says so too.
         let status_old = Snapshot {
@@ -383,7 +375,7 @@ mod tests {
         };
         assert_eq!(
             liveness(&status_old, &connection, now),
-            stale(old_at, heard, Link::Up)
+            stale(old_at, Link::Up)
         );
         // Connected, but the stream went silent.
         let mut silent = connection.clone();
@@ -391,7 +383,7 @@ mod tests {
         silent.last_event_at = Some(quiet_since);
         assert_eq!(
             liveness(&fresh, &silent, now),
-            stale(polled, quiet_since, Link::Silent(Tone::Warning))
+            stale(polled, Link::Silent(Tone::Warning))
         );
         // Lost: reconnecting.
         let mut lost = connection.clone();
@@ -403,7 +395,7 @@ mod tests {
         });
         assert_eq!(
             liveness(&fresh, &lost, now),
-            stale(polled, heard, Link::Lost(Tone::Critical))
+            stale(polled, Link::Lost(Tone::Critical))
         );
         // Lost for longer than the grace: no live data is raised, the
         // banner and the row stay red (rule 5).
@@ -414,14 +406,14 @@ mod tests {
         });
         assert_eq!(
             liveness(&fresh, &blind, now),
-            stale(polled, heard, Link::Lost(Tone::Critical))
+            stale(polled, Link::Lost(Tone::Critical))
         );
         // Lost: the engine stopped.
         let mut stopped = connection;
         stopped.on_engine_stopped("the event stream ended".to_owned());
         assert_eq!(
             liveness(&fresh, &stopped, now),
-            stale(polled, heard, Link::Lost(Tone::Critical))
+            stale(polled, Link::Lost(Tone::Critical))
         );
     }
 
@@ -454,7 +446,6 @@ mod tests {
         connection.last_event_at = Some(heard);
         let stale = |link| Liveness::Stale {
             as_of: Some(polled),
-            heard: Some(heard),
             link,
         };
         // Connecting on purpose (the environment changed): not lost.

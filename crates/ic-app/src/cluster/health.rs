@@ -62,9 +62,6 @@ pub(crate) enum Liveness {
     Stale {
         /// When the endpoints' states came.
         as_of: Option<Timestamp>,
-        /// When live data last came (the event stream's last line, UI
-        /// clock): the heartbeats' last known ages count to it.
-        heard: Option<Timestamp>,
         /// icygui's own connection to the node it talks to.
         link: Link,
     },
@@ -98,22 +95,6 @@ impl Liveness {
     /// the cluster (no false green rule 5).
     pub(crate) fn live_data(self) -> bool {
         matches!(self, Self::Live | Self::Stale { link: Link::Up, .. })
-    }
-
-    /// When live data last came: the later of the endpoints' states and
-    /// the stream's last line (`None` while live, or unknown).
-    pub(crate) fn last_live(self) -> Option<Timestamp> {
-        match self {
-            Self::Live => None,
-            Self::Stale { as_of, heard, .. } => match (as_of, heard) {
-                (Some(a), Some(b)) => Some(if a.as_unix_seconds() < b.as_unix_seconds() {
-                    b
-                } else {
-                    a
-                }),
-                (a, b) => a.or(b),
-            },
-        }
     }
 
     /// The tone of what isn't current (the health line's *as of*, the
@@ -303,11 +284,13 @@ pub(crate) struct Feature {
     pub(crate) label: &'static str,
     /// Its state on the node; `None` while the API user may not read it.
     pub(crate) state: Option<FeatureState>,
-    /// What the page says about it: `running`, `shared with master-02`,
-    /// `paused here`, `off`, `needs objects/query/CheckerComponent`.
+    /// What the page says about it: `running`, `on here · HA with
+    /// master-02`, `paused here`, `off`, `needs
+    /// objects/query/CheckerComponent`.
     pub(crate) word: String,
-    /// Whether the work is done (its dot green while live): running here,
-    /// or shared in an HA zone.
+    /// Whether the work is known to be done (its dot green while live):
+    /// running on a node that shares it with nobody. In an HA zone the
+    /// other endpoints' share is not known here: a neutral dot.
     pub(crate) running: bool,
     /// What it says is the API user's missing permission (warning text).
     pub(crate) missing: bool,
@@ -479,10 +462,15 @@ fn zone_dot((connected, down): (usize, usize), snapshot: &Snapshot, zone: &str) 
         .heartbeats
         .of_zone(zone)
         .is_some_and(super::beats::dead_in_cluster);
+    // Its checks going late while every endpoint is connected (another
+    // master's checker off, say): never green.
+    let short = snapshot.trouble.zone_short_of_checks(zone);
     match (connected, down) {
         (0, 0) => Dot::Unknown,
         (0, _) => Dot::Critical,
         _ if beat_dead => Dot::Critical,
+        _ if short == Some(ic_core::trouble::AlertTone::Critical) => Dot::Critical,
+        _ if short.is_some() => Dot::Warning,
         (_, 0) => Dot::Ok,
         _ => Dot::Warning,
     }
@@ -1018,10 +1006,13 @@ fn queue_tiles(
             } else {
                 "paused".to_owned()
             },
+            // Which master writes while this one is paused is not checked
+            // against a real Icinga DB (contract/README.md): only this
+            // node's part.
             detail: if state == FeatureState::Running {
                 "writes to Redis here".to_owned()
             } else {
-                "another master writes".to_owned()
+                "doesn't write from here".to_owned()
             },
             tone: Tone::Normal,
             trend: Vec::new(),
@@ -1159,17 +1150,21 @@ fn switches(status: &InstanceStatus) -> Vec<Switch> {
 
 /// The node's features, as far as the API user may read them.
 /// The connected node's features as the page says them (topic 06; ledger
-/// rows 72 and 74).
+/// rows 72 and 74, and the small fix 2 review).
 ///
 /// **In an HA zone** Icinga splits the checks and the notifications between
 /// the zone's connected endpoints, object by object, and the checker's and
 /// the notification feature's own objects report `paused` on all but one
 /// of them although each runs its share (checked on the demo cluster: the
 /// master with `paused: true` ran half the checks, `check_source`, and
-/// sent its share of the notifications). So while another endpoint of the
-/// node's zone is connected, either says `shared with master-02`, running
-/// or paused, and only `off` is off; `IcingaDB` writes from one master at a
-/// time (`paused here · master-02 writes`).
+/// sent its share of the notifications). icygui reads the features of the
+/// node it talks to only, so while another endpoint of the node's zone is
+/// connected either says what is true of this node and no more: `on here ·
+/// HA with master-02`, running or paused, with a neutral dot, never green
+/// (whether master-02 runs its share is not known here; a checker off
+/// there shows as the zone's checks going late, the `zone-late` alert).
+/// `IcingaDB` paused says `paused here · HA with master-02` (which master
+/// writes is not checked against a real Icinga DB). Only `off` is off.
 ///
 /// **Without the permission** to read a feature's objects the page names it
 /// (`needs objects/query/CheckerComponent`) instead of leaving the feature
@@ -1226,10 +1221,10 @@ fn features(snapshot: &Snapshot, nodes: &[ClusterNode]) -> Vec<Feature> {
         let (word, running) = match (state, &shared) {
             (FeatureState::Off, _) => ("off".to_owned(), false),
             (FeatureState::Running | FeatureState::Paused, Some(partners)) if splits => {
-                (format!("shared with {partners}"), true)
+                (format!("on here · HA with {partners}"), false)
             }
             (FeatureState::Paused, Some(partners)) => {
-                (format!("paused here · {partners} writes"), false)
+                (format!("paused here · HA with {partners}"), false)
             }
             (FeatureState::Running, _) => ("running".to_owned(), true),
             (FeatureState::Paused, None) => ("paused here".to_owned(), false),

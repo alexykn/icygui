@@ -74,6 +74,11 @@ struct Seqs {
     fetched: u64,
     /// `seq` of the last event applied.
     evented: u64,
+    /// `seq` of the last event applied that wrote the check state (a check
+    /// result, a state change, flapping; not an acknowledgement or a
+    /// downtime): above `fetched`, events wrote the check state last and
+    /// no answer can have overtaken them (`Store::overtaken`).
+    checked: u64,
 }
 
 /// What changed since the last snapshot, for publishing, the incremental
@@ -1012,6 +1017,9 @@ impl Store {
     /// those before it ([`Store::shows_change`]): applying them would take
     /// the object back to an older state, so they become
     /// [`Applied::Stale`] like lines read before the request went out.
+    /// (Only for the lines that waited during the first load, all of one
+    /// stream; a line an answer overtook later is judged by its own
+    /// check's time instead, `Store::overtaken`.)
     pub(crate) fn note_reflected(&mut self, key: &ObjectKey, seq: u64) {
         self.mark_fetched(key.clone(), seq);
     }

@@ -124,6 +124,17 @@ fn assess_with(
     beats: &Heartbeats,
     late: &BTreeMap<Option<String>, usize>,
 ) -> Vec<Finding> {
+    assess_checked(nodes, health, beats, late, &BTreeMap::new())
+}
+
+/// [`assess_with`], with how many objects each zone checks.
+fn assess_checked(
+    nodes: &[ClusterNode],
+    health: &ClusterHealth,
+    beats: &Heartbeats,
+    late: &BTreeMap<Option<String>, usize>,
+    checked: &BTreeMap<String, usize>,
+) -> Vec<Finding> {
     let zones = zones();
     assess(&Facts {
         nodes,
@@ -132,6 +143,7 @@ fn assess_with(
         health,
         heartbeats: beats,
         late,
+        checked,
         clock: &clock,
     })
 }
@@ -410,6 +422,132 @@ fn features_and_queues() {
         &BTreeMap::new(),
     );
     assert!(titles(&findings).contains(&"IcingaDB paused on master-01"));
+}
+
+/// The reviewer's case on the demo cluster: master-02's checker is off
+/// while icygui talks to master-01, whose own features read fine (the
+/// checker *paused* there, its HA state). Icinga doesn't hand master-02's
+/// share to master-01: hundreds of master-zone checks go late with both
+/// masters connected, and master-02's pinned beat keeps beating (master-01
+/// schedules it). The late checks are the only sign: one critical line for
+/// the zone, never a green word about master-02's checker.
+#[test]
+fn a_zone_short_of_checks_with_every_endpoint_connected_is_one_line() {
+    let health = ClusterHealth {
+        features: Some(NodeFeatures {
+            checker: Some(FeatureState::Paused),
+            notification: Some(FeatureState::Paused),
+            icingadb: Some(FeatureState::Off),
+        }),
+        ..ClusterHealth::default()
+    };
+    let beats = six(BeatState::OnTime, &[]);
+    let checked = BTreeMap::from([("master".to_owned(), 2_200), ("ams".to_owned(), 40)]);
+    let late = |master: usize, ams: usize| {
+        BTreeMap::from([
+            (Some("master".to_owned()), master),
+            (Some("ams".to_owned()), ams),
+        ])
+    };
+    let findings = assess_checked(&nodes(&[]), &health, &beats, &late(799, 0), &checked);
+    assert_eq!(
+        titles(&findings),
+        ["zone master: 799 checks late (master-01 and master-02 connected)"]
+    );
+    let short = &findings[0];
+    assert_eq!(short.key, "zone-late:master");
+    assert_eq!(short.tone, AlertTone::Critical);
+    assert_eq!(short.grace, GRACE);
+    assert!(short.urgent);
+    assert_eq!(
+        short.action,
+        Some(AlertAction::LateChecks {
+            zone: Some("master".to_owned())
+        })
+    );
+    assert_eq!(
+        short.detail,
+        "overdue although master-01 and master-02 are connected: one of their checkers may be off \
+         or can't keep up; Icinga doesn't hand its share to the other."
+    );
+    assert_eq!(short.note, "zone master is short of checks");
+    // A handful late is no sign (1 in 20 of the zone's checks, and at
+    // least 10): 109 of 2 200 are not, 110 are; in a small zone 10 are.
+    for (master, ams, expected) in [
+        (109, 0, Vec::<&str>::new()),
+        (
+            110,
+            0,
+            vec!["zone master: 110 checks late (master-01 and master-02 connected)"],
+        ),
+        (0, 9, vec![]),
+        (
+            0,
+            10,
+            vec!["zone ams: 10 checks late (sat-ams-01 connected)"],
+        ),
+    ] {
+        let findings = assess_checked(&nodes(&[]), &health, &beats, &late(master, ams), &checked);
+        assert_eq!(titles(&findings), expected, "{master} {ams}");
+    }
+    let findings = assess_checked(&nodes(&[]), &health, &beats, &late(0, 12), &checked);
+    assert_eq!(
+        findings[0].detail,
+        "overdue although sat-ams-01 is connected: its checker may be off or can't keep up."
+    );
+    // One cause, one line: an endpoint of the zone down says it (the zone
+    // runs on the other), and so does the node's own checker being off.
+    let findings = assess_checked(
+        &nodes(&["master-02"]),
+        &health_with(&[("master-02", 1_000.0)]),
+        &beats,
+        &late(799, 0),
+        &checked,
+    );
+    assert_eq!(titles(&findings), ["master-02 disconnected"]);
+    let off = ClusterHealth {
+        features: Some(NodeFeatures {
+            checker: Some(FeatureState::Off),
+            ..NodeFeatures::default()
+        }),
+        ..ClusterHealth::default()
+    };
+    let findings = assess_checked(&nodes(&[]), &off, &beats, &late(799, 0), &checked);
+    assert_eq!(
+        titles(&findings),
+        ["the checker feature is off on master-01"]
+    );
+    // A zone whose beat stopped runs no checks: that line, not this one.
+    let stopped = six(
+        BeatState::OnTime,
+        &[("ams", BeatState::Dead(Death::Stopped))],
+    );
+    let findings = assess_checked(&nodes(&[]), &health, &stopped, &late(0, 40), &checked);
+    assert_eq!(
+        titles(&findings),
+        ["zone ams runs no checks (sat-ams-01 connected)"]
+    );
+}
+
+/// The zone's dot follows its line while it is shown.
+#[test]
+fn a_zone_short_of_checks_is_found_by_its_zone() {
+    let trouble = Trouble {
+        alerts: vec![Alert {
+            key: "zone-late:master".to_owned(),
+            tone: AlertTone::Critical,
+            title: String::new(),
+            detail: String::new(),
+            action: None,
+            since: at(0.0),
+        }],
+        blind: None,
+    };
+    assert_eq!(
+        trouble.zone_short_of_checks("master"),
+        Some(AlertTone::Critical)
+    );
+    assert_eq!(trouble.zone_short_of_checks("ams"), None);
 }
 
 /// One level per concept: the relay queue's tile and its alert read the

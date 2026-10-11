@@ -16,7 +16,10 @@
 //!   `cluster-zone` check turns critical, and icygui raises one alert for
 //!   the zone;
 //! - an HA master zone: both masters run checks, although Icinga reports
-//!   the checker feature's object paused on one of them.
+//!   the checker feature's object paused on one of them;
+//! - a checker off on the other master: its share of the zone's checks
+//!   goes late, nothing else shows it, and icygui raises the zone's late
+//!   checks as one alert.
 //!
 //! They run when `demo/up.sh`'s variables are set (`ICYGUI_CLUSTER_SCENARIO`
 //! and the `ICYGUI_CONTRACT_*` ones), and otherwise pass without checking
@@ -663,6 +666,77 @@ async fn cluster_ha_masters_share_the_checks() {
         sources.contains("master-01") && sources.contains("master-02"),
         "{sources:?}"
     );
+}
+
+/// The small fix 2 review: master-02's checker off while icygui talks to
+/// master-01. Icinga doesn't hand master-02's share of the master zone's
+/// checks to master-01, yet master-01's own features read as before (its
+/// checker `paused`, Icinga's HA bookkeeping), both masters stay connected
+/// and master-02's pinned beat keeps beating (master-01 schedules it). The
+/// zone's late checks are the only sign: icygui raises them as one
+/// critical line for the zone, and nothing else (one cause, one alert).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cluster_a_checker_off_on_the_other_master_shows_as_the_zones_late_checks() {
+    let _turn = CLUSTER.lock().await;
+    let Some(cluster) = setup().await else {
+        return;
+    };
+    let mut engine = cluster.engine();
+    engine.send(ic_core::Command::WatchHealth(true));
+    healthy(&mut engine).await;
+    let recover = Recover(&cluster.scenario);
+    let started = Instant::now();
+    cluster.scenario(&["checker-off", "master-02"]);
+    let snapshot = wait_snapshot(
+        &mut engine,
+        Duration::from_mins(8),
+        "the master zone's late checks as an alert",
+        |snapshot| snapshot.trouble.zone_short_of_checks("master").is_some(),
+    )
+    .await;
+    eprintln!(
+        "the zone's late checks were raised {:?} after the checker went off ({} late)",
+        started.elapsed(),
+        late_in_zone(&snapshot, "master")
+    );
+    let alerts: Vec<&str> = snapshot
+        .trouble
+        .alerts
+        .iter()
+        .map(|alert| alert.title.as_str())
+        .collect();
+    assert_eq!(alerts.len(), 1, "one cause, one alert: {alerts:?}");
+    let alert = &snapshot.trouble.alerts[0];
+    assert_eq!(alert.key, "zone-late:master");
+    assert_eq!(alert.tone, ic_core::trouble::AlertTone::Critical);
+    assert!(
+        alert.title.starts_with("zone master: ")
+            && alert
+                .title
+                .ends_with(" late (master-01 and master-02 connected)"),
+        "{}",
+        alert.title
+    );
+    // What the page reads of master-01 says nothing is wrong: the late
+    // checks are the only way to see it.
+    let features = snapshot.health.features.expect("master-01's features");
+    assert!(
+        matches!(
+            features.checker,
+            Some(FeatureState::Running | FeatureState::Paused)
+        ),
+        "{features:?}"
+    );
+    assert!(
+        snapshot
+            .heartbeats
+            .beats
+            .iter()
+            .all(|beat| beat.state == BeatState::OnTime),
+        "the beats keep beating"
+    );
+    drop(recover);
+    engine.shutdown();
 }
 
 /// Ledger row 74: an API user set up exactly as the user guide recommends

@@ -258,17 +258,67 @@ fn a_healthy_cluster_reads_like_the_mock_up() {
         .map(|feature| (feature.label, feature.word.as_str()))
         .collect();
     // master-01 is in the HA zone master with master-02 connected: the
-    // checks and notifications are shared, whatever Icinga's paused flag
-    // on the feature objects says.
+    // page says what is true of master-01, whatever Icinga's paused flag
+    // on the feature objects says, and nothing about master-02's share.
     assert_eq!(
         features,
         [
-            ("checker", "shared with master-02"),
-            ("notification", "shared with master-02"),
+            ("checker", "on here · HA with master-02"),
+            ("notification", "on here · HA with master-02"),
             ("IcingaDB", "off")
         ]
     );
     assert_eq!(assess(&cluster(), true, now()), ClusterState::Ok);
+}
+
+/// The small fix 2 review: master-02's checker off while icygui talks to
+/// master-01. Both masters connected, master-01's features fine: the
+/// engine's line for the zone's late checks turns the zone's dot and the
+/// sidebar's red, and no feature says anything green about master-02.
+#[test]
+fn a_zone_short_of_checks_is_red_with_every_endpoint_connected() {
+    let mut snapshot = cluster();
+    let mut health = (*snapshot.health).clone();
+    health.features = Some(NodeFeatures {
+        checker: Some(FeatureState::Paused),
+        notification: Some(FeatureState::Paused),
+        icingadb: Some(FeatureState::Off),
+    });
+    snapshot.health = Arc::new(health);
+    snapshot.trouble = Arc::new(ic_core::trouble::Trouble {
+        alerts: vec![ic_core::trouble::Alert {
+            key: "zone-late:master".to_owned(),
+            tone: ic_core::trouble::AlertTone::Critical,
+            title: "zone master: 799 checks late (master-01 and master-02 connected)".to_owned(),
+            detail: String::new(),
+            action: Some(ic_core::trouble::AlertAction::LateChecks {
+                zone: Some("master".to_owned()),
+            }),
+            since: at(192.0),
+        }],
+        blind: None,
+    });
+    let report = report(&snapshot, Liveness::Live, now());
+    let master = &report.zones[0];
+    assert_eq!(master.name, "master");
+    assert_eq!(
+        master
+            .endpoints
+            .iter()
+            .filter(|row| row.state == NodeState::Connected)
+            .count(),
+        2
+    );
+    assert_eq!(master.dot, Dot::Critical);
+    assert_eq!(assess(&snapshot, true, now()), ClusterState::Critical);
+    assert!(
+        report
+            .features
+            .iter()
+            .all(|feature| !feature.running && !feature.word.contains("shared")),
+        "{:?}",
+        report.features
+    );
 }
 
 #[test]
@@ -398,7 +448,6 @@ fn without_live_data_nothing_is_green() {
     let snapshot = cluster();
     let stale = Liveness::Stale {
         as_of: Some(at(240.0)),
-        heard: None,
         link: Link::Lost(Tone::Warning),
     };
     let report = report(&snapshot, stale, now());
@@ -480,7 +529,6 @@ fn without_live_data_statuses_are_last_known_and_this_node_says_so() {
             &snapshot,
             Liveness::Stale {
                 as_of: Some(as_of),
-                heard: None,
                 link,
             },
             now(),
@@ -519,7 +567,6 @@ fn without_live_numbers_only_the_others_are_last_known() {
         &snapshot,
         Liveness::Stale {
             as_of: Some(as_of),
-            heard: None,
             link: Link::Up,
         },
         now(),
@@ -538,7 +585,6 @@ fn without_live_numbers_only_the_others_are_last_known() {
         &snapshot,
         Liveness::Stale {
             as_of: None,
-            heard: None,
             link: Link::Lost(Tone::Warning),
         },
         now(),
@@ -550,7 +596,6 @@ fn without_live_numbers_only_the_others_are_last_known() {
         &degraded(&[]),
         Liveness::Stale {
             as_of: Some(as_of),
-            heard: None,
             link: Link::Lost(Tone::Warning),
         },
         now(),
@@ -579,7 +624,6 @@ fn without_live_data_uptime_is_as_of_the_latest_status() {
         &snapshot,
         Liveness::Stale {
             as_of: Some(at(2.0 * 3_600.0)),
-            heard: None,
             link: Link::Lost(Tone::Warning),
         },
         now(),
@@ -738,8 +782,11 @@ fn counts_get_thousands_separators() {
 /// Ledger rows 72 and 74: in an HA zone the feature objects' `paused` is
 /// Icinga's HA bookkeeping, not a stop (the paused master runs its share of
 /// the checks and notifications, checked on the demo cluster), so the page
-/// says the work is shared while another endpoint of the zone is
-/// connected; alone, a paused feature says so. Without the permission to
+/// says the feature is on here while another endpoint of the zone is
+/// connected, with a neutral dot: whether that endpoint runs its share is
+/// not known here (the small fix 2 review: `shared with master-02` was
+/// green while master-02's checker was off). Alone, a paused feature says
+/// so. Without the permission to
 /// read a feature the page names it.
 #[test]
 fn features_say_what_is_true_in_an_ha_zone_and_what_is_missing() {
@@ -767,10 +814,18 @@ fn features_say_what_is_true_in_an_ha_zone_and_what_is_missing() {
     assert_eq!(
         words(&snapshot),
         [
-            ("checker shared with master-02".to_owned(), true, false),
-            ("notification shared with master-02".to_owned(), true, false),
             (
-                "IcingaDB paused here · master-02 writes".to_owned(),
+                "checker on here · HA with master-02".to_owned(),
+                false,
+                false
+            ),
+            (
+                "notification on here · HA with master-02".to_owned(),
+                false,
+                false
+            ),
+            (
+                "IcingaDB paused here · HA with master-02".to_owned(),
                 false,
                 false
             ),

@@ -70,6 +70,15 @@ pub(crate) enum Applied {
     Ignored,
 }
 
+/// What an event about a host or service changes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Writes {
+    /// The check state: a check result, a state change, flapping.
+    Check,
+    /// Only how it is handled: an acknowledgement.
+    Handling,
+}
+
 /// A host or service to change in place.
 enum Target<'a> {
     Host(&'a mut Host),
@@ -120,7 +129,7 @@ impl Store {
                 after,
                 at,
             } if !self.overtaken(object, seq, result_time(result, *at)) => {
-                self.on_object(object, seq, |target| {
+                self.on_object(object, seq, Writes::Check, |target| {
                     check_result(
                         target,
                         result,
@@ -140,7 +149,7 @@ impl Store {
                 acknowledgement,
                 at,
             } if !self.overtaken(object, seq, result_time(result, *at)) => {
-                self.on_object(object, seq, |target| {
+                self.on_object(object, seq, Writes::Check, |target| {
                     state_change(
                         target,
                         *state,
@@ -157,7 +166,7 @@ impl Store {
                 kind,
                 expiry,
                 ..
-            } => self.on_object(object, seq, |target| {
+            } => self.on_object(object, seq, Writes::Handling, |target| {
                 let check = target.check();
                 check.acknowledgement = if kind.is_acknowledged() {
                     *kind
@@ -166,21 +175,25 @@ impl Store {
                 };
                 check.acknowledgement_expiry = *expiry;
             }),
-            Event::AcknowledgementCleared { object, .. } => self.on_object(object, seq, |target| {
-                let check = target.check();
-                check.acknowledgement = AckKind::None;
-                check.acknowledgement_expiry = None;
-            }),
+            Event::AcknowledgementCleared { object, .. } => {
+                self.on_object(object, seq, Writes::Handling, |target| {
+                    let check = target.check();
+                    check.acknowledgement = AckKind::None;
+                    check.acknowledgement_expiry = None;
+                })
+            }
             Event::Flapping {
                 object,
                 flapping,
                 current,
                 at,
-            } if !self.overtaken(object, seq, *at) => self.on_object(object, seq, |target| {
-                let check = target.check();
-                check.flapping = *flapping;
-                check.flapping_current = *current;
-            }),
+            } if !self.overtaken(object, seq, *at) => {
+                self.on_object(object, seq, Writes::Check, |target| {
+                    let check = target.check();
+                    check.flapping = *flapping;
+                    check.flapping_current = *current;
+                })
+            }
             Event::CommentAdded { comment, .. } => self.on_comment(seq, comment, true),
             Event::CommentRemoved { comment, .. } => self.on_comment(seq, comment, false),
             Event::DowntimeAdded { downtime, .. }
@@ -200,32 +213,35 @@ impl Store {
     /// than the query answer the store's check state of `key` came from.
     ///
     /// A query sent before the line was read can be answered before it is
-    /// read: the stream is slow, or busy with a burst, while the answer
-    /// comes on a connection of its own. Icinga composed the answer after
-    /// it processed the event then, so the answer shows a later check
-    /// (`last_check` after `end`; Icinga processes the results of a check
-    /// in the order they started and drops older ones, and checks of one
-    /// object don't overlap). Applied on top, the event would take the
-    /// object back to an older state (a hard problem soft again) and the
-    /// next events forward again: two state changes in the log, and rule
-    /// inputs, for one. Such an event is [`Applied::Stale`] like a line
-    /// read before the request went out, and so are the ones after it,
-    /// until one is not older: from then on events wrote the object last
-    /// and are applied in order again.
-    fn overtaken(&mut self, key: &ObjectKey, seq: u64, end: Timestamp) -> bool {
+    /// read: the stream is slow, or holds its lines for Icinga's next
+    /// batch, while the answer comes on a connection of its own. Icinga
+    /// composed the answer after it processed the event then, so the
+    /// answer shows a later check (`last_check` after `end`; Icinga
+    /// processes the results of a check in the order they started and
+    /// drops older ones, and checks of one object don't overlap). Applied
+    /// on top, the event would take the object back to an older state (a
+    /// hard problem soft again) and the next events forward again: two
+    /// state changes in the log, and rule inputs, for one. Such an event
+    /// is [`Applied::Stale`], judged by its own check's time, until a
+    /// check event that is not older is applied: from then on events
+    /// wrote the check state last and are applied in order again.
+    ///
+    /// Only an event that writes the check state ends this (`checked`):
+    /// an acknowledgement or a downtime that came in between says nothing
+    /// about the order of check results. Icinga sends the
+    /// `AcknowledgementCleared` of a state change just before the change's
+    /// check result, so it would otherwise let the older attempts of that
+    /// very change through.
+    fn overtaken(&self, key: &ObjectKey, seq: u64, end: Timestamp) -> bool {
         let Some(seqs) = self.seqs.get(key) else {
             return false;
         };
-        // An event wrote the check state last (events come in Icinga's
-        // order), or the line is stale anyway.
-        if seqs.evented > seqs.fetched || seq <= seqs.fetched {
+        // A check event wrote the check state last (events come in
+        // Icinga's order), or the line is stale anyway.
+        if seqs.checked > seqs.fetched || seq <= seqs.fetched {
             return false;
         }
-        let older = self.older_result(key, end);
-        if older {
-            self.note_reflected(key, seq);
-        }
-        older
+        self.older_result(key, end)
     }
 
     /// Whether a check result of `key` that ended at `end` is older than
@@ -240,11 +256,13 @@ impl Store {
     }
 
     /// Changes a known host or service with `change`, unless the event is
-    /// already reflected in the object's last query answer.
+    /// already reflected in the object's last query answer. `writes`: what
+    /// the event changes.
     fn on_object(
         &mut self,
         key: &ObjectKey,
         seq: u64,
+        writes: Writes,
         change: impl FnOnce(&mut Target<'_>),
     ) -> Applied {
         if !self.contains(key) {
@@ -255,6 +273,9 @@ impl Store {
             return Applied::Stale;
         }
         seqs.evented = seqs.evented.max(seq);
+        if writes == Writes::Check {
+            seqs.checked = seqs.checked.max(seq);
+        }
         let Some(mut target) = self.target(key) else {
             return Applied::Unknown(key.clone());
         };

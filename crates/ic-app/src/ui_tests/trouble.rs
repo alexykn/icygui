@@ -414,7 +414,7 @@ fn no_live_data_shows_on_every_page_the_footer_and_the_tray() {
 /// Rule 5 (no false green; ledger row 100): icygui's own blindness never
 /// reads as late beats in the cluster. With the connection lost the
 /// beats' deadlines pass by the clock, but the heartbeat row says *no live
-/// data*, each zone's beat keeps its last known age in grey, and nothing
+/// data*, each zone's beat says when icygui last saw it in grey, and nothing
 /// on the page says late; once live again (the engine's grace moved the
 /// deadlines) they are judged, on time.
 #[test]
@@ -493,6 +493,9 @@ fn a_lost_connection_never_reads_as_late_beats() {
         for cell in &cells {
             assert_eq!(cell.tone, BeatTone::Off, "{cell:?}");
             assert!(cell.last_known, "{cell:?}");
+            // When it was last seen, a clock time: never an age frozen at
+            // the outage's start, nor one that reads as a late beat.
+            assert!(cell.text.starts_with("last "), "{cell:?}");
         }
         assert!(
             report

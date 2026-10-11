@@ -154,6 +154,9 @@ pub(super) struct Switch {
     /// Hashes of those old-stream lines (how many of each).
     old: HashMap<u64, u32>,
     stage: Stage,
+    /// Waking up: the refresh after waking went out when the new (live)
+    /// stream opened ([`Engine::woke`]), not at the handover.
+    woke: bool,
 }
 
 #[derive(Debug)]
@@ -437,6 +440,7 @@ impl Engine {
             since: self.seq.load(Ordering::SeqCst),
             old: HashMap::new(),
             stage: Stage::Opening,
+            woke: false,
         });
         let wish = Arc::clone(&self.wish);
         self.tasks.spawn(async move {
@@ -470,6 +474,7 @@ impl Engine {
                     .tasks
                     .spawn(stream::read(lines, Arc::clone(&self.seq), tx));
                 let until = Instant::now() + self.tuning.stream_handover;
+                let waking = self.stream_quiet();
                 if let Some(switch) = &mut self.switch {
                     switch.stage = Stage::Overlap {
                         lines: Some(rx),
@@ -478,6 +483,17 @@ impl Engine {
                         seen: HashSet::new(),
                         until,
                     };
+                    switch.woke = waking && !switch.quiet;
+                }
+                if waking && self.switch.as_ref().is_some_and(|switch| switch.woke) {
+                    // The live stream is subscribed: it carries every
+                    // check result from now on (its lines wait for the
+                    // handover, up to the whole window on a calm
+                    // installation), and the refresh's answers are ordered
+                    // against them like any query's. So the problems whose
+                    // results went stale are asked for now, not once the
+                    // old stream is closed.
+                    self.woke();
                 }
             }
             Err(ApiError::Unauthorized) => {
@@ -626,6 +642,7 @@ impl Engine {
             mut old,
             since,
             stage,
+            woke,
             ..
         } = switch;
         let Stage::Overlap {
@@ -696,7 +713,7 @@ impl Engine {
             waiting = buffered.len(),
             "the new event stream took over"
         );
-        if was_quiet && !quiet {
+        if was_quiet && !quiet && !woke {
             self.woke();
         }
         self.on_lines(buffered);
@@ -754,9 +771,10 @@ impl Engine {
 
     // --- waking up -----------------------------------------------------------------
 
-    /// The live stream is back after quiet mode: deadlines start over, and
-    /// the problems whose results may have been replaced meanwhile are
-    /// fetched in the background.
+    /// The live stream is back after quiet mode (subscribed: its lines may
+    /// still wait for the handover): deadlines start over, and the problems
+    /// whose results may have been replaced meanwhile are fetched in the
+    /// background.
     pub(super) fn woke(&mut self) {
         let now = self.icinga_seconds();
         self.woke_at = Some(now);

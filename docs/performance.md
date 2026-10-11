@@ -206,6 +206,173 @@ These budgets are tested: `ic-mock` has a `large` scenario of the same size with
 
 The dev-profile numbers above already meet the release budgets (50 000 events in under 3 s; a full evaluation of 20 000 × 10 well under a second; memory far below 400 MB), so release builds have a wide margin.
 
+## Fifty clients on one master
+
+**The question** (PLAN.md §4.2, *Many clients on one master*): up to 50 icygui clients on one master. Does that hurt it, and how? The answer decides between *local pacing is enough*, *the coordinator idea*, *a relay* and *neither*. The plan's rule weighs two costs apart: the **spike cost** (the master's answer times to everyone else while big loads overlap) and the **constant cost** (the master's CPU per connected event stream, at rest and in a burst). Only spikes hurt: local pacing, then the coordinator if pacing isn't enough. The constant cost hurts: only a relay helps. Both fine: neither. The thresholds were set before the numbers were read: the master stays stable and responsive for everyone, others' answers under 500 ms at the 95th percentile and under 2 s at most, no queue that keeps growing, no stall; memory is not a limit but is reported.
+
+**Measured** 2026-10-11 with commit 75a4038's engine (today's fixed pacing, with the random phase and ±20 % jitter of *No synchronised clients*; adaptive pacing isn't built), plus instrumentation only (added with this section: every load logs how long it took and how many objects it found that no event had announced; every periodic reconcile logs what it found, field by field, and when the next one is planned). Scripts, raw data and the analysis are in `contract/scale/` (`fleet.sh`, `fleet_*.py`, `fleet-data/<run>/`); `python3 contract/scale/fleet_analyse.py contract/scale/fleet-data/<run>` prints every table below from the raw data.
+
+**Setup.**
+- *The master:* the demo cluster (`demo/docker-compose.yml`) at the user's size, `ICYGUI_DEMO_SCALE_HOSTS=2000`: 2 278 hosts and 32 934 services (the scale workload's 2 000 × 15 in the master zone plus the demo's own estate and churn, about 110 check results a second), Icinga 2.15.6, master-01 and master-02 an HA pair (both check), three satellites. Every client talks to master-01. Never anything but this disposable cluster: the scripts and the harness refuse a URL off this machine, a node that isn't the compose project's `master-01`, and one where the fixture-only `viewer` user can't log in.
+- *The machine:* 4 vCPUs (Xeon @ 2.1 GHz), 15.7 GiB, no swap, nothing else running, no build during a measurement. The cluster's six containers were pinned to cores 0–1 (`docker update --cpuset-cpus`), everything on the client side to cores 2–3 (`taskset`): the clients, the probes, the samplers, the storm generator. master-01's numbers come from its own cgroup (`cpuacct.usage`: CPU time, so 1.0 is one core busy; `memory.usage_in_bytes`), sampled every second.
+- *The clients:* real `ic-core` engines, all in one process (`ic-core`'s ignored `fleet` test, a release build without LTO, `MALLOC_ARENA_MAX=2`), each with its own tiered load, event stream, timers, request budget and SQLite event log; production `Tuning` with a random seed per engine, default settings and dashboards, one URL (master-01), the API user `icygui-demo` (the user guide's permissions, no `filter-expression`). *Live* is a window on screen (every event type); *quiet* is a window hidden in the tray (`SetQuiet(true)`). Live engines open a random object about every 2 minutes (`Command::Focus`), as someone glancing at a dashboard does. Starts are the app's: `Start::User` for a window opening, `Start::Background` for a start at login (its own random wait of up to 90 s at this size). The mix at rest is about a tenth live (5 of 50), as in a team where most windows sit in the tray.
+- *Everyone else:* two probes every second, each on a fresh TLS connection, at real-time priority on the client cores (so they time the master, not the client side's CPU): another client's small **by-name** query (one service, two attributes, as in the 2026-10-06 *starts* measurement) and an **Icinga Web style** request: the command Icinga Web's API transport sends for *submit passive check result*, `POST /v1/actions/process-check-result` with a filter (`host.name=="…" && service.name=="…"`), as `demo-admin`. Icinga Web reads from Icinga DB, which the demo doesn't run; through the API it only sends commands, so a command is what it would wait for. The command flips a marker service (in a downtime, so nobody is notified) between OK and CRITICAL every second; every engine records when it saw each flip, which gives the **delay from a check result to each client**.
+- *Icinga's own numbers:* `/v1/status/ApiListener` of both masters (HTTP clients, JSON-RPC relay and sync queues, work queue rate) and master-01's `/v1/status/CIB` every 5 s, and master-01's log (`WorkQueue` lines, `JsonRpcConnection` semaphore waits, connection timeouts).
+- *Bursts:* passive check results through master-02's API (`process-check-result` by `host.vars.rack`, 750 services a rack), flipping whole racks CRITICAL and OK every second: every result is a soft state change, so nobody is notified and nothing stays broken; master-02 relays them to master-01 as its own checks would be.
+- After each restart of master-01 the demo's seed script was stopped: it re-reads the cluster with full object queries every 5 s for up to 4 minutes after a start, which no real master has.
+
+The runs (each in `fleet-data/`): `steady` (A: 0, 1, 10, 25 and 50 clients, 30 minutes at 50, then a burst), `events` (50 clients, a 750/s burst, then all 50 live), `restart-50` and `restart-40` (B: a restart of master-01, then a configuration reload, with 50 and with 40 clients), `morning` (C: 50 window opens over 3 minutes on a freshly started master, then 50 starts at login at once), `fit` and `fit-5000` (D: the constant cost of 0, 10, 25 and 50 bare event streams at rest and in a burst), `reconcile` and `quiet_reconcile` (25 and 12 clients with the periodic reconcile at 5 minutes, to see what reconciles find and what they cost).
+
+### Steady state (A)
+
+| clients (live) | minutes | by-name ms median / p95 / max | Icinga Web style ms median / p95 / max | worst minute's p95 (by-name / web) | master-01 cores | master-01 MiB (end) | requests/min, all clients | clients: cores, MiB |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 5 | 52 / 60 / 68 | 54 / 59 / 75 | 64 / 63 | 0.158 | 561 | 0 | – |
+| 1 (1) | 10 | 52 / 61 / 77 | 51 / 63 / 75 | 64 / 63 | 0.172 | 819 | 14 | 0.02, 166 |
+| 10 (2) | 10 | 52 / 60 / 92 | 52 / 60 / 86 | 64 / 67 | 0.183 | 1 347 | 103 | 0.13, 1 273 |
+| 25 (3) | 10 | 52 / 64 / 84 | 54 / 63 / 97 | 68 / 67 | 0.213 | 1 592 | 298 | 0.35, 3 195 |
+| **50 (5)** | **30** | **52 / 64 / 92** | **51 / 63 / 92** | 72 / 69 | **0.247** | 2 041 | 611 | 0.76, 6 516 |
+| 50 (5), `events` | 5 | 53 / 59 / 82 | 52 / 57 / 88 | 69 / 60 | 0.237 | 2 279 | 498 | 0.67, 6 184 |
+| 50 (50): all live | 5 | 53 / 97 / 198 | 56 / 100 / 267 | 110 / 108 | 0.628 | 2 279 | 579 | 1.35, 10 162 |
+
+Adding the clients (1, then 9, 15 and 25 more, a tenth of them `Start::User`, the rest `Start::Background`) cost others at most 119 ms; the lean loads spread over the background start's 90 s window. Icinga's queues stayed small throughout (JSON-RPC relay queue at most 8 items on master-01, no semaphore waits, no connection timeouts, status answers ≤ 0.03 s), and nothing grew over the 30 minutes.
+
+### Starts (C)
+
+| start | others: by-name ms median / p95 / max | web ms median / p95 / max | worst minute's p95 | answers > 2 s | master-01 cores | master-01 MiB start → peak | clients connected after |
+|---|---|---|---|---|---|---|---|
+| 50 window opens over 3 minutes (`Start::User`), fresh master | 62 / 114 / **2 447** | 58 / 98 / 278 | 133 / 110 | 2 | 0.92 | 497 → 2 391 | 3.5–34.1 s (median 6.4) |
+| 50 starts at login at once (`Start::Background`), fresh master | 61 / **498** / **3 043** | 62 / 446 / 1 532 | 661 / 473 | 3 | 1.01 | 521 → 2 697 | 7.8–106.8 s (median 73.8) |
+| 5 window opens and 45 starts at login at once (`events`) | 77 / **958** / **3 516** | 76 / **1 830** / **4 320** | 1 238 / 1 086 | 6 | 1.58 | 1 731 → 2 722 | user 20.9–24.7 s, login 24.2–97.8 s |
+| 12 window opens at once, quiet (`quiet_reconcile`) | 76 / **3 895** / **4 789** | 76 / **4 019** / **5 663** | (25 s) | 4 | 1.46 | 2 456 → 2 732 | 21.0–23.4 s |
+| for comparison, 2026-10-06 (single master, 30 006 services): 20 window opens at once | 53 / **3 300** / **4 500** | | | | | +1 998 | 19.0–32.9 s |
+| for comparison, 2026-10-06: 20 starts at login at once | 16 / 56 / 106 | | | | | +1 542 | 5.7–91.8 s |
+
+(The phases with starts last as long as the loads: 1.6–4.7 minutes, 25 s for the twelve. The 2026-10-06 rows ran on a single master with no other load.) Twenty starts at login were comfortable in 2026-10-06; fifty in the same 90 s window are not.
+
+`Start::Background` alone keeps the 95th percentile at the threshold, not under it, and its maximum over it: fifty lean loads in 90 s overlap. Several `Start::User` loads at the same moment are worse than the background start: they aren't spread at all, and every one of them is a full lean load of 33 000 services. The window opens of a real morning come over minutes and stay under the thresholds at the 95th percentile, but single answers still took 2.4 s.
+
+### Restart and reload of the master (B)
+
+| | restart, 50 clients | restart, 40 clients | reload (`restart-process`), 40 clients | restart, no client connected (`morning`) |
+|---|---|---|---|---|
+| master-01 answers again after | 12.3 s | 12.0 s | the old process gone 6 s after the request | 11.0–13.1 s |
+| clients reconnected after | 0.2–8.0 s | 0.1–4.8 s | 8.7–12.1 s | – |
+| clients' reloads (lean, every object) start after | from 17 s | 18–53 s (median 39; 17 within one 10 s) | 24–75 s (median 41; 20 within one 10 s) | – |
+| a reload takes | 74–79 s | median 67 s, at most 90 s | median 62 s, at most 73 s | – |
+| all reloads done after | (the client side ran out of memory at +123 s) | 116 s | 115 s | – |
+| others in the 3 minutes after: by-name median / p95 / max | 59 ms / **1 064 ms** / **30.6 s** | 56 ms / **671 ms** / **7.3 s** | 56 ms / 439 ms / **21.1 s** (5 failed while the process swapped) | 54 / 63 / 264 ms |
+| Icinga Web style median / p95 / max | 61 ms / **3 374 ms** / **22.8 s** | 57 ms / 492 ms / **16.3 s** | 55 ms / **764 ms** / **13.7 s** (5 failed) | 54 / 63 / 208 ms |
+| worst minute's p95 (by-name / web) | **5.8 s / 4.3 s** | **2.7 s** / **1.0 s** | **1.2 s** / **2.6 s** | 70 / 67 ms |
+| answers over 2 s (by-name + web) | 15 | 8 | 7 | 0 |
+| master-01 cores (3 min) | 0.92 (about 1.5 for 100 s) | 0.82 | 0.83 | 0.17 |
+| master-01 MiB fresh → peak | 470 → 3 651 | 469 → 3 164 | → 3 119 | → 2 391 (fifty loads later) |
+| Icinga's own signs | 8 JSON-RPC messages from master-02 waited up to **12.0 s** on the semaphore; 3 incoming connections timed out | status answers up to 15.6 s | status answers up to 14.6 s | none |
+
+The restart itself is cheap: with nobody connected, master-01 answers 11–13 s after `docker restart` and everyone else sees 63 ms at the 95th percentile right after. What hurts is the **reload wave**: every client notices the restart at the same moment (the stream breaks, the node's start time changes), reconnects within seconds and reloads every object within the next minute, unpaced. The random phase and the ±20 % jitter only spread the *periodic* reconciles, not this reload. For about two minutes the master then answers everyone else in seconds, up to 30 s, and the HA pair's own cluster link stalls (master-02's JSON-RPC messages waited up to 12 s on master-01's semaphore). With 40 clients the reloads took a minute each and were all done after two minutes; nothing stayed broken.
+
+### Bursts (D)
+
+| burst | streams | others: by-name ms median / p95 / max | web ms median / p95 / max | master-01 cores (master-02) | relay queue items max, m1 / m2 | delay to clients s median / p95 |
+|---|---|---|---|---|---|---|
+| 750 state changes/s for 30 s (`events`) | 50 engines (5 live) | 85 / 189 / 217 | 92 / 212 / 312 | 0.92 (0.39) | 61 / 243 | live 7.3 / 16.3, quiet 8.9 / 16.5 |
+| 1 500/s for 30 s (`steady`) | 50 engines (5 live) | 84 / 152 / 164 | 84 / 147 / 179 | 0.86 (0.65) | 26 / 1 | live 6.6 / 14.4, quiet 7.2 / 13.5 |
+| 1 500/s for 60 s (`fit`) | 0 | 56 / 63 / 71 | 55 / 63 / 67 | 0.48 (0.72) | 7 / 0 | – |
+| 1 500/s for 60 s (`fit`) | 10 bare live streams | 68 / 96 / 103 | 67 / 91 / 126 | 1.16 (0.65) | 31 / 58 | master busy for 30 s after the burst |
+| 1 500/s for 60 s (`fit`) | 25 bare live streams | 88 / 116 / 148 | 83 / 123 / 223 | 1.15 (0.64) | 1 / 6 | master busy for 105 s after |
+| 1 500/s for 60 s (`fit`) | 50 bare live streams | 91 / 176 / 320 | 83 / 159 / 319 | 1.06 (0.66) | 69 / 53 | master still busy 180 s after, when the streams were closed |
+
+(A *bare live stream* is `curl` on `/v1/events` with every type, the stream a live client opens, without the client's requests: it isolates the stream's cost. The `fit` row's master-01 cores are those during the burst; the work goes on after it, see the next section.)
+
+Others' answers stayed under the thresholds in every burst: at most 212 ms at the 95th percentile and 320 ms at most, even with master-01 busy at the limit of its share of the two cores. No Icinga queue kept growing (the JSON-RPC relay queues peaked at a few hundred items and drained; no semaphore waits, no connection timeouts). What does grow is the work the master owes the streams: it serialises every event once per stream, and with 25 or 50 live streams it was still writing them out minutes after the burst had ended. The clients see that as delay: a minute after a 30 s burst, deliveries reached them up to 52–56 s late at the 95th percentile (`events`, `steady`).
+
+On this machine the client side also falls behind in bursts (50 engines in one process on two cores at 1.5 cores busy), so the engines' delays are the master's lag and the client side's together; the bare streams above have no client side. After the 1 500/s burst the harness grew from 7.9 to 12.4 GiB and was killed by the kernel 61 s later (see *What this machine can't show*). The burst's own goal, about 5 000 state changes a second, couldn't be produced: master-02's API took 2 200–3 500 results a second at most while sharing two cores with master-01 (`fit-5000`); at that rate others' answers stayed under 530 ms at the 95th percentile and 1.6 s at most with 50 bare streams, but master-01 kept working through its backlog for minutes after each burst, so that run can't separate the cost per stream.
+
+### The constant cost, per stream
+
+| | master-01's CPU |
+|---|---|
+| at rest, engines (a tenth live, `steady`: 0, 1, 10, 25, 50) | 0.165 cores + **1.68 milli-cores per engine** (0.247 cores at 50) |
+| at rest, a quiet engine / a live engine (`events`: 45 engines switched from quiet to live, +0.39 cores) | about **0.8** / **9.5 milli-cores** |
+| at rest, bare live streams (`fit`: 0, 10, 25, 50) | 0.208 cores + **5.1 milli-cores per stream** (0.192 / 0.272 / 0.345 / 0.453) |
+| a burst of 90 000 state changes (1 500/s for 60 s), CPU above rest until the master is done (`fit`) | 11 s with no stream, 85 s with 10, 187 s with 25, more than 228 s with 50 (cut off when the streams closed): **about 7 s per live stream**, or **about 80 µs per state change and live stream** |
+
+The two numbers agree: a live stream costs Icinga about 40 µs of this 2.1 GHz Xeon per event it writes (a soft state change is two events, `CheckResult` and `StateChange`; at rest the demo's 110 check results a second make 5 milli-cores). A live engine costs more than its bare stream (9.5 against 5.1 milli-cores) because of its polls and the objects its user opens. A quiet stream gets no `CheckResult` events, so at rest it costs a sixth of a live one; in these bursts, where every result was a state change, it still got half the events. In a real mass re-check most results don't change the state, so quiet streams would get almost nothing.
+
+So the constant cost is small at rest: fifty clients, a tenth live, cost the master 0.08 cores more than none, and all fifty live 0.47. In a burst it is proportional to events × live streams: 50 live streams at 1 500 state changes a second need about 6 cores to keep up, at 5 000 a second about 20; a realistic team (5 live, 45 quiet) at 5 000 check results a second about 1–2 cores. It never slowed anyone else's answers here; it delays the streams themselves.
+
+### Delay from a check result to the clients
+
+| | live median / p95 / max | quiet median / p95 / max |
+|---|---|---|
+| 50 clients (5 live), 30 min (`steady`, 9 000 and 81 000 deliveries) | 2.8 / 5.1 / 6.6 s | 1.4 / 4.4 / 7.6 s |
+| 50 clients all live (`events`) | 6.1 / 10.5 / 18.2 s | – |
+| in a 750 or 1 500/s burst | 6.6–7.3 / 14.4–16.3 s | 7.2–8.9 / 13.5–16.5 s |
+| the 2 minutes after a restart (40 clients) | 3.0 / 15.8 / 44.3 s | 1.7 / 13.9 / 46.5 s |
+
+At rest the delay is Icinga's own: it writes each event stream in batches 5 s apart (see *Quiet mode*), the same for one client and for fifty. With all fifty live, or in a burst, it grows because the fifty engines share two cores in one process; the master's relay queue stayed small, so this is the client side, not Icinga.
+
+### Requests per client
+
+| per client and minute (`steady`, A50) | live | quiet |
+|---|---|---|
+| all requests | 11.9 | 12.3 |
+| `/v1/objects/services` | 1.4 (opened objects, tier 3) | **7.5** (the heartbeat poll) |
+| `/v1/objects/notifications` (re-read after `Notification` events) | 3.1 | 3.2 |
+| `/v1/status/*`, `/v1/objects/endpoints` (the status poll) | 6.3 | 0.8 |
+
+Fifty clients make about 610 requests a minute (10 a second); the master answers each in a median of 3 ms. Nearly two thirds of a quiet client's requests are the heartbeat poll: without `filter-expression` the quiet stream can't carry the heartbeats' results, so icygui reads their `last_check` by name once per beat interval (see *Heartbeats*); with the permission it would be about 5 a minute. The quiet table of 2026-10-06 (0.4 a minute) predates the heartbeats. About half of all requests open a new TLS connection, because the connection pool forgets idle connections after 5 s and most polls are further apart.
+
+### Periodic reconciles: overlap and what they find
+
+**Spread.** The *No synchronised clients* fix holds after a restart: the 80 reconciles planned by 40 clients after their reloads fell due between 3.7 and 61.7 minutes later, at most 7–8 in any one minute (the same after the reload). Quiet clients' next reconcile came 32–62 minutes later, live clients' 10–26 minutes later.
+
+**Cost.** A periodic reconcile is a lean load of every object: about 4 s (median 4.1 s, at most 5.8 s) and **about 2.3 s of master-01's CPU** each (`reconcile`: 91 reconciles of 15 live and 10 quiet clients at the shortest interval the settings allow, 5 minutes, over 40 minutes; master-01's CPU in the seconds a reconcile ran against the seconds none did). At 2.3 reconciles a minute others saw 54 / 82 / 166 ms (median / p95 / max) and master-01 used 0.39 cores; the 12 quiet clients of `quiet_reconcile` at 5 minutes: 56 / 68 / 91 ms (web max 924 ms once), 0.26 cores. Today's intervals at this size (live clients every 10–26 minutes, quiet ones every 30–60) mean about 1.3 reconciles a minute for fifty clients, 0.05 cores; a flat 5 minutes for everyone would be 10 a minute, about 0.4 cores on average and 0.7 reconciles running at any moment: by these numbers within the thresholds, but not measured at fifty.
+
+**What they found** (counted and logged by the instrumentation, compared field by field: state, state type, since, acknowledged, downtime depth, flapping, reachable, or gone):
+
+| run | periodic reconciles | found anything | objects found, by what changed |
+|---|---|---|---|
+| `reconcile` (15 live, 10 quiet, 40 min) | 91 | 61 | 5 054 `flapping` only (750 burst-flipped services, each once per engine); 64 the probes' marker; 7 state changes still on their way (begun 2.6–4.1 s before, inside Icinga's 5 s stream batch); 6 soft → hard at the retry check (also on their way); 2 `reachable` only (quiet engines) |
+| `quiet_reconcile` (12 quiet, 25 min) | 40 | 23 | 54 000 `flapping` only (4 500 services, each once per engine); 8 marker; 1 on its way |
+| `events`, `steady` (50 clients, today's intervals) | 2 + 19 | 2 + 13 | `events`: the marker only; `steady`: 1 322 objects, before the field-by-field log existed; the counts fell off like the decaying flapping flags above |
+
+So in these runs, **no periodic reconcile found a change the stream had missed**: what they found is one Icinga attribute icygui shouldn't compare (the raw `flapping` flag, see the ledger), the probes' own marker and changes still on their way, and one gap of quiet mode (a reachability change without a state change). The value of a periodic reconcile is the insurance against what these runs didn't produce (a stream that drops events silently, objects changed while a client was away), not drift seen in practice.
+
+### Memory
+
+- **Icinga:** 0.5 GiB freshly started; about 2.0–2.4 GiB once 50 clients have loaded, and it keeps that (+1.5–1.9 GiB, as the 2026-10-06 measurement found for twenty: the memory big answers made it allocate stays). The peak was 3.1–3.65 GiB in the reload wave after a restart, 2.4–2.7 GiB for a morning.
+- **The clients:** about 125 MiB per engine at rest in this one-process harness (166 MiB for one, 6.5 GiB for fifty; the app holds one engine per environment). A burst added 80–120 MiB per engine that stayed (10 GiB for fifty after 22 500 state changes); see the ledger.
+
+### What this machine can't show
+
+- **The master's CPU is capped at two cores, shared with master-02 and the satellites.** In the restart's reload wave master-01 used about 1.5 cores, in bursts master-02 took up to 1.5 cores generating the results, so the answer times under load are those of a master with less than two cores. A real master with more cores will look better in the spikes; how much better is not measured.
+- **The client side is one process on two cores and 13 GiB.** 50 engines in a burst or all live saturate it: the delays in those rows are the client side's, and memory ran out twice (after the 1 500/s burst in `steady`, and 123 s into the reload wave of `restart-50`; the harness has the lowest OOM priority, so Icinga was never touched). That's why the restart and reload with fifty were measured only up to two minutes, and in full with forty.
+- **No burst of 5 000 state changes a second:** the generator (master-02's API on the shared cores) reached 2 200–3 500 a second; 750 and 1 500 a second were measured with 50 engines.
+- **One machine, no network:** loopback, no latency or bandwidth limit. Fifty laptops over a VPN read their streams more slowly, so Icinga buffers more per stream.
+- **One API user for all clients**, no Icinga DB or IDO writer on the master, the demo's checks only (about 110 results a second); a production master does more besides.
+- **Runs of 5 to 40 minutes**, not days: a slow leak or a daily pattern wouldn't show.
+
+### Verdict (PLAN.md §4.2 rule)
+
+**Spike cost: hurts.** Three of the measured situations break the thresholds agreed beforehand, and all three are big loads overlapping:
+- the **reload wave after a master restart or reload**: for about two minutes others waited up to 7–30 s, the 95th percentile of the worst minute was 1.0–5.8 s, and with fifty clients the HA pair's own cluster link stalled for up to 12 s. The restart without clients is harmless, so this cost is entirely the clients' unpaced reloads;
+- **starts at the same moment**: 12 window opens at once already put others at 4–5.7 s, and 5 opens plus 45 starts at login 3.5–4.3 s; fifty starts at login spread by today's 90 s window leave the 95th percentile at the limit (498 ms) and single answers at 3 s;
+- a real morning (50 window opens over 3 minutes) stays under the 95th percentile threshold, with two single answers over 2 s.
+
+**Constant cost: fine for the master's other users.** At rest it is small (1.7 milli-cores per client in the usual mix, 9.5 for a live one; 0.08 cores for fifty) and steady state with fifty clients was indistinguishable from none for everyone else (52 / 64 / 92 ms against 52 / 60 / 68 ms over 30 minutes; nothing grew). In bursts the per-stream cost is real, about 80 µs per state change and live stream, and with 25–50 live streams master-01 was still writing a 60 s burst out to the streams minutes later; but others' answers stayed under 212 ms at the 95th percentile and 320 ms at most in every burst, no Icinga queue kept growing and nothing stalled. Its effect is the delay to the clients themselves (up to about a minute after a burst), which a relay would cut and a coordinator wouldn't.
+
+**So, by the plan's rule: only spikes hurt → local pacing** (PLAN.md §4.2 1b, step (b)); **the coordinator idea** only if the measurement after it, step (c), still breaks the thresholds; **no relay**: these numbers don't call for one. What the pacing has to cover, from these runs:
+1. **The reload after a restart or reload of the master** is the worst case and isn't in today's pacing at all: the random phase and jitter spread only the periodic reconciles. It needs the same probe-first wait and batching as the start, with a spread wide enough for fifty clients (today 40 reloads started within 35 s and each took a minute because they overlapped).
+2. **The bulk load of `Start::User`** (after the first rows the user needs; the plan already keeps the window's own first answer unpaced): twelve at once break the thresholds.
+3. **`Start::Background`**: its 90 s window is at the limit for fifty; adaptive pacing replaces a fixed window that would otherwise have to grow with the team.
+4. **The periodic reconcile:** cheap (2.3 s of master CPU each) and, at today's intervals, harmless; it found nothing the stream had missed in these runs.
+
+**Side findings for the plan.**
+- *Reconcile intervals* (PLAN.md 1b, *Question the long reconcile intervals*): the spread across clients didn't protect anyone measurably at today's rates (a reconcile costs the master about 2.3 s of CPU; at 2.3 a minute others' answers stayed at 82 ms p95), and shorter intervals wouldn't have caught anything: no reconcile found a change the stream had missed. A flat 5 minutes for fifty clients would cost about 0.4 cores on average, unmeasured at that rate. Evidence for neither direction beyond that; the count check and the rare safety pass stay a reasonable design, and the comparison should run on the paced engine of step (c).
+- *The constant cost depends on live streams*, so quiet mode is already the lever that keeps it small: in a burst, fifty windows on screen cost Icinga about six times what fifty mostly hidden ones do at rest, and more in a burst. Worth keeping in mind for the relay question if teams leave many windows on screen.
+- *Not decided here, needs a bigger box:* the burst of 5 000 state changes a second (not reachable on this machine), and the spikes on a master with its own cores.
+
 ## Heartbeats
 
 **What they cost.** A heartbeat is one `dummy` check per interval on Icinga (no plugin runs) and, on a live stream, the `CheckResult` events icygui receives anyway. On a quiet stream, Icinga's stream `filter` names the heartbeats, so only their results come along (`event.type != "CheckResult" || (event.host == "…" && event.service == "…") || …`): a few hundred bytes per beat. An API user without `filter-expression` can't filter the stream; icygui then reads the beats' `last_check` with one by-name request per interval while quiet (through the request budget). Those polls are spread like every other periodic request (*No synchronised clients* above, ledger row 99): the first falls at a random phase (half an interval to one and a half after the stream changed), each next one 80–100 % of the interval after the previous (`jitter::within`), never later. Fifty clients that went quiet together drift apart, and no beat is read after its deadline (its last run + twice the interval + its allowance; the jitter only ever polls early, which costs at most a fifth more requests). A missed beat costs one more such request; a reconnect only follows when that request shows the beat ran but its result didn't arrive.

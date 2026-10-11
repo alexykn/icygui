@@ -359,9 +359,21 @@ impl Engine {
 
     fn plan_reconcile(&mut self, draw: Draw) {
         let base = self.last_load_end.unwrap_or_else(Instant::now);
-        let wait = reconcile_wait(draw, self.reconcile_interval(), self.reconcile_floor());
+        let interval = self.reconcile_interval();
+        let wait = reconcile_wait(draw, interval, self.reconcile_floor());
         self.reconcile_draw = Some(draw);
         self.reconcile_at = Some(base + wait);
+        // Instrumentation: when the next periodic reconcile falls, so a
+        // measurement sees how the clients' timers spread.
+        tracing::debug!(
+            environment = %self.spec.environment.name,
+            cadence = ?draw.cadence,
+            interval_s = interval.as_secs(),
+            in_s = (base + wait)
+                .saturating_duration_since(Instant::now())
+                .as_secs(),
+            "reconcile planned"
+        );
     }
 
     /// When a reload or the periodic reconcile is due: only while live and

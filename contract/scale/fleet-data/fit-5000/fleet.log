@@ -1,0 +1,49 @@
+
+running 1 test
+test fleet::fleet ... fleet: mark F0-rest
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F0-storm
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F0-after
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F10-rest
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F10-storm
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F10-after
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F25-rest
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F25-storm
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F25-after
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F50-rest
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F50-storm
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark F50-after
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+fleet: mark end
+fleet: quit
+fleet: 0 engines, 0 connected, 0 live, 0 loaded, 0 marker results seen, rss 11 MiB
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 870.30s
+

@@ -7,3 +7,6 @@
 demo/** text eol=lf
 contract/icinga/** text eol=lf
 contract/scale/** text eol=lf
+# Gzipped measurement data (contract/scale/fleet-data) is binary, whatever
+# directory rule above would say.
+*.gz binary

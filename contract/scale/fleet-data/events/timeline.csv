@@ -1,0 +1,1244 @@
+t,client,event,detail
+1791705042.996,-1,command,add 5 live user
+1791705042.996,-1,command,add 45 quiet background
+1791705042.999,5,start,quiet background
+1791705042.999,6,start,quiet background
+1791705043.000,7,start,quiet background
+1791705043.001,8,start,quiet background
+1791705043.002,9,start,quiet background
+1791705043.005,10,start,quiet background
+1791705043.005,11,start,quiet background
+1791705043.007,12,start,quiet background
+1791705043.008,13,start,quiet background
+1791705043.010,14,start,quiet background
+1791705043.012,15,start,quiet background
+1791705043.014,16,start,quiet background
+1791705043.019,17,start,quiet background
+1791705043.021,18,start,quiet background
+1791705043.023,19,start,quiet background
+1791705043.025,20,start,quiet background
+1791705043.027,21,start,quiet background
+1791705043.029,22,start,quiet background
+1791705043.032,23,start,quiet background
+1791705043.035,24,start,quiet background
+1791705043.036,25,start,quiet background
+1791705043.039,26,start,quiet background
+1791705043.041,27,start,quiet background
+1791705043.044,28,start,quiet background
+1791705043.046,29,start,quiet background
+1791705043.048,30,start,quiet background
+1791705043.051,31,start,quiet background
+1791705043.052,32,start,quiet background
+1791705043.054,33,start,quiet background
+1791705043.056,34,start,quiet background
+1791705043.071,35,start,quiet background
+1791705043.073,36,start,quiet background
+1791705043.076,37,start,quiet background
+1791705043.078,38,start,quiet background
+1791705043.080,39,start,quiet background
+1791705043.083,40,start,quiet background
+1791705043.086,41,start,quiet background
+1791705043.088,42,start,quiet background
+1791705043.091,43,start,quiet background
+1791705043.093,44,start,quiet background
+1791705043.095,45,start,quiet background
+1791705043.098,46,start,quiet background
+1791705043.100,47,start,quiet background
+1791705043.102,48,start,quiet background
+1791705043.104,49,start,quiet background
+1791705043.104,49,state,connecting 1
+1791705043.111,0,start,live user
+1791705043.116,1,start,live user
+1791705043.117,2,start,live user
+1791705043.118,3,start,live user
+1791705043.120,4,start,live user
+1791705043.120,4,state,connecting 1
+1791705043.120,5,state,connecting 1
+1791705043.120,6,state,connecting 1
+1791705043.120,7,state,connecting 1
+1791705043.120,8,state,connecting 1
+1791705043.120,9,state,connecting 1
+1791705043.120,10,state,connecting 1
+1791705043.120,11,state,connecting 1
+1791705043.120,12,state,connecting 1
+1791705043.120,13,state,connecting 1
+1791705043.120,14,state,connecting 1
+1791705043.120,15,state,connecting 1
+1791705043.120,16,state,connecting 1
+1791705043.120,17,state,connecting 1
+1791705043.120,18,state,connecting 1
+1791705043.120,19,state,connecting 1
+1791705043.120,20,state,connecting 1
+1791705043.120,21,state,connecting 1
+1791705043.120,22,state,connecting 1
+1791705043.120,23,state,connecting 1
+1791705043.120,24,state,connecting 1
+1791705043.120,25,state,connecting 1
+1791705043.120,26,state,connecting 1
+1791705043.120,27,state,connecting 1
+1791705043.120,28,state,connecting 1
+1791705043.120,29,state,connecting 1
+1791705043.120,30,state,connecting 1
+1791705043.120,31,state,connecting 1
+1791705043.120,32,state,connecting 1
+1791705043.120,33,state,connecting 1
+1791705043.120,34,state,connecting 1
+1791705043.120,35,state,connecting 1
+1791705043.120,36,state,connecting 1
+1791705043.120,37,state,connecting 1
+1791705043.120,38,state,connecting 1
+1791705043.120,39,state,connecting 1
+1791705043.120,40,state,connecting 1
+1791705043.120,41,state,connecting 1
+1791705043.120,42,state,connecting 1
+1791705043.120,43,state,connecting 1
+1791705043.120,44,state,connecting 1
+1791705043.120,45,state,connecting 1
+1791705043.120,46,state,connecting 1
+1791705043.120,47,state,connecting 1
+1791705043.120,48,state,connecting 1
+1791705043.120,0,state,connecting 1
+1791705043.120,1,state,connecting 1
+1791705043.120,2,state,connecting 1
+1791705043.120,3,state,connecting 1
+1791705043.149,5,state,loading Hosts 0
+1791705043.164,8,state,loading Hosts 0
+1791705043.174,6,state,loading Hosts 0
+1791705043.175,10,state,loading Hosts 0
+1791705043.176,11,state,loading Hosts 0
+1791705043.176,12,state,loading Hosts 0
+1791705043.193,15,state,loading Hosts 0
+1791705043.194,9,state,loading Hosts 0
+1791705043.199,19,state,loading Hosts 0
+1791705043.202,28,state,loading Hosts 0
+1791705043.203,22,state,loading Hosts 0
+1791705043.210,7,state,loading Hosts 0
+1791705043.211,13,state,loading Hosts 0
+1791705043.211,14,state,loading Hosts 0
+1791705043.216,16,state,loading Hosts 0
+1791705043.218,20,state,loading Hosts 0
+1791705043.221,17,state,loading Hosts 0
+1791705043.221,18,state,loading Hosts 0
+1791705043.229,27,state,loading Hosts 0
+1791705043.234,21,state,loading Hosts 0
+1791705043.235,26,state,loading Hosts 0
+1791705043.236,25,state,loading Hosts 0
+1791705043.246,33,state,loading Hosts 0
+1791705043.249,34,state,loading Hosts 0
+1791705043.250,30,state,loading Hosts 0
+1791705043.252,32,state,loading Hosts 0
+1791705043.254,24,state,loading Hosts 0
+1791705043.254,31,state,loading Hosts 0
+1791705043.257,37,state,loading Hosts 0
+1791705043.260,23,state,loading Hosts 0
+1791705043.265,35,state,loading Hosts 0
+1791705043.269,43,state,loading Hosts 0
+1791705043.270,38,state,loading Hosts 0
+1791705043.278,36,state,loading Hosts 0
+1791705043.284,29,state,loading Hosts 0
+1791705043.396,40,state,loading Hosts 0
+1791705043.711,4,state,loading Hosts 0
+1791705043.751,39,state,loading Hosts 0
+1791705043.806,47,state,loading Hosts 0
+1791705043.900,44,state,loading Hosts 0
+1791705043.901,49,state,loading Hosts 0
+1791705044.145,41,state,loading Hosts 0
+1791705044.211,45,state,loading Hosts 0
+1791705044.303,46,state,loading Hosts 0
+1791705044.346,3,state,loading Hosts 0
+1791705044.348,42,state,loading Hosts 0
+1791705044.349,1,state,loading Hosts 0
+1791705044.388,2,state,loading Hosts 0
+1791705044.622,48,state,loading Hosts 0
+1791705045.228,0,state,loading Hosts 0
+1791705046.048,4,state,loading Services 0
+1791705046.371,2,state,loading Services 0
+1791705046.434,3,state,loading Services 0
+1791705046.468,1,state,loading Services 0
+1791705046.597,0,state,loading Services 0
+1791705047.067,38,state,loading Services 0
+1791705052.866,43,state,loading Services 0
+1791705053.856,15,state,loading Services 0
+1791705054.447,44,state,loading Services 0
+1791705055.266,6,state,loading Services 0
+1791705056.083,8,state,loading Services 0
+1791705056.319,37,state,loading Services 0
+1791705060.855,4,state,loading Details 0
+1791705061.918,20,state,loading Services 0
+1791705063.993,4,state,connected master-01
+1791705064.040,4,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705064.264,4,complete,32933 services
+1791705064.330,36,state,loading Services 0
+1791705064.888,0,state,loading Details 0
+1791705065.378,38,state,loading Details 0
+1791705065.423,1,state,loading Details 0
+1791705065.451,3,state,loading Details 0
+1791705065.468,2,state,loading Details 0
+1791705067.132,0,state,connected master-01
+1791705067.132,0,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705067.250,38,state,connected master-01
+1791705067.252,38,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705067.413,0,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705067.478,38,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705067.478,0,complete,32933 services
+1791705067.604,2,state,connected master-01
+1791705067.604,2,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705067.629,38,complete,32933 services
+1791705067.827,1,state,connected master-01
+1791705067.827,1,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705067.827,3,state,connected master-01
+1791705067.827,3,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705067.931,2,complete,32933 services
+1791705067.959,2,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705067.982,1,complete,32933 services
+1791705068.007,1,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705068.007,3,complete,32933 services
+1791705068.024,3,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705068.833,30,state,loading Services 0
+1791705069.256,43,state,loading Details 0
+1791705069.368,6,state,loading Details 0
+1791705069.536,15,state,loading Details 0
+1791705069.707,44,state,loading Details 0
+1791705070.158,8,state,loading Details 0
+1791705070.426,4,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705070.577,37,state,loading Details 0
+1791705070.817,43,state,connected master-01
+1791705070.817,43,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705070.817,43,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705070.859,6,state,connected master-01
+1791705070.859,6,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705070.859,6,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705070.917,15,state,connected master-01
+1791705070.918,15,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705070.918,15,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705071.435,43,complete,32933 services
+1791705071.482,6,complete,32933 services
+1791705071.530,15,complete,32933 services
+1791705071.601,33,state,loading Services 0
+1791705071.650,47,state,loading Services 0
+1791705071.685,44,state,connected master-01
+1791705071.685,44,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705071.685,44,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705072.030,37,state,connected master-01
+1791705072.030,37,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705072.030,37,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705072.041,8,state,connected master-01
+1791705072.041,8,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705072.041,8,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705072.207,44,complete,32933 services
+1791705072.361,37,complete,32933 services
+1791705072.373,20,state,loading Details 0
+1791705072.452,8,complete,32933 services
+1791705073.589,20,state,connected master-01
+1791705073.589,20,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705073.589,20,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705074.036,20,complete,32933 services
+1791705075.204,29,state,loading Services 0
+1791705075.687,36,state,loading Details 0
+1791705075.850,23,state,loading Services 0
+1791705076.797,36,state,connected master-01
+1791705076.797,36,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705076.797,36,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705077.532,36,complete,32933 services
+1791705079.004,30,state,loading Details 0
+1791705081.363,30,state,connected master-01
+1791705081.363,30,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705081.363,30,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705081.765,25,state,loading Services 0
+1791705081.982,30,complete,32933 services
+1791705082.857,33,state,loading Details 0
+1791705082.905,47,state,loading Details 0
+1791705083.506,33,state,connected master-01
+1791705083.506,33,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705083.506,33,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705083.609,33,complete,32933 services
+1791705083.691,47,state,connected master-01
+1791705083.691,47,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705083.691,47,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705083.815,29,state,loading Details 0
+1791705083.869,47,complete,32933 services
+1791705083.954,23,state,loading Details 0
+1791705084.843,29,state,connected master-01
+1791705084.843,29,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705084.843,29,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705084.843,17,state,loading Services 0
+1791705084.860,23,state,connected master-01
+1791705084.860,23,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705084.860,23,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705084.867,29,complete,32933 services
+1791705084.991,23,complete,32933 services
+1791705085.375,25,state,loading Details 0
+1791705085.966,25,state,connected master-01
+1791705085.966,25,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705085.966,25,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705086.016,14,state,loading Services 0
+1791705086.196,25,complete,32933 services
+1791705087.182,27,state,loading Services 0
+1791705088.843,35,state,loading Services 0
+1791705089.100,17,state,loading Details 0
+1791705089.974,7,state,loading Services 0
+1791705090.346,17,state,connected master-01
+1791705090.346,17,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705090.346,17,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705090.448,17,complete,32933 services
+1791705090.460,5,state,loading Services 0
+1791705091.227,14,state,loading Details 0
+1791705091.989,14,state,connected master-01
+1791705091.989,14,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705091.989,14,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705092.156,27,state,loading Details 0
+1791705092.328,14,complete,32933 services
+1791705093.083,27,state,connected master-01
+1791705093.084,27,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705093.084,27,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705093.281,27,complete,32933 services
+1791705093.331,42,state,loading Services 0
+1791705094.071,23,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705094.085,29,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705094.699,35,state,loading Details 0
+1791705095.548,7,state,loading Details 0
+1791705095.701,25,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705095.779,27,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705095.821,14,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705095.836,37,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705095.908,47,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705095.998,30,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.035,36,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.058,35,state,connected master-01
+1791705096.058,35,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.058,35,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705096.058,35,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705096.058,35,complete,32933 services
+1791705096.097,33,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.106,43,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.117,15,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.126,38,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.148,8,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.158,17,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.163,20,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.170,6,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.277,7,state,connected master-01
+1791705096.277,7,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.278,7,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705096.278,7,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705096.350,5,state,loading Details 0
+1791705096.429,7,complete,32933 services
+1791705096.865,2,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705096.924,49,state,loading Services 0
+1791705096.964,1,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705097.137,5,state,connected master-01
+1791705097.137,5,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705097.137,5,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705097.137,5,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705097.426,5,complete,32933 services
+1791705097.711,42,state,loading Details 0
+1791705097.728,22,state,loading Services 0
+1791705097.817,4,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705097.834,0,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705097.844,3,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705098.381,32,state,loading Services 0
+1791705098.391,42,state,connected master-01
+1791705098.391,42,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705098.391,42,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705098.391,42,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705098.532,28,state,loading Services 0
+1791705098.558,44,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705098.670,42,complete,32933 services
+1791705101.295,9,state,loading Services 0
+1791705103.576,18,state,loading Services 0
+1791705103.896,19,state,loading Services 0
+1791705104.362,34,state,loading Services 0
+1791705104.613,49,state,loading Details 0
+1791705105.289,22,state,loading Details 0
+1791705105.924,49,state,connected master-01
+1791705105.924,49,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705105.924,49,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705105.924,49,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705106.105,32,state,loading Details 0
+1791705106.269,49,complete,32933 services
+1791705106.976,22,state,connected master-01
+1791705106.976,22,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705106.976,22,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705106.976,22,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705107.032,41,state,loading Services 0
+1791705107.218,22,complete,32933 services
+1791705110.410,32,state,connected master-01
+1791705110.410,32,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705110.410,32,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705110.410,32,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705110.410,32,complete,32933 services
+1791705110.672,11,state,loading Services 0
+1791705110.672,45,state,loading Services 0
+1791705110.936,21,state,loading Services 0
+1791705112.733,16,state,loading Services 0
+1791705113.788,13,state,loading Services 0
+1791705113.806,40,state,loading Services 0
+1791705114.371,9,state,loading Details 0
+1791705116.080,19,state,loading Details 0
+1791705118.090,46,state,loading Services 0
+1791705118.607,18,state,loading Details 0
+1791705119.582,9,state,connected master-01
+1791705119.582,9,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705119.582,9,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705119.582,9,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705119.641,19,state,connected master-01
+1791705119.641,19,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705119.641,19,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705119.641,19,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705119.751,19,complete,32933 services
+1791705122.096,18,state,connected master-01
+1791705122.096,18,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705122.096,18,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705122.096,18,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705122.151,18,complete,32933 services
+1791705122.151,26,state,loading Services 0
+1791705124.795,9,complete,32933 services
+1791705125.134,28,state,loading Details 0
+1791705125.390,28,state,connected master-01
+1791705125.390,28,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705125.390,28,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705125.390,28,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705125.400,28,complete,32933 services
+1791705126.893,41,state,loading Details 0
+1791705127.360,41,state,connected master-01
+1791705127.360,41,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705127.360,41,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705127.360,41,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705127.376,41,complete,32933 services
+1791705127.918,24,state,loading Services 0
+1791705129.989,11,state,loading Details 0
+1791705129.989,11,state,connected master-01
+1791705129.989,11,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705129.989,11,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705129.989,11,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705130.129,11,complete,32933 services
+1791705130.207,26,state,loading Details 0
+1791705130.328,12,state,loading Services 0
+1791705130.361,13,state,loading Details 0
+1791705130.686,13,state,connected master-01
+1791705130.686,13,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705130.686,13,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705130.686,13,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705130.696,13,complete,32933 services
+1791705130.782,46,state,loading Details 0
+1791705130.836,46,state,connected master-01
+1791705130.836,46,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705130.836,46,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705130.836,46,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705130.836,46,complete,32933 services
+1791705131.113,39,state,loading Services 0
+1791705131.231,16,state,loading Details 0
+1791705131.238,16,state,connected master-01
+1791705131.238,16,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705131.238,16,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705131.238,16,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705131.238,16,complete,32933 services
+1791705131.262,40,state,loading Details 0
+1791705131.283,40,state,connected master-01
+1791705131.283,40,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705131.283,40,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705131.283,40,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705131.285,40,complete,32933 services
+1791705131.372,21,state,loading Details 0
+1791705131.372,21,state,connected master-01
+1791705131.372,21,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705131.372,21,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705131.372,21,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705131.389,21,complete,32933 services
+1791705131.440,45,state,loading Details 0
+1791705131.440,45,state,connected master-01
+1791705131.440,45,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705131.440,45,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705131.440,45,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705131.443,45,complete,32933 services
+1791705131.471,34,state,loading Details 0
+1791705131.546,34,state,connected master-01
+1791705131.546,34,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705131.546,34,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705131.546,34,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705131.548,34,complete,32933 services
+1791705131.834,26,state,connected master-01
+1791705131.853,26,complete,32933 services
+1791705131.853,26,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705131.853,26,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705131.853,26,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705133.779,24,state,loading Details 0
+1791705133.805,24,state,connected master-01
+1791705133.805,24,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705133.805,24,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705133.805,24,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705133.939,31,state,loading Services 0
+1791705133.939,48,state,loading Services 0
+1791705133.980,24,complete,32933 services
+1791705134.323,10,state,loading Services 0
+1791705135.174,39,state,loading Details 0
+1791705135.725,39,state,connected master-01
+1791705135.740,39,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705135.740,39,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705135.740,39,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705135.955,39,complete,32933 services
+1791705137.478,12,state,loading Details 0
+1791705139.466,12,complete,32933 services
+1791705139.466,12,state,connected master-01
+1791705139.466,12,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705139.466,12,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705139.466,12,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705139.838,31,state,loading Details 0
+1791705140.472,31,state,connected master-01
+1791705140.472,31,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705140.472,31,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705140.472,31,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705140.472,31,complete,32933 services
+1791705140.832,48,state,loading Details 0
+1791705140.832,48,state,connected master-01
+1791705140.832,48,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705140.832,48,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705140.832,48,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705140.832,48,complete,32933 services
+1791705140.850,10,state,loading Details 0
+1791705140.850,10,state,connected master-01
+1791705140.850,10,notification,CRITICAL · pg-checkpoints on db-prod-02
+1791705140.850,10,notification,CRITICAL · ntp-offset on k8s-cp-02
+1791705140.850,10,notification,CRITICAL · pg-deadlocks on lab-postgres-06
+1791705140.850,10,complete,32933 services
+1791705141.549,-1,command,mark E50
+1791705141.549,-1,mark,E50
+1791705242.388,11,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705242.446,22,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705242.852,1,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705242.948,0,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705243.017,3,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705243.067,2,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705243.178,45,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.017,30,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.035,23,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.039,42,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.044,43,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.058,35,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.083,44,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.289,48,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.294,25,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.298,17,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.303,10,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705246.308,47,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.220,21,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.300,7,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.308,13,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.317,16,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.330,5,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.353,20,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.368,49,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.377,12,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.390,36,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.403,31,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.443,8,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.467,19,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.528,6,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.583,38,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.640,37,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.678,24,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.694,27,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.710,32,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.738,28,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.776,9,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.834,33,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.870,4,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705247.973,34,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705248.204,14,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705248.252,39,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705248.269,15,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705248.283,29,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705248.315,26,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705248.328,41,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705248.344,46,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705248.366,40,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705248.394,18,notification,CRITICAL · ntp-offset on k8s-fra-node-04
+1791705347.296,46,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705347.301,37,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705347.497,23,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705347.544,9,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705347.558,26,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.024,44,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.060,47,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.075,12,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.080,17,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.193,33,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.284,30,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.320,49,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.328,43,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.333,40,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.337,15,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705348.871,4,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.116,45,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.130,25,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.141,42,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.146,29,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.156,18,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.161,38,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.172,21,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.182,14,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.188,22,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.193,28,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.199,8,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.216,13,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.221,27,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.247,34,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.269,36,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.385,20,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.398,48,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.405,19,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705349.616,1,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705350.208,0,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705350.245,32,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705350.258,3,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705350.262,16,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705350.319,11,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705350.330,6,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705350.336,24,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705350.494,2,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705351.350,5,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705351.387,41,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705351.464,31,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705351.621,7,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705352.193,39,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705352.310,35,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705352.332,10,notification,RECOVERED · pg-deadlocks on lab-postgres-06
+1791705415.344,45,notification,CRITICAL · load on web-prod-15
+1791705416.175,31,notification,CRITICAL · load on web-prod-15
+1791705416.354,46,notification,CRITICAL · load on web-prod-15
+1791705416.399,8,notification,CRITICAL · load on web-prod-15
+1791705416.485,40,notification,CRITICAL · load on web-prod-15
+1791705416.570,22,notification,CRITICAL · load on web-prod-15
+1791705416.599,37,notification,CRITICAL · load on web-prod-15
+1791705416.615,10,notification,CRITICAL · load on web-prod-15
+1791705416.631,16,notification,CRITICAL · load on web-prod-15
+1791705416.642,28,notification,CRITICAL · load on web-prod-15
+1791705416.654,15,notification,CRITICAL · load on web-prod-15
+1791705416.667,38,notification,CRITICAL · load on web-prod-15
+1791705416.677,33,notification,CRITICAL · load on web-prod-15
+1791705416.695,23,notification,CRITICAL · load on web-prod-15
+1791705416.711,6,notification,CRITICAL · load on web-prod-15
+1791705416.751,32,notification,CRITICAL · load on web-prod-15
+1791705416.777,18,notification,CRITICAL · load on web-prod-15
+1791705416.796,47,notification,CRITICAL · load on web-prod-15
+1791705416.827,48,notification,CRITICAL · load on web-prod-15
+1791705416.852,7,notification,CRITICAL · load on web-prod-15
+1791705416.869,9,notification,CRITICAL · load on web-prod-15
+1791705416.877,49,notification,CRITICAL · load on web-prod-15
+1791705416.891,21,notification,CRITICAL · load on web-prod-15
+1791705416.987,20,notification,CRITICAL · load on web-prod-15
+1791705417.072,0,notification,CRITICAL · load on web-prod-15
+1791705417.082,17,notification,CRITICAL · load on web-prod-15
+1791705417.096,3,notification,CRITICAL · load on web-prod-15
+1791705417.108,13,notification,CRITICAL · load on web-prod-15
+1791705417.139,42,notification,CRITICAL · load on web-prod-15
+1791705417.169,35,notification,CRITICAL · load on web-prod-15
+1791705417.183,26,notification,CRITICAL · load on web-prod-15
+1791705417.201,27,notification,CRITICAL · load on web-prod-15
+1791705417.213,19,notification,CRITICAL · load on web-prod-15
+1791705417.225,34,notification,CRITICAL · load on web-prod-15
+1791705417.237,11,notification,CRITICAL · load on web-prod-15
+1791705417.249,25,notification,CRITICAL · load on web-prod-15
+1791705417.268,41,notification,CRITICAL · load on web-prod-15
+1791705417.281,36,notification,CRITICAL · load on web-prod-15
+1791705417.316,2,notification,CRITICAL · load on web-prod-15
+1791705417.360,43,notification,CRITICAL · load on web-prod-15
+1791705418.161,39,notification,CRITICAL · load on web-prod-15
+1791705418.187,44,notification,CRITICAL · load on web-prod-15
+1791705419.134,5,notification,CRITICAL · load on web-prod-15
+1791705419.231,14,notification,CRITICAL · load on web-prod-15
+1791705419.280,12,notification,CRITICAL · load on web-prod-15
+1791705419.350,29,notification,CRITICAL · load on web-prod-15
+1791705419.375,30,notification,CRITICAL · load on web-prod-15
+1791705419.694,4,notification,CRITICAL · load on web-prod-15
+1791705420.010,24,notification,CRITICAL · load on web-prod-15
+1791705420.506,1,notification,CRITICAL · load on web-prod-15
+1791705441.554,-1,command,mark D50
+1791705441.554,-1,mark,D50
+1791705471.759,-1,command,mark D50-after
+1791705471.759,-1,mark,D50-after
+1791705517.629,1,state,reconnecting 2 the event stream lost a heartbeat's result; reconnecting
+1791705517.630,1,state,connecting 2
+1791705517.630,1,state,connected master-01
+1791705521.635,4,state,reconnecting 2 the event stream lost a heartbeat's result; reconnecting
+1791705521.635,4,state,connecting 2
+1791705521.635,4,state,connected master-01
+1791705591.779,-1,command,mode 45 live
+1791705591.781,5,mode,live
+1791705591.781,6,mode,live
+1791705591.781,7,mode,live
+1791705591.781,8,mode,live
+1791705591.781,9,mode,live
+1791705591.781,10,mode,live
+1791705591.781,11,mode,live
+1791705591.781,12,mode,live
+1791705591.781,13,mode,live
+1791705591.798,14,mode,live
+1791705591.798,15,mode,live
+1791705591.798,16,mode,live
+1791705591.798,17,mode,live
+1791705591.798,18,mode,live
+1791705591.798,19,mode,live
+1791705591.798,20,mode,live
+1791705591.798,21,mode,live
+1791705591.798,22,mode,live
+1791705591.810,23,mode,live
+1791705591.810,24,mode,live
+1791705591.810,25,mode,live
+1791705591.810,26,mode,live
+1791705591.810,27,mode,live
+1791705591.810,28,mode,live
+1791705591.810,29,mode,live
+1791705591.810,30,mode,live
+1791705591.810,31,mode,live
+1791705591.810,32,mode,live
+1791705591.810,33,mode,live
+1791705591.810,34,mode,live
+1791705591.810,35,mode,live
+1791705591.810,36,mode,live
+1791705591.810,37,mode,live
+1791705591.810,38,mode,live
+1791705591.810,39,mode,live
+1791705591.810,40,mode,live
+1791705591.810,41,mode,live
+1791705591.810,42,mode,live
+1791705591.810,43,mode,live
+1791705591.810,44,mode,live
+1791705591.810,45,mode,live
+1791705591.810,46,mode,live
+1791705591.810,47,mode,live
+1791705591.810,48,mode,live
+1791705591.810,49,mode,live
+1791705596.706,30,notification,CRITICAL · http-tls on edge-ams-09
+1791705598.330,49,notification,CRITICAL · http-tls on edge-ams-09
+1791705599.327,16,notification,CRITICAL · http-tls on edge-ams-09
+1791705601.294,38,notification,CRITICAL · http-tls on edge-ams-09
+1791705603.825,40,notification,CRITICAL · http-tls on edge-ams-09
+1791705603.890,28,notification,CRITICAL · http-tls on edge-ams-09
+1791705603.926,8,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.002,31,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.047,17,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.110,33,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.145,15,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.213,14,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.239,32,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.287,18,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.332,35,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.386,11,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.437,20,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.481,45,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.557,12,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.613,39,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.660,48,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.707,9,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.743,13,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.792,7,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.843,10,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.872,23,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.920,37,notification,CRITICAL · http-tls on edge-ams-09
+1791705604.963,46,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.004,27,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.054,1,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.108,47,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.153,36,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.202,34,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.296,19,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.320,29,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.561,0,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.595,41,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.660,4,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.708,5,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.758,2,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.783,6,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.867,44,notification,CRITICAL · http-tls on edge-ams-09
+1791705605.951,3,notification,CRITICAL · http-tls on edge-ams-09
+1791705606.022,22,notification,CRITICAL · http-tls on edge-ams-09
+1791705606.086,24,notification,CRITICAL · http-tls on edge-ams-09
+1791705606.137,25,notification,CRITICAL · http-tls on edge-ams-09
+1791705606.232,42,notification,CRITICAL · http-tls on edge-ams-09
+1791705606.331,26,notification,CRITICAL · http-tls on edge-ams-09
+1791705606.387,43,notification,CRITICAL · http-tls on edge-ams-09
+1791705606.442,21,notification,CRITICAL · http-tls on edge-ams-09
+1791705614.592,48,notification,UNKNOWN · containerd on k8s-node-45
+1791705614.604,40,notification,UNKNOWN · containerd on k8s-node-45
+1791705614.640,46,notification,UNKNOWN · containerd on k8s-node-45
+1791705614.657,42,notification,UNKNOWN · containerd on k8s-node-45
+1791705614.676,20,notification,UNKNOWN · containerd on k8s-node-45
+1791705614.706,32,notification,UNKNOWN · containerd on k8s-node-45
+1791705614.809,9,notification,UNKNOWN · containerd on k8s-node-45
+1791705614.883,6,notification,UNKNOWN · containerd on k8s-node-45
+1791705614.972,0,notification,UNKNOWN · containerd on k8s-node-45
+1791705614.999,43,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.069,13,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.094,7,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.124,5,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.159,45,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.188,11,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.229,38,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.250,14,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.271,21,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.292,36,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.348,26,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.405,2,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.427,23,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.455,12,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.483,24,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.512,22,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.586,35,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.631,4,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.664,25,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.694,30,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.727,37,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.755,47,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.778,15,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.804,16,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.834,27,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.866,19,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.890,41,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.915,28,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.932,10,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.964,31,notification,UNKNOWN · containerd on k8s-node-45
+1791705615.998,34,notification,UNKNOWN · containerd on k8s-node-45
+1791705616.034,33,notification,UNKNOWN · containerd on k8s-node-45
+1791705616.074,1,notification,UNKNOWN · containerd on k8s-node-45
+1791705616.105,8,notification,UNKNOWN · containerd on k8s-node-45
+1791705616.185,49,notification,UNKNOWN · containerd on k8s-node-45
+1791705616.217,3,notification,UNKNOWN · containerd on k8s-node-45
+1791705616.249,29,notification,UNKNOWN · containerd on k8s-node-45
+1791705616.264,18,notification,UNKNOWN · containerd on k8s-node-45
+1791705616.310,39,notification,UNKNOWN · containerd on k8s-node-45
+1791705616.344,17,notification,UNKNOWN · containerd on k8s-node-45
+1791705616.375,44,notification,UNKNOWN · containerd on k8s-node-45
+1791705621.782,-1,command,mark A50-live
+1791705621.788,-1,mark,A50-live
+1791705681.639,28,notification,CRITICAL · ssh on k8s-node-28
+1791705682.573,36,notification,CRITICAL · ssh on k8s-node-28
+1791705682.713,13,notification,CRITICAL · ssh on k8s-node-28
+1791705682.861,18,notification,CRITICAL · ssh on k8s-node-28
+1791705682.881,21,notification,CRITICAL · ssh on k8s-node-28
+1791705682.917,47,notification,CRITICAL · ssh on k8s-node-28
+1791705682.934,20,notification,CRITICAL · ssh on k8s-node-28
+1791705683.004,5,notification,CRITICAL · ssh on k8s-node-28
+1791705683.034,6,notification,CRITICAL · ssh on k8s-node-28
+1791705683.081,32,notification,CRITICAL · ssh on k8s-node-28
+1791705683.106,19,notification,CRITICAL · ssh on k8s-node-28
+1791705683.139,25,notification,CRITICAL · ssh on k8s-node-28
+1791705683.189,48,notification,CRITICAL · ssh on k8s-node-28
+1791705683.204,27,notification,CRITICAL · ssh on k8s-node-28
+1791705683.252,0,notification,CRITICAL · ssh on k8s-node-28
+1791705683.294,4,notification,CRITICAL · ssh on k8s-node-28
+1791705683.312,49,notification,CRITICAL · ssh on k8s-node-28
+1791705683.345,37,notification,CRITICAL · ssh on k8s-node-28
+1791705683.366,24,notification,CRITICAL · ssh on k8s-node-28
+1791705683.392,38,notification,CRITICAL · ssh on k8s-node-28
+1791705683.409,23,notification,CRITICAL · ssh on k8s-node-28
+1791705683.431,12,notification,CRITICAL · ssh on k8s-node-28
+1791705683.456,41,notification,CRITICAL · ssh on k8s-node-28
+1791705683.480,33,notification,CRITICAL · ssh on k8s-node-28
+1791705683.504,30,notification,CRITICAL · ssh on k8s-node-28
+1791705683.527,35,notification,CRITICAL · ssh on k8s-node-28
+1791705683.554,45,notification,CRITICAL · ssh on k8s-node-28
+1791705683.573,40,notification,CRITICAL · ssh on k8s-node-28
+1791705683.597,7,notification,CRITICAL · ssh on k8s-node-28
+1791705683.625,43,notification,CRITICAL · ssh on k8s-node-28
+1791705683.648,14,notification,CRITICAL · ssh on k8s-node-28
+1791705683.667,42,notification,CRITICAL · ssh on k8s-node-28
+1791705683.688,31,notification,CRITICAL · ssh on k8s-node-28
+1791705683.717,29,notification,CRITICAL · ssh on k8s-node-28
+1791705683.747,9,notification,CRITICAL · ssh on k8s-node-28
+1791705683.767,34,notification,CRITICAL · ssh on k8s-node-28
+1791705683.818,10,notification,CRITICAL · ssh on k8s-node-28
+1791705683.841,2,notification,CRITICAL · ssh on k8s-node-28
+1791705683.862,1,notification,CRITICAL · ssh on k8s-node-28
+1791705683.882,46,notification,CRITICAL · ssh on k8s-node-28
+1791705683.903,15,notification,CRITICAL · ssh on k8s-node-28
+1791705683.929,3,notification,CRITICAL · ssh on k8s-node-28
+1791705683.950,22,notification,CRITICAL · ssh on k8s-node-28
+1791705683.969,26,notification,CRITICAL · ssh on k8s-node-28
+1791705683.990,39,notification,CRITICAL · ssh on k8s-node-28
+1791705684.013,17,notification,CRITICAL · ssh on k8s-node-28
+1791705684.036,16,notification,CRITICAL · ssh on k8s-node-28
+1791705684.063,44,notification,CRITICAL · ssh on k8s-node-28
+1791705684.086,8,notification,CRITICAL · ssh on k8s-node-28
+1791705684.108,11,notification,CRITICAL · ssh on k8s-node-28
+1791705719.066,44,notification,CRITICAL · load on web-prod-12
+1791705719.194,40,notification,CRITICAL · load on web-prod-12
+1791705719.512,11,notification,CRITICAL · load on web-prod-12
+1791705719.712,4,notification,CRITICAL · load on web-prod-12
+1791705719.749,48,notification,CRITICAL · load on web-prod-12
+1791705719.878,0,notification,CRITICAL · load on web-prod-12
+1791705719.930,5,notification,CRITICAL · load on web-prod-12
+1791705719.948,35,notification,CRITICAL · load on web-prod-12
+1791705719.969,30,notification,CRITICAL · load on web-prod-12
+1791705719.998,6,notification,CRITICAL · load on web-prod-12
+1791705720.058,26,notification,CRITICAL · load on web-prod-12
+1791705720.090,42,notification,CRITICAL · load on web-prod-12
+1791705720.132,2,notification,CRITICAL · load on web-prod-12
+1791705720.164,24,notification,CRITICAL · load on web-prod-12
+1791705720.205,45,notification,CRITICAL · load on web-prod-12
+1791705720.231,31,notification,CRITICAL · load on web-prod-12
+1791705720.260,1,notification,CRITICAL · load on web-prod-12
+1791705720.280,3,notification,CRITICAL · load on web-prod-12
+1791705720.300,36,notification,CRITICAL · load on web-prod-12
+1791705720.319,32,notification,CRITICAL · load on web-prod-12
+1791705720.339,41,notification,CRITICAL · load on web-prod-12
+1791705720.395,49,notification,CRITICAL · load on web-prod-12
+1791705720.431,37,notification,CRITICAL · load on web-prod-12
+1791705720.462,46,notification,CRITICAL · load on web-prod-12
+1791705720.485,29,notification,CRITICAL · load on web-prod-12
+1791705720.521,13,notification,CRITICAL · load on web-prod-12
+1791705720.541,19,notification,CRITICAL · load on web-prod-12
+1791705720.563,43,notification,CRITICAL · load on web-prod-12
+1791705720.583,23,notification,CRITICAL · load on web-prod-12
+1791705720.607,34,notification,CRITICAL · load on web-prod-12
+1791705720.629,22,notification,CRITICAL · load on web-prod-12
+1791705720.652,25,notification,CRITICAL · load on web-prod-12
+1791705720.712,7,notification,CRITICAL · load on web-prod-12
+1791705720.731,38,notification,CRITICAL · load on web-prod-12
+1791705720.751,33,notification,CRITICAL · load on web-prod-12
+1791705720.769,18,notification,CRITICAL · load on web-prod-12
+1791705720.788,20,notification,CRITICAL · load on web-prod-12
+1791705720.815,15,notification,CRITICAL · load on web-prod-12
+1791705720.836,27,notification,CRITICAL · load on web-prod-12
+1791705720.867,39,notification,CRITICAL · load on web-prod-12
+1791705720.892,8,notification,CRITICAL · load on web-prod-12
+1791705720.912,14,notification,CRITICAL · load on web-prod-12
+1791705720.930,47,notification,CRITICAL · load on web-prod-12
+1791705720.951,10,notification,CRITICAL · load on web-prod-12
+1791705720.965,16,notification,CRITICAL · load on web-prod-12
+1791705720.999,12,notification,CRITICAL · load on web-prod-12
+1791705721.023,17,notification,CRITICAL · load on web-prod-12
+1791705721.038,9,notification,CRITICAL · load on web-prod-12
+1791705721.879,28,notification,CRITICAL · load on web-prod-12
+1791705721.947,21,notification,CRITICAL · load on web-prod-12
+1791705786.052,42,notification,CRITICAL · php-fpm on web-prod-09
+1791705787.027,21,notification,CRITICAL · php-fpm on web-prod-09
+1791705787.309,28,notification,CRITICAL · php-fpm on web-prod-09
+1791705787.351,20,notification,CRITICAL · php-fpm on web-prod-09
+1791705793.016,12,notification,CRITICAL · php-fpm on web-prod-09
+1791705793.569,0,notification,CRITICAL · php-fpm on web-prod-09
+1791705793.623,14,notification,CRITICAL · php-fpm on web-prod-09
+1791705793.725,32,notification,CRITICAL · php-fpm on web-prod-09
+1791705793.820,34,notification,CRITICAL · php-fpm on web-prod-09
+1791705793.870,29,notification,CRITICAL · php-fpm on web-prod-09
+1791705793.947,45,notification,CRITICAL · php-fpm on web-prod-09
+1791705793.996,16,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.048,27,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.072,33,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.107,4,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.141,41,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.185,25,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.223,40,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.241,31,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.283,26,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.302,35,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.342,37,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.366,3,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.397,22,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.439,7,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.483,10,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.546,36,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.572,23,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.612,38,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.662,8,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.728,6,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.766,15,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.802,46,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.853,2,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.877,43,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.910,11,notification,CRITICAL · php-fpm on web-prod-09
+1791705794.985,24,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.023,47,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.088,18,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.193,13,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.259,9,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.319,5,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.348,49,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.399,44,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.438,17,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.471,30,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.539,19,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.569,1,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.690,48,notification,CRITICAL · php-fpm on web-prod-09
+1791705795.856,39,notification,CRITICAL · php-fpm on web-prod-09
+1791705817.375,20,notification,CRITICAL · ssh on web-prod-20
+1791705823.574,12,notification,CRITICAL · ssh on web-prod-20
+1791705823.575,12,notification,CRITICAL · memory on mq-prod-04
+1791705824.666,28,notification,CRITICAL · ssh on web-prod-20
+1791705824.666,28,notification,CRITICAL · memory on mq-prod-04
+1791705825.727,39,notification,CRITICAL · ssh on web-prod-20
+1791705825.727,39,notification,CRITICAL · memory on mq-prod-04
+1791705825.861,16,notification,CRITICAL · ssh on web-prod-20
+1791705825.861,16,notification,CRITICAL · memory on mq-prod-04
+1791705825.884,49,notification,CRITICAL · ssh on web-prod-20
+1791705825.895,49,notification,CRITICAL · memory on mq-prod-04
+1791705825.932,3,notification,CRITICAL · ssh on web-prod-20
+1791705825.932,3,notification,CRITICAL · memory on mq-prod-04
+1791705825.949,35,notification,CRITICAL · ssh on web-prod-20
+1791705826.010,35,notification,CRITICAL · memory on mq-prod-04
+1791705826.148,9,notification,CRITICAL · ssh on web-prod-20
+1791705826.148,9,notification,CRITICAL · memory on mq-prod-04
+1791705826.195,33,notification,CRITICAL · ssh on web-prod-20
+1791705826.209,33,notification,CRITICAL · memory on mq-prod-04
+1791705826.252,29,notification,CRITICAL · ssh on web-prod-20
+1791705826.252,29,notification,CRITICAL · memory on mq-prod-04
+1791705826.278,25,notification,CRITICAL · ssh on web-prod-20
+1791705826.302,25,notification,CRITICAL · memory on mq-prod-04
+1791705826.322,21,notification,CRITICAL · ssh on web-prod-20
+1791705826.324,21,notification,CRITICAL · memory on mq-prod-04
+1791705826.419,38,notification,CRITICAL · ssh on web-prod-20
+1791705826.445,38,notification,CRITICAL · memory on mq-prod-04
+1791705826.463,5,notification,CRITICAL · ssh on web-prod-20
+1791705826.463,5,notification,CRITICAL · memory on mq-prod-04
+1791705826.520,1,notification,CRITICAL · ssh on web-prod-20
+1791705826.533,1,notification,CRITICAL · memory on mq-prod-04
+1791705826.556,11,notification,CRITICAL · ssh on web-prod-20
+1791705826.575,11,notification,CRITICAL · memory on mq-prod-04
+1791705826.608,30,notification,CRITICAL · ssh on web-prod-20
+1791705826.608,30,notification,CRITICAL · memory on mq-prod-04
+1791705826.689,42,notification,CRITICAL · ssh on web-prod-20
+1791705826.689,42,notification,CRITICAL · memory on mq-prod-04
+1791705826.715,31,notification,CRITICAL · ssh on web-prod-20
+1791705826.715,31,notification,CRITICAL · memory on mq-prod-04
+1791705826.775,37,notification,CRITICAL · ssh on web-prod-20
+1791705826.788,37,notification,CRITICAL · memory on mq-prod-04
+1791705826.839,36,notification,CRITICAL · ssh on web-prod-20
+1791705826.839,36,notification,CRITICAL · memory on mq-prod-04
+1791705826.875,6,notification,CRITICAL · ssh on web-prod-20
+1791705827.023,6,notification,CRITICAL · memory on mq-prod-04
+1791705827.072,45,notification,CRITICAL · ssh on web-prod-20
+1791705827.096,45,notification,CRITICAL · memory on mq-prod-04
+1791705827.148,27,notification,CRITICAL · ssh on web-prod-20
+1791705827.148,27,notification,CRITICAL · memory on mq-prod-04
+1791705827.177,2,notification,CRITICAL · ssh on web-prod-20
+1791705827.190,2,notification,CRITICAL · memory on mq-prod-04
+1791705827.211,4,notification,CRITICAL · ssh on web-prod-20
+1791705827.221,4,notification,CRITICAL · memory on mq-prod-04
+1791705827.244,34,notification,CRITICAL · ssh on web-prod-20
+1791705827.244,34,notification,CRITICAL · memory on mq-prod-04
+1791705827.281,0,notification,CRITICAL · ssh on web-prod-20
+1791705827.299,0,notification,CRITICAL · memory on mq-prod-04
+1791705827.318,19,notification,CRITICAL · ssh on web-prod-20
+1791705827.331,19,notification,CRITICAL · memory on mq-prod-04
+1791705827.364,41,notification,CRITICAL · ssh on web-prod-20
+1791705827.364,41,notification,CRITICAL · memory on mq-prod-04
+1791705827.404,17,notification,CRITICAL · ssh on web-prod-20
+1791705827.404,17,notification,CRITICAL · memory on mq-prod-04
+1791705827.446,40,notification,CRITICAL · ssh on web-prod-20
+1791705827.446,40,notification,CRITICAL · memory on mq-prod-04
+1791705827.481,24,notification,CRITICAL · ssh on web-prod-20
+1791705827.481,24,notification,CRITICAL · memory on mq-prod-04
+1791705827.516,48,notification,CRITICAL · ssh on web-prod-20
+1791705827.516,48,notification,CRITICAL · memory on mq-prod-04
+1791705827.544,46,notification,CRITICAL · ssh on web-prod-20
+1791705827.544,46,notification,CRITICAL · memory on mq-prod-04
+1791705827.567,26,notification,CRITICAL · ssh on web-prod-20
+1791705827.567,26,notification,CRITICAL · memory on mq-prod-04
+1791705827.754,10,notification,CRITICAL · ssh on web-prod-20
+1791705827.754,10,notification,CRITICAL · memory on mq-prod-04
+1791705827.790,8,notification,CRITICAL · ssh on web-prod-20
+1791705827.790,8,notification,CRITICAL · memory on mq-prod-04
+1791705827.849,13,notification,CRITICAL · ssh on web-prod-20
+1791705827.849,13,notification,CRITICAL · memory on mq-prod-04
+1791705827.961,18,notification,CRITICAL · ssh on web-prod-20
+1791705827.962,18,notification,CRITICAL · memory on mq-prod-04
+1791705827.988,32,notification,CRITICAL · ssh on web-prod-20
+1791705827.988,32,notification,CRITICAL · memory on mq-prod-04
+1791705828.019,23,notification,CRITICAL · ssh on web-prod-20
+1791705828.019,23,notification,CRITICAL · memory on mq-prod-04
+1791705828.050,15,notification,CRITICAL · ssh on web-prod-20
+1791705828.050,15,notification,CRITICAL · memory on mq-prod-04
+1791705828.105,44,notification,CRITICAL · ssh on web-prod-20
+1791705828.105,44,notification,CRITICAL · memory on mq-prod-04
+1791705828.197,43,notification,CRITICAL · ssh on web-prod-20
+1791705829.375,43,notification,CRITICAL · memory on mq-prod-04
+1791705831.800,47,notification,CRITICAL · ssh on web-prod-20
+1791705831.800,47,notification,CRITICAL · memory on mq-prod-04
+1791705832.553,7,notification,CRITICAL · ssh on web-prod-20
+1791705832.553,7,notification,CRITICAL · memory on mq-prod-04
+1791705832.616,20,notification,CRITICAL · memory on mq-prod-04
+1791705832.914,22,notification,CRITICAL · ssh on web-prod-20
+1791705832.931,22,notification,CRITICAL · memory on mq-prod-04
+1791705833.128,14,notification,CRITICAL · ssh on web-prod-20
+1791705833.144,14,notification,CRITICAL · memory on mq-prod-04
+1791705889.735,21,notification,CRITICAL · disk / on k8s-node-52
+1791705889.798,28,notification,CRITICAL · disk / on k8s-node-52
+1791705889.834,13,notification,CRITICAL · disk / on k8s-node-52
+1791705890.758,20,notification,CRITICAL · disk / on k8s-node-52
+1791705894.194,42,notification,CRITICAL · disk / on k8s-node-52
+1791705895.970,5,notification,CRITICAL · disk / on k8s-node-52
+1791705896.460,0,notification,CRITICAL · disk / on k8s-node-52
+1791705896.500,49,notification,CRITICAL · disk / on k8s-node-52
+1791705896.577,39,notification,CRITICAL · disk / on k8s-node-52
+1791705896.691,38,notification,CRITICAL · disk / on k8s-node-52
+1791705896.717,12,notification,CRITICAL · disk / on k8s-node-52
+1791705896.746,32,notification,CRITICAL · disk / on k8s-node-52
+1791705896.820,22,notification,CRITICAL · disk / on k8s-node-52
+1791705896.853,36,notification,CRITICAL · disk / on k8s-node-52
+1791705896.916,45,notification,CRITICAL · disk / on k8s-node-52
+1791705896.964,2,notification,CRITICAL · disk / on k8s-node-52
+1791705897.001,9,notification,CRITICAL · disk / on k8s-node-52
+1791705897.074,30,notification,CRITICAL · disk / on k8s-node-52
+1791705897.111,25,notification,CRITICAL · disk / on k8s-node-52
+1791705897.145,7,notification,CRITICAL · disk / on k8s-node-52
+1791705897.185,15,notification,CRITICAL · disk / on k8s-node-52
+1791705897.219,10,notification,CRITICAL · disk / on k8s-node-52
+1791705897.253,4,notification,CRITICAL · disk / on k8s-node-52
+1791705897.283,8,notification,CRITICAL · disk / on k8s-node-52
+1791705897.381,6,notification,CRITICAL · disk / on k8s-node-52
+1791705897.494,48,notification,CRITICAL · disk / on k8s-node-52
+1791705897.594,46,notification,CRITICAL · disk / on k8s-node-52
+1791705897.660,26,notification,CRITICAL · disk / on k8s-node-52
+1791705897.698,34,notification,CRITICAL · disk / on k8s-node-52
+1791705897.720,35,notification,CRITICAL · disk / on k8s-node-52
+1791705897.760,41,notification,CRITICAL · disk / on k8s-node-52
+1791705897.787,40,notification,CRITICAL · disk / on k8s-node-52
+1791705897.836,23,notification,CRITICAL · disk / on k8s-node-52
+1791705897.925,19,notification,CRITICAL · disk / on k8s-node-52
+1791705897.996,44,notification,CRITICAL · disk / on k8s-node-52
+1791705898.032,47,notification,CRITICAL · disk / on k8s-node-52
+1791705898.071,17,notification,CRITICAL · disk / on k8s-node-52
+1791705898.168,37,notification,CRITICAL · disk / on k8s-node-52
+1791705898.206,43,notification,CRITICAL · disk / on k8s-node-52
+1791705898.233,31,notification,CRITICAL · disk / on k8s-node-52
+1791705898.266,33,notification,CRITICAL · disk / on k8s-node-52
+1791705898.418,29,notification,CRITICAL · disk / on k8s-node-52
+1791705898.550,18,notification,CRITICAL · disk / on k8s-node-52
+1791705898.600,24,notification,CRITICAL · disk / on k8s-node-52
+1791705898.661,16,notification,CRITICAL · disk / on k8s-node-52
+1791705898.861,27,notification,CRITICAL · disk / on k8s-node-52
+1791705898.938,14,notification,CRITICAL · disk / on k8s-node-52
+1791705899.076,11,notification,CRITICAL · disk / on k8s-node-52
+1791705904.063,3,notification,CRITICAL · disk / on k8s-node-52
+1791705904.190,1,notification,CRITICAL · disk / on k8s-node-52
+1791705921.787,-1,command,mode 45 quiet
+1791705921.787,0,mode,quiet
+1791705921.787,1,mode,quiet
+1791705921.787,2,mode,quiet
+1791705921.787,3,mode,quiet
+1791705921.787,4,mode,quiet
+1791705921.787,5,mode,quiet
+1791705921.789,6,mode,quiet
+1791705921.797,7,mode,quiet
+1791705921.798,8,mode,quiet
+1791705921.798,9,mode,quiet
+1791705921.798,10,mode,quiet
+1791705921.798,11,mode,quiet
+1791705921.798,12,mode,quiet
+1791705921.798,13,mode,quiet
+1791705921.798,14,mode,quiet
+1791705921.801,15,mode,quiet
+1791705921.845,16,mode,quiet
+1791705921.845,17,mode,quiet
+1791705921.845,18,mode,quiet
+1791705921.845,19,mode,quiet
+1791705921.845,20,mode,quiet
+1791705921.845,21,mode,quiet
+1791705921.845,22,mode,quiet
+1791705921.852,23,mode,quiet
+1791705921.852,24,mode,quiet
+1791705921.852,25,mode,quiet
+1791705921.852,26,mode,quiet
+1791705921.852,27,mode,quiet
+1791705921.852,28,mode,quiet
+1791705921.852,29,mode,quiet
+1791705921.852,30,mode,quiet
+1791705921.852,31,mode,quiet
+1791705921.852,32,mode,quiet
+1791705921.852,33,mode,quiet
+1791705921.852,34,mode,quiet
+1791705921.852,35,mode,quiet
+1791705921.852,36,mode,quiet
+1791705921.852,37,mode,quiet
+1791705921.852,38,mode,quiet
+1791705921.852,39,mode,quiet
+1791705921.853,40,mode,quiet
+1791705921.853,41,mode,quiet
+1791705921.853,42,mode,quiet
+1791705921.853,43,mode,quiet
+1791705921.853,44,mode,quiet
+1791705944.837,7,notification,UNKNOWN · ssh on nfs-02
+1791705944.939,21,notification,UNKNOWN · ssh on nfs-02
+1791705945.054,2,notification,UNKNOWN · ssh on nfs-02
+1791705945.112,39,notification,UNKNOWN · ssh on nfs-02
+1791705945.253,9,notification,UNKNOWN · ssh on nfs-02
+1791705945.324,5,notification,UNKNOWN · ssh on nfs-02
+1791705945.377,23,notification,UNKNOWN · ssh on nfs-02
+1791705945.429,26,notification,UNKNOWN · ssh on nfs-02
+1791705945.509,30,notification,UNKNOWN · ssh on nfs-02
+1791705945.597,24,notification,UNKNOWN · ssh on nfs-02
+1791705945.625,1,notification,UNKNOWN · ssh on nfs-02
+1791705945.664,35,notification,UNKNOWN · ssh on nfs-02
+1791705945.681,27,notification,UNKNOWN · ssh on nfs-02
+1791705945.728,42,notification,UNKNOWN · ssh on nfs-02
+1791705945.748,32,notification,UNKNOWN · ssh on nfs-02
+1791705945.795,14,notification,UNKNOWN · ssh on nfs-02
+1791705945.858,33,notification,UNKNOWN · ssh on nfs-02
+1791705945.900,15,notification,UNKNOWN · ssh on nfs-02
+1791705946.128,10,notification,UNKNOWN · ssh on nfs-02
+1791705946.247,4,notification,UNKNOWN · ssh on nfs-02
+1791705946.279,13,notification,UNKNOWN · ssh on nfs-02
+1791705946.301,20,notification,UNKNOWN · ssh on nfs-02
+1791705946.322,11,notification,UNKNOWN · ssh on nfs-02
+1791705946.351,0,notification,UNKNOWN · ssh on nfs-02
+1791705946.409,37,notification,UNKNOWN · ssh on nfs-02
+1791705946.455,28,notification,UNKNOWN · ssh on nfs-02
+1791705946.493,17,notification,UNKNOWN · ssh on nfs-02
+1791705946.556,29,notification,UNKNOWN · ssh on nfs-02
+1791705946.570,12,notification,UNKNOWN · ssh on nfs-02
+1791705946.620,6,notification,UNKNOWN · ssh on nfs-02
+1791705946.635,34,notification,UNKNOWN · ssh on nfs-02
+1791705946.658,41,notification,UNKNOWN · ssh on nfs-02
+1791705946.686,44,notification,UNKNOWN · ssh on nfs-02
+1791705947.430,18,notification,UNKNOWN · ssh on nfs-02
+1791705947.486,3,notification,UNKNOWN · ssh on nfs-02
+1791705947.821,47,notification,UNKNOWN · ssh on nfs-02
+1791705948.066,38,notification,UNKNOWN · ssh on nfs-02
+1791705948.246,49,notification,UNKNOWN · ssh on nfs-02
+1791705948.444,48,notification,UNKNOWN · ssh on nfs-02
+1791705948.623,45,notification,UNKNOWN · ssh on nfs-02
+1791705948.664,46,notification,UNKNOWN · ssh on nfs-02
+1791705949.010,40,notification,UNKNOWN · ssh on nfs-02
+1791705949.048,16,notification,UNKNOWN · ssh on nfs-02
+1791705949.089,8,notification,UNKNOWN · ssh on nfs-02
+1791705949.096,43,notification,UNKNOWN · ssh on nfs-02
+1791705949.103,19,notification,UNKNOWN · ssh on nfs-02
+1791705949.156,25,notification,UNKNOWN · ssh on nfs-02
+1791705949.172,36,notification,UNKNOWN · ssh on nfs-02
+1791705949.247,31,notification,UNKNOWN · ssh on nfs-02
+1791705949.254,22,notification,UNKNOWN · ssh on nfs-02
+1791705959.529,32,notification,CRITICAL · containerd on k8s-node-54
+1791705959.554,39,notification,CRITICAL · containerd on k8s-node-54
+1791705959.561,13,notification,CRITICAL · containerd on k8s-node-54
+1791705959.611,23,notification,CRITICAL · containerd on k8s-node-54
+1791705959.611,31,notification,CRITICAL · containerd on k8s-node-54
+1791705959.611,18,notification,CRITICAL · containerd on k8s-node-54
+1791705959.611,26,notification,CRITICAL · containerd on k8s-node-54
+1791705959.977,8,notification,CRITICAL · containerd on k8s-node-54
+1791705960.203,17,notification,CRITICAL · containerd on k8s-node-54
+1791705960.254,1,notification,CRITICAL · containerd on k8s-node-54
+1791705961.064,36,notification,CRITICAL · containerd on k8s-node-54
+1791705961.075,15,notification,CRITICAL · containerd on k8s-node-54
+1791705961.099,41,notification,CRITICAL · containerd on k8s-node-54
+1791705961.105,14,notification,CRITICAL · containerd on k8s-node-54
+1791705961.131,19,notification,CRITICAL · containerd on k8s-node-54
+1791705961.224,4,notification,CRITICAL · containerd on k8s-node-54
+1791705961.288,5,notification,CRITICAL · containerd on k8s-node-54
+1791705961.347,35,notification,CRITICAL · containerd on k8s-node-54
+1791705961.356,3,notification,CRITICAL · containerd on k8s-node-54
+1791705961.365,10,notification,CRITICAL · containerd on k8s-node-54
+1791705962.069,12,notification,CRITICAL · containerd on k8s-node-54
+1791705963.095,43,notification,CRITICAL · containerd on k8s-node-54
+1791705963.102,37,notification,CRITICAL · containerd on k8s-node-54
+1791705963.145,28,notification,CRITICAL · containerd on k8s-node-54
+1791705963.165,2,notification,CRITICAL · containerd on k8s-node-54
+1791705963.305,20,notification,CRITICAL · containerd on k8s-node-54
+1791705963.340,34,notification,CRITICAL · containerd on k8s-node-54
+1791705963.382,7,notification,CRITICAL · containerd on k8s-node-54
+1791705963.403,49,notification,CRITICAL · containerd on k8s-node-54
+1791705963.417,16,notification,CRITICAL · containerd on k8s-node-54
+1791705963.449,47,notification,CRITICAL · containerd on k8s-node-54
+1791705963.472,48,notification,CRITICAL · containerd on k8s-node-54
+1791705964.225,-1,command,quit
+1791705966.461,-1,stopped,50
+1791705967.235,25,notification,CRITICAL · containerd on k8s-node-54

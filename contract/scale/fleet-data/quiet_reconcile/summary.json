@@ -1,0 +1,528 @@
+{
+ "run": "contract/scale/fleet-data/quiet_reconcile",
+ "phases": [
+  {
+   "label": "(add 12 quiet user)",
+   "start": 1791713211.901,
+   "end": 1791713237.742,
+   "minutes": 0.43068333466847736,
+   "byname": {
+    "n": 19,
+    "median": 0.0765,
+    "p95": 3.8953,
+    "max": 4.7892,
+    "failed": 0,
+    "over_500ms": 2,
+    "over_2s": 2,
+    "worst_minute_p95": 3.8953
+   },
+   "web": {
+    "n": 18,
+    "median": 0.0763,
+    "p95": 4.019,
+    "max": 5.6631,
+    "failed": 0,
+    "over_500ms": 3,
+    "over_2s": 2,
+    "worst_minute_p95": 4.019
+   },
+   "m1_cores": 1.45665241575,
+   "m2_cores": 0.100525083625,
+   "cluster_cores": 1.6129315295,
+   "m1_mem_mib": {
+    "start": 2456,
+    "peak": 2732,
+    "end": 2340,
+    "rss_end": 2269
+   },
+   "clients_cores": 0.6583333333333333,
+   "clients_rss_mib": {
+    "start": 25,
+    "peak": 1447,
+    "end": 1447
+   },
+   "engines": 0,
+   "live": 0,
+   "delay_live": {
+    "n": 0,
+    "median": null,
+    "p95": null,
+    "max": null
+   },
+   "delay_quiet": {
+    "n": 43,
+    "median": 0.09500002861022949,
+    "p95": 0.24699997901916504,
+    "max": 0.3320000171661377
+   },
+   "rpm_live": {
+    "clients": 0,
+    "mean": null,
+    "max": null,
+    "paths": {}
+   },
+   "rpm_quiet": {
+    "clients": 0,
+    "mean": null,
+    "max": null,
+    "paths": {
+     "/v1/objects/services": 250.76,
+     "/v1/status/IcingaApplication": 90.55,
+     "/v1/objects/zones": 55.73,
+     "/v1/objects/endpoints": 34.83,
+     "/v1/status/CIB": 34.83,
+     "/v1": 27.86
+    }
+   },
+   "rpm_all": 745.3271909095179,
+   "streams_opened": 36,
+   "engine_cores_live": null,
+   "engine_cores_quiet": null,
+   "http_clients": 39,
+   "m1_relay_items": {
+    "max": 1,
+    "last": 0,
+    "mean": 0.2
+   },
+   "m2_relay_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 257.01666666666665,
+    "last": 254.43333333333334,
+    "mean": 228.58666666666667
+   },
+   "m2_work_rate": {
+    "max": 342.76666666666665,
+    "last": 342.5
+   },
+   "m1_relay_rate": {
+    "max": 559.95,
+    "last": 555.9333333333333,
+    "mean": 529.7633333333333
+   },
+   "m2_relay_rate": {
+    "max": 559.9,
+    "last": 555.9666666666667
+   },
+   "pending_callbacks_max": 0,
+   "latency_avg": 0.0009096356045210852,
+   "status_answer_max": 4.820600509643555,
+   "icinga_connection_timeouts": 1,
+   "icinga_jsonrpc_waits": 4,
+   "icinga_jsonrpc_wait_max_ms": 5947,
+   "icinga_relay_items_max": null,
+   "loads": {
+    "First": 12
+   },
+   "reconciles": 0,
+   "reconciles_found": 0,
+   "reconcile_found_objects": 0,
+   "load_took_s": {
+    "First": 20.783
+   },
+   "plans_first": {
+    "n": 12,
+    "first_in_min": 5.465666667620341,
+    "last_in_min": 9.912116666634878,
+    "largest_bunch_60s": 4
+   },
+   "reconnecting": 0,
+   "connected_events": 12,
+   "completed": 12
+  },
+  {
+   "label": "Q",
+   "start": 1791713237.742,
+   "end": 1791714737.747,
+   "minutes": 25.00008333126704,
+   "byname": {
+    "n": 1500,
+    "median": 0.0563,
+    "p95": 0.0682,
+    "max": 0.0914,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0763
+   },
+   "web": {
+    "n": 1500,
+    "median": 0.0561,
+    "p95": 0.0679,
+    "max": 0.924,
+    "failed": 0,
+    "over_500ms": 1,
+    "over_2s": 0,
+    "worst_minute_p95": 0.0736
+   },
+   "m1_cores": 0.2551045820827218,
+   "m2_cores": 0.14072060497531688,
+   "cluster_cores": 0.46266766855703806,
+   "m1_mem_mib": {
+    "start": 2338,
+    "peak": 2513,
+    "end": 2388,
+    "rss_end": 2317
+   },
+   "clients_cores": 0.23122081387591728,
+   "clients_rss_mib": {
+    "start": 1447,
+    "peak": 1800,
+    "end": 1772
+   },
+   "engines": 12,
+   "live": 0,
+   "delay_live": {
+    "n": 0,
+    "median": null,
+    "p95": null,
+    "max": null
+   },
+   "delay_quiet": {
+    "n": 18028,
+    "median": 2.004500150680542,
+    "p95": 4.137900114059448,
+    "max": 5.4028000831604
+   },
+   "rpm_live": {
+    "clients": 0,
+    "mean": null,
+    "max": null,
+    "paths": {}
+   },
+   "rpm_quiet": {
+    "clients": 12,
+    "mean": 13.549954834603813,
+    "max": 20.55993146859442,
+    "paths": {
+     "/v1/objects/services": 7.58,
+     "/v1/objects/notifications": 3.02,
+     "/v1/status/IcingaApplication": 0.48,
+     "/v1/status/CIB": 0.34,
+     "/v1/objects/endpoints": 0.34,
+     "/v1/status/ApiListener": 0.21
+    }
+   },
+   "rpm_all": 162.59945801524574,
+   "streams_opened": 0,
+   "engine_cores_live": null,
+   "engine_cores_quiet": 0.015359625334822553,
+   "http_clients": 43,
+   "m1_relay_items": {
+    "max": 9,
+    "last": 0,
+    "mean": 0.12333333333333334
+   },
+   "m2_relay_items": {
+    "max": 10,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 372.55,
+    "last": 255.95,
+    "mean": 310.5563333333333
+   },
+   "m2_work_rate": {
+    "max": 353.76666666666665,
+    "last": 332.3333333333333
+   },
+   "m1_relay_rate": {
+    "max": 644.8666666666667,
+    "last": 549.0333333333333,
+    "mean": 587.6038888888888
+   },
+   "m2_relay_rate": {
+    "max": 644.9,
+    "last": 549.1
+   },
+   "pending_callbacks_max": 0,
+   "latency_avg": 0.0009153007620225296,
+   "status_answer_max": 0.008635520935058594,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": 15,
+   "loads": {
+    "Reconcile": 40
+   },
+   "reconciles": 40,
+   "reconciles_found": 23,
+   "reconcile_found_objects": 54009,
+   "load_took_s": {
+    "Reconcile": 3.522
+   },
+   "reconnecting": 0,
+   "connected_events": 0,
+   "completed": 0
+  },
+  {
+   "label": "end",
+   "start": 1791714737.747,
+   "end": 1791714742.333,
+   "minutes": 0.07643333276112875,
+   "byname": {
+    "n": 4,
+    "median": 0.0601,
+    "p95": 0.0643,
+    "max": 0.0643,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": null
+   },
+   "web": {
+    "n": 4,
+    "median": 0.0561,
+    "p95": 0.0562,
+    "max": 0.0562,
+    "failed": 0,
+    "over_500ms": 0,
+    "over_2s": 0,
+    "worst_minute_p95": null
+   },
+   "m1_cores": 0.2721469956044956,
+   "m2_cores": 0.12448902847308121,
+   "cluster_cores": 0.4614212903897639,
+   "m1_mem_mib": {
+    "start": 2388,
+    "peak": 2388,
+    "end": 2388,
+    "rss_end": 2317
+   },
+   "clients_cores": 0.6160422431921065,
+   "clients_rss_mib": {
+    "start": 1772,
+    "peak": 1772,
+    "end": 1599
+   },
+   "engines": 12,
+   "live": 0,
+   "delay_live": {
+    "n": 0,
+    "median": null,
+    "p95": null,
+    "max": null
+   },
+   "delay_quiet": {
+    "n": 0,
+    "median": null,
+    "p95": null,
+    "max": null
+   },
+   "rpm_live": {
+    "clients": 0,
+    "mean": null,
+    "max": null,
+    "paths": {}
+   },
+   "rpm_quiet": {
+    "clients": 12,
+    "mean": 0.0,
+    "max": 0.0,
+    "paths": {}
+   },
+   "rpm_all": 0.0,
+   "streams_opened": 0,
+   "engine_cores_live": null,
+   "engine_cores_quiet": null,
+   "http_clients": 21,
+   "m1_relay_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_relay_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_sync_items": {
+    "max": 0,
+    "last": 0,
+    "mean": 0
+   },
+   "m2_sync_items": {
+    "max": 0,
+    "last": 0
+   },
+   "m1_work_rate": {
+    "max": 259.1333333333333,
+    "last": 259.1333333333333,
+    "mean": 259.1333333333333
+   },
+   "m2_work_rate": {
+    "max": 330.5,
+    "last": 330.5
+   },
+   "m1_relay_rate": {
+    "max": 551.1833333333333,
+    "last": 551.1833333333333,
+    "mean": 551.1833333333333
+   },
+   "m2_relay_rate": {
+    "max": 551.1833333333333,
+    "last": 551.1833333333333
+   },
+   "pending_callbacks_max": 0,
+   "latency_avg": 0.0008212083761274749,
+   "status_answer_max": 0.0014028549194335938,
+   "icinga_connection_timeouts": 0,
+   "icinga_jsonrpc_waits": 0,
+   "icinga_jsonrpc_wait_max_ms": null,
+   "icinga_relay_items_max": null,
+   "loads": {},
+   "reconciles": 0,
+   "reconciles_found": 0,
+   "reconcile_found_objects": 0,
+   "load_took_s": {},
+   "reconnecting": 0,
+   "connected_events": 0,
+   "completed": 0
+  }
+ ],
+ "starts": [
+  {
+   "client": 0,
+   "start": 1791713211.903,
+   "mode": "quiet user",
+   "connected": 1791713233.237,
+   "complete": 1791713233.293
+  },
+  {
+   "client": 1,
+   "start": 1791713211.904,
+   "mode": "quiet user",
+   "connected": 1791713233.389,
+   "complete": 1791713233.517
+  },
+  {
+   "client": 2,
+   "start": 1791713211.905,
+   "mode": "quiet user",
+   "connected": 1791713234.907,
+   "complete": 1791713235.031
+  },
+  {
+   "client": 3,
+   "start": 1791713211.906,
+   "mode": "quiet user",
+   "complete": 1791713233.553,
+   "connected": 1791713233.556
+  },
+  {
+   "client": 4,
+   "start": 1791713211.907,
+   "mode": "quiet user",
+   "connected": 1791713232.952,
+   "complete": 1791713232.952
+  },
+  {
+   "client": 5,
+   "start": 1791713211.908,
+   "mode": "quiet user",
+   "connected": 1791713233.209,
+   "complete": 1791713233.302
+  },
+  {
+   "client": 6,
+   "start": 1791713211.909,
+   "mode": "quiet user",
+   "connected": 1791713234.924,
+   "complete": 1791713235.086
+  },
+  {
+   "client": 7,
+   "start": 1791713211.91,
+   "mode": "quiet user",
+   "connected": 1791713235.356,
+   "complete": 1791713235.463
+  },
+  {
+   "client": 8,
+   "start": 1791713211.911,
+   "mode": "quiet user",
+   "connected": 1791713235.334,
+   "complete": 1791713235.458
+  },
+  {
+   "client": 9,
+   "start": 1791713211.912,
+   "mode": "quiet user",
+   "connected": 1791713235.011,
+   "complete": 1791713235.141
+  },
+  {
+   "client": 10,
+   "start": 1791713211.913,
+   "mode": "quiet user",
+   "connected": 1791713233.002,
+   "complete": 1791713233.002
+  },
+  {
+   "client": 11,
+   "start": 1791713211.917,
+   "mode": "quiet user",
+   "connected": 1791713234.749,
+   "complete": 1791713234.808
+  }
+ ],
+ "reconciles_total": 40,
+ "reconciles_found_total": 23,
+ "reconcile_findings": {
+  "reconciles": 40,
+  "with_any": 23,
+  "with_marker": 8,
+  "with_in_flight": 1,
+  "with_missed": 0,
+  "with_reachable_only": 0,
+  "with_flapping_only": 16,
+  "with_state_type_only": 0,
+  "changed_fields": {
+   "flapping": 54000,
+   "since": 7,
+   "state+state_type+since": 2
+  },
+  "objects": {
+   "flapping only": 54000,
+   "marker": 8,
+   "in flight": 1
+  },
+  "missed": [],
+  "by_mode": {
+   "live": {},
+   "quiet": {
+    "flapping only": 54000,
+    "marker": 8,
+    "in flight": 1
+   }
+  }
+ },
+ "loads_total": {
+  "First": 12,
+  "Reconcile": 40
+ },
+ "found_by_kind": {
+  "First": 0,
+  "Reconcile": 54009
+ },
+ "events": []
+}

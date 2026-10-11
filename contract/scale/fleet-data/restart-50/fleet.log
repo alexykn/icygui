@@ -1,0 +1,19 @@
+
+running 1 test
+test fleet::fleet ... fleet: add 5 live user
+fleet: add 45 quiet background
+fleet: 50 engines, 12 connected, 5 live, 12 loaded, 56 marker results seen, rss 1702 MiB
+fleet: 50 engines, 22 connected, 5 live, 22 loaded, 431 marker results seen, rss 3577 MiB
+fleet: 50 engines, 40 connected, 5 live, 40 loaded, 1143 marker results seen, rss 5177 MiB
+fleet: mark R50
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 1988 marker results seen, rss 6151 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 2781 marker results seen, rss 6151 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 3568 marker results seen, rss 6151 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 4243 marker results seen, rss 6151 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 5158 marker results seen, rss 6152 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 5943 marker results seen, rss 6169 MiB
+fleet: mark B-restart
+fleet: mark B-restart-up
+fleet: 50 engines, 46 connected, 5 live, 50 loaded, 6416 marker results seen, rss 6170 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 7196 marker results seen, rss 6528 MiB
+fleet: 50 engines, 50 connected, 5 live, 50 loaded, 7669 marker results seen, rss 7666 MiB

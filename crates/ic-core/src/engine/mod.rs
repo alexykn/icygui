@@ -525,6 +525,15 @@ pub(crate) struct Engine {
     reconcile_streak: u32,
     /// The load in flight found something no event announced.
     load_found: bool,
+    /// How many objects the load in flight found changed without an
+    /// event (instrumentation: logged when the load is over).
+    load_found_count: usize,
+    /// Periodic reconciles completed this run, and how many of them found
+    /// something the stream missed (instrumentation, PLAN.md §4.2: logged
+    /// with every load, so a measurement counts how often the safety net
+    /// catches anything).
+    reconciles: u64,
+    reconciles_found: u64,
     /// Since when the stream has been continuous (the session went live).
     continuous_since: Option<Instant>,
     /// The last quiet status poll's counts (kept across sessions).
@@ -685,6 +694,9 @@ impl Engine {
             prefetched: VecDeque::new(),
             reconcile_streak: 0,
             load_found: false,
+            load_found_count: 0,
+            reconciles: 0,
+            reconciles_found: 0,
             continuous_since: None,
             quiet_counts: None,
             count_offsets: VecDeque::new(),
@@ -1285,6 +1297,7 @@ impl Engine {
             self.start_at = None;
         }
         self.load_found = false;
+        self.load_found_count = 0;
         self.reload_full = false;
         self.view_reload = false;
         // A fuller view than the one the store was filled from brings
@@ -1423,6 +1436,28 @@ impl Engine {
     fn load_done(&mut self, kind: LoadKind) {
         let first = kind == LoadKind::First;
         let now = Instant::now();
+        if kind == LoadKind::Reconcile {
+            self.reconciles += 1;
+            if self.load_found {
+                self.reconciles_found += 1;
+            }
+        }
+        // Instrumentation (PLAN.md §4.2, "the reconcile becomes a safety
+        // net"): every load says how long it took and what it found that
+        // no event announced; the counts tell how often a periodic
+        // reconcile catches something the stream missed.
+        tracing::info!(
+            environment = %self.spec.environment.name,
+            kind = ?kind,
+            quiet = self.quiet(),
+            took_ms = self
+                .last_load_start
+                .map_or(0, |start| now.saturating_duration_since(start).as_millis()),
+            found = self.load_found_count,
+            reconciles = self.reconciles,
+            reconciles_found = self.reconciles_found,
+            "load done"
+        );
         self.load = None;
         self.loaded = true;
         // The objects are this node's now.
@@ -2306,22 +2341,72 @@ impl Engine {
             // the status polls' offsets taken meanwhile are no references
             // (see `quiet.rs`).
             self.load_found = true;
+            self.load_found_count += found.len();
             self.count_offsets.clear();
             self.count_heard = None;
         }
         let mut stale = Vec::new();
+        // Instrumentation (PLAN.md §4.2, "the reconcile becomes a safety
+        // net"): what a periodic reconcile found is logged with how long
+        // ago Icinga says the state began, so a change the stream was
+        // still bringing (Icinga writes the stream in 5 s batches) can be
+        // told from one the stream missed.
+        let reconcile = matches!(self.load, Some((_, LoadKind::Reconcile)));
+        let icinga_now = self.evaluation_time();
         for Discovered {
             object,
             before,
             after,
         } in &found
         {
-            tracing::debug!(
-                %object,
-                from = ?before.state,
-                to = ?after.map(|after| after.state),
-                "a query found a change no event announced"
-            );
+            if reconcile {
+                // Which of the fields the store compares differ.
+                let changed = after.map_or_else(
+                    || "gone".to_owned(),
+                    |after| {
+                        [
+                            ("state", before.state != after.state),
+                            ("state_type", before.state_type != after.state_type),
+                            ("since", before.since != after.since),
+                            ("acknowledged", before.acknowledged != after.acknowledged),
+                            (
+                                "downtime_depth",
+                                before.downtime_depth != after.downtime_depth,
+                            ),
+                            ("flapping", before.flapping != after.flapping),
+                            ("reachable", before.reachable != after.reachable),
+                        ]
+                        .iter()
+                        .filter(|(_, differs)| *differs)
+                        .map(|(name, _)| *name)
+                        .collect::<Vec<_>>()
+                        .join("+")
+                    },
+                );
+                tracing::info!(
+                    environment = %self.spec.environment.name,
+                    %object,
+                    changed,
+                    since_shift_s = after.map(|after| {
+                        after.since.as_unix_seconds() - before.since.as_unix_seconds()
+                    }),
+                    from = ?before.state,
+                    to = ?after.map(|after| after.state),
+                    began_s_ago = after.map(|after| {
+                        icinga_now.as_unix_seconds() - after.since.as_unix_seconds()
+                    }),
+                    acknowledged = ?(before.acknowledged, after.map(|after| after.acknowledged)),
+                    downtime_depth = ?(before.downtime_depth, after.map(|after| after.downtime_depth)),
+                    "a reconcile found a change no event announced"
+                );
+            } else {
+                tracing::debug!(
+                    %object,
+                    from = ?before.state,
+                    to = ?after.map(|after| after.state),
+                    "a query found a change no event announced"
+                );
+            }
             let Some(after) = after else {
                 continue;
             };

@@ -36,3 +36,4 @@ uuid = { version = "1.27.0", features = ["v4"] }
 ic-mock = { path = "../ic-mock" }
 tempfile = "3.27.0"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tracing-subscriber.workspace = true

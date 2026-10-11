@@ -1,0 +1,14 @@
+1791706856.359,started: fleet pid 2081
+1791706953.357,40 loaded after 97 s
+1791706953.360,mark R40
+1791707133.365,mark B-restart
+1791707133.369,restart master-01
+1791707140.201,restarted master-01 (seed stopped: 10)
+1791707145.341,master-01 answers
+1791707145.383,mark B-restart-up
+1791707745.389,mark B-reload
+1791707745.392,reload master-01
+1791707747.526,master-01 answers after the reload
+1791707747.529,mark B-reload-up
+1791708347.535,mark end
+1791708347.539,raw streams: 0

@@ -1,0 +1,1162 @@
+t,client,event,detail
+1791706079.133,-1,command,add 5 live user
+1791706079.133,-1,command,add 45 quiet background
+1791706079.135,5,start,quiet background
+1791706079.136,6,start,quiet background
+1791706079.138,7,start,quiet background
+1791706079.139,8,start,quiet background
+1791706079.140,9,start,quiet background
+1791706079.141,10,start,quiet background
+1791706079.142,11,start,quiet background
+1791706079.143,12,start,quiet background
+1791706079.145,13,start,quiet background
+1791706079.147,14,start,quiet background
+1791706079.148,15,start,quiet background
+1791706079.150,16,start,quiet background
+1791706079.152,17,start,quiet background
+1791706079.152,18,start,quiet background
+1791706079.154,19,start,quiet background
+1791706079.156,20,start,quiet background
+1791706079.160,21,start,quiet background
+1791706079.164,22,start,quiet background
+1791706079.165,23,start,quiet background
+1791706079.170,24,start,quiet background
+1791706079.173,25,start,quiet background
+1791706079.176,26,start,quiet background
+1791706079.179,27,start,quiet background
+1791706079.181,28,start,quiet background
+1791706079.184,29,start,quiet background
+1791706079.185,30,start,quiet background
+1791706079.187,31,start,quiet background
+1791706079.190,32,start,quiet background
+1791706079.192,33,start,quiet background
+1791706079.210,34,start,quiet background
+1791706079.211,35,start,quiet background
+1791706079.213,36,start,quiet background
+1791706079.215,37,start,quiet background
+1791706079.217,38,start,quiet background
+1791706079.218,39,start,quiet background
+1791706079.221,40,start,quiet background
+1791706079.222,41,start,quiet background
+1791706079.223,42,start,quiet background
+1791706079.227,43,start,quiet background
+1791706079.228,44,start,quiet background
+1791706079.229,45,start,quiet background
+1791706079.236,46,start,quiet background
+1791706079.238,47,start,quiet background
+1791706079.243,48,start,quiet background
+1791706079.246,49,start,quiet background
+1791706079.246,49,state,connecting 1
+1791706079.248,0,start,live user
+1791706079.250,1,start,live user
+1791706079.252,2,start,live user
+1791706079.254,3,start,live user
+1791706079.255,4,start,live user
+1791706079.255,4,state,connecting 1
+1791706079.255,5,state,connecting 1
+1791706079.255,6,state,connecting 1
+1791706079.255,7,state,connecting 1
+1791706079.255,8,state,connecting 1
+1791706079.255,9,state,connecting 1
+1791706079.255,10,state,connecting 1
+1791706079.255,11,state,connecting 1
+1791706079.255,12,state,connecting 1
+1791706079.255,13,state,connecting 1
+1791706079.255,14,state,connecting 1
+1791706079.255,15,state,connecting 1
+1791706079.255,16,state,connecting 1
+1791706079.255,17,state,connecting 1
+1791706079.255,18,state,connecting 1
+1791706079.255,19,state,connecting 1
+1791706079.255,20,state,connecting 1
+1791706079.255,21,state,connecting 1
+1791706079.255,22,state,connecting 1
+1791706079.255,23,state,connecting 1
+1791706079.255,24,state,connecting 1
+1791706079.255,25,state,connecting 1
+1791706079.255,26,state,connecting 1
+1791706079.255,27,state,connecting 1
+1791706079.255,28,state,connecting 1
+1791706079.255,29,state,connecting 1
+1791706079.255,30,state,connecting 1
+1791706079.255,31,state,connecting 1
+1791706079.255,32,state,connecting 1
+1791706079.255,33,state,connecting 1
+1791706079.255,34,state,connecting 1
+1791706079.255,35,state,connecting 1
+1791706079.255,36,state,connecting 1
+1791706079.255,37,state,connecting 1
+1791706079.255,38,state,connecting 1
+1791706079.255,39,state,connecting 1
+1791706079.255,40,state,connecting 1
+1791706079.255,41,state,connecting 1
+1791706079.255,42,state,connecting 1
+1791706079.255,43,state,connecting 1
+1791706079.255,44,state,connecting 1
+1791706079.255,45,state,connecting 1
+1791706079.255,46,state,connecting 1
+1791706079.255,47,state,connecting 1
+1791706079.255,48,state,connecting 1
+1791706079.255,0,state,connecting 1
+1791706079.255,1,state,connecting 1
+1791706079.255,2,state,connecting 1
+1791706079.255,3,state,connecting 1
+1791706079.260,6,state,loading Hosts 0
+1791706079.261,7,state,loading Hosts 0
+1791706079.261,5,state,loading Hosts 0
+1791706079.272,10,state,loading Hosts 0
+1791706079.276,11,state,loading Hosts 0
+1791706079.281,13,state,loading Hosts 0
+1791706079.282,15,state,loading Hosts 0
+1791706079.282,8,state,loading Hosts 0
+1791706079.294,9,state,loading Hosts 0
+1791706079.298,19,state,loading Hosts 0
+1791706079.305,12,state,loading Hosts 0
+1791706079.305,20,state,loading Hosts 0
+1791706079.309,17,state,loading Hosts 0
+1791706079.313,18,state,loading Hosts 0
+1791706079.314,16,state,loading Hosts 0
+1791706079.322,21,state,loading Hosts 0
+1791706079.332,22,state,loading Hosts 0
+1791706079.336,27,state,loading Hosts 0
+1791706079.341,26,state,loading Hosts 0
+1791706079.341,31,state,loading Hosts 0
+1791706079.343,25,state,loading Hosts 0
+1791706079.345,23,state,loading Hosts 0
+1791706079.345,24,state,loading Hosts 0
+1791706079.348,32,state,loading Hosts 0
+1791706079.349,14,state,loading Hosts 0
+1791706079.352,29,state,loading Hosts 0
+1791706079.353,34,state,loading Hosts 0
+1791706079.355,28,state,loading Hosts 0
+1791706079.361,35,state,loading Hosts 0
+1791706079.362,36,state,loading Hosts 0
+1791706079.362,41,state,loading Hosts 0
+1791706079.362,33,state,loading Hosts 0
+1791706079.363,30,state,loading Hosts 0
+1791706079.365,37,state,loading Hosts 0
+1791706079.367,38,state,loading Hosts 0
+1791706079.368,39,state,loading Hosts 0
+1791706079.456,43,state,loading Hosts 0
+1791706079.577,42,state,loading Hosts 0
+1791706079.730,3,state,loading Hosts 0
+1791706079.814,45,state,loading Hosts 0
+1791706079.842,40,state,loading Hosts 0
+1791706080.153,1,state,loading Hosts 0
+1791706080.153,48,state,loading Hosts 0
+1791706080.171,46,state,loading Hosts 0
+1791706080.171,4,state,loading Hosts 0
+1791706080.349,2,state,loading Hosts 0
+1791706080.471,49,state,loading Hosts 0
+1791706081.370,47,state,loading Hosts 0
+1791706081.579,44,state,loading Hosts 0
+1791706081.592,0,state,loading Hosts 0
+1791706082.255,3,state,loading Services 0
+1791706082.570,4,state,loading Services 0
+1791706082.678,11,state,loading Services 0
+1791706082.682,2,state,loading Services 0
+1791706082.745,1,state,loading Services 0
+1791706082.804,0,state,loading Services 0
+1791706090.037,25,state,loading Services 0
+1791706090.098,39,state,loading Services 0
+1791706090.098,9,state,loading Services 0
+1791706093.978,3,state,loading Details 0
+1791706094.434,4,state,loading Details 0
+1791706094.469,0,state,loading Details 0
+1791706094.632,2,state,loading Details 0
+1791706094.767,1,state,loading Details 0
+1791706094.807,11,state,loading Details 0
+1791706095.217,3,state,connected master-01
+1791706095.521,0,state,connected master-01
+1791706095.583,3,complete,32933 services
+1791706095.817,0,complete,32933 services
+1791706095.944,4,state,connected master-01
+1791706096.205,2,state,connected master-01
+1791706096.221,4,complete,32933 services
+1791706096.221,1,state,connected master-01
+1791706096.233,11,state,connected master-01
+1791706096.291,1,complete,32933 services
+1791706096.356,11,complete,32933 services
+1791706096.407,2,complete,32933 services
+1791706096.776,42,state,loading Services 0
+1791706096.940,28,state,loading Services 0
+1791706097.551,5,state,loading Services 0
+1791706099.098,24,state,loading Services 0
+1791706099.368,9,state,loading Details 0
+1791706099.516,39,state,loading Details 0
+1791706100.438,9,state,connected master-01
+1791706100.708,9,complete,32933 services
+1791706100.841,39,state,connected master-01
+1791706101.090,39,complete,32933 services
+1791706102.394,31,state,loading Services 0
+1791706103.535,20,state,loading Services 0
+1791706104.928,25,state,loading Details 0
+1791706105.189,28,state,loading Details 0
+1791706105.364,30,state,loading Services 0
+1791706105.665,5,state,loading Details 0
+1791706105.902,42,state,loading Details 0
+1791706106.408,28,state,connected master-01
+1791706106.567,25,state,connected master-01
+1791706106.578,26,state,loading Services 0
+1791706106.955,25,complete,32933 services
+1791706107.497,28,complete,32933 services
+1791706107.617,5,state,connected master-01
+1791706107.948,5,complete,32933 services
+1791706108.101,42,state,connected master-01
+1791706108.247,27,state,loading Services 0
+1791706108.375,42,complete,32933 services
+1791706109.729,47,state,loading Services 0
+1791706109.834,23,state,loading Services 0
+1791706112.794,43,state,loading Services 0
+1791706116.083,44,state,loading Services 0
+1791706116.423,13,state,loading Services 0
+1791706116.906,31,state,loading Details 0
+1791706118.060,8,state,loading Services 0
+1791706118.736,31,state,connected master-01
+1791706119.327,31,complete,32933 services
+1791706120.304,38,state,loading Services 0
+1791706120.733,30,state,loading Details 0
+1791706121.486,14,state,loading Services 0
+1791706123.497,32,state,loading Services 0
+1791706123.524,30,state,connected master-01
+1791706124.141,30,complete,32933 services
+1791706124.650,6,state,loading Services 0
+1791706125.099,27,state,loading Details 0
+1791706126.356,22,state,loading Services 0
+1791706126.477,24,state,loading Details 0
+1791706127.013,47,state,loading Details 0
+1791706127.045,27,state,connected master-01
+1791706127.620,27,complete,32933 services
+1791706128.247,36,state,loading Services 0
+1791706128.312,37,state,loading Services 0
+1791706128.622,23,state,loading Details 0
+1791706129.171,24,state,connected master-01
+1791706129.983,24,complete,32933 services
+1791706130.078,20,state,loading Details 0
+1791706130.137,47,state,connected master-01
+1791706130.610,33,state,loading Services 0
+1791706131.166,47,complete,32933 services
+1791706131.380,23,state,connected master-01
+1791706131.933,23,complete,32933 services
+1791706132.396,20,state,connected master-01
+1791706132.894,20,complete,32933 services
+1791706134.189,26,state,loading Details 0
+1791706135.605,15,state,loading Services 0
+1791706136.333,13,state,loading Details 0
+1791706136.470,44,state,loading Details 0
+1791706137.171,26,state,connected master-01
+1791706137.951,26,complete,32933 services
+1791706138.098,44,state,connected master-01
+1791706138.163,13,state,connected master-01
+1791706138.317,38,state,loading Details 0
+1791706138.518,44,complete,32933 services
+1791706138.523,13,complete,32933 services
+1791706141.132,38,state,connected master-01
+1791706141.132,38,complete,32933 services
+1791706141.170,16,state,loading Services 0
+1791706141.567,32,state,loading Details 0
+1791706141.615,6,state,loading Details 0
+1791706141.684,14,state,loading Details 0
+1791706143.198,14,state,connected master-01
+1791706143.519,7,state,loading Services 0
+1791706143.614,32,state,connected master-01
+1791706143.614,32,complete,32933 services
+1791706143.650,6,state,connected master-01
+1791706143.650,6,complete,32933 services
+1791706143.715,36,state,loading Details 0
+1791706143.715,14,complete,32933 services
+1791706143.780,22,state,loading Details 0
+1791706144.065,8,state,loading Details 0
+1791706144.215,36,state,connected master-01
+1791706144.215,36,notification,CRITICAL · disk / on k8s-node-31
+1791706144.387,37,state,loading Details 0
+1791706144.465,43,state,loading Details 0
+1791706144.465,36,complete,32933 services
+1791706144.543,33,state,loading Details 0
+1791706144.840,22,state,connected master-01
+1791706144.845,22,notification,CRITICAL · disk / on k8s-node-31
+1791706145.111,22,complete,32933 services
+1791706145.557,8,state,connected master-01
+1791706145.557,8,notification,CRITICAL · disk / on k8s-node-31
+1791706145.884,2,notification,CRITICAL · disk / on k8s-node-31
+1791706145.991,1,notification,CRITICAL · disk / on k8s-node-31
+1791706146.077,3,notification,CRITICAL · disk / on k8s-node-31
+1791706146.187,4,notification,CRITICAL · disk / on k8s-node-31
+1791706146.187,8,complete,32933 services
+1791706146.242,0,notification,CRITICAL · disk / on k8s-node-31
+1791706146.242,33,state,connected master-01
+1791706146.242,33,notification,CRITICAL · disk / on k8s-node-31
+1791706146.274,40,state,loading Services 0
+1791706146.412,33,complete,32933 services
+1791706146.529,43,state,connected master-01
+1791706146.529,43,notification,CRITICAL · disk / on k8s-node-31
+1791706146.579,15,state,loading Details 0
+1791706146.614,43,complete,32933 services
+1791706147.167,9,notification,CRITICAL · disk / on k8s-node-31
+1791706147.213,30,notification,CRITICAL · disk / on k8s-node-31
+1791706147.219,47,notification,CRITICAL · disk / on k8s-node-31
+1791706147.234,25,notification,CRITICAL · disk / on k8s-node-31
+1791706147.238,20,notification,CRITICAL · disk / on k8s-node-31
+1791706147.243,23,notification,CRITICAL · disk / on k8s-node-31
+1791706147.253,24,notification,CRITICAL · disk / on k8s-node-31
+1791706147.274,26,notification,CRITICAL · disk / on k8s-node-31
+1791706147.316,32,notification,CRITICAL · disk / on k8s-node-31
+1791706147.347,5,notification,CRITICAL · disk / on k8s-node-31
+1791706147.373,38,notification,CRITICAL · disk / on k8s-node-31
+1791706147.387,13,notification,CRITICAL · disk / on k8s-node-31
+1791706147.464,42,notification,CRITICAL · disk / on k8s-node-31
+1791706147.483,28,notification,CRITICAL · disk / on k8s-node-31
+1791706147.556,39,notification,CRITICAL · disk / on k8s-node-31
+1791706147.568,44,notification,CRITICAL · disk / on k8s-node-31
+1791706147.638,14,notification,CRITICAL · disk / on k8s-node-31
+1791706147.873,31,notification,CRITICAL · disk / on k8s-node-31
+1791706148.007,27,notification,CRITICAL · disk / on k8s-node-31
+1791706148.026,37,state,connected master-01
+1791706148.026,37,notification,CRITICAL · disk / on k8s-node-31
+1791706148.106,11,notification,CRITICAL · disk / on k8s-node-31
+1791706148.137,6,notification,CRITICAL · disk / on k8s-node-31
+1791706148.189,15,state,connected master-01
+1791706148.189,15,notification,CRITICAL · disk / on k8s-node-31
+1791706148.189,15,complete,32933 services
+1791706148.204,37,complete,32933 services
+1791706148.274,16,state,loading Details 0
+1791706149.044,16,state,connected master-01
+1791706149.044,16,notification,CRITICAL · disk / on k8s-node-31
+1791706149.092,7,state,loading Details 0
+1791706149.147,16,complete,32933 services
+1791706149.547,7,state,connected master-01
+1791706149.547,7,notification,CRITICAL · disk / on k8s-node-31
+1791706149.592,7,complete,32933 services
+1791706150.742,40,state,loading Details 0
+1791706150.965,40,state,connected master-01
+1791706150.965,40,notification,CRITICAL · disk / on k8s-node-31
+1791706151.062,40,complete,32933 services
+1791706155.875,18,state,loading Services 0
+1791706156.456,17,state,loading Services 0
+1791706157.310,21,state,loading Services 0
+1791706159.638,18,state,loading Details 0
+1791706160.451,18,state,connected master-01
+1791706160.451,18,notification,CRITICAL · disk / on k8s-node-31
+1791706160.606,29,state,loading Services 0
+1791706160.748,18,complete,32933 services
+1791706161.582,17,state,loading Details 0
+1791706161.582,46,state,loading Services 0
+1791706162.034,21,state,loading Details 0
+1791706163.110,17,state,connected master-01
+1791706163.110,17,notification,CRITICAL · disk / on k8s-node-31
+1791706163.396,10,state,loading Services 0
+1791706163.638,17,complete,32933 services
+1791706163.713,21,state,connected master-01
+1791706163.715,21,notification,CRITICAL · disk / on k8s-node-31
+1791706164.137,21,complete,32933 services
+1791706164.609,45,state,loading Services 0
+1791706164.656,49,state,loading Services 0
+1791706167.233,41,state,loading Services 0
+1791706167.535,29,state,loading Details 0
+1791706170.623,29,state,connected master-01
+1791706170.623,29,notification,CRITICAL · disk / on k8s-node-31
+1791706171.292,12,state,loading Services 0
+1791706171.691,29,complete,32933 services
+1791706171.834,34,state,loading Services 0
+1791706171.835,48,state,loading Services 0
+1791706173.539,46,state,loading Details 0
+1791706174.127,35,state,loading Services 0
+1791706176.592,19,state,loading Services 0
+1791706177.327,49,state,loading Details 0
+1791706177.575,46,state,connected master-01
+1791706177.575,46,notification,CRITICAL · disk / on k8s-node-31
+1791706177.581,46,complete,32933 services
+1791706177.971,10,state,loading Details 0
+1791706177.999,45,state,loading Details 0
+1791706178.365,10,state,connected master-01
+1791706178.408,10,notification,CRITICAL · disk / on k8s-node-31
+1791706178.736,10,complete,32933 services
+1791706178.994,49,state,connected master-01
+1791706178.996,49,notification,CRITICAL · disk / on k8s-node-31
+1791706179.125,41,state,loading Details 0
+1791706179.785,45,state,connected master-01
+1791706180.347,49,complete,32933 services
+1791706181.297,45,complete,32933 services
+1791706181.297,45,notification,CRITICAL · disk / on k8s-node-31
+1791706181.674,41,state,connected master-01
+1791706181.674,41,notification,CRITICAL · disk / on k8s-node-31
+1791706182.343,41,complete,32933 services
+1791706183.261,12,state,loading Details 0
+1791706183.261,12,state,connected master-01
+1791706183.261,12,complete,32933 services
+1791706183.336,12,notification,CRITICAL · disk / on k8s-node-31
+1791706184.678,34,state,loading Details 0
+1791706184.746,34,state,connected master-01
+1791706184.746,34,notification,CRITICAL · disk / on k8s-node-31
+1791706184.746,34,complete,32933 services
+1791706184.847,48,state,loading Details 0
+1791706184.856,48,state,connected master-01
+1791706184.856,48,notification,CRITICAL · disk / on k8s-node-31
+1791706184.856,48,complete,32933 services
+1791706184.968,19,state,loading Details 0
+1791706184.968,19,state,connected master-01
+1791706184.968,19,notification,CRITICAL · disk / on k8s-node-31
+1791706184.968,19,complete,32933 services
+1791706184.977,35,state,loading Details 0
+1791706184.977,35,state,connected master-01
+1791706184.977,35,notification,CRITICAL · disk / on k8s-node-31
+1791706184.977,35,complete,32933 services
+1791706185.619,-1,command,mark R50
+1791706185.619,-1,mark,R50
+1791706363.370,48,notification,UNKNOWN · ssh on kafka-01
+1791706363.380,39,notification,UNKNOWN · ssh on kafka-01
+1791706363.428,29,notification,UNKNOWN · ssh on kafka-01
+1791706363.460,22,notification,UNKNOWN · ssh on kafka-01
+1791706363.467,24,notification,UNKNOWN · ssh on kafka-01
+1791706363.472,44,notification,UNKNOWN · ssh on kafka-01
+1791706363.477,45,notification,UNKNOWN · ssh on kafka-01
+1791706363.486,10,notification,UNKNOWN · ssh on kafka-01
+1791706363.490,42,notification,UNKNOWN · ssh on kafka-01
+1791706363.496,40,notification,UNKNOWN · ssh on kafka-01
+1791706363.501,49,notification,UNKNOWN · ssh on kafka-01
+1791706363.518,46,notification,UNKNOWN · ssh on kafka-01
+1791706363.523,38,notification,UNKNOWN · ssh on kafka-01
+1791706363.578,15,notification,UNKNOWN · ssh on kafka-01
+1791706363.825,13,notification,UNKNOWN · ssh on kafka-01
+1791706363.849,7,notification,UNKNOWN · ssh on kafka-01
+1791706363.855,41,notification,UNKNOWN · ssh on kafka-01
+1791706363.860,6,notification,UNKNOWN · ssh on kafka-01
+1791706365.625,-1,command,mark B-restart
+1791706365.625,-1,mark,B-restart
+1791706366.152,3,notification,UNKNOWN · ssh on kafka-01
+1791706366.507,8,state,reconnecting 2 a heartbeat query failed: connection failed: error sending request for url (https://127.0.0.1:5665/v1/objects/services): client error (Connect): tls handshake eof
+1791706366.675,0,notification,UNKNOWN · ssh on kafka-01
+1791706366.711,17,notification,UNKNOWN · ssh on kafka-01
+1791706366.717,26,notification,UNKNOWN · ssh on kafka-01
+1791706367.092,4,notification,UNKNOWN · ssh on kafka-01
+1791706367.138,37,state,reconnecting 2 a heartbeat query failed: connection failed: error sending request for url (https://127.0.0.1:5665/v1/objects/services): client error (Connect): Connection reset by peer (os error 104)
+1791706367.319,2,notification,UNKNOWN · ssh on kafka-01
+1791706367.320,8,state,connecting 2
+1791706367.324,8,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706367.433,1,notification,UNKNOWN · ssh on kafka-01
+1791706367.664,27,state,reconnecting 2 a heartbeat query failed: connection failed: error sending request for url (https://127.0.0.1:5665/v1/objects/services): client error (Connect): Connection reset by peer (os error 104)
+1791706367.908,14,notification,UNKNOWN · ssh on kafka-01
+1791706367.936,25,notification,UNKNOWN · ssh on kafka-01
+1791706367.941,9,notification,UNKNOWN · ssh on kafka-01
+1791706367.949,21,notification,UNKNOWN · ssh on kafka-01
+1791706367.955,21,state,reconnecting 2 a heartbeat query failed: connection failed: error sending request for url (https://127.0.0.1:5665/v1/objects/services): client error (Connect): tls handshake eof
+1791706367.960,20,notification,UNKNOWN · ssh on kafka-01
+1791706367.965,36,notification,UNKNOWN · ssh on kafka-01
+1791706367.970,5,notification,UNKNOWN · ssh on kafka-01
+1791706367.974,47,notification,UNKNOWN · ssh on kafka-01
+1791706367.978,28,notification,UNKNOWN · ssh on kafka-01
+1791706367.986,35,notification,UNKNOWN · ssh on kafka-01
+1791706367.990,12,notification,UNKNOWN · ssh on kafka-01
+1791706367.995,18,notification,UNKNOWN · ssh on kafka-01
+1791706368.000,31,notification,UNKNOWN · ssh on kafka-01
+1791706368.004,30,notification,UNKNOWN · ssh on kafka-01
+1791706368.009,32,notification,UNKNOWN · ssh on kafka-01
+1791706368.013,34,notification,UNKNOWN · ssh on kafka-01
+1791706368.018,33,notification,UNKNOWN · ssh on kafka-01
+1791706368.023,43,notification,UNKNOWN · ssh on kafka-01
+1791706368.040,11,notification,UNKNOWN · ssh on kafka-01
+1791706368.048,16,notification,UNKNOWN · ssh on kafka-01
+1791706368.055,23,notification,UNKNOWN · ssh on kafka-01
+1791706368.081,19,notification,UNKNOWN · ssh on kafka-01
+1791706368.086,37,state,connecting 2
+1791706368.101,37,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706368.305,27,state,connecting 2
+1791706368.320,27,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706368.733,42,state,reconnecting 2 a heartbeat query failed: connection failed: error sending request for url (https://127.0.0.1:5665/v1/objects/services): client error (Connect): Connection reset by peer (os error 104)
+1791706368.829,21,state,connecting 2
+1791706368.842,21,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706369.070,16,state,reconnecting 2 a heartbeat query failed: connection failed: error sending request for url (https://127.0.0.1:5665/v1/objects/services): client error (Connect): Connection reset by peer (os error 104)
+1791706369.097,9,state,reconnecting 2 a heartbeat query failed: connection failed: error sending request for url (https://127.0.0.1:5665/v1/objects/services): client error (Connect): tls handshake eof
+1791706369.209,47,state,reconnecting 2 a heartbeat query failed: connection failed: error sending request for url (https://127.0.0.1:5665/v1/objects/services): client error (Connect): Connection reset by peer (os error 104)
+1791706369.212,8,state,connecting 3
+1791706369.215,8,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706369.236,36,state,reconnecting 2 a heartbeat query failed: connection failed: error sending request for url (https://127.0.0.1:5665/v1/objects/services): client error (Connect): Connection reset by peer (os error 104)
+1791706369.245,40,state,reconnecting 2 a heartbeat query failed: connection failed: error sending request for url (https://127.0.0.1:5665/v1/objects/services): client error (Connect): Connection reset by peer (os error 104)
+1791706369.350,4,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,43,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,35,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,15,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,33,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,48,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,25,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,20,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,17,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,29,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,28,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,18,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,41,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,13,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,46,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.350,3,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,19,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,23,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,5,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,44,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,30,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,11,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,39,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,31,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,26,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,7,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,6,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,0,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.359,45,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.360,12,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.360,1,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.367,2,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.367,38,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.367,14,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.376,37,state,connecting 3
+1791706369.389,34,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.389,32,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.390,22,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.405,37,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706369.419,49,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.429,24,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.436,10,state,reconnecting 2 the event stream broke: connection failed: error decoding response body: error reading a body from connection: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+1791706369.630,42,state,connecting 2
+1791706369.631,42,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706369.736,47,state,connecting 2
+1791706369.746,47,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706369.765,36,state,connecting 2
+1791706369.774,36,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.843,48,state,connecting 2
+1791706369.852,41,state,connecting 2
+1791706369.852,18,state,connecting 2
+1791706369.857,41,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.857,48,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.861,18,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.862,33,state,connecting 2
+1791706369.870,33,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.883,9,state,connecting 2
+1791706369.883,31,state,connecting 2
+1791706369.889,29,state,connecting 2
+1791706369.889,12,state,connecting 2
+1791706369.901,9,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.901,31,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.901,39,state,connecting 2
+1791706369.906,12,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.906,22,state,connecting 2
+1791706369.909,29,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.913,39,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.915,22,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.923,16,state,connecting 2
+1791706369.933,16,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.946,15,state,connecting 2
+1791706369.947,15,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.959,2,state,connecting 2
+1791706369.960,2,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.984,46,state,connecting 2
+1791706369.984,28,state,connecting 2
+1791706369.984,28,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.984,14,state,connecting 2
+1791706369.985,40,state,connecting 2
+1791706369.986,45,state,connecting 2
+1791706369.987,40,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.997,14,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.997,46,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706369.998,45,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706370.006,5,state,connecting 2
+1791706370.021,5,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706370.022,20,state,connecting 2
+1791706370.033,20,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706370.052,25,state,connecting 2
+1791706370.061,25,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706370.062,23,state,connecting 2
+1791706370.070,23,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706370.084,3,state,connecting 2
+1791706370.085,3,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706370.088,6,state,connecting 2
+1791706370.091,6,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706370.117,26,state,connecting 2
+1791706370.118,26,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706370.133,21,state,connecting 3
+1791706370.133,38,state,connecting 2
+1791706370.137,21,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706370.142,32,state,connecting 2
+1791706370.149,38,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tcp connect error: Connection refused (os error 111)
+1791706370.168,1,state,connecting 2
+1791706370.169,1,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.180,24,state,connecting 2
+1791706370.182,30,state,connecting 2
+1791706370.182,30,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.184,17,state,connecting 2
+1791706370.186,17,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.187,19,state,connecting 2
+1791706370.189,19,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.189,35,state,connecting 2
+1791706370.191,27,state,connecting 3
+1791706370.191,35,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.191,27,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.194,24,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.211,43,state,connecting 2
+1791706370.212,43,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.229,34,state,connecting 2
+1791706370.229,49,state,connecting 2
+1791706370.233,4,state,connecting 2
+1791706370.236,34,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.236,4,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.243,49,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.256,13,state,connecting 2
+1791706370.262,7,state,connecting 2
+1791706370.266,7,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.267,13,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706370.271,11,state,connecting 2
+1791706370.272,11,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.273,0,state,connecting 2
+1791706370.275,0,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.277,44,state,connecting 2
+1791706370.289,44,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706370.388,10,state,connecting 2
+1791706370.400,10,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706370.973,48,state,connecting 3
+1791706370.974,48,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.095,40,state,connecting 3
+1791706371.097,40,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706371.118,2,state,connecting 3
+1791706371.120,2,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.127,41,state,connecting 3
+1791706371.129,41,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.143,22,state,connecting 3
+1791706371.144,22,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706371.169,32,state,reconnecting 3 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.177,42,state,connecting 3
+1791706371.178,42,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.183,12,state,connecting 3
+1791706371.184,12,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.197,36,state,connecting 3
+1791706371.199,36,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.214,46,state,connecting 3
+1791706371.216,46,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.244,23,state,connecting 3
+1791706371.246,23,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.278,29,state,connecting 3
+1791706371.279,29,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.318,35,state,connecting 3
+1791706371.319,35,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.327,38,state,connecting 3
+1791706371.329,38,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.368,45,state,connecting 3
+1791706371.369,45,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.370,20,state,connecting 3
+1791706371.371,20,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706371.371,33,state,connecting 3
+1791706371.372,33,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.376,3,state,connecting 3
+1791706371.377,3,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.423,43,state,connecting 3
+1791706371.424,43,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.428,47,state,connecting 3
+1791706371.429,47,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.432,11,state,connecting 3
+1791706371.433,9,state,connecting 3
+1791706371.433,11,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.434,9,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.443,26,state,connecting 3
+1791706371.445,26,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.447,14,state,connecting 3
+1791706371.448,14,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.451,5,state,connecting 3
+1791706371.451,5,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.458,1,state,connecting 3
+1791706371.459,1,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706371.461,18,state,connecting 3
+1791706371.462,18,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706371.470,37,state,connecting 4
+1791706371.471,37,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706371.478,34,state,connecting 3
+1791706371.478,34,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.504,28,state,connecting 3
+1791706371.507,28,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706371.548,25,state,connecting 3
+1791706371.548,25,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706371.558,6,state,connecting 3
+1791706371.559,6,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.580,16,state,connecting 3
+1791706371.581,16,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.603,17,state,connecting 3
+1791706371.605,17,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.649,24,state,connecting 3
+1791706371.650,24,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.661,39,state,connecting 3
+1791706371.662,39,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.666,15,state,connecting 3
+1791706371.666,15,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706371.673,49,state,connecting 3
+1791706371.674,49,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.746,31,state,connecting 3
+1791706371.747,31,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.773,4,state,connecting 3
+1791706371.774,4,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.898,13,state,connecting 3
+1791706371.900,13,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.926,7,state,connecting 3
+1791706371.927,7,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.988,19,state,connecting 3
+1791706371.990,19,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.990,10,state,connecting 3
+1791706371.991,10,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706371.995,0,state,connecting 3
+1791706371.996,30,state,connecting 3
+1791706371.997,0,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706371.997,30,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706372.257,44,state,connecting 3
+1791706372.259,44,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706372.524,32,state,connecting 3
+1791706372.526,32,state,reconnecting 4 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706372.789,8,state,connecting 4
+1791706372.790,8,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706373.079,27,state,connecting 4
+1791706373.080,27,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706373.276,23,state,connecting 4
+1791706373.277,23,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706373.342,22,state,connecting 4
+1791706373.344,22,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706373.480,43,state,connecting 4
+1791706373.482,43,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706373.496,34,state,connecting 4
+1791706373.497,34,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706373.562,20,state,connecting 4
+1791706373.563,20,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706373.618,9,state,connecting 4
+1791706373.620,9,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706373.641,45,state,connecting 4
+1791706373.642,45,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706373.779,15,state,connecting 4
+1791706373.784,15,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706373.805,48,state,connecting 4
+1791706373.806,48,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706373.838,49,state,connecting 4
+1791706373.839,49,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706373.876,29,state,connecting 4
+1791706373.878,29,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706373.940,16,state,connecting 4
+1791706373.942,16,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706373.989,21,state,connecting 4
+1791706373.990,21,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.021,46,state,connecting 4
+1791706374.022,46,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.027,5,state,connecting 4
+1791706374.028,5,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.055,10,state,connecting 4
+1791706374.056,10,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.075,2,state,connecting 4
+1791706374.076,2,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.077,31,state,connecting 4
+1791706374.079,31,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.096,28,state,connecting 4
+1791706374.097,28,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.110,35,state,connecting 4
+1791706374.111,35,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.135,12,state,connecting 4
+1791706374.137,12,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.207,41,state,connecting 4
+1791706374.208,41,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.285,13,state,connecting 4
+1791706374.286,13,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706374.308,11,state,connecting 4
+1791706374.310,11,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.358,47,state,connecting 4
+1791706374.361,47,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706374.399,3,state,connecting 4
+1791706374.401,3,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706374.411,0,state,connecting 4
+1791706374.414,0,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.440,36,state,connecting 4
+1791706374.441,36,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.569,42,state,connecting 4
+1791706374.571,42,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.643,25,state,connecting 4
+1791706374.644,25,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706374.829,14,state,connecting 4
+1791706374.830,14,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706374.962,19,state,connecting 4
+1791706374.963,19,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706375.008,40,state,connecting 4
+1791706375.010,40,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706375.038,4,state,connecting 4
+1791706375.039,4,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706375.047,33,state,connecting 4
+1791706375.048,33,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706375.123,24,state,connecting 4
+1791706375.124,24,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706375.152,30,state,connecting 4
+1791706375.153,30,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706375.156,18,state,connecting 4
+1791706375.157,18,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706375.221,38,state,connecting 4
+1791706375.222,38,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706375.358,1,state,connecting 4
+1791706375.359,1,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706375.421,26,state,connecting 4
+1791706375.423,26,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706375.452,39,state,connecting 4
+1791706375.454,39,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): tls handshake eof
+1791706375.503,44,state,connecting 4
+1791706375.503,6,state,connecting 4
+1791706375.504,44,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706375.505,6,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706375.548,17,state,connecting 4
+1791706375.549,17,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706375.558,32,state,connecting 4
+1791706375.559,32,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706375.778,7,state,connecting 4
+1791706375.779,7,state,reconnecting 5 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706377.499,23,state,connecting 5
+1791706377.501,23,state,reconnecting 6 connection failed: error sending request for url (https://127.0.0.1:5665/v1): client error (Connect): Connection reset by peer (os error 104)
+1791706377.993,-1,command,mark B-restart-up
+1791706377.994,-1,mark,B-restart-up
+1791706378.133,22,state,connecting 5
+1791706378.191,22,state,connected master-01
+1791706378.277,8,state,connecting 5
+1791706378.329,45,state,connecting 5
+1791706378.349,8,state,connected master-01
+1791706378.378,43,state,connecting 5
+1791706378.394,45,state,connected master-01
+1791706378.439,43,state,connected master-01
+1791706378.451,48,state,connecting 5
+1791706378.514,48,state,connected master-01
+1791706378.516,21,state,connecting 5
+1791706378.540,37,state,connecting 5
+1791706378.584,11,state,connecting 5
+1791706378.585,21,state,connected master-01
+1791706378.599,37,state,connected master-01
+1791706378.656,11,state,connected master-01
+1791706378.743,20,state,connecting 5
+1791706378.818,20,state,connected master-01
+1791706379.029,34,state,connecting 5
+1791706379.080,9,state,connecting 5
+1791706379.095,34,state,connected master-01
+1791706379.132,9,state,connected master-01
+1791706379.238,36,state,connecting 5
+1791706379.247,18,state,connecting 5
+1791706379.295,36,state,connected master-01
+1791706379.303,18,state,connected master-01
+1791706379.371,16,state,connecting 5
+1791706379.435,16,state,connected master-01
+1791706379.541,27,state,connecting 5
+1791706379.559,39,state,connecting 5
+1791706379.603,27,state,connected master-01
+1791706379.618,29,state,connecting 5
+1791706379.619,39,state,connected master-01
+1791706379.664,13,state,connecting 5
+1791706379.682,29,state,connected master-01
+1791706379.745,13,state,connected master-01
+1791706379.774,47,state,connecting 5
+1791706379.793,2,state,connecting 5
+1791706379.831,7,state,connecting 5
+1791706379.845,47,state,connected master-01
+1791706379.851,2,state,connected master-01
+1791706379.858,25,state,connecting 5
+1791706379.898,7,state,connected master-01
+1791706379.913,1,state,connecting 5
+1791706379.920,25,state,connected master-01
+1791706379.971,1,state,connected master-01
+1791706380.064,38,state,connecting 5
+1791706380.119,38,state,connected master-01
+1791706380.182,10,state,connecting 5
+1791706380.253,41,state,connecting 5
+1791706380.253,10,state,connected master-01
+1791706380.319,41,state,connected master-01
+1791706380.351,3,state,connecting 5
+1791706380.414,3,state,connected master-01
+1791706380.514,15,state,connecting 5
+1791706380.571,6,state,connecting 5
+1791706380.574,15,state,connected master-01
+1791706380.612,35,state,connecting 5
+1791706380.631,6,state,connected master-01
+1791706380.633,33,state,connecting 5
+1791706380.673,35,state,connected master-01
+1791706380.707,33,state,connected master-01
+1791706380.744,28,state,connecting 5
+1791706380.764,46,state,connecting 5
+1791706380.802,28,state,connected master-01
+1791706380.825,46,state,connected master-01
+1791706380.956,42,state,connecting 5
+1791706380.977,26,state,connecting 5
+1791706381.028,42,state,connected master-01
+1791706381.036,26,state,connected master-01
+1791706381.061,5,state,connecting 5
+1791706381.119,5,state,connected master-01
+1791706381.333,49,state,connecting 5
+1791706381.348,31,state,connecting 5
+1791706381.391,49,state,connected master-01
+1791706381.405,31,state,connected master-01
+1791706381.528,4,state,connecting 5
+1791706381.586,4,state,connected master-01
+1791706381.599,0,state,connecting 5
+1791706381.664,0,state,connected master-01
+1791706381.672,44,state,connecting 5
+1791706381.749,12,state,connecting 5
+1791706381.759,44,state,connected master-01
+1791706381.773,40,state,connecting 5
+1791706381.802,32,state,connecting 5
+1791706381.818,12,state,connected master-01
+1791706381.829,40,state,connected master-01
+1791706381.862,32,state,connected master-01
+1791706382.074,19,state,connecting 5
+1791706382.131,19,state,connected master-01
+1791706382.153,30,state,connecting 5
+1791706382.219,30,state,connected master-01
+1791706382.437,24,state,connecting 5
+1791706382.498,24,state,connected master-01
+1791706382.812,14,state,connecting 5
+1791706382.856,14,state,connected master-01
+1791706383.082,17,state,connecting 5
+1791706383.139,17,state,connected master-01
+1791706385.753,23,state,connecting 6
+1791706385.984,23,state,connected master-01
+1791706395.314,2,notification,fleet-02: master-01 restarted
+1791706395.332,29,notification,fleet-29: master-01 restarted
+1791706396.129,43,notification,fleet-43: master-01 restarted
+1791706396.478,7,notification,fleet-07: master-01 restarted
+1791706397.414,45,notification,fleet-45: master-01 restarted
+1791706398.542,12,notification,fleet-12: master-01 restarted
+1791706399.258,35,notification,fleet-35: master-01 restarted
+1791706400.195,42,notification,fleet-42: master-01 restarted
+1791706401.809,21,notification,fleet-21: master-01 restarted
+1791706401.815,14,notification,fleet-14: master-01 restarted
+1791706401.815,22,notification,fleet-22: master-01 restarted
+1791706404.487,11,notification,fleet-11: master-01 restarted
+1791706406.619,18,notification,fleet-18: master-01 restarted
+1791706407.101,47,notification,fleet-47: master-01 restarted
+1791706407.312,31,notification,fleet-31: master-01 restarted
+1791706408.962,5,notification,fleet-05: master-01 restarted
+1791706409.256,23,notification,fleet-23: master-01 restarted
+1791706409.363,16,notification,fleet-16: master-01 restarted
+1791706410.033,38,notification,fleet-38: master-01 restarted
+1791706411.905,41,notification,fleet-41: master-01 restarted
+1791706414.404,34,notification,fleet-34: master-01 restarted
+1791706414.712,28,notification,fleet-28: master-01 restarted
+1791706415.021,9,notification,fleet-09: master-01 restarted
+1791706416.454,47,notification,CRITICAL · http-tls on edge-ams-13
+1791706416.481,46,notification,CRITICAL · http-tls on edge-ams-13
+1791706416.511,36,notification,CRITICAL · http-tls on edge-ams-13
+1791706416.570,49,notification,fleet-49: master-01 restarted
+1791706416.581,49,notification,CRITICAL · http-tls on edge-ams-13
+1791706416.750,25,notification,CRITICAL · http-tls on edge-ams-13
+1791706416.751,32,notification,fleet-32: master-01 restarted
+1791706417.218,32,notification,CRITICAL · http-tls on edge-ams-13
+1791706417.374,44,notification,fleet-44: master-01 restarted
+1791706417.514,44,notification,CRITICAL · http-tls on edge-ams-13
+1791706417.846,9,notification,CRITICAL · http-tls on edge-ams-13
+1791706417.982,29,notification,CRITICAL · http-tls on edge-ams-13
+1791706418.740,6,notification,CRITICAL · http-tls on edge-ams-13
+1791706419.430,11,notification,CRITICAL · http-tls on edge-ams-13
+1791706419.656,4,notification,CRITICAL · http-tls on edge-ams-13
+1791706419.753,39,notification,CRITICAL · http-tls on edge-ams-13
+1791706419.835,20,notification,CRITICAL · http-tls on edge-ams-13
+1791706419.949,1,notification,CRITICAL · http-tls on edge-ams-13
+1791706422.592,33,notification,CRITICAL · http-tls on edge-ams-13
+1791706422.971,41,notification,CRITICAL · http-tls on edge-ams-13
+1791706423.188,30,notification,CRITICAL · http-tls on edge-ams-13
+1791706423.206,30,notification,fleet-30: master-01 restarted
+1791706423.247,46,notification,fleet-46: master-01 restarted
+1791706423.268,48,notification,CRITICAL · http-tls on edge-ams-13
+1791706423.281,48,notification,fleet-48: master-01 restarted
+1791706423.315,23,notification,CRITICAL · http-tls on edge-ams-13
+1791706423.814,36,notification,fleet-36: master-01 restarted
+1791706423.887,37,notification,CRITICAL · http-tls on edge-ams-13
+1791706424.966,37,notification,fleet-37: master-01 restarted
+1791706427.262,37,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706428.010,4,notification,fleet-04: master-01 restarted
+1791706428.071,26,notification,fleet-26: master-01 restarted
+1791706428.096,26,notification,CRITICAL · http-tls on edge-ams-13
+1791706428.286,26,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706428.428,44,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706428.489,2,notification,CRITICAL · http-tls on edge-ams-13
+1791706428.778,2,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706428.852,6,notification,fleet-06: master-01 restarted
+1791706428.965,6,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706428.993,15,notification,CRITICAL · http-tls on edge-ams-13
+1791706429.107,15,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706429.150,20,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706429.170,45,notification,CRITICAL · http-tls on edge-ams-13
+1791706429.260,45,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706429.366,25,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706429.424,12,notification,CRITICAL · http-tls on edge-ams-13
+1791706429.530,12,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706429.614,32,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706429.640,14,notification,CRITICAL · http-tls on edge-ams-13
+1791706429.736,14,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706429.769,39,notification,fleet-39: master-01 restarted
+1791706429.773,39,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706429.788,34,notification,CRITICAL · http-tls on edge-ams-13
+1791706429.875,34,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706430.032,11,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706430.086,7,notification,CRITICAL · http-tls on edge-ams-13
+1791706430.188,7,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706430.214,47,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706430.222,22,notification,CRITICAL · http-tls on edge-ams-13
+1791706430.260,22,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706430.297,1,notification,fleet-01: master-01 restarted
+1791706430.297,1,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706430.412,40,notification,CRITICAL · http-tls on edge-ams-13
+1791706430.584,40,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706430.611,46,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706430.636,31,notification,CRITICAL · http-tls on edge-ams-13
+1791706430.814,31,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706430.915,29,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706430.932,8,notification,CRITICAL · http-tls on edge-ams-13
+1791706431.093,8,notification,fleet-08: master-01 restarted
+1791706431.093,8,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.246,41,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.295,38,notification,CRITICAL · http-tls on edge-ams-13
+1791706431.494,38,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.563,49,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.600,17,notification,CRITICAL · http-tls on edge-ams-13
+1791706431.607,17,notification,fleet-17: master-01 restarted
+1791706431.636,17,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.656,33,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.656,33,notification,fleet-33: master-01 restarted
+1791706431.665,24,notification,CRITICAL · http-tls on edge-ams-13
+1791706431.696,24,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.696,24,notification,fleet-24: master-01 restarted
+1791706431.718,30,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.725,21,notification,CRITICAL · http-tls on edge-ams-13
+1791706431.783,21,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.847,36,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.884,35,notification,CRITICAL · http-tls on edge-ams-13
+1791706431.936,35,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706431.959,23,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706432.016,48,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706432.027,10,notification,CRITICAL · http-tls on edge-ams-13
+1791706432.077,10,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706432.135,9,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706432.191,42,notification,CRITICAL · http-tls on edge-ams-13
+1791706432.283,42,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706432.351,4,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706432.610,13,notification,CRITICAL · http-tls on edge-ams-13
+1791706432.757,13,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706432.832,19,notification,CRITICAL · http-tls on edge-ams-13
+1791706432.979,19,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706433.033,16,notification,CRITICAL · http-tls on edge-ams-13
+1791706433.161,16,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706433.458,27,notification,CRITICAL · http-tls on edge-ams-13
+1791706433.607,27,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706433.634,27,notification,fleet-27: master-01 restarted
+1791706433.742,43,notification,CRITICAL · http-tls on edge-ams-13
+1791706433.839,43,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706433.880,5,notification,CRITICAL · http-tls on edge-ams-13
+1791706433.973,5,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706434.116,18,notification,CRITICAL · http-tls on edge-ams-13
+1791706434.311,18,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706434.311,15,notification,fleet-15: master-01 restarted
+1791706434.333,0,notification,CRITICAL · http-tls on edge-ams-13
+1791706434.396,0,notification,fleet-00: master-01 restarted
+1791706434.434,0,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706434.739,28,notification,CRITICAL · http-tls on edge-ams-13
+1791706434.794,28,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706435.875,3,notification,CRITICAL · http-tls on edge-ams-13
+1791706436.175,3,notification,fleet-03: master-01 restarted
+1791706436.239,3,notification,CRITICAL · cert-expiry on edge-ams-13
+1791706437.823,25,notification,fleet-25: master-01 restarted
+1791706438.767,40,notification,fleet-40: master-01 restarted
+1791706440.130,19,notification,fleet-19: master-01 restarted
+1791706440.148,13,notification,fleet-13: master-01 restarted
+1791706442.685,20,notification,fleet-20: master-01 restarted
+1791706447.905,22,notification,CRITICAL · apt on web-prod-36
+1791706448.114,23,notification,CRITICAL · apt on web-prod-36
+1791706448.142,7,notification,CRITICAL · apt on web-prod-36
+1791706448.163,24,notification,CRITICAL · apt on web-prod-36
+1791706448.233,42,notification,CRITICAL · apt on web-prod-36
+1791706448.256,45,notification,CRITICAL · apt on web-prod-36
+1791706448.268,29,notification,CRITICAL · apt on web-prod-36
+1791706448.280,37,notification,CRITICAL · apt on web-prod-36
+1791706448.402,46,notification,CRITICAL · apt on web-prod-36
+1791706448.431,11,notification,CRITICAL · apt on web-prod-36
+1791706448.459,21,notification,CRITICAL · apt on web-prod-36
+1791706448.537,35,notification,CRITICAL · apt on web-prod-36
+1791706448.591,44,notification,CRITICAL · apt on web-prod-36
+1791706448.642,25,notification,CRITICAL · apt on web-prod-36
+1791706448.656,20,notification,CRITICAL · apt on web-prod-36
+1791706448.668,9,notification,CRITICAL · apt on web-prod-36
+1791706448.684,48,notification,CRITICAL · apt on web-prod-36
+1791706448.705,27,notification,CRITICAL · apt on web-prod-36
+1791706448.721,15,notification,CRITICAL · apt on web-prod-36
+1791706448.734,30,notification,CRITICAL · apt on web-prod-36
+1791706448.879,39,notification,CRITICAL · apt on web-prod-36
+1791706448.904,1,notification,CRITICAL · apt on web-prod-36
+1791706448.913,49,notification,CRITICAL · apt on web-prod-36
+1791706448.943,40,notification,CRITICAL · apt on web-prod-36
+1791706448.957,2,notification,CRITICAL · apt on web-prod-36
+1791706448.963,14,notification,CRITICAL · apt on web-prod-36
+1791706448.975,3,notification,CRITICAL · apt on web-prod-36
+1791706448.981,28,notification,CRITICAL · apt on web-prod-36
+1791706448.990,41,notification,CRITICAL · apt on web-prod-36
+1791706449.002,10,notification,CRITICAL · apt on web-prod-36
+1791706449.015,38,notification,CRITICAL · apt on web-prod-36
+1791706449.023,32,notification,CRITICAL · apt on web-prod-36
+1791706449.038,5,notification,CRITICAL · apt on web-prod-36
+1791706449.045,19,notification,CRITICAL · apt on web-prod-36
+1791706449.051,33,notification,CRITICAL · apt on web-prod-36
+1791706449.058,6,notification,CRITICAL · apt on web-prod-36
+1791706449.063,34,notification,CRITICAL · apt on web-prod-36
+1791706449.073,26,notification,CRITICAL · apt on web-prod-36
+1791706449.079,13,notification,CRITICAL · apt on web-prod-36
+1791706449.087,36,notification,CRITICAL · apt on web-prod-36
+1791706449.099,8,notification,CRITICAL · apt on web-prod-36
+1791706449.109,31,notification,CRITICAL · apt on web-prod-36
+1791706449.128,16,notification,CRITICAL · apt on web-prod-36
+1791706449.147,43,notification,CRITICAL · apt on web-prod-36
+1791706449.213,4,notification,CRITICAL · apt on web-prod-36
+1791706449.403,17,notification,CRITICAL · apt on web-prod-36
+1791706450.296,47,notification,CRITICAL · apt on web-prod-36
+1791706450.959,36,notification,CRITICAL · nginx-workers on web-prod-09
+1791706451.160,44,notification,CRITICAL · nginx-workers on web-prod-09
+1791706451.719,48,notification,CRITICAL · nginx-workers on web-prod-09
+1791706451.881,21,notification,CRITICAL · nginx-workers on web-prod-09
+1791706451.934,47,notification,CRITICAL · nginx-workers on web-prod-09
+1791706451.994,37,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.028,34,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.041,13,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.077,20,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.094,35,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.120,45,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.143,24,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.167,32,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.242,38,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.267,25,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.345,26,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.367,9,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.421,7,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.431,31,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.513,10,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.597,43,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.615,27,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.668,42,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.830,11,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.855,12,notification,CRITICAL · apt on web-prod-36
+1791706452.863,12,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.898,39,notification,CRITICAL · nginx-workers on web-prod-09
+1791706452.981,17,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.130,1,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.179,18,notification,CRITICAL · apt on web-prod-36
+1791706453.186,18,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.223,46,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.248,8,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.411,14,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.453,22,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.472,5,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.496,40,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.526,33,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.598,28,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.668,3,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.777,41,notification,CRITICAL · nginx-workers on web-prod-09
+1791706453.862,2,notification,CRITICAL · nginx-workers on web-prod-09
+1791706454.011,29,notification,CRITICAL · nginx-workers on web-prod-09
+1791706454.046,15,notification,CRITICAL · nginx-workers on web-prod-09
+1791706454.113,19,notification,CRITICAL · nginx-workers on web-prod-09
+1791706454.226,30,notification,CRITICAL · nginx-workers on web-prod-09
+1791706454.312,16,notification,CRITICAL · nginx-workers on web-prod-09
+1791706454.403,4,notification,CRITICAL · nginx-workers on web-prod-09
+1791706454.477,6,notification,CRITICAL · nginx-workers on web-prod-09
+1791706454.513,23,notification,CRITICAL · nginx-workers on web-prod-09
+1791706456.504,0,notification,CRITICAL · apt on web-prod-36
+1791706464.357,10,notification,fleet-10: master-01 restarted
+1791706468.268,49,notification,CRITICAL · nginx-workers on web-prod-09
+1791706468.362,0,notification,CRITICAL · nginx-workers on web-prod-09
+1791706477.819,22,notification,CRITICAL · kube-scheduler on k8s-cp-03
+1791706484.099,18,notification,CRITICAL · kube-scheduler on k8s-cp-03
+1791706488.636,43,notification,CRITICAL · kube-scheduler on k8s-cp-03
+1791706491.068,49,notification,CRITICAL · kube-scheduler on k8s-cp-03

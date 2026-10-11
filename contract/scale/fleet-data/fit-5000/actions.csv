@@ -1,0 +1,29 @@
+1791708382.419,started: fleet pid 20059
+1791708382.423,mark F0-rest
+1791708442.449,mark F0-storm
+1791708442.453,storm 5000/s for 30 s
+1791708487.752,storm over: fleet_storm.py: 157500 check results in 45.2 s (3484/s), 30 rounds of 7 racks
+1791708487.755,mark F0-after
+1791708547.776,raw streams: 10
+1791708577.781,mark F10-rest
+1791708637.787,mark F10-storm
+1791708637.789,storm 5000/s for 30 s
+1791708703.572,storm over: fleet_storm.py: 157500 check results in 65.7 s (2399/s), 30 rounds of 7 racks
+1791708703.590,mark F10-after
+1791708763.606,raw streams: 0
+1791708778.635,raw streams: 25
+1791708808.642,mark F25-rest
+1791708868.647,mark F25-storm
+1791708868.649,storm 5000/s for 30 s
+1791708931.018,storm over: fleet_storm.py: 157500 check results in 62.3 s (2528/s), 30 rounds of 7 racks
+1791708931.021,mark F25-after
+1791708991.032,raw streams: 0
+1791709006.157,raw streams: 50
+1791709036.170,mark F50-rest
+1791709096.287,mark F50-storm
+1791709096.291,storm 5000/s for 30 s
+1791709168.890,storm over: fleet_storm.py: 157500 check results in 72.5 s (2174/s), 30 rounds of 7 racks
+1791709168.901,mark F50-after
+1791709228.915,raw streams: 0
+1791709243.933,mark end
+1791709243.938,raw streams: 0

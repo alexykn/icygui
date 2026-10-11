@@ -10,6 +10,8 @@
 //! - `background`: engines whose environment isn't on screen, several
 //!   side by side;
 //! - `dashboards`: dashboard evaluation and previews;
+//! - `fleet`: many clients on the demo cluster for a long while, driven
+//!   by `contract/scale/fleet.sh` (ignored);
 //! - `freshness`: the freshness watchdog, hydration and reconcile;
 //! - `heartbeats`: heartbeats and trouble alerts (no live data, Icinga
 //!   health alerts);
@@ -37,6 +39,7 @@ mod connect;
 mod dashboards;
 mod event_log;
 mod events;
+mod fleet;
 mod freshness;
 mod gentle;
 mod heartbeats;
